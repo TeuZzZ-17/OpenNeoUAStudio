@@ -11,6 +11,7 @@ from __future__ import annotations
 import shutil
 import subprocess
 import sys
+import re
 from pathlib import Path
 
 from PySide6.QtCore import QSize, QTimer, QUrl, Qt
@@ -20,6 +21,7 @@ from PySide6.QtGui import (
     QColor,
     QDesktopServices,
     QImage,
+    QImageWriter,
     QKeySequence,
     QPainter,
     QPen,
@@ -30,6 +32,7 @@ from PySide6.QtWidgets import (
     QApplication,
     QAbstractItemView,
     QComboBox,
+    QColorDialog,
     QDialog,
     QDoubleSpinBox,
     QFileDialog,
@@ -44,9 +47,11 @@ from PySide6.QtWidgets import (
     QListWidgetItem,
     QMainWindow,
     QMessageBox,
+    QMenu,
     QPushButton,
     QScrollArea,
     QSizePolicy,
+    QSlider,
     QSpinBox,
     QSplitter,
     QTabWidget,
@@ -65,7 +70,7 @@ from asset_family import (
 )
 from asset_diff import SourceDiff, diff_family
 from asset_report import family_to_json, family_to_markdown
-from assembly_viewer import AssetViewport, VIEW_MODES
+from assembly_viewer import AssetViewport, VIEW_MODES, VIEW_PRESETS
 from base_mapping_editor import (
     MappingEditError,
     MappingIndex,
@@ -219,6 +224,9 @@ class AssemblyWindow(QMainWindow):
         self._saved_repair_path: str | None = None
         # geometry Edit Mode: owners with unsaved vertex edits
         self._geom_dirty: dict[str, object] = {}
+        self._snapshot_mode_active = False
+        self._snapshot_custom_color: QColor | None = None
+        self._snapshot_zoom_percent = 100
 
         self.viewport = AssetViewport()
         self.viewport.statusMessage.connect(
@@ -228,6 +236,8 @@ class AssemblyWindow(QMainWindow):
         self.viewport.objectPicked.connect(self._on_object_picked)
         self.viewport.editModeChanged.connect(self._on_edit_mode_toggled)
         self.viewport.geometryEdited.connect(self._on_geometry_edited)
+        self.viewport.animationFrameChanged.connect(
+            self._update_snapshot_frame_text)
         self.viewport.editHint.connect(
             lambda text: self.statusBar().showMessage(text, 30000)
         )
@@ -250,6 +260,10 @@ class AssemblyWindow(QMainWindow):
                                           QHeaderView.ResizeMode.ResizeToContents)
         self.asset_tree.currentItemChanged.connect(self._on_tree_node_selected)
         self.asset_tree.itemDoubleClicked.connect(self._on_tree_double_clicked)
+        self.asset_tree.setContextMenuPolicy(
+            Qt.ContextMenuPolicy.CustomContextMenu)
+        self.asset_tree.customContextMenuRequested.connect(
+            self._show_asset_context_menu)
         from PySide6.QtWidgets import QLineEdit
         self.tree_search = QLineEdit()
         self.tree_search.setPlaceholderText("Filter objects/textures...")
@@ -260,8 +274,21 @@ class AssemblyWindow(QMainWindow):
         self.stats_tree.setHeaderLabels(["Stat", "Value"])
         self.texture_list = QListWidget()
         self.texture_list.setIconSize(QPixmap(96, 96).size())
+        self.texture_list.setSelectionMode(
+            QAbstractItemView.SelectionMode.ExtendedSelection)
+        self.texture_list.setContextMenuPolicy(
+            Qt.ContextMenuPolicy.CustomContextMenu)
+        self.texture_list.customContextMenuRequested.connect(
+            self._show_texture_context_menu)
+        self.texture_list.itemDoubleClicked.connect(
+            lambda item: self._preview_family_texture(
+                item.data(Qt.ItemDataRole.UserRole)))
         self.resolve_tree = QTreeWidget()
         self.resolve_tree.setHeaderLabels(["Resource", "Status", "Path"])
+        self.resolve_tree.setContextMenuPolicy(
+            Qt.ContextMenuPolicy.CustomContextMenu)
+        self.resolve_tree.customContextMenuRequested.connect(
+            self._show_resolve_context_menu)
         self.setbas_tree = QTreeWidget()
         self.setbas_tree.setHeaderLabels(["Resource", "Payload", "Size", "Offset"])
         self.setbas_tree.setSelectionMode(
@@ -276,6 +303,10 @@ class AssemblyWindow(QMainWindow):
         self.setbas_tree.setUniformRowHeights(True)
         self.setbas_tree.itemDoubleClicked.connect(
             self._on_setbas_item_double_clicked)
+        self.setbas_tree.setContextMenuPolicy(
+            Qt.ContextMenuPolicy.CustomContextMenu)
+        self.setbas_tree.customContextMenuRequested.connect(
+            self._show_setbas_context_menu)
         setbas_header = self.setbas_tree.header()
         setbas_header.setSectionsMovable(False)
         setbas_header.setStretchLastSection(False)
@@ -334,6 +365,16 @@ class AssemblyWindow(QMainWindow):
         self.checks_list = QListWidget()
         self.log_list = QListWidget()
         self.node_inspector = QListWidget()
+        for widget in (
+                self.node_inspector, self.poly_info, self.blocks_list,
+                self.repair_preview, self.diff_tree, self.anim_tree,
+                self.refs_tree, self.stats_tree, self.warning_list,
+                self.checks_list, self.log_list):
+            widget.setContextMenuPolicy(
+                Qt.ContextMenuPolicy.CustomContextMenu)
+            widget.customContextMenuRequested.connect(
+                lambda pos, source=widget:
+                self._show_generic_item_context_menu(source, pos))
         # tool-side dependency choice profile (~/.openuastudio), never asset-side
         self._profile = DependencyProfile()
         if self._profile.load_error:
@@ -353,6 +394,226 @@ class AssemblyWindow(QMainWindow):
         action.toggled.connect(slot)
         action.setChecked(checked)
         return action
+
+    @staticmethod
+    def _prepare_context_item(widget, position):
+        item = widget.itemAt(position)
+        if item is not None and not item.isSelected() \
+                and item.flags() & Qt.ItemFlag.ItemIsSelectable:
+            widget.clearSelection()
+            item.setSelected(True)
+            widget.setCurrentItem(item)
+        return item
+
+    @staticmethod
+    def _widget_item_text(widget, item) -> str:
+        if isinstance(widget, QTreeWidget):
+            return "\t".join(item.text(column)
+                             for column in range(widget.columnCount()))
+        return item.text()
+
+    def _copy_widget_items(self, widget, selected_only: bool = True) -> None:
+        items = widget.selectedItems() if selected_only else []
+        if not selected_only:
+            if isinstance(widget, QTreeWidget):
+                def collect(parent):
+                    rows = [parent]
+                    for index in range(parent.childCount()):
+                        rows.extend(collect(parent.child(index)))
+                    return rows
+                for index in range(widget.topLevelItemCount()):
+                    items.extend(collect(widget.topLevelItem(index)))
+            else:
+                items = [widget.item(index) for index in range(widget.count())]
+        text = "\n".join(self._widget_item_text(widget, item)
+                         for item in items)
+        if text:
+            QApplication.clipboard().setText(text)
+
+    def _show_generic_item_context_menu(self, widget, position) -> None:
+        self._prepare_context_item(widget, position)
+        menu = QMenu(widget)
+        selected = widget.selectedItems()
+        copy_selected = menu.addAction(
+            f"Copy selected ({len(selected)})" if len(selected) > 1
+            else "Copy selected")
+        copy_selected.setEnabled(bool(selected))
+        copy_selected.triggered.connect(
+            lambda: self._copy_widget_items(widget, True))
+        if widget is not self.node_inspector:
+            copy_all = menu.addAction("Copy all")
+            copy_all.triggered.connect(
+                lambda: self._copy_widget_items(widget, False))
+        menu.addSeparator()
+        select_all = menu.addAction("Select all")
+        select_all.triggered.connect(widget.selectAll)
+        if isinstance(widget, QTreeWidget):
+            menu.addSeparator()
+            menu.addAction("Expand all", widget.expandAll)
+            menu.addAction("Collapse all", widget.collapseAll)
+        menu.exec(widget.viewport().mapToGlobal(position))
+
+    def _show_setbas_context_menu(self, position) -> None:
+        item = self._prepare_context_item(self.setbas_tree, position)
+        menu = QMenu(self.setbas_tree)
+        if item is not None and item.data(0, Qt.ItemDataRole.UserRole) is None:
+            self.setbas_tree.clearSelection()
+            label = "Collapse group" if item.isExpanded() else "Expand group"
+            menu.addAction(label, lambda: item.setExpanded(not item.isExpanded()))
+            menu.addSeparator()
+        resources = self._setbas_selected_resources()
+        preview = menu.addAction("Preview")
+        preview.setEnabled(
+            len(resources) == 1
+            and resources[0].class_id.lower() in ("sklt.class", "ilbm.class"))
+        preview.triggered.connect(self._preview_setbas_resource)
+        extract = menu.addAction(
+            f"Extract selected... ({len(resources)})" if len(resources) > 1
+            else "Extract selected...")
+        extract.setEnabled(bool(resources))
+        extract.triggered.connect(self._extract_setbas_selected)
+        menu.addAction("Extract entire archive...",
+                       self._extract_setbas_archive).setEnabled(
+                           self._setbas is not None)
+        if resources:
+            menu.addSeparator()
+            copy_names = menu.addAction("Copy resource name(s)")
+            copy_names.triggered.connect(lambda: QApplication.clipboard().setText(
+                "\n".join(resource.resource_name for resource in resources)))
+        menu.addSeparator()
+        menu.addAction("Select all resources", self.setbas_tree.selectAll)
+        menu.addAction("Expand all", self.setbas_tree.expandAll)
+        menu.addAction("Collapse all", self.setbas_tree.collapseAll)
+        if self._last_output_directory is not None:
+            menu.addAction("Open last output folder",
+                           self._open_last_output_folder)
+        menu.exec(self.setbas_tree.viewport().mapToGlobal(position))
+
+    def _asset_item_path(self, item) -> Path | None:
+        if item is None or self._family is None:
+            return None
+        data = item.data(0, Qt.ItemDataRole.UserRole)
+        if not data:
+            return None
+        kind, payload = data
+        if kind == "base":
+            return self._family.base_path
+        if kind in ("skeleton", "child") and payload is not None:
+            ref = getattr(payload, "skeleton_ref", None)
+            return Path(ref.path) if ref and ref.path else None
+        if kind == "texture":
+            ref = self._family.texture_refs.get(payload)
+            return Path(ref.path) if ref and ref.path else None
+        if kind == "animation":
+            ref = self._family.animation_refs.get(payload)
+            return Path(ref.path) if ref and ref.path else None
+        return None
+
+    def _reveal_asset_item(self, item) -> None:
+        path = self._asset_item_path(item)
+        if path is None:
+            self.statusBar().showMessage("No on-disk file to reveal.")
+            return
+        subprocess.Popen(["explorer", "/select,", str(path)])
+
+    def _select_and_frame_owner(self, owner: str) -> None:
+        self._select_owner(owner)
+        self.viewport.frame_owner(owner)
+
+    def _show_asset_context_menu(self, position) -> None:
+        item = self._prepare_context_item(self.asset_tree, position)
+        if item is None:
+            return
+        data = item.data(0, Qt.ItemDataRole.UserRole)
+        menu = QMenu(self.asset_tree)
+        owner = self._tree_owner_for_item(item)
+        if owner:
+            menu.addAction("Select and frame model",
+                           lambda: self._select_and_frame_owner(owner))
+        if data:
+            kind, payload = data
+            if kind == "texture":
+                preview = menu.addAction("Preview texture")
+                preview.setEnabled(self._family is not None
+                                   and payload in self._family.textures)
+                preview.triggered.connect(
+                    lambda: self._preview_family_texture(payload))
+                export = menu.addAction("Export texture as PNG...")
+                export.setEnabled(self._family is not None
+                                  and payload in self._family.textures)
+                export.triggered.connect(
+                    lambda: self._export_family_textures_png([payload]))
+        path = self._asset_item_path(item)
+        if path is not None:
+            menu.addAction("Reveal source file",
+                           lambda: self._reveal_asset_item(item))
+        menu.addSeparator()
+        menu.addAction("Copy item", lambda: QApplication.clipboard().setText(
+            self._widget_item_text(self.asset_tree, item)))
+        menu.addAction("Expand all", self.asset_tree.expandAll)
+        menu.addAction("Collapse all", self.asset_tree.collapseAll)
+        menu.exec(self.asset_tree.viewport().mapToGlobal(position))
+
+    def _selected_texture_names(self) -> list[str]:
+        names = []
+        for item in self.texture_list.selectedItems():
+            name = item.data(Qt.ItemDataRole.UserRole)
+            if name and name not in names:
+                names.append(name)
+        return names
+
+    def _show_texture_context_menu(self, position) -> None:
+        self._prepare_context_item(self.texture_list, position)
+        names = self._selected_texture_names()
+        menu = QMenu(self.texture_list)
+        preview = menu.addAction("Preview")
+        preview.setEnabled(len(names) == 1)
+        preview.triggered.connect(
+            lambda: self._preview_family_texture(names[0]) if names else None)
+        export = menu.addAction(
+            f"Export selected as PNG... ({len(names)})" if len(names) > 1
+            else "Export selected as PNG...")
+        export.setEnabled(bool(names))
+        export.triggered.connect(
+            lambda: self._export_family_textures_png(names))
+        if len(names) == 1 and self._family is not None:
+            ref = self._family.texture_refs.get(names[0])
+            if ref and ref.path:
+                menu.addAction(
+                    "Reveal source file",
+                    lambda: subprocess.Popen(
+                        ["explorer", "/select,", str(ref.path)]))
+        if names:
+            menu.addSeparator()
+            menu.addAction("Copy texture name(s)", lambda:
+                           QApplication.clipboard().setText("\n".join(names)))
+        menu.addSeparator()
+        menu.addAction("Select all textures", self.texture_list.selectAll)
+        menu.exec(self.texture_list.viewport().mapToGlobal(position))
+
+    def _show_resolve_context_menu(self, position) -> None:
+        item = self._prepare_context_item(self.resolve_tree, position)
+        if item is None:
+            return
+        menu = QMenu(self.resolve_tree)
+        target = self._selected_resolve_target()
+        for text, slot in (
+                ("Trial-load", self._use_selected_candidate),
+                ("Keep for session", self._keep_for_session),
+                ("Compare...", self._compare_candidate),
+                ("Reveal in folder", self._reveal_in_folder),
+                ("Assign file...", self._assign_manual_file),
+                ("Unload / revert", self._clear_override),
+                ("Save choice", self._save_choice),
+                ("Apply saved", self._apply_saved_choice),
+                ("Forget saved", self._forget_choice)):
+            action = menu.addAction(text, slot)
+            action.setEnabled(target is not None)
+        menu.addSeparator()
+        menu.addAction("Copy row", lambda:
+                       QApplication.clipboard().setText(
+                           self._widget_item_text(self.resolve_tree, item)))
+        menu.exec(self.resolve_tree.viewport().mapToGlobal(position))
 
     def _build_toolbar(self) -> None:
         # --- menus: everything advanced lives here, not on the toolbar ---
@@ -527,6 +788,13 @@ class AssemblyWindow(QMainWindow):
         self.viewport.set_mode("textured")
         toolbar.addWidget(QLabel(" View: "))
         toolbar.addWidget(self.mode_combo)
+
+        toolbar.addWidget(QLabel(" View preset: "))
+        self.toolbar_view_preset_combo = QComboBox()
+        self.toolbar_view_preset_combo.addItems(VIEW_PRESETS)
+        self.toolbar_view_preset_combo.currentTextChanged.connect(
+            self._on_toolbar_view_preset_changed)
+        toolbar.addWidget(self.toolbar_view_preset_combo)
 
         # Animation controls (enabled only when a VANM is loaded)
         anim_bar = QToolBar("Animation", self)
@@ -749,6 +1017,145 @@ class AssemblyWindow(QMainWindow):
         repair_dialog_layout.addWidget(repair_close_button)
         self._repair_dialog = repair_dialog
 
+        snapshot_panel = QWidget()
+        snapshot_layout = QVBoxLayout(snapshot_panel)
+        snapshot_layout.setContentsMargins(5, 5, 5, 5)
+        snapshot_layout.setSpacing(4)
+        studio_box = QGroupBox("Photo Studio")
+        studio_layout = QVBoxLayout(studio_box)
+        studio_layout.setContentsMargins(6, 6, 6, 6)
+        studio_layout.setSpacing(5)
+
+        view_box = QGroupBox("View preset")
+        view_layout = QGridLayout(view_box)
+        view_layout.setHorizontalSpacing(5)
+        view_layout.setVerticalSpacing(4)
+        self.snapshot_view_combo = QComboBox()
+        self.snapshot_view_combo.addItems(VIEW_PRESETS)
+        self.snapshot_view_combo.currentTextChanged.connect(
+            self._on_snapshot_preset_changed)
+        view_layout.addWidget(self.snapshot_view_combo, 0, 0, 1, 2)
+        view_layout.addWidget(QLabel("Zoom:"), 1, 0)
+        self.snapshot_zoom_spin = QSpinBox()
+        self.snapshot_zoom_spin.setRange(25, 300)
+        self.snapshot_zoom_spin.setSuffix("%")
+        self.snapshot_zoom_spin.setValue(100)
+        self.snapshot_zoom_spin.valueChanged.connect(
+            self._on_snapshot_zoom_changed)
+        view_layout.addWidget(self.snapshot_zoom_spin, 1, 1)
+        self.snapshot_zoom_slider = QSlider(Qt.Orientation.Horizontal)
+        self.snapshot_zoom_slider.setRange(25, 300)
+        self.snapshot_zoom_slider.setValue(100)
+        self.snapshot_zoom_slider.setSingleStep(1)
+        self.snapshot_zoom_slider.setPageStep(10)
+        self.snapshot_zoom_slider.valueChanged.connect(
+            self._on_snapshot_zoom_changed)
+        view_layout.addWidget(self.snapshot_zoom_slider, 2, 0, 1, 2)
+        self.snapshot_guides_button = QPushButton("Show Guides and Overlays")
+        self.snapshot_guides_button.setCheckable(True)
+        self.snapshot_guides_button.setChecked(False)
+        self.snapshot_guides_button.toggled.connect(
+            self._on_snapshot_guides_toggled)
+        view_layout.addWidget(self.snapshot_guides_button, 3, 0, 1, 2)
+        studio_layout.addWidget(view_box)
+
+        background_box = QGroupBox("Background")
+        background_layout = QGridLayout(background_box)
+        background_layout.addWidget(QLabel("Custom Color:"), 0, 0)
+        self.snapshot_color_button = QPushButton("None")
+        self.snapshot_color_button.setFixedSize(64, 26)
+        self.snapshot_color_button.setToolTip(
+            "No color selected: preview uses the normal dark background and export is transparent.\n"
+            "Click to choose a custom background color.")
+        self.snapshot_color_button.clicked.connect(
+            self._choose_snapshot_color)
+        background_layout.addWidget(self.snapshot_color_button, 0, 1)
+        self.snapshot_clear_color_button = QPushButton("Clear")
+        self.snapshot_clear_color_button.clicked.connect(
+            self._clear_snapshot_color)
+        self.snapshot_clear_color_button.setEnabled(False)
+        background_layout.addWidget(self.snapshot_clear_color_button, 0, 2)
+        studio_layout.addWidget(background_box)
+
+        output_box = QGroupBox("Output size")
+        output_layout = QGridLayout(output_box)
+        self.snapshot_size_combo = QComboBox()
+        self.snapshot_size_combo.addItems([
+            "Current Viewport", "512 x 512", "1024 x 1024",
+            "1920 x 1080", "Custom",
+        ])
+        self.snapshot_size_combo.setCurrentText("1024 x 1024")
+        self.snapshot_size_combo.currentTextChanged.connect(
+            self._on_snapshot_size_changed)
+        output_layout.addWidget(self.snapshot_size_combo, 0, 0, 1, 2)
+        self.snapshot_width_label = QLabel("Width:")
+        self.snapshot_width_spin = QSpinBox()
+        self.snapshot_width_spin.setRange(64, 8192)
+        self.snapshot_width_spin.setValue(1024)
+        self.snapshot_height_label = QLabel("Height:")
+        self.snapshot_height_spin = QSpinBox()
+        self.snapshot_height_spin.setRange(64, 8192)
+        self.snapshot_height_spin.setValue(1024)
+        for spin in (self.snapshot_width_spin, self.snapshot_height_spin):
+            spin.valueChanged.connect(self._on_snapshot_size_changed)
+        output_layout.addWidget(self.snapshot_width_label, 1, 0)
+        output_layout.addWidget(self.snapshot_width_spin, 1, 1)
+        output_layout.addWidget(self.snapshot_height_label, 2, 0)
+        output_layout.addWidget(self.snapshot_height_spin, 2, 1)
+        self._set_snapshot_custom_size_visible(False)
+        studio_layout.addWidget(output_box)
+
+        animation_box = QGroupBox("Animation frame")
+        animation_layout = QVBoxLayout(animation_box)
+        animation_layout.addWidget(QLabel("Current animation frame"))
+        self.snapshot_frame_label = QLabel("No animation")
+        self.snapshot_frame_label.setWordWrap(True)
+        animation_layout.addWidget(self.snapshot_frame_label)
+        animation_buttons = QHBoxLayout()
+        self.snapshot_next_frame_button = QPushButton("Next Frame")
+        self.snapshot_next_frame_button.clicked.connect(
+            self.viewport.step_animation)
+        animation_buttons.addWidget(self.snapshot_next_frame_button)
+        self.snapshot_reset_frame_button = QPushButton("Reset Frame")
+        self.snapshot_reset_frame_button.clicked.connect(
+            self.viewport.reset_animation)
+        animation_buttons.addWidget(self.snapshot_reset_frame_button)
+        animation_layout.addLayout(animation_buttons)
+        studio_layout.addWidget(animation_box)
+
+        export_box = QGroupBox("Export")
+        export_layout = QGridLayout(export_box)
+        export_layout.addWidget(QLabel("Format:"), 0, 0)
+        self.snapshot_format_combo = QComboBox()
+        supported = {
+            bytes(fmt).decode("ascii", errors="ignore").lower()
+            for fmt in QImageWriter.supportedImageFormats()
+        }
+        self._snapshot_formats = {"png"}
+        self.snapshot_format_combo.addItem("PNG", "png")
+        if "jpeg" in supported or "jpg" in supported:
+            self._snapshot_formats.add("jpg")
+            self.snapshot_format_combo.addItem("JPEG", "jpg")
+        if "webp" in supported:
+            self._snapshot_formats.add("webp")
+            self.snapshot_format_combo.addItem("WebP", "webp")
+        self.snapshot_format_combo.currentIndexChanged.connect(
+            self._on_snapshot_format_changed)
+        export_layout.addWidget(self.snapshot_format_combo, 0, 1)
+        export_layout.addWidget(QLabel("Quality:"), 1, 0)
+        self.snapshot_quality_spin = QSpinBox()
+        self.snapshot_quality_spin.setRange(1, 100)
+        self.snapshot_quality_spin.setValue(95)
+        self.snapshot_quality_spin.setEnabled(False)
+        export_layout.addWidget(self.snapshot_quality_spin, 1, 1)
+        self.snapshot_export_button = QPushButton("Export Image As...")
+        self.snapshot_export_button.clicked.connect(self._export_snapshot)
+        export_layout.addWidget(self.snapshot_export_button, 2, 0, 1, 2)
+        studio_layout.addWidget(export_box)
+        studio_layout.addStretch(1)
+        snapshot_layout.addWidget(studio_box)
+        snapshot_layout.addStretch(1)
+
         # Advanced keeps the technical panels and absorbs Animations and
         # Dependencies so the primary tab row stays short and readable.
         resolve_panel = QWidget()
@@ -838,11 +1245,15 @@ class AssemblyWindow(QMainWindow):
         tabs.addTab(textures_panel, "Textures")
         tabs.addTab(inspector_panel, "Inspector")
         tabs.addTab(poly_panel, "Poly Inspector")
+        tabs.addTab(snapshot_panel, "Snapshot")
         tabs.addTab(advanced_panel, "Advanced")
-        tabs.currentChanged.connect(lambda _index: self._sync_animation_controls())
-        tabs.setCurrentWidget(setbas_panel)
         self._right_tabs = tabs
         self._setbas_panel = setbas_panel
+        self._snapshot_panel = snapshot_panel
+        tabs.currentChanged.connect(self._on_right_tab_changed)
+        tabs.setCurrentWidget(setbas_panel)
+        self._update_snapshot_color_button()
+        self._sync_animation_controls()
 
         center_panel = QWidget()
         center_panel.setMinimumHeight(0)
@@ -854,7 +1265,9 @@ class AssemblyWindow(QMainWindow):
         center_layout = QVBoxLayout(center_panel)
         center_layout.setContentsMargins(0, 0, 0, 0)
         center_layout.setSpacing(2)
-        self.completeness_label = QLabel("No asset loaded.")
+        self.completeness_label = QLabel(
+            "Open a .base to assemble resources automatically, or a .bas "
+            "to browse all packed resources.")
         self.completeness_label.setWordWrap(False)
         self.completeness_label.setMaximumHeight(42)
         self.completeness_label.setMargin(4)
@@ -1214,6 +1627,7 @@ class AssemblyWindow(QMainWindow):
             # The archive is the file the user just opened, so keep its path
             # visible after the internal family refresh.
             self._set_document_title(archive.path)
+        self._preview_first_setbas_skeleton()
 
     def _raise_setbas_tab(self) -> None:
         """Bring the primary BAS panel to the front after loading it."""
@@ -1301,6 +1715,28 @@ class AssemblyWindow(QMainWindow):
         self.setbas_tree.setCurrentItem(item)
         self._preview_setbas_resource()
 
+    def _preview_first_setbas_skeleton(self) -> None:
+        """Load the first embedded SKLT, using archive mappings for textures."""
+
+        if self._setbas is None:
+            return
+        resource = next(
+            (entry for entry in self._setbas.resources
+             if entry.class_id.lower() == "sklt.class" and not entry.error),
+            None)
+        if resource is None:
+            return
+        for group_index in range(self.setbas_tree.topLevelItemCount()):
+            group = self.setbas_tree.topLevelItem(group_index)
+            for child_index in range(group.childCount()):
+                item = group.child(child_index)
+                if item.data(0, Qt.ItemDataRole.UserRole) == resource.index:
+                    group.setExpanded(True)
+                    self.setbas_tree.setCurrentItem(item)
+                    self.setbas_tree.scrollToItem(item)
+                    self._preview_setbas_skeleton()
+                    return
+
     def _setbas_palette(self):
         """Palette for embedded VBMP previews and conversions."""
 
@@ -1350,41 +1786,19 @@ class AssemblyWindow(QMainWindow):
             "Preview supports only SKLT skeletons and ILBM/VBMP textures.",
         )
 
-    def _preview_setbas_texture(self, resource) -> None:
-        try:
-            from setbas_reader import decode_texture
+    def _show_image_preview(self, title: str, info_text: str,
+                            image: QImage, tooltip: str = "") -> None:
+        """Open the shared non-modal texture preview window."""
 
-            decoded = decode_texture(self._setbas, resource)
-
-            palette = decoded.palette
-            palette_source = "embedded CMAP" if palette is not None else ""
-            if palette is None:
-                palette, palette_source = self._setbas_palette()
-
-            image = _qimage_from_ilbm(decoded, palette)
-            if image is None or image.isNull():
-                raise ValueError("the texture decoded to an empty image")
-        except Exception as exc:
-            QMessageBox.warning(
-                self,
-                "Texture preview failed",
-                f"No file was modified.\n\n{exc}",
-            )
-            return
-
-        # A parentless non-modal window is deliberate on Windows: transient
-        # tool dialogs can force a maximized main window to restore using its
-        # old oversized geometry, pushing content under the taskbar.
         dialog = QDialog(None)
-        dialog.setWindowTitle(f"Texture preview - {resource.resource_name}")
+        dialog.setWindowTitle(title)
         dialog.setWindowModality(Qt.WindowModality.NonModal)
         layout = QVBoxLayout(dialog)
         layout.setContentsMargins(8, 8, 8, 8)
         layout.setSpacing(6)
-        info = QLabel(
-            f"{resource.resource_name}  |  {decoded.width} x "
-            f"{decoded.height}  |  {resource.display_payload}")
-        info.setToolTip(f"Palette: {palette_source}")
+        info = QLabel(info_text)
+        if tooltip:
+            info.setToolTip(tooltip)
         layout.addWidget(info)
         preview = QLabel()
         preview.setAlignment(Qt.AlignmentFlag.AlignCenter)
@@ -1419,8 +1833,6 @@ class AssemblyWindow(QMainWindow):
                 self._preview_windows.remove(dialog)
 
         dialog.destroyed.connect(forget_preview)
-        # Normal top-level window, not Qt.Tool: it must never alter the main
-        # workbench's maximized/full-screen geometry.
         dialog.show()
         if available is not None:
             frame = dialog.frameGeometry()
@@ -1428,6 +1840,34 @@ class AssemblyWindow(QMainWindow):
             dialog.move(frame.topLeft())
         dialog.raise_()
         dialog.activateWindow()
+
+    def _preview_setbas_texture(self, resource) -> None:
+        try:
+            from setbas_reader import decode_texture
+
+            decoded = decode_texture(self._setbas, resource)
+
+            palette = decoded.palette
+            palette_source = "embedded CMAP" if palette is not None else ""
+            if palette is None:
+                palette, palette_source = self._setbas_palette()
+
+            image = _qimage_from_ilbm(decoded, palette)
+            if image is None or image.isNull():
+                raise ValueError("the texture decoded to an empty image")
+        except Exception as exc:
+            QMessageBox.warning(
+                self,
+                "Texture preview failed",
+                f"No file was modified.\n\n{exc}",
+            )
+            return
+
+        self._show_image_preview(
+            f"Texture preview - {resource.resource_name}",
+            f"{resource.resource_name}  |  {decoded.width} x "
+            f"{decoded.height}  |  {resource.display_payload}",
+            image, f"Palette: {palette_source}")
 
     def _preview_setbas_skeleton(self) -> None:
         if self._setbas is None:
@@ -1786,37 +2226,98 @@ class AssemblyWindow(QMainWindow):
             self, "Metadata export complete",
             f"{message}\n\nOutput: {metadata_dir}")
 
-    def _export_texture_png(self) -> None:
+    def _preview_family_texture(self, name: str) -> None:
+        if self._family is None:
+            return
+        image = self._family.textures.get(name)
+        if image is None or not image.has_body:
+            self.statusBar().showMessage("The selected texture is not decoded.")
+            return
+        qimage = _qimage_from_ilbm(
+            image, self._family.external_palette if image.palette is None
+            else None)
+        if qimage is None or qimage.isNull():
+            QMessageBox.warning(self, "Preview failed",
+                                f"{name} decoded to an empty image.")
+            return
+        self._show_image_preview(
+            f"Texture preview - {name}",
+            f"{name}  |  {image.width} x {image.height}  |  {image.kind}",
+            qimage)
+
+    def _export_family_textures_png(self, names: list[str]) -> None:
         if self._family is None:
             self.statusBar().showMessage("Load an asset family first.")
             return
-        item = self.texture_list.currentItem()
-        name = item.data(Qt.ItemDataRole.UserRole) if item else None
-        img = self._family.textures.get(name) if name else None
-        if img is None or not img.has_body:
+        valid = [(name, self._family.textures.get(name)) for name in names]
+        valid = [(name, image) for name, image in valid
+                 if image is not None and image.has_body]
+        if not valid:
             self.statusBar().showMessage(
-                "Select a decoded texture first (one with a preview icon).")
+                "Select one or more decoded textures first.")
             return
         from texture_convert import TextureConvertError, ilbm_image_to_png
-        safe = Path(name.replace("\\", "/")).name
-        suggested = Path(self._last_directory) / (Path(safe).stem + ".png")
-        path, _ = QFileDialog.getSaveFileName(
-            self, f"Export {name} as indexed PNG", str(suggested),
-            "PNG image (*.png)")
-        if not path:
+
+        targets: list[tuple[str, object, Path]] = []
+        if len(valid) == 1:
+            name, image = valid[0]
+            safe = Path(name.replace("\\", "/")).name
+            suggested = (Path(self._last_directory)
+                         / (Path(safe).stem + ".png"))
+            path, _ = QFileDialog.getSaveFileName(
+                self, f"Export {name} as indexed PNG", str(suggested),
+                "PNG image (*.png)")
+            if not path:
+                return
+            targets.append((name, image, Path(path)))
+        else:
+            directory = QFileDialog.getExistingDirectory(
+                self, f"Output folder for {len(valid)} PNG textures",
+                str(self._last_directory))
+            if not directory:
+                return
+            root = Path(directory)
+            reserved: set[str] = set()
+            for name, image in valid:
+                safe = Path(name.replace("\\", "/")).stem + ".png"
+                target = self._available_output_path(root / safe, reserved)
+                reserved.add(str(target).casefold())
+                targets.append((name, image, target))
+
+        errors = []
+        written = 0
+        for name, image, target in targets:
+            try:
+                ilbm_image_to_png(
+                    image, target,
+                    self._family.external_palette
+                    if image.palette is None else None)
+            except (TextureConvertError, OSError) as exc:
+                errors.append(f"{name}: {exc}")
+                continue
+            written += 1
+            self._log(f"texture exported: {name} -> {target}")
+        if not written:
+            QMessageBox.critical(self, "Export failed",
+                                 "\n".join(errors[:12]))
             return
-        try:
-            ilbm_image_to_png(
-                img, path,
-                self._family.external_palette if img.palette is None
-                else None)
-        except (TextureConvertError, OSError) as exc:
-            QMessageBox.critical(self, "Export failed", str(exc))
-            return
-        self._last_directory = Path(path).parent
-        self._remember_output_folder(Path(path).parent)
-        self._log(f"texture exported: {name} -> {path}")
-        self.statusBar().showMessage(f"PNG written: {path}", 8000)
+        output_folder = targets[0][2].parent
+        self._last_directory = output_folder
+        self._remember_output_folder(output_folder)
+        message = f"{written} PNG texture(s) written to {output_folder}"
+        if errors:
+            QMessageBox.warning(
+                self, "Export completed with errors",
+                message + "\n\n" + "\n".join(errors[:12]))
+        self.statusBar().showMessage(message, 8000)
+
+    def _export_texture_png(self) -> None:
+        names = self._selected_texture_names()
+        if not names:
+            item = self.texture_list.currentItem()
+            name = item.data(Qt.ItemDataRole.UserRole) if item else None
+            names = [name] if name else []
+        self._export_family_textures_png(names)
 
     def _convert_ilbm_to_png_dialog(self) -> None:
         files, _ = QFileDialog.getOpenFileNames(
@@ -2177,6 +2678,7 @@ class AssemblyWindow(QMainWindow):
         self.play_button.setEnabled(has_anim)
         self.step_button.setEnabled(has_anim)
         self.speed_spin.setEnabled(has_anim)
+        self._update_snapshot_frame_text()
         if not has_anim:
             if self.play_button.isChecked():
                 self.play_button.setChecked(False)
@@ -2186,6 +2688,239 @@ class AssemblyWindow(QMainWindow):
         self.play_button.setText(
             "Pause" if self.play_button.isChecked() else "Play")
         self.viewport.play_animation(self.play_button.isChecked())
+
+    def _on_right_tab_changed(self, index: int) -> None:
+        self._sync_animation_controls()
+        tabs = getattr(self, "_right_tabs", None)
+        snapshot_panel = getattr(self, "_snapshot_panel", None)
+        entering = (tabs is not None and snapshot_panel is not None
+                    and tabs.widget(index) is snapshot_panel)
+        if entering:
+            self._snapshot_mode_active = True
+            self.viewport.begin_snapshot_mode(self._snapshot_background())
+            self._snapshot_zoom_percent = 100
+            for widget in (self.snapshot_zoom_spin,
+                           self.snapshot_zoom_slider):
+                widget.blockSignals(True)
+                widget.setValue(100)
+                widget.blockSignals(False)
+            self.snapshot_guides_button.setChecked(False)
+            self.viewport.set_snapshot_guides_visible(False)
+            self.mode_combo.blockSignals(True)
+            self.mode_combo.setCurrentIndex(VIEW_MODES.index("textured"))
+            self.mode_combo.blockSignals(False)
+            self.mode_combo.setEnabled(False)
+            self.edit_mode_combo.setEnabled(False)
+            self.toolbar_view_preset_combo.setEnabled(False)
+            for action in (self.sen_check, self.wire_check, self.axes_check,
+                           self.grid_check, self.overlay_check,
+                           self.mapping_diag_check):
+                action.setEnabled(False)
+            self._on_snapshot_preset_changed(
+                self.snapshot_view_combo.currentText())
+        else:
+            self._snapshot_mode_active = False
+            restored_mode = self.viewport.end_snapshot_mode()
+            restored_index = self.mode_combo.findData(restored_mode)
+            if restored_index >= 0:
+                self.mode_combo.blockSignals(True)
+                self.mode_combo.setCurrentIndex(restored_index)
+                self.mode_combo.blockSignals(False)
+            self.mode_combo.setEnabled(True)
+            self.edit_mode_combo.setEnabled(True)
+            self.toolbar_view_preset_combo.setEnabled(True)
+            for action in (self.sen_check, self.wire_check, self.axes_check,
+                           self.grid_check, self.overlay_check,
+                           self.mapping_diag_check):
+                action.setEnabled(True)
+
+    def _set_snapshot_custom_size_visible(self, visible: bool) -> None:
+        for widget in (
+                self.snapshot_width_label, self.snapshot_width_spin,
+                self.snapshot_height_label, self.snapshot_height_spin):
+            widget.setVisible(visible)
+
+    def _snapshot_output_size(self) -> QSize:
+        choice = self.snapshot_size_combo.currentText()
+        if choice == "Current Viewport":
+            return QSize(max(1, self.viewport.width()),
+                         max(1, self.viewport.height()))
+        if choice == "Custom":
+            return QSize(self.snapshot_width_spin.value(),
+                         self.snapshot_height_spin.value())
+        width, height = choice.lower().split(" x ", 1)
+        return QSize(int(width), int(height))
+
+    def _on_snapshot_size_changed(self, _value=None) -> None:
+        custom = self.snapshot_size_combo.currentText() == "Custom"
+        self._set_snapshot_custom_size_visible(custom)
+
+    def _on_snapshot_zoom_changed(self, value: int) -> None:
+        value = max(25, min(300, int(value)))
+        for widget in (self.snapshot_zoom_spin, self.snapshot_zoom_slider):
+            if widget.value() != value:
+                widget.blockSignals(True)
+                widget.setValue(value)
+                widget.blockSignals(False)
+        previous = self._snapshot_zoom_percent
+        self._snapshot_zoom_percent = value
+        if self._snapshot_mode_active and previous > 0:
+            self.viewport.adjust_snapshot_zoom(value / previous)
+
+    def _on_snapshot_guides_toggled(self, visible: bool) -> None:
+        self.snapshot_guides_button.setText(
+            "Hide Guides and Overlays" if visible
+            else "Show Guides and Overlays")
+        self.viewport.set_snapshot_guides_visible(visible)
+
+    def _on_snapshot_preset_changed(self, preset: str) -> None:
+        if not self._snapshot_mode_active:
+            return
+        if preset == "Current View" and self._snapshot_zoom_percent != 100:
+            self._snapshot_zoom_percent = 100
+            for widget in (self.snapshot_zoom_spin,
+                           self.snapshot_zoom_slider):
+                widget.blockSignals(True)
+                widget.setValue(100)
+                widget.blockSignals(False)
+        self.viewport.apply_snapshot_preset(
+            preset, self._snapshot_output_size(),
+            self._snapshot_zoom_percent)
+
+    def _on_toolbar_view_preset_changed(self, preset: str) -> None:
+        if self._snapshot_mode_active:
+            return
+        self.viewport.apply_view_preset(
+            preset,
+            QSize(max(1, self.viewport.width()),
+                  max(1, self.viewport.height())))
+
+    def _snapshot_background(self) -> QColor | None:
+        return (QColor(self._snapshot_custom_color)
+                if self._snapshot_custom_color is not None else None)
+
+    def _update_snapshot_color_button(self) -> None:
+        if not hasattr(self, "snapshot_color_button"):
+            return
+        color = self._snapshot_custom_color
+        if color is None:
+            self.snapshot_color_button.setText("None")
+            self.snapshot_color_button.setStyleSheet("")
+            self.snapshot_clear_color_button.setEnabled(False)
+            return
+        self.snapshot_color_button.setText("")
+        self.snapshot_color_button.setStyleSheet(
+            f"background-color: {color.name()}; border: 1px solid #b0b0b0;")
+        self.snapshot_clear_color_button.setEnabled(True)
+
+    def _choose_snapshot_color(self) -> None:
+        initial = (self._snapshot_custom_color
+                   if self._snapshot_custom_color is not None
+                   else QColor(96, 96, 96))
+        color = QColorDialog.getColor(
+            initial, self, "Snapshot background",
+            QColorDialog.ColorDialogOption.DontUseNativeDialog)
+        if not color.isValid():
+            return
+        self._snapshot_custom_color = color
+        self._update_snapshot_color_button()
+        self.viewport.set_snapshot_background(color)
+
+    def _clear_snapshot_color(self) -> None:
+        self._snapshot_custom_color = None
+        self._update_snapshot_color_button()
+        self.viewport.set_snapshot_background(None)
+
+    def _update_snapshot_frame_text(self, _text: str = "") -> None:
+        if not hasattr(self, "snapshot_frame_label"):
+            return
+        has_animation = self.viewport.has_animation
+        text = self.viewport.current_frame_text() if has_animation else "No animation"
+        self.snapshot_frame_label.setText(text)
+        self.snapshot_next_frame_button.setEnabled(has_animation)
+        self.snapshot_reset_frame_button.setEnabled(has_animation)
+
+    def _on_snapshot_format_changed(self, _index: int) -> None:
+        self.snapshot_quality_spin.setEnabled(
+            self.snapshot_format_combo.currentData() != "png")
+
+    def _snapshot_name(self) -> str:
+        obj = self._owner_to_obj.get(self._selected_owner)
+        if obj is not None:
+            name = getattr(obj, "display_name", "")
+        elif self._family is not None and self._family.base_path:
+            name = self._family.base_path.stem
+        elif self._family is not None and self._family.setbas_path:
+            name = self._family.setbas_path.stem
+        else:
+            name = "Snapshot"
+        name = Path(str(name).replace("\\", "/")).stem
+        name = re.sub(r'[<>:"/\\|?*\x00-\x1f]+', "_", name).strip(" ._")
+        return name or "Snapshot"
+
+    def _export_snapshot(self) -> None:
+        if not self.viewport.has_model:
+            QMessageBox.information(self, "No model loaded",
+                                    "Load a model before exporting an image.")
+            return
+        selected_format = self.snapshot_format_combo.currentData()
+        preset = self.snapshot_view_combo.currentText().replace(" ", "")
+        suggested = self._last_directory / (
+            f"{self._snapshot_name()}_{preset}.{selected_format}")
+        labels = {"png": "PNG (*.png)", "jpg": "JPEG (*.jpg *.jpeg)",
+                  "webp": "WebP (*.webp)"}
+        formats = [selected_format] + sorted(
+            self._snapshot_formats - {selected_format})
+        filters = ";;".join(labels[fmt] for fmt in formats)
+        path_text, _selected_filter = QFileDialog.getSaveFileName(
+            self, "Export Snapshot", str(suggested), filters,
+            options=QFileDialog.Option.DontConfirmOverwrite)
+        if not path_text:
+            return
+        path = Path(path_text)
+        if not path.suffix:
+            dialog_format = next(
+                (fmt for fmt, label in labels.items()
+                 if label == _selected_filter), selected_format)
+            path = path.with_suffix(f".{dialog_format}")
+        suffix = path.suffix.lower().lstrip(".")
+        image_format = {"png": "png", "jpg": "jpg", "jpeg": "jpg",
+                        "webp": "webp"}.get(suffix)
+        if image_format not in self._snapshot_formats:
+            QMessageBox.warning(self, "Unsupported format",
+                                f"The format '.{suffix}' is not supported by "
+                                "this Qt runtime.")
+            return
+        if path.exists():
+            answer = QMessageBox.question(
+                self, "Replace existing file?",
+                f"The file already exists:\n{path}\n\nReplace it?",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                QMessageBox.StandardButton.No)
+            if answer != QMessageBox.StandardButton.Yes:
+                return
+        background = self._snapshot_background()
+        if image_format == "jpg" and background is None:
+            background = QColor(96, 96, 96)
+        image = self.viewport.render_snapshot(
+            self._snapshot_output_size(), background,
+            include_guides=self.snapshot_guides_button.isChecked())
+        if image.isNull():
+            QMessageBox.warning(self, "Export failed",
+                                "The snapshot image could not be rendered.")
+            return
+        writer_format = "jpeg" if image_format == "jpg" else image_format
+        writer = QImageWriter(str(path), writer_format.encode("ascii"))
+        if image_format != "png":
+            writer.setQuality(self.snapshot_quality_spin.value())
+        if not writer.write(image):
+            QMessageBox.warning(
+                self, "Export failed",
+                writer.errorString() or f"Could not write {path}.")
+            return
+        self._last_directory = path.parent
+        self.statusBar().showMessage(
+            f"Snapshot written to {path} ({image.width()} x {image.height()})")
 
     # -- texture resolution (session-only overrides) -----------------------------
 
