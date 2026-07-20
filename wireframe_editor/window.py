@@ -384,7 +384,7 @@ class WireframeEditorWindow(QMainWindow):
             self.statusBar().showMessage("Save failed")
             return
 
-        save_label = "OTL2 outline" if save_mode == "otl2" else "POO2 wireframe"
+        save_label = "OTL2 outline" if save_mode == "otl2" else "wireframe"
         message = f"Saved edited {save_label} to {self._current_file_path.name}."
         QMessageBox.information(self, "File saved", message)
         self._show_model(saved_model, self._current_file_path)
@@ -400,7 +400,7 @@ class WireframeEditorWindow(QMainWindow):
 
         suggested = self._current_file_path or self._last_directory / "outline.SKL"
         save_mode = self.outline_editor.save_mode
-        save_label = "OTL2 outline" if save_mode == "otl2" else "projected POO2 wireframe"
+        save_label = "OTL2 outline" if save_mode == "otl2" else "wireframe"
         path, _ = QFileDialog.getSaveFileName(
             self,
             f"Save edited {save_label} as",

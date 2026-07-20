@@ -2,13 +2,15 @@
 
 The main window assembles BASE + skeleton + texture + animation families,
 provides the former BASet extraction/conversion workflows, and launches the
-integrated Wireframe Editor.  Original assets are only written through
+integrated Wireframe Editor and Map Editor.  Original assets are only written through
 explicit verified Save As or extraction actions.
 """
 
 from __future__ import annotations
 
 import shutil
+import subprocess
+import sys
 from pathlib import Path
 
 from PySide6.QtCore import QSize, QTimer, QUrl, Qt
@@ -470,6 +472,9 @@ class AssemblyWindow(QMainWindow):
         wireframe_action.triggered.connect(self._open_wireframe_editor)
         tools_menu.addSeparator()
         tools_menu.addAction(wireframe_action)
+        map_editor_action = QAction("Map Editor", self)
+        map_editor_action.triggered.connect(self._open_map_editor)
+        tools_menu.addAction(map_editor_action)
 
         diagnostics_menu = self.menuBar().addMenu("&Diagnostics")
         show_warnings = QAction("Warnings", self)
@@ -1067,6 +1072,32 @@ class AssemblyWindow(QMainWindow):
         window.show()
         window.raise_()
         window.activateWindow()
+
+    def _open_map_editor(self) -> None:
+        """Launch the integrated Map Editor in a separate process.
+
+        Map Editor uses Tk while the main workbench uses Qt. Keeping their
+        event loops in separate processes preserves the original editor
+        behavior and avoids toolkit conflicts.
+        """
+
+        if getattr(sys, "frozen", False):
+            command = [sys.executable, "--map-editor"]
+            working_directory = Path(sys.executable).resolve().parent
+        else:
+            main_path = Path(__file__).resolve().with_name("main.py")
+            command = [sys.executable, str(main_path), "--map-editor"]
+            working_directory = main_path.parent
+
+        try:
+            subprocess.Popen(command, cwd=str(working_directory))
+        except OSError as exc:
+            QMessageBox.critical(
+                self,
+                "Map Editor unavailable",
+                "The integrated Map Editor could not be launched.\n\n"
+                f"{exc}",
+            )
 
     def open_base_dialog(self) -> None:
         path, _ = QFileDialog.getOpenFileName(

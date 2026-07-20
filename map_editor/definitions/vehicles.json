@@ -1,0 +1,202 @@
+[
+  {
+    "id": 1,
+    "name": "Weasel"
+  },
+  {
+    "id": 16,
+    "name": "Fox"
+  },
+  {
+    "id": 2,
+    "name": "Jaguar"
+  },
+  {
+    "id": 3,
+    "name": "Tiger"
+  },
+  {
+    "id": 12,
+    "name": "Rhino"
+  },
+  {
+    "id": 11,
+    "name": "Rock-Sled"
+  },
+  {
+    "id": 10,
+    "name": "Firefly"
+  },
+  {
+    "id": 6,
+    "name": "Wasp"
+  },
+  {
+    "id": 15,
+    "name": "Hornet"
+  },
+  {
+    "id": 14,
+    "name": "Dragonfly"
+  },
+  {
+    "id": 4,
+    "name": "Falcon"
+  },
+  {
+    "id": 7,
+    "name": "Warhammer"
+  },
+  {
+    "id": 5,
+    "name": "Marauder"
+  },
+  {
+    "id": 9,
+    "name": "Scout"
+  },
+  {
+    "id": 133,
+    "name": "Gigant"
+  },
+  {
+    "id": 134,
+    "name": "Bronsteijn"
+  },
+  {
+    "id": 73,
+    "name": "Blue Spore"
+  },
+  {
+    "id": 71,
+    "name": "Mean Green"
+  },
+  {
+    "id": 72,
+    "name": "Slime Lord"
+  },
+  {
+    "id": 74,
+    "name": "Little Brother"
+  },
+  {
+    "id": 65,
+    "name": "5P0 Air Prism"
+  },
+  {
+    "id": 64,
+    "name": "XO1 Quadda"
+  },
+  {
+    "id": 66,
+    "name": "Static"
+  },
+  {
+    "id": 68,
+    "name": "Ground Cube"
+  },
+  {
+    "id": 63,
+    "name": "Hourglass"
+  },
+  {
+    "id": 69,
+    "name": "Air Stick"
+  },
+  {
+    "id": 70,
+    "name": "Bomber"
+  },
+  {
+    "id": 67,
+    "name": "Radar"
+  },
+  {
+    "id": 32,
+    "name": "Eisenhans"
+  },
+  {
+    "id": 37,
+    "name": "Leonid"
+  },
+  {
+    "id": 33,
+    "name": "Hetzel"
+  },
+  {
+    "id": 8,
+    "name": "Phantom"
+  },
+  {
+    "id": 36,
+    "name": "Serp"
+  },
+  {
+    "id": 38,
+    "name": "Mnosjetz"
+  },
+  {
+    "id": 131,
+    "name": "Zeppelin"
+  },
+  {
+    "id": 34,
+    "name": "Bronsteijn"
+  },
+  {
+    "id": 35,
+    "name": "Ormu-Scout"
+  },
+  {
+    "id": 22,
+    "name": "Speedy"
+  },
+  {
+    "id": 26,
+    "name": "Tekh-Trak"
+  },
+  {
+    "id": 24,
+    "name": "Ghargoil"
+  },
+  {
+    "id": 28,
+    "name": "Ghargoil 2"
+  },
+  {
+    "id": 25,
+    "name": "Ghargoil 3"
+  },
+  {
+    "id": 23,
+    "name": "Ying"
+  },
+  {
+    "id": 31,
+    "name": "Tien-Ying 7"
+  },
+  {
+    "id": 130,
+    "name": "Yang"
+  },
+  {
+    "id": 27,
+    "name": "Gigant"
+  },
+  {
+    "id": 30,
+    "name": "Gigant 2"
+  },
+  {
+    "id": 29,
+    "name": "Ghor-Scout"
+  },
+  {
+    "id": 138,
+    "name": "Drone"
+  },
+  {
+    "id": 142,
+    "name": "Drone+"
+  }
+]

@@ -1,0 +1,298 @@
+[
+  {
+    "id": 1,
+    "name": "Weasel weapon"
+  },
+  {
+    "id": 2,
+    "name": "Jaguar weapon"
+  },
+  {
+    "id": 3,
+    "name": "Tiger weapon"
+  },
+  {
+    "id": 4,
+    "name": "Falcon weapon"
+  },
+  {
+    "id": 5,
+    "name": "Marauder weapon"
+  },
+  {
+    "id": 6,
+    "name": "Wasp weapon"
+  },
+  {
+    "id": 7,
+    "name": "Warhammer weapon"
+  },
+  {
+    "id": 8,
+    "name": "Phantom weapon"
+  },
+  {
+    "id": 10,
+    "name": "Firefly weapon"
+  },
+  {
+    "id": 12,
+    "name": "Rhino weapon"
+  },
+  {
+    "id": 13,
+    "name": "Evilfurz weapon"
+  },
+  {
+    "id": 14,
+    "name": "Dragonfly weapon"
+  },
+  {
+    "id": 15,
+    "name": "Hornet weapon"
+  },
+  {
+    "id": 16,
+    "name": "Fox weapon"
+  },
+  {
+    "id": 17,
+    "name": "Yang weapon"
+  },
+  {
+    "id": 18,
+    "name": "Zeppelin weapon"
+  },
+  {
+    "id": 19,
+    "name": "Drone weapon"
+  },
+  {
+    "id": 20,
+    "name": "Bronsteijn weapon"
+  },
+  {
+    "id": 22,
+    "name": "Speedy weapon"
+  },
+  {
+    "id": 23,
+    "name": "Ying weapon"
+  },
+  {
+    "id": 24,
+    "name": "Ghargoil I weapon"
+  },
+  {
+    "id": 25,
+    "name": "Ghargoil III weapon"
+  },
+  {
+    "id": 26,
+    "name": "Tekh Trak weapon"
+  },
+  {
+    "id": 27,
+    "name": "Gigant 2 weapon"
+  },
+  {
+    "id": 28,
+    "name": "Ghargoil II weapon"
+  },
+  {
+    "id": 31,
+    "name": "Tien Ying weapon"
+  },
+  {
+    "id": 32,
+    "name": "Eisenhans weapon"
+  },
+  {
+    "id": 33,
+    "name": "Hetzel weapon"
+  },
+  {
+    "id": 34,
+    "name": "Bronsteijn weapon"
+  },
+  {
+    "id": 36,
+    "name": "Serp weapon"
+  },
+  {
+    "id": 37,
+    "name": "Leonid weapon"
+  },
+  {
+    "id": 38,
+    "name": "Mnosjetz weapon"
+  },
+  {
+    "id": 49,
+    "name": "Ziing 1"
+  },
+  {
+    "id": 63,
+    "name": "Hourglass weapon"
+  },
+  {
+    "id": 64,
+    "name": "Xo1 Quadda weapon"
+  },
+  {
+    "id": 65,
+    "name": "5p0 Air Prism weapon"
+  },
+  {
+    "id": 66,
+    "name": "Static weapon"
+  },
+  {
+    "id": 68,
+    "name": "Ground Cube weapon"
+  },
+  {
+    "id": 69,
+    "name": "Air Stick weapon"
+  },
+  {
+    "id": 70,
+    "name": "Bomber weapon"
+  },
+  {
+    "id": 71,
+    "name": "Mean Green weapon"
+  },
+  {
+    "id": 72,
+    "name": "Slime Lord weapon"
+  },
+  {
+    "id": 73,
+    "name": "Blue Spore weapon"
+  },
+  {
+    "id": 80,
+    "name": "Network Myko Flak weapon"
+  },
+  {
+    "id": 81,
+    "name": "Taer Hs Flak weapon"
+  },
+  {
+    "id": 82,
+    "name": "Myko Hs Flak weapon"
+  },
+  {
+    "id": 83,
+    "name": "Kyt Tarantul Hs Flak weapon"
+  },
+  {
+    "id": 84,
+    "name": "Kyt Scorpio Hs Flak weapon"
+  },
+  {
+    "id": 90,
+    "name": "Resistance Hs Flak 1 weapon"
+  },
+  {
+    "id": 91,
+    "name": "Resistance Hs Flak 4 weapon"
+  },
+  {
+    "id": 92,
+    "name": "Resistance HS Top Flak weapon"
+  },
+  {
+    "id": 93,
+    "name": "Resistance HS Bottom Flak weapon"
+  },
+  {
+    "id": 94,
+    "name": "Black Sect Hs Flak 1 weapon"
+  },
+  {
+    "id": 95,
+    "name": "Black Sect Hs Flak 2 weapon"
+  },
+  {
+    "id": 96,
+    "name": "Resistance Dual Flak I weapon"
+  },
+  {
+    "id": 97,
+    "name": "Myko Ground Flak weapon"
+  },
+  {
+    "id": 100,
+    "name": "Resistance Big Flak weapon"
+  },
+  {
+    "id": 101,
+    "name": "Usr Flak1"
+  },
+  {
+    "id": 102,
+    "name": "Usr Flak2"
+  },
+  {
+    "id": 103,
+    "name": "Usr Flak3"
+  },
+  {
+    "id": 104,
+    "name": "Usr Flak4"
+  },
+  {
+    "id": 105,
+    "name": "Usr Flak5"
+  },
+  {
+    "id": 106,
+    "name": "Giant Ground Flak weapon"
+  },
+  {
+    "id": 107,
+    "name": "Gittr T Flak weapon"
+  },
+  {
+    "id": 108,
+    "name": "Taer Flak weapon"
+  },
+  {
+    "id": 111,
+    "name": "Kyt Flak weapon"
+  },
+  {
+    "id": 112,
+    "name": "Sulg Einschuss"
+  },
+  {
+    "id": 115,
+    "name": "Not For Usr weapon"
+  },
+  {
+    "id": 116,
+    "name": "Grasflak"
+  },
+  {
+    "id": 117,
+    "name": "Myko Flak weapon"
+  },
+  {
+    "id": 120,
+    "name": "Internet Resistance HS Bottom Flak weapon"
+  },
+  {
+    "id": 121,
+    "name": "Internet Ghork Flak weapon"
+  },
+  {
+    "id": 122,
+    "name": "Internet Myko Flak weapon"
+  },
+  {
+    "id": 123,
+    "name": "Internet Taer Flak weapon"
+  }
+]
