@@ -40,11 +40,9 @@ class MapEditor(
         if self.startup_file:
             self.set_folder = self.detect_ldf_set_folder(self.startup_file) or "set1"
         else:
-            startup_map_settings = self.ask_new_map_settings(title=APP_NAME)
-            if not startup_map_settings:
-                root.destroy()
-                return
-            self.set_folder = startup_map_settings['set_folder']
+            # A blank SET1 map is immediately editable through New Map and
+            # Resize, so startup should never block on a creation dialog.
+            self.set_folder = "set1"
 
         self.current_filename = None 
         self.current_filepath = None
@@ -179,16 +177,17 @@ def run_map_editor(startup_file=None):
     """Launch the integrated map editor in its own Tk event loop."""
 
     root = tk.Tk()
-    try:
-        root.state("zoomed")
-    except tk.TclError:
-        pass
+    window_width, window_height = 1200, 760
+    x = max(0, (root.winfo_screenwidth() - window_width) // 2)
+    y = max(0, (root.winfo_screenheight() - window_height) // 2)
+    # Explicit coordinates prevent Windows from cascading separate Tk
+    # processes: every Map Editor instance opens in the exact same place.
+    root.geometry(f"{window_width}x{window_height}+{x}+{y}")
 
     MapEditor(root, startup_file=startup_file)
     try:
         root.mainloop()
     except tk.TclError:
-        # The initial New Map dialog may close and destroy the root window.
         pass
     return 0
 

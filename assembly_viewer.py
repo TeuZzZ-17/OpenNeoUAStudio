@@ -59,6 +59,19 @@ MATERIAL_COLORS = [
 ]
 
 VIEW_MODES = ("wireframe", "solid", "materials", "textured")
+VIEW_PRESET_ANGLES = {
+    "Front": (0.0, 0.0),
+    "Back": (180.0, 0.0),
+    "Left": (90.0, 0.0),
+    "Right": (-90.0, 0.0),
+    "Top": (0.0, 90.0),
+    "Bottom": (0.0, -90.0),
+    "Isometric Front Right": (-45.0, 35.264),
+    "Isometric Front Left": (45.0, 35.264),
+    "Isometric Back Right": (-135.0, 35.264),
+    "Isometric Back Left": (135.0, 35.264),
+}
+VIEW_PRESETS = ("Current View", *VIEW_PRESET_ANGLES)
 
 
 @dataclass
@@ -163,6 +176,7 @@ class AssetViewport(QWidget):
     editModeChanged = Signal(bool)  # geometry Edit Mode entered / left
     geometryEdited = Signal(str)    # owner_path whose vertices changed
     editHint = Signal(str)          # live hint text for the active tool
+    animationFrameChanged = Signal(str)
 
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
@@ -223,6 +237,11 @@ class AssetViewport(QWidget):
         self._zoom = 1.0
         self._pan = QPointF(0.0, 0.0)
         self._last_mouse = QPoint()
+        self._snapshot_active = False
+        self._snapshot_show_guides = False
+        self._snapshot_background: QColor | None = None
+        self._snapshot_saved_state: dict | None = None
+        self._snapshot_current_camera: dict | None = None
 
         # VANM playback state (per material with anim_frames)
         self._anim_timer = QTimer(self)
@@ -408,6 +427,8 @@ class AssetViewport(QWidget):
         return self._edit_session
 
     def toggle_edit_mode(self) -> bool:
+        if self._snapshot_active:
+            return self._edit_session is not None
         if self._edit_session is not None:
             self.exit_edit_mode()
             return False
@@ -420,6 +441,8 @@ class AssetViewport(QWidget):
         model space (raw POO2 coordinates); the point count and the POL2
         topology never change, so the file save path stays byte-safe."""
 
+        if self._snapshot_active:
+            return self._edit_session is not None
         if self._edit_session is not None:
             return True
         if self._family_ref is None:
@@ -524,11 +547,12 @@ class AssetViewport(QWidget):
             self._owner_bounds[self._edit_owner] = (
                 min(xs), min(ys), min(zs), max(xs), max(ys), max(zs))
 
-    def _edit_screen_points(self) -> list[QPointF]:
+    def _edit_screen_points(self, target: QRectF | None = None,
+                            camera: dict | None = None) -> list[QPointF]:
         session = self._edit_session
         if session is None:
             return []
-        return [self._project(self._camera_vertex(p))
+        return [self._project(self._camera_vertex(p, camera), target, camera)
                 for p in session.world_points()]
 
     def _pick_edit_vertex(self, point: QPoint, extend: bool) -> None:
@@ -931,6 +955,188 @@ class AssetViewport(QWidget):
         self._backface_cull = enabled
         self.update()
 
+    @property
+    def has_model(self) -> bool:
+        return bool(self._faces)
+
+    def _camera_state(self) -> dict:
+        return {
+            "yaw": self._yaw,
+            "pitch": self._pitch,
+            "zoom": self._zoom,
+            "pan": QPointF(self._pan),
+            "center": self._center,
+            "scale": self._scale,
+        }
+
+    def _set_camera_state(self, state: dict) -> None:
+        self._yaw = state["yaw"]
+        self._pitch = state["pitch"]
+        self._zoom = state["zoom"]
+        self._pan = QPointF(state["pan"])
+        self._center = state["center"]
+        self._scale = state["scale"]
+
+    def begin_snapshot_mode(self, background: QColor | None = None) -> None:
+        """Enter the temporary clean Photo Studio view without editing data."""
+
+        if self._snapshot_saved_state is None:
+            camera = self._camera_state()
+            self._snapshot_saved_state = {
+                "camera": camera,
+                "mode": self._mode,
+                "show_sen": self._show_sen,
+                "show_axes": self._show_axes,
+                "show_grid": self._show_grid,
+                "show_wire_overlay": self._show_wire_overlay,
+                "mapping_diagnostics": self._mapping_diagnostics,
+                "show_diag_overlay": self._show_diag_overlay,
+            }
+            self._snapshot_current_camera = camera.copy()
+            self._snapshot_current_camera["pan"] = QPointF(camera["pan"])
+        self._snapshot_active = True
+        self._snapshot_show_guides = False
+        self._snapshot_background = (QColor(background)
+                                     if background is not None else None)
+        self._mode = "textured"
+        self._show_sen = False
+        self._show_axes = False
+        self._show_grid = False
+        self._show_wire_overlay = False
+        self._mapping_diagnostics = False
+        self._show_diag_overlay = False
+        self.update()
+
+    def end_snapshot_mode(self) -> str:
+        """Leave Photo Studio and restore the exact prior viewport state."""
+
+        state = self._snapshot_saved_state
+        if state is not None:
+            self._set_camera_state(state["camera"])
+            self._mode = state["mode"]
+            self._show_sen = state["show_sen"]
+            self._show_axes = state["show_axes"]
+            self._show_grid = state["show_grid"]
+            self._show_wire_overlay = state["show_wire_overlay"]
+            self._mapping_diagnostics = state["mapping_diagnostics"]
+            self._show_diag_overlay = state["show_diag_overlay"]
+        self._snapshot_active = False
+        self._snapshot_show_guides = False
+        self._snapshot_background = None
+        self._snapshot_saved_state = None
+        self._snapshot_current_camera = None
+        self.update()
+        return self._mode
+
+    def set_snapshot_background(self, background: QColor | None) -> None:
+        self._snapshot_background = (QColor(background)
+                                     if background is not None else None)
+        if self._snapshot_active:
+            self.update()
+
+    def set_snapshot_guides_visible(self, visible: bool) -> None:
+        """Show the saved regular overlays in preview and snapshot export."""
+
+        self._snapshot_show_guides = bool(visible)
+        state = self._snapshot_saved_state
+        if self._snapshot_active and state is not None:
+            self._show_sen = state["show_sen"] if visible else False
+            self._show_axes = state["show_axes"] if visible else False
+            self._show_grid = state["show_grid"] if visible else False
+            self._show_wire_overlay = (
+                state["show_wire_overlay"] if visible else False)
+            self._mapping_diagnostics = (
+                state["mapping_diagnostics"] if visible else False)
+            self._show_diag_overlay = (
+                state["show_diag_overlay"] if visible else False)
+        self.update()
+
+    def adjust_snapshot_zoom(self, factor: float) -> None:
+        if factor > 0:
+            self._zoom = max(0.08, min(30.0, self._zoom * factor))
+            self.update()
+
+    def apply_snapshot_preset(self, preset: str, target_size,
+                              zoom_percent: int = 100) -> None:
+        """Apply a camera-only canonical view and frame visible geometry."""
+
+        if preset == "Current View":
+            if self._snapshot_current_camera is not None:
+                self._set_camera_state(self._snapshot_current_camera)
+            self.update()
+            return
+        self.apply_view_preset(preset, target_size, zoom_percent)
+
+    def apply_view_preset(self, preset: str, target_size,
+                          zoom_percent: int = 100) -> None:
+        """Apply a canonical camera view in either regular or Snapshot mode."""
+
+        if preset == "Current View":
+            return
+        angles = VIEW_PRESET_ANGLES.get(preset)
+        if angles is None:
+            return
+        self._yaw, self._pitch = angles
+        self._fit_view_to_model(target_size, zoom_percent)
+
+    def _fit_view_to_model(self, target_size,
+                           zoom_percent: int = 100) -> None:
+        """Center canonical presets on all visible geometry."""
+
+        points = [vertex for face in self._faces for vertex in face.vertices]
+        width = max(1, int(target_size.width()))
+        height = max(1, int(target_size.height()))
+        if not points:
+            return
+        xs = [point[0] for point in points]
+        ys = [point[1] for point in points]
+        zs = [point[2] for point in points]
+        self._center = ((min(xs) + max(xs)) / 2,
+                        (min(ys) + max(ys)) / 2,
+                        (min(zs) + max(zs)) / 2)
+        extent = max(max(xs) - min(xs), max(ys) - min(ys),
+                     max(zs) - min(zs), 1e-6)
+        self._scale = 2.0 / extent
+        self._pan = QPointF(0.0, 0.0)
+        camera_points = [self._camera_vertex(point) for point in points]
+        base_focal = min(width, height) * 1.5
+        # Keep a small fixed safety border; the public control is a direct
+        # zoom percentage rather than an implementation-oriented margin.
+        usable = 0.92
+        half_width = width * 0.5 * usable
+        half_height = height * 0.5 * usable
+        limits = [30.0]
+        for x, y, z in camera_points:
+            denominator = max(0.2, 4.0 - z)
+            if abs(x) > 1e-9:
+                limits.append(half_width * denominator
+                              / (abs(x) * base_focal))
+            if abs(y) > 1e-9:
+                limits.append(half_height * denominator
+                              / (abs(y) * base_focal))
+        zoom_factor = max(25, min(300, zoom_percent)) / 100.0
+        self._zoom = max(0.08, min(30.0, min(limits) * zoom_factor))
+        self.update()
+
+    def render_snapshot(self, target_size, background: QColor | None,
+                        include_guides: bool = False) -> QImage:
+        """Render the visible model directly into an alpha-capable QImage."""
+
+        width = int(target_size.width())
+        height = int(target_size.height())
+        if not self._faces or width <= 0 or height <= 0:
+            return QImage()
+        image = QImage(width, height,
+                       QImage.Format.Format_ARGB32_Premultiplied)
+        image.fill(Qt.GlobalColor.transparent)
+        painter = QPainter(image)
+        self._render_scene(painter, QRectF(0, 0, width, height), background,
+                           clean=not include_guides,
+                           camera=self._camera_state(),
+                           allow_transparent_background=True)
+        painter.end()
+        return image
+
     def reset_view(self) -> None:
         self._yaw = -35.0
         self._pitch = 20.0
@@ -970,6 +1176,12 @@ class AssetViewport(QWidget):
             self._anim_states[mat_id] = (frame, direction)
             self._anim_left_ms[mat_id] = 0.0
         self.update()
+        self.animationFrameChanged.emit(self.current_frame_text())
+
+    def reset_animation(self) -> None:
+        self._reset_animation_states()
+        self.update()
+        self.animationFrameChanged.emit(self.current_frame_text())
 
     def current_frame_text(self) -> str:
         parts = []
@@ -1025,31 +1237,41 @@ class AssetViewport(QWidget):
             self._anim_left_ms[mat_id] = left
         if changed:
             self.update()
-            self.statusMessage.emit(self.current_frame_text())
+            text = self.current_frame_text()
+            self.statusMessage.emit(text)
+            self.animationFrameChanged.emit(text)
 
     # -- projection --------------------------------------------------------------
 
-    def _camera_vertex(self, point) -> tuple[float, float, float]:
-        x = (point[0] - self._center[0]) * self._scale
-        y = -(point[1] - self._center[1]) * self._scale  # UA -Y is up
-        z = (point[2] - self._center[2]) * self._scale
+    def _camera_vertex(self, point, camera: dict | None = None
+                       ) -> tuple[float, float, float]:
+        camera = camera or self._camera_state()
+        center = camera["center"]
+        scale = camera["scale"]
+        x = (point[0] - center[0]) * scale
+        y = -(point[1] - center[1]) * scale  # UA -Y is up
+        z = (point[2] - center[2]) * scale
 
-        yaw = math.radians(self._yaw)
-        pitch = math.radians(self._pitch)
+        yaw = math.radians(camera["yaw"])
+        pitch = math.radians(camera["pitch"])
         xz_x = x * math.cos(yaw) + z * math.sin(yaw)
         xz_z = -x * math.sin(yaw) + z * math.cos(yaw)
         yz_y = y * math.cos(pitch) - xz_z * math.sin(pitch)
         yz_z = y * math.sin(pitch) + xz_z * math.cos(pitch)
         return (xz_x, yz_y, yz_z)
 
-    def _project(self, camera_point) -> QPointF:
+    def _project(self, camera_point, target: QRectF | None = None,
+                 camera: dict | None = None) -> QPointF:
+        camera = camera or self._camera_state()
+        target = target or QRectF(self.rect())
         x, y, z = camera_point
         distance = 4.0
         denominator = max(0.2, distance - z)
-        focal = min(self.width(), self.height()) * 1.5 * self._zoom
+        focal = min(target.width(), target.height()) * 1.5 * camera["zoom"]
+        pan = camera["pan"]
         return QPointF(
-            self.width() * 0.5 + self._pan.x() + x * focal / denominator,
-            self.height() * 0.5 + self._pan.y() - y * focal / denominator,
+            target.center().x() + pan.x() + x * focal / denominator,
+            target.center().y() + pan.y() - y * focal / denominator,
         )
 
     # -- painting ------------------------------------------------------------------
@@ -1059,21 +1281,41 @@ class AssetViewport(QWidget):
 
     def paintEvent(self, event) -> None:  # noqa: N802 - Qt override
         painter = QPainter(self)
+        background = self._snapshot_background
+        if self._snapshot_active and background is None:
+            background = QColor(24, 26, 32)
+        self._render_scene(painter, QRectF(self.rect()), background,
+                           clean=(self._snapshot_active
+                                  and not self._snapshot_show_guides),
+                           camera=self._camera_state())
+        painter.end()
+
+    def _render_scene(self, painter: QPainter, target: QRectF,
+                      background: QColor | None, clean: bool,
+                      camera: dict,
+                      allow_transparent_background: bool = False) -> None:
+        """Shared QWidget/QImage renderer; ``clean`` draws model pixels only."""
+
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
         painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform)
-        painter.fillRect(self.rect(), QColor(24, 26, 32))
+        if background is not None:
+            painter.fillRect(target, background)
+        elif not allow_transparent_background:
+            painter.fillRect(target, QColor(24, 26, 32))
 
         if not self._faces:
-            painter.setPen(QColor(180, 185, 192))
-            painter.drawText(self.rect(), Qt.AlignmentFlag.AlignCenter,
-                             "Open a .base file or asset family to preview it.")
-            painter.end()
+            if not clean:
+                painter.setPen(QColor(180, 185, 192))
+                painter.drawText(target, Qt.AlignmentFlag.AlignCenter,
+                                 "Open a .base to assemble resources "
+                                 "automatically,\nor a .bas to browse all "
+                                 "packed resources.")
             return
 
-        if self._show_grid:
-            self._draw_grid(painter)
-        if self._show_axes:
-            self._draw_axes(painter)
+        if self._show_grid and not clean:
+            self._draw_grid(painter, target, camera)
+        if self._show_axes and not clean:
+            self._draw_axes(painter, target, camera)
 
         # Depth sort (painter's algorithm, mean camera z).  Additive
         # (flat-tracy) faces are drawn in a second pass on top, matching the
@@ -1081,23 +1323,24 @@ class AssetViewport(QWidget):
         opaque = []
         additive = []
         for face in self._faces:
-            if not face.mapped and not self._mapping_diagnostics:
+            if not clean and not face.mapped and not self._mapping_diagnostics:
                 continue  # unmapped polys appear only in diagnostics mode
-            cam = [self._camera_vertex(v) for v in face.vertices]
+            cam = [self._camera_vertex(v, camera) for v in face.vertices]
             depth = sum(p[2] for p in cam) / len(cam)
             mat = self._materials[face.material]
-            if self._mode == "textured" and mat.additive and face.mapped:
+            mode = "textured" if clean else self._mode
+            if mode == "textured" and mat.additive and face.mapped:
                 additive.append((depth, face, cam))
             else:
                 opaque.append((depth, face, cam))
         opaque.sort(key=lambda item: item[0])
         additive.sort(key=lambda item: item[0])
 
-        self._pick_shapes = []
+        pick_shapes = []
         selected_shape = None
         for _, face, cam in opaque + additive:
-            screen = [self._project(p) for p in cam]
-            if self._backface_cull and self._mode != "wireframe":
+            screen = [self._project(p, target, camera) for p in cam]
+            if self._backface_cull and mode != "wireframe":
                 area = 0.0
                 for i in range(len(screen)):
                     j = (i + 1) % len(screen)
@@ -1107,31 +1350,38 @@ class AssetViewport(QWidget):
                 if area > 0:
                     continue
             polygon = QPolygonF(screen)
-            if not face.mapped:
+            if not face.mapped and not clean:
                 # bright magenta overlay for ATTS coverage holes
                 painter.setPen(QPen(QColor(255, 255, 255), 1.0))
                 painter.setBrush(QColor(255, 40, 200, 230))
                 painter.drawPolygon(polygon)
             else:
-                self._draw_face(painter, face, screen)
-            if self._mapping_diagnostics and face.mapped \
+                self._draw_face(painter, face, screen, mode=mode,
+                                draw_wire=(self._show_wire_overlay
+                                           and not clean))
+            if not clean and self._mapping_diagnostics and face.mapped \
                     and face.primary and face.poly_id in self._duplicate_polys:
                 painter.setPen(Qt.PenStyle.NoPen)
                 painter.setBrush(QColor(255, 230, 40, 130))
                 painter.drawPolygon(polygon)
-            if face.primary and face.poly_id in self._highlight_polys:
+            if not clean and face.primary \
+                    and face.poly_id in self._highlight_polys:
                 painter.setPen(QPen(QColor(90, 230, 255), 1.2))
                 painter.setBrush(QColor(90, 230, 255, 90))
                 painter.drawPolygon(polygon)
-            if self._selected_owner is not None \
+            if not clean and self._selected_owner is not None \
                     and face.owner == self._selected_owner \
                     and self._mode != "textured":
                 painter.setPen(Qt.PenStyle.NoPen)
                 painter.setBrush(QColor(90, 230, 255, 60))
                 painter.drawPolygon(polygon)
-            self._pick_shapes.append((polygon, face))
-            if face.primary and face.poly_id == self._selected_poly:
+            if not clean:
+                pick_shapes.append((polygon, face))
+            if not clean and face.primary and face.poly_id == self._selected_poly:
                 selected_shape = polygon
+
+        if not clean:
+            self._pick_shapes = pick_shapes
 
         if selected_shape is not None:
             painter.setPen(QPen(QColor(255, 255, 255), 2.4))
@@ -1141,26 +1391,26 @@ class AssetViewport(QWidget):
                                 Qt.PenStyle.DashLine))
             painter.drawPolygon(selected_shape)
 
-        if self._selected_owner is not None:
-            self._draw_owner_bbox(painter, self._selected_owner)
+        if not clean and self._selected_owner is not None:
+            self._draw_owner_bbox(painter, self._selected_owner,
+                                  target, camera)
 
-        if self._show_sen:
-            self._draw_sen(painter)
+        if not clean and self._show_sen:
+            self._draw_sen(painter, target, camera)
 
-        if self._mode == "textured" and self._diagnostics \
+        if not clean and self._mode == "textured" and self._diagnostics \
                 and self._show_diag_overlay:
             self._draw_diagnostics_overlay(painter)
 
-        if self._edit_session is not None:
-            self._draw_edit_overlay(painter)
+        if not clean and self._edit_session is not None:
+            self._draw_edit_overlay(painter, target, camera)
 
-        painter.end()
-
-    def _draw_edit_overlay(self, painter: QPainter) -> None:
+    def _draw_edit_overlay(self, painter: QPainter, target: QRectF,
+                           camera: dict) -> None:
         session = self._edit_session
         if session is None:
             return
-        screen = self._edit_screen_points()
+        screen = self._edit_screen_points(target, camera)
 
         # Constraint guide: model axis through the pivot, in the axis color.
         if self._modal_op is not None and self._modal_axis is not None:
@@ -1171,11 +1421,11 @@ class AssetViewport(QWidget):
                 a = self._project(self._camera_vertex((
                     px - axis_world[0] * length,
                     py - axis_world[1] * length,
-                    pz - axis_world[2] * length)))
+                    pz - axis_world[2] * length), camera), target, camera)
                 b = self._project(self._camera_vertex((
                     px + axis_world[0] * length,
                     py + axis_world[1] * length,
-                    pz + axis_world[2] * length)))
+                    pz + axis_world[2] * length), camera), target, camera)
                 color = {"X": QColor(240, 100, 100),
                          "Y": QColor(110, 230, 110),
                          "Z": QColor(110, 160, 250)}[self._modal_axis]
@@ -1199,7 +1449,8 @@ class AssetViewport(QWidget):
         pivot = session.selection_pivot()
         if pivot is not None:
             world = _apply(session.matrix, pivot, session.position)
-            center = self._project(self._camera_vertex(world))
+            center = self._project(self._camera_vertex(world, camera),
+                                   target, camera)
             painter.setPen(QPen(QColor(255, 255, 255), 1.2))
             painter.drawLine(QPointF(center.x() - 6, center.y()),
                              QPointF(center.x() + 6, center.y()))
@@ -1210,7 +1461,14 @@ class AssetViewport(QWidget):
             painter.setPen(QPen(QColor(90, 230, 255), 1.0,
                                 Qt.PenStyle.DashLine))
             painter.setBrush(QColor(90, 230, 255, 40))
-            painter.drawRect(self._box_rect)
+            scale_x = target.width() / max(1, self.width())
+            scale_y = target.height() / max(1, self.height())
+            box = QRectF(
+                target.left() + self._box_rect.left() * scale_x,
+                target.top() + self._box_rect.top() * scale_y,
+                self._box_rect.width() * scale_x,
+                self._box_rect.height() * scale_y)
+            painter.drawRect(box)
 
         label = (f"EDIT MODE - {self._edit_owner} - "
                  f"{len(session.selection)}/{len(session.model.points)} "
@@ -1220,21 +1478,24 @@ class AssetViewport(QWidget):
         metrics = painter.fontMetrics()
         width = metrics.horizontalAdvance(label) + 16
         height = metrics.height() + 10
-        x = (self.width() - width) // 2
+        x = int(target.center().x() - width / 2)
+        y = int(target.top()) + 6
         painter.setPen(Qt.PenStyle.NoPen)
         painter.setBrush(QColor(36, 58, 38, 215))
-        painter.drawRect(x, 6, width, height)
+        painter.drawRect(x, y, width, height)
         painter.setPen(QColor(170, 240, 170))
-        painter.drawText(x + 8, 6 + metrics.ascent() + 5, label)
+        painter.drawText(x + 8, y + metrics.ascent() + 5, label)
 
-    def _draw_owner_bbox(self, painter: QPainter, owner: str) -> None:
+    def _draw_owner_bbox(self, painter: QPainter, owner: str,
+                         target: QRectF, camera: dict) -> None:
         bounds = self._owner_bounds.get(owner)
         if bounds is None:
             return
         x0, y0, z0, x1, y1, z1 = bounds
         corners = [(x, y, z) for x in (x0, x1) for y in (y0, y1)
                    for z in (z0, z1)]
-        pts = [self._project(self._camera_vertex(c)) for c in corners]
+        pts = [self._project(self._camera_vertex(c, camera), target, camera)
+               for c in corners]
         edges = [(0, 1), (0, 2), (0, 4), (1, 3), (1, 5), (2, 3), (2, 6),
                  (3, 7), (4, 5), (4, 6), (5, 7), (6, 7)]
         painter.setPen(QPen(QColor(90, 230, 255, 220), 1.4,
@@ -1269,22 +1530,25 @@ class AssetViewport(QWidget):
         return max(0.15, min(1.0, value))  # 0.15 floor for visibility
 
     def _draw_face(self, painter: QPainter, face: ViewFace,
-                   screen: list[QPointF]) -> None:
+                   screen: list[QPointF], mode: str | None = None,
+                   draw_wire: bool | None = None) -> None:
         polygon = QPolygonF(screen)
         mat = self._materials[face.material]
+        mode = mode or self._mode
+        draw_wire = self._show_wire_overlay if draw_wire is None else draw_wire
 
-        if self._mode == "wireframe":
+        if mode == "wireframe":
             painter.setPen(QPen(QColor(112, 210, 255), 1.0))
             painter.setBrush(Qt.BrushStyle.NoBrush)
             painter.drawPolygon(polygon)
             return
 
-        if self._mode == "solid":
+        if mode == "solid":
             level = int(210 * self._face_brightness(face))
             painter.setPen(QPen(QColor(30, 32, 38), 0.5))
             painter.setBrush(QColor(level, level, level))
             painter.drawPolygon(polygon)
-        elif self._mode == "materials":
+        elif mode == "materials":
             brightness = self._face_brightness(face)
             color = QColor(int(mat.color.red() * brightness),
                            int(mat.color.green() * brightness),
@@ -1306,7 +1570,7 @@ class AssetViewport(QWidget):
                 self._draw_textured(painter, screen, uvs, image,
                                     additive=mat.additive)
 
-        if self._show_wire_overlay:
+        if draw_wire:
             painter.setPen(QPen(QColor(0, 0, 0, 130), 0.75))
             painter.setBrush(Qt.BrushStyle.NoBrush)
             painter.drawPolygon(polygon)
@@ -1361,12 +1625,14 @@ class AssetViewport(QWidget):
             painter.drawImage(0, 0, image)
             painter.restore()
 
-    def _draw_sen(self, painter: QPainter) -> None:
+    def _draw_sen(self, painter: QPainter, target: QRectF,
+                  camera: dict) -> None:
         painter.setPen(QPen(QColor(255, 170, 60, 200), 1.4,
                             Qt.PenStyle.DashLine))
         painter.setBrush(Qt.BrushStyle.NoBrush)
         for box in self._sen_boxes:
-            pts = [self._project(self._camera_vertex(p)) for p in box]
+            pts = [self._project(self._camera_vertex(p, camera),
+                                 target, camera) for p in box]
             if len(pts) == 8:
                 edges = [(0, 1), (1, 3), (3, 2), (2, 0),
                          (4, 5), (5, 7), (7, 6), (6, 4),
@@ -1380,27 +1646,29 @@ class AssetViewport(QWidget):
         # covered textured FX and fought with the status bar, so keep the
         # viewport clean and expose the feature through View > SEN2 volume.
 
-    def _draw_axes(self, painter: QPainter) -> None:
-        origin3 = self._camera_vertex(self._center)
+    def _draw_axes(self, painter: QPainter, target: QRectF,
+                   camera: dict) -> None:
+        origin3 = self._camera_vertex(self._center, camera)
         length = 0.6
         axes = [
             ((length / self._scale, 0, 0), QColor(240, 100, 100), "X"),
             ((0, -length / self._scale, 0), QColor(110, 230, 110), "Y (up)"),
             ((0, 0, length / self._scale), QColor(110, 160, 250), "Z"),
         ]
-        origin_screen = self._project(origin3)
+        origin_screen = self._project(origin3, target, camera)
         for offset, color, label in axes:
             end3 = self._camera_vertex((
                 self._center[0] + offset[0],
                 self._center[1] + offset[1],
                 self._center[2] + offset[2],
-            ))
-            end_screen = self._project(end3)
+            ), camera)
+            end_screen = self._project(end3, target, camera)
             painter.setPen(QPen(color, 1.2))
             painter.drawLine(origin_screen, end_screen)
             painter.drawText(end_screen + QPointF(3, -3), label)
 
-    def _draw_grid(self, painter: QPainter) -> None:
+    def _draw_grid(self, painter: QPainter, target: QRectF,
+                   camera: dict) -> None:
         painter.setPen(QPen(QColor(55, 60, 70), 0.8))
         steps = 8
         size = 1.4 / self._scale
@@ -1412,17 +1680,17 @@ class AssetViewport(QWidget):
             ):
                 a = self._project(self._camera_vertex((
                     self._center[0] + start[0], self._center[1] + start[1],
-                    self._center[2] + start[2])))
+                    self._center[2] + start[2]), camera), target, camera)
                 b = self._project(self._camera_vertex((
                     self._center[0] + end[0], self._center[1] + end[1],
-                    self._center[2] + end[2])))
+                    self._center[2] + end[2]), camera), target, camera)
                 painter.drawLine(a, b)
 
     # -- interaction ------------------------------------------------------------
 
     def mousePressEvent(self, event: QMouseEvent) -> None:  # noqa: N802
         pos = event.position().toPoint()
-        if self._edit_session is not None:
+        if self._edit_session is not None and not self._snapshot_active:
             if self._modal_op is not None:
                 if event.button() == Qt.MouseButton.LeftButton:
                     self._commit_modal()
@@ -1442,7 +1710,7 @@ class AssetViewport(QWidget):
         event.accept()
 
     def mouseReleaseEvent(self, event: QMouseEvent) -> None:  # noqa: N802
-        if self._edit_session is not None:
+        if self._edit_session is not None and not self._snapshot_active:
             shift = bool(event.modifiers()
                          & Qt.KeyboardModifier.ShiftModifier)
             if self._box_start is not None \
@@ -1459,7 +1727,7 @@ class AssetViewport(QWidget):
             event.accept()
             return
         if event.button() == Qt.MouseButton.LeftButton \
-                and self._press_pos is not None:
+                and self._press_pos is not None and not self._snapshot_active:
             delta = event.position().toPoint() - self._press_pos
             if abs(delta.x()) <= 4 and abs(delta.y()) <= 4:
                 self.pick_at(event.position().toPoint())
@@ -1490,7 +1758,7 @@ class AssetViewport(QWidget):
         # Tab toggles Edit Mode; it must be caught before Qt's focus chain.
         if ev.type() == QEvent.Type.KeyPress \
                 and ev.key() == Qt.Key.Key_Tab \
-                and self._family_ref is not None:
+                and self._family_ref is not None and not self._snapshot_active:
             self.toggle_edit_mode()
             return True
         return super().event(ev)
@@ -1565,7 +1833,7 @@ class AssetViewport(QWidget):
         return False
 
     def keyPressEvent(self, event) -> None:  # noqa: N802 - Qt override
-        if self._edit_key_press(event):
+        if not self._snapshot_active and self._edit_key_press(event):
             return
         key = event.key()
         if key == Qt.Key.Key_F and self._selected_owner:
@@ -1575,7 +1843,7 @@ class AssetViewport(QWidget):
 
     def mouseMoveEvent(self, event: QMouseEvent) -> None:  # noqa: N802
         current = event.position().toPoint()
-        if self._edit_session is not None:
+        if self._edit_session is not None and not self._snapshot_active:
             if self._modal_op is not None:
                 self._modal_last_mouse = current
                 self._last_mouse = current
