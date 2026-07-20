@@ -1,27 +1,7 @@
-# Python
-__pycache__/
-*.py[cod]
-.pytest_cache/
-.mypy_cache/
 
-# Ambienti virtuali
-.venv/
-venv/
-env/
-
-# Build e pacchetti
-build/
+# OpenUAStudio build outputs
+OpenUAStudio.exe
 dist/
-
-# IDE
-.vscode/
-.idea/
-
-# Sistema operativo
-Thumbs.db
-.DS_Store
-
-# File temporanei
-*.log
-*.tmp
-*.bak
+build/
+__pycache__/
+*.pyc

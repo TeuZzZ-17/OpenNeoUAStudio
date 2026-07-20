@@ -1,60 +1,39 @@
 # OpenUAStudio
 
-OpenUAStudio is the unified asset toolset for **OpenUA / Microsoft Urban Assault (1998)**.
-It combines the former 3D asset workbench, BASet extraction and texture conversion workflows, and the former 2D editor in one application.
+OpenUAStudio is the unified editing workbench for **OpenUA / Microsoft Urban Assault (1998)**. It combines the 3D asset tools, BASE and SET.BAS workflows, texture conversion, the Wireframe Editor, and the Map Editor in one project.
 
-## Main workbench
+## Integrated editors
 
-The default window provides:
+From the **Tools** menu:
 
-- BASE and SET.BAS family browsing;
-- textured SKLT preview with child objects and VANM playback;
-- object, polygon, UV and material inspection;
-- safe geometry and mapping edits through explicit Save As operations;
-- embedded resource preview, Ctrl/Shift multi-selection and extraction;
-- double-click preview for embedded SKLT and ILBM/VBMP resources;
-- source comparison, dependency resolution and technical reports.
+- **Wireframe Editor** opens the SKL/SKLT wireframe editor.
+- **Map Editor** opens the integrated Map Editor for creating and editing Urban Assault LDF maps.
 
-## SET.BAS and texture tools
+The Map Editor is stored inside the `map_editor/` subfolder with its original map-editing logic and resources. It runs in a separate process because OpenUAStudio uses Qt while Map Editor uses Tk. This keeps both interfaces stable while presenting them through one application.
 
-The BASet workflows are integrated into the SET.BAS tab and Tools menu:
+## Running from source
 
-- extract selected resources;
-- convert selected embedded VBMP textures directly to usable ILBM;
-- non-modal texture previews that leave the maximized workbench untouched;
-- extract a complete archive with manifests;
-- automatic VBMP to ILBM and PNG conversion;
-- optional BASE/KIDS raw developer export;
-- optional scene metadata export;
-- ILBM/VBMP to PNG conversion;
-- VBMP to standalone ILBM conversion;
-- template-safe PNG to ILBM conversion;
-- open the latest output folder.
+```bash
+python main.py
+```
 
-The source SET.BAS is always treated as read-only.
+The Map Editor can also be launched directly through the OpenUAStudio entry point:
 
-## Wireframe Editor
+```bash
+python main.py --map-editor
+python main.py --map-editor path/to/level.ldf
+```
 
-Use **Wireframe Editor** beside the Tools menu to open the complete integrated 2D SKL/SKLT editor. It retains its own editing, outline, save, undo/redo and 3D wireframe-preview functions while sharing the same OpenUAStudio process.
+Required Python packages include PySide6 and Pillow. Tkinter must be available in the Python installation.
 
-## Supported and researched formats
+## Windows one-file build
 
-- SKL / SKLT
-- BASE / BAS / SET.BAS
-- ILBM / ILB / VBMP
-- ANM / VANM
-- PNG conversion workflows
+The included `OpenUAStudio.spec` packages the Map Editor code and its resources:
 
-## Philosophy
+```bash
+pyinstaller --noconfirm --clean OpenUAStudio.spec
+```
 
-OpenUAStudio favors small, verified changes, original-game compatibility, read-only inspection where possible, and explicit output paths for every write operation.
+## Safety
 
-## License
-
-GNU General Public License v3.0.
-
-## Legal notice
-
-OpenUAStudio is a free, non-commercial community tool for Urban Assault/OpenUA modding, preservation and research. It does not include the full original game content. Users must provide their own legally obtained assets.
-
-Created by TeuZzZ-17. Urban Assault was developed by TerraTools and published by Microsoft in 1998. OpenUAStudio is an independent community project and is not affiliated with Microsoft or TerraTools.
+Original files should be treated as read-only whenever possible. Save edited assets and levels to explicit output paths and keep backups of source data.

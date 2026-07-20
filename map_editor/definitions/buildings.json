@@ -1,0 +1,94 @@
+[
+  {
+    "id": 1,
+    "name": "Power Station 1+"
+  },
+  {
+    "id": 2,
+    "name": "Flak Station 2"
+  },
+  {
+    "id": 3,
+    "name": "Radar Station 1"
+  },
+  {
+    "id": 10,
+    "name": "Myko Power 1"
+  },
+  {
+    "id": 11,
+    "name": "Power Station 2"
+  },
+  {
+    "id": 12,
+    "name": "Kyt Power 2"
+  },
+  {
+    "id": 13,
+    "name": "Myko Flak"
+  },
+  {
+    "id": 14,
+    "name": "Power Station 3"
+  },
+  {
+    "id": 17,
+    "name": "Taer Power 2"
+  },
+  {
+    "id": 18,
+    "name": "Black Sect Flak"
+  },
+  {
+    "id": 19,
+    "name": "Kyt Ground Flak"
+  },
+  {
+    "id": 28,
+    "name": "Flak Station 1"
+  },
+  {
+    "id": 30,
+    "name": "Kyt Flak"
+  },
+  {
+    "id": 31,
+    "name": "Taer Flak"
+  },
+  {
+    "id": 52,
+    "name": "Kyt Power"
+  },
+  {
+    "id": 53,
+    "name": "Taer Power"
+  },
+  {
+    "id": 54,
+    "name": "Radar Station 2"
+  },
+  {
+    "id": 63,
+    "name": "Power Station 1"
+  },
+  {
+    "id": 64,
+    "name": "Power Station 2+"
+  },
+  {
+    "id": 71,
+    "name": "Kyt Radar"
+  },
+  {
+    "id": 72,
+    "name": "Myko Radar"
+  },
+  {
+    "id": 73,
+    "name": "Taer Radar"
+  },
+  {
+    "id": 62,
+    "name": "Stonehenge"
+  }
+]

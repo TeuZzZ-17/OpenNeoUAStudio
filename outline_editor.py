@@ -829,8 +829,11 @@ class OutlineCanvas(QWidget):
         xs = [point[0] for point in self._points]
         ys = [point[1] for point in self._points]
         extent = max(max(xs) - min(xs), max(ys) - min(ys), 1.0)
-        threshold = max(8.0, extent * 0.018)
-        threshold_sq = threshold * threshold
+        point_threshold = max(8.0, extent * 0.018)
+        point_threshold_sq = point_threshold * point_threshold
+        line_threshold = max(8.0, extent * 0.018)
+        edges = self._iter_edges()
+        preview_pairs: set[tuple[ProjectedPoint, ProjectedPoint]] = set()
         for index, point in moved_positions.items():
             if not (0 <= index < len(self._points)):
                 continue
@@ -841,8 +844,18 @@ class OutlineCanvas(QWidget):
             )
             target = self._points[nearest]
             distance_sq = (target[0] - point[0]) ** 2 + (target[1] - point[1]) ** 2
-            if distance_sq <= threshold_sq:
-                self._snap_preview_pairs.append((point, target))
+            if distance_sq <= point_threshold_sq:
+                preview_pairs.add((point, target))
+
+            x_candidates, z_candidates = _axis_aligned_line_snap_candidates(
+                self._points, edges, moved_indices, point, line_threshold
+            )
+            if x_candidates:
+                preview_pairs.add((point, min(x_candidates, key=lambda item: item[0])[2]))
+            if z_candidates:
+                preview_pairs.add((point, min(z_candidates, key=lambda item: item[0])[2]))
+
+        self._snap_preview_pairs.extend(sorted(preview_pairs))
         self.update()
 
     def _make_transform(self) -> tuple[QRectF, float, float, float, float, float]:
@@ -1650,13 +1663,16 @@ class OutlineEditor(QWidget):
         self._link_start_index = -1
         if vertices:
             self._delete_vertices(vertices)
+            self._last_auto_align_message = "Deleted selection"
         elif edges:
-            self._delete_edges(edges)
+            removed_links, removed_vertices = self._delete_edges(edges)
+            self._last_auto_align_message = _deleted_links_message(
+                removed_links, removed_vertices
+            )
         self._selected_indices.clear()
         self._selected_index = -1
         self._selected_edges.clear()
         self._selected_link = None
-        self._last_auto_align_message = "Deleted selection"
         self._push_history(before, self._snapshot())
         self._after_edit()
         self.selectionChanged.emit(-1)
@@ -1683,10 +1699,23 @@ class OutlineEditor(QWidget):
         self._points_3d = new_points
         self._groups = remapped_groups
 
-    def _delete_edges(self, edges: set[tuple[int, int]]) -> None:
+    def _delete_edges(self, edges: set[tuple[int, int]]) -> tuple[int, int]:
+        endpoint_candidates: set[int] = set()
+        removed_count = 0
         for first, second in sorted(edges):
             if self._has_edge(first, second):
+                endpoint_candidates.update((first, second))
                 self._remove_edge_from_groups(first, second)
+                removed_count += 1
+
+        # Delete only endpoints that became truly orphaned because of this link
+        # deletion. Shared vertices stay intact, so neighbouring geometry is not
+        # damaged when a single line or polygon edge is removed.
+        referenced_vertices = {index for group in self._groups for index in group}
+        orphaned_vertices = endpoint_candidates - referenced_vertices
+        if orphaned_vertices:
+            self._delete_vertices(orphaned_vertices)
+        return removed_count, len(orphaned_vertices)
 
     def start_link(self) -> None:
         if (
@@ -1813,35 +1842,53 @@ class OutlineEditor(QWidget):
             return first_axis_value, second_axis_value
 
         projected = self._projected_points()
-        candidates = self._connected_vertices(index)
-        if not candidates:
-            self._last_auto_align_message = ""
-            return first_axis_value, second_axis_value
-
         xs = [point[0] for point in projected]
         zs = [point[1] for point in projected]
         extent = max(max(xs) - min(xs), max(zs) - min(zs), 1.0)
-        snap_threshold = max(4.0, extent * 0.012)
+        vertex_snap_threshold = max(4.0, extent * 0.012)
+        line_snap_threshold = max(8.0, extent * 0.018)
+
+        x_candidates: list[tuple[float, float, str]] = []
+        z_candidates: list[tuple[float, float, str]] = []
+        for candidate in self._connected_vertices(index):
+            x_value, z_value = projected[candidate]
+            x_distance = abs(x_value - first_axis_value)
+            z_distance = abs(z_value - second_axis_value)
+            if x_distance <= vertex_snap_threshold:
+                x_candidates.append((x_distance, x_value, f"v{candidate}"))
+            if z_distance <= vertex_snap_threshold:
+                z_candidates.append((z_distance, z_value, f"v{candidate}"))
+
+        line_x_candidates, line_z_candidates = _axis_aligned_line_snap_candidates(
+            projected,
+            self._iter_edges(),
+            {index},
+            (first_axis_value, second_axis_value),
+            line_snap_threshold,
+        )
+        x_candidates.extend(
+            (distance, value, f"line v{edge[0]}-v{edge[1]}")
+            for distance, value, _target, edge in line_x_candidates
+            if distance <= line_snap_threshold
+        )
+        z_candidates.extend(
+            (distance, value, f"line v{edge[0]}-v{edge[1]}")
+            for distance, value, _target, edge in line_z_candidates
+            if distance <= line_snap_threshold
+        )
 
         snapped_x = first_axis_value
         snapped_z = second_axis_value
         message_parts: list[str] = []
 
-        nearest_x = min(
-            candidates,
-            key=lambda candidate: abs(projected[candidate][0] - first_axis_value),
-        )
-        nearest_z = min(
-            candidates,
-            key=lambda candidate: abs(projected[candidate][1] - second_axis_value),
-        )
-
-        if abs(projected[nearest_x][0] - first_axis_value) <= snap_threshold:
-            snapped_x = projected[nearest_x][0]
-            message_parts.append(f"X→v{nearest_x}")
-        if abs(projected[nearest_z][1] - second_axis_value) <= snap_threshold:
-            snapped_z = projected[nearest_z][1]
-            message_parts.append(f"Z→v{nearest_z}")
+        if x_candidates:
+            _distance, value, label = min(x_candidates, key=lambda item: item[0])
+            snapped_x = value
+            message_parts.append(f"X→{label}")
+        if z_candidates:
+            _distance, value, label = min(z_candidates, key=lambda item: item[0])
+            snapped_z = value
+            message_parts.append(f"Z→{label}")
 
         self._last_auto_align_message = (
             "Auto Align: " + ", ".join(message_parts) if message_parts else ""
@@ -1853,12 +1900,10 @@ class OutlineEditor(QWidget):
             return
         before = self._snapshot()
         self._link_start_index = -1
-        removed_count = 0
-        for first, second in sorted(self._selected_edges):
-            if self._has_edge(first, second):
-                self._remove_edge_from_groups(first, second)
-                removed_count += 1
-        self._last_auto_align_message = f"Deleted {removed_count} link(s)"
+        removed_count, removed_vertices = self._delete_edges(set(self._selected_edges))
+        self._last_auto_align_message = _deleted_links_message(
+            removed_count, removed_vertices
+        )
         self._selected_link = None
         self._selected_edges.clear()
         self._push_history(before, self._snapshot())
@@ -2479,6 +2524,59 @@ class OutlineEditor(QWidget):
             return
         self._dirty = dirty
         self.dirtyChanged.emit(dirty)
+
+
+def _axis_aligned_line_snap_candidates(
+    points: list[ProjectedPoint],
+    edges: list[tuple[int, int]],
+    moved_indices: set[int],
+    moving_point: ProjectedPoint,
+    threshold: float,
+) -> tuple[
+    list[tuple[float, float, ProjectedPoint, tuple[int, int]]],
+    list[tuple[float, float, ProjectedPoint, tuple[int, int]]],
+]:
+    """Return X/Z snap targets from stable near-vertical/horizontal edges."""
+    x_candidates: list[tuple[float, float, ProjectedPoint, tuple[int, int]]] = []
+    z_candidates: list[tuple[float, float, ProjectedPoint, tuple[int, int]]] = []
+    moving_x, moving_z = moving_point
+    orientation_tolerance = max(0.001, threshold * 0.25)
+
+    for first, second in edges:
+        if first in moved_indices or second in moved_indices:
+            continue
+        if not (0 <= first < len(points) and 0 <= second < len(points)):
+            continue
+        first_point = points[first]
+        second_point = points[second]
+        delta_x = abs(second_point[0] - first_point[0])
+        delta_z = abs(second_point[1] - first_point[1])
+        edge = _edge_key(first, second)
+
+        vertical_tolerance = min(orientation_tolerance, max(delta_z, 0.001) * 0.05)
+        if delta_z > 0.001 and delta_x <= vertical_tolerance:
+            line_x = (first_point[0] + second_point[0]) * 0.5
+            min_z, max_z = sorted((first_point[1], second_point[1]))
+            if min_z - threshold <= moving_z <= max_z + threshold:
+                target = (line_x, min(max(moving_z, min_z), max_z))
+                x_candidates.append((abs(line_x - moving_x), line_x, target, edge))
+
+        horizontal_tolerance = min(orientation_tolerance, max(delta_x, 0.001) * 0.05)
+        if delta_x > 0.001 and delta_z <= horizontal_tolerance:
+            line_z = (first_point[1] + second_point[1]) * 0.5
+            min_x, max_x = sorted((first_point[0], second_point[0]))
+            if min_x - threshold <= moving_x <= max_x + threshold:
+                target = (min(max(moving_x, min_x), max_x), line_z)
+                z_candidates.append((abs(line_z - moving_z), line_z, target, edge))
+
+    return x_candidates, z_candidates
+
+
+def _deleted_links_message(removed_links: int, removed_vertices: int) -> str:
+    message = f"Deleted {removed_links} link(s)"
+    if removed_vertices:
+        message += f" and {removed_vertices} vertex/vertices"
+    return message
 
 
 def _points_center(points: list[ProjectedPoint]) -> ProjectedPoint:

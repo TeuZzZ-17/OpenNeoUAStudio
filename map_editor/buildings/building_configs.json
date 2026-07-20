@@ -1,0 +1,285 @@
+{
+  "01": {
+    "name": "Power Station 1+",
+    "icons": [
+      "energy+"
+    ]
+  },
+  "02": {
+    "name": "Flak Station 2",
+    "icons": [
+      "flak"
+    ]
+  },
+  "03": {
+    "name": "Radar Station 1",
+    "icons": [
+      "radar"
+    ]
+  },
+  "04": {
+    "name": "Gem / Upgrade Sector",
+    "icons": [
+      "gem"
+    ],
+    "hidden": true
+  },
+  "05": {
+    "name": "Beamgate",
+    "icons": [
+      "beamgate"
+    ],
+    "hidden": true
+  },
+  "07": {
+    "name": "Gem / Upgrade Sector",
+    "icons": [
+      "gem"
+    ],
+    "hidden": true
+  },
+  "08": {
+    "name": "Flak Station",
+    "icons": [
+      "flak"
+    ],
+    "hidden": true
+  },
+  "0a": {
+    "name": "Myko Power 1",
+    "icons": [
+      "energy"
+    ]
+  },
+  "0b": {
+    "name": "Power Station 2",
+    "icons": [
+      "energy",
+      "flak"
+    ]
+  },
+  "0c": {
+    "name": "Kyt Power2",
+    "icons": [
+      "energy+"
+    ]
+  },
+  "0d": {
+    "name": "Myko Flak",
+    "icons": [
+      "flak"
+    ]
+  },
+  "0e": {
+    "name": "Power Station 3",
+    "icons": [
+      "energy+",
+      "energy"
+    ]
+  },
+  "0f": {
+    "name": "Gem / Upgrade Sector",
+    "icons": [
+      "gem"
+    ],
+    "hidden": true
+  },
+  "10": {
+    "name": "Gem / Upgrade Sector",
+    "icons": [
+      "gem"
+    ],
+    "hidden": true
+  },
+  "11": {
+    "name": "Taer Power 2",
+    "icons": [
+      "energy+"
+    ]
+  },
+  "12": {
+    "name": "Black Sect Flak",
+    "icons": [
+      "flak"
+    ]
+  },
+  "13": {
+    "name": "Kyt Ground Flak",
+    "icons": [
+      "flak"
+    ]
+  },
+  "14": {
+    "name": "Flak Station",
+    "icons": [
+      "flak"
+         ],
+    "hidden": true
+  },
+  "15": {
+    "name": "Flak Station",
+    "icons": [
+      "flak"
+         ],
+    "hidden": true
+  },
+  "19": {
+    "name": "Beamgate",
+    "icons": [
+      "beamgate"
+    ],
+    "hidden": true
+  },
+  "1c": {
+    "name": "Flak Station 1",
+    "icons": [
+      "flak"
+    ]
+  },
+  "1d": {
+    "name": "Flak Station",
+    "icons": [
+      "flak"
+         ],
+    "hidden": true
+  },
+  "1e": {
+    "name": "Kyt Flak",
+    "icons": [
+      "flak"
+    ]
+  },
+  "1f": {
+    "name": "Taer Flak",
+    "icons": [
+      "flak"
+    ]
+  },
+  "21": {
+    "name": "Flak Station",
+    "icons": [
+      "flak"
+    ],
+    "hidden": true
+  },
+  "22": {
+    "name": "Flak Station",
+    "icons": [
+      "flak"
+    ],
+    "hidden": true
+  },
+  "23": {
+    "name": "Super Item Sector",
+    "icons": [
+      "superitem"
+    ],
+    "hidden": true
+  },
+  "24": {
+    "name": "Super Item Sector",
+    "icons": [
+      "superitem"
+    ],
+    "hidden": true
+  },
+  "32": {
+    "name": "Gem / Upgrade Sector",
+    "icons": [
+      "gem"
+    ],
+    "hidden": true
+  },
+  "33": {
+    "name": "Gem / Upgrade Sector",
+    "icons": [
+      "gem"
+    ],
+    "hidden": true
+  },
+  "34": {
+    "name": "Kyt Power",
+    "icons": [
+      "energy"
+    ]
+  },
+  "35": {
+    "name": "Taer Power",
+    "icons": [
+      "energy"
+    ]
+  },
+  "36": {
+    "name": "Radar Station 2",
+    "icons": [
+      "radar",
+      "radar"
+    ]
+  },
+  "3c": {
+    "name": "Gem / Upgrade Sector",
+    "icons": [
+      "gem"
+    ],
+    "hidden": true
+  },
+  "3d": {
+    "name": "Gem / Upgrade Sector",
+    "icons": [
+      "gem"
+    ],
+    "hidden": true
+  },
+  "3e": {
+    "name": "Stonehenge",
+    "icons": [
+      "energy+",
+      "energy+"
+    ]
+  },
+  "3f": {
+    "name": "Power Station 1",
+    "icons": [
+      "energy"
+    ]
+  },
+  "40": {
+    "name": "Power Station 2+",
+    "icons": [
+      "energy+",
+      "flak"
+    ]
+  },
+  "41": {
+    "name": "Gem / Upgrade Sector",
+    "icons": [
+      "gem"
+    ],
+    "hidden": true
+  },
+  "44": {
+    "name": "Super Item Sector",
+    "icons": [
+      "superitem"
+    ],
+    "hidden": true
+  },
+  "47": {
+    "name": "Kyt Radar",
+    "icons": [
+      "radar"
+    ]
+  },
+  "48": {
+    "name": "Myko Radar",
+    "icons": [
+      "radar"
+    ]
+  },
+  "49": {
+    "name": "Taer Radar",
+    "icons": [
+      "radar"
+    ]
+  }
+}
