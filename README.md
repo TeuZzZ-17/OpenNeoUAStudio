@@ -1,39 +1,58 @@
 # OpenUAStudio
 
-OpenUAStudio is the unified editing workbench for **OpenUA / Microsoft Urban Assault (1998)**. It combines the 3D asset tools, BASE and SET.BAS workflows, texture conversion, the Wireframe Editor, and the Map Editor in one project.
+OpenUAStudio is an independent, community-developed editing workbench for OpenUA and Microsoft Urban Assault (1998).
 
-## Integrated editors
+The project brings together tools and workflows for inspecting, editing, converting, and creating compatible game data. Its structure, interface, supported formats, and integrated editors may change as development continues.
 
-From the **Tools** menu:
+## Project status
 
-- **Wireframe Editor** opens the SKL/SKLT wireframe editor.
-- **Map Editor** opens the integrated Map Editor for creating and editing Urban Assault LDF maps.
+OpenUAStudio is under active development.
 
-The Map Editor is stored inside the `map_editor/` subfolder with its original map-editing logic and resources. It runs in a separate process because OpenUAStudio uses Qt while Map Editor uses Tk. This keeps both interfaces stable while presenting them through one application.
+Features, file layouts, commands, dependencies, and user-interface elements may be added, removed, renamed, or reorganized without notice. The current repository should be treated as a development version rather than a final product specification.
 
-## Running from source
+## Basic use
+
+Run from source:
 
 ```bash
 python main.py
 ```
 
-The Map Editor can also be launched directly through the OpenUAStudio entry point:
+A precompiled Windows executable may also be included in the repository for convenience.
 
-```bash
-python main.py --map-editor
-python main.py --map-editor path/to/level.ldf
-```
+## License
 
-Required Python packages include PySide6 and Pillow. Tkinter must be available in the Python installation.
+Copyright (C) 2025-2026 TeuZzZ-17
 
-## Windows one-file build
+The original OpenUAStudio source code and original project components are licensed under the GNU General Public License version 3 only (`GPL-3.0-only`). See the `LICENSE` file for the complete terms.
 
-The included `OpenUAStudio.spec` packages the Map Editor code and its resources:
+The GNU GPL applies only to material for which the OpenUAStudio copyright holders have the legal authority to grant that license. It does not relicense third-party software, game data, trademarks, artwork, textures, models, sounds, documentation, or other materials owned by their respective rights holders.
 
-```bash
-pyinstaller --noconfirm --clean OpenUAStudio.spec
-```
+## Third-party game data and asset notice
 
-## Safety
+OpenUAStudio is an unofficial fan-made project. It is not affiliated with, endorsed by, sponsored by, or approved by Microsoft, Xbox Game Studios, TerraTools, or any other original publisher, developer, or rights holder connected with Urban Assault.
 
-Original files should be treated as read-only whenever possible. Save edited assets and levels to explicit output paths and keep backups of source data.
+Microsoft Urban Assault, its name, trademarks, logos, artwork, game data, audiovisual material, and other proprietary content remain the property of their respective owners.
+
+Some resources stored under project subfolders, including resources required by the Map Editor for visualization, identification, compatibility, or editing workflows, may originate from or be based on third-party game data. Such resources are not claimed as original OpenUAStudio work and are not covered by the GNU GPL unless an individual file explicitly states otherwise.
+
+Their presence in this repository:
+
+- does not transfer ownership;
+- does not grant additional rights to copy, sell, sublicense, or redistribute them;
+- does not imply endorsement by the original rights holders;
+- does not convert proprietary game assets into free or open-source content.
+
+Users are responsible for obtaining and using game data lawfully and for complying with applicable copyright, trademark, and other laws in their jurisdiction.
+
+This notice is intended to clarify ownership and project scope. It is not legal authorization to redistribute third-party material and does not replace permission from the relevant rights holders.
+
+A rights holder who believes that material has been included improperly may contact the repository owner through the GitHub repository so the material can be reviewed.
+
+## Safety and data handling
+
+Treat original game files as read-only whenever possible. Save edited assets and levels to explicit output paths and keep backups of source data.
+
+## Warranty
+
+OpenUAStudio is provided without warranty. Use it at your own risk. The full warranty disclaimer and limitation of liability are contained in the GNU GPL v3 license text.
