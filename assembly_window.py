@@ -794,6 +794,8 @@ class AssemblyWindow(QMainWindow):
         self.toolbar_view_preset_combo.addItems(VIEW_PRESETS)
         self.toolbar_view_preset_combo.currentTextChanged.connect(
             self._on_toolbar_view_preset_changed)
+        self.viewport.manualCameraChanged.connect(
+            self._on_manual_camera_changed)
         toolbar.addWidget(self.toolbar_view_preset_combo)
 
         # Animation controls (enabled only when a VANM is loaded)
@@ -2794,6 +2796,17 @@ class AssemblyWindow(QMainWindow):
             preset,
             QSize(max(1, self.viewport.width()),
                   max(1, self.viewport.height())))
+
+    def _on_manual_camera_changed(self) -> None:
+        """Mark the active preset as Current View after user navigation."""
+
+        combo = (self.snapshot_view_combo if self._snapshot_mode_active
+                 else self.toolbar_view_preset_combo)
+        if combo.currentText() == "Current View":
+            return
+        combo.blockSignals(True)
+        combo.setCurrentText("Current View")
+        combo.blockSignals(False)
 
     def _snapshot_background(self) -> QColor | None:
         return (QColor(self._snapshot_custom_color)
