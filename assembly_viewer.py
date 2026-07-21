@@ -177,6 +177,7 @@ class AssetViewport(QWidget):
     geometryEdited = Signal(str)    # owner_path whose vertices changed
     editHint = Signal(str)          # live hint text for the active tool
     animationFrameChanged = Signal(str)
+    manualCameraChanged = Signal()  # orbit, pan or zoom changed by the user
 
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
@@ -1859,18 +1860,27 @@ class AssetViewport(QWidget):
         delta = current - self._last_mouse
         self._last_mouse = current
         if event.buttons() & Qt.MouseButton.LeftButton:
+            old_yaw = self._yaw
+            old_pitch = self._pitch
             self._yaw += delta.x() * 0.6
             self._pitch = max(-89.0, min(89.0, self._pitch + delta.y() * 0.6))
+            if self._yaw != old_yaw or self._pitch != old_pitch:
+                self.manualCameraChanged.emit()
             self.update()
         elif event.buttons() & (Qt.MouseButton.RightButton
                                 | Qt.MouseButton.MiddleButton):
-            self._pan += QPointF(delta.x(), delta.y())
+            if not delta.isNull():
+                self._pan += QPointF(delta.x(), delta.y())
+                self.manualCameraChanged.emit()
             self.update()
         event.accept()
 
     def wheelEvent(self, event: QWheelEvent) -> None:  # noqa: N802
         factor = math.pow(1.0015, event.angleDelta().y())
+        old_zoom = self._zoom
         self._zoom = max(0.08, min(30.0, self._zoom * factor))
+        if self._zoom != old_zoom:
+            self.manualCameraChanged.emit()
         self.update()
         event.accept()
 
