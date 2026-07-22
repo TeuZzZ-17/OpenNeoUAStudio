@@ -171,10 +171,17 @@ class AssetViewport(QWidget):
     """3D preview of an asset family with polygon picking."""
 
     statusMessage = Signal(str)
-    polygonPicked = Signal(int)     # poly_id of the primary skeleton object
+    polygonPicked = Signal(int)     # compatibility signal
+    polygonPickedDetailed = Signal(int, bool)  # poly_id, Ctrl additive select
+    polygonDeselected = Signal(int)
+    selectionCleared = Signal()
     objectPicked = Signal(str)      # owner_path of the clicked object
     editModeChanged = Signal(bool)  # geometry Edit Mode entered / left
+    editSelectionChanged = Signal(int)
     geometryEdited = Signal(str)    # owner_path whose vertices changed
+    geometryCommandCommitted = Signal(str, object, object)
+    undoRequested = Signal()
+    redoRequested = Signal()
     editHint = Signal(str)          # live hint text for the active tool
     animationFrameChanged = Signal(str)
     manualCameraChanged = Signal()  # orbit, pan or zoom changed by the user
@@ -196,6 +203,7 @@ class AssetViewport(QWidget):
 
         # Polygon Mapping Workbench state
         self._selected_poly: int | None = None
+        self._polygon_texture_overrides: dict[tuple[str, int], str] = {}
         self._mapping_diagnostics = False
         self._highlight_polys: set[int] = set()
         self._duplicate_polys: set[int] = set()
@@ -222,9 +230,13 @@ class AssetViewport(QWidget):
         self._modal_center_screen = QPointF()
         self._modal_denom = 4.0
         self._modal_pivot_world = (0.0, 0.0, 0.0)
-        self._box_armed = False
+        self._direct_grab_active = False
+        self._direct_grab_selected_only = False
+        self._edit_pick_polygons = False
         self._box_start: QPoint | None = None
         self._box_rect: QRect | None = None
+        self._marquee_candidate = False
+        self._mode_label_rect: QRect | None = None
 
         self._mode = "textured"
         self._show_sen = True
@@ -266,9 +278,12 @@ class AssetViewport(QWidget):
         self._modal_op = None
         self._modal_axis = None
         self._modal_numeric = ""
-        self._box_armed = False
+        self._direct_grab_active = False
+        self._direct_grab_selected_only = False
+        self._edit_pick_polygons = False
         self._box_start = None
         self._box_rect = None
+        self._marquee_candidate = False
         self._faces = []
         self._materials = []
         self._sen_boxes = []
@@ -292,6 +307,30 @@ class AssetViewport(QWidget):
         self._selected_poly = poly_id
         self.update()
 
+    def polygon_texture_override(self, owner: str, poly_id: int) -> str | None:
+        return self._polygon_texture_overrides.get((owner, poly_id))
+
+    def set_polygon_texture_overrides(self, owner: str, poly_ids,
+                                      texture_name: str | None) -> None:
+        for poly_id in poly_ids:
+            key = (owner, int(poly_id))
+            if texture_name:
+                self._polygon_texture_overrides[key] = texture_name
+            else:
+                self._polygon_texture_overrides.pop(key, None)
+        self.refresh_family_materials()
+
+    def restore_polygon_texture_overrides(
+            self, values: dict[tuple[str, int], str | None]) -> None:
+        """Restore several per-polygon previews with one material rebuild."""
+
+        for key, texture_name in values.items():
+            if texture_name:
+                self._polygon_texture_overrides[key] = texture_name
+            else:
+                self._polygon_texture_overrides.pop(key, None)
+        self.refresh_family_materials()
+
     def set_highlight_polys(self, poly_ids: set[int]) -> None:
         self._highlight_polys = set(poly_ids)
         self.update()
@@ -309,6 +348,8 @@ class AssetViewport(QWidget):
                     keep_camera: bool = False,
                     primary_owner: str | None = None) -> None:
         selected = self._selected_owner
+        if family is not self._family_ref:
+            self._polygon_texture_overrides = {}
         self.clear()
         self._family_ref = family
         self._visible_owners = visible_owners
@@ -369,6 +410,41 @@ class AssetViewport(QWidget):
                          primary_owner=self._primary_owner)
         self.update()
 
+    def refresh_family_materials(self) -> None:
+        """Rebuild textures/materials while preserving active edit history."""
+
+        if self._family_ref is None:
+            return
+        session = self._edit_session
+        edit_state = None
+        if session is not None and self._edit_owner is not None:
+            if session.modal_active:
+                session.cancel_modal()
+            edit_state = {
+                "owner": self._edit_owner,
+                "selection": set(session.selection),
+                "undo": [list(points) for points in session._undo],
+                "redo": [list(points) for points in session._redo],
+                "dirty": session.dirty,
+                "selected_only": self._direct_grab_selected_only,
+                "pick_polygons": self._edit_pick_polygons,
+            }
+        owners = (set(self._visible_owners)
+                  if self._visible_owners is not None else None)
+        self.load_family(self._family_ref, owners, keep_camera=True,
+                         primary_owner=self._primary_owner)
+        if edit_state is not None \
+                and self.enter_edit_mode(edit_state["owner"]):
+            restored = self._edit_session
+            restored.set_selection(edit_state["selection"])
+            restored._undo = edit_state["undo"]
+            restored._redo = edit_state["redo"]
+            restored.dirty = edit_state["dirty"]
+            self.configure_edit_interaction(
+                selected_only=edit_state["selected_only"],
+                pick_polygons=edit_state["pick_polygons"])
+        self.update()
+
     def descendants_of(self, owner: str) -> set[str]:
         prefix = owner + "/"
         return {o for o in self._owner_bounds
@@ -427,6 +503,17 @@ class AssetViewport(QWidget):
     def edit_session(self) -> GeometryEditSession | None:
         return self._edit_session
 
+    @property
+    def edit_owner(self) -> str | None:
+        return self._edit_owner
+
+    def configure_edit_interaction(self, *, selected_only: bool,
+                                   pick_polygons: bool) -> None:
+        """Set mouse behavior without replacing the active edit session."""
+
+        self._direct_grab_selected_only = selected_only
+        self._edit_pick_polygons = pick_polygons
+
     def toggle_edit_mode(self) -> bool:
         if self._snapshot_active:
             return self._edit_session is not None
@@ -477,6 +564,8 @@ class AssetViewport(QWidget):
             pos = (0.0, 0.0, 0.0)
         self._edit_session = GeometryEditSession(fam_obj, matrix, pos)
         self._edit_owner = target
+        self._direct_grab_selected_only = False
+        self._edit_pick_polygons = False
         self._selected_owner = target
         polygons = fam_obj.skeleton.polygons
         self._edit_faces = [
@@ -490,9 +579,37 @@ class AssetViewport(QWidget):
                 "deltas fall back to an identity mapping.")
         self.editModeChanged.emit(True)
         self.editHint.emit(
-            f"Edit Mode [{target}]: click select | Shift+click add | B box "
-            "| A all | Alt+A none | G move | R rotate | S scale | X/Y/Z "
-            "axis | Ctrl+Z undo | Tab exit")
+            f"Edit Mode [{target}]: drag selected vertex move | "
+            "Ctrl+click add | Ctrl+drag empty space box-select | "
+            "A all | Alt+A none | G move | "
+            "R rotate | S scale | X/Y/Z axis | Ctrl+Z undo | Tab exit")
+        self.update()
+        return True
+
+    def enter_edit_mode_with_vertices(self, owner: str, indices,
+                                      pick_polygons: bool = False) -> bool:
+        """Enter the existing Edit Mode and select only validated POO2 indices."""
+
+        started_here = self._edit_session is None or self._edit_owner != owner
+        if self._edit_session is not None and self._edit_owner != owner:
+            self.exit_edit_mode()
+        if not self.enter_edit_mode(owner):
+            return False
+        try:
+            self._edit_session.set_selection(indices)
+        except ValueError as exc:
+            self.statusMessage.emit(f"Edit Mode: {exc}")
+            if started_here:
+                self.exit_edit_mode()
+            return False
+        if not self._edit_session.selection:
+            self.statusMessage.emit("Edit Mode: the FX polygon has no vertices.")
+            if started_here:
+                self.exit_edit_mode()
+            return False
+        self._direct_grab_selected_only = True
+        self._edit_pick_polygons = pick_polygons
+        self._emit_selection_hint()
         self.update()
         return True
 
@@ -509,9 +626,12 @@ class AssetViewport(QWidget):
         self._modal_op = None
         self._modal_axis = None
         self._modal_numeric = ""
-        self._box_armed = False
+        self._direct_grab_active = False
+        self._direct_grab_selected_only = False
+        self._edit_pick_polygons = False
         self._box_start = None
         self._box_rect = None
+        self._marquee_candidate = False
         self.editModeChanged.emit(False)
         self.editHint.emit("")
         self.update()
@@ -531,6 +651,203 @@ class AssetViewport(QWidget):
             self.geometryEdited.emit(self._edit_owner or "")
             self.statusMessage.emit("Geometry edit: redo")
             self.update()
+
+    def select_all_edit_vertices(self) -> None:
+        session = self._edit_session
+        if session is None:
+            self.statusMessage.emit("Edit Mode: no editable model is active.")
+            return
+        session.select_all()
+        self._selected_owner = self._edit_owner
+        self._emit_selection_hint()
+        self.update()
+
+    def select_no_edit_vertices(self) -> None:
+        session = self._edit_session
+        if session is not None:
+            session.select_none()
+        self._selected_poly = None
+        self._selected_owner = None
+        self._highlight_polys.clear()
+        self._emit_selection_hint()
+        self.selectionCleared.emit()
+        self.update()
+
+    def deselect_at(self, point: QPoint) -> bool:
+        """Deselect the visible polygon below ``point`` and its vertices."""
+
+        pos = QPointF(point)
+        for polygon, face in reversed(self._pick_shapes):
+            if not polygon.containsPoint(pos, Qt.FillRule.OddEvenFill):
+                continue
+            session = self._edit_session
+            if session is not None and face.owner == self._edit_owner:
+                model = session.model
+                if 0 <= face.poly_id < len(model.polygons):
+                    session.selection.difference_update(
+                        model.polygons[face.poly_id])
+                    self._emit_selection_hint()
+            self._highlight_polys.discard(face.poly_id)
+            if self._selected_poly == face.poly_id:
+                self._selected_poly = None
+            if session is None or not session.selection:
+                self._selected_owner = None
+            if face.primary:
+                self.polygonDeselected.emit(face.poly_id)
+            self.update()
+            return True
+        self.select_no_edit_vertices()
+        return False
+
+    def selected_edit_points(self):
+        session = self._edit_session
+        if session is None:
+            return []
+        return [(index, session.model.points[index])
+                for index in sorted(session.selection)
+                if index < len(session.model.points)]
+
+    def replace_selected_edit_points(self, points) -> bool:
+        session = self._edit_session
+        replacements = list(points)
+        if session is None or not session.selection:
+            self.statusMessage.emit(
+                "Paste: select the destination vertices first.")
+            return False
+        if len(replacements) != len(session.selection):
+            self.statusMessage.emit(
+                "Paste: copied and selected vertex counts do not match.")
+            return False
+        if not session.begin_modal():
+            return False
+        before = session.modal_origin_points()
+        try:
+            session.preview_replace_selected(replacements)
+        except ValueError as exc:
+            session.cancel_modal()
+            self.statusMessage.emit(f"Paste: {exc}")
+            return False
+        changed = session.commit_modal()
+        self._refresh_edit_faces()
+        if changed:
+            self._emit_geometry_command(before)
+            self.statusMessage.emit(
+                f"Pasted {len(replacements)} vertex position(s).")
+        else:
+            self.statusMessage.emit("Paste made no coordinate changes.")
+        self.update()
+        return changed
+
+    def nudge_edit_selection(self, dx_pixels: float,
+                             dy_pixels: float) -> bool:
+        """Move selected vertices in the current screen plane."""
+
+        session = self._edit_session
+        if session is None or not session.selection:
+            self.statusMessage.emit(
+                "Nudge: enable Edit Mode and select one or more vertices.")
+            return False
+        pivot = session.selection_pivot()
+        if pivot is None or not session.begin_modal():
+            return False
+        before = session.modal_origin_points()
+        pivot_world = _apply(session.matrix, pivot, session.position)
+        cam = self._camera_vertex(pivot_world)
+        self._modal_denom = max(0.2, 4.0 - cam[2])
+        world = self._screen_delta_to_world(dx_pixels, dy_pixels)
+        delta = session.world_delta_to_model(world)
+        session.preview_grab(delta)
+        changed = session.commit_modal()
+        self._refresh_edit_faces()
+        if changed:
+            self._emit_geometry_command(before)
+            self.statusMessage.emit(
+                f"Nudged {len(session.selection)} selected vertex/vertices.")
+        self.update()
+        return changed
+
+    def scale_edit_selection(self, factor: float,
+                             select_all_if_empty: bool = True) -> bool:
+        session = self._edit_session
+        if session is None:
+            self.statusMessage.emit("Scale: enable Edit Mode first.")
+            return False
+        selected_all = False
+        if not session.selection and select_all_if_empty:
+            session.select_all()
+            selected_all = True
+        if not session.selection or not session.begin_modal():
+            self.statusMessage.emit("Scale: no vertices selected.")
+            return False
+        before = session.modal_origin_points()
+        session.preview_scale(factor)
+        changed = session.commit_modal()
+        self._refresh_edit_faces()
+        if changed:
+            self._emit_geometry_command(before)
+            scope = "entire model" if selected_all else (
+                f"{len(session.selection)} selected vertex/vertices")
+            self.statusMessage.emit(f"Scaled {scope} by {factor:g}.")
+        self.update()
+        return changed
+
+    def begin_scale_preview(self, select_all_if_empty: bool = True) -> bool:
+        session = self._edit_session
+        if session is None:
+            return False
+        if not session.selection and select_all_if_empty:
+            session.select_all()
+            self._emit_selection_hint()
+        return bool(session.selection and session.begin_modal())
+
+    def update_scale_preview(self, factor: float) -> None:
+        session = self._edit_session
+        if session is None or not session.modal_active:
+            return
+        session.preview_scale(factor)
+        self._refresh_edit_faces()
+        self.update()
+
+    def finish_scale_preview(self, accept: bool) -> bool:
+        session = self._edit_session
+        if session is None or not session.modal_active:
+            return False
+        before = session.modal_origin_points()
+        if not accept:
+            session.cancel_modal()
+            self._refresh_edit_faces()
+            self.update()
+            return False
+        changed = session.commit_modal()
+        self._refresh_edit_faces()
+        if changed:
+            self._emit_geometry_command(before)
+        self.update()
+        return changed
+
+    def apply_geometry_snapshot(self, owner: str, points) -> bool:
+        """Apply a window-level undo snapshot to the active edited owner."""
+
+        session = self._edit_session
+        values = [tuple(point) for point in points]
+        if session is None or self._edit_owner != owner \
+                or len(values) != len(session.model.points):
+            return False
+        session.cancel_modal()
+        session.model.points[:] = values
+        session.dirty = True
+        self._refresh_edit_faces()
+        self.geometryEdited.emit(owner)
+        self.update()
+        return True
+
+    def _emit_geometry_command(self, before) -> None:
+        owner = self._edit_owner or ""
+        session = self._edit_session
+        self.geometryEdited.emit(owner)
+        if session is not None and before is not None:
+            self.geometryCommandCommitted.emit(
+                owner, list(before), list(session.model.points))
 
     def _refresh_edit_faces(self) -> None:
         """Push the session's current coordinates into the owner's faces."""
@@ -556,10 +873,12 @@ class AssetViewport(QWidget):
         return [self._project(self._camera_vertex(p, camera), target, camera)
                 for p in session.world_points()]
 
-    def _pick_edit_vertex(self, point: QPoint, extend: bool) -> None:
+    def _nearest_edit_vertex(self, point: QPoint) -> int | None:
+        """Return the vertex under the cursor using the visible pick radius."""
+
         session = self._edit_session
         if session is None:
-            return
+            return None
         best = None
         best_dist = 12.0 ** 2
         for index, screen in enumerate(self._edit_screen_points()):
@@ -569,6 +888,13 @@ class AssetViewport(QWidget):
             if dist < best_dist:
                 best = index
                 best_dist = dist
+        return best
+
+    def _pick_edit_vertex(self, point: QPoint, extend: bool) -> int | None:
+        session = self._edit_session
+        if session is None:
+            return None
+        best = self._nearest_edit_vertex(point)
         if best is None:
             if not extend:
                 session.select_none()
@@ -578,11 +904,11 @@ class AssetViewport(QWidget):
             session.selection = {best}
         self._emit_selection_hint()
         self.update()
+        return best
 
     def _apply_box_select(self, extend: bool) -> None:
         session = self._edit_session
         rect = self._box_rect
-        self._box_armed = False
         self._box_start = None
         self._box_rect = None
         if session is None or rect is None:
@@ -603,17 +929,19 @@ class AssetViewport(QWidget):
         self.statusMessage.emit(
             f"Edit Mode: {len(session.selection)}"
             f"/{len(session.model.points)} vertices selected")
+        self.editSelectionChanged.emit(len(session.selection))
 
     # -- modal transforms (G / R / S) ------------------------------------------
 
-    def _begin_modal(self, op: str) -> None:
+    def _begin_modal(self, op: str, start: QPoint | None = None,
+                     direct_grab: bool = False) -> None:
         session = self._edit_session
         if session is None:
             return
         if not session.selection:
             self.statusMessage.emit(
                 "Edit Mode: select at least one vertex first "
-                "(click, B box select, or A for all).")
+                "(click, drag a selection box, or A for all).")
             return
         if not session.begin_modal():
             return
@@ -626,7 +954,9 @@ class AssetViewport(QWidget):
         self._modal_op = op
         self._modal_axis = None
         self._modal_numeric = ""
-        cursor = self.mapFromGlobal(QCursor.pos())
+        self._direct_grab_active = direct_grab
+        cursor = (start if start is not None
+                  else self.mapFromGlobal(QCursor.pos()))
         self._modal_start = cursor
         self._modal_last_mouse = cursor
         self._update_modal(cursor)
@@ -635,13 +965,15 @@ class AssetViewport(QWidget):
         session = self._edit_session
         if session is None or self._modal_op is None:
             return
+        before = session.modal_origin_points()
         changed = session.commit_modal()
         self._modal_op = None
         self._modal_axis = None
         self._modal_numeric = ""
+        self._direct_grab_active = False
         self._refresh_edit_faces()
         if changed:
-            self.geometryEdited.emit(self._edit_owner or "")
+            self._emit_geometry_command(before)
         self.editHint.emit("")
         self.update()
 
@@ -653,6 +985,7 @@ class AssetViewport(QWidget):
         self._modal_op = None
         self._modal_axis = None
         self._modal_numeric = ""
+        self._direct_grab_active = False
         self._refresh_edit_faces()
         self.editHint.emit("")
         self.update()
@@ -873,10 +1206,20 @@ class AssetViewport(QWidget):
                 polygon = polygons[poly_id]
                 if len(polygon) < 3:
                     continue
+                face_mat_id = mat_id
+                face_animated = animated
+                override_name = self._polygon_texture_overrides.get(
+                    (owner, poly_id))
+                if override_name:
+                    override_key = f"__poly__{owner}:{poly_id}:{override_name}"
+                    face_mat_id = self._ensure_material(
+                        override_key, override_name, "ilbm", family,
+                        material_index, block=block)
+                    face_animated = False
                 self._faces.append(ViewFace(
                     vertices=[world_points[i] for i in polygon],
-                    uvs=list(uvs), material=mat_id, shade=shade,
-                    poly_id=poly_id, animated=animated, primary=primary,
+                    uvs=list(uvs), material=face_mat_id, shade=shade,
+                    poly_id=poly_id, animated=face_animated, primary=primary,
                     owner=owner,
                 ))
 
@@ -1352,9 +1695,11 @@ class AssetViewport(QWidget):
                     continue
             polygon = QPolygonF(screen)
             if not face.mapped and not clean:
-                # bright magenta overlay for ATTS coverage holes
-                painter.setPen(QPen(QColor(255, 255, 255), 1.0))
-                painter.setBrush(QColor(255, 40, 200, 230))
+                # ATTS coverage holes are only a diagnostic aid.  Keep them
+                # visible without letting legacy unmapped faces dominate the
+                # textured model preview.
+                painter.setPen(QPen(QColor(155, 160, 170, 115), 1.0))
+                painter.setBrush(QColor(105, 110, 120, 48))
                 painter.drawPolygon(polygon)
             else:
                 self._draw_face(painter, face, screen, mode=mode,
@@ -1370,11 +1715,19 @@ class AssetViewport(QWidget):
                 painter.setPen(QPen(QColor(90, 230, 255), 1.2))
                 painter.setBrush(QColor(90, 230, 255, 90))
                 painter.drawPolygon(polygon)
+            whole_edit_owner_selected = bool(
+                self._edit_session is not None
+                and self._edit_owner == face.owner
+                and len(self._edit_session.selection)
+                == len(self._edit_session.model.points)
+            )
             if not clean and self._selected_owner is not None \
                     and face.owner == self._selected_owner \
-                    and self._mode != "textured":
+                    and (self._mode != "textured"
+                         or whole_edit_owner_selected):
                 painter.setPen(Qt.PenStyle.NoPen)
-                painter.setBrush(QColor(90, 230, 255, 60))
+                painter.setBrush(QColor(
+                    60, 185, 255, 82 if whole_edit_owner_selected else 60))
                 painter.drawPolygon(polygon)
             if not clean:
                 pick_shapes.append((polygon, face))
@@ -1405,6 +1758,8 @@ class AssetViewport(QWidget):
 
         if not clean and self._edit_session is not None:
             self._draw_edit_overlay(painter, target, camera)
+        elif not clean:
+            self._draw_mode_label(painter, target, False)
 
     def _draw_edit_overlay(self, painter: QPainter, target: QRectF,
                            camera: dict) -> None:
@@ -1440,12 +1795,13 @@ class AssetViewport(QWidget):
                 continue
             painter.drawRect(QRectF(point.x() - 2.5, point.y() - 2.5,
                                     5.0, 5.0))
-        painter.setBrush(QColor(255, 160, 50))
+        painter.setPen(QPen(QColor(255, 244, 120), 1.8))
+        painter.setBrush(QColor(255, 32, 48))
         for index in session.selection:
             if index < len(screen):
                 point = screen[index]
-                painter.drawRect(QRectF(point.x() - 3.5, point.y() - 3.5,
-                                        7.0, 7.0))
+                painter.drawRect(QRectF(point.x() - 4.5, point.y() - 4.5,
+                                        9.0, 9.0))
 
         pivot = session.selection_pivot()
         if pivot is not None:
@@ -1471,21 +1827,26 @@ class AssetViewport(QWidget):
                 self._box_rect.height() * scale_y)
             painter.drawRect(box)
 
-        label = (f"EDIT MODE - {self._edit_owner} - "
-                 f"{len(session.selection)}/{len(session.model.points)} "
-                 "vertices")
-        if session.dirty:
-            label += " (modified)"
+        self._draw_mode_label(painter, target, True)
+
+    def _draw_mode_label(self, painter: QPainter, target: QRectF,
+                         editing: bool) -> None:
+        label = "Edit Mode" if editing else "View Mode"
         metrics = painter.fontMetrics()
         width = metrics.horizontalAdvance(label) + 16
         height = metrics.height() + 10
         x = int(target.center().x() - width / 2)
         y = int(target.top()) + 6
         painter.setPen(Qt.PenStyle.NoPen)
-        painter.setBrush(QColor(36, 58, 38, 215))
+        painter.setBrush(QColor(36, 58, 38, 215) if editing
+                         else QColor(30, 32, 38, 205))
         painter.drawRect(x, y, width, height)
-        painter.setPen(QColor(170, 240, 170))
+        painter.setPen(QColor(170, 240, 170) if editing
+                       else QColor(255, 255, 255))
         painter.drawText(x + 8, y + metrics.ascent() + 5, label)
+        if (int(target.left()), int(target.top()), int(target.width()),
+                int(target.height())) == (0, 0, self.width(), self.height()):
+            self._mode_label_rect = QRect(x, y, width, height)
 
     def _draw_owner_bbox(self, painter: QPainter, owner: str,
                          target: QRectF, camera: dict) -> None:
@@ -1691,6 +2052,14 @@ class AssetViewport(QWidget):
 
     def mousePressEvent(self, event: QMouseEvent) -> None:  # noqa: N802
         pos = event.position().toPoint()
+        if event.button() == Qt.MouseButton.LeftButton \
+                and self._mode_label_rect is not None \
+                and self._mode_label_rect.contains(pos) \
+                and self._family_ref is not None \
+                and not self._snapshot_active:
+            self.toggle_edit_mode()
+            event.accept()
+            return
         if self._edit_session is not None and not self._snapshot_active:
             if self._modal_op is not None:
                 if event.button() == Qt.MouseButton.LeftButton:
@@ -1699,12 +2068,34 @@ class AssetViewport(QWidget):
                     self._cancel_modal()
                 event.accept()
                 return
-            if self._box_armed \
-                    and event.button() == Qt.MouseButton.LeftButton:
-                self._box_start = pos
-                self._box_rect = QRect(pos, pos)
+            if self._edit_session.modal_active:
+                # A live scale preview owns the geometry, but the viewport
+                # remains free for camera inspection until the dialog closes.
+                self._last_mouse = pos
+                self._press_pos = pos
                 event.accept()
                 return
+            if event.button() == Qt.MouseButton.LeftButton:
+                vertex = self._nearest_edit_vertex(pos)
+                additive = bool(event.modifiers()
+                                & Qt.KeyboardModifier.ControlModifier)
+                if additive:
+                    self._marquee_candidate = True
+                    self._last_mouse = pos
+                    self._press_pos = pos
+                    event.accept()
+                    return
+                if not additive:
+                    if vertex is not None \
+                            and not self._direct_grab_selected_only \
+                            and vertex not in self._edit_session.selection:
+                        self._edit_session.selection = {vertex}
+                        self._emit_selection_hint()
+                        self.update()
+                    if vertex in self._edit_session.selection:
+                        self._begin_modal("grab", pos, direct_grab=True)
+                        event.accept()
+                        return
         self._last_mouse = pos
         if event.button() == Qt.MouseButton.LeftButton:
             self._press_pos = self._last_mouse
@@ -1712,30 +2103,52 @@ class AssetViewport(QWidget):
 
     def mouseReleaseEvent(self, event: QMouseEvent) -> None:  # noqa: N802
         if self._edit_session is not None and not self._snapshot_active:
-            shift = bool(event.modifiers()
-                         & Qt.KeyboardModifier.ShiftModifier)
+            if self._edit_session.modal_active and self._modal_op is None:
+                self._press_pos = None
+                event.accept()
+                return
+            if self._direct_grab_active \
+                    and event.button() == Qt.MouseButton.LeftButton:
+                self._commit_modal()
+                event.accept()
+                return
+            additive = bool(event.modifiers()
+                            & Qt.KeyboardModifier.ControlModifier)
             if self._box_start is not None \
                     and event.button() == Qt.MouseButton.LeftButton:
-                self._apply_box_select(shift)
+                self._apply_box_select(additive)
+                self._marquee_candidate = False
                 event.accept()
                 return
             if event.button() == Qt.MouseButton.LeftButton \
                     and self._press_pos is not None:
                 delta = event.position().toPoint() - self._press_pos
                 if abs(delta.x()) <= 4 and abs(delta.y()) <= 4:
-                    self._pick_edit_vertex(event.position().toPoint(), shift)
+                    point = event.position().toPoint()
+                    nearest = self._nearest_edit_vertex(point)
+                    if self._edit_pick_polygons \
+                            and (nearest is None
+                                 or (self._direct_grab_selected_only
+                                     and nearest not in
+                                     self._edit_session.selection)):
+                        self.pick_at(point, additive)
+                    else:
+                        self._pick_edit_vertex(point, additive)
             self._press_pos = None
+            self._marquee_candidate = False
             event.accept()
             return
         if event.button() == Qt.MouseButton.LeftButton \
                 and self._press_pos is not None and not self._snapshot_active:
             delta = event.position().toPoint() - self._press_pos
             if abs(delta.x()) <= 4 and abs(delta.y()) <= 4:
-                self.pick_at(event.position().toPoint())
+                additive = bool(event.modifiers()
+                                & Qt.KeyboardModifier.ControlModifier)
+                self.pick_at(event.position().toPoint(), additive)
         self._press_pos = None
         event.accept()
 
-    def pick_at(self, point: QPoint) -> int | None:
+    def pick_at(self, point: QPoint, additive: bool = False) -> int | None:
         """Select the topmost polygon under the cursor.
 
         Faces were queued back-to-front (painter's algorithm), so the last
@@ -1751,6 +2164,7 @@ class AssetViewport(QWidget):
                 if face.primary:
                     self._selected_poly = face.poly_id
                     self.polygonPicked.emit(face.poly_id)
+                    self.polygonPickedDetailed.emit(face.poly_id, additive)
                 self.update()
                 return face.poly_id if face.primary else None
         return None
@@ -1799,18 +2213,6 @@ class AssetViewport(QWidget):
             self._emit_selection_hint()
             self.update()
             return True
-        if key == Qt.Key.Key_B:
-            self._box_armed = True
-            self.statusMessage.emit(
-                "Box select: drag with the left mouse button "
-                "(Shift extends, Esc cancels).")
-            return True
-        if key == Qt.Key.Key_Escape and self._box_armed:
-            self._box_armed = False
-            self._box_start = None
-            self._box_rect = None
-            self.update()
-            return True
         if key == Qt.Key.Key_G:
             self._begin_modal("grab")
             return True
@@ -1823,13 +2225,13 @@ class AssetViewport(QWidget):
         if key == Qt.Key.Key_Z \
                 and mods & Qt.KeyboardModifier.ControlModifier:
             if mods & Qt.KeyboardModifier.ShiftModifier:
-                self.edit_redo()
+                self.redoRequested.emit()
             else:
-                self.edit_undo()
+                self.undoRequested.emit()
             return True
         if key == Qt.Key.Key_Y \
                 and mods & Qt.KeyboardModifier.ControlModifier:
-            self.edit_redo()
+            self.redoRequested.emit()
             return True
         return False
 
@@ -1855,6 +2257,19 @@ class AssetViewport(QWidget):
                 self._box_rect = QRect(self._box_start, current).normalized()
                 self._last_mouse = current
                 self.update()
+                event.accept()
+                return
+            if self._marquee_candidate \
+                    and event.buttons() & Qt.MouseButton.LeftButton \
+                    and self._press_pos is not None:
+                delta = current - self._press_pos
+                if abs(delta.x()) > 4 or abs(delta.y()) > 4:
+                    self._box_start = self._press_pos
+                    self._box_rect = QRect(
+                        self._box_start, current).normalized()
+                    self._marquee_candidate = False
+                    self._last_mouse = current
+                    self.update()
                 event.accept()
                 return
         delta = current - self._last_mouse
@@ -1885,7 +2300,7 @@ class AssetViewport(QWidget):
         event.accept()
 
     def mouseDoubleClickEvent(self, event: QMouseEvent) -> None:  # noqa: N802
-        self.reset_view()
+        self.deselect_at(event.position().toPoint())
         event.accept()
 
 

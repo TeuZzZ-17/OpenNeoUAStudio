@@ -12,9 +12,25 @@ Usage:
 from __future__ import annotations
 
 import sys
+from pathlib import Path
 
 APP_TITLE = "OpenUAStudio"
 MAP_EDITOR_FLAG = "--map-editor"
+
+
+def _open_startup_path(window, value: str) -> None:
+    """Route the documented command-line file types to the matching UI.
+
+    ``SET.BAS`` is both a ``.BAS`` filename and a resource archive.  Sending
+    it through ``open_base`` happens to expose some geometry, but skips the
+    archive browser/provider state that the File menu initializes.
+    """
+
+    path = Path(value)
+    if path.name.casefold() == "set.bas":
+        window.open_setbas(path)
+    else:
+        window.open_base(path)
 
 
 def _run_map_editor(args: list[str]) -> int:
@@ -46,7 +62,7 @@ def main() -> int:
     window.show()
 
     if args:
-        window.open_base(args[0])
+        _open_startup_path(window, args[0])
 
     return app.exec()
 

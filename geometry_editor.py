@@ -151,6 +151,20 @@ class GeometryEditSession:
     def select_none(self) -> None:
         self.selection = set()
 
+    def set_selection(self, indices) -> None:
+        """Replace the selection with validated POO2 vertex indices."""
+
+        selected = set(indices)
+        if any(not isinstance(index, int) for index in selected):
+            raise ValueError("vertex selection indices must be integers")
+        invalid = sorted(index for index in selected
+                         if index < 0 or index >= len(self.model.points))
+        if invalid:
+            raise ValueError(
+                f"vertex selection contains invalid POO2 index {invalid[0]}"
+            )
+        self.selection = selected
+
     def toggle(self, index: int) -> None:
         if index in self.selection:
             self.selection.discard(index)
@@ -176,6 +190,10 @@ class GeometryEditSession:
     @property
     def modal_active(self) -> bool:
         return self._modal_origin is not None
+
+    def modal_origin_points(self) -> list[Point3D] | None:
+        return (list(self._modal_origin)
+                if self._modal_origin is not None else None)
 
     def begin_modal(self) -> bool:
         if not self.selection or self.modal_active:
@@ -236,6 +254,22 @@ class GeometryEditSession:
                     cy + (y - cy) * fy,
                     cz + (z - cz) * fz,
                 )
+        self._pending = pending
+
+    def preview_replace_selected(self, points) -> None:
+        """Replace selected coordinates during a normal undoable modal edit."""
+
+        if self._modal_origin is None:
+            return
+        indices = sorted(self.selection)
+        replacements = list(points)
+        if len(indices) != len(replacements):
+            raise ValueError(
+                "replacement point count must match the vertex selection")
+        pending = list(self._modal_origin)
+        for index, point in zip(indices, replacements):
+            if index < len(pending):
+                pending[index] = tuple(float(value) for value in point)
         self._pending = pending
 
     def cancel_modal(self) -> None:

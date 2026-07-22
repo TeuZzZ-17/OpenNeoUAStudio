@@ -63,7 +63,7 @@ class SkltModel:
 
     @property
     def rendered_polygon_count(self) -> int:
-        return len(self.polygons)
+        return sum(1 for polygon in self.polygons if len(polygon) >= 2)
 
     @property
     def rendered_polygon_line_count(self) -> int:
@@ -549,7 +549,12 @@ def _parse_pol2(payload: bytes, warnings: list[str]) -> list[Polygon]:
 def _validate_polygons(
     polygons: Iterable[Polygon], point_count: int, warnings: list[str]
 ) -> list[Polygon]:
-    valid_polygons: list[Polygon] = []
+    # POL2 list positions are persistent polyIDs referenced by BASE/ATTS.
+    # Never compact this list when a malformed record is encountered: doing
+    # so would silently apply every later material/UV entry to the wrong face.
+    # An empty placeholder is safe because both viewers already skip
+    # non-renderable polygons while the original on-disk index is preserved.
+    validated_polygons: list[Polygon] = []
 
     for polygon_index, polygon in enumerate(polygons):
         invalid_indices = [index for index in polygon if index >= point_count]
@@ -557,18 +562,20 @@ def _validate_polygons(
             warnings.append(
                 f"POL2 polygon {polygon_index} references point index "
                 f"{invalid_indices[0]}, but POO2 contains {point_count} point(s); "
-                "the polygon was skipped."
+                "an empty polyID placeholder was kept."
             )
+            validated_polygons.append([])
             continue
         if len(polygon) < 2:
             warnings.append(
                 f"POL2 polygon {polygon_index} has fewer than two vertices; "
-                "it cannot be rendered."
+                "it cannot be rendered, but its polyID was preserved."
             )
+            validated_polygons.append([])
             continue
-        valid_polygons.append(polygon)
+        validated_polygons.append(polygon)
 
-    return valid_polygons
+    return validated_polygons
 
 
 def _parse_otl2(payload: bytes, warnings: list[str]) -> list[Point2D]:
@@ -664,9 +671,13 @@ def _encode_pol2(polygons: list[Polygon], point_count: int) -> bytes:
     encoded = bytearray()
     encoded.extend(struct.pack(">I", len(polygons)))
     for polygon_index, polygon in enumerate(polygons):
-        if len(polygon) < 2:
+        # Original assets use zero-length POL2 records as stable polyID
+        # placeholders.  Preserve them during structural saves; a one-vertex
+        # record is still rejected because it is neither a valid face nor a
+        # known placeholder convention.
+        if len(polygon) == 1:
             raise SkltParseError(
-                f"POL2 polygon {polygon_index} has fewer than two vertices."
+                f"POL2 polygon {polygon_index} has exactly one vertex."
             )
         if len(polygon) > 0xFFFF:
             raise SkltParseError(

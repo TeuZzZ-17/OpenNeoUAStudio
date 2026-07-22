@@ -66,7 +66,19 @@ class DirectoryIndex:
         self.by_name: dict[str, list[Path]] = {}
         self.file_count = 0
         for dirpath, dirnames, filenames in os.walk(root):
-            dirnames[:] = [d for d in dirnames if d.lower() not in IGNORED_DIRS]
+            current = Path(dirpath)
+            dirnames[:] = [
+                directory for directory in dirnames
+                if directory.lower() not in IGNORED_DIRS
+                # SET.BAS extraction creates set/manifest.json + set/raw/.
+                # That raw dump is not an engine loose-override directory and
+                # must not silently shadow the archive when a broader asset
+                # root is indexed. Choosing raw itself as the root still works.
+                and not (
+                    directory.lower() == "raw"
+                    and (current / "manifest.json").is_file()
+                )
+            ]
             for filename in filenames:
                 if filename.lower().endswith(".info"):
                     continue

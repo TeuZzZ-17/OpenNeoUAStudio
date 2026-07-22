@@ -29,7 +29,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 import struct
 
-from base_parser import AmeshBlock, AttsEntry, parse_base_bytes
+from base_parser import AmeshBlock, parse_base_bytes
 from iff_reader import read_iff_bytes
 
 
@@ -401,6 +401,18 @@ class AttsValueEdit:
         return (self.owner_path, self.block_index, self.atts_index)
 
 
+@dataclass
+class TextureNameEdit:
+    """Replace one diffuse ILBM reference inside an existing material block."""
+
+    owner_path: str
+    block_index: int
+    name: str
+
+    def key(self) -> tuple[str, int]:
+        return (self.owner_path, self.block_index)
+
+
 def _walk_with_owner_paths(root) -> dict[str, object]:
     """BaseObject tree -> {owner_path: BaseObject}, same labelling as
     asset_family (parse order is deterministic)."""
@@ -680,6 +692,174 @@ def save_uv_edited_base(family, edits: list[UVEdit],
     """Apply UV edits to the ORIGINAL file bytes and save to a NEW path."""
 
     return save_family_edits(family, edits, [], out_path)
+
+
+# --- standalone model BASE export and texture references -----------------------
+
+
+def export_base_object_bytes(source: bytes, base_object) -> bytes:
+    """Wrap one source FORM OBJT (including its KIDS) in a standalone MC2.
+
+    No object payload is reconstructed: the exact original OBJT bytes are
+    copied, while archive siblings stay out of the loose BASE export.
+    """
+
+    offset = getattr(base_object, "source_objt_offset", -1)
+    size = getattr(base_object, "source_objt_size", 0)
+    end = offset + 8 + size + (size & 1)
+    if offset < 0 or size < 4 or end > len(source):
+        raise MappingEditError("selected BASE object has no valid source OBJT span")
+    if source[offset:offset + 4] != b"FORM" \
+            or source[offset + 8:offset + 12] != b"OBJT":
+        raise MappingEditError("selected source span is not FORM OBJT")
+    objt = source[offset:end]
+    payload = b"MC2 " + objt
+    exported = b"FORM" + struct.pack(">I", len(payload)) + payload
+    if len(payload) & 1:
+        exported += b"\0"
+    parsed = parse_base_bytes(exported, "<standalone-model-base>")
+    if parsed.root is None:
+        raise MappingEditError("standalone BASE verification could not parse its root")
+    return exported
+
+
+def _texture_name_span(data: bytes, block, edit: TextureNameEdit):
+    texture = block.texture
+    if texture is None:
+        raise MappingEditError(
+            f"{edit.owner_path} block #{edit.block_index} has no diffuse texture")
+    if texture.kind != "ilbm":
+        raise MappingEditError(
+            f"{edit.owner_path} block #{edit.block_index} uses "
+            f"{texture.kind or 'an unsupported texture class'}; only ILBM "
+            "references can be exported safely")
+    offset = texture.name_payload_offset
+    capacity = texture.name_capacity
+    if offset < 0 or capacity <= 0 or offset + capacity > len(data):
+        raise MappingEditError(
+            f"{edit.owner_path} block #{edit.block_index} has no writable NAM2 span")
+    try:
+        encoded = edit.name.encode("latin-1")
+    except UnicodeEncodeError as exc:
+        raise MappingEditError("texture names must use Latin-1 characters") from exc
+    if not encoded or b"\0" in encoded:
+        raise MappingEditError("texture name must be a non-empty c-string")
+    if len(encoded) + 1 > capacity:
+        raise MappingEditError(
+            f"texture name {edit.name!r} needs {len(encoded) + 1} bytes, "
+            f"but the original NAM2 allocation has {capacity}; choose a "
+            f"name of at most {capacity - 1} bytes")
+    return offset, capacity, encoded
+
+
+def apply_texture_name_edits_to_bytes(
+        data: bytes, edits: list[TextureNameEdit]) -> bytes:
+    asset = parse_base_bytes(data, "<texture-name-edit>")
+    if asset.root is None:
+        raise MappingEditError("not a parseable BASE file")
+    objects = _walk_with_owner_paths(asset.root)
+    output = bytearray(data)
+    seen: set[tuple[str, int]] = set()
+    for edit in edits:
+        if edit.key() in seen:
+            raise MappingEditError(f"duplicate texture edit for {edit.key()}")
+        seen.add(edit.key())
+        obj = objects.get(edit.owner_path)
+        if obj is None or not (0 <= edit.block_index < len(obj.ades)):
+            raise MappingEditError(
+                f"{edit.owner_path}: block #{edit.block_index} not found")
+        offset, capacity, encoded = _texture_name_span(
+            data, obj.ades[edit.block_index], edit)
+        output[offset:offset + capacity] = (
+            encoded + b"\0" + bytes(capacity - len(encoded) - 1))
+    return bytes(output)
+
+
+def verify_texture_name_edits(original: bytes, edited: bytes,
+                              edits: list[TextureNameEdit]) -> list[str]:
+    if len(original) != len(edited):
+        raise MappingEditError("texture edit changed the BASE file size")
+    before = parse_base_bytes(original, "<texture-original>")
+    after = parse_base_bytes(edited, "<texture-edited>")
+    if before.root is None or after.root is None:
+        raise MappingEditError("texture-edited BASE did not re-parse")
+    objects_before = _walk_with_owner_paths(before.root)
+    objects_after = _walk_with_owner_paths(after.root)
+    if objects_before.keys() != objects_after.keys():
+        raise MappingEditError("texture edit changed the BASE object tree")
+    edits_by_key = {edit.key(): edit for edit in edits}
+    allowed: set[int] = set()
+    notes: list[str] = []
+    for owner, obj_before in objects_before.items():
+        obj_after = objects_after[owner]
+        if len(obj_before.ades) != len(obj_after.ades):
+            raise MappingEditError(f"{owner}: material block count changed")
+        for block_index, (block_before, block_after) in enumerate(
+                zip(obj_before.ades, obj_after.ades)):
+            edit = edits_by_key.get((owner, block_index))
+            before_name = (block_before.texture.name
+                           if block_before.texture else None)
+            after_name = (block_after.texture.name
+                          if block_after.texture else None)
+            if edit is None:
+                if before_name != after_name:
+                    raise MappingEditError(
+                        f"{owner} block #{block_index}: unintended texture change")
+            elif after_name != edit.name:
+                raise MappingEditError(
+                    f"{owner} block #{block_index}: texture edit did not re-parse")
+            else:
+                offset, capacity, _encoded = _texture_name_span(
+                    original, block_before, edit)
+                allowed.update(range(offset, offset + capacity))
+                notes.append(
+                    f"{owner} block #{block_index}: {before_name} -> {after_name}")
+            before_tracy = (block_before.tracy_texture.name
+                            if block_before.tracy_texture else None)
+            after_tracy = (block_after.tracy_texture.name
+                           if block_after.tracy_texture else None)
+            if before_tracy != after_tracy:
+                raise MappingEditError(
+                    f"{owner} block #{block_index}: tracy texture changed")
+    changed = {index for index, pair in enumerate(zip(original, edited))
+               if pair[0] != pair[1]}
+    unexpected = changed - allowed
+    if unexpected:
+        raise MappingEditError(
+            f"unexpected byte changed at 0x{min(unexpected):X}")
+    notes.append("BASE size and chunk structure unchanged")
+    return notes
+
+
+def save_model_base_copy(data: bytes, uv_edits: list[UVEdit],
+                         texture_edits: list[TextureNameEdit],
+                         out_path: str | Path) -> list[str]:
+    """Save and verify a standalone model BASE copy.
+
+    UV and texture-name edits are fixed-size patches.  An unchanged BASE copy
+    is also allowed so a SKLT export can always have its companion BASE.
+    """
+
+    edited = data
+    notes: list[str] = []
+    if uv_edits:
+        uv_edited = apply_uv_edits_to_bytes(edited, uv_edits)
+        notes.extend(verify_uv_edits(edited, uv_edited, uv_edits))
+        edited = uv_edited
+    if texture_edits:
+        texture_edited = apply_texture_name_edits_to_bytes(
+            edited, texture_edits)
+        notes.extend(verify_texture_name_edits(
+            edited, texture_edited, texture_edits))
+        edited = texture_edited
+    verified = parse_base_bytes(edited, "<model-base-export>")
+    if verified.root is None:
+        raise MappingEditError("exported model BASE failed final verification")
+    destination = Path(out_path)
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    destination.write_bytes(edited)
+    notes.append(f"saved to {destination}")
+    return notes
 
 
 def save_repaired_base(family, fam_obj, plans: list[RepairPlan],

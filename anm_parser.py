@@ -155,7 +155,7 @@ def parse_anm_bytes(data: bytes, source_name: str = "<memory>") -> VanmData:
             return anm
         try:
             _parse_stream(data, data_chunk.payload_offset,
-                          data_chunk.payload_end, anm)
+                          data_chunk.available_payload_end, anm)
         except AnmParseError as exc:
             anm.warnings.append(f"DATA stream parse failed: {exc}")
     else:

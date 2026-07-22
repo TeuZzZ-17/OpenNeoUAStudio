@@ -105,6 +105,10 @@ class TextureRef:
     name: str = ""          # resource file name (NAM2 / BANI STRC name)
     outline_uvs: list[tuple[int, int]] = field(default_factory=list)  # CIBO OTL2
     anim_type: int | None = None  # BANI only: 0 loop, 1 ping-pong
+    # Absolute c-string span in the source BASE.  The conservative texture
+    # writer only replaces names that fit in this existing allocation.
+    name_payload_offset: int = -1
+    name_capacity: int = 0
 
 
 @dataclass
@@ -181,7 +185,7 @@ class EmbeddedResource:
     payload_tag: str = ""
     payload_form_type: str = ""
     payload_offset: int = 0
-    payload_size: int = 0
+    payload_size: int = 0  # full payload chunk bytes, including header/pad
 
 
 @dataclass
@@ -197,6 +201,10 @@ class BaseObject:
     embedded: list[EmbeddedResource] = field(default_factory=list)
     unknown_chunks: list[str] = field(default_factory=list)
     warnings: list[str] = field(default_factory=list)
+    # Source FORM OBJT location, used to export one KIDS object as a standalone
+    # loose BASE without serializing or rewriting unrelated archive objects.
+    source_objt_offset: int = -1
+    source_objt_size: int = 0
 
     def iter_tree(self):
         yield self
@@ -244,7 +252,9 @@ class BaseAsset:
 def _read_clid(data: bytes, objt: IffChunk) -> str:
     for child in objt.children:
         if child.tag == "CLID":
-            text, _ = read_cstring(data, child.payload_offset, child.payload_end)
+            text, _ = read_cstring(
+                data, child.payload_offset, child.available_payload_end
+            )
             return text
     return ""
 
@@ -266,15 +276,18 @@ def _read_root_name(data: bytes, form: IffChunk) -> str:
         return ""
     for child in root.children:
         if child.tag == "NAME":
-            text, _ = read_cstring(data, child.payload_offset, child.payload_end)
+            text, _ = read_cstring(
+                data, child.payload_offset, child.available_payload_end
+            )
             return text
     return ""
 
 
 def _parse_base_strc(data: bytes, chunk: IffChunk, warnings: list[str]) -> BaseTransform:
-    if chunk.size < 62:
+    if chunk.available_size < 62:
         warnings.append(
-            f"BASE STRC at 0x{chunk.offset:X} is {chunk.size} bytes; expected 62."
+            f"BASE STRC at 0x{chunk.offset:X} has {chunk.available_size} "
+            "available bytes; expected 62."
         )
         return BaseTransform()
     p = chunk.payload_offset
@@ -294,7 +307,11 @@ def _parse_cibo(data: bytes, form: IffChunk, class_id: str) -> TextureRef:
     tex = TextureRef(class_id=class_id, kind="ilbm")
     for child in form.children:
         if child.tag == "NAM2":
-            tex.name, _ = read_cstring(data, child.payload_offset, child.payload_end)
+            tex.name, _ = read_cstring(
+                data, child.payload_offset, child.available_payload_end
+            )
+            tex.name_payload_offset = child.payload_offset
+            tex.name_capacity = child.available_size
         elif child.tag == "OTL2":
             payload = child.payload(data)
             usable = len(payload) - (len(payload) % 2)
@@ -310,9 +327,10 @@ def _parse_bani(data: bytes, form: IffChunk, class_id: str,
     for child in form.children:
         if child.tag == "STRC":
             p = child.payload_offset
-            if child.size < 7:
+            if child.available_size < 7:
                 warnings.append(
-                    f"BANI STRC at 0x{child.offset:X} is too small ({child.size})."
+                    f"BANI STRC at 0x{child.offset:X} is too small "
+                    f"({child.available_size} available bytes)."
                 )
                 continue
             version, name_offset, anim_type = struct.unpack_from(">hhh", data, p)
@@ -320,8 +338,12 @@ def _parse_bani(data: bytes, form: IffChunk, class_id: str,
             # Runtime: name starts at buf[nameOffset - 6] where buf follows the
             # three int16 fields (bmpAnm.cpp LoadingFromIFF, CONFIRMED).
             name_start = p + 6 + max(0, name_offset - 6)
-            if version >= 1 and name_start < child.payload_end:
-                tex.name, _ = read_cstring(data, name_start, child.payload_end)
+            if version >= 1 and name_start < child.available_payload_end:
+                tex.name, _ = read_cstring(
+                    data, name_start, child.available_payload_end
+                )
+                tex.name_payload_offset = name_start
+                tex.name_capacity = child.available_payload_end - name_start
     return tex
 
 
@@ -347,7 +369,7 @@ def _parse_area(data: bytes, area: IffChunk, block: AmeshBlock) -> None:
     for child in area.children:
         if child.is_form("ADE"):
             for sub in child.children:
-                if sub.tag == "STRC" and sub.size >= 10:
+                if sub.tag == "STRC" and sub.available_size >= 10:
                     p = sub.payload_offset
                     version, _nu, flags, point, poly, _nu2 = struct.unpack_from(
                         ">hbbhhh", data, p
@@ -357,9 +379,10 @@ def _parse_area(data: bytes, area: IffChunk, block: AmeshBlock) -> None:
                         block.ade_point_id = point
                         block.ade_poly_id = poly
         elif child.tag == "STRC":
-            if child.size < 10:
+            if child.available_size < 10:
                 block.warnings.append(
-                    f"AREA STRC at 0x{child.offset:X} is {child.size} bytes; expected 10."
+                    f"AREA STRC at 0x{child.offset:X} has "
+                    f"{child.available_size} available bytes; expected 10."
                 )
                 continue
             p = child.payload_offset
@@ -392,10 +415,11 @@ def _parse_area(data: bytes, area: IffChunk, block: AmeshBlock) -> None:
 def _parse_atts(data: bytes, chunk: IffChunk, block: AmeshBlock) -> None:
     block.atts_chunk_offset = chunk.offset
     block.atts_chunk_size = chunk.size
-    count = chunk.size // 6
-    if chunk.size % 6:
+    count = chunk.available_size // 6
+    if chunk.available_size % 6:
         block.warnings.append(
-            f"ATTS size {chunk.size} is not a multiple of 6; trailing bytes ignored."
+            f"ATTS available size {chunk.available_size} is not a multiple of 6; "
+            "trailing bytes ignored."
         )
     p = chunk.payload_offset
     for i in range(count):
@@ -407,7 +431,7 @@ def _parse_olpl(data: bytes, chunk: IffChunk, block: AmeshBlock) -> None:
     block.olpl_chunk_offset = chunk.offset
     block.olpl_chunk_size = chunk.size
     p = chunk.payload_offset
-    end = chunk.payload_end
+    end = chunk.available_payload_end
     expected = len(block.atts)
     while p + 2 <= end and (expected == 0 or len(block.olpl) < expected):
         count = struct.unpack_from(">h", data, p)[0]
@@ -465,23 +489,35 @@ def _parse_area_only(data: bytes, form: IffChunk, class_id: str) -> AmeshBlock:
 
 
 def _parse_embed(data: bytes, form: IffChunk, obj: BaseObject) -> None:
-    for child in form.children:
+    for child_index, child in enumerate(form.children):
         if child.tag != "EMRS":
             continue
-        class_id, pos = read_cstring(data, child.payload_offset, child.payload_end)
-        res_name, pos = read_cstring(data, pos, child.payload_end)
+        class_id, pos = read_cstring(
+            data, child.payload_offset, child.available_payload_end
+        )
+        res_name, pos = read_cstring(data, pos, child.available_payload_end)
         record = EmbeddedResource(class_id=class_id, resource_name=res_name)
         # Payload is either inline after the strings or the next sibling chunk.
-        while pos < child.payload_end and data[pos] == 0:
+        while pos < child.available_payload_end and data[pos] == 0:
             pos += 1
-        if pos + 8 <= child.payload_end:
+        if pos + 8 <= child.available_payload_end:
             record.payload_tag = data[pos:pos + 4].decode("latin-1", "replace")
-            record.payload_size = struct.unpack_from(">I", data, pos + 4)[0]
+            declared = struct.unpack_from(">I", data, pos + 4)[0]
+            record.payload_size = 8 + declared + (declared & 1)
             record.payload_offset = pos
             if record.payload_tag == "FORM":
                 record.payload_form_type = data[pos + 8:pos + 12].decode(
                     "latin-1", "replace"
                 )
+        elif child_index + 1 < len(form.children):
+            # embed.cpp stores the normal payload as the EMRS record's next
+            # sibling.  It is not part of the EMRS chunk itself.
+            payload = form.children[child_index + 1]
+            if payload.tag != "EMRS":
+                record.payload_tag = payload.tag
+                record.payload_form_type = payload.form_type
+                record.payload_offset = payload.offset
+                record.payload_size = 8 + payload.size + (payload.size & 1)
         obj.embedded.append(record)
 
 
@@ -516,6 +552,8 @@ def _parse_ades(data: bytes, form: IffChunk, obj: BaseObject) -> None:
 
 def _parse_base_object(data: bytes, objt: IffChunk, warnings: list[str]) -> BaseObject:
     obj = BaseObject()
+    obj.source_objt_offset = objt.offset
+    obj.source_objt_size = objt.size
     class_id = _read_clid(data, objt)
     if class_id and class_id.lower() != "base.class":
         obj.warnings.append(f"OBJT declares class {class_id!r}; expected base.class.")
@@ -554,7 +592,8 @@ def _parse_base_object(data: bytes, objt: IffChunk, warnings: list[str]) -> Base
                     for sub in inner_form.children:
                         if sub.tag == "NAME":
                             obj.skeleton_name, _ = read_cstring(
-                                data, sub.payload_offset, sub.payload_end
+                                data, sub.payload_offset,
+                                sub.available_payload_end
                             )
                 else:
                     obj.warnings.append(

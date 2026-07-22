@@ -43,17 +43,32 @@ class IffChunk:
     form_type: str = ""
     children: list["IffChunk"] = field(default_factory=list)
     truncated: bool = False
+    actual_size: int | None = None
 
     @property
     def payload_end(self) -> int:
+        """Declared payload end (kept for compatibility with existing users)."""
+
         return self.payload_offset + self.size
+
+    @property
+    def available_size(self) -> int:
+        """Payload bytes that are actually present in the input buffer."""
+
+        return self.size if self.actual_size is None else self.actual_size
+
+    @property
+    def available_payload_end(self) -> int:
+        return self.payload_offset + self.available_size
 
     @property
     def display_name(self) -> str:
         return f"{self.tag} ({self.form_type})" if self.form_type else self.tag
 
     def payload(self, data: bytes) -> bytes:
-        return data[self.payload_offset : min(self.payload_end, len(data))]
+        return data[
+            self.payload_offset : min(self.available_payload_end, len(data))
+        ]
 
     def is_form(self, form_type: str | None = None) -> bool:
         # UA form types are four bytes and may be space-padded ("MC2 ", "ADE ").
@@ -85,6 +100,7 @@ class IffChunk:
             "form_type": self.form_type or None,
             "offset": self.offset,
             "size": self.size,
+            "actual_size": self.available_size,
             "payload_offset": self.payload_offset,
             "truncated": self.truncated,
         }
@@ -181,6 +197,7 @@ def _parse_stream(
             size=size,
             payload_offset=payload_offset,
             depth=depth,
+            actual_size=max(0, min(declared_end, end) - payload_offset),
             form_type=form_type,
             truncated=truncated,
         )

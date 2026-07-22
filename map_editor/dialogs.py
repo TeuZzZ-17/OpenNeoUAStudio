@@ -4,6 +4,7 @@ from PIL import Image, ImageTk
 import os
 
 from .constants import *
+from .map_io import DEFAULT_LDF_ENCODING
 from .paths import resource_path
 
 class DialogMixin:
@@ -320,6 +321,8 @@ class DialogMixin:
 
         self.current_filename = None
         self.current_filepath = None
+        self._ldf_encoding = DEFAULT_LDF_ENCODING
+        self._ldf_newline = "\r\n"
         self.update_window_title()
 
         self.mw, self.mh = width, height
