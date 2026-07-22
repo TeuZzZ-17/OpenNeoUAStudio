@@ -232,6 +232,120 @@ class _HoldNudgeButton(QPushButton):
         super().keyPressEvent(event)
 
 
+class _ResponsiveButtonGrid(QWidget):
+    """Keep a short tool row readable by wrapping it at narrow widths."""
+
+    def __init__(self, buttons: list[QPushButton], parent=None) -> None:
+        super().__init__(parent)
+        self._buttons = buttons
+        self._columns = 0
+        self._layout = QGridLayout(self)
+        self._layout.setContentsMargins(0, 0, 0, 0)
+        self._layout.setHorizontalSpacing(5)
+        self._layout.setVerticalSpacing(5)
+        self.setSizePolicy(
+            QSizePolicy.Policy.Ignored,
+            QSizePolicy.Policy.Minimum,
+        )
+        for button in self._buttons:
+            # QPushButton's text-based minimum size can otherwise become the
+            # minimum width of the complete editor page. That is especially
+            # visible once a vertical scrollbar consumes a few pixels.
+            button.setMinimumWidth(0)
+            button.setSizePolicy(
+                QSizePolicy.Policy.Ignored,
+                QSizePolicy.Policy.Fixed,
+            )
+        self._relayout(2)
+
+    def minimumSizeHint(self) -> QSize:  # noqa: N802 - Qt override
+        # The grid can always wrap to fewer columns, so it must not impose the
+        # width of its current arrangement on the surrounding scroll page.
+        return QSize(0, self._layout.minimumSize().height())
+
+    def _required_width(self, columns: int) -> int:
+        spacing = self._layout.horizontalSpacing()
+        widest_row = 0
+        for start in range(0, len(self._buttons), columns):
+            row = self._buttons[start:start + columns]
+            row_width = sum(button.sizeHint().width() for button in row)
+            row_width += spacing * max(0, len(row) - 1)
+            widest_row = max(widest_row, row_width)
+        return widest_row
+
+    def _best_columns(self, available_width: int) -> int:
+        candidates = [len(self._buttons)]
+        if len(self._buttons) > 2:
+            candidates.append(2)
+        candidates.append(1)
+        for columns in candidates:
+            if available_width >= self._required_width(columns):
+                return columns
+        return 1
+
+    def _relayout(self, columns: int) -> None:
+        if columns == self._columns:
+            return
+        while self._layout.count():
+            self._layout.takeAt(0)
+        for index, button in enumerate(self._buttons):
+            row, column = divmod(index, columns)
+            self._layout.addWidget(button, row, column)
+        for column in range(len(self._buttons)):
+            self._layout.setColumnStretch(column, 0)
+        for column in range(columns):
+            self._layout.setColumnStretch(column, 1)
+        self._columns = columns
+        self._layout.activate()
+        height = self._layout.sizeHint().height()
+        self.setMinimumHeight(height)
+        self.setMaximumHeight(height)
+        self.updateGeometry()
+
+    def resizeEvent(self, event) -> None:  # noqa: N802 - Qt override
+        self._relayout(self._best_columns(event.size().width()))
+        super().resizeEvent(event)
+
+
+class _ViewportWidthScrollArea(QScrollArea):
+    """Vertical scroll page whose content always matches the viewport width.
+
+    QScrollArea can retain the page's pre-scrollbar width on some Windows/Qt
+    layouts. With the horizontal bar disabled, the final few pixels are then
+    merely clipped. Synchronising against ``viewport().width()`` keeps every
+    child inside the actually visible area, including after the vertical bar
+    appears or disappears.
+    """
+
+    def setWidget(self, widget: QWidget) -> None:  # noqa: N802 - Qt override
+        widget.setMinimumWidth(0)
+        widget.setSizePolicy(
+            QSizePolicy.Policy.Ignored,
+            QSizePolicy.Policy.Preferred,
+        )
+        super().setWidget(widget)
+        QTimer.singleShot(0, self._sync_page_width)
+
+    def resizeEvent(self, event) -> None:  # noqa: N802 - Qt override
+        super().resizeEvent(event)
+        self._sync_page_width()
+        # Scrollbar visibility is resolved after the first layout pass.
+        QTimer.singleShot(0, self._sync_page_width)
+
+    def _sync_page_width(self) -> None:
+        page = self.widget()
+        if page is None:
+            return
+        width = self.viewport().width()
+        if width <= 0:
+            return
+        if page.maximumWidth() != width:
+            page.setMaximumWidth(width)
+        if page.width() != width:
+            page.resize(width, page.height())
+        page.updateGeometry()
+
+
 def _status_icon(status: str) -> QPixmap:
     pix = QPixmap(12, 12)
     pix.fill(STATUS_COLORS.get(status, QColor(150, 150, 150)))
@@ -470,6 +584,11 @@ class AssemblyWindow(QMainWindow):
         self._snapshot_zoom_percent = 100
         self._skip_model_switch_warning = False
         self._bundle_targets: dict[str, tuple[Path, Path]] = {}
+        # Last successfully written standalone BASE per owner.  Subsequent
+        # Overwrite / Save As operations build on this verified snapshot so
+        # already-saved UV and texture edits are not lost after the dirty
+        # markers are cleared.
+        self._bundle_base_snapshots: dict[str, bytes] = {}
         self._live_scale_dialog: LiveScaleDialog | None = None
 
         self.viewport = AssetViewport()
@@ -1293,6 +1412,11 @@ class AssemblyWindow(QMainWindow):
         center_hint = QLabel("MOVE")
         center_hint.setAlignment(Qt.AlignmentFlag.AlignCenter)
         center_hint.setStyleSheet("color: #d7d7d7; font-size: 9px;")
+        center_hint.setMinimumWidth(0)
+        center_hint.setSizePolicy(
+            QSizePolicy.Policy.Ignored,
+            QSizePolicy.Policy.Preferred,
+        )
         nudge_layout.addWidget(center_hint, 1, 1)
         for text, dx, dy, row, column in directions:
             button = _HoldNudgeButton(text)
@@ -1300,7 +1424,12 @@ class AssemblyWindow(QMainWindow):
             button.setAutoRepeat(True)
             button.setAutoRepeatDelay(350)
             button.setAutoRepeatInterval(70)
+            button.setMinimumWidth(0)
             button.setMinimumHeight(28)
+            button.setSizePolicy(
+                QSizePolicy.Policy.Ignored,
+                QSizePolicy.Policy.Fixed,
+            )
             button.setToolTip(
                 "Move selected vertices in the current view; hold for "
                 "progressively faster movement.")
@@ -1328,6 +1457,11 @@ class AssemblyWindow(QMainWindow):
 
         fx_row = QHBoxLayout()
         fx_row.addWidget(QLabel("FX element:"))
+        self.fx_combo.setMinimumWidth(0)
+        self.fx_combo.setSizePolicy(
+            QSizePolicy.Policy.Ignored,
+            QSizePolicy.Policy.Fixed,
+        )
         fx_row.addWidget(self.fx_combo, 1)
         model_box_layout.addLayout(fx_row)
 
@@ -1338,23 +1472,24 @@ class AssemblyWindow(QMainWindow):
         self.uv_editor.uvChanged.connect(self._on_uv_changed)
         self.uv_editor.editFinished.connect(self._on_uv_edit_finished)
         uv_layout.addWidget(self.uv_editor, 1)
-        uv_tools = QHBoxLayout()
         self.uv_select_all_button = QPushButton("Select All UVs")
         self.uv_select_all_button.clicked.connect(self.uv_editor.select_all)
-        uv_tools.addWidget(self.uv_select_all_button)
         self.uv_clear_selection_button = QPushButton("Clear Selection")
         self.uv_clear_selection_button.clicked.connect(
             self.uv_editor.select_none)
-        uv_tools.addWidget(self.uv_clear_selection_button)
         self.uv_align_horizontal_button = QPushButton("Align Horizontal")
         self.uv_align_horizontal_button.clicked.connect(
             self.uv_editor.align_selected_horizontal)
-        uv_tools.addWidget(self.uv_align_horizontal_button)
         self.uv_align_vertical_button = QPushButton("Align Vertical")
         self.uv_align_vertical_button.clicked.connect(
             self.uv_editor.align_selected_vertical)
-        uv_tools.addWidget(self.uv_align_vertical_button)
-        uv_layout.addLayout(uv_tools)
+        uv_tools = _ResponsiveButtonGrid([
+            self.uv_select_all_button,
+            self.uv_clear_selection_button,
+            self.uv_align_horizontal_button,
+            self.uv_align_vertical_button,
+        ])
+        uv_layout.addWidget(uv_tools)
         uv_buttons = QHBoxLayout()
         self.uv_revert_button = QPushButton("Revert Selected UV")
         self.uv_revert_button.setEnabled(False)
@@ -1636,8 +1771,19 @@ class AssemblyWindow(QMainWindow):
         resources_tabs.addTab(asset_panel, "Assets")
         resources_tabs.addTab(resolve_panel, "Dependencies")
 
+        # The model editor is taller than the normal windowed viewport.
+        # Keep its controls in document flow and scroll the page instead of
+        # letting Qt compress the layout below its minimum height, which can
+        # make the UV toolbar overlap the texture preview on Windows.
+        model_scroll = _ViewportWidthScrollArea()
+        model_scroll.setWidgetResizable(True)
+        model_scroll.setFrameShape(QFrame.Shape.NoFrame)
+        model_scroll.setHorizontalScrollBarPolicy(
+            Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        model_scroll.setWidget(model_panel)
+
         editor_tabs = category_tabs()
-        editor_tabs.addTab(model_panel, "Model and Texture Editor")
+        editor_tabs.addTab(model_scroll, "Model and Texture Editor")
         editor_tabs.addTab(mapping_panel, "Mapping Repair")
 
         visuals_tabs = category_tabs()
@@ -1654,7 +1800,7 @@ class AssemblyWindow(QMainWindow):
         self._assets_panel = asset_panel
         self._editor_tabs = editor_tabs
         self._visuals_tabs = visuals_tabs
-        self._model_editor_panel = model_panel
+        self._model_editor_panel = model_scroll
         self._mapping_panel = mapping_panel
         self._snapshot_panel = snapshot_panel
         editor_tabs.currentChanged.connect(self._on_nested_tab_changed)
@@ -4946,9 +5092,12 @@ class AssemblyWindow(QMainWindow):
             if answer != QMessageBox.StandardButton.Yes:
                 return False
 
+        verified_base_bytes: bytes | None = None
         try:
-            standalone = export_base_object_bytes(
-                tree.data, fam_obj.base_object)
+            standalone = self._bundle_base_snapshots.get(owner)
+            if standalone is None:
+                standalone = export_base_object_bytes(
+                    tree.data, fam_obj.base_object)
             uv_edits, texture_edits = self._bundle_base_edits(owner, fam_obj)
             with tempfile.TemporaryDirectory(
                     prefix="OpenUAStudio_bundle_") as temp_dir:
@@ -4972,6 +5121,7 @@ class AssemblyWindow(QMainWindow):
                         "exported SKLT failed coordinate round-trip verification")
                 notes = save_model_base_copy(
                     standalone, uv_edits, texture_edits, temp_base)
+                verified_base_bytes = temp_base.read_bytes()
                 notes.extend(_commit_verified_files([
                     (temp_skeleton, skeleton_target),
                     (temp_base, base_target),
@@ -4989,6 +5139,28 @@ class AssemblyWindow(QMainWindow):
                 self, "Save failed - current files unchanged", str(exc))
             return False
 
+        # The write and round-trip verification succeeded.  The current
+        # in-memory state is now the clean baseline, not an unsaved edit.
+        # Keep the verified BASE bytes so later saves preserve committed UV
+        # and texture changes while applying only the new deltas.
+        if verified_base_bytes is None:
+            # Defensive only: the normal successful path always assigns it.
+            QMessageBox.critical(
+                self, "Save verification failed",
+                "The files were written, but the verified BASE snapshot was "
+                "not retained. Reload the saved model before editing again.")
+            return False
+        self._bundle_base_snapshots[owner] = verified_base_bytes
+
+        self._geom_dirty.pop(owner, None)
+        self._geom_original[owner] = list(model.points)
+        for key in [key for key in self._uv_original if key[0] == owner]:
+            del self._uv_original[key]
+        for key in [key for key in self._texture_original if key[0] == owner]:
+            del self._texture_original[key]
+        self._uv_history_before = None
+
+        self._sync_geometry_save_controls()
         self._update_banner()
         self._log("Model saved: " + "; ".join(notes[-3:]))
         return True
@@ -5535,6 +5707,7 @@ class AssemblyWindow(QMainWindow):
         self._cancel_live_scale()
         if family is not self._family:
             self._bundle_targets.clear()
+            self._bundle_base_snapshots.clear()
         self._family = family
         # The viewport always renders the selected object plus its children.
         # This is predictable for normal assets and safe for huge SET.BAS
