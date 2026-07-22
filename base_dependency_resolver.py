@@ -132,12 +132,20 @@ def collect_dependencies(family) -> list[AssetDependency]:
             supported = res.class_id.lower() in (
                 "ilbm.class", "sklt.class", "bmpanim.class"
             )
+            has_payload = res.payload_size > 0
+            if not has_payload and family.setbas_archive is not None:
+                has_payload = any(
+                    candidate.decodable for candidate in
+                    family.setbas_archive.find(
+                        res.resource_name, res.class_id)
+                )
             deps.append(AssetDependency(
                 kind="embedded", raw_ref=res.resource_name,
                 source=f"EMBD EMRS {res.class_id} "
                        f"({res.payload_form_type or res.payload_tag})",
                 owner_node=label,
-                status="resolved" if supported else "unsupported_loader",
+                status=("resolved" if supported and has_payload else
+                        "missing" if supported else "unsupported_loader"),
             ))
 
         for unknown in base_obj.unknown_chunks:

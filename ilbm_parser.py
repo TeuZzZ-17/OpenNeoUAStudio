@@ -250,20 +250,20 @@ def parse_ilbm_tree(tree: IffTree) -> IlbmImage:
 
     body_chunk = None
     for chunk in root.children:
-        if chunk.tag == "BMHD" and chunk.size >= 20:
+        if chunk.tag == "BMHD" and chunk.available_size >= 20:
             p = chunk.payload_offset
             (img.width, img.height, _x, _y) = struct.unpack_from(">HHHH", data, p)
             img.n_planes, img.masking, img.compression, _flags = struct.unpack_from(
                 ">bbbb", data, p + 8
             )
             img.transparent_color = struct.unpack_from(">H", data, p + 12)[0]
-        elif chunk.tag == "HEAD" and chunk.size >= 6:
+        elif chunk.tag == "HEAD" and chunk.available_size >= 6:
             p = chunk.payload_offset
             img.width, img.height, _flags = struct.unpack_from(">HHH", data, p)
             img.n_planes = 8
             img.compression = 0
         elif chunk.tag == "CMAP":
-            count = min(256, chunk.size // 3)
+            count = min(256, chunk.available_size // 3)
             p = chunk.payload_offset
             img.palette = [
                 (data[p + i * 3], data[p + i * 3 + 1], data[p + i * 3 + 2])
