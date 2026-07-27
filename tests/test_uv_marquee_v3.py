@@ -7,7 +7,7 @@ from PySide6.QtCore import QPointF, Qt
 from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication
 
-from uv_editor_widget import UVEditorWidget
+from uv_editor_widget import UVEditorWidget, UVLoop
 
 
 class UVMarqueeV3Tests(unittest.TestCase):
@@ -109,6 +109,52 @@ class UVMarqueeV3Tests(unittest.TestCase):
             self.widget, Qt.MouseButton.LeftButton,
             Qt.KeyboardModifier.ControlModifier, first)
         self.assertEqual(self.widget.selected_points(), {1})
+
+    def test_multi_loop_select_all_nudge_and_colors(self):
+        loops = [
+            UVLoop(("root", 0, 0), 3,
+                   [(20, 30), (80, 30), (50, 90)]),
+            UVLoop(("root", 1, 0), 7,
+                   [(130, 140), (190, 140), (190, 200), (130, 200)]),
+        ]
+        self.widget.set_loops(None, loops, "multi")
+        finished = []
+        changed = []
+        self.widget.editFinished.connect(lambda: finished.append(True))
+        self.widget.loopsChanged.connect(lambda payload: changed.append(payload))
+
+        self.assertNotEqual(
+            self.widget.loop_color(loops[0].key).name(),
+            self.widget.loop_color(loops[1].key).name())
+        self.widget.select_all()
+        self.assertEqual(len(self.widget.selected_handles()), 7)
+        before = self.widget.loop_uvs()
+        self.widget.nudge_selected(4, -3)
+        after = self.widget.loop_uvs()
+
+        for key, old_loop in before.items():
+            self.assertEqual(
+                after[key],
+                [(u + 4, v - 3) for u, v in old_loop])
+        self.assertEqual(len(changed), 1)
+        self.assertEqual(len(finished), 1)
+
+    def test_right_click_handle_emits_context_identity(self):
+        key = ("root", 4, 2)
+        self.widget.set_loops(
+            None, [UVLoop(key, 9, [(40, 40), (100, 40), (70, 100)])],
+            "context")
+        requested = []
+        self.widget.handleContextMenuRequested.connect(
+            lambda loop_key, index, position:
+            requested.append((loop_key, index, position)))
+        point = self.widget._uv_to_screen((100, 40)).toPoint()
+
+        QTest.mouseClick(
+            self.widget, Qt.MouseButton.RightButton,
+            Qt.KeyboardModifier.NoModifier, point)
+
+        self.assertEqual(requested[0][:2], (key, 1))
 
 
 if __name__ == "__main__":

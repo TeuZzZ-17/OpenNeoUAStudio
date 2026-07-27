@@ -1,4 +1,4 @@
-"""Atomic POL2/POO2/OLPL vertex insertion for the model UV editor."""
+"""Atomic POL2/POO2/OLPL vertex edits for the model UV editor."""
 
 from __future__ import annotations
 
@@ -23,11 +23,16 @@ class UVVertexInsertion:
     uv: tuple[int, int]
 
 
-def plan_uv_vertex_insertion(
-        model, block, poly_id: int, atts_index: int,
-        edge_start: int) -> UVVertexInsertion:
-    """Plan a midpoint inserted after one selected UV/winding vertex."""
+@dataclass(frozen=True)
+class UVVertexDeletion:
+    poly_id: int
+    atts_index: int
+    vertex_index: int
+    point_index: int
+    uv: tuple[int, int]
 
+
+def _editable_uv_group(model, block, poly_id: int, atts_index: int):
     if (block.class_id or "").lower() != "amesh.class":
         raise UVTopologyError("only amesh.class OLPL mappings are editable")
     if not (0 <= poly_id < len(model.polygons)):
@@ -38,7 +43,6 @@ def plan_uv_vertex_insertion(
         raise UVTopologyError("the selected ATTS entry maps another polygon")
     if not (0 <= atts_index < len(block.olpl)):
         raise UVTopologyError("the matching OLPL group is unavailable")
-
     polygon = model.polygons[poly_id]
     uvs = block.olpl[atts_index]
     if len(polygon) < 3:
@@ -46,6 +50,16 @@ def plan_uv_vertex_insertion(
     if len(uvs) != len(polygon):
         raise UVTopologyError(
             "POL2 winding and OLPL coordinate counts do not match")
+    return polygon, uvs
+
+
+def plan_uv_vertex_insertion(
+        model, block, poly_id: int, atts_index: int,
+        edge_start: int) -> UVVertexInsertion:
+    """Plan a midpoint inserted after one selected UV/winding vertex."""
+
+    polygon, uvs = _editable_uv_group(
+        model, block, poly_id, atts_index)
     if not (0 <= edge_start < len(polygon)):
         raise UVTopologyError("select exactly one UV handle first")
     if len(model.points) >= 0x10000:
@@ -108,3 +122,49 @@ def apply_uv_vertex_insertion(model, block,
     model.points.append(plan.point)
     polygon.insert(plan.insert_at, plan.new_point_index)
     uvs.insert(plan.insert_at, plan.uv)
+
+
+def plan_uv_vertex_deletion(
+        model, block, poly_id: int, atts_index: int,
+        vertex_index: int) -> UVVertexDeletion:
+    """Plan removal of one winding/OLPL element without compacting POO2."""
+
+    polygon, uvs = _editable_uv_group(
+        model, block, poly_id, atts_index)
+    if len(polygon) <= 3:
+        raise UVTopologyError(
+            "deleting this vertex would leave fewer than three vertices")
+    if not (0 <= vertex_index < len(polygon)):
+        raise UVTopologyError("select exactly one UV handle first")
+    point_index = polygon[vertex_index]
+    if not (0 <= point_index < len(model.points)):
+        raise UVTopologyError("the selected POL2 vertex references invalid POO2")
+    uv = tuple(uvs[vertex_index])
+    if len(uv) != 2 or any(value < 0 or value > 255 for value in uv):
+        raise UVTopologyError("the selected OLPL vertex is outside byte range")
+    return UVVertexDeletion(
+        poly_id=poly_id,
+        atts_index=atts_index,
+        vertex_index=vertex_index,
+        point_index=point_index,
+        uv=uv,
+    )
+
+
+def apply_uv_vertex_deletion(model, block,
+                             plan: UVVertexDeletion) -> None:
+    """Apply a still-current plan; callers provide transaction rollback."""
+
+    polygon, uvs = _editable_uv_group(
+        model, block, plan.poly_id, plan.atts_index)
+    if len(polygon) <= 3:
+        raise UVTopologyError(
+            "deleting this vertex would leave fewer than three vertices")
+    if not (0 <= plan.vertex_index < len(polygon)):
+        raise UVTopologyError("the selected vertex changed before deletion")
+    if polygon[plan.vertex_index] != plan.point_index \
+            or tuple(uvs[plan.vertex_index]) != plan.uv:
+        raise UVTopologyError(
+            "the selected POL2/OLPL vertex changed before deletion")
+    polygon.pop(plan.vertex_index)
+    uvs.pop(plan.vertex_index)

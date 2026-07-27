@@ -177,6 +177,94 @@ class DepthRendererTests(unittest.TestCase):
         self.assertEqual(len(viewport._pick_shapes), 1)
         self.assertEqual(viewport._pick_shapes[0].face.poly_id, 7)
 
+    def test_wire_overlay_is_occluded_by_nearer_bsp_surface(self):
+        viewport = AssetViewport()
+        viewport.resize(240, 240)
+        viewport._yaw = 0.0
+        viewport._pitch = 0.0
+        viewport._center = (0.0, 0.0, 0.0)
+        viewport._scale = 1.0
+        viewport._zoom = 1.0
+        viewport._pan = QPointF()
+        viewport._show_grid = False
+        viewport._show_axes = False
+        viewport._show_wire_overlay = True
+        viewport._backface_cull = False
+        viewport._mode = "materials"
+        viewport._materials = [
+            ViewMaterial("far", color=QColor(230, 40, 40)),
+            ViewMaterial("near", color=QColor(40, 80, 230)),
+        ]
+        far = list(reversed([
+            (-0.22, 0.95, -1.0), (-0.22, -0.95, -1.0),
+            (0.22, -0.95, -1.0), (0.22, 0.95, -1.0),
+        ]))
+        near = list(reversed([
+            (-0.85, 0.8, 1.0), (-0.85, -0.8, 1.0),
+            (0.85, -0.8, 1.0), (0.85, 0.8, 1.0),
+        ]))
+        viewport._faces = [
+            ViewFace(far, [], 0, poly_id=0),
+            ViewFace(near, [], 1, poly_id=1),
+        ]
+        camera = viewport._camera_state()
+        output = QImage(240, 240, QImage.Format.Format_ARGB32)
+        output.fill(QColor(0, 0, 0, 0))
+        painter = QPainter(output)
+        viewport._render_scene(
+            painter, QRectF(0, 0, 240, 240), None, False, camera,
+            allow_transparent_background=True)
+        painter.end()
+
+        hidden_edge = viewport._project(
+            viewport._camera_vertex((-0.22, 0.0, -1.0), camera),
+            QRectF(0, 0, 240, 240), camera)
+        sample = output.pixelColor(
+            round(hidden_edge.x()), round(hidden_edge.y()))
+        self.assertGreater(sample.blue(), 180)
+        self.assertLess(sample.red(), 80)
+
+    def test_wire_overlay_ignores_rendered_backface_when_culling_is_off(self):
+        viewport = AssetViewport()
+        viewport.resize(180, 180)
+        viewport._yaw = 0.0
+        viewport._pitch = 0.0
+        viewport._center = (0.0, 0.0, 0.0)
+        viewport._scale = 1.0
+        viewport._zoom = 1.0
+        viewport._pan = QPointF()
+        viewport._show_grid = False
+        viewport._show_axes = False
+        viewport._backface_cull = False
+        viewport._mode = "materials"
+        viewport._materials = [
+            ViewMaterial("back", color=QColor(180, 90, 40))]
+        viewport._faces = [ViewFace([
+            (-0.8, 0.8, 0.0), (-0.8, -0.8, 0.0),
+            (0.8, -0.8, 0.0), (0.8, 0.8, 0.0),
+        ], [], 0, poly_id=0)]
+        camera = viewport._camera_state()
+
+        def render(wire):
+            viewport._show_wire_overlay = wire
+            image = QImage(180, 180, QImage.Format.Format_ARGB32)
+            image.fill(QColor(0, 0, 0, 0))
+            painter = QPainter(image)
+            viewport._render_scene(
+                painter, QRectF(0, 0, 180, 180), None, False, camera,
+                allow_transparent_background=True)
+            painter.end()
+            return image
+
+        plain = render(False)
+        overlay = render(True)
+        self.assertEqual(
+            [plain.pixel(x, y)
+             for y in range(plain.height()) for x in range(plain.width())],
+            [overlay.pixel(x, y)
+             for y in range(overlay.height()) for x in range(overlay.width())],
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

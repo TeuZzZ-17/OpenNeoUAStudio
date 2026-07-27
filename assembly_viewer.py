@@ -129,6 +129,7 @@ class ViewFace:
 class _RenderPayload:
     face: ViewFace
     image: QImage | None
+    front_facing: bool
 
 
 @dataclass
@@ -137,6 +138,7 @@ class PickShape:
     face: ViewFace
     camera_vertices: tuple[tuple[float, float, float], ...]
     draw_order: int
+    front_facing: bool = True
 
 
 @dataclass
@@ -246,6 +248,95 @@ def resolve_pick_shape(shapes, point: QPointF) -> PickShape | None:
     return best_shape
 
 
+def resolve_visible_edit_vertices(
+        shapes, screen_points, polygons, owner: str,
+        selected=(), target: QRectF | None = None) -> set[int]:
+    """Return handles that are front-facing and nearest at their screen point.
+
+    The function consumes the BSP-generated pick pieces, so edit visibility
+    follows the same camera/depth result as polygon rendering without a second
+    geometry pass. Explicitly selected handles remain visible by design.
+    """
+
+    points = tuple(screen_points)
+    selected_indices = {
+        int(index) for index in selected
+        if isinstance(index, int) and 0 <= index < len(points)
+    }
+    visible = set(selected_indices)
+    if not shapes or not points:
+        return visible
+
+    if target is None:
+        xs = [point.x() for point in points]
+        ys = [point.y() for point in points]
+        target = QRectF(
+            min(xs), min(ys),
+            max(1.0, max(xs) - min(xs)),
+            max(1.0, max(ys) - min(ys)),
+        )
+    target = QRectF(target).normalized()
+    if target.isEmpty():
+        return visible
+    expanded_target = target.adjusted(-1.0, -1.0, 1.0, 1.0)
+
+    # A small deterministic screen grid keeps the per-frame visibility pass
+    # local even for models with many BSP pieces.
+    cell_size = 64.0
+    columns = max(1, math.ceil(target.width() / cell_size))
+    rows = max(1, math.ceil(target.height() / cell_size))
+    grid: dict[tuple[int, int], list[PickShape]] = {}
+
+    def cell(value: float, origin: float, count: int) -> int:
+        return max(
+            0, min(count - 1, math.floor((value - origin) / cell_size)))
+
+    for shape in shapes:
+        bounds = shape.polygon.boundingRect().intersected(target)
+        if bounds.isEmpty():
+            continue
+        left = cell(bounds.left(), target.left(), columns)
+        right = cell(bounds.right(), target.left(), columns)
+        top = cell(bounds.top(), target.top(), rows)
+        bottom = cell(bounds.bottom(), target.top(), rows)
+        for grid_y in range(top, bottom + 1):
+            for grid_x in range(left, right + 1):
+                grid.setdefault((grid_x, grid_y), []).append(shape)
+
+    polygon_sets: dict[int, frozenset[int]] = {}
+    for index, point in enumerate(points):
+        if index in selected_indices \
+                or not expanded_target.contains(point):
+            continue
+        grid_x = cell(point.x(), target.left(), columns)
+        grid_y = cell(point.y(), target.top(), rows)
+        nearest_depth = None
+        incident_front_depth = None
+        for shape in grid.get((grid_x, grid_y), ()):
+            depth = _pick_shape_depth(shape, point)
+            if depth is None:
+                continue
+            if nearest_depth is None or depth < nearest_depth:
+                nearest_depth = depth
+            face = shape.face
+            if not shape.front_facing or face.owner != owner \
+                    or not (0 <= face.poly_id < len(polygons)):
+                continue
+            winding = polygon_sets.setdefault(
+                face.poly_id, frozenset(polygons[face.poly_id]))
+            if index not in winding:
+                continue
+            if incident_front_depth is None or depth < incident_front_depth:
+                incident_front_depth = depth
+        if nearest_depth is None or incident_front_depth is None:
+            continue
+        epsilon = _PICK_DEPTH_EPSILON * max(
+            1.0, nearest_depth, incident_front_depth)
+        if incident_front_depth <= nearest_depth + epsilon:
+            visible.add(index)
+    return visible
+
+
 def _rotation_matrix(euler: tuple[int, int, int],
                      scale: tuple[float, float, float]) -> list[list[float]]:
     """Exact port of TForm3D::scale_rot_7 (UA angles are degrees, CONFIRMED)."""
@@ -306,6 +397,11 @@ def _image_from_effect_png(path) -> QImage | None:
 class AssetViewport(QWidget):
     """3D preview of an asset family with polygon picking."""
 
+    RESET_YAW = -35.0
+    RESET_PITCH = 20.0
+    RESET_ZOOM = 1.0
+    CAMERA_EPSILON = 1e-6
+
     statusMessage = Signal(str)
     polygonPicked = Signal(int)     # compatibility signal
     polygonPickedDetailed = Signal(int, bool)  # poly_id, Ctrl additive select
@@ -349,6 +445,7 @@ class AssetViewport(QWidget):
         self._duplicate_polys: set[int] = set()
         self._pick_shapes: list[PickShape] = []
         self._press_pos: QPoint | None = None
+        self._press_additive = False
 
         # Object selection / isolation (Blender-style)
         self._family_ref = None
@@ -371,7 +468,7 @@ class AssetViewport(QWidget):
         self._modal_denom = 4.0
         self._modal_pivot_world = (0.0, 0.0, 0.0)
         self._paste_preview: PastePreviewState | None = None
-        self._auto_align_enabled = False
+        self._auto_align_enabled = True
         self._alignment_targets: tuple[tuple[AlignmentTarget, ...], ...] = (
             (), (), ())
         self._alignment_values: tuple[tuple[float, ...], ...] = ((), (), ())
@@ -393,6 +490,8 @@ class AssetViewport(QWidget):
         self._direct_grab_selected_only = False
         self._edit_pick_polygons = False
         self._edit_read_only_vertices: set[int] = set()
+        self._edit_visible_vertices: set[int] = set()
+        self._edit_visibility_ready = False
         self._box_start: QPoint | None = None
         self._box_rect: QRect | None = None
         self._marquee_candidate = False
@@ -407,9 +506,9 @@ class AssetViewport(QWidget):
         self._show_owner_bbox = False
         self._backface_cull = True
 
-        self._yaw = -35.0
-        self._pitch = 20.0
-        self._zoom = 1.0
+        self._yaw = self.RESET_YAW
+        self._pitch = self.RESET_PITCH
+        self._zoom = self.RESET_ZOOM
         self._pan = QPointF(0.0, 0.0)
         self._last_mouse = QPoint()
         self._snapshot_active = False
@@ -449,6 +548,8 @@ class AssetViewport(QWidget):
         self._direct_grab_selected_only = False
         self._edit_pick_polygons = False
         self._edit_read_only_vertices.clear()
+        self._edit_visible_vertices.clear()
+        self._edit_visibility_ready = False
         self._box_start = None
         self._box_rect = None
         self._marquee_candidate = False
@@ -576,8 +677,16 @@ class AssetViewport(QWidget):
     def set_visible_owners(self, owners: set[str] | None) -> None:
         if self._family_ref is None:
             return
+        # Rebuilding the visible owner scope calls ``clear()`` internally.
+        # Keep the current interaction mode stable while the user switches
+        # models: Edit stays Edit, View stays View.  Polygon/vertex selection is
+        # intentionally reset because it belongs to the previous owner.
+        was_editing = self._edit_session is not None
+        target_owner = self._selected_owner if was_editing else None
         self.load_family(self._family_ref, owners, keep_camera=True,
                          primary_owner=self._primary_owner)
+        if was_editing and target_owner is not None:
+            self.enter_edit_mode(target_owner)
         self.update()
 
     def refresh_family_materials(self) -> None:
@@ -705,6 +814,31 @@ class AssetViewport(QWidget):
         return self._yaw, self._pitch
 
     @property
+    def has_loaded_resource(self) -> bool:
+        """Return whether the viewport currently owns a loaded asset family."""
+
+        return self._family_ref is not None
+
+    @property
+    def camera_is_reset(self) -> bool:
+        """Return whether orbit, pan and zoom match the canonical view."""
+
+        epsilon = self.CAMERA_EPSILON
+        return (
+            abs(self._yaw - self.RESET_YAW) <= epsilon
+            and abs(self._pitch - self.RESET_PITCH) <= epsilon
+            and abs(self._zoom - self.RESET_ZOOM) <= epsilon
+            and abs(self._pan.x()) <= epsilon
+            and abs(self._pan.y()) <= epsilon
+        )
+
+    @property
+    def can_reset_camera(self) -> bool:
+        """Reset is meaningful only for a loaded, displaced camera."""
+
+        return self.has_loaded_resource and not self.camera_is_reset
+
+    @property
     def edit_model_matrix(self):
         session = self._edit_session
         return session.matrix if session is not None else (
@@ -748,24 +882,119 @@ class AssetViewport(QWidget):
                 point for index, point in enumerate(all_points)
                 if index not in selected
             ]
-            for point in unselected:
+            polygons = session.model.polygons
+            usable_faces: list[tuple[int, tuple[int, ...]]] = []
+            unique_edges: set[tuple[int, int]] = set()
+            for poly_id, polygon in enumerate(polygons):
+                winding = tuple(polygon)
+                if len(winding) < 3 or selected.intersection(winding) \
+                        or any(index < 0 or index >= len(all_points)
+                               for index in winding):
+                    continue
+                usable_faces.append((poly_id, winding))
+                for edge_index, first in enumerate(winding):
+                    second = winding[(edge_index + 1) % len(winding)]
+                    if first != second:
+                        unique_edges.add(tuple(sorted((first, second))))
+
+            owner_features = self._bounds_features(all_points)
+            owner_center = tuple(
+                owner_features[axis][1] if owner_features else 0.0
+                for axis in range(3))
+
+            # Add richer topology targets first so a coincident scalar keeps
+            # the most useful deterministic label after de-duplication.
+            derived_points: list[tuple[tuple[float, float, float], str]] = []
+            for poly_id, winding in usable_faces:
+                face_points = [all_points[index] for index in winding]
+                center = tuple(
+                    sum(point[axis] for point in face_points)
+                    / len(face_points)
+                    for axis in range(3))
+                derived_points.append((center, f"face #{poly_id} center"))
+                for axis in range(3):
+                    values = [point[axis] for point in face_points]
+                    scale = max(
+                        1.0, max(abs(value) for value in values))
+                    if max(values) - min(values) <= 1e-8 * scale:
+                        targets[axis].append(AlignmentTarget(
+                            sum(values) / len(values),
+                            f"face #{poly_id} coplanar {'XYZ'[axis]}"))
+            for first, second in sorted(unique_edges):
+                midpoint = tuple(
+                    (all_points[first][axis] + all_points[second][axis]) * 0.5
+                    for axis in range(3))
+                derived_points.append((
+                    midpoint, f"edge {first}-{second} midpoint"))
+
+            # Continue only an already-demonstrated regular spacing at either
+            # outer edge.  Three consecutive reference coordinates and two
+            # equal gaps are required; two arbitrary points or an internal
+            # hole are deliberately insufficient evidence for a snap target.
+            for axis, axis_name in enumerate("XYZ"):
+                coordinates = sorted({
+                    round(point[axis], 9) for point in unselected
+                    if math.isfinite(point[axis])
+                })
+                if len(coordinates) < 3:
+                    continue
+                lower, upper = coordinates[0], coordinates[-1]
+                scale = max(1.0, abs(lower), abs(upper))
+                minimum_gap = 1e-9 * scale
+                for index in range(len(coordinates) - 2):
+                    first, second, third = coordinates[index:index + 3]
+                    first_gap = second - first
+                    second_gap = third - second
+                    if min(first_gap, second_gap) <= minimum_gap:
+                        continue
+                    tolerance = max(
+                        minimum_gap,
+                        max(first_gap, second_gap) * 1e-6)
+                    if abs(first_gap - second_gap) > tolerance:
+                        continue
+                    gap = (first_gap + second_gap) * 0.5
+                    for candidate in (first - gap, third + gap):
+                        if candidate >= lower - tolerance \
+                                and candidate <= upper + tolerance:
+                            continue
+                        targets[axis].append(AlignmentTarget(
+                            candidate,
+                            f"equal spacing/distance {axis_name} "
+                            f"({gap:g})"))
+
+            reference_points = [
+                (tuple(point), "reference vertex") for point in unselected
+            ]
+            for point, label in (*derived_points, *reference_points):
                 for axis in range(3):
                     targets[axis].append(
-                        AlignmentTarget(point[axis], "reference vertex"))
-            for points, label in (
-                    (unselected, "unselected geometry"),
-                    (all_points, "model")):
+                        AlignmentTarget(point[axis], label))
+
+            if unselected:
                 for axis, features in enumerate(
-                        self._bounds_features(points)):
+                        self._bounds_features(unselected)):
                     for feature, value in zip(
                             ("min", "center", "max"), features):
-                        targets[axis].append(
-                            AlignmentTarget(value, f"{label} {feature}"))
+                        targets[axis].append(AlignmentTarget(
+                            value, f"unselected bounds {feature}"))
+
+            # Symmetry candidates are snapshots of reference geometry around
+            # both the model origin and the current owner's cached bbox center.
+            # Selected geometry is intentionally excluded to prevent snap-back
+            # false positives while it is being transformed.
+            mirror_sources = (*derived_points, *reference_points)
+            for point, label in mirror_sources:
+                for axis, axis_name in enumerate("XYZ"):
+                    for mirror_center, mirror_label in (
+                            (0.0, "origin"),
+                            (owner_center[axis], "owner bounds center")):
+                        mirrored = 2.0 * mirror_center - point[axis]
+                        if abs(mirrored - point[axis]) <= 1e-9:
+                            continue
+                        targets[axis].append(AlignmentTarget(
+                            mirrored,
+                            f"{label} mirror {axis_name} at {mirror_label}"))
         selection = tuple(tuple(point) for point in selection_points)
-        for axis, features in enumerate(self._bounds_features(selection)):
-            for feature, value in zip(("min", "center", "max"), features):
-                targets[axis].append(
-                    AlignmentTarget(value, f"selection {feature}"))
         deduplicated = []
         for axis_targets in targets:
             seen = {}
@@ -866,7 +1095,10 @@ class AssetViewport(QWidget):
             source_features = self._bounds_features(values)
             axes = (
                 ("XYZ".index(axis_name),) if axis_name is not None
-                else range(3)
+                else (
+                    (self._auto_axis_lock,)
+                    if allow_axis_lock and self._auto_axis_lock is not None
+                    else range(3))
             )
             mutable = list(delta)
             for axis in axes:
@@ -1261,6 +1493,8 @@ class AssetViewport(QWidget):
             pos = (0.0, 0.0, 0.0)
         self._edit_session = GeometryEditSession(fam_obj, matrix, pos)
         self._edit_owner = target
+        self._edit_visible_vertices.clear()
+        self._edit_visibility_ready = False
         self._direct_grab_selected_only = False
         self._edit_pick_polygons = False
         self._selected_owner = target
@@ -1326,6 +1560,8 @@ class AssetViewport(QWidget):
         self._edit_session = None
         self._edit_owner = None
         self._edit_faces = []
+        self._edit_visible_vertices.clear()
+        self._edit_visibility_ready = False
         self._modal_op = None
         self._modal_axis = None
         self._modal_numeric = ""
@@ -1365,11 +1601,20 @@ class AssetViewport(QWidget):
         if session is None:
             self.statusMessage.emit("Edit Mode: no editable model is active.")
             return
-        session.select_all()
-        session.selection.difference_update(self._edit_read_only_vertices)
+        self._select_all_editable_vertices()
         self._selected_owner = self._edit_owner
         self._emit_selection_hint("vertex")
         self.update()
+
+    def _select_all_editable_vertices(self) -> bool:
+        """Select every safe POO2 index, excluding shared/read-only FX."""
+
+        session = self._edit_session
+        if session is None:
+            return False
+        session.select_all()
+        session.selection.difference_update(self._edit_read_only_vertices)
+        return bool(session.selection)
 
     def select_no_edit_vertices(self) -> None:
         session = self._edit_session
@@ -1645,8 +1890,7 @@ class AssetViewport(QWidget):
             return False
         selected_all = False
         if not session.selection and select_all_if_empty:
-            session.select_all()
-            selected_all = True
+            selected_all = self._select_all_editable_vertices()
         if not session.selection or not session.begin_modal():
             self.statusMessage.emit("Scale: no vertices selected.")
             return False
@@ -1667,7 +1911,7 @@ class AssetViewport(QWidget):
         if session is None:
             return False
         if not session.selection and select_all_if_empty:
-            session.select_all()
+            self._select_all_editable_vertices()
             self._emit_selection_hint()
         return bool(session.selection and session.begin_modal())
 
@@ -1684,7 +1928,7 @@ class AssetViewport(QWidget):
         if session is None:
             return False
         if not session.selection and select_all_if_empty:
-            session.select_all()
+            self._select_all_editable_vertices()
             self._emit_selection_hint()
         return bool(session.selection and session.begin_modal())
 
@@ -1772,24 +2016,64 @@ class AssetViewport(QWidget):
         return [self._project(self._camera_vertex(p, camera), target, camera)
                 for p in session.world_points()]
 
+    def _refresh_edit_vertex_visibility(
+            self, screen_points=None, target: QRectF | None = None) -> set[int]:
+        """Cache non-selected handles proven visible by rendered pick pieces."""
+
+        session = self._edit_session
+        if session is None:
+            self._edit_visible_vertices.clear()
+            self._edit_visibility_ready = False
+            return set()
+        points = (
+            list(screen_points) if screen_points is not None
+            else self._edit_screen_points())
+        self._edit_visible_vertices = resolve_visible_edit_vertices(
+            self._pick_shapes,
+            points,
+            session.model.polygons,
+            self._edit_owner or "",
+            target=target if target is not None else QRectF(self.rect()),
+        )
+        self._edit_visibility_ready = True
+        return set(self._edit_visible_vertices)
+
+    def _available_edit_vertices(self, screen_points=None) -> set[int]:
+        session = self._edit_session
+        if session is None:
+            return set()
+        if not self._edit_visibility_ready:
+            self._refresh_edit_vertex_visibility(screen_points)
+        return (
+            set(self._edit_visible_vertices)
+            | set(session.selection)
+        ) - self._edit_read_only_vertices
+
     def _nearest_edit_vertex(self, point: QPoint) -> int | None:
         """Return the vertex under the cursor using the visible pick radius."""
 
         session = self._edit_session
         if session is None:
             return None
+        screen_points = self._edit_screen_points()
+        available = self._available_edit_vertices(screen_points)
         best = None
-        best_dist = 12.0 ** 2
-        for index, screen in enumerate(self._edit_screen_points()):
-            if index in self._edit_read_only_vertices:
+        for index, screen in enumerate(screen_points):
+            if index not in available:
                 continue
             dx = screen.x() - point.x()
             dy = screen.y() - point.y()
             dist = dx * dx + dy * dy
-            if dist < best_dist:
-                best = index
-                best_dist = dist
-        return best
+            if dist >= 12.0 ** 2:
+                continue
+            candidate = (
+                dist,
+                0 if index in session.selection else 1,
+                index,
+            )
+            if best is None or candidate < best:
+                best = candidate
+        return best[2] if best is not None else None
 
     def _pick_edit_vertex(self, point: QPoint, extend: bool) -> int | None:
         session = self._edit_session
@@ -1815,9 +2099,11 @@ class AssetViewport(QWidget):
         if session is None or rect is None:
             self.update()
             return
+        screen_points = self._edit_screen_points()
+        available = self._available_edit_vertices(screen_points)
         hits = {
-            index for index, screen in enumerate(self._edit_screen_points())
-            if index not in self._edit_read_only_vertices
+            index for index, screen in enumerate(screen_points)
+            if index in available
             if rect.contains(int(screen.x()), int(screen.y()))
         }
         session.selection = (session.selection | hits) if extend else hits
@@ -2429,9 +2715,9 @@ class AssetViewport(QWidget):
         return image
 
     def reset_view(self) -> None:
-        self._yaw = -35.0
-        self._pitch = 20.0
-        self._zoom = 1.0
+        self._yaw = self.RESET_YAW
+        self._pitch = self.RESET_PITCH
+        self._zoom = self.RESET_ZOOM
         self._pan = QPointF(0.0, 0.0)
         self.update()
 
@@ -2660,9 +2946,11 @@ class AssetViewport(QWidget):
         selected_shape = None
         source_polygons: dict[int, QPolygonF] = {}
         visible_faces: set[int] = set()
+        highlight_paths: dict[int, QPainterPath] = {}
 
         def draw_piece(face: ViewFace, piece_camera, piece_uvs,
-                       image: QImage | None) -> None:
+                       image: QImage | None,
+                       front_facing: bool) -> None:
             screen = [
                 self._project(point, target, camera)
                 for point in piece_camera
@@ -2687,9 +2975,17 @@ class AssetViewport(QWidget):
                 painter.drawPolygon(polygon)
             if not clean and face.primary \
                     and face.poly_id in self._highlight_polys:
-                painter.setPen(QPen(QColor(90, 230, 255), 1.2))
+                painter.setPen(Qt.PenStyle.NoPen)
                 painter.setBrush(QColor(90, 230, 255, 90))
                 painter.drawPolygon(polygon)
+                piece_path = QPainterPath()
+                piece_path.addPolygon(polygon)
+                piece_path.closeSubpath()
+                key = id(face)
+                previous = highlight_paths.get(key)
+                highlight_paths[key] = (
+                    piece_path if previous is None
+                    else previous.united(piece_path))
             whole_edit_owner_selected = bool(
                 self._edit_session is not None
                 and self._edit_owner == face.owner
@@ -2704,12 +3000,27 @@ class AssetViewport(QWidget):
                 painter.setBrush(QColor(
                     60, 185, 255, 82 if whole_edit_owner_selected else 60))
                 painter.drawPolygon(polygon)
+            if not clean and mode != "wireframe" \
+                    and self._show_wire_overlay and front_facing:
+                source_polygon = source_polygons.get(id(face))
+                if source_polygon is not None:
+                    clip = QPainterPath()
+                    clip.addPolygon(polygon)
+                    clip.closeSubpath()
+                    painter.save()
+                    painter.setClipPath(
+                        clip, Qt.ClipOperation.IntersectClip)
+                    painter.setPen(QPen(QColor(0, 0, 0, 130), 0.75))
+                    painter.setBrush(Qt.BrushStyle.NoBrush)
+                    painter.drawPolygon(source_polygon)
+                    painter.restore()
             if not clean:
                 pick_shapes.append(PickShape(
                     polygon=polygon,
                     face=face,
                     camera_vertices=tuple(piece_camera),
                     draw_order=len(pick_shapes),
+                    front_facing=front_facing,
                 ))
             visible_faces.add(id(face))
 
@@ -2732,7 +3043,23 @@ class AssetViewport(QWidget):
                     queued, key=lambda item: item[0]):
                 source_polygons[id(face)] = QPolygonF([
                     self._project(point, target, camera) for point in cam])
-                draw_piece(face, cam, ((0.0, 0.0),) * len(cam), None)
+                screen = list(source_polygons[id(face)])
+                front_facing = False
+                for index in range(2, len(screen)):
+                    triangle = [
+                        screen[item] for item in (0, index, index - 1)]
+                    area = sum(
+                        triangle[item].x()
+                        * triangle[(item + 1) % 3].y()
+                        - triangle[(item + 1) % 3].x()
+                        * triangle[item].y()
+                        for item in range(3))
+                    if area >= 0.0:
+                        front_facing = True
+                        break
+                draw_piece(
+                    face, cam, ((0.0, 0.0),) * len(cam), None,
+                    front_facing)
         else:
             # Match OpenUA's runtime fan triangulation, then use a camera-space
             # BSP to split intersecting triangles.  QPainter can consequently
@@ -2772,12 +3099,13 @@ class AssetViewport(QWidget):
                         * tri_screen[item].y()
                         for item in range(3)
                     )
-                    if self._backface_cull and area < 0.0:
+                    front_facing = area >= 0.0
+                    if self._backface_cull and not front_facing:
                         continue
                     triangles.append(CameraPolygon(
                         tri_camera,
                         tuple(tuple(face_uvs[item]) for item in indices),
-                        _RenderPayload(face, image),
+                        _RenderPayload(face, image, front_facing),
                         source_order,
                     ))
                     source_order += 1
@@ -2786,9 +3114,16 @@ class AssetViewport(QWidget):
                 payload = piece.payload
                 draw_piece(
                     payload.face, piece.vertices,
-                    piece.attributes, payload.image)
+                    piece.attributes, payload.image,
+                    payload.front_facing)
 
-        if not clean and self._show_wire_overlay:
+        if not clean and highlight_paths:
+            painter.setPen(QPen(QColor(90, 230, 255), 1.2))
+            painter.setBrush(Qt.BrushStyle.NoBrush)
+            for path in highlight_paths.values():
+                painter.drawPath(path.simplified())
+
+        if not clean and self._show_wire_overlay and mode == "wireframe":
             painter.setPen(QPen(QColor(0, 0, 0, 130), 0.75))
             painter.setBrush(Qt.BrushStyle.NoBrush)
             for face in self._faces:
@@ -2808,6 +3143,12 @@ class AssetViewport(QWidget):
 
         if not clean:
             self._pick_shapes = pick_shapes
+            if self._edit_session is not None:
+                self._refresh_edit_vertex_visibility(
+                    self._edit_screen_points(target, camera), target)
+            else:
+                self._edit_visible_vertices.clear()
+                self._edit_visibility_ready = False
 
         if selected_shape is not None:
             painter.setPen(QPen(QColor(255, 255, 255), 2.4))
@@ -2849,6 +3190,7 @@ class AssetViewport(QWidget):
         if session is None:
             return
         screen = self._edit_screen_points(target, camera)
+        available = self._available_edit_vertices(screen)
 
         # Constraint guide: model axis through the pivot, in the axis color.
         if self._modal_op is not None and self._modal_axis is not None:
@@ -2873,7 +3215,7 @@ class AssetViewport(QWidget):
         painter.setPen(QPen(QColor(20, 22, 26), 1.0))
         painter.setBrush(QColor(208, 212, 220))
         for index, point in enumerate(screen):
-            if index in session.selection:
+            if index in session.selection or index not in available:
                 continue
             painter.drawRect(QRectF(point.x() - 2.5, point.y() - 2.5,
                                     5.0, 5.0))
@@ -3361,7 +3703,7 @@ class AssetViewport(QWidget):
         length = 25.0 if compact else 34.0
         axes = [
             ((1, 0, 0), QColor(240, 100, 100), "X"),
-            ((0, -1, 0), QColor(110, 230, 110), "-Y Up"),
+            ((0, -1, 0), QColor(110, 230, 110), "-Y"),
             ((0, 0, 1), QColor(110, 160, 250), "Z"),
         ]
         yaw = math.radians(camera["yaw"])
@@ -3412,6 +3754,9 @@ class AssetViewport(QWidget):
 
     def mousePressEvent(self, event: QMouseEvent) -> None:  # noqa: N802
         pos = event.position().toPoint()
+        if event.button() == Qt.MouseButton.LeftButton:
+            self._press_additive = bool(
+                event.modifiers() & Qt.KeyboardModifier.ControlModifier)
         if self._paste_preview is not None:
             if event.button() == Qt.MouseButton.LeftButton \
                     and event.modifiers() & Qt.KeyboardModifier.AltModifier:
@@ -3490,6 +3835,7 @@ class AssetViewport(QWidget):
         if self._edit_session is not None and not self._snapshot_active:
             if self._edit_session.modal_active and self._modal_op is None:
                 self._press_pos = None
+                self._press_additive = False
                 event.accept()
                 return
             if self._direct_grab_active \
@@ -3497,6 +3843,7 @@ class AssetViewport(QWidget):
                 self._commit_modal()
                 self._vertex_press = None
                 self._press_pos = None
+                self._press_additive = False
                 event.accept()
                 return
             if self._vertex_press is not None \
@@ -3506,15 +3853,16 @@ class AssetViewport(QWidget):
                 self._edit_session.selection = {pressed.vertex}
                 self._emit_selection_hint("vertex")
                 self._press_pos = None
+                self._press_additive = False
                 self.update()
                 event.accept()
                 return
-            additive = bool(event.modifiers()
-                            & Qt.KeyboardModifier.ControlModifier)
+            additive = self._press_additive
             if self._box_start is not None \
                     and event.button() == Qt.MouseButton.LeftButton:
                 self._apply_box_select(additive)
                 self._marquee_candidate = False
+                self._press_additive = False
                 event.accept()
                 return
             if event.button() == Qt.MouseButton.LeftButton \
@@ -3533,16 +3881,17 @@ class AssetViewport(QWidget):
                         self._pick_edit_vertex(point, additive)
             self._press_pos = None
             self._marquee_candidate = False
+            self._press_additive = False
             event.accept()
             return
         if event.button() == Qt.MouseButton.LeftButton \
                 and self._press_pos is not None and not self._snapshot_active:
             delta = event.position().toPoint() - self._press_pos
             if abs(delta.x()) <= 4 and abs(delta.y()) <= 4:
-                additive = bool(event.modifiers()
-                                & Qt.KeyboardModifier.ControlModifier)
+                additive = self._press_additive
                 self.pick_at(event.position().toPoint(), additive)
         self._press_pos = None
+        self._press_additive = False
         event.accept()
 
     def pick_at(self, point: QPoint, additive: bool = False) -> int | None:

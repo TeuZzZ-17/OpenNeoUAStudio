@@ -140,6 +140,29 @@ class GeometryPasteIntegrationTests(unittest.TestCase):
                          (6, 2))
         self.assertEqual(len(self.block.olpl), 2)
 
+    def test_post_append_failure_rolls_back_without_undo_ghost(self):
+        clipboard = self.window._geometry_clipboard
+        position = self.window.viewport._project(
+            self.window.viewport._camera_vertex(
+                clipboard.pivot)).toPoint()
+        self.assertTrue(self.window.viewport.begin_paste_preview(
+            clipboard, position))
+        before = self.window._capture_topology_state("root")
+
+        with patch.object(
+                self.window, "_rebuild_workbench",
+                side_effect=RuntimeError("simulated refresh failure")):
+            self.window._confirm_paste_geometry()
+
+        after = self.window._capture_topology_state("root")
+        self.assertEqual(
+            self.window._topology_content(after),
+            self.window._topology_content(before))
+        self.assertEqual(self.window._edit_undo_stack, [])
+        self.assertEqual(self.window._edit_redo_stack, [])
+        self.assertFalse(self.window.viewport.paste_preview_active)
+        self.assertNotIn("root", self.window._topology_original)
+
     def test_transform_after_paste_undoes_before_topology(self):
         self._confirm_at_source_pivot()
         pasted_points = list(self.model.points)

@@ -77,16 +77,30 @@ class ModelSpaceGizmoTests(unittest.TestCase):
         self.assertIn(
             "+Y = Down", gizmo.direction_text((0, 1, 0)))
 
-    def test_large_expanding_layout_uses_added_panel_space(self):
+    def test_compact_layout_scales_without_clipping_handles(self):
         gizmo = ModelSpaceGizmo()
-        self.assertGreaterEqual(gizmo.minimumWidth(), 300)
-        self.assertGreaterEqual(gizmo.minimumHeight(), 300)
+        self.assertEqual(gizmo.minimumWidth(), 240)
+        self.assertEqual(gizmo.minimumHeight(), 240)
+        self.assertEqual(gizmo.sizeHint().width(), 300)
+        self.assertEqual(gizmo.sizeHint().height(), 300)
         self.assertEqual(
             gizmo.sizePolicy().horizontalPolicy(),
             QSizePolicy.Policy.Expanding)
         self.assertEqual(
             gizmo.sizePolicy().verticalPolicy(),
-            QSizePolicy.Policy.Expanding)
+            QSizePolicy.Policy.Preferred)
+        gizmo.resize(240, 240)
+        for mode in ("move", "rotate", "scale"):
+            gizmo.set_mode(mode)
+            for handle in gizmo.handles:
+                margin = handle.radius + 4.0
+                self.assertGreaterEqual(handle.position.x(), margin)
+                self.assertGreaterEqual(handle.position.y(), margin)
+                self.assertLessEqual(
+                    handle.position.x(), gizmo.width() - margin)
+                self.assertLessEqual(
+                    handle.position.y(), gizmo.height() - margin)
+        gizmo.set_mode("move")
         gizmo.resize(360, 360)
         center_small = QPointF(180, 180)
         small = gizmo.handle_for_direction((1, 0, 0)).position
@@ -153,6 +167,19 @@ class ModelSpaceGizmoTests(unittest.TestCase):
             Qt.KeyboardModifier.NoModifier, handle.position.toPoint())
         self.assertEqual(clicked, [(0, 1, 1)])
         self.assertEqual(finished, [True])
+
+    def test_implicit_scale_rotate_select_all_excludes_read_only_fx(self):
+        viewport, _model = _editable_viewport()
+        viewport.edit_session.selection.clear()
+        viewport.set_edit_read_only_vertices({1})
+        self.assertTrue(viewport.begin_scale_preview())
+        self.assertEqual(viewport.edit_session.selection, {0, 2})
+        viewport.finish_scale_preview(False)
+
+        viewport.edit_session.selection.clear()
+        self.assertTrue(viewport.begin_rotate_preview())
+        self.assertEqual(viewport.edit_session.selection, {0, 2})
+        viewport.finish_rotate_preview(False)
 
     def test_outward_drag_keeps_discrete_click_hold_behavior(self):
         gizmo = ModelSpaceGizmo()
@@ -239,6 +266,9 @@ class ModelSpaceGizmoTests(unittest.TestCase):
         original_viewport = window.viewport
         window.viewport = viewport
         try:
+            window.global_edit_button.blockSignals(True)
+            window.global_edit_button.setChecked(True)
+            window.global_edit_button.blockSignals(False)
             window.gizmo_intensity_spin.setValue(0.20)
             window._apply_gizmo_nudge((0, 1, -1))
             after_delta = viewport.paste_preview_delta
@@ -263,16 +293,16 @@ class ModelSpaceGizmoTests(unittest.TestCase):
         self.assertEqual(window.gizmo_intensity_slider.maximum(), 1000)
         self.assertEqual(
             window.gizmo_intensity_slider.value(),
-            window._gizmo_intensity_to_slider(0.20))
-        self.assertAlmostEqual(window._gizmo_intensity(), 0.20)
+            window._gizmo_intensity_to_slider(0.30))
+        self.assertAlmostEqual(window._gizmo_intensity(), 0.30)
         self.assertEqual(
-            window.gizmo_intensity_spin.text(), "0.20 model units")
+            window.gizmo_intensity_spin.text(), "0.30 model units")
         window.gizmo_intensity_slider.setValue(0)
         self.assertAlmostEqual(window._gizmo_intensity(), 0.001)
         window.gizmo_intensity_slider.setValue(1000)
         self.assertAlmostEqual(window._gizmo_intensity(), 1000.0)
         self.assertFalse(window.model_gizmo.isEnabled())
-        self.assertFalse(window.auto_align_check.isChecked())
+        self.assertTrue(window.auto_align_check.isChecked())
         self.assertEqual(
             window.model_gizmo.shortcutContext()
             if hasattr(window.model_gizmo, "shortcutContext") else None,
