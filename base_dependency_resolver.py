@@ -2,8 +2,9 @@
 
 Collects every detectable reference of a parsed family — skeletons per
 object (including nested KIDS children), textures, tracy textures, VANM
-animations and their frame bitmaps, embedded EMRS resources, particle
-blocks and unknown chunks — into flat :class:`AssetDependency` records with
+animations and their frame bitmaps, embedded EMRS resources, recursively
+decoded particle life-stage materials and unknown chunks — into flat
+:class:`AssetDependency` records with
 clear statuses:
 
     auto_loaded        resolved unambiguously and loaded
@@ -30,7 +31,7 @@ from pathlib import Path
 class AssetDependency:
     kind: str                      # skeleton | texture | tracy_texture |
                                    # animation | anm_bitmap | embedded |
-                                   # child_base | particle | unknown_chunk
+                                   # child_base | unknown_chunk
     raw_ref: str
     source: str = ""               # block/field that references it
     owner_node: str | None = None  # object path for KIDS context
@@ -87,6 +88,12 @@ def collect_dependencies(family) -> list[AssetDependency]:
     seen_textures: set[str] = set()
     seen_anims: set[str] = set()
 
+    def iter_visual_blocks(block, source: str):
+        yield block, source
+        for stage_index, stage in enumerate(block.particle_stages):
+            yield from iter_visual_blocks(
+                stage, f"{source} PTCL stage #{stage_index}")
+
     def walk(fam_obj, label: str) -> None:
         base_obj = fam_obj.base_object
 
@@ -97,36 +104,31 @@ def collect_dependencies(family) -> list[AssetDependency]:
                 fam_obj.skeleton_ref, fam_obj.skeleton is not None,
             ))
 
-        for block_index, block in enumerate(base_obj.ades):
-            class_id = (block.class_id or "").lower()
-            if class_id == "particle.class":
-                deps.append(AssetDependency(
-                    kind="particle", raw_ref=f"ADES block #{block_index}",
-                    source="particle.class (emitter ATTS not decoded)",
-                    owner_node=label, status="unsupported_loader",
-                ))
-                continue
-            for tex, tex_kind in ((block.texture, "texture"),
-                                  (block.tracy_texture, "tracy_texture")):
-                if tex is None or not tex.name:
-                    continue
-                if tex.kind == "bmpanim":
-                    if tex.name not in seen_anims:
-                        seen_anims.add(tex.name)
-                        ref = family.animation_refs.get(tex.name)
+        for block_index, root_block in enumerate(base_obj.ades):
+            for block, source in iter_visual_blocks(
+                    root_block, f"ADES block #{block_index}"):
+                for tex, tex_kind in (
+                        (block.texture, "texture"),
+                        (block.tracy_texture, "tracy_texture")):
+                    if tex is None or not tex.name:
+                        continue
+                    if tex.kind == "bmpanim":
+                        if tex.name not in seen_anims:
+                            seen_anims.add(tex.name)
+                            ref = family.animation_refs.get(tex.name)
+                            deps.append(_dep_from_ref(
+                                family, tex.name, "animation",
+                                f"{source} BANI", label,
+                                ref, tex.name in family.animations,
+                            ))
+                    elif tex.name not in seen_textures:
+                        seen_textures.add(tex.name)
+                        ref = family.texture_refs.get(tex.name)
                         deps.append(_dep_from_ref(
-                            family, tex.name, "animation",
-                            f"ADES block #{block_index} BANI", label,
-                            ref, tex.name in family.animations,
+                            family, tex.name, tex_kind,
+                            f"{source} CIBO NAM2", label,
+                            ref, tex.name in family.textures,
                         ))
-                elif tex.name not in seen_textures:
-                    seen_textures.add(tex.name)
-                    ref = family.texture_refs.get(tex.name)
-                    deps.append(_dep_from_ref(
-                        family, tex.name, tex_kind,
-                        f"ADES block #{block_index} CIBO NAM2", label,
-                        ref, tex.name in family.textures,
-                    ))
 
         for res in base_obj.embedded:
             supported = res.class_id.lower() in (
