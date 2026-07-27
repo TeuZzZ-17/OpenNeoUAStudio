@@ -308,6 +308,17 @@ def _build_materials(fam_obj: FamilyObject, family: AssetFamily) -> None:
         family.warnings.extend(f"{label}: {w}" for w in group.warnings)
 
 
+def rebuild_materials(fam_obj: FamilyObject, family: AssetFamily) -> None:
+    """Rebind MaterialGroups after an in-memory ADES grow/shrink operation."""
+
+    warning_count = len(family.warnings)
+    fam_obj.materials.clear()
+    _build_materials(fam_obj, family)
+    # Runtime editing should not duplicate load-time diagnostics each time a
+    # topology command is applied, undone or redone.
+    del family.warnings[warning_count:]
+
+
 def _load_family_object(base_obj: BaseObject, family: AssetFamily,
                         resolver: AssetResolver,
                         owner_path: str = "root") -> FamilyObject:
@@ -356,22 +367,24 @@ def _load_family_object(base_obj: BaseObject, family: AssetFamily,
                     f"Skeleton {base_obj.skeleton_name} failed to parse: {exc}"
                 )
 
-    for block in base_obj.ades:
-        for tex in (block.texture, block.tracy_texture):
-            if tex is None or not tex.name:
-                continue
-            if tex.kind == "bmpanim":
-                _load_animation(family, resolver, tex.name)
-            else:
-                _load_texture(family, resolver, tex.name)
-            family.texture_tracy_usage.setdefault(tex.name, set()).add(
-                block.tracy_mode
-            )
-            if block.tracy_mode == "mapped":
-                family.diag(
-                    f"{tex.name}: tracy 'mapped' present but not previewed yet "
-                    "(second-texture transparency is not implemented)."
+    for root_block in base_obj.ades:
+        for block in root_block.iter_visual_blocks():
+            for tex in (block.texture, block.tracy_texture):
+                if tex is None or not tex.name:
+                    continue
+                if tex.kind == "bmpanim":
+                    _load_animation(family, resolver, tex.name)
+                else:
+                    _load_texture(family, resolver, tex.name)
+                family.texture_tracy_usage.setdefault(tex.name, set()).add(
+                    block.tracy_mode
                 )
+                if block.tracy_mode == "mapped":
+                    family.diag(
+                        f"{tex.name}: tracy 'mapped' present but not previewed "
+                        "yet (second-texture transparency is not "
+                        "implemented)."
+                    )
 
     _build_materials(fam_obj, family)
 
@@ -433,7 +446,12 @@ def _run_checks(family: AssetFamily) -> None:
                         if (b.class_id or "").lower() == "amesh.class"]
         amesh_atts = sum(len(b.atts) for b in amesh_blocks)
         amesh_olpl = sum(len(b.olpl) for b in amesh_blocks)
-        area_blocks = len(base_obj.ades) - len(amesh_blocks)
+        area_blocks = [
+            b for b in base_obj.ades
+            if (b.class_id or "").lower() == "area.class"]
+        particle_blocks = [
+            b for b in base_obj.ades
+            if (b.class_id or "").lower() == "particle.class"]
 
         family.check(True, f"{name}: POL2 polygons = {poly_count}, "
                            f"POO2 points = {len(skeleton.points)}, "
@@ -476,8 +494,15 @@ def _run_checks(family: AssetFamily) -> None:
                              "no valid UVs)")
         if area_blocks:
             family.check(True,
-                         f"{name}: {area_blocks} area.class block(s) use "
+                         f"{name}: {len(area_blocks)} area.class block(s) use "
                          "texture-outline/VANM UVs (no OLPL chunk by design)")
+        if particle_blocks:
+            stage_count = sum(
+                len(block.particle_stages) for block in particle_blocks)
+            family.check(
+                True,
+                f"{name}: {len(particle_blocks)} particle.class emitter(s), "
+                f"{stage_count} nested visual life stage(s) decoded")
         if atts_total:
             family.check(
                 len(covered) == atts_total,

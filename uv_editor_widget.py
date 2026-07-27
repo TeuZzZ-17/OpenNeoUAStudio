@@ -34,6 +34,10 @@ class UVEditorWidget(QWidget):
         self._drag_changed = False
         self._box_start: QPointF | None = None
         self._box_rect: QRectF | None = None
+        self._press_hit = -1
+        self._press_pos: QPointF | None = None
+        self._press_additive = False
+        self._press_selection: set[int] = set()
         self._zoom = 1.0
         self._pan = QPointF(0.0, 0.0)
         self._pan_last: QPoint | None = None
@@ -49,6 +53,9 @@ class UVEditorWidget(QWidget):
         self._dragging = False
         self._box_start = None
         self._box_rect = None
+        self._press_hit = -1
+        self._press_pos = None
+        self._press_selection.clear()
         self.update()
 
     def uvs(self) -> list[tuple[int, int]]:
@@ -72,39 +79,21 @@ class UVEditorWidget(QWidget):
         self.pointSelected.emit(-1)
         self.update()
 
+    def select_point(self, index: int) -> None:
+        if 0 <= index < len(self._uvs):
+            self._selected_points = {index}
+            self._active_point = index
+        else:
+            self._selected_points.clear()
+            self._active_point = -1
+        self.pointSelected.emit(self._active_point)
+        self.update()
+
     def _finish_programmatic_edit(self, before) -> None:
         if before == self._uvs:
             return
         self.uvChanged.emit(self.uvs())
         self.editFinished.emit()
-
-    def align_selected_horizontal(self) -> None:
-        """Give selected handles the same V coordinate."""
-
-        indices = sorted(self._selected_points)
-        if not self._editable or len(indices) < 2:
-            return
-        before = list(self._uvs)
-        value = round(sum(self._uvs[index][1] for index in indices)
-                      / len(indices))
-        for index in indices:
-            self._uvs[index] = (self._uvs[index][0], value)
-        self.update()
-        self._finish_programmatic_edit(before)
-
-    def align_selected_vertical(self) -> None:
-        """Give selected handles the same U coordinate."""
-
-        indices = sorted(self._selected_points)
-        if not self._editable or len(indices) < 2:
-            return
-        before = list(self._uvs)
-        value = round(sum(self._uvs[index][0] for index in indices)
-                      / len(indices))
-        for index in indices:
-            self._uvs[index] = (value, self._uvs[index][1])
-        self.update()
-        self._finish_programmatic_edit(before)
 
     def nudge_selected(self, du: int, dv: int) -> None:
         indices = sorted(self._selected_points)
@@ -214,6 +203,10 @@ class UVEditorWidget(QWidget):
             hit = self._hit_point(pos)
             additive = bool(event.modifiers()
                             & Qt.KeyboardModifier.ControlModifier)
+            self._press_hit = hit
+            self._press_pos = QPointF(pos)
+            self._press_additive = additive
+            self._press_selection = set(self._selected_points)
             if hit >= 0:
                 if additive:
                     if hit in self._selected_points:
@@ -226,20 +219,9 @@ class UVEditorWidget(QWidget):
                                       else min(self._selected_points,
                                                default=-1))
                 self.pointSelected.emit(self._active_point)
-            elif additive:
-                self._box_start = pos
-                self._box_rect = QRectF(pos, pos)
             else:
-                self.select_none()
-            if hit >= 0 and hit in self._selected_points and self._editable:
-                self._dragging = True
-                self._drag_axis = None
-                self._drag_start_uvs = {
-                    index: self._uvs[index]
-                    for index in self._selected_points
-                }
-                self._drag_anchor_uv = self._uvs[hit]
-                self._drag_changed = False
+                self._box_start = pos
+                self._box_rect = None
             self.update()
         elif event.button() in (Qt.MouseButton.MiddleButton,
                                 Qt.MouseButton.RightButton):
@@ -248,6 +230,20 @@ class UVEditorWidget(QWidget):
 
     def mouseMoveEvent(self, event) -> None:  # noqa: N802
         pos = event.position()
+        if event.buttons() & Qt.MouseButton.LeftButton \
+                and self._press_hit >= 0 and not self._dragging \
+                and self._editable \
+                and self._press_hit in self._selected_points:
+            if self._press_pos is not None \
+                    and (pos - self._press_pos).manhattanLength() >= 5.0:
+                self._dragging = True
+                self._drag_axis = None
+                self._drag_start_uvs = {
+                    index: self._uvs[index]
+                    for index in self._selected_points
+                }
+                self._drag_anchor_uv = self._uvs[self._press_hit]
+                self._drag_changed = False
         if self._dragging and self._active_point >= 0 \
                 and self._drag_anchor_uv is not None:
             u, v = self._screen_to_uv(pos)
@@ -265,15 +261,15 @@ class UVEditorWidget(QWidget):
                     max(0, min(255, start_u + du)),
                     max(0, min(255, start_v + dv)),
                 )
-            self._drag_changed = self._uvs != [
-                self._drag_start_uvs.get(index, uv)
-                for index, uv in enumerate(self._uvs)
-            ]
+            self._drag_changed = any(
+                self._uvs[index] != start
+                for index, start in self._drag_start_uvs.items())
             self.uvChanged.emit(self.uvs())
             self.update()
         elif self._box_start is not None:
-            self._box_rect = QRectF(self._box_start, pos).normalized()
-            self.update()
+            if (pos - self._box_start).manhattanLength() >= 5.0:
+                self._box_rect = QRectF(self._box_start, pos).normalized()
+                self.update()
         elif self._pan_last is not None:
             delta = event.position().toPoint() - self._pan_last
             self._pan_last = event.position().toPoint()
@@ -291,17 +287,27 @@ class UVEditorWidget(QWidget):
             self._drag_anchor_uv = None
             self._drag_changed = False
         if self._box_start is not None:
-            rect = self._box_rect or QRectF(self._box_start, self._box_start)
-            hits = {
-                index for index, uv in enumerate(self._uvs)
-                if rect.contains(self._uv_to_screen(uv))
-            }
-            self._selected_points |= hits
-            self._active_point = min(hits, default=self._active_point)
+            if self._box_rect is None:
+                if not self._press_additive:
+                    self._selected_points.clear()
+                    self._active_point = -1
+            else:
+                hits = {
+                    index for index, uv in enumerate(self._uvs)
+                    if self._box_rect.contains(self._uv_to_screen(uv))
+                }
+                self._selected_points = (
+                    self._press_selection | hits
+                    if self._press_additive else hits)
+                self._active_point = min(
+                    hits, default=min(self._selected_points, default=-1))
             self.pointSelected.emit(self._active_point)
             self._box_start = None
             self._box_rect = None
             self.update()
+        self._press_hit = -1
+        self._press_pos = None
+        self._press_selection.clear()
         self._pan_last = None
         event.accept()
 
