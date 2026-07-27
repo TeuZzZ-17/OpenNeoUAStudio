@@ -97,6 +97,7 @@ class RepairPlan:
     color_val: int = 0
     shade_val: int = 0
     tracy_val: int = 128
+    pad: int = 0
     uvs: list[tuple[int, int]] = field(default_factory=list)
     method: str = ""          # "copy-style" | "planar"
     source_poly: int | None = None
@@ -107,12 +108,33 @@ class RepairPlan:
             f"repair polygon #{self.poly_id} -> material block "
             f"#{self.block_index} ({self.method})",
             f"ATTS entry: polyID={self.poly_id} colorVal={self.color_val} "
-            f"shadeVal={self.shade_val} tracyVal={self.tracy_val} pad=0",
+            f"shadeVal={self.shade_val} tracyVal={self.tracy_val} "
+            f"pad={self.pad}",
             f"OLPL group ({len(self.uvs)} UVs): "
             + " ".join(f"({u},{v})" for u, v in self.uvs),
         ]
         lines.extend(self.notes)
         return lines
+
+
+@dataclass(frozen=True)
+class StructuralBlockState:
+    """Complete typed state for one ADES block.
+
+    ``template_objt`` is the exact parsed source OBJT used by the grow/shrink
+    writer.  ``None`` retains compatibility with the older amesh-only API.
+    """
+
+    block_index: int
+    atts: tuple
+    # None means that this material uses ATTS-only mapping semantics (for
+    # example a demonstrated VANM block) and its OLPL chunk must be preserved.
+    olpl: tuple | None
+    class_id: str = ""
+    payload_form_type: str = ""
+    ade_poly_id: int | None = None
+    template_objt: bytes | None = field(
+        default=None, repr=False, compare=False)
 
 
 def _polygon_vertices(fam_obj, poly_id: int) -> list[tuple[float, float, float]]:
@@ -250,7 +272,8 @@ def eligible_blocks(fam_obj) -> list[tuple[int, AmeshBlock]]:
 
 def _pack_atts_entry(plan: RepairPlan) -> bytes:
     return struct.pack(">hBBBB", plan.poly_id, plan.color_val & 0xFF,
-                       plan.shade_val & 0xFF, plan.tracy_val & 0xFF, 0)
+                       plan.shade_val & 0xFF, plan.tracy_val & 0xFF,
+                       plan.pad & 0xFF)
 
 
 def _pack_olpl_group(plan: RepairPlan) -> bytes:
@@ -338,8 +361,9 @@ def verify_repair(original: bytes, repaired: bytes, block_index: int,
                 )
             new_entry = b.atts[-1]
             if (new_entry.poly_id, new_entry.color_val, new_entry.shade_val,
-                    new_entry.tracy_val) != (plan.poly_id, plan.color_val,
-                                             plan.shade_val, plan.tracy_val):
+                    new_entry.tracy_val, new_entry.pad) != (
+                        plan.poly_id, plan.color_val, plan.shade_val,
+                        plan.tracy_val, plan.pad):
                 raise MappingEditError("appended ATTS entry does not match plan")
             if b.olpl[-1] != plan.uvs:
                 raise MappingEditError("appended OLPL group does not match plan")
@@ -365,6 +389,388 @@ def verify_repair(original: bytes, repaired: bytes, block_index: int,
         f"(+{len(repaired) - len(original)} bytes)"
     )
     return notes
+
+
+def _encode_atts_payload(entries) -> bytes:
+    payload = bytearray()
+    for index, entry in enumerate(entries):
+        if not (-0x8000 <= entry.poly_id <= 0x7FFF):
+            raise MappingEditError(
+                f"ATTS entry #{index} polyID is outside signed 16-bit range")
+        values = (
+            entry.color_val, entry.shade_val, entry.tracy_val, entry.pad)
+        if any(value < 0 or value > 0xFF for value in values):
+            raise MappingEditError(
+                f"ATTS entry #{index} contains a value outside byte range")
+        payload.extend(struct.pack(
+            ">hBBBB", entry.poly_id, entry.color_val, entry.shade_val,
+            entry.tracy_val, entry.pad))
+    return bytes(payload)
+
+
+def _encode_olpl_payload(groups) -> bytes:
+    payload = bytearray()
+    for index, group in enumerate(groups):
+        if len(group) > 0x7FFF:
+            raise MappingEditError(
+                f"OLPL group #{index} exceeds the signed 16-bit count limit")
+        payload.extend(struct.pack(">h", len(group)))
+        for u, v in group:
+            if not (0 <= u <= 0xFF and 0 <= v <= 0xFF):
+                raise MappingEditError(
+                    f"OLPL group #{index} contains a UV outside byte range")
+            payload.extend(struct.pack(">BB", u, v))
+    return bytes(payload)
+
+
+def _rebuild_iff_chunk(data: bytes, chunk, replacements: dict[int, bytes]) -> bytes:
+    replacement = replacements.get(chunk.offset)
+    if replacement is not None:
+        payload = replacement
+    elif chunk.tag == "FORM" and chunk.children:
+        payload = bytearray(data[chunk.payload_offset:chunk.payload_offset + 4])
+        cursor = chunk.payload_offset + 4
+        declared_end = chunk.payload_offset + chunk.size
+        for child in chunk.children:
+            payload.extend(data[cursor:child.offset])
+            payload.extend(_rebuild_iff_chunk(data, child, replacements))
+            cursor = child.offset + 8 + child.size + (child.size & 1)
+        payload.extend(data[cursor:declared_end])
+        payload = bytes(payload)
+    else:
+        end = chunk.offset + 8 + chunk.size + (chunk.size & 1)
+        return data[chunk.offset:end]
+
+    result = bytearray(data[chunk.offset:chunk.offset + 4])
+    result.extend(struct.pack(">I", len(payload)))
+    result.extend(payload)
+    if len(payload) & 1:
+        old_pad = chunk.payload_offset + chunk.size
+        result.append(data[old_pad] if old_pad < len(data) else 0)
+    return bytes(result)
+
+
+def _wrap_ades_objt(objt: bytes) -> bytes:
+    if len(objt) < 12 or objt[:4] != b"FORM" or objt[8:12] != b"OBJT":
+        raise MappingEditError("structural ADES template is not FORM OBJT")
+
+    def chunk(tag: bytes, payload: bytes) -> bytes:
+        encoded = tag + struct.pack(">I", len(payload)) + payload
+        return encoded + (b"\0" if len(payload) & 1 else b"")
+
+    def form(form_type: bytes, children: bytes) -> bytes:
+        return chunk(b"FORM", form_type + children)
+
+    ades = form(b"ADES", objt)
+    base = form(b"BASE", ades)
+    root_objt = form(
+        b"OBJT", chunk(b"CLID", b"base.class\0") + base)
+    return form(b"MC2 ", root_objt)
+
+
+def _rewrite_structural_objt(state: StructuralBlockState) -> bytes:
+    template = state.template_objt
+    if template is None:
+        raise MappingEditError(
+            f"block #{state.block_index} has no typed source OBJT")
+    wrapped = _wrap_ades_objt(template)
+    parsed = parse_base_bytes(wrapped, "<ades-template>")
+    if parsed.root is None or parsed.tree is None \
+            or len(parsed.root.ades) != 1:
+        raise MappingEditError(
+            f"block #{state.block_index} source OBJT failed to parse")
+    block = parsed.root.ades[0]
+    expected_class = (state.class_id or block.class_id or "").lower()
+    if (block.class_id or "").lower() != expected_class:
+        raise MappingEditError(
+            f"block #{state.block_index} source class changed from "
+            f"{state.class_id!r} to {block.class_id!r}")
+    replacements: dict[int, bytes] = {}
+    if expected_class == "amesh.class":
+        if block.atts_chunk_offset < 0:
+            raise MappingEditError(
+                f"amesh.class block #{state.block_index} has no ATTS chunk")
+        if state.olpl is not None and block.olpl_chunk_offset < 0:
+            raise MappingEditError(
+                f"amesh.class block #{state.block_index} has no OLPL chunk")
+        if state.olpl is not None and len(state.atts) != len(state.olpl):
+            raise MappingEditError(
+                f"amesh.class block #{state.block_index} has ambiguous "
+                "ATTS/OLPL counts")
+        replacements[block.atts_chunk_offset] = _encode_atts_payload(
+            state.atts)
+        if state.olpl is not None:
+            replacements[block.olpl_chunk_offset] = _encode_olpl_payload(
+                state.olpl)
+    elif expected_class == "area.class":
+        if state.ade_poly_id is None:
+            raise MappingEditError(
+                f"area.class block #{state.block_index} has no POL2 reference")
+        if len(state.atts) != 1 \
+                or state.atts[0].poly_id != state.ade_poly_id:
+            raise MappingEditError(
+                f"area.class block #{state.block_index} has an inconsistent "
+                "derived mapping")
+        if block.ade_strc_chunk_offset < 0 \
+                or block.ade_strc_chunk_size < 10:
+            raise MappingEditError(
+                f"area.class block #{state.block_index} has no writable "
+                "FORM ADE/STRC")
+        ade_chunk = next(
+            (chunk for chunk in parsed.tree.iter_all()
+             if chunk.offset == block.ade_strc_chunk_offset), None)
+        if ade_chunk is None or ade_chunk.available_size < 10:
+            raise MappingEditError(
+                f"area.class block #{state.block_index} ADE/STRC is truncated")
+        payload = bytearray(ade_chunk.payload(wrapped))
+        struct.pack_into(">h", payload, 6, state.ade_poly_id)
+        replacements[ade_chunk.offset] = bytes(payload)
+    elif expected_class == "particle.class":
+        # PTCL/ATTS stores emitter parameters; there are no decoded POL2 refs.
+        pass
+    else:
+        # Unknown classes are preserved byte-for-byte.  Topology renumbering
+        # reaches this writer only after the reference graph has rejected any
+        # operation that could require rewriting one.
+        if template != block.source_objt_bytes:
+            raise MappingEditError(
+                f"unknown class {state.class_id!r} template is inconsistent")
+
+    root = parsed.tree.roots[0]
+    rebuilt = _rebuild_iff_chunk(wrapped, root, replacements)
+    verified = parse_base_bytes(rebuilt, "<ades-template-rewritten>")
+    if verified.root is None or len(verified.root.ades) != 1:
+        raise MappingEditError(
+            f"block #{state.block_index} rewrite failed to re-parse")
+    return verified.root.ades[0].source_objt_bytes
+
+
+def _rewrite_complete_ades(
+        data: bytes, asset, states: list[StructuralBlockState]) -> bytes:
+    if asset.root.ades_form_offset < 0:
+        raise MappingEditError("the standalone BASE has no FORM ADES")
+    expected_indices = list(range(len(states)))
+    if [state.block_index for state in states] != expected_indices:
+        raise MappingEditError(
+            "complete ADES states must be ordered and consecutively indexed")
+    children = b"".join(_rewrite_structural_objt(state) for state in states)
+    replacements = {
+        asset.root.ades_form_offset: b"ADES" + children,
+    }
+    output = bytearray()
+    cursor = 0
+    for root in asset.tree.roots:
+        output.extend(data[cursor:root.offset])
+        output.extend(_rebuild_iff_chunk(data, root, replacements))
+        cursor = root.offset + 8 + root.size + (root.size & 1)
+    output.extend(data[cursor:])
+    return bytes(output)
+
+
+def rewrite_model_base_structure(
+        data: bytes, states: list[StructuralBlockState]) -> bytes:
+    """Rewrite typed ADES state, including OBJT grow/shrink."""
+
+    asset = parse_base_bytes(data, "<model-base-structure>")
+    if asset.root is None or asset.tree is None:
+        raise MappingEditError("not a parseable standalone model BASE")
+    if any(chunk.truncated for chunk in asset.tree.iter_all()):
+        raise MappingEditError(
+            "the BASE contains truncated chunks and cannot be rewritten")
+    complete = any(state.template_objt is not None for state in states)
+    if complete:
+        if not all(state.template_objt is not None for state in states):
+            raise MappingEditError(
+                "typed and legacy structural block states cannot be mixed")
+        return _rewrite_complete_ades(data, asset, states)
+
+    # Backward-compatible amesh-only writer used by existing API callers.
+    blocks = asset.root.ades
+    replacements: dict[int, bytes] = {}
+    seen: set[int] = set()
+    for state in states:
+        block_index = state.block_index
+        if block_index in seen:
+            raise MappingEditError(
+                f"duplicate structural state for block #{block_index}")
+        seen.add(block_index)
+        if not (0 <= block_index < len(blocks)):
+            raise MappingEditError(
+                f"material block #{block_index} no longer exists")
+        block = blocks[block_index]
+        if (block.class_id or "").lower() != "amesh.class":
+            raise MappingEditError(
+                f"block #{block_index} is not an editable amesh block")
+        if block.atts_chunk_offset < 0:
+            raise MappingEditError(
+                f"block #{block_index} has no structural ATTS chunk")
+        if state.olpl is not None and block.olpl_chunk_offset < 0:
+            raise MappingEditError(
+                f"block #{block_index} has no structural OLPL chunk")
+        if state.olpl is not None and len(state.atts) != len(state.olpl):
+            raise MappingEditError(
+                f"block #{block_index} has ambiguous ATTS/OLPL counts")
+        replacements[block.atts_chunk_offset] = _encode_atts_payload(
+            state.atts)
+        if state.olpl is not None:
+            replacements[block.olpl_chunk_offset] = _encode_olpl_payload(
+                state.olpl)
+
+    output = bytearray()
+    cursor = 0
+    for root in asset.tree.roots:
+        output.extend(data[cursor:root.offset])
+        output.extend(_rebuild_iff_chunk(data, root, replacements))
+        cursor = root.offset + 8 + root.size + (root.size & 1)
+    output.extend(data[cursor:])
+    return bytes(output)
+
+
+def _block_metadata(block) -> tuple:
+    texture = block.texture
+    tracy = block.tracy_texture
+    return (
+        block.class_id, block.ade_flags, block.ade_point_id,
+        block.ade_poly_id, block.area_flags, block.polflags,
+        block.color_val, block.tracy_val, block.shade_val,
+        (
+            texture.class_id, texture.kind, texture.name,
+            tuple(texture.outline_uvs), texture.anim_type
+        ) if texture is not None else None,
+        (
+            tracy.class_id, tracy.kind, tracy.name,
+            tuple(tracy.outline_uvs), tracy.anim_type
+        ) if tracy is not None else None,
+    )
+
+
+def _block_material_metadata(block) -> tuple:
+    metadata = _block_metadata(block)
+    # ADE polyID is the only AREA material metadata field rewritten by the
+    # typed handler.  ATTS/OLPL are intentionally not part of this tuple.
+    return metadata[:3] + metadata[4:]
+
+
+def verify_model_base_structure(
+        original: bytes, edited: bytes,
+        states: list[StructuralBlockState]) -> list[str]:
+    """Prove structural output matches requested mappings only."""
+
+    before = parse_base_bytes(original, "<model-base-before>")
+    after = parse_base_bytes(edited, "<model-base-after>")
+    if before.root is None or after.root is None \
+            or before.tree is None or after.tree is None:
+        raise MappingEditError("structurally edited BASE failed to re-parse")
+    complete = any(state.template_objt is not None for state in states)
+    before_objects = _walk_with_owner_paths(before.root)
+    after_objects = _walk_with_owner_paths(after.root)
+    if before_objects.keys() != after_objects.keys():
+        raise MappingEditError("BASE object tree changed")
+    requested = {state.block_index: state for state in states}
+    for owner, object_before in before_objects.items():
+        object_after = after_objects[owner]
+        if (
+                object_before.name != object_after.name
+                or object_before.transform != object_after.transform
+                or object_before.skeleton_class != object_after.skeleton_class
+                or object_before.skeleton_name != object_after.skeleton_name):
+            raise MappingEditError(
+                f"{owner}: non-mapping BASE object data changed")
+        if owner != "root" or not complete:
+            if len(object_before.ades) != len(object_after.ades):
+                raise MappingEditError(
+                    f"{owner}: unrelated material block count changed")
+        if owner == "root" and complete:
+            if len(object_after.ades) != len(states):
+                raise MappingEditError(
+                    "typed ADES block count did not round-trip")
+            for state, block_after in zip(states, object_after.ades):
+                if (block_after.class_id or "").lower() \
+                        != (state.class_id or "").lower():
+                    raise MappingEditError(
+                        f"block #{state.block_index}: class did not round-trip")
+                if list(state.atts) != block_after.atts:
+                    raise MappingEditError(
+                        f"block #{state.block_index}: POL2 mapping did not "
+                        "round-trip")
+                expected_olpl = (
+                    [list(group) for group in state.olpl]
+                    if state.olpl is not None else None)
+                if expected_olpl is not None \
+                        and expected_olpl != block_after.olpl:
+                    raise MappingEditError(
+                        f"block #{state.block_index}: OLPL did not round-trip")
+                if (state.class_id or "").lower() == "area.class" \
+                        and block_after.ade_poly_id != state.ade_poly_id:
+                    raise MappingEditError(
+                        f"block #{state.block_index}: AREA polyID did not "
+                        "round-trip")
+                template = parse_base_bytes(
+                    _wrap_ades_objt(state.template_objt),
+                    "<verify-ades-template>")
+                template_block = template.root.ades[0]
+                if _block_material_metadata(template_block) \
+                        != _block_material_metadata(block_after):
+                    raise MappingEditError(
+                        f"block #{state.block_index}: material, texture or "
+                        "animation data changed")
+            continue
+        for block_index, (block_before, block_after) in enumerate(
+                zip(object_before.ades, object_after.ades)):
+            if _block_metadata(block_before) != _block_metadata(block_after):
+                raise MappingEditError(
+                    f"{owner} block #{block_index}: material data changed")
+            state = requested.get(block_index) if owner == "root" else None
+            if state is None:
+                if block_before.atts != block_after.atts \
+                        or block_before.olpl != block_after.olpl:
+                    raise MappingEditError(
+                        f"{owner} block #{block_index}: unrelated mapping changed")
+            else:
+                expected_atts = list(state.atts)
+                expected_olpl = (
+                    [
+                        [tuple(uv) for uv in group]
+                        for group in state.olpl
+                    ]
+                    if state.olpl is not None else block_before.olpl)
+                if block_after.atts != expected_atts \
+                        or block_after.olpl != expected_olpl:
+                    raise MappingEditError(
+                        f"block #{block_index}: structural mapping did not "
+                        "round-trip exactly")
+
+    if complete:
+        return [
+            f"verified {len(states)} typed ADES block state(s)",
+            f"BASE size {len(original)} -> {len(edited)}",
+            "object tree, materials, textures, animations and non-ADES data "
+            "preserved",
+        ]
+
+    chunks_before = list(before.tree.iter_all())
+    chunks_after = list(after.tree.iter_all())
+    if len(chunks_before) != len(chunks_after):
+        raise MappingEditError("BASE chunk tree length changed")
+    target_offsets = set()
+    for state in states:
+        block = before.root.ades[state.block_index]
+        target_offsets.add(block.atts_chunk_offset)
+        if state.olpl is not None:
+            target_offsets.add(block.olpl_chunk_offset)
+    for old, new in zip(chunks_before, chunks_after):
+        if old.tag != new.tag or old.form_type != new.form_type:
+            raise MappingEditError("BASE chunk tree shape changed")
+        if old.children or old.offset in target_offsets:
+            continue
+        if old.payload(original) != new.payload(edited):
+            raise MappingEditError(
+                f"unrelated chunk {old.display_name} payload changed")
+    return [
+        f"verified {len(states)} complete amesh ATTS/OLPL block state(s)",
+        f"BASE size {len(original)} -> {len(edited)}",
+        "object tree, materials, textures and unrelated chunk payloads preserved",
+    ]
 
 
 # --- UV edits (fixed-size in-place patch of existing OLPL groups) ---------------
@@ -833,7 +1239,11 @@ def verify_texture_name_edits(original: bytes, edited: bytes,
 
 def save_model_base_copy(data: bytes, uv_edits: list[UVEdit],
                          texture_edits: list[TextureNameEdit],
-                         out_path: str | Path) -> list[str]:
+                         out_path: str | Path,
+                         mapping_plans: list[RepairPlan] | None = None,
+                         *,
+                         structural_blocks: list[StructuralBlockState] | None = None
+                         ) -> list[str]:
     """Save and verify a standalone model BASE copy.
 
     UV and texture-name edits are fixed-size patches.  An unchanged BASE copy
@@ -842,6 +1252,27 @@ def save_model_base_copy(data: bytes, uv_edits: list[UVEdit],
 
     edited = data
     notes: list[str] = []
+    if structural_blocks is not None:
+        if mapping_plans:
+            raise MappingEditError(
+                "append repair plans and complete structural states cannot "
+                "be combined")
+        structured = rewrite_model_base_structure(
+            edited, structural_blocks)
+        notes.extend(verify_model_base_structure(
+            edited, structured, structural_blocks))
+        edited = structured
+    for plan in mapping_plans or []:
+        parsed = parse_base_bytes(edited, "<model-base-append>")
+        blocks = parsed.root.ades if parsed.root else []
+        if not (0 <= plan.block_index < len(blocks)):
+            raise MappingEditError(
+                f"material block #{plan.block_index} no longer exists")
+        repaired = apply_repair_to_bytes(
+            edited, blocks[plan.block_index], plan)
+        notes.extend(verify_repair(
+            edited, repaired, plan.block_index, plan))
+        edited = repaired
     if uv_edits:
         uv_edited = apply_uv_edits_to_bytes(edited, uv_edits)
         notes.extend(verify_uv_edits(edited, uv_edited, uv_edits))

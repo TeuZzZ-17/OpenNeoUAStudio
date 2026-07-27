@@ -46,7 +46,8 @@ File layout (CONFIRMED):
 
 IMPORTANT: the chunk ID "ATTS" is reused by particle.class (FORM PTCL) with a
 completely different payload (emitter parameters).  The meaning of ATTS
-depends on the containing class; this parser only decodes amesh ATTS.
+depends on the containing class; particle attributes and nested life-stage
+ADE objects are decoded through their dedicated typed path.
 """
 
 from __future__ import annotations
@@ -56,6 +57,7 @@ from pathlib import Path
 import struct
 
 from iff_reader import IffChunk, IffTree, read_cstring, read_iff_bytes, read_iff_file
+from particle_parser import ParticleAttributes, parse_particle_attributes
 
 CONFIRMED = "CONFIRMED"
 STRONG_HYPOTHESIS = "STRONG HYPOTHESIS"
@@ -135,6 +137,18 @@ class AmeshBlock:
     atts_chunk_size: int = 0
     olpl_chunk_offset: int = -1
     olpl_chunk_size: int = 0
+    # Structural source metadata for typed ADES grow/shrink serialization.
+    payload_form_type: str = ""
+    source_ades_index: int = -1
+    source_objt_offset: int = -1
+    source_objt_size: int = 0
+    source_objt_bytes: bytes = field(default=b"", repr=False, compare=False)
+    ade_strc_chunk_offset: int = -1
+    ade_strc_chunk_size: int = 0
+    # particle.class PTCL payload.  Particle life stages are nested ADE OBJTs,
+    # not standalone external dependencies.
+    particle_attributes: ParticleAttributes | None = None
+    particle_stages: list["AmeshBlock"] = field(default_factory=list)
 
     # AREA_POL_FLAG_* bits (CONFIRMED, area.h)
     @property
@@ -175,6 +189,13 @@ class AmeshBlock:
             parts.append("depth-fade")
         return ", ".join(parts)
 
+    def iter_visual_blocks(self):
+        """Yield this ADE and recursively decoded particle life stages."""
+
+        yield self
+        for stage in self.particle_stages:
+            yield from stage.iter_visual_blocks()
+
 
 @dataclass
 class EmbeddedResource:
@@ -205,6 +226,8 @@ class BaseObject:
     # loose BASE without serializing or rewriting unrelated archive objects.
     source_objt_offset: int = -1
     source_objt_size: int = 0
+    ades_form_offset: int = -1
+    ades_form_size: int = 0
 
     def iter_tree(self):
         yield self
@@ -230,19 +253,22 @@ class BaseAsset:
     def referenced_textures(self) -> list[str]:
         names = []
         for obj in self.all_objects():
-            for block in obj.ades:
-                for tex in (block.texture, block.tracy_texture):
-                    if tex and tex.name and tex.name not in names:
-                        names.append(tex.name)
+            for root_block in obj.ades:
+                for block in root_block.iter_visual_blocks():
+                    for tex in (block.texture, block.tracy_texture):
+                        if tex and tex.name and tex.name not in names:
+                            names.append(tex.name)
         return names
 
     def referenced_animations(self) -> list[str]:
         names = []
         for obj in self.all_objects():
-            for block in obj.ades:
-                for tex in (block.texture, block.tracy_texture):
-                    if tex and tex.kind == "bmpanim" and tex.name and tex.name not in names:
-                        names.append(tex.name)
+            for root_block in obj.ades:
+                for block in root_block.iter_visual_blocks():
+                    for tex in (block.texture, block.tracy_texture):
+                        if tex and tex.kind == "bmpanim" and tex.name \
+                                and tex.name not in names:
+                            names.append(tex.name)
         return names
 
 
@@ -365,19 +391,32 @@ def _parse_texture_objt(data: bytes, objt: IffChunk,
     return TextureRef(class_id=class_id, kind=class_id or "unknown")
 
 
+def _parse_ade(data: bytes, form: IffChunk, block: AmeshBlock) -> None:
+    """Decode the common ADE/STRC reference embedded by AREA and PTCL."""
+
+    for child in form.children:
+        if child.tag != "STRC":
+            continue
+        if child.available_size < 10:
+            block.warnings.append(
+                f"ADE STRC at 0x{child.offset:X} has "
+                f"{child.available_size} available bytes; expected 10.")
+            continue
+        block.ade_strc_chunk_offset = child.offset
+        block.ade_strc_chunk_size = child.size
+        p = child.payload_offset
+        version, _nu, flags, point, poly, _nu2 = struct.unpack_from(
+            ">hbbhhh", data, p)
+        if version >= 1:
+            block.ade_flags = flags
+            block.ade_point_id = point
+            block.ade_poly_id = poly
+
+
 def _parse_area(data: bytes, area: IffChunk, block: AmeshBlock) -> None:
     for child in area.children:
         if child.is_form("ADE"):
-            for sub in child.children:
-                if sub.tag == "STRC" and sub.available_size >= 10:
-                    p = sub.payload_offset
-                    version, _nu, flags, point, poly, _nu2 = struct.unpack_from(
-                        ">hbbhhh", data, p
-                    )
-                    if version >= 1:
-                        block.ade_flags = flags
-                        block.ade_point_id = point
-                        block.ade_poly_id = poly
+            _parse_ade(data, child, block)
         elif child.tag == "STRC":
             if child.available_size < 10:
                 block.warnings.append(
@@ -488,6 +527,71 @@ def _parse_area_only(data: bytes, form: IffChunk, class_id: str) -> AmeshBlock:
     return block
 
 
+def _parse_particle(data: bytes, form: IffChunk,
+                    class_id: str) -> AmeshBlock:
+    """Decode a particle emitter and all nested visual life-stage ADEs."""
+
+    block = AmeshBlock(class_id=class_id)
+    for child in form.children:
+        if child.is_form("ADE"):
+            _parse_ade(data, child, block)
+        elif child.tag == "ATTS":
+            block.atts_chunk_offset = child.offset
+            block.atts_chunk_size = child.size
+            block.particle_attributes = parse_particle_attributes(data, child)
+            if block.particle_attributes is None:
+                block.warnings.append(
+                    f"PTCL ATTS at 0x{child.offset:X} has "
+                    f"{child.available_size} available bytes; expected at "
+                    "least 94.")
+            else:
+                block.warnings.extend(block.particle_attributes.warnings)
+        elif child.is_form("OBJT"):
+            block.particle_stages.append(_parse_ades_objt(
+                data, child, len(block.particle_stages)))
+        else:
+            block.warnings.append(
+                f"Unhandled chunk {child.display_name} inside PTCL at "
+                f"0x{child.offset:X}.")
+    if len(block.particle_stages) > 8:
+        block.warnings.append(
+            f"PTCL contains {len(block.particle_stages)} life stages; the "
+            "confirmed runtime limit is 8.")
+    return block
+
+
+def _parse_ades_objt(data: bytes, child: IffChunk,
+                     source_index: int) -> AmeshBlock:
+    """Parse one ADES-compatible OBJT, including nested particle stages."""
+
+    class_id = _read_clid(data, child)
+    payload = _payload_form(child)
+    if payload is None:
+        block = AmeshBlock(class_id=class_id)
+        block.warnings.append(
+            f"ADES OBJT at 0x{child.offset:X} ({class_id!r}) has no "
+            "payload FORM.")
+    elif payload.form_type == "AMSH":
+        block = _parse_amesh(data, payload, class_id)
+    elif payload.form_type == "AREA":
+        block = _parse_area_only(data, payload, class_id)
+    elif payload.form_type == "PTCL":
+        block = _parse_particle(data, payload, class_id)
+    else:
+        block = AmeshBlock(class_id=class_id)
+        block.warnings.append(
+            f"ADES entry with unhandled payload FORM "
+            f"{payload.form_type!r} (class {class_id!r}) at "
+            f"0x{payload.offset:X}.")
+    block.payload_form_type = payload.form_type if payload is not None else ""
+    block.source_ades_index = source_index
+    block.source_objt_offset = child.offset
+    block.source_objt_size = child.size
+    end = child.offset + 8 + child.size + (child.size & 1)
+    block.source_objt_bytes = bytes(data[child.offset:end])
+    return block
+
+
 def _parse_embed(data: bytes, form: IffChunk, obj: BaseObject) -> None:
     for child_index, child in enumerate(form.children):
         if child.tag != "EMRS":
@@ -522,32 +626,12 @@ def _parse_embed(data: bytes, form: IffChunk, obj: BaseObject) -> None:
 
 
 def _parse_ades(data: bytes, form: IffChunk, obj: BaseObject) -> None:
+    obj.ades_form_offset = form.offset
+    obj.ades_form_size = form.size
     for child in form.children:
         if not child.is_form("OBJT"):
             continue
-        class_id = _read_clid(data, child)
-        payload = _payload_form(child)
-        if payload is None:
-            obj.warnings.append(
-                f"ADES OBJT at 0x{child.offset:X} ({class_id!r}) has no payload FORM."
-            )
-            continue
-        if payload.form_type == "AMSH":
-            obj.ades.append(_parse_amesh(data, payload, class_id))
-        elif payload.form_type == "AREA":
-            obj.ades.append(_parse_area_only(data, payload, class_id))
-        elif payload.form_type == "PTCL":
-            block = AmeshBlock(class_id=class_id)
-            block.warnings.append(
-                "particle.class block: its ATTS chunk stores emitter parameters "
-                "(not polygon attributes) and is not decoded here."
-            )
-            obj.ades.append(block)
-        else:
-            obj.warnings.append(
-                f"ADES entry with unhandled payload FORM {payload.form_type!r} "
-                f"(class {class_id!r}) at 0x{payload.offset:X}."
-            )
+        obj.ades.append(_parse_ades_objt(data, child, len(obj.ades)))
 
 
 def _parse_base_object(data: bytes, objt: IffChunk, warnings: list[str]) -> BaseObject:
