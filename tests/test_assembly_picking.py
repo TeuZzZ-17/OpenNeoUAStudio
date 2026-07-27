@@ -1,9 +1,11 @@
 import os
 import unittest
+from types import SimpleNamespace
+from unittest.mock import patch
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-from PySide6.QtCore import QPoint, QPointF, QRectF
+from PySide6.QtCore import QPoint, QPointF, QRect, QRectF
 from PySide6.QtGui import QColor, QImage, QPainter, QPolygonF
 from PySide6.QtWidgets import QApplication
 
@@ -13,10 +15,14 @@ from assembly_viewer import (
     ViewFace,
     ViewMaterial,
     resolve_pick_shape,
+    resolve_visible_edit_vertices,
 )
+from geometry_editor import GeometryEditSession
+from sklt_parser import SkltModel
 
 
-def _shape(poly_id, screen, depths, draw_order, *, owner="root"):
+def _shape(poly_id, screen, depths, draw_order, *, owner="root",
+           front_facing=True):
     face = ViewFace(
         vertices=[(0.0, 0.0, depth) for depth in depths],
         uvs=[],
@@ -29,6 +35,7 @@ def _shape(poly_id, screen, depths, draw_order, *, owner="root"):
         face,
         tuple((0.0, 0.0, depth) for depth in depths),
         draw_order,
+        front_facing,
     )
 
 
@@ -138,6 +145,56 @@ class PickingDepthTests(unittest.TestCase):
             viewport._camera_state())
         painter.end()
         self.assertEqual(len(viewport._pick_shapes), 1)
+
+    def test_vertex_overlay_click_and_box_share_front_depth_visibility(self):
+        screen = [(40, 40), (40, 120), (120, 120)]
+        near = _shape(0, screen, [1.0] * 3, 1)
+        far = _shape(1, screen, [-1.0] * 3, 0)
+        backface = _shape(
+            2, [(180, 40), (180, 120), (260, 120)],
+            [1.0] * 3, 2, front_facing=False)
+        points = [QPointF(x, y) for x, y in (
+            *screen, *screen, (180, 40), (180, 120), (260, 120))]
+        polygons = [[0, 1, 2], [3, 4, 5], [6, 7, 8]]
+
+        visible = resolve_visible_edit_vertices(
+            [far, near, backface], points, polygons, "root",
+            target=QRectF(0, 0, 300, 180))
+        self.assertEqual(visible, {0, 1, 2})
+        self.assertEqual(resolve_visible_edit_vertices(
+            [far, near, backface], points, polygons, "root",
+            selected={3}, target=QRectF(0, 0, 300, 180)),
+            {0, 1, 2, 3})
+
+        model = SkltModel(
+            source_name="VISIBLE.SKLT",
+            points=[(0.0, 0.0, 0.0)] * len(points),
+            polygons=polygons,
+            parsed_polygon_count=3,
+        )
+        viewport = AssetViewport()
+        viewport.resize(300, 180)
+        viewport._edit_session = GeometryEditSession(
+            SimpleNamespace(
+                skeleton=model,
+                base_object=SimpleNamespace(ades=[])),
+            [[1.0, 0.0, 0.0],
+             [0.0, 1.0, 0.0],
+             [0.0, 0.0, 1.0]],
+            (0.0, 0.0, 0.0),
+        )
+        viewport._edit_owner = "root"
+        viewport._pick_shapes = [far, near, backface]
+        viewport._edit_visibility_ready = False
+        with patch.object(
+                viewport, "_edit_screen_points", return_value=points):
+            self.assertEqual(viewport._nearest_edit_vertex(QPoint(40, 40)), 0)
+            viewport.edit_session.selection = {3}
+            self.assertEqual(viewport._nearest_edit_vertex(QPoint(40, 40)), 3)
+            viewport.edit_session.selection.clear()
+            viewport._box_rect = QRect(35, 35, 90, 90)
+            viewport._apply_box_select(False)
+        self.assertEqual(viewport.edit_session.selection, {0, 1, 2})
 
 
 if __name__ == "__main__":

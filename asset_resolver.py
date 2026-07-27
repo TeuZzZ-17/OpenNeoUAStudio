@@ -49,6 +49,7 @@ TYPE_HINTS: dict[str, tuple[str, ...]] = {
 # Directories never scanned by the recursive index.
 IGNORED_DIRS = {".git", "__pycache__", "build", "dist", ".venv",
                 "node_modules", ".idea", ".vscode"}
+SETBAS_EXPORT_DIRS = {"raw", "textures_ilbm", "textures_png"}
 
 
 class DirectoryIndex:
@@ -70,12 +71,13 @@ class DirectoryIndex:
             dirnames[:] = [
                 directory for directory in dirnames
                 if directory.lower() not in IGNORED_DIRS
-                # SET.BAS extraction creates set/manifest.json + set/raw/.
-                # That raw dump is not an engine loose-override directory and
-                # must not silently shadow the archive when a broader asset
-                # root is indexed. Choosing raw itself as the root still works.
+                # SET.BAS extraction creates manifest.json beside raw dumps
+                # and converted texture previews.  Those inspection outputs
+                # are not engine loose overrides and must not shadow archive
+                # resources when a broader root is indexed.  Choosing one of
+                # these output folders itself as the root still works.
                 and not (
-                    directory.lower() == "raw"
+                    directory.lower() in SETBAS_EXPORT_DIRS
                     and (current / "manifest.json").is_file()
                 )
             ]
