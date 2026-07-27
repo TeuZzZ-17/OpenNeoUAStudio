@@ -75,17 +75,17 @@ class TransformGizmoV4Tests(unittest.TestCase):
             selection = set(window.viewport.edit_session.selection)
             self.assertEqual(window._transform_mode, "move")
             self.assertEqual(window.transform_box.title(), "Transform")
-            self.assertFalse(window.auto_align_check.isChecked())
+            self.assertTrue(window.auto_align_check.isChecked())
             self.assertEqual(
-                window.gizmo_intensity_spin.text(), "0.20 model units")
+                window.gizmo_intensity_spin.text(), "0.30 model units")
             window._set_transform_mode("rotate")
             self.assertEqual(window.transform_step_label.text(), "Rotate step")
-            self.assertEqual(window.gizmo_intensity_spin.text(), "5°")
+            self.assertEqual(window.gizmo_intensity_spin.text(), "1°")
             self.assertEqual(
                 window.viewport.edit_session.selection, selection)
             window._set_transform_mode("scale")
             self.assertEqual(window.transform_step_label.text(), "Scale step")
-            self.assertEqual(window.gizmo_intensity_spin.text(), "5%")
+            self.assertEqual(window.gizmo_intensity_spin.text(), "1%")
             self.assertEqual(
                 window.viewport.edit_session.selection, selection)
         finally:

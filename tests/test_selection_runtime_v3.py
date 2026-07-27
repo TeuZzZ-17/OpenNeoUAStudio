@@ -189,10 +189,67 @@ class SelectionRuntimeV3Tests(unittest.TestCase):
         finally:
             window.close()
 
+    def test_explicit_polygon_pick_does_not_expand_from_shared_vertices(self):
+        window, _obj, _model = _prepare_window()
+        try:
+            # Simulate two overlapping POL2 faces which reuse the exact same
+            # POO2 vertices.  A direct click must remain one polygon even
+            # though the edit session necessarily selects those shared points.
+            window._workbench_obj.skeleton.polygons[1] = [0, 1, 2]
+            window._on_polygon_picked(0, False)
+            window.viewport.edit_session.selection = {0, 1, 2}
+            self.assertEqual(window._selected_polys, {0})
+            self.assertEqual(window._resolved_geometry_polys(), {0})
+        finally:
+            window.close()
+
+    def test_visible_owner_rebuild_preserves_edit_and_view_modes(self):
+        family, _obj, _model = _selection_family()
+        viewport = AssetViewport()
+        try:
+            viewport.load_family(family, primary_owner="root")
+            self.assertFalse(viewport.is_edit_mode)
+            viewport.set_visible_owners({"root"})
+            self.assertFalse(viewport.is_edit_mode)
+
+            self.assertTrue(viewport.enter_edit_mode("root"))
+            viewport.set_visible_owners({"root"})
+            self.assertTrue(viewport.is_edit_mode)
+            self.assertEqual(viewport.edit_owner, "root")
+        finally:
+            viewport.close()
+
+    def test_family_reload_preserves_global_edit_mode(self):
+        family, _obj, _model = _selection_family()
+        window = AssemblyWindow()
+        try:
+            window._set_family(family)
+            window.global_edit_button.setChecked(True)
+            self.assertTrue(window.global_edit_button.isChecked())
+            self.assertTrue(window.viewport.is_edit_mode)
+
+            window._set_family(family)
+            self.assertTrue(window.global_edit_button.isChecked())
+            self.assertTrue(window.viewport.is_edit_mode)
+
+            window.global_edit_button.setChecked(False)
+            self.assertFalse(window.viewport.is_edit_mode)
+            window._set_family(family)
+            self.assertFalse(window.global_edit_button.isChecked())
+            self.assertFalse(window.viewport.is_edit_mode)
+        finally:
+            window.close()
+
     def test_direct_polygon_pick_and_box_selection_use_same_actions(self):
         window, _obj, _model = _prepare_window()
         try:
+            window._on_polygon_picked(0)
+            self.assertEqual(window._resolved_geometry_polys(), {0})
             window._on_polygon_picked(1)
+            self.assertEqual(window._resolved_geometry_polys(), {1})
+            window._on_polygon_picked(0, additive=True)
+            self.assertEqual(window._resolved_geometry_polys(), {0, 1})
+            window._on_polygon_picked(0, additive=True)
             self.assertEqual(window._resolved_geometry_polys(), {1})
             self.assertTrue(window.delete_geometry_action.isEnabled())
 
@@ -220,7 +277,9 @@ class SelectionRuntimeV3Tests(unittest.TestCase):
         try:
             with patch.object(
                     window.viewport, "_edit_screen_points",
-                    return_value=screen):
+                    return_value=screen), patch.object(
+                    window.viewport, "_available_edit_vertices",
+                    return_value={0, 1, 2, 3}):
                 QTest.mousePress(
                     window.viewport, Qt.MouseButton.LeftButton,
                     Qt.KeyboardModifier.ControlModifier, QPoint(20, 20))

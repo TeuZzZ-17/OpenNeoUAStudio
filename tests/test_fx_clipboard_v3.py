@@ -654,6 +654,8 @@ class FxClipboardV3Tests(unittest.TestCase):
                 template = next(
                     element for element in window._fx_elements
                     if element.editable)
+                expected_clone = build_fx_element_clipboard(
+                    obj, template, family.animations)
                 with patch(
                         "assembly_window.AddFxElementDialog.exec",
                         return_value=QDialog.DialogCode.Accepted), patch(
@@ -661,8 +663,10 @@ class FxClipboardV3Tests(unittest.TestCase):
                         return_value=template):
                     window._add_fx_element()
                 self.assertTrue(window.viewport.paste_preview_active)
+                self.assertEqual(window._geometry_clipboard, expected_clone)
                 self.assertEqual(
-                    window._geometry_clipboard.source_poly_ids, (-1,))
+                    window._geometry_clipboard.source_poly_ids,
+                    template.poly_ids)
                 window._confirm_paste_geometry()
                 self.assertEqual(len(obj.skeleton.polygons), 3)
                 self.assertEqual(len(obj.base_object.ades[0].atts), 3)
@@ -690,7 +694,7 @@ class FxClipboardV3Tests(unittest.TestCase):
                 window._on_polygon_picked(0)
                 window._update_uv_editor(0)
                 self.assertTrue(window.uv_editor._editable)
-                window.uv_editor.select_all()
+                window.uv_editor.select_point(1)
                 window.uv_editor.nudge_selected(-5, 0)
                 edited = list(obj.base_object.ades[0].olpl[0])
                 self.assertNotEqual(edited, UVS)
@@ -854,6 +858,8 @@ class FxClipboardV3Tests(unittest.TestCase):
         window = prepare()
         try:
             selected = window._selected_fx_element()
+            expected_clone = build_fx_element_clipboard(
+                obj, selected, family.animations)
             with patch(
                     "assembly_window.AddFxElementDialog.exec",
                     return_value=QDialog.DialogCode.Accepted), patch(
@@ -863,8 +869,10 @@ class FxClipboardV3Tests(unittest.TestCase):
             self.assertTrue(window.viewport.paste_preview_active)
             self.assertIsInstance(
                 window._geometry_clipboard, FxElementClipboard)
+            self.assertEqual(window._geometry_clipboard, expected_clone)
             self.assertEqual(
-                window._geometry_clipboard.source_poly_ids, (-1,))
+                window._geometry_clipboard.source_poly_ids,
+                selected.poly_ids)
             window.viewport.cancel_paste_preview()
 
             window._on_polygon_picked(0)

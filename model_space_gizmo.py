@@ -47,9 +47,9 @@ class ModelSpaceGizmo(QWidget):
 
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
-        self.setMinimumSize(360, 360)
+        self.setMinimumSize(240, 240)
         self.setSizePolicy(
-            QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
+            QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
         self.setMouseTracking(True)
         self._mode = "move"
         self._update_tooltip()
@@ -69,10 +69,10 @@ class ModelSpaceGizmo(QWidget):
         self._handles: tuple[GizmoHandle, ...] = ()
 
     def sizeHint(self) -> QSize:  # noqa: N802 - Qt override
-        return QSize(480, 480)
+        return QSize(300, 300)
 
     def minimumSizeHint(self) -> QSize:  # noqa: N802 - Qt override
-        return QSize(360, 360)
+        return QSize(240, 240)
 
     @property
     def directions(self) -> tuple[tuple[int, int, int], ...]:
@@ -180,20 +180,35 @@ class ModelSpaceGizmo(QWidget):
 
     def _project_handles(self) -> tuple[GizmoHandle, ...]:
         center = QPointF(self.width() * 0.5, self.height() * 0.5)
-        # Use substantially more of the available panel than the earlier
-        # compact control, while preserving a margin for labels and hit boxes.
-        extent = min(self.width(), self.height()) * 0.72
-        handles = []
+        projected = []
         for direction in self.directions:
             cx, cy, depth = self._camera_direction(direction)
             denominator = max(1.45, 2.75 - depth * 0.36)
-            point = QPointF(
-                center.x() + cx * extent / denominator,
-                center.y() - cy * extent / denominator,
-            )
             active_axes = sum(value != 0 for value in direction)
             radius = 14.0 if active_axes == 1 else (
                 11.0 if active_axes == 2 else 9.0)
+            projected.append((
+                direction, cx / denominator, -cy / denominator,
+                depth, radius))
+
+        # Fit the complete hit geometry inside compact layouts. Text labels
+        # are clamped separately at paint time.
+        max_x = max((abs(item[1]) for item in projected), default=1.0)
+        max_y = max((abs(item[2]) for item in projected), default=1.0)
+        margin = 22.0
+        horizontal = max(1.0, self.width() * 0.5 - margin)
+        vertical = max(1.0, self.height() * 0.5 - margin)
+        extent = min(
+            min(self.width(), self.height()) * 0.72,
+            horizontal / max(max_x, 1e-9),
+            vertical / max(max_y, 1e-9),
+        )
+        handles = []
+        for direction, offset_x, offset_y, depth, radius in projected:
+            point = QPointF(
+                center.x() + offset_x * extent,
+                center.y() + offset_y * extent,
+            )
             handles.append(GizmoHandle(direction, point, depth, radius))
         return tuple(handles)
 
@@ -228,6 +243,25 @@ class ModelSpaceGizmo(QWidget):
             sum(colors[index].green() for index in active) // len(active),
             sum(colors[index].blue() for index in active) // len(active),
         )
+
+    def _draw_label(self, painter: QPainter, position: QPointF,
+                    dx: float, dy: float, text: str) -> None:
+        """Draw a handle label wholly inside even the compact 240 px widget."""
+
+        metrics = painter.fontMetrics()
+        width = metrics.horizontalAdvance(text)
+        left = (
+            position.x() + 8.0 if dx >= 0.0
+            else position.x() - width - 8.0)
+        baseline = (
+            position.y() - 7.0 if dy >= 0.0
+            else position.y() + metrics.height())
+        left = max(2.0, min(self.width() - width - 2.0, left))
+        baseline = max(
+            metrics.ascent() + 2.0,
+            min(self.height() - metrics.descent() - 2.0, baseline),
+        )
+        painter.drawText(QPointF(left, baseline), text)
 
     def paintEvent(self, _event) -> None:  # noqa: N802
         painter = QPainter(self)
@@ -266,10 +300,7 @@ class ModelSpaceGizmo(QWidget):
                 painter.drawEllipse(position, handle.radius + 2,
                                     handle.radius + 2)
                 painter.setPen(QPen(QColor(238, 240, 245), 1.0))
-                painter.drawText(
-                    position + QPointF(8 if dx >= 0 else -34,
-                                       -8 if dy >= 0 else 18),
-                    label)
+                self._draw_label(painter, position, dx, dy, label)
             elif self._mode == "scale":
                 r = handle.radius + (3 if active_axes == 3 else 0)
                 painter.drawRect(QRectF(
@@ -278,10 +309,7 @@ class ModelSpaceGizmo(QWidget):
                 display = (
                     "All +" if handle.direction == (1, 1, 1) else
                     "All -" if handle.direction == (-1, -1, -1) else label)
-                painter.drawText(
-                    position + QPointF(8 if dx >= 0 else -38,
-                                       -8 if dy >= 0 else 18),
-                    display)
+                self._draw_label(painter, position, dx, dy, display)
             elif active_axes == 1:
                 length = max(1e-9, math.hypot(dx, dy))
                 ux, uy = dx / length, dy / length
@@ -295,10 +323,7 @@ class ModelSpaceGizmo(QWidget):
                 ])
                 painter.drawPolygon(arrow)
                 painter.setPen(QPen(QColor(238, 240, 245), 1.0))
-                painter.drawText(
-                    position + QPointF(7 if dx >= 0 else -25,
-                                       -7 if dy >= 0 else 17),
-                    label)
+                self._draw_label(painter, position, dx, dy, label)
             elif active_axes == 2:
                 painter.drawEllipse(position, handle.radius, handle.radius)
             else:

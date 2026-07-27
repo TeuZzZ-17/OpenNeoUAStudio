@@ -1,6 +1,7 @@
 import os
 import unittest
 from types import SimpleNamespace
+from unittest.mock import MagicMock
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
@@ -101,6 +102,13 @@ class RenderRegressionV3Tests(unittest.TestCase):
     def test_orientation_triad_stays_at_margin_and_tracks_camera(self):
         viewport = AssetViewport()
         target = QRectF(0, 0, 360, 260)
+        painter_probe = MagicMock()
+        viewport._draw_axes(
+            painter_probe, target, {"yaw": 0.0, "pitch": 0.0})
+        labels = [call.args[-1]
+                  for call in painter_probe.drawText.call_args_list]
+        self.assertIn("-Y", labels)
+        self.assertNotIn("-Y Up", labels)
 
         def render(yaw, pitch):
             image = QImage(360, 260, QImage.Format.Format_ARGB32)
