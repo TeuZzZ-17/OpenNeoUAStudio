@@ -809,14 +809,15 @@ class AttsValueEdit:
 
 @dataclass
 class TextureNameEdit:
-    """Replace one diffuse ILBM reference inside an existing material block."""
+    """Replace one logical ILBM or bmpanim reference in a material block."""
 
     owner_path: str
     block_index: int
     name: str
+    binding_slot: str = "texture"
 
-    def key(self) -> tuple[str, int]:
-        return (self.owner_path, self.block_index)
+    def key(self) -> tuple[str, int, str]:
+        return (self.owner_path, self.block_index, self.binding_slot)
 
 
 def _walk_with_owner_paths(root) -> dict[str, object]:
@@ -1130,20 +1131,24 @@ def export_base_object_bytes(source: bytes, base_object) -> bytes:
 
 
 def _texture_name_span(data: bytes, block, edit: TextureNameEdit):
-    texture = block.texture
+    if edit.binding_slot not in ("texture", "tracy_texture"):
+        raise MappingEditError(
+            f"unsupported texture binding slot {edit.binding_slot!r}")
+    texture = getattr(block, edit.binding_slot)
     if texture is None:
         raise MappingEditError(
-            f"{edit.owner_path} block #{edit.block_index} has no diffuse texture")
-    if texture.kind != "ilbm":
+            f"{edit.owner_path} block #{edit.block_index} has no texture binding")
+    if texture.kind not in ("ilbm", "bmpanim"):
         raise MappingEditError(
             f"{edit.owner_path} block #{edit.block_index} uses "
-            f"{texture.kind or 'an unsupported texture class'}; only ILBM "
-            "references can be exported safely")
+            f"{texture.kind or 'an unsupported texture class'}; only ILBM and "
+            "bmpanim references can be exported safely")
     offset = texture.name_payload_offset
     capacity = texture.name_capacity
     if offset < 0 or capacity <= 0 or offset + capacity > len(data):
         raise MappingEditError(
-            f"{edit.owner_path} block #{edit.block_index} has no writable NAM2 span")
+            f"{edit.owner_path} block #{edit.block_index} has no writable "
+            "texture-name span")
     try:
         encoded = edit.name.encode("latin-1")
     except UnicodeEncodeError as exc:
@@ -1153,7 +1158,7 @@ def _texture_name_span(data: bytes, block, edit: TextureNameEdit):
     if len(encoded) + 1 > capacity:
         raise MappingEditError(
             f"texture name {edit.name!r} needs {len(encoded) + 1} bytes, "
-            f"but the original NAM2 allocation has {capacity}; choose a "
+            f"but the original name allocation has {capacity}; choose a "
             f"name of at most {capacity - 1} bytes")
     return offset, capacity, encoded
 
@@ -1165,7 +1170,7 @@ def apply_texture_name_edits_to_bytes(
         raise MappingEditError("not a parseable BASE file")
     objects = _walk_with_owner_paths(asset.root)
     output = bytearray(data)
-    seen: set[tuple[str, int]] = set()
+    seen: set[tuple[str, int, str]] = set()
     for edit in edits:
         if edit.key() in seen:
             raise MappingEditError(f"duplicate texture edit for {edit.key()}")
@@ -1202,31 +1207,30 @@ def verify_texture_name_edits(original: bytes, edited: bytes,
             raise MappingEditError(f"{owner}: material block count changed")
         for block_index, (block_before, block_after) in enumerate(
                 zip(obj_before.ades, obj_after.ades)):
-            edit = edits_by_key.get((owner, block_index))
-            before_name = (block_before.texture.name
-                           if block_before.texture else None)
-            after_name = (block_after.texture.name
-                          if block_after.texture else None)
-            if edit is None:
-                if before_name != after_name:
+            for binding_slot in ("texture", "tracy_texture"):
+                edit = edits_by_key.get(
+                    (owner, block_index, binding_slot))
+                before_texture = getattr(block_before, binding_slot)
+                after_texture = getattr(block_after, binding_slot)
+                before_name = (
+                    before_texture.name if before_texture else None)
+                after_name = after_texture.name if after_texture else None
+                if edit is None:
+                    if before_name != after_name:
+                        raise MappingEditError(
+                            f"{owner} block #{block_index} {binding_slot}: "
+                            "unintended texture change")
+                elif after_name != edit.name:
                     raise MappingEditError(
-                        f"{owner} block #{block_index}: unintended texture change")
-            elif after_name != edit.name:
-                raise MappingEditError(
-                    f"{owner} block #{block_index}: texture edit did not re-parse")
-            else:
-                offset, capacity, _encoded = _texture_name_span(
-                    original, block_before, edit)
-                allowed.update(range(offset, offset + capacity))
-                notes.append(
-                    f"{owner} block #{block_index}: {before_name} -> {after_name}")
-            before_tracy = (block_before.tracy_texture.name
-                            if block_before.tracy_texture else None)
-            after_tracy = (block_after.tracy_texture.name
-                           if block_after.tracy_texture else None)
-            if before_tracy != after_tracy:
-                raise MappingEditError(
-                    f"{owner} block #{block_index}: tracy texture changed")
+                        f"{owner} block #{block_index} {binding_slot}: "
+                        "texture edit did not re-parse")
+                else:
+                    offset, capacity, _encoded = _texture_name_span(
+                        original, block_before, edit)
+                    allowed.update(range(offset, offset + capacity))
+                    notes.append(
+                        f"{owner} block #{block_index} {binding_slot}: "
+                        f"{before_name} -> {after_name}")
     changed = {index for index, pair in enumerate(zip(original, edited))
                if pair[0] != pair[1]}
     unexpected = changed - allowed

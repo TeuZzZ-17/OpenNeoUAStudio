@@ -290,6 +290,30 @@ def order_camera_polygons(
     return ordered
 
 
+def order_camera_polygons_fast(
+        polygons: list[CameraPolygon]) -> list[CameraPolygon]:
+    """Cheap camera-drag ordering; the exact BSP is restored on release."""
+
+    return sorted(
+        (polygon for polygon in polygons
+         if len(polygon.vertices) >= 3
+         and len(polygon.attributes) == len(polygon.vertices)),
+        key=lambda polygon: (polygon.mean_z(), polygon.source_order),
+    )
+
+
+def clip_camera_polygon_near(
+        polygon: CameraPolygon,
+        camera_distance: float = 4.0,
+        minimum_distance: float = 0.2,
+        ) -> CameraPolygon | None:
+    """Clip one polygon before projection instead of clamping vertices."""
+
+    maximum_z = camera_distance - minimum_distance
+    plane = _Plane((0.0, 0.0, 1.0), -maximum_z)
+    return _clip_half_space(polygon, plane, False)
+
+
 def _affine_coefficients(source, values):
     x0, y0 = source[0]
     x1, y1 = source[1]

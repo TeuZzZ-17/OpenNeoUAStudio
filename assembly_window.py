@@ -19,7 +19,7 @@ import os
 import tempfile
 from pathlib import Path
 
-from PySide6.QtCore import QSize, QTimer, QUrl, Qt
+from PySide6.QtCore import QPointF, QSize, QTimer, QUrl, Qt
 from PySide6.QtGui import (
     QAction,
     QColor,
@@ -31,6 +31,7 @@ from PySide6.QtGui import (
     QPainter,
     QPen,
     QPixmap,
+    QPolygonF,
 )
 from PySide6.QtWidgets import (
     QCheckBox,
@@ -77,6 +78,7 @@ from asset_family import (
     load_manual_family,
     rebuild_materials,
 )
+from anm_parser import AnmParseError, export_anm_bytes, parse_anm_bytes
 from asset_tree_filter import filter_tree as filter_asset_tree
 from asset_report import family_to_json, family_to_markdown
 from assembly_viewer import AssetViewport, VIEW_MODES, VIEW_PRESETS
@@ -112,12 +114,11 @@ from fx_element_editor import (
     FxElementClipboard,
     append_fx_element_clipboard,
     build_fx_element_clipboard,
+    detach_shared_fx_vertices,
     detect_fx_elements,
     validate_fx_element_clipboard,
 )
 from polygon_reference_graph import diagnose_polygon_references
-from primitive_dialog import PrimitiveDialog
-from primitive_geometry import build_primitive_clipboard
 from setbas_reader import (
     SetBasArchive,
     SetBasError,
@@ -178,6 +179,22 @@ class _TransformStepSpinBox(QDoubleSpinBox):
         if self.display_mode == "move":
             return f"{value:.2f}"
         return f"{value:g}"
+
+
+class _BasResourceTree(QTreeWidget):
+    """Keep right-click purely contextual for every BAS resource class."""
+
+    def mousePressEvent(self, event) -> None:  # noqa: N802 - Qt override
+        if event.button() == Qt.MouseButton.RightButton:
+            event.accept()
+            return
+        super().mousePressEvent(event)
+
+    def mouseReleaseEvent(self, event) -> None:  # noqa: N802 - Qt override
+        if event.button() == Qt.MouseButton.RightButton:
+            event.accept()
+            return
+        super().mouseReleaseEvent(event)
 
 
 def _display_path(path: str | Path) -> Path:
@@ -285,9 +302,16 @@ class AddFxElementDialog(QDialog):
     """Choose one compatible FX element to clone without reconstruction."""
 
     def __init__(self, templates: list[FxElement], parent=None,
-                 preferred: FxElement | None = None) -> None:
+                 preferred: FxElement | None = None,
+                 preview_provider=None) -> None:
         super().__init__(parent)
         self.setWindowTitle("Add FX Element")
+        self._preview_provider = preview_provider
+        self._preview_frames: list[QImage] = []
+        self._preview_frame = 0
+        self._preview_timer = QTimer(self)
+        self._preview_timer.setInterval(180)
+        self._preview_timer.timeout.connect(self._advance_preview)
         layout = QVBoxLayout(self)
         layout.addWidget(QLabel("Existing FX element"))
         self.material_combo = QComboBox()
@@ -301,22 +325,77 @@ class AddFxElementDialog(QDialog):
                 self.material_combo.setCurrentIndex(
                     self.material_combo.count() - 1)
         layout.addWidget(self.material_combo)
-        note = QLabel(
-            "Creates an exact structural clone. Geometry, winding, material, "
-            "texture or VANM animation and UVs are preserved; only placement "
-            "is chosen in the viewport preview.")
-        note.setWordWrap(True)
-        layout.addWidget(note)
+        self.preview_label = QLabel("Preview unavailable")
+        self.preview_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.preview_label.setMinimumSize(180, 120)
+        self.preview_label.setStyleSheet(
+            "background: #22252b; border: 1px solid #555b66;")
+        layout.addWidget(self.preview_label)
+        self.preview_info = QLabel()
+        self.preview_info.setWordWrap(True)
+        layout.addWidget(self.preview_info)
         buttons = QDialogButtonBox(
             QDialogButtonBox.StandardButton.Ok
             | QDialogButtonBox.StandardButton.Cancel)
         buttons.accepted.connect(self.accept)
         buttons.rejected.connect(self.reject)
         layout.addWidget(buttons)
+        self.material_combo.currentIndexChanged.connect(
+            self._refresh_preview)
+        self._refresh_preview()
 
     def selected_template(self) -> FxElement | None:
         value = self.material_combo.currentData()
         return value if isinstance(value, FxElement) else None
+
+    def _show_preview_frame(self) -> None:
+        if not self._preview_frames:
+            self.preview_label.setPixmap(QPixmap())
+            self.preview_label.setText("Missing or unreadable asset")
+            return
+        image = self._preview_frames[
+            self._preview_frame % len(self._preview_frames)]
+        if image.isNull():
+            self.preview_label.setPixmap(QPixmap())
+            self.preview_label.setText("Missing or unreadable asset")
+            return
+        pixmap = QPixmap.fromImage(image).scaled(
+            self.preview_label.size(),
+            Qt.AspectRatioMode.KeepAspectRatio,
+            Qt.TransformationMode.FastTransformation)
+        self.preview_label.setText("")
+        self.preview_label.setPixmap(pixmap)
+
+    def _refresh_preview(self, _index: int = 0) -> None:
+        self._preview_timer.stop()
+        self._preview_frames = []
+        self._preview_frame = 0
+        element = self.selected_template()
+        info = []
+        if element is not None and self._preview_provider is not None:
+            try:
+                frames, info = self._preview_provider(element)
+                self._preview_frames = [
+                    frame for frame in frames
+                    if isinstance(frame, QImage) and not frame.isNull()]
+            except Exception as exc:
+                info = [f"Preview diagnostic: {exc}"]
+        self.preview_info.setText("\n".join(info))
+        self._show_preview_frame()
+        if len(self._preview_frames) > 1:
+            self._preview_timer.start()
+
+    def _advance_preview(self) -> None:
+        if len(self._preview_frames) < 2:
+            self._preview_timer.stop()
+            return
+        self._preview_frame = (self._preview_frame + 1) % len(
+            self._preview_frames)
+        self._show_preview_frame()
+
+    def done(self, result: int) -> None:
+        self._preview_timer.stop()
+        super().done(result)
 
 
 class AssemblyWindow(QMainWindow):
@@ -365,8 +444,16 @@ class AssemblyWindow(QMainWindow):
         self._uv_ctx: tuple | None = None
         self._uv_contexts: dict[tuple[str, int, int], tuple] = {}
         self._uv_original: dict[tuple[str, int, int], list[tuple[int, int]]] = {}
-        # Session-only material previews; SET.BAS and BASE stay untouched.
-        self._texture_original: dict[tuple[str, int], str | None] = {}
+        self._vanm_uv_original: dict[
+            tuple[str, int], list[tuple[int, int]]] = {}
+        # Session-only logical material bindings; source files stay untouched.
+        self._texture_original: dict[tuple[str, int, str], str] = {}
+        self._tab_edit_selection: dict[str, set[int]] = {}
+        self._setbas_context_item = None
+        self._setbas_preview_active = False
+        self._fx_preview_cache: dict[tuple, tuple[list[QImage], list[str]]] = {}
+        self._mapping_dialog: QDialog | None = None
+        self._picked_structure: tuple[str, int, int] | None = None
         self._geometry_clipboard = None
         self._geometry_writer_capability_cache: dict[tuple, str] = {}
         self._topology_original: dict[str, dict] = {}
@@ -392,12 +479,15 @@ class AssemblyWindow(QMainWindow):
         self._live_rotate_dialog: LiveRotateDialog | None = None
         self._asset_filter_expansion: dict[int, bool] | None = None
         self._texture_preview_cache: dict[tuple[int, str], str | None] = {}
+        self._texture_qimage_cache: dict[tuple, QImage] = {}
 
         self.viewport = AssetViewport()
         self.viewport.statusMessage.connect(
             lambda text: self._notify(text, 4500)
         )
         self.viewport.polygonPickedDetailed.connect(self._on_polygon_picked)
+        self.viewport.polygonStructurePicked.connect(
+            self._on_polygon_structure_picked)
         self.viewport.polygonDeselected.connect(self._on_polygon_deselected)
         self.viewport.selectionCleared.connect(self._on_selection_cleared)
         self.viewport.objectPicked.connect(self._on_object_picked)
@@ -496,7 +586,7 @@ class AssemblyWindow(QMainWindow):
             Qt.ContextMenuPolicy.CustomContextMenu)
         self.resolve_tree.customContextMenuRequested.connect(
             self._show_resolve_context_menu)
-        self.setbas_tree = QTreeWidget()
+        self.setbas_tree = _BasResourceTree()
         self.setbas_tree.setHeaderLabels(["Resource", "Payload", "VP"])
         self.setbas_tree.setSelectionMode(
             QAbstractItemView.SelectionMode.ExtendedSelection)
@@ -678,13 +768,9 @@ class AssemblyWindow(QMainWindow):
         menu.exec(widget.viewport().mapToGlobal(position))
 
     def _show_setbas_context_menu(self, position) -> None:
-        item = self._prepare_context_item(self.setbas_tree, position)
+        item = self.setbas_tree.itemAt(position)
         menu = QMenu(self.setbas_tree)
-        if item is not None and item.data(0, Qt.ItemDataRole.UserRole) is None:
-            self.setbas_tree.clearSelection()
-            label = "Collapse group" if item.isExpanded() else "Expand group"
-            menu.addAction(label, lambda: item.setExpanded(not item.isExpanded()))
-            menu.addSeparator()
+        self._setbas_context_item = item
         resources = self._setbas_selected_resources()
         kind = item.data(0, _BAS_KIND_ROLE) if item is not None else None
         preview = menu.addAction(
@@ -694,7 +780,8 @@ class AssemblyWindow(QMainWindow):
             or (len(resources) == 1
                 and resources[0].class_id.lower()
                 in ("sklt.class", "ilbm.class", "bmpanim.class")))
-        preview.triggered.connect(self._preview_setbas_resource)
+        preview.triggered.connect(
+            lambda: self._preview_setbas_resource(item))
         extract = menu.addAction(
             f"Extract selected... ({len(resources)})" if len(resources) > 1
             else "Extract selected...")
@@ -709,12 +796,22 @@ class AssemblyWindow(QMainWindow):
             copy_names.triggered.connect(lambda: self._copy_text(
                 "\n".join(resource.resource_name for resource in resources),
                 f"Copied {len(resources)} BAS resource name(s)."))
+        elif kind == "base" and item is not None:
+            base_name = (
+                item.data(0, _BAS_NAME_ROLE) or item.text(0)).strip()
+            menu.addSeparator()
+            copy_name = menu.addAction("Copy BASE name")
+            copy_name.triggered.connect(lambda: self._copy_text(
+                base_name, "BASE name copied successfully."))
         menu.addSeparator()
         menu.addAction("Select all resources", self.setbas_tree.selectAll)
         if self._last_output_directory is not None:
             menu.addAction("Open last output folder",
                            self._open_last_output_folder)
-        menu.exec(self.setbas_tree.viewport().mapToGlobal(position))
+        try:
+            menu.exec(self.setbas_tree.viewport().mapToGlobal(position))
+        finally:
+            self._setbas_context_item = None
 
     def _asset_item_path(self, item) -> Path | None:
         if item is None or self._family is None:
@@ -903,11 +1000,11 @@ class AssemblyWindow(QMainWindow):
         self.edit_menu = edit_menu
         self.edit_menu = edit_menu
         self.edit_toggle_action = QAction("Edit Mode", self)
+        self.edit_toggle_action.setCheckable(True)
         self.edit_toggle_action.setShortcut(QKeySequence("Tab"))
         self.edit_toggle_action.setShortcutContext(
             Qt.ShortcutContext.WindowShortcut)
-        self.edit_toggle_action.triggered.connect(
-            self._toggle_global_edit_mode)
+        self.edit_toggle_action.toggled.connect(self._set_global_edit_mode)
         edit_menu.addAction(self.edit_toggle_action)
         edit_menu.addSeparator()
         self.edit_undo_action = QAction("Undo", self)
@@ -998,29 +1095,6 @@ class AssemblyWindow(QMainWindow):
         self.save_as_action.triggered.connect(self._save_model_as)
         edit_menu.addAction(self.save_as_action)
 
-        add_menu = self.menuBar().addMenu("&Add")
-        self.add_menu = add_menu
-        self.primitive_actions: dict[str, QAction] = {}
-        for kind, label in (
-                ("triangle", "Triangle"),
-                ("square", "Square"),
-                ("rectangle", "Rectangle..."),
-                ("circle", "Circle / Disc..."),
-                ("plane", "Plane"),
-                ("cube", "Cube / Box..."),
-                ("pyramid", "Pyramid..."),
-                ("cylinder", "Cylinder...")):
-            action = QAction(label, self)
-            action.setEnabled(False)
-            action.setStatusTip(
-                "Create normal POO2/POL2 geometry using the current static "
-                "material, then place it with the existing paste preview.")
-            action.triggered.connect(
-                lambda _checked=False, shape=kind:
-                self._add_primitive(shape))
-            add_menu.addAction(action)
-            self.primitive_actions[kind] = action
-
         view_menu = self.menuBar().addMenu("&View")
         self.view_menu = view_menu
         self.sen_check = self._checkable("SEN2 volume",
@@ -1081,6 +1155,10 @@ class AssemblyWindow(QMainWindow):
         wireframe_action.triggered.connect(self._open_wireframe_editor)
         tools_menu.addSeparator()
         tools_menu.addAction(wireframe_action)
+        self.mapping_repair_action = QAction("Mapping Repair...", self)
+        self.mapping_repair_action.triggered.connect(
+            self._show_mapping_repair)
+        tools_menu.addAction(self.mapping_repair_action)
         map_editor_action = QAction("Map Editor", self)
         map_editor_action.triggered.connect(self._open_map_editor)
         tools_menu.addAction(map_editor_action)
@@ -1152,6 +1230,7 @@ class AssemblyWindow(QMainWindow):
         anim_bar = QToolBar("Animation", self)
         anim_bar.setMovable(False)
         self.addToolBar(Qt.ToolBarArea.TopToolBarArea, anim_bar)
+        self.animation_toolbar = anim_bar
 
         anim_bar.addWidget(QLabel(" VANM preview: "))
         self.play_button = QPushButton("Play")
@@ -1177,33 +1256,15 @@ class AssemblyWindow(QMainWindow):
         self.global_undo_button.setMinimumWidth(88)
         self.global_undo_button.setToolTip(
             "Undo the latest geometry, texture or UV edit.")
-        self.global_undo_button.setStyleSheet(
-            "QPushButton { background: #276c7a; color: white; "
-            "border: 1px solid #58b7c8; padding: 4px 10px; } "
-            "QPushButton:hover:enabled { background: #33899a; }")
         self.global_undo_button.clicked.connect(self._undo_edit)
-        self.global_edit_button = QPushButton("Edit Mode")
-        self.global_edit_button.setCheckable(True)
-        self.global_edit_button.setMinimumWidth(96)
-        self.global_edit_button.setToolTip(
-            "Enable vertex editing globally in every tab (shortcut: Tab).")
-        self.global_edit_button.setStyleSheet(
-            "QPushButton { background: #7b3947; color: white; "
-            "border: 1px solid #c76573; padding: 4px 10px; } "
-            "QPushButton:hover { background: #914555; } "
-            "QPushButton:checked { background: #c24d5e; "
-            "border-color: #ff8997; font-weight: bold; }")
-        self.global_edit_button.toggled.connect(self._set_global_edit_mode)
         self.global_redo_button = QPushButton("Redo >")
         self.global_redo_button.setEnabled(False)
         self.global_redo_button.setMinimumWidth(88)
         self.global_redo_button.setToolTip(
             "Redo the latest geometry, texture or UV edit.")
-        self.global_redo_button.setStyleSheet(
-            "QPushButton { background: #276c7a; color: white; "
-            "border: 1px solid #58b7c8; padding: 4px 10px; } "
-            "QPushButton:hover:enabled { background: #33899a; }")
         self.global_redo_button.clicked.connect(self._redo_edit)
+        anim_bar.addWidget(self.global_undo_button)
+        anim_bar.addWidget(self.global_redo_button)
 
     def _build_layout(self) -> None:
         tabs = QTabWidget()
@@ -1362,6 +1423,16 @@ class AssemblyWindow(QMainWindow):
         self.poly_id_next_button.clicked.connect(
             lambda: self._step_poly_id(1))
         poly_id_row.addWidget(self.poly_id_next_button)
+        self.poly_select_all_button = QPushButton("Select All")
+        self.poly_select_all_button.setEnabled(False)
+        self.poly_select_all_button.clicked.connect(
+            self.viewport.select_all_edit_vertices)
+        poly_id_row.addWidget(self.poly_select_all_button)
+        self.poly_deselect_all_button = QPushButton("Deselect All")
+        self.poly_deselect_all_button.setEnabled(False)
+        self.poly_deselect_all_button.clicked.connect(
+            self.viewport.select_no_edit_vertices)
+        poly_id_row.addWidget(self.poly_deselect_all_button)
         model_box_layout.addLayout(poly_id_row)
 
         gizmo_box = QGroupBox("Transform")
@@ -1373,7 +1444,7 @@ class AssemblyWindow(QMainWindow):
         gizmo_layout.setSpacing(4)
         self._transform_mode = "move"
         self._transform_steps = {
-            "move": 0.30,
+            "move": 0.50,
             "rotate": 1.0,
             "scale": 1.0,
         }
@@ -1413,14 +1484,14 @@ class AssemblyWindow(QMainWindow):
         self.gizmo_intensity_slider = QSlider(Qt.Orientation.Horizontal)
         self.gizmo_intensity_slider.setRange(0, 1000)
         self.gizmo_intensity_slider.setValue(
-            self._gizmo_intensity_to_slider(0.20))
+            self._gizmo_intensity_to_slider(0.50))
         self.gizmo_intensity_slider.setToolTip(
             "Set the click and hold-repeat distance in model-space units.")
         self.gizmo_intensity_spin = _TransformStepSpinBox()
         self.gizmo_intensity_spin.setRange(0.001, 1000.0)
         self.gizmo_intensity_spin.setDecimals(4)
         self.gizmo_intensity_spin.setSingleStep(0.1)
-        self.gizmo_intensity_spin.setValue(0.20)
+        self.gizmo_intensity_spin.setValue(0.50)
         self.gizmo_intensity_spin.setSuffix(" model units")
         self.gizmo_intensity_spin.setMinimumWidth(135)
         self.gizmo_intensity_spin.setToolTip(
@@ -1432,6 +1503,7 @@ class AssemblyWindow(QMainWindow):
         intensity_row.addWidget(self.gizmo_intensity_slider, 1)
         intensity_row.addWidget(self.gizmo_intensity_spin)
         gizmo_layout.addLayout(intensity_row)
+        transform_options = QHBoxLayout()
         self.auto_align_check = QCheckBox("Auto Align")
         self.auto_align_check.setChecked(True)
         self.auto_align_check.setToolTip(
@@ -1440,7 +1512,20 @@ class AssemblyWindow(QMainWindow):
         self.auto_align_check.toggled.connect(
             self.viewport.set_auto_align_enabled)
         self.viewport.set_auto_align_enabled(True)
-        gizmo_layout.addWidget(self.auto_align_check)
+        transform_options.addWidget(self.auto_align_check)
+        self.mirror_x_check = QCheckBox("Symmetry (Mirror X)")
+        self.mirror_x_check.setChecked(False)
+        self.mirror_x_check.setToolTip(
+            "Apply Move, Rotate and Scale to the matching vertex on the "
+            "opposite side of the model's X=0 symmetry plane.")
+        self.mirror_x_check.toggled.connect(
+            self.viewport.set_mirror_x_enabled)
+        self.viewport.set_mirror_x_enabled(False)
+        transform_options.addWidget(self.mirror_x_check)
+        transform_options.addStretch(1)
+        gizmo_layout.addLayout(transform_options)
+        self.viewport.set_direct_transform("move", 0.50)
+        self._apply_transform_mode_colors()
         model_box_layout.addWidget(gizmo_box)
 
         self.model_texture_label = QLabel("Current texture: -")
@@ -1498,6 +1583,14 @@ class AssemblyWindow(QMainWindow):
         self.uv_editor.handleContextMenuRequested.connect(
             self._show_uv_handle_context_menu)
         uv_layout.addWidget(self.uv_editor, 1)
+        self.uv_auto_align_check = QCheckBox("Auto Align UV")
+        self.uv_auto_align_check.setChecked(True)
+        self.uv_auto_align_check.setToolTip(
+            "Snap UV handles using screen-distance guides. Hold Alt while "
+            "dragging to bypass snapping temporarily.")
+        self.uv_auto_align_check.toggled.connect(
+            self.uv_editor.set_auto_align_enabled)
+        uv_layout.addWidget(self.uv_auto_align_check)
         self.uv_select_all_button = QPushButton("Select All UVs")
         self.uv_select_all_button.clicked.connect(self.uv_editor.select_all)
         self.uv_clear_selection_button = QPushButton("Clear Selection")
@@ -1521,6 +1614,10 @@ class AssemblyWindow(QMainWindow):
         self.uv_revert_button.setEnabled(False)
         self.uv_revert_button.clicked.connect(self._revert_selected_uv)
         uv_buttons.addWidget(self.uv_revert_button)
+        self.uv_reset_all_button = QPushButton("Reset All UVs")
+        self.uv_reset_all_button.setEnabled(False)
+        self.uv_reset_all_button.clicked.connect(self._reset_all_uvs)
+        uv_buttons.addWidget(self.uv_reset_all_button)
         uv_layout.addLayout(uv_buttons)
         model_box_layout.addWidget(uv_box, 1)
 
@@ -1800,7 +1897,6 @@ class AssemblyWindow(QMainWindow):
 
         editor_tabs = category_tabs()
         editor_tabs.addTab(model_scroll, "Model and Texture Editor")
-        editor_tabs.addTab(mapping_panel, "Mapping Repair")
 
         visuals_tabs = category_tabs()
         visuals_tabs.addTab(textures_panel, "Textures")
@@ -1830,18 +1926,7 @@ class AssemblyWindow(QMainWindow):
         right_layout = QVBoxLayout(right_panel)
         right_layout.setContentsMargins(0, 0, 0, 0)
         right_layout.setSpacing(2)
-        edit_controls = QWidget()
-        edit_controls_layout = QHBoxLayout(edit_controls)
-        edit_controls_layout.setContentsMargins(4, 3, 4, 1)
-        edit_controls_layout.setSpacing(4)
-        edit_controls_layout.addStretch(1)
-        edit_controls_layout.addWidget(self.global_undo_button)
-        edit_controls_layout.addWidget(self.global_edit_button)
-        edit_controls_layout.addWidget(self.global_redo_button)
-        edit_controls_layout.addStretch(1)
-        right_layout.addWidget(edit_controls)
         right_layout.addWidget(tabs, 1)
-        self._edit_controls_bar = edit_controls
 
         center_panel = QWidget()
         center_panel.setMinimumHeight(0)
@@ -2924,22 +3009,20 @@ class AssemblyWindow(QMainWindow):
             f"Playing {animation_name} on {owner}", 8000)
 
     def _on_setbas_item_selected(self, current, _previous=None) -> None:
-        """Single-click VANM preview while remaining in Bas Manager."""
+        """Preview every supported BAS row selected by mouse or keyboard."""
 
-        if current is None or self._setbas is None:
+        if current is None or self._setbas is None \
+                or self._setbas_preview_active:
             return
-        if current.data(0, _BAS_KIND_ROLE) != "bmpanim.class":
+        kind = current.data(0, _BAS_KIND_ROLE)
+        if kind not in ("base", "sklt.class", "ilbm.class",
+                        "bmpanim.class"):
             return
-        index = current.data(0, Qt.ItemDataRole.UserRole)
-        if index is None or not (0 <= int(index) < len(self._setbas.resources)):
-            return
-        resource = self._setbas.resources[int(index)]
-        if resource.error:
-            self.statusBar().showMessage(
-                f"Cannot preview {resource.resource_name}: {resource.error}",
-                8000)
-            return
-        self._preview_setbas_animation(resource)
+        self._setbas_preview_active = True
+        try:
+            self._preview_setbas_resource(current)
+        finally:
+            self._setbas_preview_active = False
 
     def _on_setbas_item_double_clicked(self, item, _column: int) -> None:
         if item is None:
@@ -2947,8 +3030,9 @@ class AssemblyWindow(QMainWindow):
         kind = item.data(0, _BAS_KIND_ROLE)
         index = item.data(0, Qt.ItemDataRole.UserRole)
         if kind == "base" or index is not None:
+            if self.setbas_tree.currentItem() is item:
+                return
             self.setbas_tree.setCurrentItem(item)
-            self._preview_setbas_resource()
             return
         # Class/group rows keep QTreeWidget's normal expand/collapse.
         self._sync_vp_controls()
@@ -2971,10 +3055,18 @@ class AssemblyWindow(QMainWindow):
                 item = group.child(child_index)
                 if item.data(0, Qt.ItemDataRole.UserRole) == resource.index:
                     group.setExpanded(True)
-                    self.setbas_tree.setCurrentItem(item)
+                    changed = self.setbas_tree.currentItem() is not item
+                    if changed and not confirm_discard:
+                        self._setbas_preview_active = True
+                    try:
+                        self.setbas_tree.setCurrentItem(item)
+                    finally:
+                        if changed and not confirm_discard:
+                            self._setbas_preview_active = False
                     self.setbas_tree.scrollToItem(item)
-                    self._preview_setbas_skeleton(
-                        confirm_discard=confirm_discard)
+                    if not changed or not confirm_discard:
+                        self._preview_setbas_skeleton(
+                            confirm_discard=confirm_discard)
                     return
 
     def _setbas_palette(self):
@@ -2997,12 +3089,12 @@ class AssemblyWindow(QMainWindow):
                 return palette, str(palette_path)
         return cmap_to_palette(BUILTIN_AIR1TXT_CMAP), BUILTIN_PALETTE_SOURCE
 
-    def _preview_setbas_resource(self) -> None:
+    def _preview_setbas_resource(self, item=None) -> None:
         """Preview the selected BASE, embedded SKLT or ILBM resource."""
 
         if self._setbas is None:
             return
-        item = self.setbas_tree.currentItem()
+        item = item or self.setbas_tree.currentItem()
         if item is None:
             QMessageBox.information(
                 self, "No resource selected",
@@ -3289,7 +3381,10 @@ class AssemblyWindow(QMainWindow):
             return []
         resources = []
         seen: set[int] = set()
+        context_item = self._setbas_context_item
         items = self.setbas_tree.selectedItems()
+        if context_item is not None and not context_item.isSelected():
+            items = [context_item]
         if not items and self.setbas_tree.currentItem() is not None:
             items = [self.setbas_tree.currentItem()]
         for item in items:
@@ -3901,10 +3996,17 @@ class AssemblyWindow(QMainWindow):
             return None
         return self._editor_tabs.currentWidget()
 
+    def _has_editable_model(self) -> bool:
+        if self._family is None:
+            return False
+        owner = self._selected_owner
+        obj = self._owner_to_obj.get(owner) if owner else None
+        return bool(obj is not None and obj.skeleton is not None)
+
     def _editing_allowed(self) -> bool:
         """Single source of truth for every model-mutating operation."""
 
-        button = getattr(self, "global_edit_button", None)
+        button = getattr(self, "edit_toggle_action", None)
         return bool(
             button is not None and button.isChecked()
             and self.viewport.is_edit_mode
@@ -3941,7 +4043,7 @@ class AssemblyWindow(QMainWindow):
         return obj.owner_path, sorted(vertices)
 
     def _sync_editor_context(self) -> None:
-        edit_button = getattr(self, "global_edit_button", None)
+        edit_button = getattr(self, "edit_toggle_action", None)
         if edit_button is None or not edit_button.isChecked():
             if self.viewport.is_edit_mode:
                 self.viewport.exit_edit_mode()
@@ -3950,6 +4052,20 @@ class AssemblyWindow(QMainWindow):
         panel = self._active_editor_panel()
         if panel is self._model_editor_panel:
             self.viewport.set_highlight_polys(set())
+            owner = self._selected_owner
+            saved_selection = self._tab_edit_selection.pop(
+                owner, None) if owner else None
+            if saved_selection is not None:
+                self._remember_geometry_original(owner)
+                entered = (
+                    self.viewport.enter_edit_mode_with_vertices(
+                        owner, saved_selection, pick_polygons=True)
+                    if saved_selection
+                    else self.viewport.enter_edit_mode(owner))
+                if entered:
+                    self.viewport.configure_edit_interaction(
+                        selected_only=False, pick_polygons=True)
+                    return
             target = self._selected_polygon_vertices()
             if target is not None:
                 owner, vertices = target
@@ -3968,6 +4084,35 @@ class AssemblyWindow(QMainWindow):
             self.viewport.enter_edit_mode(owner)
         self.viewport.configure_edit_interaction(
             selected_only=False, pick_polygons=True)
+
+    def _sync_tab_edit_mode(self) -> None:
+        """Apply the Editor=Edit / other tabs=View contract without data loss."""
+
+        if self.viewport.paste_preview_active:
+            return
+        active = (
+            self._active_editor_panel() is self._model_editor_panel
+            and self._has_editable_model()
+            and not self._snapshot_mode_active)
+        button = self.edit_toggle_action
+        if active:
+            if not button.isChecked():
+                button.blockSignals(True)
+                button.setChecked(True)
+                button.blockSignals(False)
+            self._sync_editor_context()
+            return
+        session = self.viewport.edit_session
+        if session is not None and self.viewport.edit_owner is not None:
+            self._tab_edit_selection[self.viewport.edit_owner] = set(
+                session.selection)
+        if button.isChecked():
+            button.blockSignals(True)
+            button.setChecked(False)
+            button.blockSignals(False)
+        self._cancel_live_transforms()
+        if self.viewport.is_edit_mode:
+            self.viewport.exit_edit_mode()
 
     def _on_right_tab_changed(self, index: int) -> None:
         if self.viewport.paste_preview_active:
@@ -4005,7 +4150,7 @@ class AssemblyWindow(QMainWindow):
                 self.mode_combo.findData("textured"))
             self.mode_combo.blockSignals(False)
             self.mode_combo.setEnabled(False)
-            self.global_edit_button.setEnabled(False)
+            self.edit_toggle_action.setEnabled(False)
             self.toolbar_view_preset_combo.setEnabled(False)
             for action in (self.sen_check, self.wire_check,
                            self.owner_bounds_check, self.axes_check,
@@ -4023,14 +4168,14 @@ class AssemblyWindow(QMainWindow):
                 self.mode_combo.setCurrentIndex(restored_index)
                 self.mode_combo.blockSignals(False)
             self.mode_combo.setEnabled(True)
-            self.global_edit_button.setEnabled(True)
+            self.edit_toggle_action.setEnabled(True)
             self.toolbar_view_preset_combo.setEnabled(True)
             for action in (self.sen_check, self.wire_check,
                            self.owner_bounds_check, self.axes_check,
                            self.grid_check, self.overlay_check,
                            self.mapping_diag_check):
                 action.setEnabled(True)
-        self._sync_editor_context()
+        self._sync_tab_edit_mode()
         if tabs is not None:
             outer_index = tabs.currentIndex()
             outer = tabs.tabText(outer_index)
@@ -4190,6 +4335,12 @@ class AssemblyWindow(QMainWindow):
             self._update_uv_editor(self._selected_poly)
             self._fill_fx_inspector(element, self._selected_poly)
             return
+        if self._mapping_index is not None and self._selected_poly is not None:
+            refs = self._mapping_index.refs.get(self._selected_poly, [])
+            if len(refs) == 1 and refs[0].block.texture is not None \
+                    and refs[0].block.texture.kind == "bmpanim":
+                self._update_uv_editor(self._selected_poly)
+                return
         context = getattr(self, "_uv_ctx", None)
         if context is None:
             return
@@ -4376,7 +4527,7 @@ class AssemblyWindow(QMainWindow):
             self._notify(
                 "Paste preview cancelled because the model owner changed.",
                 6000)
-        edit_button = getattr(self, "global_edit_button", None)
+        edit_button = getattr(self, "edit_toggle_action", None)
         keep_global_edit = bool(edit_button and edit_button.isChecked())
         self._selected_owner = owner
         self.viewport.set_selected_owner(owner)
@@ -4410,10 +4561,10 @@ class AssemblyWindow(QMainWindow):
             self._focus_assets_for_owner(owner, switch_tabs=False)
         self._sync_geometry_save_controls()
         if hasattr(self, "_editor_tabs"):
-            if keep_global_edit and not self.global_edit_button.isChecked():
-                self.global_edit_button.blockSignals(True)
-                self.global_edit_button.setChecked(True)
-                self.global_edit_button.blockSignals(False)
+            if keep_global_edit and not self.edit_toggle_action.isChecked():
+                self.edit_toggle_action.blockSignals(True)
+                self.edit_toggle_action.setChecked(True)
+                self.edit_toggle_action.blockSignals(False)
             self._sync_editor_context()
 
     def _on_object_picked(self, owner: str) -> None:
@@ -4439,7 +4590,9 @@ class AssemblyWindow(QMainWindow):
                if self._selected_owner else None)
         selected = obj.display_name if obj else "-"
         large = (" | large family" if self._large_mode else "")
-        n_dirty = len(self._geom_dirty) + len(self._uv_original)
+        n_dirty = (
+            len(self._geom_dirty) + len(self._uv_original)
+            + len(self._vanm_uv_original))
         dirty = (f" | <b>UNSAVED EDITS: {n_dirty}</b>" if n_dirty else "")
         preview = (f" | <b>TEXTURE PREVIEW: {len(self._texture_original)}</b>"
                    if self._texture_original else "")
@@ -4920,6 +5073,7 @@ class AssemblyWindow(QMainWindow):
         return ""
 
     def _refresh_fx_elements(self) -> None:
+        self._fx_preview_cache.clear()
         previous = self._selected_fx_element()
         previous_identity = previous.identity if previous is not None else None
         self._fx_elements = []
@@ -4949,9 +5103,9 @@ class AssemblyWindow(QMainWindow):
                     if element.bilateral else "Move/Scale only")
             else:
                 status = (
-                "Invalid | Read-only"
-                if element.shared_state == "invalid" else
-                "Shared vertices | Read-only")
+                    "Invalid"
+                    if element.shared_state == "invalid" else
+                    "Shared vertices | Auto-detach on edit")
             label = (
                 f"{element.fx_name} - polyIDs "
                 f"{','.join(str(poly_id) for poly_id in element.poly_ids)} "
@@ -4972,7 +5126,8 @@ class AssemblyWindow(QMainWindow):
                     f"other POL2: {list(element.shared_with_polys)}"
                 )
                 details.append(
-                    "Editing is disabled because it would deform other geometry."
+                    "Editing duplicates only these shared vertices first, so "
+                    "the other geometry is not deformed."
                 )
             if delete_reason:
                 details.append(f"Delete unavailable: {delete_reason}.")
@@ -5013,79 +5168,6 @@ class AssemblyWindow(QMainWindow):
         }
         self.viewport.set_edit_read_only_vertices(read_only_vertices)
 
-    def _primitive_context(self):
-        if not self._editing_allowed():
-            return None, "Enter Edit Mode and select one normal polygon first."
-        if self.viewport.paste_preview_active:
-            return None, "Finish or cancel the active paste preview first."
-        owner = self.viewport.edit_owner
-        fam_obj = self._owner_to_obj.get(owner) if owner else None
-        if fam_obj is None or fam_obj is not self._workbench_obj:
-            return None, "The selected model is not the active editable owner."
-        poly_id = self._selected_poly
-        if poly_id is None or self._mapping_index is None:
-            return None, "Select one polygon with a static material first."
-        refs = self._mapping_index.refs.get(poly_id, [])
-        if len(refs) != 1:
-            return None, (
-                "The current polygon needs one unambiguous material mapping.")
-        if any(
-                element.owner_path == owner and poly_id in element.poly_ids
-                for element in self._fx_elements):
-            return None, (
-                "Select a normal model polygon; FX material structures are "
-                "not used for normal primitives.")
-        ref = refs[0]
-        try:
-            # The pure generator is the single validation source for static
-            # material, ATTS/OLPL and writable geometry compatibility.
-            build_primitive_clipboard(
-                fam_obj, owner, ref.block_index, ref.atts_index,
-                "triangle", size=1.0)
-        except GeometryClipboardError as exc:
-            return None, str(exc)
-        writer_reason = self._geometry_writer_reason(owner, fam_obj)
-        if writer_reason:
-            return None, writer_reason
-        return (fam_obj, owner, ref.block_index, ref.atts_index, poly_id), ""
-
-    def _add_primitive(self, kind: str) -> None:
-        context, reason = self._primitive_context()
-        if context is None:
-            self._notify(f"Add primitive unavailable: {reason}", 9000)
-            return
-        dialog = PrimitiveDialog(kind, self)
-        if dialog.exec() != QDialog.DialogCode.Accepted:
-            self._notify("Add primitive cancelled.", 3000)
-            return
-        current, reason = self._primitive_context()
-        if current is None or current != context:
-            self._notify(
-                "Add primitive cancelled because the editable material "
-                f"context changed. {reason}", 8000)
-            return
-        fam_obj, owner, block_index, atts_index, _poly_id = current
-        try:
-            clipboard = build_primitive_clipboard(
-                fam_obj, owner, block_index, atts_index, kind,
-                **dialog.parameters())
-        except GeometryClipboardError as exc:
-            self._notify(f"Add primitive refused: {exc}.", 9000)
-            return
-        self._geometry_clipboard = clipboard
-        position = self._current_viewport_position()
-        if not self.viewport.begin_paste_preview(clipboard, position):
-            self._notify(
-                "Primitive prepared, but its placement preview could not "
-                f"start: {self._preview_geometry_reason()}.", 9000)
-            return
-        self.viewport.setFocus()
-        self._sync_edit_action_states()
-        self._notify(
-            f"Add {kind.title()} Preview: choose the final position. "
-            "Paste/LMB/Enter confirms atomically; RMB/Esc cancels.",
-            12000)
-
     def _fx_combo_index(self, identity) -> int:
         for index in range(1, self.fx_combo.count()):
             candidate = self.fx_combo.itemData(index)
@@ -5101,22 +5183,101 @@ class AssemblyWindow(QMainWindow):
             self._sync_edit_action_states()
             return
         self._select_highlight_fx()
+        if self._editing_allowed() and element.shared_state == "shared":
+            element = self._detach_fx_for_editing(element) or element
         if element.editable and self._editing_allowed():
             self._edit_selected_fx()
         self._sync_edit_action_states()
+
+    def _detach_fx_for_editing(
+            self, element: FxElement) -> FxElement | None:
+        """Make one shared FX independently editable as one undoable edit."""
+
+        owner = element.owner_path
+        fam_obj = self._owner_to_obj.get(owner)
+        if fam_obj is None or fam_obj is not self._workbench_obj:
+            return None
+        reason = self._geometry_writer_reason(owner, fam_obj)
+        if reason:
+            self._notify(f"FX edit unavailable: {reason}.", 8000)
+            return None
+        before = self._capture_topology_state(owner)
+        if before is None:
+            return None
+        had_topology_original = owner in self._topology_original
+        had_geom_original = owner in self._geom_original
+        previous_geom_original = copy.deepcopy(
+            self._geom_original.get(owner))
+        had_dirty = owner in self._geom_dirty
+        previous_dirty = self._geom_dirty.get(owner)
+        previous_undo = list(self._edit_undo_stack)
+        previous_redo = list(self._edit_redo_stack)
+        try:
+            detached = detach_shared_fx_vertices(fam_obj, element)
+            if not detached:
+                return None
+            self._topology_original.setdefault(owner, copy.deepcopy(before))
+            self._refresh_object_material_faces(fam_obj)
+            self.viewport.refresh_family_materials()
+            self._rebuild_workbench(self._family, owner)
+            self._refresh_fx_elements()
+            updated = next((
+                candidate for candidate in self._fx_elements
+                if candidate.identity == element.identity), None)
+            if updated is None or not updated.editable:
+                raise GeometryClipboardError(
+                    "the detached FX did not become independently editable")
+            self.fx_combo.blockSignals(True)
+            self.fx_combo.setCurrentIndex(
+                self._fx_combo_index(updated.identity))
+            self.fx_combo.blockSignals(False)
+            self._on_geometry_edited(owner)
+            after = self._capture_topology_state(owner)
+            if after is None:
+                raise GeometryClipboardError(
+                    "the detached FX could not be verified")
+            self._record_edit_command({
+                "kind": "topology",
+                "owner": owner,
+                "before": before,
+                "after": after,
+                "label": f"Detach {element.fx_name} for editing",
+            })
+            self._notify(
+                f"{element.fx_name} detached from shared model vertices; "
+                f"{detached} mirrored/source vertex reference(s) duplicated. "
+                "The operation can be undone.",
+                9000)
+            return updated
+        except Exception as exc:
+            self._restore_topology_state(owner, before)
+            if not had_topology_original:
+                self._topology_original.pop(owner, None)
+            if had_geom_original:
+                self._geom_original[owner] = previous_geom_original
+            else:
+                self._geom_original.pop(owner, None)
+            if had_dirty:
+                self._geom_dirty[owner] = previous_dirty
+            else:
+                self._geom_dirty.pop(owner, None)
+            self._edit_undo_stack[:] = previous_undo
+            self._edit_redo_stack[:] = previous_redo
+            self._notify(f"FX detach failed and was rolled back: {exc}.", 9000)
+            return None
 
     def _can_delete_selected_fx_element(self) -> bool:
         element = self._selected_fx_element()
         return bool(
             self._editing_allowed()
             and element is not None
-            and element.editable
+            and element.shared_state != "invalid"
             and not self._delete_geometry_reason())
 
     def _fx_structural_delete_reason(self, element: FxElement) -> str:
-        if not element.editable:
+        if element.shared_state == "invalid":
             return (
-                f"{element.fx_name} is {element.shared_state} and is read-only")
+                f"{element.fx_name} is structurally invalid")
         fam_obj = self._owner_to_obj.get(element.owner_path)
         if fam_obj is None or fam_obj is not self._workbench_obj:
             return "the owner is not the editable model"
@@ -5134,10 +5295,11 @@ class AssemblyWindow(QMainWindow):
             self, element: FxElement) -> FxElementCapabilities:
         fam_obj = self._owner_to_obj.get(element.owner_path)
         family = self._family
-        can_move = element.editable
+        can_move = element.shared_state != "invalid"
         can_copy = False
         can_add_similar = False
-        if fam_obj is not None and family is not None and element.editable:
+        if fam_obj is not None and family is not None \
+                and element.shared_state != "invalid":
             try:
                 build_fx_element_clipboard(
                     fam_obj, element, family.animations)
@@ -5173,10 +5335,10 @@ class AssemblyWindow(QMainWindow):
         if element is None:
             self._notify("Select an FX element from the list first.", 5000)
             return
-        if not element.editable:
+        if element.shared_state == "invalid":
             self._notify(
                 f"Delete refused: {element.fx_name} is "
-                f"{element.shared_state} and is read-only.", 8000)
+                "structurally invalid.", 8000)
             return
         identity = element.identity
         if self._selected_owner != element.owner_path:
@@ -5218,7 +5380,8 @@ class AssemblyWindow(QMainWindow):
         templates = []
         seen = set()
         for element in self._fx_elements:
-            if not element.editable or element.owner_path != fam_obj.owner_path:
+            if element.shared_state == "invalid" \
+                    or element.owner_path != fam_obj.owner_path:
                 continue
             key = element.identity
             if key in seen:
@@ -5231,6 +5394,112 @@ class AssemblyWindow(QMainWindow):
             seen.add(key)
             templates.append(element)
         return templates
+
+    def _fx_template_preview(
+            self, element: FxElement) -> tuple[list[QImage], list[str]]:
+        cached = self._fx_preview_cache.get(element.identity)
+        if cached is not None:
+            return cached
+        frames: list[QImage] = []
+        phase_count = 1
+        if element.source_kind == "VANM" and self._family is not None:
+            animation_names = []
+            for _poly_id, _block_index, _atts_index, block, _material in \
+                    self._fx_face_records(element):
+                texture = block.texture
+                if texture is not None and texture.kind == "bmpanim":
+                    animation_names.append(texture.name)
+            animations = []
+            for name in dict.fromkeys(animation_names):
+                normalized = name.replace("\\", "/").casefold()
+                animation = next((
+                    value for key, value in self._family.animations.items()
+                    if key.replace("\\", "/").casefold() == normalized
+                ), None)
+                if animation is not None:
+                    animations.append(animation)
+            for animation in animations:
+                phase_count = max(phase_count, len(animation.frames))
+                for frame in animation.frames:
+                    if not (
+                            0 <= frame.frame_id
+                            < len(animation.bitmap_names)
+                            and 0 <= frame.texcoords_id
+                            < len(animation.texcoord_groups)):
+                        continue
+                    image = self._texture_qimage(
+                        animation.bitmap_names[frame.frame_id])
+                    if image is None or image.isNull():
+                        continue
+                    frames.append(self._fx_uv_preview_image(
+                        image,
+                        [animation.texcoord_groups[
+                            frame.texcoords_id]]))
+        else:
+            groups_by_material: dict[str, list[list[tuple[int, int]]]] = {}
+            for _poly_id, _block_index, atts_index, block, material in \
+                    self._fx_face_records(element):
+                if 0 <= atts_index < len(block.olpl):
+                    groups_by_material.setdefault(
+                        material.casefold(), []).append(
+                            list(block.olpl[atts_index]))
+            for material in dict.fromkeys(element.material_names):
+                image = self._texture_qimage(material)
+                if image is not None and not image.isNull():
+                    frames.append(self._fx_uv_preview_image(
+                        image, groups_by_material.get(
+                            material.casefold(), [])))
+        frame_label = "frame" if phase_count == 1 else "frames"
+        state = "bilateral" if element.bilateral else element.shared_state
+        uv_state = (
+            "UV VANM"
+            if element.source_kind == "VANM"
+            else "UV OLPL editable"
+            if element.editable and element.uv_source == "OLPL"
+            else f"UV {element.uv_source} unavailable")
+        info = [
+            f"{element.fx_name} | {element.source_kind} | "
+            f"{len(element.poly_ids)} polygon(s) | "
+            f"{phase_count} {frame_label} | {state} | {uv_state}",
+        ]
+        if not frames:
+            info.append(
+                "preview diagnostic: referenced asset is missing or unreadable")
+        result = (frames, info)
+        self._fx_preview_cache[element.identity] = result
+        return result
+
+    @staticmethod
+    def _fx_uv_preview_image(
+            image: QImage,
+            groups: list[list[tuple[int, int]]]) -> QImage:
+        """Draw the exact cloned UV outlines with the classic yellow style."""
+
+        output = image.convertToFormat(
+            QImage.Format.Format_ARGB32).copy()
+        if output.isNull():
+            return output
+        painter = QPainter(output)
+        color = QColor(255, 255, 90)
+        painter.setPen(QPen(color, 1.6))
+        painter.setBrush(color)
+        width = output.width()
+        height = output.height()
+        for group in groups:
+            points = QPolygonF([
+                QPointF(
+                    float(u) / 256.0 * width,
+                    float(v) / 256.0 * height)
+                for u, v in group
+            ])
+            if len(points) >= 2:
+                painter.setBrush(Qt.BrushStyle.NoBrush)
+                painter.drawPolygon(points)
+                painter.setBrush(color)
+            for point in points:
+                painter.drawEllipse(point, 2.5, 2.5)
+        painter.end()
+        return output
 
     def _can_add_fx_element(self) -> bool:
         return bool(
@@ -5249,7 +5518,8 @@ class AssemblyWindow(QMainWindow):
                 "existing FX1/FX2 or VANM quad material.", 9000)
             return
         dialog = AddFxElementDialog(
-            templates, self, preferred=preferred)
+            templates, self, preferred=preferred,
+            preview_provider=self._fx_template_preview)
         if dialog.exec() != QDialog.DialogCode.Accepted:
             self._notify("Add FX Element cancelled.", 3000)
             return
@@ -5308,20 +5578,19 @@ class AssemblyWindow(QMainWindow):
             f"(material blocks "
             f"{','.join(str(index) for index in element.block_indices)})"
             + (
-                f" | Read-only: {element.shared_state} geometry/mapping."
-                if not element.editable else "")
+                f" | Invalid: {element.shared_state} geometry/mapping."
+                if element.shared_state == "invalid" else "")
         )
 
     def _edit_selected_fx(self) -> None:
         element = self._selected_fx_element()
         if element is None:
             return
-        if not element.editable:
+        if element.shared_state == "invalid":
             QMessageBox.information(
-                self, "FX element is read-only",
-                f"This FX element is {element.shared_state} and has unsafe "
-                "or ambiguous geometry/mapping references.\n\nEditing is "
-                "disabled because it could deform or corrupt other geometry."
+                self, "Invalid FX element",
+                "This FX element has invalid or ambiguous geometry/mapping "
+                "references and cannot be edited safely."
             )
             return
         self._select_highlight_fx()
@@ -5478,6 +5747,10 @@ class AssemblyWindow(QMainWindow):
         )
         self._draw_block_uv_islands(index)
 
+    def _on_polygon_structure_picked(
+            self, owner: str, poly_id: int, block_index: int) -> None:
+        self._picked_structure = (owner, poly_id, block_index)
+
     def _on_polygon_picked(self, poly_id: int,
                            additive: bool = False) -> None:
         if additive:
@@ -5505,14 +5778,25 @@ class AssemblyWindow(QMainWindow):
                 f"Selected {len(self._selected_polys)} polygon(s); "
                 f"current #{self._selected_poly}: {status}"
             )
-        # A viewport click selects exactly one logical polygon.  Complete
-        # multi-face FX selection is reserved for an explicit combo choice.
+        picked = self._picked_structure
+        self._picked_structure = None
+        block_index = (
+            picked[2] if picked is not None
+            and picked[0] == self._selected_owner
+            and picked[1] == poly_id else None)
+        element = self._fx_element_for_polygon(poly_id, block_index)
         self.fx_combo.blockSignals(True)
-        self.fx_combo.setCurrentIndex(0)
+        self.fx_combo.setCurrentIndex(
+            self._fx_combo_index(element.identity) if element else 0)
         self.fx_combo.blockSignals(False)
+        if element is not None and not additive:
+            self._select_highlight_fx()
+            if self._editing_allowed() \
+                    and element.shared_state == "shared":
+                element = self._detach_fx_for_editing(element) or element
         self._sync_edit_action_states()
         if self._active_editor_panel() is not self._model_editor_panel \
-                or not self.global_edit_button.isChecked() \
+                or not self.edit_toggle_action.isChecked() \
                 or not self.viewport.is_edit_mode:
             return
         target = self._selected_polygon_vertices()
@@ -5523,15 +5807,24 @@ class AssemblyWindow(QMainWindow):
             self.viewport.configure_edit_interaction(
                 selected_only=False, pick_polygons=True)
 
-    def _fx_element_for_polygon(self, poly_id: int | None) -> FxElement | None:
+    def _fx_element_for_polygon(
+            self, poly_id: int | None,
+            block_index: int | None = None) -> FxElement | None:
         if poly_id is None:
             return None
+        def matches(element: FxElement) -> bool:
+            return any(
+                candidate_poly == poly_id
+                and (block_index is None or candidate_block == block_index)
+                for candidate_poly, candidate_block in zip(
+                    element.poly_ids, element.block_indices))
+
         selected = self._selected_fx_element()
-        if selected is not None and poly_id in selected.poly_ids:
+        if selected is not None and matches(selected):
             return selected
         return next((element for element in self._fx_elements
                      if element.owner_path == self._selected_owner
-                     and poly_id in element.poly_ids), None)
+                     and matches(element)), None)
 
     def _fx_face_records(self, element: FxElement):
         obj = self._owner_to_obj.get(element.owner_path)
@@ -5555,11 +5848,15 @@ class AssemblyWindow(QMainWindow):
         return records
 
     def _update_fx_uv_editor(self, element: FxElement) -> None:
+        self._uv_ctx = None
+        self._uv_contexts = {}
         obj = self._owner_to_obj.get(element.owner_path)
         model = getattr(obj, "skeleton", None)
         loops = []
         image = None
         descriptions = []
+        editable_count = 0
+        loop_keys = set()
         for poly_id, block_index, atts_index, block, material in \
                 self._fx_face_records(element):
             if model is None or not (0 <= poly_id < len(model.polygons)):
@@ -5570,6 +5867,8 @@ class AssemblyWindow(QMainWindow):
                     or (block.texture is not None
                         and block.texture.kind == "bmpanim"):
                 frame = self.viewport.current_animation_frame_data(
+                    element.owner_path, block_index)
+                animation_group = self.viewport.current_animation_group(
                     element.owner_path, block_index)
                 if frame is not None:
                     if image is None:
@@ -5583,14 +5882,56 @@ class AssemblyWindow(QMainWindow):
             if image is None and material and material != "-":
                 image = self._texture_qimage(material)
             if uvs:
+                vanm_context = (
+                    animation_group
+                    if element.source_kind == "VANM" else None)
+                key = (
+                    ("@VANM", vanm_context[0], vanm_context[1])
+                    if vanm_context is not None else
+                    (element.owner_path, block_index, atts_index))
+                if key in loop_keys:
+                    continue
+                loop_keys.add(key)
+                editable = bool(self._editing_allowed() and (
+                    (vanm_context is not None
+                     and self._animation_uv_writable(
+                         vanm_context[0], vanm_context[1]))
+                    or (
+                        element.editable
+                        and element.source_kind == "direct"
+                        and element.uv_source == "OLPL"
+                        and (block.class_id or "").casefold() == "amesh.class"
+                        and 0 <= atts_index < len(block.olpl)
+                        and len(block.olpl[atts_index]) == vertex_count)))
+                if editable:
+                    context = (
+                        (obj, None, vanm_context[0],
+                         vanm_context[1], poly_id)
+                        if vanm_context is not None else
+                        (obj, block, block_index, atts_index, poly_id))
+                    self._uv_contexts[key] = context
+                    if self._uv_ctx is None and vanm_context is None:
+                        self._uv_ctx = context
+                    editable_count += 1
                 loops.append(UVLoop(
-                    (element.owner_path, block_index, atts_index),
-                    poly_id, uvs, False))
-        message = "FX UV preview is read-only."
-        if descriptions:
-            message += " Current VANM " + "; ".join(dict.fromkeys(descriptions))
-        self._uv_ctx = None
-        self._uv_contexts = {}
+                    key, poly_id, uvs, editable))
+        if editable_count:
+            message = (
+                f"UV source: VANM. {editable_count} current frame group(s) "
+                "are editable and exported as verified ANM files by Save As. "
+                + "; ".join(dict.fromkeys(descriptions))
+                if element.source_kind == "VANM" else
+                f"UV source: OLPL. {editable_count} direct {element.fx_name} "
+                "loop(s) are editable and saved through verified BASE Save As.")
+        elif descriptions:
+            message = (
+                "UV source: VANM. No writable fixed-size UV group is "
+                "available. Current "
+                + "; ".join(dict.fromkeys(descriptions)))
+        else:
+            message = (
+                f"UV source: {element.uv_source}. No unambiguous writable "
+                "UV group is available for this element.")
         self.uv_editor.set_loops(image, loops, message)
         self._sync_uv_add_vertex_button()
 
@@ -5602,7 +5943,15 @@ class AssemblyWindow(QMainWindow):
             f"polyID {poly_id} | {len(polygon)} vertices | POO2 {list(polygon)}",
             f"FX element: {element.fx_name} | source: {element.source_kind}",
             f"FX polyIDs: {list(element.poly_ids)}",
-            f"UV source: {element.uv_source} | read-only preview",
+            f"UV source: {element.uv_source} | "
+            + (
+                "editable VANM group"
+                if element.source_kind == "VANM"
+                else
+                "editable direct OLPL"
+                if element.editable and element.source_kind == "direct"
+                and element.uv_source == "OLPL"
+                else "UV coordinates unavailable"),
         ]
         labels = []
         for face_poly, block_index, atts_index, block, material in \
@@ -5622,10 +5971,9 @@ class AssemblyWindow(QMainWindow):
         label = ", ".join(dict.fromkeys(value for value in labels if value))
         self.model_texture_label.setText(
             "Current texture: " + (label or "-"))
-        self.load_texture_button.setEnabled(False)
         self.load_texture_button.setToolTip(
-            "FX texture replacement is disabled because its AREA/VANM "
-            "structure must remain unchanged.")
+            "Replace the selected FX logical texture or VANM binding without "
+            "changing its geometry, winding or animation data.")
         self._set_polygon_object_info(lines)
 
     def _fill_polygon_inspector(self, poly_id: int | None) -> None:
@@ -5660,7 +6008,7 @@ class AssemblyWindow(QMainWindow):
         self.load_texture_button.setEnabled(
             self._editing_allowed() and bool(texture_selection.groups))
         self.load_texture_button.setToolTip(
-            "Replace each compatible static ILBM material block once. "
+            "Replace one compatible logical ILBM or VANM material binding. "
             f"{len(texture_selection.skipped)} incompatible selected "
             "polygon(s) will be left unchanged.")
 
@@ -5672,11 +6020,9 @@ class AssemblyWindow(QMainWindow):
             return
 
         texture_names = []
-        override = self.viewport.polygon_texture_override(
-            obj.owner_path, poly_id)
         for ref in self._mapping_index.refs.get(poly_id, []):
             block = ref.block
-            tex = override or (block.texture.name if block.texture else "-")
+            tex = block.texture.name if block.texture else "-"
             texture_names.append(tex)
             lines.append(
                 f"block #{ref.block_index} | texture: {tex} | "
@@ -5702,11 +6048,25 @@ class AssemblyWindow(QMainWindow):
                 img = family.textures.get(anm.bitmap_names[0])
         if img is None or not img.has_body:
             return None
-        rgba = img.to_rgba_bytes(
-            family.external_palette if not img.palette else None, "chroma"
+        external_palette = (
+            family.external_palette if not img.palette else None)
+        cache_key = (
+            id(family),
+            id(img),
+            id(external_palette),
+            str(tex_name).casefold(),
         )
-        return QImage(rgba, img.width, img.height, img.width * 4,
-                      QImage.Format.Format_RGBA8888).copy()
+        cached = self._texture_qimage_cache.get(cache_key)
+        if cached is not None:
+            return QImage(cached)
+        rgba = img.to_rgba_bytes(
+            external_palette, "chroma"
+        )
+        cached = QImage(
+            rgba, img.width, img.height, img.width * 4,
+            QImage.Format.Format_RGBA8888).copy()
+        self._texture_qimage_cache[cache_key] = cached
+        return QImage(cached)
 
     def _draw_uv_overlay(self, tex_name: str, uvs: list, poly_id: int,
                          extra_groups: list | None = None) -> None:
@@ -5750,6 +6110,19 @@ class AssemblyWindow(QMainWindow):
 
     # -- Model and Texture Editor -------------------------------------------------
 
+    def _apply_transform_mode_colors(self) -> None:
+        colors = {
+            "move": ("#8f2530", "#ef3f50"),
+            "rotate": ("#244f99", "#4b86ff"),
+            "scale": ("#28783f", "#43c96c"),
+        }
+        for mode, button in self.transform_mode_buttons.items():
+            base, border = colors[mode]
+            button.setStyleSheet(
+                "QPushButton:checked {"
+                f"background: {base}; border: 2px solid {border};"
+                "color: white; font-weight: bold; }")
+
     def _set_transform_mode(self, mode: str) -> None:
         mode = str(mode).lower()
         if mode not in ("move", "rotate", "scale"):
@@ -5765,6 +6138,7 @@ class AssemblyWindow(QMainWindow):
             button.setChecked(name == mode)
             button.blockSignals(False)
         self.model_gizmo.set_mode(mode)
+        self._apply_transform_mode_colors()
         settings = {
             "move": {
                 "label": "Move step",
@@ -5824,6 +6198,7 @@ class AssemblyWindow(QMainWindow):
             slider.setValue(round(spin.value() * 10.0))
         slider.setToolTip(settings["tip"])
         slider.blockSignals(False)
+        self.viewport.set_direct_transform(mode, spin.value())
 
     def _begin_gizmo_nudge(self, direction) -> None:
         if not self._editing_allowed():
@@ -5863,6 +6238,8 @@ class AssemblyWindow(QMainWindow):
         spin.setValue(step)
         spin.blockSignals(False)
         self._transform_steps[self._transform_mode] = float(spin.value())
+        self.viewport.set_direct_transform(
+            self._transform_mode, spin.value())
 
     def _set_gizmo_slider_from_intensity(self, value: float) -> None:
         slider = getattr(self, "gizmo_intensity_slider", None)
@@ -5875,6 +6252,8 @@ class AssemblyWindow(QMainWindow):
             slider.setValue(round(float(value) * 10.0))
         slider.blockSignals(False)
         self._transform_steps[self._transform_mode] = float(value)
+        self.viewport.set_direct_transform(
+            self._transform_mode, value)
 
     def _apply_gizmo_nudge(self, direction) -> None:
         # ModelSpaceGizmo is normally disabled in View Mode, but guard the
@@ -5911,7 +6290,7 @@ class AssemblyWindow(QMainWindow):
             element_polys = set(element.poly_ids)
             if not (selected & element_polys):
                 continue
-            if element.shared_state not in ("exclusive", "bilateral") \
+            if element.shared_state == "invalid" \
                     or (element.bilateral
                         and not element_polys.issubset(selected)):
                 unsafe.update(selected & element_polys)
@@ -6067,10 +6446,9 @@ class AssemblyWindow(QMainWindow):
             mixed_reason = self._mixed_fx_selection_reason(element)
             if mixed_reason:
                 return mixed_reason
-            if not element.editable:
+            if element.shared_state == "invalid":
                 return (
-                    f"{element.fx_name} is {element.shared_state} and "
-                    "is read-only")
+                    f"{element.fx_name} is structurally invalid")
             try:
                 build_fx_element_clipboard(
                     fam_obj, element,
@@ -6340,7 +6718,7 @@ class AssemblyWindow(QMainWindow):
             return False
         if self.viewport.paste_preview_active:
             self.viewport.cancel_paste_preview()
-        keep_global_edit = self.global_edit_button.isChecked()
+        keep_global_edit = self.edit_toggle_action.isChecked()
         if self.viewport.is_edit_mode:
             self.viewport.blockSignals(True)
             self.viewport.exit_edit_mode()
@@ -6369,13 +6747,19 @@ class AssemblyWindow(QMainWindow):
         self.viewport.set_selected_polygon(self._selected_poly)
         self.viewport.set_highlight_polys(self._selected_polys)
         self._sync_poly_id_control()
-        if keep_global_edit and not self.global_edit_button.isChecked():
-            self.global_edit_button.blockSignals(True)
-            self.global_edit_button.setChecked(True)
-            self.global_edit_button.blockSignals(False)
+        if keep_global_edit and not self.edit_toggle_action.isChecked():
+            self.edit_toggle_action.blockSignals(True)
+            self.edit_toggle_action.setChecked(True)
+            self.edit_toggle_action.blockSignals(False)
         if state["edit_active"] and keep_global_edit:
-            self.viewport.enter_edit_mode_with_vertices(
-                owner, state["selected_vertices"], pick_polygons=True)
+            selected_vertices = state["selected_vertices"]
+            if selected_vertices:
+                self.viewport.enter_edit_mode_with_vertices(
+                    owner, selected_vertices, pick_polygons=True)
+            else:
+                self.viewport.enter_edit_mode(owner)
+                self.viewport.configure_edit_interaction(
+                    selected_only=False, pick_polygons=True)
             session = self.viewport.edit_session
             if session is not None:
                 session._undo.clear()
@@ -6561,9 +6945,9 @@ class AssemblyWindow(QMainWindow):
         mixed_reason = self._mixed_fx_selection_reason(element)
         if mixed_reason:
             return mixed_reason
-        if element is not None and not element.editable:
+        if element is not None and element.shared_state == "invalid":
             return (
-                f"{element.fx_name} is {element.shared_state} and is read-only")
+                f"{element.fx_name} is structurally invalid")
         selected = (
             set(element.poly_ids) if element is not None
             else self._resolved_geometry_polys())
@@ -6571,6 +6955,8 @@ class AssemblyWindow(QMainWindow):
             return "select one or more complete polygons first"
         if any(key[0] == owner for key in self._uv_original):
             return "save or reset pending UV edits before changing topology"
+        if self._owner_vanm_uv_keys(owner):
+            return "save or reset pending VANM UV edits before changing topology"
         if any(key[0] == owner for key in self._texture_original):
             return (
                 "save or reset pending material previews before changing "
@@ -6886,7 +7272,10 @@ class AssemblyWindow(QMainWindow):
         session = self.viewport.edit_session
         active = session is not None
         mode_text = "View Mode" if active else "Edit Mode"
-        menu.addAction(mode_text, self._toggle_global_edit_mode)
+        menu.addAction(
+            mode_text,
+            lambda: self.edit_toggle_action.setChecked(
+                not self.edit_toggle_action.isChecked()))
         menu.addSeparator()
         editing = self._editing_allowed()
         undo = menu.addAction("Undo", self._undo_edit)
@@ -6983,23 +7372,37 @@ class AssemblyWindow(QMainWindow):
         if model is not None:
             self._geom_original[owner] = list(model.points)
 
-    def _toggle_global_edit_mode(self, _checked=False) -> None:
-        self.global_edit_button.setChecked(
-            not self.global_edit_button.isChecked())
-
     def _show_model_editor(self) -> None:
         if hasattr(self, "_right_tabs") and hasattr(self, "_editor_tabs"):
             self._right_tabs.setCurrentWidget(self._editor_tabs)
             self._editor_tabs.setCurrentWidget(self._model_editor_panel)
+
+    def _show_mapping_repair(self) -> None:
+        """Open the existing repair panel as one shared-state tool window."""
+
+        self._show_model_editor()
+        if self._mapping_dialog is None:
+            dialog = QDialog(self)
+            dialog.setWindowTitle("Mapping Repair")
+            dialog.resize(520, 680)
+            layout = QVBoxLayout(dialog)
+            layout.setContentsMargins(4, 4, 4, 4)
+            layout.addWidget(self._mapping_panel)
+            self._mapping_dialog = dialog
+        self._update_mapping_diagnostics_summary()
+        self._update_repair_buttons()
+        self._mapping_dialog.show()
+        self._mapping_dialog.raise_()
+        self._mapping_dialog.activateWindow()
 
     def _set_global_edit_mode(self, enabled: bool) -> None:
         if enabled:
             self._remember_geometry_original(self._selected_owner)
             self._sync_editor_context()
             if not self.viewport.is_edit_mode:
-                self.global_edit_button.blockSignals(True)
-                self.global_edit_button.setChecked(False)
-                self.global_edit_button.blockSignals(False)
+                self.edit_toggle_action.blockSignals(True)
+                self.edit_toggle_action.setChecked(False)
+                self.edit_toggle_action.blockSignals(False)
                 return
             self.viewport.setFocus()
         else:
@@ -7011,12 +7414,14 @@ class AssemblyWindow(QMainWindow):
             self._clear_model_selection()
 
     def _on_edit_mode_toggled(self, active: bool) -> None:
-        button = getattr(self, "global_edit_button", None)
+        button = getattr(self, "edit_toggle_action", None)
         if button is not None and button.isChecked() != active:
             button.blockSignals(True)
             button.setChecked(active)
             button.blockSignals(False)
         if active:
+            if self._active_editor_panel() is not self._model_editor_panel:
+                self._show_model_editor()
             # The viewport's central Edit Mode badge and the Tab shortcut can
             # enter Edit Mode directly. Reapply the same polygon-picking
             # interaction configured by the main switch so all entry paths
@@ -7036,7 +7441,6 @@ class AssemblyWindow(QMainWindow):
         self.file_menu.setEnabled(not active)
         self.asset_tree.setEnabled(not active)
         self.edit_toggle_action.setEnabled(not active)
-        self.global_edit_button.setEnabled(not active)
         self.toolbar_view_preset_combo.setEnabled(not active)
         self.edit_reset_action.setEnabled(
             not active and self.edit_reset_action.isEnabled())
@@ -7048,6 +7452,10 @@ class AssemblyWindow(QMainWindow):
         active = session is not None
         editing = self._editing_allowed()
         paste_preview = self.viewport.paste_preview_active
+        copy_reason = self._copy_geometry_reason()
+        delete_reason = self._delete_geometry_reason()
+        can_copy = not copy_reason
+        can_delete = not delete_reason
         if hasattr(self, "edit_toggle_action"):
             self.edit_toggle_action.setText(
                 "View Mode" if active else "Edit Mode")
@@ -7056,6 +7464,11 @@ class AssemblyWindow(QMainWindow):
             action = getattr(self, name, None)
             if action is not None:
                 action.setEnabled(active and not paste_preview)
+        for name in ("poly_select_all_button", "poly_deselect_all_button"):
+            button = getattr(self, name, None)
+            if button is not None:
+                button.setEnabled(
+                    editing and active and not paste_preview)
         if hasattr(self, "edit_undo_action"):
             self.edit_undo_action.setEnabled(
                 editing and bool(self._edit_undo_stack)
@@ -7078,7 +7491,7 @@ class AssemblyWindow(QMainWindow):
             f"{'VANM ' if active_fx.source_kind == 'VANM' else ''}Element"
             if active_fx is not None else "")
         if hasattr(self, "copy_geometry_action"):
-            self.copy_geometry_action.setEnabled(self.can_copy_geometry())
+            self.copy_geometry_action.setEnabled(can_copy)
             copy_tip = (
                 f"Copy {fx_descriptor} and start Paste FX Preview."
                 if active_fx is not None else
@@ -7108,7 +7521,7 @@ class AssemblyWindow(QMainWindow):
             self.paste_geometry_action.setStatusTip(paste_reason)
         if hasattr(self, "cut_geometry_action"):
             self.cut_geometry_action.setEnabled(
-                editing and self.can_cut_geometry())
+                editing and can_copy and can_delete)
             cut_tip = (
                 f"Copy and atomically remove the complete {fx_descriptor}."
                 if active_fx is not None else
@@ -7117,7 +7530,7 @@ class AssemblyWindow(QMainWindow):
             self.cut_geometry_action.setStatusTip(cut_tip)
         if hasattr(self, "delete_geometry_action"):
             self.delete_geometry_action.setEnabled(
-                editing and self.can_delete_geometry())
+                editing and can_delete)
             delete_tip = (
                 f"Delete the complete {fx_descriptor}."
                 if active_fx is not None else
@@ -7131,19 +7544,22 @@ class AssemblyWindow(QMainWindow):
             self.add_fx_button.setEnabled(can_add_fx)
         if hasattr(self, "delete_fx_button"):
             can_delete_fx = (
-                editing and self._can_delete_selected_fx_element())
+                editing
+                and self._selected_fx_element() is not None
+                and self._selected_fx_element().shared_state != "invalid"
+                and can_delete)
             self.delete_fx_button.setEnabled(can_delete_fx)
             element = self._selected_fx_element()
             if element is None:
                 delete_fx_tip = "Select an FX element from the list first."
-            elif not element.editable:
+            elif element.shared_state == "invalid":
                 delete_fx_tip = (
-                    f"{element.fx_name} is {element.shared_state} and "
+                    f"{element.fx_name} is structurally invalid and "
                     "cannot be deleted safely.")
             else:
-                reason = self._delete_geometry_reason()
                 delete_fx_tip = (
-                    f"Delete unavailable: {reason}." if reason else
+                    f"Delete unavailable: {delete_reason}."
+                    if delete_reason else
                     f"Delete the complete {element.fx_name} FX element. "
                     "The operation can be undone.")
             self.delete_fx_button.setToolTip(delete_fx_tip)
@@ -7164,17 +7580,6 @@ class AssemblyWindow(QMainWindow):
         if hasattr(self, "edit_rotate_action"):
             self.edit_rotate_action.setEnabled(
                 editing and self._family is not None and not paste_preview)
-        if hasattr(self, "primitive_actions"):
-            _context, primitive_reason = self._primitive_context()
-            enabled = editing and not primitive_reason
-            tip = (
-                "Create normal editable POO2/POL2 geometry with the current "
-                "static material and place it in the paste preview."
-                if enabled else f"Add primitive unavailable: {primitive_reason}")
-            for action in self.primitive_actions.values():
-                action.setEnabled(enabled)
-                action.setToolTip(tip)
-                action.setStatusTip(tip)
         if hasattr(self, "load_texture_button"):
             classification = (
                 classify_texture_assignment(
@@ -7204,7 +7609,8 @@ class AssemblyWindow(QMainWindow):
             and (
                 owner in self._geom_dirty
                 or any(key[0] == owner for key in self._texture_original)
-                or any(key[0] == owner for key in self._uv_original)))
+                or any(key[0] == owner for key in self._uv_original)
+                or bool(self._owner_vanm_uv_keys(owner))))
         reset_action = getattr(self, "edit_reset_action", None)
         if reset_action is not None:
             reset_action.setEnabled(can_reset)
@@ -7259,27 +7665,129 @@ class AssemblyWindow(QMainWindow):
         return applied
 
     def _apply_texture_history(self, snapshot: dict) -> bool:
-        restore = {}
+        resolved = []
+        affected = set()
         for key, target in snapshot.items():
-            current = self.viewport.polygon_texture_override(*key)
-            if key not in self._texture_original and current != target:
-                self._texture_original[key] = current
-            original = self._texture_original.get(key)
-            restore[key] = target
-            if target == original:
-                self._texture_original.pop(key, None)
-        self.viewport.restore_polygon_texture_overrides(restore)
+            owner, block_index, binding_slot = key
+            fam_obj = self._owner_to_obj.get(owner)
+            if fam_obj is None or not (
+                    0 <= block_index < len(fam_obj.base_object.ades)):
+                return False
+            block = fam_obj.base_object.ades[block_index]
+            if binding_slot not in ("texture", "tracy_texture"):
+                return False
+            texture = getattr(block, binding_slot)
+            if texture is None:
+                return False
+            current = texture.name
+            resolved.append((key, texture, current, str(target)))
+            affected.add(owner)
+        tracker_before = dict(self._texture_original)
+        try:
+            for key, texture, current, target in resolved:
+                if key not in self._texture_original \
+                        and current.casefold() != target.casefold():
+                    self._texture_original[key] = current
+                texture.name = target
+                original = self._texture_original.get(key)
+                if original is not None \
+                        and target.casefold() == original.casefold():
+                    self._texture_original.pop(key, None)
+            for owner in affected:
+                fam_obj = self._owner_to_obj.get(owner)
+                if fam_obj is not None and self._family is not None:
+                    rebuild_materials(fam_obj, self._family)
+        except Exception:
+            for _key, texture, current, _target in resolved:
+                texture.name = current
+            self._texture_original = tracker_before
+            for owner in affected:
+                fam_obj = self._owner_to_obj.get(owner)
+                if fam_obj is not None and self._family is not None:
+                    try:
+                        rebuild_materials(fam_obj, self._family)
+                    except Exception:
+                        pass
+            return False
+        self.viewport.refresh_family_materials()
+        self._refresh_fx_elements()
         return True
+
+    def _animation_for_name(self, name: str):
+        if self._family is None:
+            return None
+        return next((
+            (canonical, animation)
+            for canonical, animation in self._family.animations.items()
+            if canonical.casefold() == str(name).casefold()
+        ), None)
+
+    def _animation_uv_writable(self, name: str, group_index: int) -> bool:
+        entry = self._animation_for_name(name)
+        if entry is None:
+            return False
+        animation = entry[1]
+        if not (0 <= int(group_index) < len(animation.texcoord_groups)):
+            return False
+        try:
+            export_anm_bytes(animation)
+        except AnmParseError:
+            return False
+        return True
+
+    def _owner_animation_names(self, owner: str | None) -> set[str]:
+        fam_obj = self._owner_to_obj.get(owner) if owner else None
+        if fam_obj is None:
+            return set()
+        names = set()
+        for block in fam_obj.base_object.ades:
+            texture = block.texture
+            if texture is None or texture.kind != "bmpanim":
+                continue
+            entry = self._animation_for_name(texture.name)
+            if entry is not None:
+                names.add(entry[0].casefold())
+        return names
+
+    def _owner_vanm_uv_keys(self, owner: str | None):
+        names = self._owner_animation_names(owner)
+        return {
+            key for key in self._vanm_uv_original
+            if key[0].casefold() in names}
 
     def _uv_storage(self, key):
         owner, block_index, atts_index = key
+        if owner == "@VANM":
+            entry = self._animation_for_name(block_index)
+            if entry is None:
+                return None
+            canonical, animation = entry
+            group_index = int(atts_index)
+            if not (0 <= group_index < len(animation.texcoord_groups)):
+                return None
+            return "vanm", canonical, animation, group_index
         fam_obj = self._owner_to_obj.get(owner)
         if fam_obj is None or block_index >= len(fam_obj.base_object.ades):
             return None
         block = fam_obj.base_object.ades[block_index]
         if atts_index >= len(block.olpl):
             return None
-        return fam_obj, block, atts_index
+        return "olpl", fam_obj, block, atts_index
+
+    @staticmethod
+    def _uv_storage_points(storage):
+        kind, _owner, container, index = storage
+        groups = (
+            container.texcoord_groups if kind == "vanm"
+            else container.olpl)
+        return [tuple(uv) for uv in groups[index]]
+
+    def _uv_original_tracker(self, key):
+        if key[0] == "@VANM":
+            entry = self._animation_for_name(key[1])
+            canonical = entry[0] if entry is not None else str(key[1])
+            return self._vanm_uv_original, (canonical, int(key[2]))
+        return self._uv_original, key
 
     def _apply_uv_histories(self, snapshot: dict,
                             *, refresh: bool = True) -> bool:
@@ -7291,8 +7799,7 @@ class AssemblyWindow(QMainWindow):
             storage = self._uv_storage(key)
             if storage is None:
                 return False
-            _fam_obj, block, atts_index = storage
-            current = [tuple(uv) for uv in block.olpl[atts_index]]
+            current = self._uv_storage_points(storage)
             updated = [tuple(uv) for uv in target]
             if len(updated) != len(current) or any(
                     len(uv) != 2
@@ -7302,29 +7809,30 @@ class AssemblyWindow(QMainWindow):
             resolved[key] = updated
             before[key] = current
 
-        dirty_before = {
-            key: (
-                key in self._uv_original,
-                copy.deepcopy(self._uv_original.get(key)),
-            )
-            for key in resolved
-        }
+        dirty_before = {}
+        for key in resolved:
+            tracker, tracked_key = self._uv_original_tracker(key)
+            dirty_before[key] = (
+                tracker, tracked_key, tracked_key in tracker,
+                copy.deepcopy(tracker.get(tracked_key)))
         try:
             for key, updated in resolved.items():
                 current = before[key]
-                if key not in self._uv_original and current != updated:
-                    self._uv_original[key] = current
+                tracker, tracked_key = self._uv_original_tracker(key)
+                if tracked_key not in tracker and current != updated:
+                    tracker[tracked_key] = current
                 self._restore_uv(key, updated)
-                if self._uv_original.get(key) == updated:
-                    self._uv_original.pop(key, None)
+                if tracker.get(tracked_key) == updated:
+                    tracker.pop(tracked_key, None)
         except Exception:
             for key, current in before.items():
                 self._restore_uv(key, current)
-            for key, (existed, value) in dirty_before.items():
+            for _key, (tracker, tracked_key, existed, value) \
+                    in dirty_before.items():
                 if existed:
-                    self._uv_original[key] = value
+                    tracker[tracked_key] = value
                 else:
-                    self._uv_original.pop(key, None)
+                    tracker.pop(tracked_key, None)
             return False
         if refresh:
             self.viewport.refresh_family_materials()
@@ -7375,6 +7883,9 @@ class AssemblyWindow(QMainWindow):
                         target["textures"]) and applied
                 for key, uvs in target.get("uvs", {}).items():
                     applied = self._apply_uv_history(key, uvs) and applied
+                for key, uvs in target.get("vanm_uvs", {}).items():
+                    applied = self._apply_uv_history(
+                        ("@VANM", key[0], key[1]), uvs) and applied
             else:
                 applied = False
         finally:
@@ -7438,7 +7949,8 @@ class AssemblyWindow(QMainWindow):
 
         model_dirty = bool(
             self._geom_dirty or self._texture_original
-            or self._uv_original or self._pending_repairs)
+            or self._uv_original or self._vanm_uv_original
+            or self._pending_repairs)
         vp_dirty = self._has_unsaved_vp_changes()
         if not model_dirty and not vp_dirty:
             return True
@@ -7487,34 +7999,37 @@ class AssemblyWindow(QMainWindow):
             relative = relative.with_suffix(".SKLT")
         return relative
 
+    @staticmethod
+    def _bundle_animation_relative_path(name: str) -> Path:
+        logical = str(name).replace("\\", "/")
+        parts = []
+        for raw in logical.split("/"):
+            if not raw or raw in (".", ".."):
+                continue
+            clean = re.sub(r'[^A-Za-z0-9_. -]', "_", raw).strip()
+            if clean:
+                parts.append(clean)
+        relative = Path(*parts) if parts else Path("ANIMATION.ANM")
+        if relative.suffix.lower() not in (".anm", ".vanm"):
+            relative = relative.with_suffix(".ANM")
+        return relative
+
     def _bundle_base_edits(self, owner: str, fam_obj):
         texture_edits: list[TextureNameEdit] = []
-        for block_index, block in enumerate(fam_obj.base_object.ades):
-            texture = block.texture
-            if texture is None or not texture.name:
+        for (changed_owner, block_index, binding_slot), original in \
+                self._texture_original.items():
+            if changed_owner != owner:
                 continue
-            poly_ids = {entry.poly_id for entry in block.atts}
-            changed = {poly_id for changed_owner, poly_id
-                       in self._texture_original
-                       if changed_owner == owner and poly_id in poly_ids}
-            if not changed:
-                continue
-            desired = {
-                self.viewport.polygon_texture_override(owner, poly_id)
-                for poly_id in changed
-            }
-            desired.discard(None)
-            if not desired:
-                continue
-            if len(desired) > 1:
+            blocks = fam_obj.base_object.ades
+            if not (0 <= block_index < len(blocks)) \
+                    or binding_slot not in ("texture", "tracy_texture") \
+                    or getattr(blocks[block_index], binding_slot) is None:
                 raise MappingEditError(
-                    f"Material #{block_index} has conflicting texture "
-                    "changes. Use one texture for that material before "
-                    "saving.")
-            name = next(iter(desired))
-            if name.lower() != texture.name.lower():
+                    "an edited texture binding no longer exists")
+            name = getattr(blocks[block_index], binding_slot).name
+            if name.casefold() != original.casefold():
                 texture_edits.append(TextureNameEdit(
-                    "root", block_index, name))
+                    "root", block_index, name, binding_slot))
 
         uv_edits: list[UVEdit] = []
         for changed_owner, block_index, atts_index in self._uv_original:
@@ -7713,6 +8228,9 @@ class AssemblyWindow(QMainWindow):
         base_stem = re.sub(r'[^A-Za-z0-9_.-]', "_",
                            base_label) or "MODEL"
         base_target = output_root / f"{base_stem}.BASE"
+        vanm_count = len({
+            name for name, _group_index
+            in self._owner_vanm_uv_keys(owner)})
 
         if self._write_model_files(
                 owner, family, fam_obj, skeleton_target, base_target,
@@ -7721,7 +8239,9 @@ class AssemblyWindow(QMainWindow):
             self._last_directory = output_root
             self._sync_geometry_save_controls()
             self._notify(
-                f"Saved {skeleton_target.name} and {base_target.name}.",
+                f"Saved {skeleton_target.name}, {base_target.name}"
+                + (f" and {vanm_count} edited ANM file(s)."
+                   if vanm_count else "."),
                 9000)
 
     def _overwrite_model(self) -> None:
@@ -7754,8 +8274,33 @@ class AssemblyWindow(QMainWindow):
         skeleton_source = (Path(ref.path) if ref is not None
                            and getattr(ref, "path", None) else None)
         base_source = Path(family.base_path) if family.base_path else None
+        modified_animation_names = sorted({
+            name for name, _group_index in self._owner_vanm_uv_keys(owner)
+        }, key=str.casefold)
+        animation_exports = []
+        for name in modified_animation_names:
+            entry = self._animation_for_name(name)
+            if entry is None:
+                QMessageBox.critical(
+                    self, "Save failed - current files unchanged",
+                    f"Modified VANM {name} is no longer loaded.")
+                return False
+            canonical, animation = entry
+            animation_exports.append((
+                canonical, animation,
+                self._bundle_animation_relative_path(canonical),
+            ))
         forbidden = [path.resolve() for path in (skeleton_source, base_source)
                      if path is not None and path.exists()]
+        for canonical, _animation, _relative in animation_exports:
+            ref_entry = next((
+                value for key, value in family.animation_refs.items()
+                if key.casefold() == canonical.casefold()), None)
+            source = (
+                Path(ref_entry.path)
+                if ref_entry is not None and ref_entry.path else None)
+            if source is not None and source.exists():
+                forbidden.append(source.resolve())
         if skeleton_target.resolve() in forbidden \
                 or base_target.resolve() in forbidden:
             QMessageBox.warning(
@@ -7763,7 +8308,17 @@ class AssemblyWindow(QMainWindow):
                 "Save As cannot replace the model currently open in the "
                 "editor. Choose another folder.")
             return False
-        existing = [path for path in (skeleton_target, base_target)
+        animation_targets = [
+            base_target.parent / relative
+            for _name, _animation, relative in animation_exports]
+        if any(target.resolve() in forbidden for target in animation_targets):
+            QMessageBox.warning(
+                self, "Choose another output folder",
+                "Save As cannot replace a VANM currently open in the editor. "
+                "Choose another folder.")
+            return False
+        existing = [path for path in (
+                skeleton_target, base_target, *animation_targets)
                     if path.exists()]
         if ask_replace and existing:
             answer = QMessageBox.warning(
@@ -7778,6 +8333,7 @@ class AssemblyWindow(QMainWindow):
                 return False
 
         verified_base_bytes: bytes | None = None
+        verified_animation_bytes: dict[str, bytes] = {}
         try:
             standalone = self._bundle_base_snapshots.get(owner)
             if standalone is None:
@@ -7791,6 +8347,7 @@ class AssemblyWindow(QMainWindow):
                 temp_root = Path(temp_dir)
                 temp_skeleton = temp_root / skeleton_target.name
                 temp_base = temp_root / base_target.name
+                temp_animations = []
                 original_model = parse_sklt_bytes(
                     model.original_data, "<model-save-baseline>")
                 structural = (
@@ -7851,9 +8408,22 @@ class AssemblyWindow(QMainWindow):
                         != source_archive_digest:
                     raise MappingEditError(
                         "the read-only source BASE/SET.BAS bytes changed")
+                for canonical, animation, relative in animation_exports:
+                    data = export_anm_bytes(animation)
+                    verified = parse_anm_bytes(data, canonical)
+                    if verified.texcoord_groups != animation.texcoord_groups:
+                        raise AnmParseError(
+                            f"{canonical} failed UV round-trip verification")
+                    temp_animation = temp_root / relative
+                    temp_animation.parent.mkdir(parents=True, exist_ok=True)
+                    temp_animation.write_bytes(data)
+                    target = base_target.parent / relative
+                    temp_animations.append((temp_animation, target))
+                    verified_animation_bytes[canonical] = data
                 notes.extend(_commit_verified_files([
                     (temp_skeleton, skeleton_target),
                     (temp_base, base_target),
+                    *temp_animations,
                 ]))
         except _BundleCommitError as exc:
             title = (
@@ -7863,7 +8433,7 @@ class AssemblyWindow(QMainWindow):
             )
             QMessageBox.critical(self, title, str(exc))
             return False
-        except (MappingEditError, SkltParseError, OSError) as exc:
+        except (AnmParseError, MappingEditError, SkltParseError, OSError) as exc:
             QMessageBox.critical(
                 self, "Save failed - current files unchanged", str(exc))
             return False
@@ -7892,6 +8462,14 @@ class AssemblyWindow(QMainWindow):
             del self._uv_original[key]
         for key in [key for key in self._texture_original if key[0] == owner]:
             del self._texture_original[key]
+        for canonical, data in verified_animation_bytes.items():
+            entry = self._animation_for_name(canonical)
+            if entry is not None:
+                entry[1].original_data = data
+            for key in [
+                    key for key in self._vanm_uv_original
+                    if key[0].casefold() == canonical.casefold()]:
+                del self._vanm_uv_original[key]
         self._uv_history_before = None
 
         self._sync_geometry_save_controls()
@@ -7921,6 +8499,10 @@ class AssemblyWindow(QMainWindow):
         if len(self._uv_contexts) != 1 or self.uv_editor.loop_count() != 1:
             return "Select exactly one editable UV loop/polygon first."
         key, context = next(iter(self._uv_contexts.items()))
+        if key[0] == "@VANM":
+            return (
+                "VANM supports coordinate editing only; changing the UV "
+                "group length would invalidate its frame layout.")
         fam_obj, block, _block_index, atts_index, poly_id = context
         selected = self.uv_editor.selected_handles()
         if handle is None:
@@ -7973,12 +8555,12 @@ class AssemblyWindow(QMainWindow):
         if not selected:
             return "Select one or more edited UV handles first."
         for key, index in selected:
-            original = self._uv_original.get(key)
+            tracker, tracked_key = self._uv_original_tracker(key)
+            original = tracker.get(tracked_key)
             storage = self._uv_storage(key)
             if original is None or storage is None:
                 continue
-            _fam_obj, block, atts_index = storage
-            current = block.olpl[atts_index]
+            current = self._uv_storage_points(storage)
             if index < len(original) and index < len(current) \
                     and tuple(current[index]) != tuple(original[index]):
                 return ""
@@ -8007,6 +8589,17 @@ class AssemblyWindow(QMainWindow):
             revert_button.setEnabled(not reason)
             revert_button.setToolTip(
                 reason or "Revert only the selected edited UV handles.")
+        reset_all = getattr(self, "uv_reset_all_button", None)
+        if reset_all is not None:
+            owner = self._selected_owner
+            changed = bool(
+                self._editing_allowed() and owner is not None
+                and any(key[0] == owner for key in self._uv_original))
+            reset_all.setEnabled(changed)
+            reset_all.setToolTip(
+                "Restore every changed editable UV loop in the active model."
+                if changed else
+                "No changed editable UV loop is available to reset.")
         select_all = getattr(self, "uv_select_all_button", None)
         if select_all is not None:
             select_all.setEnabled(self.uv_editor.loop_count() > 0)
@@ -8138,7 +8731,7 @@ class AssemblyWindow(QMainWindow):
             self.viewport.set_selected_owner(owner)
             self.viewport.set_selected_polygon(poly_id)
             self.viewport.set_highlight_polys({poly_id})
-            if self.global_edit_button.isChecked():
+            if self.edit_toggle_action.isChecked():
                 self.viewport.enter_edit_mode_with_vertices(
                     owner, [selected_vertex], pick_polygons=True)
                 self.viewport.configure_edit_interaction(
@@ -8263,28 +8856,36 @@ class AssemblyWindow(QMainWindow):
                     continue
                 frame = self.viewport.current_animation_frame_data(
                     self._workbench_obj.owner_path, ref.block_index)
+                animation_group = self.viewport.current_animation_group(
+                    self._workbench_obj.owner_path, ref.block_index)
                 source_uvs = []
                 if frame is not None:
                     source_uvs = list(
                         frame[1][:len(model.polygons[selected_poly])])
                     image = frame[0]
                     message = (
-                        f"UV source: VANM current {frame[2]}. Read-only because "
-                        "the animation may be shared; structural FX edits "
-                        "preserve it.")
+                        f"UV source: VANM current {frame[2]}. Coordinate edits "
+                        "are exported as a verified ANM file by Save As.")
                 elif ref.atts_index < len(block.olpl):
                     source_uvs = list(block.olpl[ref.atts_index])
-                    message = "Animated/VANM UV data is read-only."
+                    message = "The current VANM frame group is unavailable."
                 if source_uvs:
                     key = (
-                        self._workbench_obj.owner_path,
-                        ref.block_index, ref.atts_index)
-                    context = (
-                        self._workbench_obj, block, ref.block_index,
-                        ref.atts_index, selected_poly)
-                    self._uv_contexts[key] = context
+                        ("@VANM", animation_group[0], animation_group[1])
+                        if animation_group is not None else
+                        (self._workbench_obj.owner_path,
+                         ref.block_index, ref.atts_index))
+                    editable = bool(
+                        animation_group is not None
+                        and self._animation_uv_writable(
+                            animation_group[0], animation_group[1]))
+                    if editable:
+                        self._uv_contexts[key] = (
+                            self._workbench_obj, None,
+                            animation_group[0], animation_group[1],
+                            selected_poly)
                     loops.append(UVLoop(
-                        key, selected_poly, source_uvs, False))
+                        key, selected_poly, source_uvs, editable))
                 else:
                     skipped.append((selected_poly, "VANM frame unavailable"))
                 continue
@@ -8309,16 +8910,17 @@ class AssemblyWindow(QMainWindow):
                 key, selected_poly, uvs, self._editing_allowed()))
             if image is None:
                 texture_name = (
-                    self.viewport.polygon_texture_override(
-                        self._workbench_obj.owner_path, selected_poly)
-                    or (texture.name if texture else ""))
+                    texture.name if texture else "")
                 image = (
                     self._texture_qimage(texture_name)
                     if texture_name else None)
 
         if loops:
-            first_key = loops[0].key
-            self._uv_ctx = self._uv_contexts[first_key]
+            first_key = next(
+                (loop.key for loop in loops
+                 if loop.key in self._uv_contexts), None)
+            if first_key is not None:
+                self._uv_ctx = self._uv_contexts[first_key]
         category_counts = {}
         for _skipped_poly, category in skipped:
             category_counts[category] = category_counts.get(category, 0) + 1
@@ -8334,7 +8936,8 @@ class AssemblyWindow(QMainWindow):
         elif not loops:
             if skipped and skipped[0][1] == "unmapped":
                 message = (
-                    "This polygon has no UV mapping. Use Mapping Repair first.")
+                    "This polygon has no UV mapping. Open Tools > "
+                    "Mapping Repair... first.")
             else:
                 reason = skipped[0][1] if skipped else "UV data unavailable"
                 message = f"This polygon is not editable: {reason}."
@@ -8355,8 +8958,7 @@ class AssemblyWindow(QMainWindow):
             storage = self._uv_storage(key)
             if storage is None:
                 return
-            _fam_obj, block, atts_index = storage
-            current = [tuple(uv) for uv in block.olpl[atts_index]]
+            current = self._uv_storage_points(storage)
             updated = [tuple(uv) for uv in uvs]
             if current != updated:
                 before[key] = current
@@ -8392,8 +8994,7 @@ class AssemblyWindow(QMainWindow):
             storage = self._uv_storage(key)
             if storage is None:
                 continue
-            _fam_obj, block, atts_index = storage
-            after = [tuple(uv) for uv in block.olpl[atts_index]]
+            after = self._uv_storage_points(storage)
             if list(before) != after:
                 before_snapshot[key] = list(before)
                 after_snapshot[key] = after
@@ -8415,14 +9016,17 @@ class AssemblyWindow(QMainWindow):
 
     def _restore_uv(self, key: tuple[str, int, int],
                     uvs: list[tuple[int, int]]) -> None:
-        owner, block_index, atts_index = key
-        fam_obj = self._owner_to_obj.get(owner)
-        if fam_obj is None or block_index >= len(fam_obj.base_object.ades):
-            return
-        block = fam_obj.base_object.ades[block_index]
-        if atts_index >= len(block.olpl):
+        storage = self._uv_storage(key)
+        if storage is None:
             return
         updated = [tuple(uv) for uv in uvs]
+        kind, fam_obj_or_name, container, atts_index = storage
+        if kind == "vanm":
+            container.texcoord_groups[atts_index] = updated
+            return
+        fam_obj = fam_obj_or_name
+        block = container
+        block_index = int(key[1])
         block.olpl[atts_index] = updated
         entry = block.atts[atts_index] if atts_index < len(block.atts) else None
         if block_index < len(fam_obj.materials) and entry is not None:
@@ -8442,12 +9046,12 @@ class AssemblyWindow(QMainWindow):
         before = {}
         reverted_count = 0
         for key, index in selected:
-            original = self._uv_original.get(key)
+            tracker, tracked_key = self._uv_original_tracker(key)
+            original = tracker.get(tracked_key)
             storage = self._uv_storage(key)
             if original is None or storage is None:
                 continue
-            _fam_obj, block, atts_index = storage
-            current = [tuple(uv) for uv in block.olpl[atts_index]]
+            current = self._uv_storage_points(storage)
             if not (index < len(original) and index < len(current)) \
                     or current[index] == tuple(original[index]):
                 continue
@@ -8475,13 +9079,71 @@ class AssemblyWindow(QMainWindow):
         self.statusBar().showMessage(
             f"Reverted {reverted_count} selected UV handle(s).", 4000)
 
+    def _reset_all_uvs(self) -> None:
+        if not self._require_editing("Reset All UVs"):
+            return
+        owner = self._selected_owner
+        targets = {
+            key: list(original)
+            for key, original in self._uv_original.items()
+            if key[0] == owner and self._uv_storage(key) is not None
+        }
+        targets.update({
+            ("@VANM", name, group_index): list(original)
+            for (name, group_index), original
+            in self._vanm_uv_original.items()
+            if (name, group_index) in self._owner_vanm_uv_keys(owner)
+            and self._uv_storage(
+                ("@VANM", name, group_index)) is not None
+        })
+        if not targets:
+            return
+        before = {}
+        poly_ids = set()
+        for key in targets:
+            storage = self._uv_storage(key)
+            before[key] = self._uv_storage_points(storage)
+            if storage[0] == "olpl":
+                _kind, _fam_obj, block, atts_index = storage
+                if atts_index < len(block.atts):
+                    poly_ids.add(block.atts[atts_index].poly_id)
+        if len(targets) > 1 or len(poly_ids) > 1:
+            answer = QMessageBox.warning(
+                self, "Reset all UVs?",
+                f"Restore {len(targets)} changed UV loops across "
+                f"{len(poly_ids)} polygon(s)?",
+                QMessageBox.StandardButton.Yes
+                | QMessageBox.StandardButton.No,
+                QMessageBox.StandardButton.No)
+            if answer != QMessageBox.StandardButton.Yes:
+                return
+        if not self._apply_uv_histories(targets):
+            self._notify(
+                "Reset All UVs failed; all loops were left unchanged.", 7000)
+            return
+        self._record_edit_command({
+            "kind": "uv_multi",
+            "before": before,
+            "after": targets,
+            "label": "reset all UVs",
+        })
+        self._update_uv_editor(self._selected_poly)
+        self._sync_geometry_save_controls()
+        self._update_banner()
+        self._sync_uv_add_vertex_button()
+        self._notify(
+            f"Reset {len(targets)} UV loop(s) to their loaded positions.",
+            5000)
+
     def _reset_model(self) -> None:
         if not self._require_editing("Reset Model"):
             return
         owner = self._selected_owner
         has_geometry = owner in self._geom_dirty
         has_texture = any(key[0] == owner for key in self._texture_original)
-        has_uv = any(key[0] == owner for key in self._uv_original)
+        has_uv = (
+            any(key[0] == owner for key in self._uv_original)
+            or bool(self._owner_vanm_uv_keys(owner)))
         if owner is None or not (has_geometry or has_texture or has_uv):
             return
         answer = QMessageBox.warning(
@@ -8498,6 +9160,7 @@ class AssemblyWindow(QMainWindow):
         texture_keys = [key for key in self._texture_original
                         if key[0] == owner]
         uv_keys = [key for key in self._uv_original if key[0] == owner]
+        vanm_uv_keys = self._owner_vanm_uv_keys(owner)
         before_state = {
             "topology": self._capture_topology_state(owner)
             if owner in self._topology_original else None,
@@ -8506,7 +9169,9 @@ class AssemblyWindow(QMainWindow):
                 if model is not None and owner not in self._topology_original
                 else None),
             "textures": {
-                key: self.viewport.polygon_texture_override(*key)
+                key: getattr(
+                    self._owner_to_obj[key[0]].base_object.ades[key[1]],
+                    key[2]).name
                 for key in texture_keys
             },
             "uvs": {
@@ -8514,8 +9179,13 @@ class AssemblyWindow(QMainWindow):
                           .ades[key[1]].olpl[key[2]])
                 for key in uv_keys
             },
+            "vanm_uvs": {
+                key: self._uv_storage_points(
+                    self._uv_storage(("@VANM", key[0], key[1])))
+                for key in vanm_uv_keys
+            },
         }
-        resume_edit = self.global_edit_button.isChecked()
+        resume_edit = self.edit_toggle_action.isChecked()
         if self.viewport.is_edit_mode:
             self.viewport.exit_edit_mode()
         original = self._geom_original.get(owner)
@@ -8530,14 +9200,17 @@ class AssemblyWindow(QMainWindow):
             if key[0] == owner
         }
         if texture_restore:
-            self.viewport.restore_polygon_texture_overrides(texture_restore)
-            for key in texture_restore:
-                del self._texture_original[key]
+            self._apply_texture_history(texture_restore)
         for key, uvs in list(self._uv_original.items()):
             if key[0] != owner:
                 continue
             self._restore_uv(key, uvs)
             del self._uv_original[key]
+        for key in list(vanm_uv_keys):
+            self._restore_uv(
+                ("@VANM", key[0], key[1]),
+                self._vanm_uv_original[key])
+            del self._vanm_uv_original[key]
         after_state = {
             "topology": self._capture_topology_state(owner)
             if topology_original is not None else None,
@@ -8545,11 +9218,21 @@ class AssemblyWindow(QMainWindow):
                 list(model.points)
                 if model is not None and topology_original is None
                 else None),
-            "textures": dict(texture_restore),
+            "textures": {
+                key: getattr(
+                    self._owner_to_obj[key[0]].base_object.ades[key[1]],
+                    key[2]).name
+                for key in texture_keys
+            },
             "uvs": {
                 key: list(self._owner_to_obj[key[0]].base_object
                           .ades[key[1]].olpl[key[2]])
                 for key in uv_keys
+            },
+            "vanm_uvs": {
+                key: self._uv_storage_points(
+                    self._uv_storage(("@VANM", key[0], key[1])))
+                for key in vanm_uv_keys
             },
         }
         self._geom_dirty.pop(owner, None)
@@ -8559,7 +9242,7 @@ class AssemblyWindow(QMainWindow):
         self._sync_geometry_save_controls()
         self._update_banner()
         if resume_edit:
-            self.global_edit_button.setChecked(True)
+            self.edit_toggle_action.setChecked(True)
         self._sync_editor_context()
         self._record_edit_command({
             "kind": "model_state", "owner": owner,
@@ -8580,6 +9263,14 @@ class AssemblyWindow(QMainWindow):
                 entry.archive_resource is not None and entry.decodable
             ) or entry.name.casefold() in loaded
         ]
+
+    def _available_model_animations(self) -> list[str]:
+        family = self._family
+        if family is None:
+            return []
+        return sorted(
+            family.animations,
+            key=lambda value: value.casefold())
 
     def _visual_texture_available(self, name: str) -> bool:
         family = self._family
@@ -8663,14 +9354,54 @@ class AssemblyWindow(QMainWindow):
         family.textures[resource.resource_name] = decoded
         return self._texture_qimage(resource.resource_name)
 
+    def _binding_thumbnail_for_picker(
+            self, name: str, binding_kind: str) -> QImage | None:
+        if binding_kind != "bmpanim":
+            return self._texture_thumbnail_for_picker(name)
+        family = self._family
+        if family is None:
+            return None
+        animation = next((
+            value for key, value in family.animations.items()
+            if key.casefold() == name.casefold()
+        ), None)
+        if animation is None:
+            return None
+        for bitmap_name in animation.bitmap_names:
+            image = self._texture_thumbnail_for_picker(bitmap_name)
+            if image is not None and not image.isNull():
+                return image
+        return None
+
     def _choose_model_texture(self, names: list[str],
-                              current: str) -> str | None:
+                              current: str,
+                              binding_kind: str = "ilbm") -> str | None:
         dialog = TexturePickerDialog(
-            names, current, self._texture_thumbnail_for_picker, self)
+            names, current,
+            lambda name: self._binding_thumbnail_for_picker(
+                name, binding_kind),
+            self)
         if dialog.exec() != QDialog.DialogCode.Accepted:
             self._notify("Texture selection cancelled.", 3000)
             return None
         return dialog.selected_name()
+
+    def _choose_texture_binding_group(self, groups):
+        if len(groups) == 1:
+            return groups[0]
+        labels = [
+            f"{len(group.bindings)} block(s) {group.binding_slot}: "
+            f"{group.binding_name} "
+            f"({group.binding_kind}, {len(group.affected_polys)} polygons)"
+            for group in groups
+        ]
+        selected, accepted = QInputDialog.getItem(
+            self, "Choose texture binding",
+            "Replace which logical material binding?",
+            labels, 0, False)
+        if not accepted:
+            return None
+        return groups[labels.index(selected)]
 
     def _load_model_texture(self) -> None:
         if not self._require_editing("Load Texture"):
@@ -8685,93 +9416,107 @@ class AssemblyWindow(QMainWindow):
             }
         if not requested and self._selected_poly is not None:
             requested = {self._selected_poly}
-        classification = classify_texture_assignment(
+        selected_classification = classify_texture_assignment(
             self._mapping_index, requested)
-        if not classification.groups:
+        if not selected_classification.groups:
             reasons = sorted({reason for _poly, reason
-                              in classification.skipped})
+                              in selected_classification.skipped})
             QMessageBox.information(
                 self, "Texture replacement unavailable",
-                "No selected polygon belongs to an unambiguous static ILBM "
-                "material. No texture was changed."
+                "No selected polygon belongs to an unambiguous ILBM or VANM "
+                "material binding. No texture was changed."
                 + (f"\n\nSkipped: {', '.join(reasons)}." if reasons else ""))
             return
-        names = self._available_model_textures()
+        group = self._choose_texture_binding_group(
+            list(selected_classification.groups))
+        if group is None:
+            self._notify("Texture binding selection cancelled.", 3000)
+            return
+        names = (
+            self._available_model_animations()
+            if group.binding_kind == "bmpanim"
+            else self._available_model_textures())
         if not names:
             QMessageBox.information(
                 self, "No textures available",
-                "No decoded ILBM texture is available in this family or SET.BAS.")
+                "No compatible decoded texture or animation binding is "
+                "available in this family or SET.BAS.")
             return
         owner = self._workbench_obj.owner_path
-        first_group = classification.groups[0]
-        first_poly = min(first_group.affected_polys)
-        current = (
-            self.viewport.polygon_texture_override(owner, first_poly)
-            or first_group.block.texture.name)
-        chosen = self._choose_model_texture(names, current)
+        current = group.binding_name
+        chosen = self._choose_model_texture(
+            names, current, group.binding_kind)
         if not chosen:
             return
-        loaded_name = self._ensure_model_texture_loaded(chosen)
+        if group.binding_kind == "bmpanim":
+            loaded_name = next((
+                name for name in self._family.animations
+                if name.casefold() == chosen.casefold()
+            ), None)
+        else:
+            loaded_name = self._ensure_model_texture_loaded(chosen)
         if loaded_name is None:
             QMessageBox.warning(
                 self, "Texture load failed",
                 f"{chosen} could not be decoded from the loaded sources.")
             return
-        applicable = set(classification.affected_polys)
-        before_overrides = {
-            (owner, poly_id): self.viewport.polygon_texture_override(
-                owner, poly_id)
-            for poly_id in applicable
+        whole_model = classify_texture_assignment(
+            self._mapping_index,
+            range(self._mapping_index.poly_count))
+        target_groups = [
+            candidate for candidate in whole_model.groups
+            if candidate.binding_kind == group.binding_kind
+            and candidate.binding_slot == group.binding_slot
+        ]
+        bindings = {
+            (binding.block_index, binding.binding_slot): binding
+            for candidate in target_groups
+            for binding in candidate.bindings
         }
-        restore = {}
-        apply = set()
-        for poly_id in applicable:
-            key = (owner, poly_id)
-            if key not in self._texture_original:
-                self._texture_original[key] = (
-                    self.viewport.polygon_texture_override(owner, poly_id))
-            original_override = self._texture_original[key]
-            poly_refs = self._mapping_index.refs.get(poly_id, [])
-            base_name = next(
-                (item.block.texture.name for item in poly_refs
-                 if item.block.texture is not None), "")
-            original_name = original_override or base_name
-            if loaded_name.lower() == original_name.lower():
-                restore[key] = original_override
-                del self._texture_original[key]
-            else:
-                apply.add(poly_id)
-        if restore:
-            self.viewport.restore_polygon_texture_overrides(restore)
-        if apply:
-            self.viewport.set_polygon_texture_overrides(
-                owner, apply, loaded_name)
-        self._selected_polys = set(requested)
+        affected_polys = {
+            poly_id for candidate in target_groups
+            for poly_id in candidate.affected_polys
+        }
+        before = {
+            (owner, binding.block_index, binding.binding_slot):
+            getattr(binding.block, binding.binding_slot).name
+            for binding in bindings.values()
+        }
+        changes = {
+            key: loaded_name for key, old_name in before.items()
+            if old_name.casefold() != loaded_name.casefold()
+        }
+        if not changes:
+            self._notify(
+                "Every compatible model section already uses that resource.",
+                         3500)
+            return
+        if not self._apply_texture_history(changes):
+            self._notify(
+                "Texture replacement failed; the binding was left unchanged.",
+                7000)
+            return
+        after = {
+            key: getattr(
+                self._owner_to_obj[key[0]].base_object.ades[key[1]],
+                key[2]).name
+            for key in before
+        }
+        self._selected_polys = set(group.selected_polys)
         self.viewport.set_highlight_polys(self._selected_polys)
-        after_overrides = {
-            key: self.viewport.polygon_texture_override(*key)
-            for key in before_overrides
-        }
-        if after_overrides != before_overrides:
-            self._record_edit_command({
-                "kind": "texture",
-                "before": before_overrides,
-                "after": after_overrides,
-                "label": "texture assignment",
-            })
+        self._record_edit_command({
+            "kind": "texture",
+            "before": before,
+            "after": after,
+            "label": "texture binding assignment",
+        })
         self._fill_polygon_inspector(self._selected_poly)
         self._sync_geometry_save_controls()
         self._update_banner()
         self._sync_editor_context()
-        changed_blocks = sum(
-            any(before_overrides[(owner, poly_id)]
-                != after_overrides[(owner, poly_id)]
-                for poly_id in group.affected_polys)
-            for group in classification.groups)
-        changed_polygons = sum(
-            before_overrides[key] != after_overrides[key]
-            for key in before_overrides)
-        skipped = len(classification.skipped)
+        changed_blocks = len(changes)
+        changed_polygons = len(affected_polys)
+        skipped = len(whole_model.skipped)
         message = (
             f"{changed_blocks} material block(s) changed, "
             f"{changed_polygons} polygon(s) affected, "
@@ -8782,7 +9527,9 @@ class AssemblyWindow(QMainWindow):
     # -- repair -----------------------------------------------------------------
 
     def _update_repair_buttons(self) -> None:
-        editing = self._editing_allowed()
+        editing = (
+            self._editing_allowed()
+            and not self.viewport.paste_preview_active)
         can_plan = (
             editing
             and self._selected_poly is not None
@@ -8835,6 +9582,11 @@ class AssemblyWindow(QMainWindow):
 
     def _apply_repair_in_memory(self) -> None:
         if not self._require_editing("Apply Mapping Repair"):
+            return
+        if self.viewport.paste_preview_active:
+            self._notify(
+                "Finish or cancel Paste Geometry before applying a mapping "
+                "repair.", 6000)
             return
         plan = self._repair_plan
         if plan is None or self._workbench_obj is None:
@@ -8924,10 +9676,9 @@ class AssemblyWindow(QMainWindow):
         )
 
     def _set_family(self, family: AssetFamily) -> None:
-        edit_button = getattr(self, "global_edit_button", None)
-        keep_global_edit = bool(edit_button and edit_button.isChecked())
         self._cancel_live_scale()
         self._texture_preview_cache.clear()
+        self._texture_qimage_cache.clear()
         if family is not self._family:
             self._bundle_targets.clear()
             self._bundle_base_snapshots.clear()
@@ -8977,7 +9728,10 @@ class AssemblyWindow(QMainWindow):
         self._uv_ctx = None
         self._uv_contexts = {}
         self._uv_original = {}
+        self._vanm_uv_original = {}
         self._texture_original = {}
+        self._tab_edit_selection = {}
+        self._fx_preview_cache.clear()
         self._edit_undo_stack.clear()
         self._edit_redo_stack.clear()
         self._uv_history_before = None
@@ -8995,16 +9749,8 @@ class AssemblyWindow(QMainWindow):
         self._sync_animation_controls()
 
         self._update_banner()
-        # Loading a different BASE/model rebuilds the viewport and therefore
-        # briefly destroys its GeometryEditSession.  Preserve the user's
-        # explicit global mode across that rebuild instead of silently falling
-        # back to View Mode.  View Mode is preserved in the same way.
-        if edit_button is not None \
-                and edit_button.isChecked() != keep_global_edit:
-            edit_button.blockSignals(True)
-            edit_button.setChecked(keep_global_edit)
-            edit_button.blockSignals(False)
-        self._sync_editor_context()
+        # Reapply the active main-tab contract after the viewport rebuild.
+        self._sync_tab_edit_mode()
         self._update_reset_camera_action()
         status, _details = self._completeness(family)
         self._log(f"loaded {family.base_path}: {status}")

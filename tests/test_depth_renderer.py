@@ -1,5 +1,6 @@
 import os
 import unittest
+from unittest.mock import patch
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
@@ -7,12 +8,23 @@ from PySide6.QtCore import QPointF, QRectF
 from PySide6.QtGui import QColor, QImage, QPainter, QTransform
 from PySide6.QtWidgets import QApplication
 
-from assembly_viewer import AssetViewport, ViewFace, ViewMaterial
+from asset_family import AssetFamily, FamilyObject
+from assembly_viewer import (
+    AssetViewport,
+    ViewFace,
+    ViewMaterial,
+    _projective_image_transform_is_bounded,
+    resolve_visible_edit_vertices,
+)
+from base_parser import BaseObject
 from depth_renderer import (
     CameraPolygon,
+    clip_camera_polygon_near,
     order_camera_polygons,
+    order_camera_polygons_fast,
     projective_texture_coefficients,
 )
+from sklt_parser import SkltModel
 
 
 def _solid_image(color):
@@ -25,6 +37,32 @@ class DepthRendererTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         cls.app = QApplication.instance() or QApplication([])
+
+    @staticmethod
+    def _editable_triangle_viewport():
+        model = SkltModel(
+            points=[(-1.0, 1.0, 0.0), (-1.0, -1.0, 0.0),
+                    (1.0, -1.0, 0.0)],
+            polygons=[[0, 2, 1]],
+        )
+        obj = FamilyObject(BaseObject(), skeleton=model)
+        family = AssetFamily(root_object=obj)
+        viewport = AssetViewport()
+        viewport._show_grid = False
+        viewport._show_axes = False
+        viewport.load_family(family, primary_owner="root")
+        return viewport
+
+    @staticmethod
+    def _render(viewport):
+        output = QImage(160, 160, QImage.Format.Format_ARGB32)
+        output.fill(QColor(0, 0, 0, 0))
+        painter = QPainter(output)
+        viewport._render_scene(
+            painter, QRectF(0, 0, 160, 160), None, False,
+            viewport._camera_state(), allow_transparent_background=True)
+        painter.end()
+        return output
 
     def test_bsp_splits_intersecting_polygons(self):
         flat = CameraPolygon(
@@ -59,6 +97,83 @@ class DepthRendererTests(unittest.TestCase):
         }
         self.assertGreaterEqual(max(piece_counts.values()), 2)
 
+    def test_fast_order_preserves_polygons_without_bsp_splitting(self):
+        polygons = [
+            CameraPolygon(
+                ((0.0, 0.0, depth), (1.0, 0.0, depth),
+                 (0.0, 1.0, depth)),
+                ((0.0, 0.0),) * 3, str(depth), index)
+            for index, depth in enumerate((1.0, -1.0, 0.0))
+        ]
+        ordered = order_camera_polygons_fast(polygons)
+        self.assertEqual([polygon.mean_z() for polygon in ordered],
+                         [-1.0, 0.0, 1.0])
+        self.assertEqual(len(ordered), len(polygons))
+
+    def test_play_and_edit_use_fast_order_while_static_view_stays_exact(self):
+        viewport = self._editable_triangle_viewport()
+        try:
+            with patch(
+                    "assembly_viewer.order_camera_polygons",
+                    wraps=order_camera_polygons) as exact, patch(
+                    "assembly_viewer.order_camera_polygons_fast",
+                    wraps=order_camera_polygons_fast) as fast:
+                self._render(viewport)
+                self.assertEqual(exact.call_count, 1)
+                self.assertEqual(fast.call_count, 0)
+
+                viewport._anim_playing = True
+                self._render(viewport)
+                self.assertEqual(fast.call_count, 1)
+
+                viewport._anim_playing = False
+                self.assertTrue(viewport.enter_edit_mode("root"))
+                self._render(viewport)
+                self.assertEqual(fast.call_count, 2)
+                self.assertEqual(exact.call_count, 1)
+        finally:
+            viewport.close()
+
+    def test_edit_visibility_is_reused_until_camera_or_committed_geometry_changes(
+            self):
+        viewport = self._editable_triangle_viewport()
+        try:
+            self.assertTrue(viewport.enter_edit_mode("root"))
+            with patch(
+                    "assembly_viewer.resolve_visible_edit_vertices",
+                    wraps=resolve_visible_edit_vertices) as resolve:
+                self._render(viewport)
+                self._render(viewport)
+                self.assertEqual(resolve.call_count, 1)
+
+                viewport._yaw += 1.0
+                self._render(viewport)
+                self.assertEqual(resolve.call_count, 2)
+
+                viewport._refresh_edit_faces(
+                    invalidate_visibility=False)
+                self._render(viewport)
+                self.assertEqual(resolve.call_count, 2)
+
+                viewport._refresh_edit_faces()
+                self._render(viewport)
+                self.assertEqual(resolve.call_count, 3)
+        finally:
+            viewport.close()
+
+    def test_near_plane_clips_vertices_and_interpolates_uvs(self):
+        polygon = CameraPolygon(
+            ((-1.0, 0.0, 3.0), (1.0, 0.0, 3.0),
+             (0.0, 1.0, 4.2)),
+            ((0.0, 0.0), (100.0, 0.0), (50.0, 100.0)),
+            "near",
+        )
+        clipped = clip_camera_polygon_near(polygon)
+        self.assertIsNotNone(clipped)
+        self.assertTrue(all(vertex[2] <= 3.8 + 1e-7
+                            for vertex in clipped.vertices))
+        self.assertEqual(len(clipped.vertices), len(clipped.attributes))
+
     def test_projective_transform_maps_vertices_and_is_not_affine(self):
         source = ((0.0, 0.0), (100.0, 0.0), (0.0, 100.0))
         screen = ((20.0, 20.0), (220.0, 35.0), (30.0, 230.0))
@@ -84,6 +199,50 @@ class DepthRendererTests(unittest.TestCase):
             + abs(mapped_center.y() - affine_center[1]),
             5.0,
         )
+
+    def test_unbounded_projective_image_uses_bounded_fallback_predicate(self):
+        self.assertFalse(_projective_image_transform_is_bounded(
+            (1.0, 0.0, 1.0, 0.0, 1.0, 0.0, 0.0, 0.0, -50.0),
+            100, 100))
+        self.assertTrue(_projective_image_transform_is_bounded(
+            (1.0, 0.0, 0.01, 0.0, 1.0, 0.01, 0.0, 0.0, 5.0),
+            100, 100))
+
+    def test_unbounded_projective_map_always_uses_bounded_affine_path(self):
+        viewport = AssetViewport()
+        output = QImage(120, 120, QImage.Format.Format_ARGB32)
+        output.fill(QColor(0, 0, 0, 0))
+        painter = QPainter(output)
+        screen = [
+            QPointF(10, 10), QPointF(100, 20), QPointF(20, 100)]
+        uvs = [(0, 0), (255, 0), (0, 255)]
+        camera = [(-1.0, 1.0, 0.0),
+                  (1.0, 1.0, 1.0),
+                  (-1.0, -1.0, 2.0)]
+        unbounded = (
+            1.0, 0.0, 1.0,
+            0.0, 1.0, 0.0,
+            0.0, 0.0, -2.0,
+        )
+        try:
+            with patch(
+                    "assembly_viewer.projective_texture_coefficients",
+                    return_value=unbounded), patch.object(
+                    viewport, "_draw_degenerate_uv_triangle") as fallback:
+                viewport._camera_interacting = True
+                viewport._draw_textured(
+                    painter, screen, uvs,
+                    _solid_image(QColor(80, 140, 220)), False, camera)
+                fallback.assert_not_called()
+
+                viewport._camera_interacting = False
+                viewport._draw_textured(
+                    painter, screen, uvs,
+                    _solid_image(QColor(80, 140, 220)), False, camera)
+                fallback.assert_not_called()
+        finally:
+            painter.end()
+            viewport.close()
 
     def test_intersecting_textured_faces_are_visible_on_correct_side(self):
         viewport = AssetViewport()

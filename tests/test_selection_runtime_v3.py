@@ -11,7 +11,8 @@ from PySide6.QtWidgets import QApplication, QMessageBox
 
 from assembly_viewer import AssetViewport
 from assembly_window import AssemblyWindow
-from asset_family import AssetFamily, FamilyObject, MaterialGroup
+from asset_family import (
+    AssetFamily, FamilyObject, MaterialGroup, rebuild_materials)
 from base_mapping_editor import MappingIndex
 from base_parser import AmeshBlock, AttsEntry, BaseObject, TextureRef
 from geometry_editor import GeometryEditSession
@@ -219,24 +220,130 @@ class SelectionRuntimeV3Tests(unittest.TestCase):
         finally:
             viewport.close()
 
-    def test_family_reload_preserves_global_edit_mode(self):
+    def test_family_reload_follows_active_main_tab_edit_contract(self):
         family, _obj, _model = _selection_family()
         window = AssemblyWindow()
         try:
             window._set_family(family)
-            window.global_edit_button.setChecked(True)
-            self.assertTrue(window.global_edit_button.isChecked())
+            window.edit_toggle_action.setChecked(True)
+            self.assertTrue(window.edit_toggle_action.isChecked())
             self.assertTrue(window.viewport.is_edit_mode)
 
             window._set_family(family)
-            self.assertTrue(window.global_edit_button.isChecked())
+            self.assertIs(
+                window._right_tabs.currentWidget(), window._resources_tabs)
+            self.assertFalse(window.edit_toggle_action.isChecked())
+            self.assertFalse(window.viewport.is_edit_mode)
+
+            window._show_model_editor()
+            self.assertTrue(window.edit_toggle_action.isChecked())
             self.assertTrue(window.viewport.is_edit_mode)
 
-            window.global_edit_button.setChecked(False)
+            window.edit_toggle_action.setChecked(False)
             self.assertFalse(window.viewport.is_edit_mode)
             window._set_family(family)
-            self.assertFalse(window.global_edit_button.isChecked())
+            self.assertFalse(window.edit_toggle_action.isChecked())
             self.assertFalse(window.viewport.is_edit_mode)
+        finally:
+            window.close()
+
+    def test_editor_tab_auto_mode_preserves_selection_and_history(self):
+        family, _obj, _model = _selection_family()
+        window = AssemblyWindow()
+        try:
+            window._set_family(family)
+            self.assertFalse(hasattr(window, "global_edit_button"))
+            self.assertTrue(window.edit_toggle_action.isCheckable())
+            self.assertEqual(
+                window.edit_toggle_action.shortcut().toString(), "Tab")
+
+            window._show_model_editor()
+            self.assertTrue(window.edit_toggle_action.isChecked())
+            self.assertTrue(window.viewport.is_edit_mode)
+            window.viewport.edit_session.selection = {0, 1}
+            marker = {"kind": "test-marker"}
+            window._edit_undo_stack.append(marker)
+
+            window._right_tabs.setCurrentWidget(window._resources_tabs)
+            self.assertFalse(window.edit_toggle_action.isChecked())
+            self.assertFalse(window.viewport.is_edit_mode)
+            self.assertEqual(window._edit_undo_stack, [marker])
+
+            window._show_model_editor()
+            self.assertTrue(window.edit_toggle_action.isChecked())
+            self.assertTrue(window.viewport.is_edit_mode)
+            self.assertEqual(window.viewport.edit_session.selection, {0, 1})
+            self.assertEqual(window._edit_undo_stack, [marker])
+
+            window.viewport.set_edit_read_only_vertices({3})
+            window.poly_select_all_button.click()
+            self.assertEqual(
+                window.viewport.edit_session.selection, {0, 1, 2})
+            window.poly_deselect_all_button.click()
+            self.assertEqual(window.viewport.edit_session.selection, set())
+            window._right_tabs.setCurrentWidget(window._resources_tabs)
+            window._show_model_editor()
+            self.assertEqual(window.viewport.edit_session.selection, set())
+        finally:
+            window.close()
+
+    def test_load_texture_updates_every_compatible_block_in_model(self):
+        family, obj, _model = _selection_family()
+        first = AmeshBlock(
+            class_id="amesh.class",
+            texture=TextureRef(
+                class_id="ilbm.class", kind="ilbm",
+                name="STONE.ILBM"),
+            atts=[AttsEntry(0, 1, 2, 3, 4)],
+            olpl=[[(0, 0), (255, 0), (0, 255)]],
+        )
+        second = AmeshBlock(
+            class_id="amesh.class",
+            texture=TextureRef(
+                class_id="ilbm.class", kind="ilbm",
+                name="OTHER.ILBM"),
+            atts=[AttsEntry(1, 5, 6, 7, 8)],
+            olpl=[[(255, 0), (255, 255), (0, 255)]],
+        )
+        obj.base_object.ades[:] = [first, second]
+        rebuild_materials(obj, family)
+        window = AssemblyWindow()
+        try:
+            window._set_family(family)
+            window._show_model_editor()
+            window._on_polygon_picked(0)
+            self.assertFalse(window._apply_texture_history({
+                ("root", 0, "texture"): "BROKEN.ILBM",
+                ("root", 99, "texture"): "BROKEN.ILBM",
+            }))
+            self.assertEqual(
+                [block.texture.name for block in obj.base_object.ades],
+                ["STONE.ILBM", "OTHER.ILBM"])
+            with patch.object(
+                    window, "_available_model_textures",
+                    return_value=["MARBLE.ILBM"]), \
+                    patch.object(
+                        window, "_choose_model_texture",
+                        return_value="MARBLE.ILBM"), \
+                    patch.object(
+                        window, "_ensure_model_texture_loaded",
+                        return_value="MARBLE.ILBM"):
+                window._load_model_texture()
+
+            self.assertEqual(
+                [block.texture.name for block in obj.base_object.ades],
+                ["MARBLE.ILBM", "MARBLE.ILBM"])
+            command = window._edit_undo_stack[-1]
+            self.assertEqual(command["kind"], "texture")
+            self.assertEqual(len(command["before"]), 2)
+            window._undo_edit()
+            self.assertEqual(
+                [block.texture.name for block in obj.base_object.ades],
+                ["STONE.ILBM", "OTHER.ILBM"])
+            window._redo_edit()
+            self.assertEqual(
+                [block.texture.name for block in obj.base_object.ades],
+                ["MARBLE.ILBM", "MARBLE.ILBM"])
         finally:
             window.close()
 
@@ -370,6 +477,62 @@ class VertexClickDragV3Tests(unittest.TestCase):
         self.assertNotEqual(self.model.points[1], before[1])
         self.assertEqual(self.model.points[2], before[2])
         self.assertEqual(len(commands), 1)
+
+    def test_direct_rotate_and_scale_follow_mode_and_commit_once(self):
+        session = self.viewport.edit_session
+        for mode, intensity in (("rotate", 5.0), ("scale", 5.0)):
+            with self.subTest(mode=mode):
+                self.model.points[:] = [
+                    (0.0, 0.0, 0.0),
+                    (1.0, 0.0, 0.0),
+                    (0.0, 1.0, 0.0),
+                ]
+                session.selection = {0, 1, 2}
+                session._undo.clear()
+                session._redo.clear()
+                self.viewport.set_direct_transform(mode, intensity)
+                before = list(self.model.points)
+                commands = []
+                self.viewport.geometryCommandCommitted.connect(
+                    lambda *args, target=commands: target.append(args))
+                start = QPoint(260, 150)
+                end = (
+                    QPoint(200, 90) if mode == "rotate"
+                    else QPoint(330, 150))
+                with patch.object(
+                        self.viewport, "_nearest_edit_vertex",
+                        return_value=0):
+                    QTest.mousePress(
+                        self.viewport, Qt.MouseButton.LeftButton,
+                        Qt.KeyboardModifier.NoModifier, start)
+                    QTest.mouseMove(
+                        self.viewport, end, delay=1)
+                    QTest.mouseRelease(
+                        self.viewport, Qt.MouseButton.LeftButton,
+                        Qt.KeyboardModifier.NoModifier, end)
+                self.assertNotEqual(self.model.points, before)
+                self.assertEqual(len(commands), 1)
+
+    def test_escape_cancels_direct_mouse_transform(self):
+        session = self.viewport.edit_session
+        session.selection = {0, 1}
+        self.viewport.set_direct_transform("move", 0.5)
+        before = list(self.model.points)
+        commands = []
+        self.viewport.geometryCommandCommitted.connect(
+            lambda *args: commands.append(args))
+        with patch.object(
+                self.viewport, "_nearest_edit_vertex", return_value=0):
+            QTest.mousePress(
+                self.viewport, Qt.MouseButton.LeftButton,
+                Qt.KeyboardModifier.NoModifier, QPoint(80, 80))
+            QTest.mouseMove(self.viewport, QPoint(110, 95), delay=1)
+            QTest.keyClick(self.viewport, Qt.Key.Key_Escape)
+            QTest.mouseRelease(
+                self.viewport, Qt.MouseButton.LeftButton,
+                Qt.KeyboardModifier.NoModifier, QPoint(110, 95))
+        self.assertEqual(self.model.points, before)
+        self.assertEqual(commands, [])
 
     def test_click_unselected_and_ctrl_click_keep_expected_semantics(self):
         session = self.viewport.edit_session
