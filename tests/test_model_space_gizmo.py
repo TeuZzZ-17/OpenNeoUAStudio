@@ -168,7 +168,7 @@ class ModelSpaceGizmoTests(unittest.TestCase):
         self.assertEqual(clicked, [(0, 1, 1)])
         self.assertEqual(finished, [True])
 
-    def test_implicit_scale_rotate_select_all_excludes_read_only_fx(self):
+    def test_implicit_scale_rotate_select_all_excludes_protected_fx(self):
         viewport, _model = _editable_viewport()
         viewport.edit_session.selection.clear()
         viewport.set_edit_read_only_vertices({1})
@@ -266,9 +266,9 @@ class ModelSpaceGizmoTests(unittest.TestCase):
         original_viewport = window.viewport
         window.viewport = viewport
         try:
-            window.global_edit_button.blockSignals(True)
-            window.global_edit_button.setChecked(True)
-            window.global_edit_button.blockSignals(False)
+            window.edit_toggle_action.blockSignals(True)
+            window.edit_toggle_action.setChecked(True)
+            window.edit_toggle_action.blockSignals(False)
             window.gizmo_intensity_spin.setValue(0.20)
             window._apply_gizmo_nudge((0, 1, -1))
             after_delta = viewport.paste_preview_delta
@@ -293,10 +293,10 @@ class ModelSpaceGizmoTests(unittest.TestCase):
         self.assertEqual(window.gizmo_intensity_slider.maximum(), 1000)
         self.assertEqual(
             window.gizmo_intensity_slider.value(),
-            window._gizmo_intensity_to_slider(0.30))
-        self.assertAlmostEqual(window._gizmo_intensity(), 0.30)
+            window._gizmo_intensity_to_slider(0.50))
+        self.assertAlmostEqual(window._gizmo_intensity(), 0.50)
         self.assertEqual(
-            window.gizmo_intensity_spin.text(), "0.30 model units")
+            window.gizmo_intensity_spin.text(), "0.50 model units")
         window.gizmo_intensity_slider.setValue(0)
         self.assertAlmostEqual(window._gizmo_intensity(), 0.001)
         window.gizmo_intensity_slider.setValue(1000)

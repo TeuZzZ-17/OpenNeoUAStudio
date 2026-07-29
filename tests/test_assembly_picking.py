@@ -86,6 +86,7 @@ class PickingDepthTests(unittest.TestCase):
 
     def test_pick_and_deselect_share_the_same_resolver(self):
         viewport = AssetViewport()
+        viewport._edit_session = object()
         screen = [(0, 0), (0, 100), (100, 100), (100, 0)]
         near = _shape(7, screen, [1.0] * 4, 0)
         far = _shape(8, screen, [-1.0] * 4, 1)
@@ -93,11 +94,13 @@ class PickingDepthTests(unittest.TestCase):
         deselected = []
         viewport.polygonDeselected.connect(deselected.append)
         self.assertEqual(viewport.pick_at(QPoint(50, 50), True), 7)
+        viewport._edit_session = None
         self.assertTrue(viewport.deselect_at(QPoint(50, 50)))
         self.assertEqual(deselected, [7])
 
     def test_ctrl_additive_flag_is_preserved(self):
         viewport = AssetViewport()
+        viewport._edit_session = object()
         shape = _shape(
             4, [(0, 0), (0, 100), (100, 100), (100, 0)], [0.0] * 4, 0)
         viewport._pick_shapes = [shape]
@@ -106,6 +109,17 @@ class PickingDepthTests(unittest.TestCase):
             lambda poly_id, additive: picked.append((poly_id, additive)))
         viewport.pick_at(QPoint(50, 50), True)
         self.assertEqual(picked, [(4, True)])
+
+    def test_view_mode_never_selects_polygon_or_owner(self):
+        viewport = AssetViewport()
+        shape = _shape(
+            4, [(0, 0), (0, 100), (100, 100), (100, 0)], [0.0] * 4, 0)
+        viewport._pick_shapes = [shape]
+        picked = []
+        viewport.objectPicked.connect(picked.append)
+        self.assertIsNone(viewport.pick_at(QPoint(50, 50)))
+        self.assertEqual(picked, [])
+        self.assertIsNone(viewport._selected_owner)
 
     def test_only_registered_rendered_shapes_are_pickable(self):
         visible = _shape(

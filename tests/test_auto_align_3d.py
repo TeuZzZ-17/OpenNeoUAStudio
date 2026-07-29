@@ -52,6 +52,29 @@ class AutoAlign3DTests(unittest.TestCase):
     def test_viewport_default_is_enabled(self):
         self.assertTrue(AssetViewport()._auto_align_enabled)
 
+    def test_mirror_x_applies_move_rotate_and_scale_to_counterparts(self):
+        points = [
+            (1.0, 0.0, 0.0), (1.0, 2.0, 0.0),
+            (-1.0, 0.0, 0.0), (-1.0, 2.0, 0.0),
+        ]
+        for operation in ("move", "rotate", "scale"):
+            with self.subTest(operation=operation):
+                viewport, _model = _viewport(points, {0, 1})
+                session = viewport.edit_session
+                session.set_mirror_x_enabled(True)
+                self.assertTrue(session.begin_modal())
+                if operation == "move":
+                    session.preview_grab((0.5, 0.25, 0.0))
+                elif operation == "rotate":
+                    session.preview_rotate((0.0, 0.0, 1.0), 0.4)
+                else:
+                    session.preview_scale_axes((1.4, 0.8, 1.0))
+                pending = session.points()
+                self.assertEqual(
+                    pending[2], (-pending[0][0], pending[0][1], pending[0][2]))
+                self.assertEqual(
+                    pending[3], (-pending[1][0], pending[1][1], pending[1][2]))
+
     def test_snap_to_origin_and_reference_vertex_uses_pixel_threshold(self):
         viewport, _model = _viewport(
             [(0.04, 0.0, 0.0), (1.0, 0.0, 0.0)], {0})

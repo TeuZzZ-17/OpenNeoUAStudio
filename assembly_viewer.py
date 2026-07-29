@@ -52,7 +52,9 @@ from PySide6.QtWidgets import QApplication
 from asset_family import AssetFamily, FamilyObject
 from depth_renderer import (
     CameraPolygon,
+    clip_camera_polygon_near,
     order_camera_polygons,
+    order_camera_polygons_fast,
     projective_texture_coefficients,
 )
 from geometry_editor import (
@@ -123,6 +125,7 @@ class ViewFace:
                                     # (pickable / selectable scope)
     owner: str = "root"             # FamilyObject.owner_path for object
                                     # selection / isolation
+    block_index: int = -1           # structural ADES material identity
 
 
 @dataclass(frozen=True)
@@ -405,6 +408,7 @@ class AssetViewport(QWidget):
     statusMessage = Signal(str)
     polygonPicked = Signal(int)     # compatibility signal
     polygonPickedDetailed = Signal(int, bool)  # poly_id, Ctrl additive select
+    polygonStructurePicked = Signal(str, int, int)  # owner, poly_id, ADES block
     polygonDeselected = Signal(int)
     selectionCleared = Signal()
     objectPicked = Signal(str)      # owner_path of the clicked object
@@ -439,7 +443,6 @@ class AssetViewport(QWidget):
 
         # Polygon Mapping Workbench state
         self._selected_poly: int | None = None
-        self._polygon_texture_overrides: dict[tuple[str, int], str] = {}
         self._mapping_diagnostics = False
         self._highlight_polys: set[int] = set()
         self._duplicate_polys: set[int] = set()
@@ -453,6 +456,7 @@ class AssetViewport(QWidget):
         self._selected_owner: str | None = None
         self._primary_owner: str | None = None
         self._owner_bounds: dict[str, tuple] = {}
+        self._texture_image_cache: dict[tuple, QImage] = {}
         self._show_diag_overlay = True
 
         # Geometry Edit Mode (Blender-style vertex editing)
@@ -487,11 +491,16 @@ class AssetViewport(QWidget):
         self._model_transform_factors = (1.0, 1.0, 1.0)
         self._suppress_next_context_menu = False
         self._direct_grab_active = False
+        self._direct_transform_mode = "move"
+        self._direct_transform_intensity = 0.5
+        self._active_edit_vertex: int | None = None
         self._direct_grab_selected_only = False
         self._edit_pick_polygons = False
+        self._mirror_x_enabled = False
         self._edit_read_only_vertices: set[int] = set()
         self._edit_visible_vertices: set[int] = set()
         self._edit_visibility_ready = False
+        self._edit_visibility_view_key: tuple | None = None
         self._box_start: QPoint | None = None
         self._box_rect: QRect | None = None
         self._marquee_candidate = False
@@ -511,6 +520,7 @@ class AssetViewport(QWidget):
         self._zoom = self.RESET_ZOOM
         self._pan = QPointF(0.0, 0.0)
         self._last_mouse = QPoint()
+        self._camera_interacting = False
         self._snapshot_active = False
         self._snapshot_show_guides = False
         self._snapshot_background: QColor | None = None
@@ -550,6 +560,7 @@ class AssetViewport(QWidget):
         self._edit_read_only_vertices.clear()
         self._edit_visible_vertices.clear()
         self._edit_visibility_ready = False
+        self._edit_visibility_view_key = None
         self._box_start = None
         self._box_rect = None
         self._marquee_candidate = False
@@ -578,30 +589,6 @@ class AssetViewport(QWidget):
         self._selected_poly = poly_id
         self.update()
 
-    def polygon_texture_override(self, owner: str, poly_id: int) -> str | None:
-        return self._polygon_texture_overrides.get((owner, poly_id))
-
-    def set_polygon_texture_overrides(self, owner: str, poly_ids,
-                                      texture_name: str | None) -> None:
-        for poly_id in poly_ids:
-            key = (owner, int(poly_id))
-            if texture_name:
-                self._polygon_texture_overrides[key] = texture_name
-            else:
-                self._polygon_texture_overrides.pop(key, None)
-        self.refresh_family_materials()
-
-    def restore_polygon_texture_overrides(
-            self, values: dict[tuple[str, int], str | None]) -> None:
-        """Restore several per-polygon previews with one material rebuild."""
-
-        for key, texture_name in values.items():
-            if texture_name:
-                self._polygon_texture_overrides[key] = texture_name
-            else:
-                self._polygon_texture_overrides.pop(key, None)
-        self.refresh_family_materials()
-
     def set_highlight_polys(self, poly_ids: set[int]) -> None:
         self._highlight_polys = set(poly_ids)
         self.update()
@@ -618,9 +605,12 @@ class AssetViewport(QWidget):
                     visible_owners: set[str] | None = None,
                     keep_camera: bool = False,
                     primary_owner: str | None = None) -> None:
+        same_family = family is self._family_ref
+        previous_bounds = (
+            dict(self._owner_bounds) if keep_camera and same_family else {})
+        if not same_family:
+            self._texture_image_cache.clear()
         selected = self._selected_owner
-        if family is not self._family_ref:
-            self._polygon_texture_overrides = {}
         self.clear()
         self._family_ref = family
         self._visible_owners = visible_owners
@@ -644,6 +634,9 @@ class AssetViewport(QWidget):
         for fam_obj in family.all_objects():
             owner = getattr(fam_obj, "owner_path", "root")
             visible = (visible_owners is None or owner in visible_owners)
+            if not visible and owner in previous_bounds:
+                self._owner_bounds[owner] = previous_bounds[owner]
+                continue
             self._load_object(fam_obj, family, material_index,
                               primary=fam_obj is primary_obj,
                               owner=owner, build_faces=visible)
@@ -793,6 +786,24 @@ class AssetViewport(QWidget):
         self._direct_grab_selected_only = selected_only
         self._edit_pick_polygons = pick_polygons
 
+    @property
+    def direct_transform_mode(self) -> str:
+        return self._direct_transform_mode
+
+    @property
+    def direct_transform_intensity(self) -> float:
+        return self._direct_transform_intensity
+
+    def set_direct_transform(self, mode: str, intensity: float) -> None:
+        """Configure direct vertex dragging without affecting camera controls."""
+
+        normalized = str(mode).casefold()
+        if normalized not in ("move", "rotate", "scale"):
+            return
+        self._direct_transform_mode = normalized
+        self._direct_transform_intensity = max(0.001, float(intensity))
+        self.update()
+
     def set_edit_read_only_vertices(self, indices) -> None:
         """Exclude unsafe shared FX vertices from every edit selection path."""
 
@@ -852,6 +863,11 @@ class AssetViewport(QWidget):
         if not enabled:
             self._precision_guides = ()
         self.update()
+
+    def set_mirror_x_enabled(self, enabled: bool) -> None:
+        self._mirror_x_enabled = bool(enabled)
+        if self._edit_session is not None:
+            self._edit_session.set_mirror_x_enabled(enabled)
 
     @staticmethod
     def _bounds_features(points) -> tuple[tuple[float, float, float], ...]:
@@ -1492,11 +1508,14 @@ class AssetViewport(QWidget):
             matrix = _rotation_matrix((0, 0, 0), (1.0, 1.0, 1.0))
             pos = (0.0, 0.0, 0.0)
         self._edit_session = GeometryEditSession(fam_obj, matrix, pos)
+        self._edit_session.set_mirror_x_enabled(self._mirror_x_enabled)
         self._edit_owner = target
         self._edit_visible_vertices.clear()
         self._edit_visibility_ready = False
+        self._edit_visibility_view_key = None
         self._direct_grab_selected_only = False
         self._edit_pick_polygons = False
+        self._active_edit_vertex = None
         self._selected_owner = target
         polygons = fam_obj.skeleton.polygons
         self._edit_faces = [
@@ -1544,6 +1563,8 @@ class AssetViewport(QWidget):
                 self.exit_edit_mode()
             return False
         self._direct_grab_selected_only = True
+        self._active_edit_vertex = min(
+            self._edit_session.selection, default=None)
         self._edit_pick_polygons = pick_polygons
         self._emit_selection_hint()
         self.update()
@@ -1562,10 +1583,12 @@ class AssetViewport(QWidget):
         self._edit_faces = []
         self._edit_visible_vertices.clear()
         self._edit_visibility_ready = False
+        self._edit_visibility_view_key = None
         self._modal_op = None
         self._modal_axis = None
         self._modal_numeric = ""
         self._direct_grab_active = False
+        self._active_edit_vertex = None
         self._direct_grab_selected_only = False
         self._edit_pick_polygons = False
         self._box_start = None
@@ -1603,11 +1626,12 @@ class AssetViewport(QWidget):
             return
         self._select_all_editable_vertices()
         self._selected_owner = self._edit_owner
+        self._active_edit_vertex = min(session.selection, default=None)
         self._emit_selection_hint("vertex")
         self.update()
 
     def _select_all_editable_vertices(self) -> bool:
-        """Select every safe POO2 index, excluding shared/read-only FX."""
+        """Select every safe POO2 index, excluding protected FX vertices."""
 
         session = self._edit_session
         if session is None:
@@ -1620,6 +1644,7 @@ class AssetViewport(QWidget):
         session = self._edit_session
         if session is not None:
             session.select_none()
+        self._active_edit_vertex = None
         self._selected_poly = None
         self._selected_owner = None
         self._highlight_polys.clear()
@@ -1743,7 +1768,7 @@ class AssetViewport(QWidget):
         # Auto Align is intentionally limited to direct viewport editing.
         # Gizmo actions must apply the exact configured step on every axis.
         session.preview_grab(raw)
-        self._refresh_edit_faces()
+        self._refresh_edit_faces(invalidate_visibility=False)
         self.editHint.emit(
             f"Move Gizmo | X {raw[0]:+.3f} "
             f"Y {raw[1]:+.3f} Z {raw[2]:+.3f}")
@@ -1822,7 +1847,7 @@ class AssetViewport(QWidget):
         axis = ("X", "Y", "Z")[axis_index]
         session.preview_rotate(AXIS_VECTORS[axis],
                                self._model_transform_angle)
-        self._refresh_edit_faces()
+        self._refresh_edit_faces(invalidate_visibility=False)
         self.editHint.emit(
             f"Rotate Gizmo | {axis} "
             f"{math.degrees(self._model_transform_angle):+.2f}°")
@@ -1852,7 +1877,7 @@ class AssetViewport(QWidget):
             return False
         self._model_transform_factors = tuple(factors)
         session.preview_scale_axes(self._model_transform_factors)
-        self._refresh_edit_faces()
+        self._refresh_edit_faces(invalidate_visibility=False)
         self.editHint.emit(
             "Scale Gizmo | "
             + " ".join(
@@ -1920,7 +1945,7 @@ class AssetViewport(QWidget):
         if session is None or not session.modal_active:
             return
         session.preview_scale(factor)
-        self._refresh_edit_faces()
+        self._refresh_edit_faces(invalidate_visibility=False)
         self.update()
 
     def begin_rotate_preview(self, select_all_if_empty: bool = True) -> bool:
@@ -1942,7 +1967,7 @@ class AssetViewport(QWidget):
             return
         session.preview_rotate(
             AXIS_VECTORS[axis_name], math.radians(angle_degrees))
-        self._refresh_edit_faces()
+        self._refresh_edit_faces(invalidate_visibility=False)
         self.update()
 
     def _finish_transform_preview(self, accept: bool) -> bool:
@@ -1992,12 +2017,16 @@ class AssetViewport(QWidget):
             self.geometryCommandCommitted.emit(
                 owner, list(before), list(session.model.points))
 
-    def _refresh_edit_faces(self) -> None:
+    def _refresh_edit_faces(
+            self, invalidate_visibility: bool = True) -> None:
         """Push the session's current coordinates into the owner's faces."""
 
         session = self._edit_session
         if session is None:
             return
+        if invalidate_visibility:
+            self._edit_visibility_ready = False
+            self._edit_visibility_view_key = None
         world = session.world_points()
         for face, indices in self._edit_faces:
             face.vertices = [world[i] for i in indices if i < len(world)]
@@ -2017,13 +2046,15 @@ class AssetViewport(QWidget):
                 for p in session.world_points()]
 
     def _refresh_edit_vertex_visibility(
-            self, screen_points=None, target: QRectF | None = None) -> set[int]:
+            self, screen_points=None, target: QRectF | None = None,
+            view_key: tuple | None = None) -> set[int]:
         """Cache non-selected handles proven visible by rendered pick pieces."""
 
         session = self._edit_session
         if session is None:
             self._edit_visible_vertices.clear()
             self._edit_visibility_ready = False
+            self._edit_visibility_view_key = None
             return set()
         points = (
             list(screen_points) if screen_points is not None
@@ -2036,6 +2067,7 @@ class AssetViewport(QWidget):
             target=target if target is not None else QRectF(self.rect()),
         )
         self._edit_visibility_ready = True
+        self._edit_visibility_view_key = view_key
         return set(self._edit_visible_vertices)
 
     def _available_edit_vertices(self, screen_points=None) -> set[int]:
@@ -2087,6 +2119,9 @@ class AssetViewport(QWidget):
             session.toggle(best)
         else:
             session.selection = {best}
+        self._active_edit_vertex = (
+            best if best is not None and best in session.selection
+            else min(session.selection, default=None))
         self._emit_selection_hint("vertex")
         self.update()
         return best
@@ -2107,6 +2142,8 @@ class AssetViewport(QWidget):
             if rect.contains(int(screen.x()), int(screen.y()))
         }
         session.selection = (session.selection | hits) if extend else hits
+        self._active_edit_vertex = min(hits, default=min(
+            session.selection, default=None))
         self._emit_selection_hint("vertex")
         self.update()
 
@@ -2281,6 +2318,13 @@ class AssetViewport(QWidget):
                     pos.x() - self._modal_start.x(),
                     pos.y() - self._modal_start.y())
                 delta = session.world_delta_to_model(world)
+            if self._direct_grab_active:
+                step = self._direct_transform_intensity
+                length = math.sqrt(sum(value * value for value in delta))
+                if length > 1e-12:
+                    snapped_length = max(step, round(length / step) * step)
+                    delta = tuple(
+                        value * snapped_length / length for value in delta)
             origin = session.modal_origin_points() or []
             selected = [
                 origin[index] for index in sorted(session.selection)
@@ -2314,6 +2358,9 @@ class AssetViewport(QWidget):
                 a1 = math.atan2(-(pos.y() - center.y()),
                                 pos.x() - center.x())
                 visual_deg = math.degrees(a1 - a0)
+            if self._direct_grab_active:
+                step = self._direct_transform_intensity
+                visual_deg = round(visual_deg / step) * step
             session.preview_rotate(axis_model,
                                    -math.radians(visual_deg) * sign)
             self.editHint.emit(
@@ -2329,6 +2376,10 @@ class AssetViewport(QWidget):
                 d1 = math.hypot(pos.x() - center.x(),
                                 pos.y() - center.y())
                 factor = d1 / max(d0, 8.0)
+            if self._direct_grab_active:
+                step = self._direct_transform_intensity
+                percent = round(((factor - 1.0) * 100.0) / step) * step
+                factor = max(0.01, 1.0 + percent / 100.0)
             factor = self._snap_scale_factor(factor, self._modal_axis)
             session.preview_scale(factor, self._modal_axis)
             self.editHint.emit(
@@ -2337,7 +2388,7 @@ class AssetViewport(QWidget):
                 + (f" | {self._precision_guides[0].label}"
                    if self._precision_guides else "")
                 + suffix)
-        self._refresh_edit_faces()
+        self._refresh_edit_faces(invalidate_visibility=False)
         self.update()
 
     def _load_object(self, fam_obj: FamilyObject, family: AssetFamily,
@@ -2385,6 +2436,7 @@ class AssetViewport(QWidget):
                         vertices=[world_points[i] for i in polygon],
                         uvs=[], material=mat_id, shade=0, poly_id=poly_id,
                         primary=primary, owner=owner,
+                        block_index=-1,
                     ))
             return
 
@@ -2414,7 +2466,11 @@ class AssetViewport(QWidget):
         for block_index, group in enumerate(groups):
             block = group.block
             tracy_key = block.tracy_mode if block is not None else "none"
-            key = (f"{group.texture_name}|{group.kind}|{tracy_key}"
+            # Material animation state and UV groups belong to one structural
+            # ADES block.  Same-name FX1/FX2 blocks must not share a runtime
+            # material merely because they reference the same resource.
+            key = (f"{owner}|{block_index}|{group.texture_name}|"
+                   f"{group.kind}|{tracy_key}"
                    if group.texture_name else f"__block__{id(group)}")
             mat_id = self._ensure_material(key, group.label, group.kind,
                                            family, material_index,
@@ -2429,21 +2485,12 @@ class AssetViewport(QWidget):
                 polygon = polygons[poly_id]
                 if len(polygon) < 3:
                     continue
-                face_mat_id = mat_id
-                face_animated = animated
-                override_name = self._polygon_texture_overrides.get(
-                    (owner, poly_id))
-                if override_name:
-                    override_key = f"__poly__{owner}:{poly_id}:{override_name}"
-                    face_mat_id = self._ensure_material(
-                        override_key, override_name, "ilbm", family,
-                        material_index, block=block)
-                    face_animated = False
                 self._faces.append(ViewFace(
                     vertices=[world_points[i] for i in polygon],
-                    uvs=list(uvs), material=face_mat_id, shade=shade,
-                    poly_id=poly_id, animated=face_animated, primary=primary,
+                    uvs=list(uvs), material=mat_id, shade=shade,
+                    poly_id=poly_id, animated=animated, primary=primary,
                     owner=owner,
+                    block_index=block_index,
                 ))
 
     def _ensure_material(self, key: str, label: str, kind: str,
@@ -2467,11 +2514,8 @@ class AssetViewport(QWidget):
                     img = family.textures.get(bitmap_name)
                     override = (family.effect_override_paths.get(
                         bitmap_name.lower()) if mat.additive else None)
-                    qimage = (_image_from_effect_png(override)
-                              if override is not None else
-                              _image_from_ilbm(
-                                  img, family.external_palette
-                                  if img and not img.palette else None))
+                    qimage = self._cached_texture_image(
+                        family, bitmap_name, img, override)
                     mat.anim_images.append(qimage if qimage else QImage())
                 mat.anim_uv_groups = [list(g) for g in anm.texcoord_groups]
                 mat.anim_frames = [
@@ -2486,15 +2530,38 @@ class AssetViewport(QWidget):
             img = family.textures.get(label)
             override = (family.effect_override_paths.get(label.lower())
                         if mat.additive else None)
-            mat.image = (_image_from_effect_png(override)
-                         if override is not None else
-                         _image_from_ilbm(
-                             img, family.external_palette
-                             if img and not img.palette else None))
+            mat.image = self._cached_texture_image(
+                family, label, img, override)
 
         material_index[key] = len(self._materials)
         self._materials.append(mat)
         return material_index[key]
+
+    def _cached_texture_image(
+            self, family: AssetFamily, name: str, image,
+            override) -> QImage:
+        """Decode each immutable family texture once across scene refreshes."""
+
+        external_palette = (
+            family.external_palette
+            if image is not None and not image.palette else None)
+        cache_key = (
+            id(family),
+            str(name).casefold(),
+            id(image),
+            id(external_palette),
+            str(override) if override is not None else "",
+        )
+        cached = self._texture_image_cache.get(cache_key)
+        if cached is not None:
+            return QImage(cached)
+        decoded = (
+            _image_from_effect_png(override)
+            if override is not None else
+            _image_from_ilbm(image, external_palette))
+        cached = QImage(decoded) if decoded is not None else QImage()
+        self._texture_image_cache[cache_key] = cached
+        return QImage(cached)
 
     # -- public view controls --------------------------------------------------
 
@@ -2815,6 +2882,26 @@ class AssetViewport(QWidget):
             description,
         )
 
+    def current_animation_group(
+            self, owner: str, block_index: int
+            ) -> tuple[str, int] | None:
+        """Return the logical VANM name and UV-group index being rendered."""
+
+        material_id = self._block_material_ids.get((owner, block_index))
+        if material_id is None or not (
+                0 <= material_id < len(self._materials)):
+            return None
+        material = self._materials[material_id]
+        if not material.anim_frames:
+            return None
+        frame_index, _direction = self._anim_states.get(material_id, (0, 1))
+        if not (0 <= frame_index < len(material.anim_frames)):
+            return None
+        _duration, _image_id, uv_id = material.anim_frames[frame_index]
+        if not (0 <= uv_id < len(material.anim_uv_groups)):
+            return None
+        return material.label, uv_id
+
     def _reset_animation_states(self) -> None:
         self._anim_states = {}
         self._anim_left_ms = {}
@@ -3086,9 +3173,17 @@ class AssetViewport(QWidget):
                 for index in range(2, len(cam)):
                     indices = (0, index, index - 1)
                     tri_camera = tuple(cam[item] for item in indices)
+                    clipped = clip_camera_polygon_near(CameraPolygon(
+                        tri_camera,
+                        tuple(tuple(face_uvs[item]) for item in indices),
+                        None,
+                        source_order,
+                    ))
+                    if clipped is None:
+                        continue
                     tri_screen = [
                         self._project(point, target, camera)
-                        for point in tri_camera
+                        for point in clipped.vertices
                     ]
                     # Runtime indices use (0, j, j-1).  With screen Y pointing
                     # down, its visible clockwise triangles have positive area.
@@ -3103,14 +3198,27 @@ class AssetViewport(QWidget):
                     if self._backface_cull and not front_facing:
                         continue
                     triangles.append(CameraPolygon(
-                        tri_camera,
-                        tuple(tuple(face_uvs[item]) for item in indices),
+                        clipped.vertices,
+                        clipped.attributes,
                         _RenderPayload(face, image, front_facing),
                         source_order,
                     ))
                     source_order += 1
 
-            for piece in order_camera_polygons(triangles):
+            interactive_render = (
+                not clean
+                and (
+                    self._camera_interacting
+                    or self._anim_playing
+                    or self._edit_session is not None
+                    or self._paste_preview is not None
+                )
+            )
+            ordered = (
+                order_camera_polygons_fast(triangles)
+                if interactive_render
+                else order_camera_polygons(triangles))
+            for piece in ordered:
                 payload = piece.payload
                 draw_piece(
                     payload.face, piece.vertices,
@@ -3144,11 +3252,24 @@ class AssetViewport(QWidget):
         if not clean:
             self._pick_shapes = pick_shapes
             if self._edit_session is not None:
-                self._refresh_edit_vertex_visibility(
-                    self._edit_screen_points(target, camera), target)
+                pan = camera["pan"]
+                visibility_view_key = (
+                    target.x(), target.y(), target.width(), target.height(),
+                    camera["yaw"], camera["pitch"], camera["zoom"],
+                    pan.x(), pan.y(),
+                    tuple(camera["center"]), camera["scale"],
+                    len(pick_shapes),
+                )
+                if not self._edit_visibility_ready \
+                        or self._edit_visibility_view_key \
+                        != visibility_view_key:
+                    self._refresh_edit_vertex_visibility(
+                        self._edit_screen_points(target, camera), target,
+                        visibility_view_key)
             else:
                 self._edit_visible_vertices.clear()
                 self._edit_visibility_ready = False
+                self._edit_visibility_view_key = None
 
         if selected_shape is not None:
             painter.setPen(QPen(QColor(255, 255, 255), 2.4))
@@ -3219,17 +3340,32 @@ class AssetViewport(QWidget):
                 continue
             painter.drawRect(QRectF(point.x() - 2.5, point.y() - 2.5,
                                     5.0, 5.0))
+        painter.setPen(QPen(QColor(90, 92, 100), 1.0))
+        painter.setBrush(QColor(105, 108, 118))
+        for index in sorted(
+                self._edit_read_only_vertices
+                & self._edit_visible_vertices):
+            if index < len(screen):
+                point = screen[index]
+                painter.drawRect(QRectF(
+                    point.x() - 3.0, point.y() - 3.0, 6.0, 6.0))
         snapped = bool(self._precision_guides)
+        mode_color = {
+            "move": QColor(255, 32, 48),
+            "rotate": QColor(70, 130, 255),
+            "scale": QColor(62, 205, 105),
+        }[self._direct_transform_mode]
         painter.setPen(QPen(
-            QColor(210, 255, 220) if snapped else QColor(255, 244, 120),
+            QColor(235, 255, 240) if snapped else mode_color.lighter(165),
             1.8))
-        painter.setBrush(
-            QColor(45, 255, 95) if snapped else QColor(255, 32, 48))
+        painter.setBrush(QColor(45, 255, 95) if snapped else mode_color)
         for index in session.selection:
             if index < len(screen):
                 point = screen[index]
-                painter.drawRect(QRectF(point.x() - 4.5, point.y() - 4.5,
-                                        9.0, 9.0))
+                radius = 5.5 if index == self._active_edit_vertex else 4.5
+                painter.drawRect(QRectF(
+                    point.x() - radius, point.y() - radius,
+                    radius * 2.0, radius * 2.0))
 
         pivot = session.selection_pivot()
         if pivot is not None:
@@ -3578,6 +3714,16 @@ class AssetViewport(QWidget):
                 )
                 if tri_camera is not None else None
             )
+            if coefficients is not None \
+                    and not _projective_image_transform_is_bounded(
+                        coefficients, width, height):
+                # A valid perspective map may have its projective infinity
+                # outside the source UV triangle but inside the full bitmap.
+                # QPainter then expands the complete image catastrophically.
+                # Use the bounded affine triangle path in every repaint.
+                # The former per-pixel fallback made animated/idle editor
+                # repaints hundreds of milliseconds slower.
+                coefficients = None
             transform = (
                 QTransform(*coefficients)
                 if coefficients is not None
@@ -3753,6 +3899,7 @@ class AssetViewport(QWidget):
     # -- interaction ------------------------------------------------------------
 
     def mousePressEvent(self, event: QMouseEvent) -> None:  # noqa: N802
+        self._camera_interacting = False
         pos = event.position().toPoint()
         if event.button() == Qt.MouseButton.LeftButton:
             self._press_additive = bool(
@@ -3817,6 +3964,7 @@ class AssetViewport(QWidget):
                         selection=selection,
                         was_selected=vertex in selection,
                     )
+                    self._active_edit_vertex = vertex
                     self._last_mouse = pos
                     self._press_pos = pos
                     event.accept()
@@ -3827,6 +3975,10 @@ class AssetViewport(QWidget):
         event.accept()
 
     def mouseReleaseEvent(self, event: QMouseEvent) -> None:  # noqa: N802
+        was_camera_interacting = self._camera_interacting
+        self._camera_interacting = False
+        if was_camera_interacting:
+            self.update()
         if self._paste_preview is not None:
             self._paste_preview.camera_inspect = False
             self._reanchor_paste_mouse(event.position().toPoint())
@@ -3851,6 +4003,7 @@ class AssetViewport(QWidget):
                 pressed = self._vertex_press
                 self._vertex_press = None
                 self._edit_session.selection = {pressed.vertex}
+                self._active_edit_vertex = pressed.vertex
                 self._emit_selection_hint("vertex")
                 self._press_pos = None
                 self._press_additive = False
@@ -3897,6 +4050,8 @@ class AssetViewport(QWidget):
     def pick_at(self, point: QPoint, additive: bool = False) -> int | None:
         """Select the geometrically nearest rendered polygon under the cursor."""
 
+        if self._edit_session is None or self._snapshot_active:
+            return None
         hit = resolve_pick_shape(self._pick_shapes, QPointF(point))
         if hit is not None:
             face = hit.face
@@ -3904,6 +4059,8 @@ class AssetViewport(QWidget):
             self.objectPicked.emit(face.owner)
             if face.primary:
                 self._selected_poly = face.poly_id
+                self.polygonStructurePicked.emit(
+                    face.owner, face.poly_id, face.block_index)
                 self.polygonPicked.emit(face.poly_id)
                 self.polygonPickedDetailed.emit(face.poly_id, additive)
             self.update()
@@ -4066,8 +4223,10 @@ class AssetViewport(QWidget):
                         self._edit_session.selection = {pressed.vertex}
                     self._emit_selection_hint("vertex")
                     self._begin_modal(
-                        "grab", pressed.position, direct_grab=True)
-                    if self._modal_op == "grab":
+                        "grab" if self._direct_transform_mode == "move"
+                        else self._direct_transform_mode,
+                        pressed.position, direct_grab=True)
+                    if self._modal_op is not None:
                         self._modal_last_mouse = current
                         self._update_modal(current)
                     self._vertex_press = None
@@ -4095,11 +4254,13 @@ class AssetViewport(QWidget):
             self._yaw += delta.x() * 0.6
             self._pitch = max(-89.0, min(89.0, self._pitch + delta.y() * 0.6))
             if self._yaw != old_yaw or self._pitch != old_pitch:
+                self._camera_interacting = True
                 self.manualCameraChanged.emit()
             self.update()
         elif event.buttons() & (Qt.MouseButton.RightButton
                                 | Qt.MouseButton.MiddleButton):
             if not delta.isNull():
+                self._camera_interacting = True
                 self._pan += QPointF(delta.x(), delta.y())
                 self.manualCameraChanged.emit()
             self.update()
@@ -4143,3 +4304,24 @@ def _affine_from_triangles(src: list[QPointF],
     d = ((v2 - v0) * (x1 - x0) - (v1 - v0) * (x2 - x0)) / det
     f = v0 - b * x0 - d * y0
     return QTransform(a, b, c, d, e, f)
+
+
+def _projective_image_transform_is_bounded(
+        coefficients, width: int, height: int) -> bool:
+    """Reject QPainter projective images whose denominator crosses infinity."""
+
+    if len(coefficients) != 9 \
+            or not all(math.isfinite(value) for value in coefficients):
+        return False
+    w_u, w_v, w_offset = (
+        coefficients[2], coefficients[5], coefficients[8])
+    denominators = [
+        w_u * x + w_v * y + w_offset
+        for x, y in (
+            (0.0, 0.0), (float(width), 0.0),
+            (0.0, float(height)), (float(width), float(height)))
+    ]
+    epsilon = 1e-6
+    return (
+        min(denominators) > epsilon
+        or max(denominators) < -epsilon)

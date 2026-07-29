@@ -592,6 +592,7 @@ class GeometryEditSession:
         self._pending: list[Point3D] | None = None
         self._modal_origin: list[Point3D] | None = None
         self._modal_pivot: tuple[float, float, float] | None = None
+        self.mirror_x_enabled = False
 
     # -- coordinate helpers ---------------------------------------------------
 
@@ -682,6 +683,61 @@ class GeometryEditSession:
         self._modal_pivot = self.selection_pivot()
         return True
 
+    def set_mirror_x_enabled(self, enabled: bool) -> None:
+        self.mirror_x_enabled = bool(enabled)
+
+    def _apply_x_mirror(self, pending: list[Point3D]) -> None:
+        """Mirror transformed vertices across X=0 without touching unpaired data."""
+
+        if not self.mirror_x_enabled or self._modal_origin is None:
+            return
+        origin = self._modal_origin
+        if not origin:
+            return
+        extent = max(
+            max(point[axis] for point in origin)
+            - min(point[axis] for point in origin)
+            for axis in range(3))
+        tolerance = max(1e-5, extent * 1e-5)
+        positives = [
+            index for index, point in enumerate(origin)
+            if point[0] > tolerance]
+        negatives = {
+            index for index, point in enumerate(origin)
+            if point[0] < -tolerance}
+        pairs = []
+        for positive in positives:
+            point = origin[positive]
+            candidates = [
+                negative for negative in negatives
+                if abs(origin[negative][0] + point[0]) <= tolerance
+                and abs(origin[negative][1] - point[1]) <= tolerance
+                and abs(origin[negative][2] - point[2]) <= tolerance
+            ]
+            if not candidates:
+                continue
+            negative = min(candidates, key=lambda index: (
+                abs(origin[index][0] + point[0])
+                + abs(origin[index][1] - point[1])
+                + abs(origin[index][2] - point[2]),
+                index))
+            negatives.remove(negative)
+            pairs.append((positive, negative))
+
+        for positive, negative in pairs:
+            positive_selected = positive in self.selection
+            negative_selected = negative in self.selection
+            if not positive_selected and not negative_selected:
+                continue
+            source = positive if positive_selected else negative
+            target = negative if source == positive else positive
+            x, y, z = pending[source]
+            pending[target] = (-x, y, z)
+        for index in self.selection:
+            if index < len(origin) and abs(origin[index][0]) <= tolerance:
+                _x, y, z = pending[index]
+                pending[index] = (0.0, y, z)
+
     def preview_grab(self, delta_model, axis: str | None = None) -> None:
         if self._modal_origin is None:
             return
@@ -697,6 +753,7 @@ class GeometryEditSession:
             if i < len(pending):
                 x, y, z = self._modal_origin[i]
                 pending[i] = (x + dx, y + dy, z + dz)
+        self._apply_x_mirror(pending)
         self._pending = pending
 
     def preview_rotate(self, axis_vector, angle: float) -> None:
@@ -711,6 +768,7 @@ class GeometryEditSession:
                 pending[i] = rotate_around_axis(
                     self._modal_origin[i], axis, angle, self._modal_pivot
                 )
+        self._apply_x_mirror(pending)
         self._pending = pending
 
     def preview_scale(self, factor: float, axis: str | None = None) -> None:
@@ -745,6 +803,7 @@ class GeometryEditSession:
                     cy + (y - cy) * fy,
                     cz + (z - cz) * fz,
                 )
+        self._apply_x_mirror(pending)
         self._pending = pending
 
     def preview_replace_selected(self, points) -> None:

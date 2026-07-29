@@ -14,6 +14,7 @@ from PySide6.QtGui import QColor, QImage, QPainter, QPen, QPolygonF
 from PySide6.QtWidgets import QWidget
 
 HANDLE_RADIUS = 6.0
+SNAP_DISTANCE_PX = 8.0
 
 
 @dataclass
@@ -64,6 +65,8 @@ class UVEditorWidget(QWidget):
         self._zoom = 1.0
         self._pan = QPointF(0.0, 0.0)
         self._pan_last: QPoint | None = None
+        self._auto_align_enabled = True
+        self._snap_guides: tuple[tuple[str, int, str], ...] = ()
 
     def set_data(self, image: QImage | None, uvs: list[tuple[int, int]],
                  editable: bool, message: str = "") -> None:
@@ -100,6 +103,21 @@ class UVEditorWidget(QWidget):
         self._press_hit = None
         self._press_pos = None
         self._press_selection.clear()
+        self._snap_guides = ()
+        self.update()
+
+    @property
+    def auto_align_enabled(self) -> bool:
+        return self._auto_align_enabled
+
+    @property
+    def snap_guides(self) -> tuple[tuple[str, int, str], ...]:
+        return self._snap_guides
+
+    def set_auto_align_enabled(self, enabled: bool) -> None:
+        self._auto_align_enabled = bool(enabled)
+        if not enabled:
+            self._snap_guides = ()
         self.update()
 
     def _sync_primary_uvs(self) -> None:
@@ -328,6 +346,158 @@ class UVEditorWidget(QWidget):
         v = round((point.y() - oy) / size * 256.0)
         return max(0, min(255, u)), max(0, min(255, v))
 
+    @staticmethod
+    def _signed_area(points: list[tuple[int, int]]) -> int:
+        return sum(
+            points[index][0] * points[(index + 1) % len(points)][1]
+            - points[(index + 1) % len(points)][0] * points[index][1]
+            for index in range(len(points)))
+
+    @classmethod
+    def _near_quad_target(
+            cls, loop: UVLoop, handle_index: int,
+            proposed: tuple[int, int],
+            threshold_uv: float) -> tuple[tuple[int, int], str] | None:
+        """Complete a near rectangle/square from three ordered vertices."""
+
+        if len(loop.uvs) != 4 or not (0 <= handle_index < 4):
+            return None
+        previous = loop.uvs[(handle_index - 1) % 4]
+        opposite = loop.uvs[(handle_index + 2) % 4]
+        following = loop.uvs[(handle_index + 1) % 4]
+        first = (previous[0] - opposite[0], previous[1] - opposite[1])
+        second = (following[0] - opposite[0], following[1] - opposite[1])
+        first_len = (first[0] ** 2 + first[1] ** 2) ** 0.5
+        second_len = (second[0] ** 2 + second[1] ** 2) ** 0.5
+        if first_len < 2.0 or second_len < 2.0:
+            return None
+        cosine = abs(
+            first[0] * second[0] + first[1] * second[1]
+        ) / (first_len * second_len)
+        ratio = max(first_len, second_len) / min(first_len, second_len)
+        if cosine > 0.15:
+            return None
+        target = (
+            previous[0] + following[0] - opposite[0],
+            previous[1] + following[1] - opposite[1],
+        )
+        if not (0 <= target[0] <= 255 and 0 <= target[1] <= 255):
+            return None
+        if ((target[0] - proposed[0]) ** 2
+                + (target[1] - proposed[1]) ** 2) ** 0.5 > threshold_uv:
+            return None
+        candidate = list(loop.uvs)
+        candidate[handle_index] = target
+        if cls._signed_area(candidate) * cls._signed_area(loop.uvs) <= 0:
+            return None
+        if len(set(candidate)) != 4:
+            return None
+        return target, "square" if ratio <= 1.15 else "rectangle"
+
+    @classmethod
+    def _near_square_target(
+            cls, loop: UVLoop, handle_index: int,
+            proposed: tuple[int, int],
+            threshold_uv: float) -> tuple[int, int] | None:
+        candidate = cls._near_quad_target(
+            loop, handle_index, proposed, threshold_uv)
+        if candidate is None or candidate[1] != "square":
+            return None
+        return candidate[0]
+
+    def _snap_drag_delta(
+            self, handles: set[tuple[Hashable, int]],
+            du: int, dv: int, *, allow_u: bool = True,
+            allow_v: bool = True) -> tuple[int, int]:
+        """Return one common screen-distance-based delta for all handles."""
+
+        self._snap_guides = ()
+        if not self._auto_align_enabled or not handles:
+            return du, dv
+        _ox, _oy, size = self._canvas_rect()
+        threshold_uv = SNAP_DISTANCE_PX * 256.0 / max(size, 1.0)
+        guides: list[tuple[str, int, str]] = []
+
+        if len(handles) == 1 and allow_u and allow_v:
+            handle = next(iter(handles))
+            loop = self._loop(handle[0])
+            if loop is not None and len(loop.uvs) == 4:
+                start = self._drag_start_uvs[handle]
+                quad_target = self._near_quad_target(
+                    loop, handle[1],
+                    (start[0] + du, start[1] + dv), threshold_uv)
+                if quad_target is not None:
+                    target, shape = quad_target
+                    self._snap_guides = (
+                        ("u", target[0], shape),
+                        ("v", target[1], shape),
+                    )
+                    return target[0] - start[0], target[1] - start[1]
+
+        starts = list(self._drag_start_uvs.values())
+        moved_u = [u + du for u, _v in starts]
+        moved_v = [v + dv for _u, v in starts]
+        other_uvs = [
+            uv
+            for loop in self._loops
+            for index, uv in enumerate(loop.uvs)
+            if (loop.key, index) not in handles
+        ]
+
+        def correction(axis: str, moved: list[int]) -> tuple[int, int, str] | None:
+            other = [uv[0 if axis == "u" else 1] for uv in other_uvs]
+            targets = [(0, "boundary"), (255, "boundary")]
+            targets.extend((value, "coordinate") for value in other)
+            if other:
+                targets.extend((
+                    (round((min(other) + max(other)) / 2), "center"),
+                    (min(other), "minimum"),
+                    (max(other), "maximum"),
+                ))
+                ordered = sorted(set(other))
+                spacing_targets = set()
+                for left_index, left in enumerate(ordered):
+                    for right in ordered[left_index + 1:]:
+                        spacing_targets.add(round((left + right) / 2))
+                        spacing_targets.add(2 * right - left)
+                        spacing_targets.add(2 * left - right)
+                targets.extend(
+                    (value, "equal spacing")
+                    for value in sorted(spacing_targets)
+                    if 0 <= value <= 255)
+            features = (
+                (min(moved), "minimum"),
+                (round((min(moved) + max(moved)) / 2), "center"),
+                (max(moved), "maximum"),
+            )
+            best = None
+            for source, source_label in features:
+                for target, target_label in targets:
+                    distance = abs(target - source)
+                    if distance > threshold_uv:
+                        continue
+                    candidate = (
+                        distance, abs(target), target - source, target,
+                        f"{source_label} to {target_label}")
+                    if best is None or candidate < best:
+                        best = candidate
+            if best is None:
+                return None
+            return best[2], best[3], best[4]
+
+        if allow_u:
+            snap = correction("u", moved_u)
+            if snap is not None:
+                du += snap[0]
+                guides.append(("u", snap[1], snap[2]))
+        if allow_v:
+            snap = correction("v", moved_v)
+            if snap is not None:
+                dv += snap[0]
+                guides.append(("v", snap[1], snap[2]))
+        self._snap_guides = tuple(guides)
+        return du, dv
+
     def paintEvent(self, event) -> None:  # noqa: N802
         painter = QPainter(self)
         painter.fillRect(self.rect(), QColor(30, 32, 38))
@@ -374,6 +544,20 @@ class UVEditorWidget(QWidget):
                         point + QPointF(8, -6),
                         f"{prefix}{index} ({loop.uvs[index][0]},"
                         f"{loop.uvs[index][1]})")
+        if self._snap_guides:
+            painter.setPen(QPen(
+                QColor(120, 230, 255, 180), 1.0, Qt.PenStyle.DashLine))
+            for axis, value, _label in self._snap_guides:
+                if axis == "u":
+                    point = self._uv_to_screen((value, 0))
+                    painter.drawLine(
+                        QPointF(point.x(), oy),
+                        QPointF(point.x(), oy + size))
+                else:
+                    point = self._uv_to_screen((0, value))
+                    painter.drawLine(
+                        QPointF(ox, point.y()),
+                        QPointF(ox + size, point.y()))
         if self._box_rect is not None:
             painter.setPen(QPen(QColor(90, 230, 255), 1.0,
                                 Qt.PenStyle.DashLine))
@@ -460,6 +644,16 @@ class UVEditorWidget(QWidget):
                     dv = 0
                 elif self._drag_axis == "v":
                     du = 0
+            bypass_snap = bool(
+                event.modifiers() & Qt.KeyboardModifier.AltModifier)
+            if bypass_snap:
+                self._snap_guides = ()
+            else:
+                du, dv = self._snap_drag_delta(
+                    set(self._drag_start_uvs),
+                    du, dv,
+                    allow_u=self._drag_axis != "v",
+                    allow_v=self._drag_axis != "u")
             du, dv = self._shared_delta(
                 self._drag_start_uvs.values(), du, dv)
             changed_now = False
@@ -492,6 +686,7 @@ class UVEditorWidget(QWidget):
             self._drag_start_uvs.clear()
             self._drag_anchor_uv = None
             self._drag_changed = False
+            self._snap_guides = ()
         if self._box_start is not None:
             if self._box_rect is None:
                 if not self._press_additive:

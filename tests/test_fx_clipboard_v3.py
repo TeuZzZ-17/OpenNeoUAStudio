@@ -1,3 +1,4 @@
+import copy
 import os
 import struct
 import tempfile
@@ -8,12 +9,24 @@ from unittest.mock import patch
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
+from PySide6.QtGui import QImage
 from PySide6.QtWidgets import QApplication, QDialog, QMessageBox
 
-from anm_parser import VanmData, VanmFrame
-from assembly_window import AssemblyWindow
-from asset_family import AssetFamily, FamilyObject, MaterialGroup
-from base_mapping_editor import MappingIndex
+from anm_parser import (
+    VanmData, VanmFrame, export_anm_bytes, parse_anm_bytes,
+)
+from assembly_viewer import AssetViewport
+from assembly_window import AddFxElementDialog, AssemblyWindow
+from asset_family import (
+    AssetFamily, FamilyObject, MaterialGroup, rebuild_materials,
+)
+from base_mapping_editor import (
+    MappingEditError,
+    MappingIndex,
+    TextureNameEdit,
+    apply_texture_name_edits_to_bytes,
+    verify_texture_name_edits,
+)
 from base_parser import (
     AmeshBlock,
     AttsEntry,
@@ -26,6 +39,7 @@ from fx_element_editor import (
     append_fx_element_clipboard,
     build_fx_element_clipboard,
     build_new_fx_clipboard,
+    detach_shared_fx_vertices,
     detect_fx_elements,
     validate_fx_element_clipboard,
 )
@@ -55,7 +69,9 @@ def _form(form_type, children):
     return _chunk(b"FORM", form_type + children)
 
 
-def _fx_base_bytes(fx_name="FX1", *, vanm=False, bilateral=False):
+def _fx_base_bytes(
+        fx_name="FX1", *, vanm=False, bilateral=False,
+        tracy_name=None):
     entries = [
         struct.pack(">hBBBB", index, 12, 34, 56, 78)
         for index in range(2 if bilateral else 1)
@@ -86,10 +102,26 @@ def _fx_base_bytes(fx_name="FX1", *, vanm=False, bilateral=False):
             + bytes(value for uv in group for value in uv)
             for group in groups)
         olpl = _chunk(b"OLPL", olpl_payload)
+    tracy_texture = b""
+    if tracy_name:
+        tracy_texture = _form(
+            b"OBJT",
+            _chunk(b"CLID", b"ilbm.class\0")
+            + _form(
+                b"CIBO",
+                _chunk(b"NAM2", tracy_name.encode("ascii") + b"\0")
+                + _chunk(
+                    b"OTL2",
+                    bytes(value for uv in UVS for value in uv))),
+        )
     area = _form(
         b"AREA",
-        _chunk(b"STRC", struct.pack(">hHHBBBB", 1, 0, 0x88, 0, 255, 0, 255))
-        + texture,
+        _chunk(
+            b"STRC",
+            struct.pack(
+                ">hHHBBBB", 1, 0, 0xC8 if tracy_name else 0x88,
+                0, 255, 0, 255))
+        + texture + tracy_texture,
     )
     amesh = _form(
         b"AMSH", area + _chunk(b"ATTS", b"".join(entries)) + olpl)
@@ -111,7 +143,29 @@ def _fx_base_bytes(fx_name="FX1", *, vanm=False, bilateral=False):
     )
 
 
-def _animation(fx_name="FX1"):
+def _vanm_bytes(fx_name="FX1"):
+    bitmap_class = b"ilbm.class\0"
+    bitmap_names = (
+        f"{fx_name}.ILBM\0{fx_name}.ILBM\0".encode("ascii"))
+    groups = [list(UVS), list(reversed(UVS))]
+    stream = (
+        struct.pack(">h", len(bitmap_class)) + bitmap_class
+        + struct.pack(">h", len(bitmap_names)) + bitmap_names
+        + struct.pack(">h", sum(len(group) + 1 for group in groups))
+        + b"".join(
+            struct.pack(">h", len(group))
+            + bytes(value for uv in group for value in uv)
+            for group in groups)
+        + struct.pack(">h", 2)
+        + struct.pack(">ihh", 128, 0, 0)
+        + struct.pack(">ihh", 256, 1, 1)
+    )
+    return _form(b"VANM", _chunk(b"DATA", stream))
+
+
+def _animation(fx_name="FX1", *, writable=False):
+    if writable:
+        return parse_anm_bytes(_vanm_bytes(fx_name), "GLOW.ANM")
     return VanmData(
         source_name="GLOW.ANM",
         bitmap_class="ilbm.class",
@@ -253,7 +307,9 @@ def _writable_family(root: Path, fx_name="FX1", *, vanm=False,
     model = parse_sklt_file(sklt_path)
     base_asset = parse_base_bytes(base_path.read_bytes(), str(base_path))
     block = base_asset.root.ades[0]
-    animations = {"GLOW.ANM": _animation(fx_name)} if vanm else {}
+    animations = {
+        "GLOW.ANM": _animation(fx_name, writable=True)
+    } if vanm else {}
     face_uvs = animations["GLOW.ANM"].texcoord_groups[0] if vanm else UVS
     obj = FamilyObject(
         base_object=base_asset.root,
@@ -316,6 +372,215 @@ class FxClipboardV3Tests(unittest.TestCase):
             self.assertEqual(
                 [(item.fx_name, item.source_kind) for item in detected],
                 [(fx_name, "direct"), (fx_name, "direct")])
+
+    def test_fx2_blocks_keep_independent_animation_material_state(self):
+        family, obj = _memory_family("FX2", vanm=True)
+        second = copy.deepcopy(obj.base_object.ades[0])
+        second.texture.anim_type = 0
+        second.atts[0].poly_id = 1
+        obj.base_object.ades.append(second)
+        obj.skeleton.polygons.append([3, 2, 1, 0])
+        obj.skeleton.parsed_polygon_count = 2
+        rebuild_materials(obj, family)
+
+        elements = detect_fx_elements(obj, family.animations)
+        self.assertEqual(
+            [(element.fx_name, element.source_kind)
+             for element in elements],
+            [("FX2", "VANM")])
+        self.assertEqual(elements[0].block_indices, (0, 1))
+        viewport = AssetViewport()
+        try:
+            viewport.load_family(family, primary_owner="root")
+            first_id = viewport._block_material_ids[("root", 0)]
+            second_id = viewport._block_material_ids[("root", 1)]
+            self.assertNotEqual(first_id, second_id)
+            self.assertEqual(viewport._materials[first_id].anim_type, 1)
+            self.assertEqual(viewport._materials[second_id].anim_type, 0)
+        finally:
+            viewport.close()
+
+    def test_fx_selection_syncs_viewport_structure_and_combo(self):
+        family, obj = _memory_family("FX2", bilateral=True)
+        window = AssemblyWindow()
+        try:
+            window._family = family
+            window._owner_to_obj = {"root": obj}
+            window._selected_owner = "root"
+            window._workbench_obj = obj
+            window._mapping_index = MappingIndex(obj)
+            window.viewport.load_family(family, primary_owner="root")
+            window._rebuild_workbench(family, "root")
+            window._refresh_fx_elements()
+            window._show_model_editor()
+
+            window._on_polygon_structure_picked("root", 1, 0)
+            window._on_polygon_picked(1)
+            selected = window.fx_combo.currentData()
+            self.assertEqual(selected.fx_name, "FX2")
+            self.assertEqual(window._selected_polys, {0, 1})
+            self.assertEqual(window.viewport._highlight_polys, {0, 1})
+
+            window.fx_combo.setCurrentIndex(0)
+            index = window._fx_combo_index(selected.identity)
+            window.fx_combo.setCurrentIndex(index)
+            self.assertEqual(window._selected_polys, {0, 1})
+            self.assertEqual(window.viewport._highlight_polys, {0, 1})
+        finally:
+            window.close()
+
+    def test_add_fx_preview_supports_static_and_animated_templates(self):
+        direct_family, direct_obj = _memory_family("FX1")
+        direct = detect_fx_elements(
+            direct_obj, direct_family.animations)[0]
+        static_image = QImage(4, 4, QImage.Format.Format_ARGB32)
+        static_image.fill(0xFFFF0000)
+        static_dialog = AddFxElementDialog(
+            [direct], preview_provider=lambda _element:
+            ([static_image], ["FX1", "static"]))
+        try:
+            self.assertEqual(len(static_dialog._preview_frames), 1)
+            self.assertIn("static", static_dialog.preview_info.text())
+            self.assertFalse(static_dialog._preview_timer.isActive())
+        finally:
+            static_dialog.close()
+
+        vanm_family, vanm_obj = _memory_family("FX2", vanm=True)
+        animated = detect_fx_elements(
+            vanm_obj, vanm_family.animations)[0]
+        second_image = static_image.copy()
+        second_image.fill(0xFF0000FF)
+        animated_dialog = AddFxElementDialog(
+            [animated], preview_provider=lambda _element:
+            ([static_image, second_image], ["FX2", "2 phases"]))
+        try:
+            self.assertEqual(len(animated_dialog._preview_frames), 2)
+            self.assertIn("2 phases", animated_dialog.preview_info.text())
+            self.assertTrue(animated_dialog._preview_timer.isActive())
+            animated_dialog._advance_preview()
+            self.assertEqual(animated_dialog._preview_frame, 1)
+        finally:
+            animated_dialog.close()
+
+    def test_add_fx_preview_draws_exact_classic_yellow_uvs(self):
+        interior = [
+            (64, 64), (192, 64), (192, 192), (64, 192)]
+        image = QImage(256, 256, QImage.Format.Format_ARGB32)
+        image.fill(0xFF202020)
+
+        direct_family, direct_obj = _memory_family("FX1")
+        direct_obj.base_object.ades[0].olpl[0] = list(interior)
+        direct = detect_fx_elements(
+            direct_obj, direct_family.animations)[0]
+        direct_window = AssemblyWindow()
+        try:
+            direct_window._family = direct_family
+            direct_window._owner_to_obj = {"root": direct_obj}
+            with patch.object(
+                    direct_window, "_texture_qimage",
+                    return_value=image):
+                frames, info = direct_window._fx_template_preview(direct)
+            self.assertEqual(len(frames), 1)
+            color = frames[0].pixelColor(64, 64)
+            self.assertGreaterEqual(color.red(), 240)
+            self.assertGreaterEqual(color.green(), 240)
+            self.assertLess(color.blue(), 150)
+            self.assertEqual(len(info), 1)
+            self.assertNotIn("materials/textures", info[0])
+            self.assertNotIn("clone/edit", info[0])
+        finally:
+            direct_window.close()
+
+        vanm_family, vanm_obj = _memory_family("FX2", vanm=True)
+        animation = vanm_family.animations["GLOW.ANM"]
+        animation.texcoord_groups[:] = [
+            list(interior), list(reversed(interior))]
+        animated = detect_fx_elements(
+            vanm_obj, vanm_family.animations)[0]
+        animated_window = AssemblyWindow()
+        try:
+            animated_window._family = vanm_family
+            animated_window._owner_to_obj = {"root": vanm_obj}
+            with patch.object(
+                    animated_window, "_texture_qimage",
+                    return_value=image):
+                frames, info = animated_window._fx_template_preview(animated)
+            self.assertEqual(len(frames), 2)
+            for frame in frames:
+                color = frame.pixelColor(64, 64)
+                self.assertGreaterEqual(color.red(), 240)
+                self.assertGreaterEqual(color.green(), 240)
+                self.assertLess(color.blue(), 150)
+            self.assertIn("2 frames", info[0])
+            self.assertIn("UV VANM", info[0])
+        finally:
+            animated_window.close()
+
+    def test_texture_name_writer_round_trips_ilbm_and_bmpanim(self):
+        for vanm, replacement in (
+                (False, "FX2.ILBM"),
+                (True, "FIRE.ANM")):
+            with self.subTest(vanm=vanm):
+                original = _fx_base_bytes("FX1", vanm=vanm)
+                edits = [TextureNameEdit("root", 0, replacement)]
+                edited = apply_texture_name_edits_to_bytes(original, edits)
+                notes = verify_texture_name_edits(
+                    original, edited, edits)
+                parsed = parse_base_bytes(edited).root
+                self.assertEqual(len(edited), len(original))
+                self.assertEqual(
+                    parsed.ades[0].texture.name, replacement)
+                self.assertEqual(
+                    parsed.ades[0].texture.kind,
+                    "bmpanim" if vanm else "ilbm")
+                self.assertEqual(
+                    notes[-1], "BASE size and chunk structure unchanged")
+        original = _fx_base_bytes(
+            "FX1", tracy_name="MASK.ILBM")
+        edits = [TextureNameEdit(
+            "root", 0, "FX2.ILBM", "tracy_texture")]
+        edited = apply_texture_name_edits_to_bytes(original, edits)
+        verify_texture_name_edits(original, edited, edits)
+        parsed = parse_base_bytes(edited).root
+        self.assertEqual(parsed.ades[0].texture.name, "FX1.ILBM")
+        self.assertEqual(
+            parsed.ades[0].tracy_texture.name, "FX2.ILBM")
+        with self.assertRaises(MappingEditError):
+            apply_texture_name_edits_to_bytes(
+                b"not a BASE",
+                [TextureNameEdit("root", 0, "FIRE.ILBM")])
+
+    def test_vanm_binding_replacement_is_one_undoable_block_edit(self):
+        family, obj = _memory_family("FX2", vanm=True)
+        family.animations["FIRE.ANM"] = _animation("FX1")
+        window = AssemblyWindow()
+        try:
+            window._family = family
+            window._owner_to_obj = {"root": obj}
+            window._selected_owner = "root"
+            window._workbench_obj = obj
+            window._mapping_index = MappingIndex(obj)
+            window.viewport.load_family(family, primary_owner="root")
+            window._rebuild_workbench(family, "root")
+            window._refresh_fx_elements()
+            window._show_model_editor()
+            window._on_polygon_picked(0)
+            with patch.object(
+                    window, "_choose_model_texture",
+                    return_value="FIRE.ANM"):
+                window._load_model_texture()
+            self.assertEqual(
+                obj.base_object.ades[0].texture.name, "FIRE.ANM")
+            self.assertEqual(
+                window._edit_undo_stack[-1]["kind"], "texture")
+            window._undo_edit()
+            self.assertEqual(
+                obj.base_object.ades[0].texture.name, "GLOW.ANM")
+            window._redo_edit()
+            self.assertEqual(
+                obj.base_object.ades[0].texture.name, "FIRE.ANM")
+        finally:
+            window.close()
 
     def test_vanm_snapshot_append_and_changed_timeline_refusal_are_atomic(self):
         family, obj = _memory_family("FX2", vanm=True)
@@ -463,12 +728,22 @@ class FxClipboardV3Tests(unittest.TestCase):
         self.assertEqual(
             static.texture.name, "STONE.ILBM")
 
-    def test_shared_and_invalid_fx_are_read_only(self):
+    def test_shared_fx_can_copy_and_detach_but_invalid_fx_is_refused(self):
         family, obj = _memory_family("FX1", shared=True)
         element = detect_fx_elements(obj, family.animations)[0]
         self.assertEqual(element.shared_state, "shared")
-        with self.assertRaises(GeometryClipboardError):
-            build_fx_element_clipboard(obj, element, family.animations)
+        clipboard = build_fx_element_clipboard(
+            obj, element, family.animations)
+        self.assertEqual(clipboard.shared_state, "exclusive")
+        static_before = list(obj.skeleton.polygons[-1])
+        detached = detach_shared_fx_vertices(obj, element)
+        self.assertEqual(detached, 1)
+        self.assertEqual(obj.skeleton.polygons[-1], static_before)
+        self.assertNotEqual(
+            obj.skeleton.polygons[element.poly_ids[0]][0],
+            static_before[0])
+        updated = detect_fx_elements(obj, family.animations)[0]
+        self.assertTrue(updated.editable)
 
     def test_mixed_static_and_fx_ui_selection_is_refused(self):
         family, obj = _memory_family("FX1")
@@ -518,7 +793,7 @@ class FxClipboardV3Tests(unittest.TestCase):
         with self.assertRaises(GeometryClipboardError):
             build_fx_element_clipboard(obj, element, family.animations)
 
-    def test_shared_fx_vertices_are_protected_from_normal_edit_mode(self):
+    def test_shared_fx_copy_add_delete_are_available_before_safe_detach(self):
         family, obj = _memory_family("FX1", shared=True)
         window = AssemblyWindow()
         try:
@@ -529,10 +804,15 @@ class FxClipboardV3Tests(unittest.TestCase):
             window._mapping_index = MappingIndex(obj)
             window.viewport.load_family(family, primary_owner="root")
             window.viewport.set_selected_owner("root")
-            window.viewport.enter_edit_mode("root")
+            window._show_model_editor()
             window._refresh_fx_elements()
             window._sync_edit_action_states()
-            self.assertFalse(window.add_fx_action.isEnabled())
+            self.assertTrue(window.add_fx_action.isEnabled())
+            shared = window._fx_elements[0]
+            window.fx_combo.setCurrentIndex(
+                window._fx_combo_index(shared.identity))
+            self.assertTrue(window.copy_geometry_action.isEnabled())
+            self.assertTrue(window.delete_fx_button.isEnabled())
             window.viewport.select_all_edit_vertices()
             self.assertEqual(
                 window.viewport.edit_session.selection, {4, 5})
@@ -546,6 +826,46 @@ class FxClipboardV3Tests(unittest.TestCase):
             window.viewport._cancel_modal()
             window._on_polygon_picked(0)
             self.assertIsNone(window._selected_polygon_vertices())
+        finally:
+            window.close()
+
+    def test_shared_fx_auto_detach_is_undoable(self):
+        family, obj = _memory_family("FX1", shared=True)
+        window = AssemblyWindow()
+        try:
+            window._family = family
+            window._owner_to_obj = {"root": obj}
+            window._selected_owner = "root"
+            window._workbench_obj = obj
+            window._mapping_index = MappingIndex(obj)
+            window.viewport.load_family(family, primary_owner="root")
+            window.viewport.set_selected_owner("root")
+            window._show_model_editor()
+            window._refresh_fx_elements()
+            original_points = list(obj.skeleton.points)
+            original_polygons = copy.deepcopy(obj.skeleton.polygons)
+            shared = window._fx_elements[0]
+
+            with patch.object(
+                    window, "_geometry_writer_reason",
+                    return_value=""):
+                editable = window._detach_fx_for_editing(shared)
+            self.assertIsNotNone(editable)
+            self.assertTrue(editable.editable)
+            self.assertEqual(len(obj.skeleton.points), 7)
+            self.assertEqual(obj.skeleton.polygons[-1],
+                             original_polygons[-1])
+            self.assertEqual(len(window._edit_undo_stack), 1)
+
+            window._undo_edit()
+            self.assertEqual(obj.skeleton.points, original_points)
+            self.assertEqual(obj.skeleton.polygons, original_polygons)
+            self.assertEqual(
+                detect_fx_elements(obj, family.animations)[0].shared_state,
+                "shared")
+            window._redo_edit()
+            self.assertTrue(
+                detect_fx_elements(obj, family.animations)[0].editable)
         finally:
             window.close()
 
@@ -568,8 +888,8 @@ class FxClipboardV3Tests(unittest.TestCase):
         family, obj = _memory_family("FX1", vanm=True, shared=True)
         fx = detect_fx_elements(obj, family.animations)[0]
         self.assertEqual(fx.shared_state, "shared")
-        # The shared-state policy rejects UI deletion.  The structural planner
-        # itself must nevertheless preserve demonstrated ATTS-only semantics.
+        # Shared vertices remain valid when the complete FX polygon is
+        # structurally deleted; unrelated polygon references are preserved.
         plan = plan_delete_geometry(
             obj, {0}, MappingIndex(obj))
         apply_delete_geometry(
@@ -580,7 +900,7 @@ class FxClipboardV3Tests(unittest.TestCase):
         self.assertEqual(block.texture.kind, "bmpanim")
         self.assertEqual(block.texture.name, "GLOW.ANM")
 
-    def test_ui_dispatch_copy_paste_undo_redo_and_vanm_uv_read_only(self):
+    def test_ui_dispatch_copy_paste_undo_redo_and_vanm_uv_editing(self):
         with tempfile.TemporaryDirectory() as temp:
             family, obj = _writable_family(
                 Path(temp), "FX2", vanm=True)
@@ -609,7 +929,7 @@ class FxClipboardV3Tests(unittest.TestCase):
                     window.delete_geometry_action.toolTip())
 
                 window._update_uv_editor(0)
-                self.assertFalse(window.uv_editor._editable)
+                self.assertTrue(window.uv_editor._editable)
                 self.assertIn(
                     "UV source: VANM", window.uv_editor.toolTip())
                 self.assertIn("frame 1/2", window.uv_editor.toolTip())
@@ -624,11 +944,17 @@ class FxClipboardV3Tests(unittest.TestCase):
                     list(group)
                     for group in family.animations[
                         "GLOW.ANM"].texcoord_groups]
-                window.uv_editor.select_all()
-                window.uv_editor.nudge_selected(5, 5)
+                window.uv_editor.select_point(1)
+                window.uv_editor.nudge_selected(-5, -5)
+                self.assertNotEqual(
+                    family.animations["GLOW.ANM"].texcoord_groups,
+                    animation_uvs)
+                self.assertTrue(window._vanm_uv_original)
+                window._undo_edit()
                 self.assertEqual(
                     family.animations["GLOW.ANM"].texcoord_groups,
                     animation_uvs)
+                self.assertFalse(window._vanm_uv_original)
 
                 window._copy_geometry()
                 self.assertIsInstance(
@@ -708,6 +1034,50 @@ class FxClipboardV3Tests(unittest.TestCase):
             finally:
                 window.close()
 
+    def test_vanm_uv_save_as_exports_verified_anm(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            family, obj = _writable_family(root, "FX2", vanm=True)
+            window = AssemblyWindow()
+            try:
+                window._family = family
+                window._owner_to_obj = {"root": obj}
+                window._selected_owner = "root"
+                window._workbench_obj = obj
+                window.viewport.load_family(
+                    family, primary_owner="root")
+                window.viewport.set_selected_owner("root")
+                window._rebuild_workbench(family, "root")
+                window._refresh_fx_elements()
+                window.viewport.enter_edit_mode("root")
+                window._on_polygon_picked(0)
+                window._update_uv_editor(0)
+                self.assertTrue(window.uv_editor._editable)
+                window.uv_editor.select_point(1)
+                window.uv_editor.nudge_selected(-7, 3)
+                edited = [
+                    list(group) for group in
+                    family.animations["GLOW.ANM"].texcoord_groups]
+                self.assertNotEqual(edited[0], UVS)
+
+                output = root / "bundle"
+                self.assertTrue(window._write_model_files(
+                    "root", family, obj,
+                    output / "FXTEST.SKLT",
+                    output / "FXTEST.BASE",
+                    ask_replace=False))
+                target = output / "GLOW.ANM"
+                self.assertTrue(target.exists())
+                saved = parse_anm_bytes(
+                    target.read_bytes(), target.name)
+                self.assertEqual(saved.texcoord_groups, edited)
+                self.assertEqual(
+                    export_anm_bytes(family.animations["GLOW.ANM"]),
+                    target.read_bytes())
+                self.assertFalse(window._vanm_uv_original)
+            finally:
+                window.close()
+
     def test_add_uv_vertex_updates_poo2_pol2_olpl_save_and_history(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
@@ -724,6 +1094,7 @@ class FxClipboardV3Tests(unittest.TestCase):
                 window.viewport.set_selected_owner("root")
                 window._rebuild_workbench(family, "root")
                 window._refresh_fx_elements()
+                window._show_model_editor()
                 window._on_polygon_picked(0)
                 window.uv_editor.select_point(0)
 

@@ -3,7 +3,8 @@ import unittest
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-from PySide6.QtCore import QPointF, Qt
+from PySide6.QtCore import QEvent, QPointF, Qt
+from PySide6.QtGui import QMouseEvent
 from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication
 
@@ -109,6 +110,62 @@ class UVMarqueeV3Tests(unittest.TestCase):
             self.widget, Qt.MouseButton.LeftButton,
             Qt.KeyboardModifier.ControlModifier, first)
         self.assertEqual(self.widget.selected_points(), {1})
+
+    def test_auto_align_coordinates_spacing_and_conservative_square(self):
+        self.widget.set_data(
+            None, [(40, 40), (100, 40), (70, 100)], True, "triangle")
+        handle = (0, 2)
+        self.widget._drag_start_uvs = {handle: (70, 100)}
+        delta = self.widget._snap_drag_delta(
+            {handle}, 27, -57)
+        self.assertEqual(delta, (30, -60))
+        self.assertEqual(
+            {(axis, value) for axis, value, _label
+             in self.widget.snap_guides},
+            {("u", 100), ("v", 40)})
+
+        self.widget.set_data(
+            None, [(40, 40), (80, 90), (130, 140)], True, "spacing")
+        handle = (0, 2)
+        self.widget._drag_start_uvs = {handle: (130, 140)}
+        delta = self.widget._snap_drag_delta(
+            {handle}, -9, 0, allow_v=False)
+        self.assertEqual(delta[0], -10)
+        self.assertTrue(any(
+            label.endswith("to equal spacing")
+            for _axis, _value, label in self.widget.snap_guides))
+
+        loop = UVLoop(
+            "square", 0,
+            [(14, 12), (50, 10), (50, 50), (10, 50)])
+        self.assertEqual(
+            self.widget._near_square_target(
+                loop, 0, (12, 11), threshold_uv=6.0),
+            (10, 10))
+        self.assertIsNone(self.widget._near_square_target(
+            loop, 0, (30, 30), threshold_uv=6.0))
+        rectangle = UVLoop(
+            "rectangle", 0,
+            [(14, 12), (90, 10), (90, 50), (10, 50)])
+        self.assertEqual(
+            self.widget._near_quad_target(
+                rectangle, 0, (12, 11), threshold_uv=6.0),
+            ((10, 10), "rectangle"))
+
+    def test_alt_bypasses_uv_snap_for_current_drag(self):
+        self.widget.select_handle(0, 0)
+        handle = (0, 0)
+        self.widget._dragging = True
+        self.widget._drag_anchor_uv = (40, 40)
+        self.widget._drag_start_uvs = {handle: (40, 40)}
+        target = self.widget._uv_to_screen((43, 42))
+        event = QMouseEvent(
+            QEvent.Type.MouseMove, target, target, target,
+            Qt.MouseButton.NoButton, Qt.MouseButton.LeftButton,
+            Qt.KeyboardModifier.AltModifier)
+        self.widget.mouseMoveEvent(event)
+        self.assertEqual(self.widget.uvs()[0], (43, 42))
+        self.assertEqual(self.widget.snap_guides, ())
 
     def test_multi_loop_select_all_nudge_and_colors(self):
         loops = [

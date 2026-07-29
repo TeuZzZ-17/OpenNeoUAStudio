@@ -100,8 +100,24 @@ class WindowContractV5Tests(unittest.TestCase):
             self.assertEqual(window.step_button.text(), ">>")
             self.assertTrue(window.auto_align_check.isChecked())
             self.assertEqual(window._resources_tabs.tabText(0), "Bas Manager")
-            add_labels = [
-                action.text() for action in window.add_menu.actions()]
+            self.assertFalse(hasattr(window, "global_edit_button"))
+            toolbar_widgets = [
+                action.defaultWidget()
+                for action in window.animation_toolbar.actions()]
+            speed_index = toolbar_widgets.index(window.speed_spin)
+            self.assertEqual(
+                toolbar_widgets[speed_index + 1:speed_index + 3],
+                [window.global_undo_button, window.global_redo_button])
+            self.assertEqual(
+                [window._editor_tabs.tabText(index)
+                 for index in range(window._editor_tabs.count())],
+                ["Model and Texture Editor"])
+            self.assertEqual(window.mapping_repair_action.text(),
+                             "Mapping Repair...")
+            self.assertNotIn(
+                "Add",
+                [action.text().replace("&", "")
+                 for action in window.menuBar().actions()])
 
             view_labels = [
                 action.text() for action in window.view_menu.actions()
@@ -117,9 +133,11 @@ class WindowContractV5Tests(unittest.TestCase):
                     child.text() for child in menu.actions()
                     if not child.isSeparator())
             self.assertNotIn("Go to polyID...", tool_labels)
-            self.assertEqual(add_labels, [
-                "Triangle", "Square", "Rectangle...", "Circle / Disc...",
-                "Plane", "Cube / Box...", "Pyramid...", "Cylinder..."])
+            self.assertEqual(window.global_undo_button.styleSheet(), "")
+            self.assertEqual(window.global_redo_button.styleSheet(), "")
+            self.assertEqual(
+                window.mirror_x_check.text(), "Symmetry (Mirror X)")
+            self.assertFalse(window.mirror_x_check.isChecked())
         finally:
             window.close()
 
@@ -235,6 +253,223 @@ class WindowContractV5Tests(unittest.TestCase):
                     window, "_preview_setbas_animation") as preview:
                 window._on_setbas_item_selected(item)
             preview.assert_called_once_with(resource)
+        finally:
+            window.close()
+
+    def test_setbas_context_menu_does_not_change_current_row(self):
+        window = AssemblyWindow()
+        try:
+            resources = [
+                SimpleNamespace(
+                    class_id="sklt.class", resource_name="A.SKLT",
+                    error=""),
+                SimpleNamespace(
+                    class_id="ilbm.class", resource_name="B.ILBM",
+                    error=""),
+            ]
+            window._setbas = SimpleNamespace(resources=resources)
+            first = QTreeWidgetItem(["A.SKLT", "SKLT", ""])
+            second = QTreeWidgetItem(["B.ILBM", "ILBM", ""])
+            for index, (item, kind) in enumerate((
+                    (first, "sklt.class"), (second, "ilbm.class"))):
+                item.setData(
+                    0, assembly_window_module._BAS_KIND_ROLE, kind)
+                item.setData(0, Qt.ItemDataRole.UserRole, index)
+            window.setbas_tree.blockSignals(True)
+            window.setbas_tree.addTopLevelItems([first, second])
+            window.setbas_tree.setCurrentItem(first)
+            window.setbas_tree.blockSignals(False)
+
+            fake_menu = _FakeMenu()
+            with patch.object(
+                    window.setbas_tree, "itemAt", return_value=second), \
+                    patch.object(
+                        assembly_window_module, "QMenu",
+                        return_value=fake_menu):
+                window._show_setbas_context_menu(QPoint())
+            self.assertIs(window.setbas_tree.currentItem(), first)
+            labels = [
+                action.text() for action in fake_menu.actions()
+                if not action.isSeparator()]
+            self.assertNotIn("Expand group", labels)
+            self.assertNotIn("Collapse group", labels)
+            self.assertIn("Preview", labels)
+        finally:
+            window.close()
+
+    def test_setbas_base_context_copies_the_base_name(self):
+        window = AssemblyWindow()
+        try:
+            window._setbas = SimpleNamespace(resources=[])
+            item = QTreeWidgetItem(["MODEL.BASE", "", ""])
+            item.setData(
+                0, assembly_window_module._BAS_KIND_ROLE, "base")
+            item.setData(
+                0, assembly_window_module._BAS_NAME_ROLE,
+                "Objects/MODEL.BASE")
+            fake_menu = _FakeMenu()
+            with patch.object(
+                    window.setbas_tree, "itemAt", return_value=item), \
+                    patch.object(
+                        assembly_window_module, "QMenu",
+                        return_value=fake_menu), \
+                    patch.object(window, "_copy_text") as copied:
+                window._show_setbas_context_menu(QPoint())
+                action = next(
+                    candidate for candidate in fake_menu.actions()
+                    if candidate.text() == "Copy BASE name")
+                action.triggered.callback()
+            copied.assert_called_once_with(
+                "Objects/MODEL.BASE", "BASE name copied successfully.")
+        finally:
+            window.close()
+
+    def test_setbas_right_click_never_selects_or_previews_any_resource_type(
+            self):
+        window = AssemblyWindow()
+        try:
+            kinds = (
+                ("base", "MODEL.BASE"),
+                ("bmpanim.class", "EFFECT.ANM"),
+                ("ilbm.class", "BODY.ILBM"),
+                ("sklt.class", "MODEL.SKLT"),
+                ("particle.class", "SMOKE.PARTICLE"),
+            )
+            resources = [
+                SimpleNamespace(
+                    class_id=kind, resource_name=name, error="")
+                for kind, name in kinds
+            ]
+            window._setbas = SimpleNamespace(resources=resources)
+            items = []
+            for index, (kind, name) in enumerate(kinds):
+                item = QTreeWidgetItem([name, kind, ""])
+                item.setData(
+                    0, assembly_window_module._BAS_KIND_ROLE, kind)
+                item.setData(0, Qt.ItemDataRole.UserRole, index)
+                items.append(item)
+            window.setbas_tree.blockSignals(True)
+            window.setbas_tree.addTopLevelItems(items)
+            window.setbas_tree.setCurrentItem(items[0])
+            window.setbas_tree.blockSignals(False)
+            window.setbas_tree.resize(520, 260)
+            window.setbas_tree.show()
+            QApplication.processEvents()
+
+            with patch.object(
+                    window, "_preview_setbas_resource") as preview, \
+                    patch.object(
+                        assembly_window_module, "QMenu",
+                        return_value=_FakeMenu()):
+                for item in items[1:]:
+                    window.setbas_tree.scrollToItem(item)
+                    QApplication.processEvents()
+                    position = window.setbas_tree.visualItemRect(item).center()
+                    QTest.mouseClick(
+                        window.setbas_tree.viewport(),
+                        Qt.MouseButton.RightButton,
+                        Qt.KeyboardModifier.NoModifier,
+                        position)
+                    QApplication.processEvents()
+                    self.assertIs(
+                        window.setbas_tree.currentItem(), items[0])
+            preview.assert_not_called()
+        finally:
+            window.close()
+
+    def test_setbas_left_click_selects_and_previews_every_supported_type(self):
+        window = AssemblyWindow()
+        try:
+            kinds = (
+                ("base", "MODEL.BASE"),
+                ("bmpanim.class", "EFFECT.ANM"),
+                ("ilbm.class", "BODY.ILBM"),
+                ("sklt.class", "MODEL.SKLT"),
+            )
+            resources = [
+                SimpleNamespace(
+                    class_id=kind, resource_name=name, error="")
+                for kind, name in kinds
+            ]
+            window._setbas = SimpleNamespace(resources=resources)
+            items = []
+            for index, (kind, name) in enumerate(kinds):
+                item = QTreeWidgetItem([name, kind, ""])
+                item.setData(
+                    0, assembly_window_module._BAS_KIND_ROLE, kind)
+                item.setData(0, Qt.ItemDataRole.UserRole, index)
+                items.append(item)
+            window.setbas_tree.blockSignals(True)
+            window.setbas_tree.addTopLevelItems(items)
+            window.setbas_tree.blockSignals(False)
+            window.setbas_tree.resize(520, 240)
+            window.setbas_tree.show()
+            QApplication.processEvents()
+
+            with patch.object(
+                    window, "_preview_setbas_resource") as preview:
+                for item in items:
+                    window.setbas_tree.scrollToItem(item)
+                    QApplication.processEvents()
+                    position = window.setbas_tree.visualItemRect(item).center()
+                    QTest.mouseClick(
+                        window.setbas_tree.viewport(),
+                        Qt.MouseButton.LeftButton,
+                        Qt.KeyboardModifier.NoModifier,
+                        position)
+                    QApplication.processEvents()
+                    self.assertIs(window.setbas_tree.currentItem(), item)
+                    preview.assert_called_with(item)
+        finally:
+            window.close()
+
+    def test_setbas_arrow_navigation_refreshes_supported_preview(self):
+        window = AssemblyWindow()
+        try:
+            resources = [
+                SimpleNamespace(
+                    class_id="base.class", resource_name="MODEL.BASE",
+                    error=""),
+                SimpleNamespace(
+                    class_id="ilbm.class", resource_name="BODY.ILBM",
+                    error=""),
+            ]
+            window._setbas = SimpleNamespace(resources=resources)
+            first = QTreeWidgetItem(["MODEL.BASE", "BASE", ""])
+            second = QTreeWidgetItem(["BODY.ILBM", "ILBM", ""])
+            first.setData(0, assembly_window_module._BAS_KIND_ROLE, "base")
+            second.setData(
+                0, assembly_window_module._BAS_KIND_ROLE, "ilbm.class")
+            first.setData(0, Qt.ItemDataRole.UserRole, 0)
+            second.setData(0, Qt.ItemDataRole.UserRole, 1)
+            window.setbas_tree.blockSignals(True)
+            window.setbas_tree.addTopLevelItems([first, second])
+            window.setbas_tree.setCurrentItem(first)
+            window.setbas_tree.blockSignals(False)
+            window.setbas_tree.show()
+            window.setbas_tree.setFocus()
+
+            with patch.object(
+                    window, "_preview_setbas_resource") as preview:
+                QTest.keyClick(window.setbas_tree, Qt.Key.Key_Down)
+                QApplication.processEvents()
+            self.assertIs(window.setbas_tree.currentItem(), second)
+            preview.assert_called_once_with(second)
+        finally:
+            window.close()
+
+    def test_mapping_repair_is_one_standalone_shared_state_tool(self):
+        window = AssemblyWindow()
+        try:
+            panel = window._mapping_panel
+            window._show_mapping_repair()
+            first_dialog = window._mapping_dialog
+            self.assertIsNotNone(first_dialog)
+            self.assertIs(panel.parentWidget(), first_dialog)
+            first_dialog.close()
+            window._show_mapping_repair()
+            self.assertIs(window._mapping_dialog, first_dialog)
+            self.assertIs(window._mapping_panel, panel)
         finally:
             window.close()
 
