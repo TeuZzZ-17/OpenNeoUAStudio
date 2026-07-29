@@ -77,17 +77,37 @@ class TransformGizmoV4Tests(unittest.TestCase):
             self.assertEqual(window.transform_box.title(), "Transform")
             self.assertTrue(window.auto_align_check.isChecked())
             self.assertEqual(
-                window.gizmo_intensity_spin.text(), "0.30 model units")
+                window.gizmo_intensity_spin.text(), "0.50 model units")
+            self.assertEqual(window.viewport.direct_transform_mode, "move")
+            self.assertAlmostEqual(
+                window.viewport.direct_transform_intensity, 0.50)
+            window.gizmo_intensity_spin.setValue(0.75)
             window._set_transform_mode("rotate")
             self.assertEqual(window.transform_step_label.text(), "Rotate step")
             self.assertEqual(window.gizmo_intensity_spin.text(), "1°")
             self.assertEqual(
                 window.viewport.edit_session.selection, selection)
+            self.assertEqual(window.viewport.direct_transform_mode, "rotate")
+            window.gizmo_intensity_spin.setValue(12.0)
             window._set_transform_mode("scale")
             self.assertEqual(window.transform_step_label.text(), "Scale step")
             self.assertEqual(window.gizmo_intensity_spin.text(), "1%")
             self.assertEqual(
                 window.viewport.edit_session.selection, selection)
+            self.assertEqual(window.viewport.direct_transform_mode, "scale")
+            window.gizmo_intensity_spin.setValue(8.0)
+            window._set_transform_mode("move")
+            self.assertAlmostEqual(window.gizmo_intensity_spin.value(), 0.75)
+            window._set_transform_mode("rotate")
+            self.assertAlmostEqual(window.gizmo_intensity_spin.value(), 12.0)
+            window._set_transform_mode("scale")
+            self.assertAlmostEqual(window.gizmo_intensity_spin.value(), 8.0)
+            for mode, color in (
+                    ("move", "#8f2530"),
+                    ("rotate", "#244f99"),
+                    ("scale", "#28783f")):
+                self.assertIn(
+                    color, window.transform_mode_buttons[mode].styleSheet())
         finally:
             window.close()
 
@@ -138,9 +158,9 @@ class TransformGizmoV4Tests(unittest.TestCase):
                 {0, 1, 2},
             )
             window._selected_owner = "root"
-            window.global_edit_button.blockSignals(True)
-            window.global_edit_button.setChecked(True)
-            window.global_edit_button.blockSignals(False)
+            window.edit_toggle_action.blockSignals(True)
+            window.edit_toggle_action.setChecked(True)
+            window.edit_toggle_action.blockSignals(False)
             original = list(model.points)
             for direction in ((1, 0, 0), (0, -1, 0), (0, 0, 1)):
                 window._set_transform_mode("rotate")

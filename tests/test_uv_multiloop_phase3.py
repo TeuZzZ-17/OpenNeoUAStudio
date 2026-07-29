@@ -8,7 +8,7 @@ from unittest.mock import patch
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-from PySide6.QtWidgets import QApplication, QMenu
+from PySide6.QtWidgets import QApplication, QMenu, QMessageBox
 
 from assembly_window import AssemblyWindow
 from asset_family import AssetFamily, FamilyObject, MaterialGroup
@@ -137,6 +137,7 @@ def _open_memory_window(family, obj):
     window.viewport.set_selected_owner("root")
     window._rebuild_workbench(family, "root")
     window._refresh_fx_elements()
+    window._show_model_editor()
     return window
 
 
@@ -213,6 +214,36 @@ class UVPhase3Tests(unittest.TestCase):
             self.assertEqual(editor.loop_uvs(), after)
         finally:
             editor.close()
+
+    def test_reset_all_uvs_is_one_reversible_multi_loop_command(self):
+        family, obj = _two_polygon_family()
+        original = copy.deepcopy(obj.base_object.ades[0].olpl)
+        window = _open_memory_window(family, obj)
+        try:
+            window._on_polygon_picked(0)
+            window._on_polygon_picked(1, True)
+            window.uv_editor.select_all()
+            window.uv_editor.nudge_selected(4, 3)
+            edited = copy.deepcopy(obj.base_object.ades[0].olpl)
+            self.assertNotEqual(edited, original)
+            self.assertTrue(window.uv_reset_all_button.isEnabled())
+
+            with patch.object(
+                    QMessageBox, "warning",
+                    return_value=QMessageBox.StandardButton.Yes):
+                window._reset_all_uvs()
+            self.assertEqual(obj.base_object.ades[0].olpl, original)
+            self.assertEqual(
+                window._edit_undo_stack[-1]["kind"], "uv_multi")
+            self.assertEqual(
+                window._edit_undo_stack[-1]["label"], "reset all UVs")
+
+            window._undo_edit()
+            self.assertEqual(obj.base_object.ades[0].olpl, edited)
+            window._redo_edit()
+            self.assertEqual(obj.base_object.ades[0].olpl, original)
+        finally:
+            window.close()
 
     def test_delete_plan_keeps_poo2_and_rejects_triangles(self):
         family, obj = _two_polygon_family()

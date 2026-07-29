@@ -234,7 +234,7 @@ class AreaFxStructuralTests(unittest.TestCase):
                 window._workbench_obj = obj
                 window.viewport.load_family(family, primary_owner="root")
                 window.viewport.set_selected_owner("root")
-                window.viewport.enter_edit_mode("root")
+                window._show_model_editor()
                 window._apply_delete_plan(
                     "root", obj, plan, label="Delete FX2 FX")
                 self.assertEqual(len(obj.skeleton.polygons), 20)

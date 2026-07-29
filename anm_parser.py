@@ -1,4 +1,4 @@
-"""Read-only parser for Urban Assault .ANM / VANM texture animations.
+"""Parser and fixed-layout UV writer for Urban Assault .ANM / VANM animations.
 
 Layout (CONFIRMED, mirrors OpenUA UA_source/src/bmpAnm.cpp and verified byte
 for byte against original FLAK1.ANM):
@@ -59,6 +59,8 @@ class VanmData:
     texcoord_groups: list[list[tuple[int, int]]] = field(default_factory=list)
     frames: list[VanmFrame] = field(default_factory=list)
     warnings: list[str] = field(default_factory=list)
+    original_data: bytes = b""
+    texcoord_offsets: list[int] = field(default_factory=list)
 
     @property
     def total_duration_ms(self) -> float:
@@ -102,6 +104,7 @@ def _parse_stream(data: bytes, start: int, end: int, anm: VanmData) -> None:
         num_uv, pos = _read_s16(view, pos)
         if num_uv < 0 or pos + num_uv * 2 > end:
             raise AnmParseError("invalid UV group")
+        anm.texcoord_offsets.append(pos)
         anm.texcoord_groups.append(
             [(view[pos + 2 * j], view[pos + 2 * j + 1]) for j in range(num_uv)]
         )
@@ -134,7 +137,7 @@ def _parse_stream(data: bytes, start: int, end: int, anm: VanmData) -> None:
 
 
 def parse_anm_bytes(data: bytes, source_name: str = "<memory>") -> VanmData:
-    anm = VanmData(source_name=source_name)
+    anm = VanmData(source_name=source_name, original_data=bytes(data))
     if len(data) < 4:
         anm.warnings.append("File too small.")
         return anm
@@ -167,6 +170,39 @@ def parse_anm_bytes(data: bytes, source_name: str = "<memory>") -> VanmData:
     return anm
 
 
+def export_anm_bytes(anm: VanmData) -> bytes:
+    """Patch same-length VANM UV groups and verify a complete round trip."""
+
+    if not anm.original_data:
+        raise AnmParseError("VANM source bytes are unavailable")
+    if len(anm.texcoord_offsets) != len(anm.texcoord_groups):
+        raise AnmParseError("VANM UV offsets are incomplete")
+    output = bytearray(anm.original_data)
+    for group_index, (offset, group) in enumerate(zip(
+            anm.texcoord_offsets, anm.texcoord_groups)):
+        if offset < 0 or offset + len(group) * 2 > len(output):
+            raise AnmParseError(
+                f"VANM UV group #{group_index} exceeds its source span")
+        for point_index, uv in enumerate(group):
+            if len(uv) != 2 or any(
+                    not isinstance(value, int) or value < 0 or value > 255
+                    for value in uv):
+                raise AnmParseError(
+                    f"VANM UV group #{group_index} has an invalid coordinate")
+            output[offset + point_index * 2] = uv[0]
+            output[offset + point_index * 2 + 1] = uv[1]
+    verified = parse_anm_bytes(bytes(output), anm.source_name)
+    if verified.bitmap_class != anm.bitmap_class \
+            or verified.bitmap_names != anm.bitmap_names \
+            or verified.texcoord_groups != anm.texcoord_groups \
+            or [(frame.frame_time, frame.frame_id, frame.texcoords_id)
+                for frame in verified.frames] != [
+                    (frame.frame_time, frame.frame_id, frame.texcoords_id)
+                    for frame in anm.frames]:
+        raise AnmParseError("exported VANM failed round-trip verification")
+    return bytes(output)
+
+
 def parse_anm_file(path: str | Path) -> VanmData:
     file_path = Path(path)
     try:
@@ -180,7 +216,7 @@ def parse_anm_file(path: str | Path) -> VanmData:
 if __name__ == "__main__":
     import argparse
 
-    cli = argparse.ArgumentParser(description="Inspect a VANM/ANM file (read-only).")
+    cli = argparse.ArgumentParser(description="Inspect a VANM/ANM file.")
     cli.add_argument("file")
     args = cli.parse_args()
 

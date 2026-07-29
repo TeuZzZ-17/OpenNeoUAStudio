@@ -189,13 +189,15 @@ class TextureAssignmentTests(unittest.TestCase):
 
         result = classify_texture_assignment(mapping, range(5))
 
-        self.assertEqual(len(result.groups), 1)
+        self.assertEqual(len(result.groups), 2)
         self.assertEqual(result.groups[0].block_index, 2)
         self.assertEqual(result.groups[0].selected_polys, {0, 1})
-        self.assertEqual(result.affected_polys, {0, 1})
+        self.assertEqual(result.affected_polys, {0, 1, 3})
         self.assertEqual(
             dict(result.skipped),
-            {2: "unmapped", 3: "animated/VANM", 4: "invalid"})
+            {2: "unmapped", 4: "invalid"})
+        self.assertEqual(result.groups[1].binding_kind, "bmpanim")
+        self.assertEqual(result.groups[1].affected_polys, {3})
 
     def test_duplicate_overlap_rejects_the_whole_material_group(self):
         block = SimpleNamespace(
@@ -221,6 +223,66 @@ class TextureAssignmentTests(unittest.TestCase):
         self.assertEqual(
             dict(result.skipped),
             {0: "material overlaps duplicate mapping"})
+
+    def test_primary_and_tracy_bindings_are_distinct_choices(self):
+        block = SimpleNamespace(
+            texture=SimpleNamespace(kind="ilbm", name="BODY.ILBM"),
+            tracy_texture=SimpleNamespace(
+                kind="ilbm", name="MASK.ILBM"),
+            atts=[SimpleNamespace(poly_id=0)],
+        )
+        mapping = SimpleNamespace(
+            poly_count=1,
+            refs={0: [self._ref(block, 3)]},
+            status=lambda _poly_id: "mapped",
+        )
+        result = classify_texture_assignment(mapping, {0})
+        self.assertEqual(
+            [(group.binding_slot, group.binding_name)
+             for group in result.groups],
+            [("texture", "BODY.ILBM"),
+             ("tracy_texture", "MASK.ILBM")])
+        self.assertEqual(result.affected_polys, {0})
+
+    def test_same_logical_texture_across_blocks_is_one_model_binding(self):
+        first = SimpleNamespace(
+            texture=SimpleNamespace(kind="ilbm", name="HUBI.ILBM"),
+            tracy_texture=None,
+            atts=[SimpleNamespace(poly_id=0)],
+        )
+        second = SimpleNamespace(
+            texture=SimpleNamespace(kind="ilbm", name="hubi.ilbm"),
+            tracy_texture=None,
+            atts=[
+                SimpleNamespace(poly_id=1),
+                SimpleNamespace(poly_id=2),
+            ],
+        )
+        different = SimpleNamespace(
+            texture=SimpleNamespace(kind="ilbm", name="OTHER.ILBM"),
+            tracy_texture=None,
+            atts=[SimpleNamespace(poly_id=3)],
+        )
+        mapping = SimpleNamespace(
+            poly_count=4,
+            refs={
+                0: [self._ref(first, 2)],
+                1: [self._ref(second, 3)],
+                2: [self._ref(second, 3)],
+                3: [self._ref(different, 4)],
+            },
+            status=lambda _poly_id: "mapped",
+        )
+
+        result = classify_texture_assignment(mapping, {0})
+
+        self.assertEqual(len(result.groups), 1)
+        group = result.groups[0]
+        self.assertEqual(
+            [binding.block_index for binding in group.bindings], [2, 3])
+        self.assertEqual(group.selected_polys, {0})
+        self.assertEqual(group.affected_polys, {0, 1, 2})
+        self.assertNotIn(3, result.affected_polys)
 
 
 if __name__ == "__main__":

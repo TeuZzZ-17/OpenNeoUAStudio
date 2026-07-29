@@ -34,7 +34,22 @@ def _form(form_type, children):
 def _base_bytes():
     atts = struct.pack(">hBBBB", 0, 1, 2, 3, 0)
     olpl = struct.pack(">hBBBBBB", 3, 0, 0, 255, 0, 0, 255)
-    amesh = _form(b"AMSH", _chunk(b"ATTS", atts) + _chunk(b"OLPL", olpl))
+    texture = _form(
+        b"OBJT",
+        _chunk(b"CLID", b"ilbm.class\0")
+        + _form(
+            b"CIBO",
+            _chunk(b"NAM2", b"STATIC.ILB\0")
+            + _chunk(b"OTL2", bytes((0, 0, 255, 0, 0, 255)))))
+    area = _form(
+        b"AREA",
+        _chunk(
+            b"STRC",
+            struct.pack(">hHHBBBB", 1, 0, 0x88, 0, 255, 0, 255))
+        + texture)
+    amesh = _form(
+        b"AMSH",
+        area + _chunk(b"ATTS", atts) + _chunk(b"OLPL", olpl))
     material = _form(
         b"OBJT", _chunk(b"CLID", b"amesh.class\0") + amesh)
     skeleton = _form(
@@ -97,7 +112,7 @@ class GeometryPasteIntegrationTests(unittest.TestCase):
         self.window.viewport.load_family(
             self.family, primary_owner="root")
         self.window.viewport.set_selected_owner("root")
-        self.window.global_edit_button.setChecked(True)
+        self.window.edit_toggle_action.setChecked(True)
         self.window.viewport.enter_edit_mode_with_vertices(
             "root", [0, 1, 2], pick_polygons=True)
         self.window._geometry_clipboard = build_geometry_clipboard(
@@ -115,7 +130,7 @@ class GeometryPasteIntegrationTests(unittest.TestCase):
         self.assertTrue(self.window.viewport.begin_paste_preview(
             clipboard, position))
         self.assertFalse(self.window.file_menu.isEnabled())
-        self.assertFalse(self.window.global_edit_button.isEnabled())
+        self.assertFalse(self.window.edit_toggle_action.isEnabled())
         self.assertFalse(self.window.edit_undo_action.isEnabled())
         self.assertTrue(self.window.model_gizmo.isEnabled())
         self.window._confirm_paste_geometry()

@@ -1,9 +1,4 @@
-"""Conservative discovery and grouping of FX1/FX2 geometry elements.
-
-Discovery is read-only.  It follows material/VANM -> ATTS -> POL2 -> POO2
-and groups coincident FX faces only when every use of their vertices belongs
-to one deterministic, compatible FX group.
-"""
+"""Discovery and conservative structural editing of FX1/FX2 elements."""
 
 from __future__ import annotations
 
@@ -186,14 +181,14 @@ def build_fx_element_clipboard(
         fam_obj: FamilyObject, element: FxElement,
         animations: Mapping[str, VanmData] | None = None,
         ) -> FxElementClipboard:
-    """Copy one complete editable FX element without static conversion."""
+    """Copy one complete valid FX element without static conversion."""
 
     model = fam_obj.skeleton
     if model is None or element.owner_path != fam_obj.owner_path:
         raise GeometryClipboardError("the selected FX owner is not editable")
-    if element.shared_state not in ("exclusive", "bilateral"):
+    if element.shared_state == "invalid":
         raise GeometryClipboardError(
-            f"{element.fx_name} is {element.shared_state} and is read-only")
+            f"{element.fx_name} is structurally invalid")
     count = len(element.poly_ids)
     if not count or not (
             len(element.block_indices) == count
@@ -320,7 +315,8 @@ def build_fx_element_clipboard(
         source_name=model.source_name,
         fx_name=element.fx_name,
         source_kind=source_kind or element.source_kind,
-        shared_state=element.shared_state,
+        shared_state=(
+            "bilateral" if element.bilateral else "exclusive"),
         bilateral=element.bilateral,
         block_indices=tuple(element.block_indices),
         atts_indices=tuple(element.atts_indices),
@@ -334,6 +330,47 @@ def build_fx_element_clipboard(
         material_signature=tuple(material_signature),
         animation=animation_snapshot,
     )
+
+
+def detach_shared_fx_vertices(
+        fam_obj: FamilyObject, element: FxElement) -> int:
+    """Duplicate only FX vertices also used outside the selected FX element."""
+
+    model = fam_obj.skeleton
+    if model is None or element.owner_path != fam_obj.owner_path:
+        raise GeometryClipboardError("the selected FX owner is not editable")
+    if element.shared_state != "shared":
+        return 0
+    selected = set(element.poly_ids)
+    if not selected or any(
+            poly_id < 0 or poly_id >= len(model.polygons)
+            for poly_id in selected):
+        raise GeometryClipboardError("the shared FX polygon set is invalid")
+    users: dict[int, set[int]] = {}
+    for poly_id, polygon in enumerate(model.polygons):
+        for vertex in set(polygon):
+            users.setdefault(vertex, set()).add(poly_id)
+    shared = {
+        vertex for poly_id in selected for vertex in model.polygons[poly_id]
+        if users.get(vertex, set()) - selected
+    }
+    if not shared:
+        return 0
+    if len(model.points) + len(shared) > 0x10000:
+        raise GeometryClipboardError(
+            "detaching the shared FX exceeds the POO2 index limit")
+    replacements = {}
+    for vertex in sorted(shared):
+        if not (0 <= vertex < len(model.points)):
+            raise GeometryClipboardError(
+                "the shared FX references an invalid POO2 vertex")
+        replacements[vertex] = len(model.points)
+        model.points.append(tuple(model.points[vertex]))
+    for poly_id in selected:
+        model.polygons[poly_id] = [
+            replacements.get(vertex, vertex)
+            for vertex in model.polygons[poly_id]]
+    return len(replacements)
 
 
 def build_new_fx_clipboard(
