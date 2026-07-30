@@ -418,8 +418,8 @@ class FxClipboardV3Tests(unittest.TestCase):
             window._on_polygon_picked(1)
             selected = window.fx_combo.currentData()
             self.assertEqual(selected.fx_name, "FX2")
-            self.assertEqual(window._selected_polys, {0, 1})
-            self.assertEqual(window.viewport._highlight_polys, {0, 1})
+            self.assertEqual(window._selected_polys, {1})
+            self.assertEqual(window.viewport._highlight_polys, {1})
 
             window.fx_combo.setCurrentIndex(0)
             index = window._fx_combo_index(selected.identity)
@@ -581,6 +581,63 @@ class FxClipboardV3Tests(unittest.TestCase):
                 obj.base_object.ades[0].texture.name, "FIRE.ANM")
         finally:
             window.close()
+
+    def test_load_texture_splits_shared_block_for_one_selected_segment(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            family, obj = _writable_family(
+                Path(temp_dir), "FX1", bilateral=True)
+            family.textures["FX2.ILBM"] = _image("FX2.ILBM")
+            window = AssemblyWindow()
+            try:
+                window._set_family(family)
+                window._show_model_editor()
+                window._on_polygon_picked(0)
+                self.assertEqual(window._selected_polys, {0})
+                with patch.object(
+                        window, "_choose_model_texture",
+                        return_value="FX2.ILBM"):
+                    window._load_model_texture()
+
+                blocks = obj.base_object.ades
+                self.assertEqual(len(blocks), 2)
+                self.assertEqual(
+                    [(block.texture.name,
+                      [entry.poly_id for entry in block.atts])
+                     for block in blocks],
+                    [("FX1.ILBM", [1]), ("FX2.ILBM", [0])])
+                self.assertEqual(
+                    window._edit_undo_stack[-1]["kind"], "topology")
+
+                window._undo_edit()
+                self.assertEqual(len(obj.base_object.ades), 1)
+                self.assertEqual(
+                    [entry.poly_id for entry
+                     in obj.base_object.ades[0].atts],
+                    [0, 1])
+                self.assertEqual(
+                    obj.base_object.ades[0].texture.name, "FX1.ILBM")
+
+                window._redo_edit()
+                self.assertEqual(
+                    [(block.texture.name,
+                      [entry.poly_id for entry in block.atts])
+                     for block in obj.base_object.ades],
+                    [("FX1.ILBM", [1]), ("FX2.ILBM", [0])])
+
+                output_root = Path(temp_dir) / "saved"
+                skeleton_target = output_root / "FXTEST.SKLT"
+                base_target = output_root / "FXTEST.BASE"
+                self.assertTrue(window._write_model_files(
+                    "root", family, obj, skeleton_target, base_target,
+                    ask_replace=False))
+                saved = parse_base_bytes(base_target.read_bytes()).root
+                self.assertEqual(
+                    [(block.texture.name,
+                      [entry.poly_id for entry in block.atts])
+                     for block in saved.ades],
+                    [("FX1.ILBM", [1]), ("FX2.ILBM", [0])])
+            finally:
+                window.close()
 
     def test_vanm_snapshot_append_and_changed_timeline_refusal_are_atomic(self):
         family, obj = _memory_family("FX2", vanm=True)

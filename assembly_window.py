@@ -93,6 +93,7 @@ from base_mapping_editor import (
     export_base_object_bytes,
     plan_copy_style,
     plan_planar,
+    rewrite_block_texture_template,
     save_model_base_copy,
     save_repaired_base,
 )
@@ -1503,7 +1504,10 @@ class AssemblyWindow(QMainWindow):
         intensity_row.addWidget(self.gizmo_intensity_slider, 1)
         intensity_row.addWidget(self.gizmo_intensity_spin)
         gizmo_layout.addLayout(intensity_row)
-        transform_options = QHBoxLayout()
+        transform_options = QGridLayout()
+        transform_options.setContentsMargins(0, 0, 0, 0)
+        transform_options.setHorizontalSpacing(12)
+        transform_options.setVerticalSpacing(3)
         self.auto_align_check = QCheckBox("Auto Align")
         self.auto_align_check.setChecked(True)
         self.auto_align_check.setToolTip(
@@ -1512,17 +1516,18 @@ class AssemblyWindow(QMainWindow):
         self.auto_align_check.toggled.connect(
             self.viewport.set_auto_align_enabled)
         self.viewport.set_auto_align_enabled(True)
-        transform_options.addWidget(self.auto_align_check)
-        self.mirror_x_check = QCheckBox("Symmetry (Mirror X)")
-        self.mirror_x_check.setChecked(False)
-        self.mirror_x_check.setToolTip(
-            "Apply Move, Rotate and Scale to the matching vertex on the "
-            "opposite side of the model's X=0 symmetry plane.")
-        self.mirror_x_check.toggled.connect(
-            self.viewport.set_mirror_x_enabled)
-        self.viewport.set_mirror_x_enabled(False)
-        transform_options.addWidget(self.mirror_x_check)
-        transform_options.addStretch(1)
+        transform_options.addWidget(self.auto_align_check, 0, 0)
+        self.symmetry_mirror_check = QCheckBox("Symmetry Mirror")
+        self.symmetry_mirror_check.setChecked(False)
+        self.symmetry_mirror_check.setToolTip(
+            "Apply Move, Rotate and Scale to every matching counterpart "
+            "across the model's X, Y and Z symmetry planes.")
+        self.symmetry_mirror_check.toggled.connect(
+            self.viewport.set_mirror_enabled)
+        self.viewport.set_mirror_enabled(False)
+        transform_options.addWidget(
+            self.symmetry_mirror_check, 0, 1)
+        transform_options.setColumnStretch(1, 1)
         gizmo_layout.addLayout(transform_options)
         self.viewport.set_direct_transform("move", 0.50)
         self._apply_transform_mode_colors()
@@ -1535,9 +1540,8 @@ class AssemblyWindow(QMainWindow):
         self.load_texture_button = QPushButton("Load Texture...")
         self.load_texture_button.setEnabled(False)
         self.load_texture_button.setToolTip(
-            "Replace the selected material using a texture already available "
-            "in the loaded family or SET.BAS. Areas sharing that material "
-            "change together, exactly as they will after Save As.")
+            "Replace the texture only on the selected polygon segments. "
+            "Select multiple segments to update them together.")
         self.load_texture_button.clicked.connect(self._load_model_texture)
         model_box_layout.addWidget(self.load_texture_button)
 
@@ -1926,6 +1930,50 @@ class AssemblyWindow(QMainWindow):
         right_layout = QVBoxLayout(right_panel)
         right_layout.setContentsMargins(0, 0, 0, 0)
         right_layout.setSpacing(2)
+        editor_status_row = QWidget()
+        editor_status_layout = QHBoxLayout(editor_status_row)
+        editor_status_layout.setContentsMargins(0, 0, 0, 0)
+        editor_status_layout.setSpacing(0)
+        editor_status_layout.addStretch(1)
+        self.editor_status_panel = QWidget()
+        self.editor_status_panel.setObjectName("editorStatusPanel")
+        self.editor_status_panel.setMinimumHeight(44)
+        self.editor_status_panel.setStyleSheet("""
+            QWidget#editorStatusPanel {
+                background: #202126;
+                border: 2px solid #b3485c;
+            }
+            QLabel {
+                border: none;
+                background: transparent;
+            }
+        """)
+        editor_status_center = QHBoxLayout(self.editor_status_panel)
+        editor_status_center.setContentsMargins(14, 3, 14, 3)
+        editor_status_center.setSpacing(18)
+        editor_status_center.addStretch(1)
+        self.loaded_resource_label = QLabel("No Resource Loaded")
+        self.loaded_resource_label.setAlignment(
+            Qt.AlignmentFlag.AlignCenter)
+        resource_font = self.loaded_resource_label.font()
+        resource_font.setPointSize(13)
+        resource_font.setBold(True)
+        self.loaded_resource_label.setFont(resource_font)
+        self.loaded_resource_label.setStyleSheet("color: #ffffff;")
+        editor_status_center.addWidget(self.loaded_resource_label)
+        self.unsaved_edits_label = QLabel()
+        self.unsaved_edits_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        unsaved_font = self.unsaved_edits_label.font()
+        unsaved_font.setPointSize(13)
+        unsaved_font.setBold(True)
+        self.unsaved_edits_label.setFont(unsaved_font)
+        self.unsaved_edits_label.setStyleSheet("color: #ffffff;")
+        self.unsaved_edits_label.hide()
+        editor_status_center.addWidget(self.unsaved_edits_label)
+        editor_status_center.addStretch(1)
+        editor_status_layout.addWidget(self.editor_status_panel, 8)
+        editor_status_layout.addStretch(1)
+        right_layout.addWidget(editor_status_row)
         right_layout.addWidget(tabs, 1)
 
         center_panel = QWidget()
@@ -1938,13 +1986,6 @@ class AssemblyWindow(QMainWindow):
         center_layout = QVBoxLayout(center_panel)
         center_layout.setContentsMargins(0, 0, 0, 0)
         center_layout.setSpacing(2)
-        self.completeness_label = QLabel(
-            "Open a .base to assemble resources automatically, or a .bas "
-            "to browse all packed resources.")
-        self.completeness_label.setWordWrap(False)
-        self.completeness_label.setMaximumHeight(42)
-        self.completeness_label.setMargin(4)
-        center_layout.addWidget(self.completeness_label)
         center_layout.addWidget(self.viewport, 1)
 
         main_split = QSplitter(Qt.Orientation.Horizontal)
@@ -4555,7 +4596,7 @@ class AssemblyWindow(QMainWindow):
         self.statusBar().showMessage(
             f"Selected object: {label} [{owner or '-'}]"
         )
-        self._update_banner()
+        self._update_editor_status()
         self._refresh_fx_elements()
         if not preserve_asset_selection:
             self._focus_assets_for_owner(owner, switch_tabs=False)
@@ -4577,29 +4618,25 @@ class AssemblyWindow(QMainWindow):
         visible = self._family_descendants(self._family, owner)
         self.viewport.set_visible_owners(visible)
         self._sync_animation_controls()
-        self._update_banner()
+        self._update_editor_status()
 
-    def _update_banner(self) -> None:
+    def _update_editor_status(self) -> None:
         if self._family is None:
+            self.loaded_resource_label.setText("No Resource Loaded")
+            self.loaded_resource_label.setToolTip("")
+            self.unsaved_edits_label.clear()
+            self.unsaved_edits_label.hide()
             return
-        status, details = self._completeness(self._family)
-        visible = self.viewport.visible_owners()
-        scope = ("-" if visible is None
-                 else f"{len(visible)}/{len(self.viewport.owners())}")
         obj = (self._owner_to_obj.get(self._selected_owner)
                if self._selected_owner else None)
-        selected = obj.display_name if obj else "-"
-        large = (" | large family" if self._large_mode else "")
+        selected = obj.display_name if obj else "NO RESOURCE SELECTED"
         n_dirty = (
             len(self._geom_dirty) + len(self._uv_original)
-            + len(self._vanm_uv_original))
-        dirty = (f" | <b>UNSAVED EDITS: {n_dirty}</b>" if n_dirty else "")
-        preview = (f" | <b>TEXTURE PREVIEW: {len(self._texture_original)}</b>"
-                   if self._texture_original else "")
-        summary = (f"<b>{status}</b> | selected: {selected} | "
-                   f"selected + children: {scope}{large}{dirty}{preview}")
-        self.completeness_label.setText(summary)
-        self.completeness_label.setToolTip("\n".join(details))
+            + len(self._vanm_uv_original) + len(self._texture_original))
+        self.loaded_resource_label.setText(selected)
+        self.loaded_resource_label.setToolTip(selected)
+        self.unsaved_edits_label.setText(f"Unsave edits: {n_dirty}")
+        self.unsaved_edits_label.setVisible(n_dirty > 0)
 
     # -- log / profile / candidate tools ------------------------------------------
 
@@ -5790,7 +5827,6 @@ class AssemblyWindow(QMainWindow):
             self._fx_combo_index(element.identity) if element else 0)
         self.fx_combo.blockSignals(False)
         if element is not None and not additive:
-            self._select_highlight_fx()
             if self._editing_allowed() \
                     and element.shared_state == "shared":
                 element = self._detach_fx_for_editing(element) or element
@@ -5972,7 +6008,7 @@ class AssemblyWindow(QMainWindow):
         self.model_texture_label.setText(
             "Current texture: " + (label or "-"))
         self.load_texture_button.setToolTip(
-            "Replace the selected FX logical texture or VANM binding without "
+            "Replace the selected FX segment texture or VANM binding without "
             "changing its geometry, winding or animation data.")
         self._set_polygon_object_info(lines)
 
@@ -6006,11 +6042,12 @@ class AssemblyWindow(QMainWindow):
         texture_selection = classify_texture_assignment(
             self._mapping_index, requested)
         self.load_texture_button.setEnabled(
-            self._editing_allowed() and bool(texture_selection.groups))
+            self._editing_allowed() and bool(
+                texture_selection.groups or texture_selection.skipped))
         self.load_texture_button.setToolTip(
-            "Replace one compatible logical ILBM or VANM material binding. "
-            f"{len(texture_selection.skipped)} incompatible selected "
-            "polygon(s) will be left unchanged.")
+            "Replace the compatible ILBM or VANM binding only on the selected "
+            "segment(s). Clicking the button explains any selected segment "
+            "that has no replaceable texture binding.")
 
         status = self._mapping_index.status(poly_id)
         lines.append(f"mapping: {status.upper()}")
@@ -7587,7 +7624,7 @@ class AssemblyWindow(QMainWindow):
                 if self._mapping_index is not None else None)
             self.load_texture_button.setEnabled(bool(
                 editing and classification is not None
-                and classification.groups))
+                and (classification.groups or classification.skipped)))
         # This synchronizer is also used while the window is being built.
         # Keep it safe before the later editor widgets exist.
         if hasattr(self, "repair_copy_button"):
@@ -7623,7 +7660,7 @@ class AssemblyWindow(QMainWindow):
             self._remember_geometry_original(owner)
             self._geom_dirty[owner] = fam_obj
         self._sync_geometry_save_controls()
-        self._update_banner()
+        self._update_editor_status()
         self._sync_uv_add_vertex_button()
 
     def _on_geometry_command_committed(self, owner: str, before,
@@ -7894,7 +7931,7 @@ class AssemblyWindow(QMainWindow):
             return False
         self._fill_polygon_inspector(self._selected_poly)
         self._sync_geometry_save_controls()
-        self._update_banner()
+        self._update_editor_status()
         self._sync_uv_add_vertex_button()
         self._sync_editor_context()
         return True
@@ -8141,8 +8178,7 @@ class AssemblyWindow(QMainWindow):
             class_id = (current.class_id or "").lower()
             atts_only = bool(
                 class_id == "amesh.class"
-                and
-                current.texture is not None
+                and current.texture is not None
                 and current.texture.kind == "bmpanim"
                 and not current.olpl)
             if class_id == "amesh.class" \
@@ -8214,20 +8250,26 @@ class AssemblyWindow(QMainWindow):
         if context is None:
             return
         owner, family, fam_obj, _model, _tree = context
-        output = QFileDialog.getExistingDirectory(
-            self, "Save model as",
-            str(self._last_directory))
-        if not output:
-            self._notify("Save As cancelled.", 3000)
-            return
-        output_root = Path(output)
         skeleton_relative = self._bundle_skeleton_relative_path(fam_obj)
-        skeleton_target = output_root / skeleton_relative
         base_label = (fam_obj.base_object.name
                       or skeleton_relative.stem)
         base_stem = re.sub(r'[^A-Za-z0-9_.-]', "_",
                            base_label) or "MODEL"
-        base_target = output_root / f"{base_stem}.BASE"
+        if Path(base_stem).suffix.casefold() == ".base":
+            base_stem = Path(base_stem).stem or "MODEL"
+        suggested = self._last_directory / f"{base_stem}.BASE"
+        output, _selected_filter = QFileDialog.getSaveFileName(
+            self, "Save model as", str(suggested),
+            "BASE model (*.BASE *.base);;All files (*.*)",
+            options=QFileDialog.Option.DontConfirmOverwrite)
+        if not output:
+            self._notify("Save As cancelled.", 3000)
+            return
+        base_target = Path(output)
+        if base_target.suffix.casefold() != ".base":
+            base_target = base_target.with_suffix(".BASE")
+        output_root = base_target.parent
+        skeleton_target = output_root / skeleton_relative
         vanm_count = len({
             name for name, _group_index
             in self._owner_vanm_uv_keys(owner)})
@@ -8473,7 +8515,7 @@ class AssemblyWindow(QMainWindow):
         self._uv_history_before = None
 
         self._sync_geometry_save_controls()
-        self._update_banner()
+        self._update_editor_status()
         self._sync_uv_add_vertex_button()
         self._log("Model saved: " + "; ".join(notes[-3:]))
         return True
@@ -8978,7 +9020,7 @@ class AssemblyWindow(QMainWindow):
             self._update_uv_editor(self._selected_poly)
             return
         self._sync_geometry_save_controls()
-        self._update_banner()
+        self._update_editor_status()
         self._sync_uv_add_vertex_button()
 
     def _on_uv_edit_finished(self) -> None:
@@ -9074,7 +9116,7 @@ class AssemblyWindow(QMainWindow):
         self._update_uv_editor(poly_id)
         self.uv_editor.select_handles(selected)
         self._sync_geometry_save_controls()
-        self._update_banner()
+        self._update_editor_status()
         self._sync_uv_add_vertex_button()
         self.statusBar().showMessage(
             f"Reverted {reverted_count} selected UV handle(s).", 4000)
@@ -9129,7 +9171,7 @@ class AssemblyWindow(QMainWindow):
         })
         self._update_uv_editor(self._selected_poly)
         self._sync_geometry_save_controls()
-        self._update_banner()
+        self._update_editor_status()
         self._sync_uv_add_vertex_button()
         self._notify(
             f"Reset {len(targets)} UV loop(s) to their loaded positions.",
@@ -9240,7 +9282,7 @@ class AssemblyWindow(QMainWindow):
             self.viewport.refresh_family_materials()
         self._fill_polygon_inspector(self._selected_poly)
         self._sync_geometry_save_controls()
-        self._update_banner()
+        self._update_editor_status()
         if resume_edit:
             self.edit_toggle_action.setChecked(True)
         self._sync_editor_context()
@@ -9403,6 +9445,137 @@ class AssemblyWindow(QMainWindow):
             return None
         return groups[labels.index(selected)]
 
+    def _replace_selected_texture_structurally(
+            self, owner: str, group, bindings,
+            loaded_name: str) -> bool:
+        """Split shared AMESH mappings so only selected POL2s are retargeted."""
+
+        fam_obj = self._owner_to_obj.get(owner)
+        if fam_obj is None:
+            return False
+        reason = self._geometry_writer_reason(owner, fam_obj)
+        if reason:
+            self._notify(f"Load Texture refused: {reason}.", 8000)
+            return False
+        before = self._capture_topology_state(owner)
+        if before is None:
+            return False
+        had_topology_original = owner in self._topology_original
+        had_geom_original = owner in self._geom_original
+        previous_geom_original = copy.deepcopy(
+            self._geom_original.get(owner))
+        had_dirty = owner in self._geom_dirty
+        previous_dirty = self._geom_dirty.get(owner)
+        previous_undo = list(self._edit_undo_stack)
+        previous_redo = list(self._edit_redo_stack)
+        try:
+            self._topology_original.setdefault(
+                owner, copy.deepcopy(before))
+            blocks = fam_obj.base_object.ades
+            split_count = 0
+            for binding in bindings:
+                if not (0 <= binding.block_index < len(blocks)):
+                    raise MappingEditError(
+                        "the selected material block no longer exists")
+                block = blocks[binding.block_index]
+                selected = set(binding.selected_polys)
+                selected_positions = [
+                    index for index, entry in enumerate(block.atts)
+                    if entry.poly_id in selected
+                ]
+                if not selected_positions:
+                    raise MappingEditError(
+                        "the selected segment is no longer in its material")
+                new_template = rewrite_block_texture_template(
+                    block, loaded_name, binding.binding_slot)
+                if len(selected_positions) == len(block.atts):
+                    getattr(block, binding.binding_slot).name = loaded_name
+                    block.source_objt_bytes = new_template
+                    continue
+                if (block.class_id or "").casefold() != "amesh.class":
+                    raise MappingEditError(
+                        "only AMESH material blocks can be split by segment")
+                atts_only = bool(
+                    block.texture is not None
+                    and block.texture.kind == "bmpanim"
+                    and not block.olpl)
+                if not atts_only and len(block.atts) != len(block.olpl):
+                    raise MappingEditError(
+                        "the shared material has ambiguous ATTS/OLPL counts")
+                selected_set = set(selected_positions)
+                clone = copy.deepcopy(block)
+                clone.atts = [
+                    copy.deepcopy(block.atts[index])
+                    for index in selected_positions]
+                clone.olpl = (
+                    [] if atts_only else [
+                        copy.deepcopy(block.olpl[index])
+                        for index in selected_positions])
+                block.atts = [
+                    entry for index, entry in enumerate(block.atts)
+                    if index not in selected_set]
+                if not atts_only:
+                    block.olpl = [
+                        uvs for index, uvs in enumerate(block.olpl)
+                        if index not in selected_set]
+                getattr(clone, binding.binding_slot).name = loaded_name
+                clone.source_objt_bytes = new_template
+                blocks.append(clone)
+                split_count += 1
+
+            self._refresh_object_material_faces(fam_obj)
+            self._selected_owner = owner
+            self._selected_polys = set(group.selected_polys)
+            self._selected_poly = min(
+                self._selected_polys,
+                default=self._selected_poly)
+            self.viewport.refresh_family_materials()
+            self._rebuild_workbench(self._family, owner)
+            self._refresh_fx_elements()
+            self.viewport.set_selected_owner(owner)
+            self.viewport.set_selected_polygon(self._selected_poly)
+            self.viewport.set_highlight_polys(self._selected_polys)
+            self._on_geometry_edited(owner)
+            after = self._capture_topology_state(owner)
+            if after is None:
+                raise MappingEditError(
+                    "the segment-scoped texture edit could not be verified")
+            self._record_edit_command({
+                "kind": "topology",
+                "owner": owner,
+                "before": before,
+                "after": after,
+                "label": "segment texture assignment",
+            })
+            self._fill_polygon_inspector(self._selected_poly)
+            self._sync_geometry_save_controls()
+            self._update_editor_status()
+            self._sync_editor_context()
+            message = (
+                f"{len(group.selected_polys)} selected polygon(s) changed"
+                + (f"; {split_count} shared material block(s) isolated."
+                   if split_count else "."))
+            self.statusBar().showMessage(message, 9000)
+            self._log(f"Load Texture: {message}")
+            return True
+        except Exception as exc:
+            self._restore_topology_state(owner, before)
+            if not had_topology_original:
+                self._topology_original.pop(owner, None)
+            if had_geom_original:
+                self._geom_original[owner] = previous_geom_original
+            else:
+                self._geom_original.pop(owner, None)
+            if had_dirty:
+                self._geom_dirty[owner] = previous_dirty
+            else:
+                self._geom_dirty.pop(owner, None)
+            self._edit_undo_stack[:] = previous_undo
+            self._edit_redo_stack[:] = previous_redo
+            self._notify(
+                f"Load Texture failed and was rolled back: {exc}.", 9000)
+            return False
+
     def _load_model_texture(self) -> None:
         if not self._require_editing("Load Texture"):
             return
@@ -9418,14 +9591,42 @@ class AssemblyWindow(QMainWindow):
             requested = {self._selected_poly}
         selected_classification = classify_texture_assignment(
             self._mapping_index, requested)
+        if selected_classification.skipped:
+            reason_labels = {
+                "unmapped": (
+                    "has no ATTS material mapping in the BASE file"),
+                "duplicate-mapped": (
+                    "has more than one material mapping"),
+                "invalid": "is not a valid polygon",
+                "material has no texture": (
+                    "uses a color-only material with no texture binding"),
+                "material has no valid polygons": (
+                    "belongs to an invalid material block"),
+                "material overlaps duplicate mapping": (
+                    "belongs to an ambiguous shared material"),
+            }
+            details = [
+                f"Polygon #{poly_id}: "
+                f"{reason_labels.get(reason, reason)}."
+                for poly_id, reason in selected_classification.skipped[:12]
+            ]
+            remaining = len(selected_classification.skipped) - len(details)
+            if remaining:
+                details.append(f"...and {remaining} more polygon(s).")
+            if selected_classification.groups:
+                summary = (
+                    "Some selected segments cannot have their texture "
+                    "replaced and will be left unchanged.")
+            else:
+                summary = (
+                    "The selected segment(s) cannot have their texture "
+                    "replaced. The engine data contains no compatible texture "
+                    "binding to change.")
+            QMessageBox.warning(
+                self, "Texture cannot be replaced",
+                summary + "\n\n" + "\n".join(details)
+                + "\n\nNo unsupported material data was modified.")
         if not selected_classification.groups:
-            reasons = sorted({reason for _poly, reason
-                              in selected_classification.skipped})
-            QMessageBox.information(
-                self, "Texture replacement unavailable",
-                "No selected polygon belongs to an unambiguous ILBM or VANM "
-                "material binding. No texture was changed."
-                + (f"\n\nSkipped: {', '.join(reasons)}." if reasons else ""))
             return
         group = self._choose_texture_binding_group(
             list(selected_classification.groups))
@@ -9460,23 +9661,11 @@ class AssemblyWindow(QMainWindow):
                 self, "Texture load failed",
                 f"{chosen} could not be decoded from the loaded sources.")
             return
-        whole_model = classify_texture_assignment(
-            self._mapping_index,
-            range(self._mapping_index.poly_count))
-        target_groups = [
-            candidate for candidate in whole_model.groups
-            if candidate.binding_kind == group.binding_kind
-            and candidate.binding_slot == group.binding_slot
-        ]
         bindings = {
             (binding.block_index, binding.binding_slot): binding
-            for candidate in target_groups
-            for binding in candidate.bindings
+            for binding in group.bindings
         }
-        affected_polys = {
-            poly_id for candidate in target_groups
-            for poly_id in candidate.affected_polys
-        }
+        affected_polys = set(group.affected_polys)
         before = {
             (owner, binding.block_index, binding.binding_slot):
             getattr(binding.block, binding.binding_slot).name
@@ -9488,8 +9677,20 @@ class AssemblyWindow(QMainWindow):
         }
         if not changes:
             self._notify(
-                "Every compatible model section already uses that resource.",
+                "Every selected compatible section already uses that resource.",
                          3500)
+            return
+        changed_bindings = [
+            binding for binding in bindings.values()
+            if (owner, binding.block_index, binding.binding_slot) in changes
+        ]
+        structural_needed = any(
+            len(binding.selected_polys)
+            < len(getattr(binding.block, "atts", ()))
+            for binding in changed_bindings)
+        if structural_needed:
+            self._replace_selected_texture_structurally(
+                owner, group, changed_bindings, loaded_name)
             return
         if not self._apply_texture_history(changes):
             self._notify(
@@ -9512,11 +9713,11 @@ class AssemblyWindow(QMainWindow):
         })
         self._fill_polygon_inspector(self._selected_poly)
         self._sync_geometry_save_controls()
-        self._update_banner()
+        self._update_editor_status()
         self._sync_editor_context()
         changed_blocks = len(changes)
         changed_polygons = len(affected_polys)
-        skipped = len(whole_model.skipped)
+        skipped = len(selected_classification.skipped)
         message = (
             f"{changed_blocks} material block(s) changed, "
             f"{changed_polygons} polygon(s) affected, "
@@ -9748,7 +9949,7 @@ class AssemblyWindow(QMainWindow):
 
         self._sync_animation_controls()
 
-        self._update_banner()
+        self._update_editor_status()
         # Reapply the active main-tab contract after the viewport rebuild.
         self._sync_tab_edit_mode()
         self._update_reset_camera_action()

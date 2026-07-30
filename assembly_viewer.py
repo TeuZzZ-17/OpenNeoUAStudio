@@ -496,7 +496,7 @@ class AssetViewport(QWidget):
         self._active_edit_vertex: int | None = None
         self._direct_grab_selected_only = False
         self._edit_pick_polygons = False
-        self._mirror_x_enabled = False
+        self._mirror_enabled = False
         self._edit_read_only_vertices: set[int] = set()
         self._edit_visible_vertices: set[int] = set()
         self._edit_visibility_ready = False
@@ -864,10 +864,22 @@ class AssetViewport(QWidget):
             self._precision_guides = ()
         self.update()
 
-    def set_mirror_x_enabled(self, enabled: bool) -> None:
-        self._mirror_x_enabled = bool(enabled)
+    def set_mirror_enabled(self, enabled: bool) -> None:
+        self._mirror_enabled = bool(enabled)
         if self._edit_session is not None:
-            self._edit_session.set_mirror_x_enabled(enabled)
+            self._edit_session.set_mirror_enabled(enabled)
+
+    def _active_mirror_targets(self) -> tuple[set[int], set[int]]:
+        session = self._edit_session
+        if session is None or not session.modal_active:
+            return set(), set()
+        recipients = session.mirror_recipient_indices()
+        polygons = set()
+        for poly_id, indices in enumerate(session.model.polygons):
+            vertices = set(indices)
+            if vertices and vertices.issubset(recipients):
+                polygons.add(poly_id)
+        return recipients, polygons
 
     @staticmethod
     def _bounds_features(points) -> tuple[tuple[float, float, float], ...]:
@@ -1508,7 +1520,7 @@ class AssetViewport(QWidget):
             matrix = _rotation_matrix((0, 0, 0), (1.0, 1.0, 1.0))
             pos = (0.0, 0.0, 0.0)
         self._edit_session = GeometryEditSession(fam_obj, matrix, pos)
-        self._edit_session.set_mirror_x_enabled(self._mirror_x_enabled)
+        self._edit_session.set_mirror_enabled(self._mirror_enabled)
         self._edit_owner = target
         self._edit_visible_vertices.clear()
         self._edit_visibility_ready = False
@@ -3007,8 +3019,14 @@ class AssetViewport(QWidget):
                       allow_transparent_background: bool = False) -> None:
         """Shared QWidget/QImage renderer; ``clean`` draws model pixels only."""
 
-        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
-        painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform)
+        # While the camera is actively moving, favor response time over
+        # sub-pixel filtering.  Mouse release immediately requests a normal
+        # repaint, so the exact visual quality is restored at rest.
+        camera_preview = self._camera_interacting and not clean
+        painter.setRenderHint(
+            QPainter.RenderHint.Antialiasing, not camera_preview)
+        painter.setRenderHint(
+            QPainter.RenderHint.SmoothPixmapTransform, not camera_preview)
         if background is not None:
             painter.fillRect(target, background)
         elif not allow_transparent_background:
@@ -3034,6 +3052,7 @@ class AssetViewport(QWidget):
         source_polygons: dict[int, QPolygonF] = {}
         visible_faces: set[int] = set()
         highlight_paths: dict[int, QPainterPath] = {}
+        mirror_recipients, mirror_polys = self._active_mirror_targets()
 
         def draw_piece(face: ViewFace, piece_camera, piece_uvs,
                        image: QImage | None,
@@ -3060,11 +3079,33 @@ class AssetViewport(QWidget):
                 painter.setPen(Qt.PenStyle.NoPen)
                 painter.setBrush(QColor(255, 230, 40, 130))
                 painter.drawPolygon(polygon)
-            if not clean and face.primary \
-                    and face.poly_id in self._highlight_polys:
+            whole_edit_owner_selected = bool(
+                self._edit_session is not None
+                and self._edit_owner == face.owner
+                and len(self._edit_session.selection)
+                == len(self._edit_session.model.points)
+            )
+            poly_highlighted = bool(
+                not clean and face.primary
+                and (face.poly_id in self._highlight_polys
+                     or face.poly_id in mirror_polys))
+            owner_highlighted = bool(
+                not clean
+                and self._selected_owner is not None
+                and face.owner == self._selected_owner
+                and (self._mode != "textured"
+                     or whole_edit_owner_selected))
+            if poly_highlighted or owner_highlighted:
+                highlight_color = (
+                    QColor(90, 230, 255, 90)
+                    if poly_highlighted
+                    else QColor(
+                        60, 185, 255,
+                        82 if whole_edit_owner_selected else 60))
                 painter.setPen(Qt.PenStyle.NoPen)
-                painter.setBrush(QColor(90, 230, 255, 90))
+                painter.setBrush(highlight_color)
                 painter.drawPolygon(polygon)
+            if poly_highlighted:
                 piece_path = QPainterPath()
                 piece_path.addPolygon(polygon)
                 piece_path.closeSubpath()
@@ -3073,20 +3114,6 @@ class AssetViewport(QWidget):
                 highlight_paths[key] = (
                     piece_path if previous is None
                     else previous.united(piece_path))
-            whole_edit_owner_selected = bool(
-                self._edit_session is not None
-                and self._edit_owner == face.owner
-                and len(self._edit_session.selection)
-                == len(self._edit_session.model.points)
-            )
-            if not clean and self._selected_owner is not None \
-                    and face.owner == self._selected_owner \
-                    and (self._mode != "textured"
-                         or whole_edit_owner_selected):
-                painter.setPen(Qt.PenStyle.NoPen)
-                painter.setBrush(QColor(
-                    60, 185, 255, 82 if whole_edit_owner_selected else 60))
-                painter.drawPolygon(polygon)
             if not clean and mode != "wireframe" \
                     and self._show_wire_overlay and front_facing:
                 source_polygon = source_polygons.get(id(face))
@@ -3301,15 +3328,19 @@ class AssetViewport(QWidget):
             self._draw_diagnostics_overlay(painter)
 
         if not clean and self._edit_session is not None:
-            self._draw_edit_overlay(painter, target, camera)
+            self._draw_edit_overlay(
+                painter, target, camera, mirror_recipients)
         elif not clean:
             self._draw_mode_label(painter, target, False)
 
-    def _draw_edit_overlay(self, painter: QPainter, target: QRectF,
-                           camera: dict) -> None:
+    def _draw_edit_overlay(
+            self, painter: QPainter, target: QRectF,
+            camera: dict,
+            mirror_recipients: set[int] | None = None) -> None:
         session = self._edit_session
         if session is None:
             return
+        mirror_recipients = mirror_recipients or set()
         screen = self._edit_screen_points(target, camera)
         available = self._available_edit_vertices(screen)
 
@@ -3336,7 +3367,8 @@ class AssetViewport(QWidget):
         painter.setPen(QPen(QColor(20, 22, 26), 1.0))
         painter.setBrush(QColor(208, 212, 220))
         for index, point in enumerate(screen):
-            if index in session.selection or index not in available:
+            if index in session.selection or index in mirror_recipients \
+                    or index not in available:
                 continue
             painter.drawRect(QRectF(point.x() - 2.5, point.y() - 2.5,
                                     5.0, 5.0))
@@ -3349,17 +3381,14 @@ class AssetViewport(QWidget):
                 point = screen[index]
                 painter.drawRect(QRectF(
                     point.x() - 3.0, point.y() - 3.0, 6.0, 6.0))
-        snapped = bool(self._precision_guides)
         mode_color = {
             "move": QColor(255, 32, 48),
             "rotate": QColor(70, 130, 255),
             "scale": QColor(62, 205, 105),
         }[self._direct_transform_mode]
-        painter.setPen(QPen(
-            QColor(235, 255, 240) if snapped else mode_color.lighter(165),
-            1.8))
-        painter.setBrush(QColor(45, 255, 95) if snapped else mode_color)
-        for index in session.selection:
+        painter.setPen(QPen(mode_color.lighter(165), 1.8))
+        painter.setBrush(mode_color)
+        for index in session.selection | mirror_recipients:
             if index < len(screen):
                 point = screen[index]
                 radius = 5.5 if index == self._active_edit_vertex else 4.5
