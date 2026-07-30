@@ -134,6 +134,34 @@ class DepthRendererTests(unittest.TestCase):
         finally:
             viewport.close()
 
+    def test_camera_preview_restores_full_render_hints_at_rest(self):
+        viewport = self._editable_triangle_viewport()
+        output = QImage(160, 160, QImage.Format.Format_ARGB32)
+        painter = QPainter(output)
+        try:
+            viewport._camera_interacting = True
+            viewport._render_scene(
+                painter, QRectF(0, 0, 160, 160), None, False,
+                viewport._camera_state(),
+                allow_transparent_background=True)
+            self.assertFalse(painter.testRenderHint(
+                QPainter.RenderHint.Antialiasing))
+            self.assertFalse(painter.testRenderHint(
+                QPainter.RenderHint.SmoothPixmapTransform))
+
+            viewport._camera_interacting = False
+            viewport._render_scene(
+                painter, QRectF(0, 0, 160, 160), None, False,
+                viewport._camera_state(),
+                allow_transparent_background=True)
+            self.assertTrue(painter.testRenderHint(
+                QPainter.RenderHint.Antialiasing))
+            self.assertTrue(painter.testRenderHint(
+                QPainter.RenderHint.SmoothPixmapTransform))
+        finally:
+            painter.end()
+            viewport.close()
+
     def test_edit_visibility_is_reused_until_camera_or_committed_geometry_changes(
             self):
         viewport = self._editable_triangle_viewport()

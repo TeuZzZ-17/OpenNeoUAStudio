@@ -244,7 +244,7 @@ class TextureAssignmentTests(unittest.TestCase):
              ("tracy_texture", "MASK.ILBM")])
         self.assertEqual(result.affected_polys, {0})
 
-    def test_same_logical_texture_across_blocks_is_one_model_binding(self):
+    def test_same_logical_texture_does_not_expand_past_selected_blocks(self):
         first = SimpleNamespace(
             texture=SimpleNamespace(kind="ilbm", name="HUBI.ILBM"),
             tracy_texture=None,
@@ -279,10 +279,38 @@ class TextureAssignmentTests(unittest.TestCase):
         self.assertEqual(len(result.groups), 1)
         group = result.groups[0]
         self.assertEqual(
-            [binding.block_index for binding in group.bindings], [2, 3])
+            [binding.block_index for binding in group.bindings], [2])
         self.assertEqual(group.selected_polys, {0})
-        self.assertEqual(group.affected_polys, {0, 1, 2})
+        self.assertEqual(group.affected_polys, {0})
         self.assertNotIn(3, result.affected_polys)
+
+    def test_partial_shared_material_block_tracks_only_selected_polygons(self):
+        block = SimpleNamespace(
+            texture=SimpleNamespace(kind="ilbm", name="BODY.ILBM"),
+            tracy_texture=None,
+            atts=[
+                SimpleNamespace(poly_id=0),
+                SimpleNamespace(poly_id=1),
+            ],
+        )
+        mapping = SimpleNamespace(
+            poly_count=2,
+            refs={
+                0: [self._ref(block, 0)],
+                1: [self._ref(block, 0)],
+            },
+            status=lambda _poly_id: "mapped",
+        )
+        partial = classify_texture_assignment(mapping, {0})
+        self.assertEqual(len(partial.groups), 1)
+        self.assertEqual(partial.groups[0].selected_polys, {0})
+        self.assertEqual(partial.groups[0].affected_polys, {0})
+        self.assertEqual(
+            partial.groups[0].bindings[0].selected_polys, {0})
+
+        complete = classify_texture_assignment(mapping, {0, 1})
+        self.assertEqual(len(complete.groups), 1)
+        self.assertEqual(complete.groups[0].affected_polys, {0, 1})
 
 
 if __name__ == "__main__":

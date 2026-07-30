@@ -137,7 +137,7 @@ class RenderRegressionV3Tests(unittest.TestCase):
         self.assertFalse(image.isNull())
         self.assertEqual(viewport._pick_shapes, [marker])
 
-    def test_snap_changes_selected_vertices_to_bright_green_temporarily(self):
+    def test_move_vertices_stay_red_while_auto_align_is_active(self):
         model = SkltModel(
             source_name="SNAP.SKLT",
             points=[(0.0, 0.0, 0.0), (1.0, 0.0, 0.0),
@@ -175,23 +175,17 @@ class RenderRegressionV3Tests(unittest.TestCase):
             PrecisionGuide(0, 0.0, "status-only guide"),)
         snapped = render()
         viewport._clear_precision_guides()
-        restored = render()
-
         green = QColor(45, 255, 95).rgba()
         red = QColor(255, 32, 48).rgba()
-        self.assertGreater(sum(
-            snapped.pixel(x, y) == green
-            for y in range(snapped.height())
-            for x in range(snapped.width())), 20)
-        self.assertGreater(sum(
-            normal.pixel(x, y) == red
-            for y in range(normal.height())
-            for x in range(normal.width())), 20)
-        self.assertEqual(
-            sum(restored.pixel(x, y) == green
-                for y in range(restored.height())
-                for x in range(restored.width())),
-            0)
+        for image in (normal, snapped):
+            self.assertGreater(sum(
+                image.pixel(x, y) == red
+                for y in range(image.height())
+                for x in range(image.width())), 20)
+            self.assertEqual(sum(
+                image.pixel(x, y) == green
+                for y in range(image.height())
+                for x in range(image.width())), 0)
 
 
 if __name__ == "__main__":

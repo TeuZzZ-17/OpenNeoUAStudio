@@ -1241,6 +1241,27 @@ def verify_texture_name_edits(original: bytes, edited: bytes,
     return notes
 
 
+def rewrite_block_texture_template(
+        block, name: str, binding_slot: str = "texture") -> bytes:
+    """Return one ADES OBJT template with a verified texture-name change."""
+
+    template = getattr(block, "source_objt_bytes", b"")
+    if not template:
+        raise MappingEditError("material block has no parsed source OBJT")
+    wrapped = _wrap_ades_objt(template)
+    edit = TextureNameEdit("root", 0, name, binding_slot)
+    edited = apply_texture_name_edits_to_bytes(wrapped, [edit])
+    parsed = parse_base_bytes(edited, "<retargeted-ades-template>")
+    if parsed.root is None or len(parsed.root.ades) != 1:
+        raise MappingEditError(
+            "retargeted material template failed to re-parse")
+    updated = getattr(parsed.root.ades[0], binding_slot, None)
+    if updated is None or updated.name != name:
+        raise MappingEditError(
+            "retargeted material template did not preserve the new texture")
+    return parsed.root.ades[0].source_objt_bytes
+
+
 def save_model_base_copy(data: bytes, uv_edits: list[UVEdit],
                          texture_edits: list[TextureNameEdit],
                          out_path: str | Path,

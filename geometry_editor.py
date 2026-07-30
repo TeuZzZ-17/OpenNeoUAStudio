@@ -592,7 +592,9 @@ class GeometryEditSession:
         self._pending: list[Point3D] | None = None
         self._modal_origin: list[Point3D] | None = None
         self._modal_pivot: tuple[float, float, float] | None = None
-        self.mirror_x_enabled = False
+        self.mirror_enabled = False
+        self._mirror_components: list[tuple[int, ...]] | None = None
+        self._mirror_tolerance = 1e-5
 
     # -- coordinate helpers ---------------------------------------------------
 
@@ -681,62 +683,141 @@ class GeometryEditSession:
         self._modal_origin = list(self.model.points)
         self._pending = list(self.model.points)
         self._modal_pivot = self.selection_pivot()
+        self._mirror_components = None
         return True
 
-    def set_mirror_x_enabled(self, enabled: bool) -> None:
-        self.mirror_x_enabled = bool(enabled)
+    def set_mirror_enabled(self, enabled: bool) -> None:
+        self.mirror_enabled = bool(enabled)
+        self._mirror_components = None
 
-    def _apply_x_mirror(self, pending: list[Point3D]) -> None:
-        """Mirror transformed vertices across X=0 without touching unpaired data."""
+    def _enabled_mirror_axes(self) -> tuple[int, ...]:
+        return (0, 1, 2) if self.mirror_enabled else ()
 
-        if not self.mirror_x_enabled or self._modal_origin is None:
-            return
-        origin = self._modal_origin
-        if not origin:
-            return
+    def _build_mirror_components(
+            self, origin: list[Point3D],
+            axes: tuple[int, ...]) -> list[tuple[int, ...]]:
+        """Build one-to-one symmetry orbits for the active coordinate planes."""
+
         extent = max(
             max(point[axis] for point in origin)
             - min(point[axis] for point in origin)
             for axis in range(3))
         tolerance = max(1e-5, extent * 1e-5)
-        positives = [
-            index for index, point in enumerate(origin)
-            if point[0] > tolerance]
-        negatives = {
-            index for index, point in enumerate(origin)
-            if point[0] < -tolerance}
-        pairs = []
-        for positive in positives:
-            point = origin[positive]
-            candidates = [
-                negative for negative in negatives
-                if abs(origin[negative][0] + point[0]) <= tolerance
-                and abs(origin[negative][1] - point[1]) <= tolerance
-                and abs(origin[negative][2] - point[2]) <= tolerance
-            ]
-            if not candidates:
-                continue
-            negative = min(candidates, key=lambda index: (
-                abs(origin[index][0] + point[0])
-                + abs(origin[index][1] - point[1])
-                + abs(origin[index][2] - point[2]),
-                index))
-            negatives.remove(negative)
-            pairs.append((positive, negative))
+        self._mirror_tolerance = tolerance
+        adjacency = {index: set() for index in range(len(origin))}
+        for axis in axes:
+            positives = [
+                index for index, point in enumerate(origin)
+                if point[axis] > tolerance]
+            negatives = {
+                index for index, point in enumerate(origin)
+                if point[axis] < -tolerance}
+            for positive in positives:
+                point = origin[positive]
+                candidates = [
+                    negative for negative in negatives
+                    if all(
+                        abs(
+                            origin[negative][coordinate]
+                            - (-point[coordinate]
+                               if coordinate == axis
+                               else point[coordinate]))
+                        <= tolerance
+                        for coordinate in range(3))
+                ]
+                if not candidates:
+                    continue
+                negative = min(candidates, key=lambda index: (
+                    sum(
+                        abs(
+                            origin[index][coordinate]
+                            - (-point[coordinate]
+                               if coordinate == axis
+                               else point[coordinate]))
+                        for coordinate in range(3)),
+                    index))
+                negatives.remove(negative)
+                adjacency[positive].add(negative)
+                adjacency[negative].add(positive)
 
-        for positive, negative in pairs:
-            positive_selected = positive in self.selection
-            negative_selected = negative in self.selection
-            if not positive_selected and not negative_selected:
+        components = []
+        visited = set()
+        for start in range(len(origin)):
+            if start in visited:
                 continue
-            source = positive if positive_selected else negative
-            target = negative if source == positive else positive
-            x, y, z = pending[source]
-            pending[target] = (-x, y, z)
+            pending = [start]
+            component = []
+            while pending:
+                index = pending.pop()
+                if index in visited:
+                    continue
+                visited.add(index)
+                component.append(index)
+                pending.extend(adjacency[index] - visited)
+            components.append(tuple(sorted(component)))
+        return components
+
+    def _apply_mirrors(self, pending: list[Point3D]) -> None:
+        """Propagate transformed vertices across every enabled symmetry plane."""
+
+        origin = self._modal_origin
+        axes = self._enabled_mirror_axes()
+        if origin is None or not origin or not axes:
+            return
+        if self._mirror_components is None:
+            self._mirror_components = self._build_mirror_components(
+                origin, axes)
+        tolerance = self._mirror_tolerance
+        for component in self._mirror_components:
+            selected = [
+                index for index in component if index in self.selection]
+            if not selected:
+                continue
+            source = min(selected, key=lambda index: (
+                tuple(
+                    0 if origin[index][axis] > tolerance
+                    else 1 if abs(origin[index][axis]) <= tolerance
+                    else 2
+                    for axis in axes),
+                index,
+            ))
+            source_point = pending[source]
+            for target in component:
+                values = list(source_point)
+                for axis in axes:
+                    source_coordinate = origin[source][axis]
+                    target_coordinate = origin[target][axis]
+                    if abs(target_coordinate) <= tolerance:
+                        values[axis] = 0.0
+                    elif source_coordinate * target_coordinate < 0.0:
+                        values[axis] = -values[axis]
+                pending[target] = tuple(values)
         for index in self.selection:
-            if index < len(origin) and abs(origin[index][0]) <= tolerance:
-                _x, y, z = pending[index]
-                pending[index] = (0.0, y, z)
+            if index >= len(origin):
+                continue
+            values = list(pending[index])
+            for axis in axes:
+                if abs(origin[index][axis]) <= tolerance:
+                    values[axis] = 0.0
+            pending[index] = tuple(values)
+
+    def mirror_recipient_indices(self) -> set[int]:
+        """Unselected vertices currently receiving a mirrored modal edit."""
+
+        origin = self._modal_origin
+        axes = self._enabled_mirror_axes()
+        if origin is None or not origin or not axes:
+            return set()
+        if self._mirror_components is None:
+            self._mirror_components = self._build_mirror_components(
+                origin, axes)
+        recipients = set()
+        for component in self._mirror_components:
+            if any(index in self.selection for index in component):
+                recipients.update(
+                    index for index in component
+                    if index not in self.selection)
+        return recipients
 
     def preview_grab(self, delta_model, axis: str | None = None) -> None:
         if self._modal_origin is None:
@@ -753,7 +834,7 @@ class GeometryEditSession:
             if i < len(pending):
                 x, y, z = self._modal_origin[i]
                 pending[i] = (x + dx, y + dy, z + dz)
-        self._apply_x_mirror(pending)
+        self._apply_mirrors(pending)
         self._pending = pending
 
     def preview_rotate(self, axis_vector, angle: float) -> None:
@@ -768,7 +849,7 @@ class GeometryEditSession:
                 pending[i] = rotate_around_axis(
                     self._modal_origin[i], axis, angle, self._modal_pivot
                 )
-        self._apply_x_mirror(pending)
+        self._apply_mirrors(pending)
         self._pending = pending
 
     def preview_scale(self, factor: float, axis: str | None = None) -> None:
@@ -803,7 +884,7 @@ class GeometryEditSession:
                     cy + (y - cy) * fy,
                     cz + (z - cz) * fz,
                 )
-        self._apply_x_mirror(pending)
+        self._apply_mirrors(pending)
         self._pending = pending
 
     def preview_replace_selected(self, points) -> None:
@@ -826,6 +907,7 @@ class GeometryEditSession:
         self._pending = None
         self._modal_origin = None
         self._modal_pivot = None
+        self._mirror_components = None
 
     def commit_modal(self) -> bool:
         """Apply the preview; returns True when geometry actually changed."""
