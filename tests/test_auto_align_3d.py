@@ -61,8 +61,10 @@ class AutoAlign3DTests(unittest.TestCase):
             with self.subTest(operation=operation):
                 viewport, _model = _viewport(points, {0, 1})
                 session = viewport.edit_session
-                session.set_mirror_x_enabled(True)
+                session.set_mirror_enabled(True)
                 self.assertTrue(session.begin_modal())
+                self.assertEqual(
+                    session.mirror_recipient_indices(), {2, 3})
                 if operation == "move":
                     session.preview_grab((0.5, 0.25, 0.0))
                 elif operation == "rotate":
@@ -74,6 +76,71 @@ class AutoAlign3DTests(unittest.TestCase):
                     pending[2], (-pending[0][0], pending[0][1], pending[0][2]))
                 self.assertEqual(
                     pending[3], (-pending[1][0], pending[1][1], pending[1][2]))
+
+    def test_mirror_y_and_z_apply_to_matching_counterparts(self):
+        cases = (
+            (
+                "Y",
+                [(0.0, 1.0, 2.0), (0.0, -1.0, 2.0)],
+                lambda source: (source[0], -source[1], source[2]),
+            ),
+            (
+                "Z",
+                [(1.0, 2.0, 3.0), (1.0, 2.0, -3.0)],
+                lambda source: (source[0], source[1], -source[2]),
+            ),
+        )
+        for axis, points, reflected in cases:
+            for operation in ("move", "rotate", "scale"):
+                with self.subTest(axis=axis, operation=operation):
+                    viewport, _model = _viewport(points, {0})
+                    session = viewport.edit_session
+                    session.set_mirror_enabled(True)
+                    self.assertTrue(session.begin_modal())
+                    if operation == "move":
+                        session.preview_grab((0.25, 0.5, -0.75))
+                    elif operation == "rotate":
+                        session.preview_rotate((1.0, 0.0, 0.0), 0.3)
+                    else:
+                        session.preview_scale_axes((1.2, 0.8, 1.4))
+                    self.assertEqual(
+                        session.points()[1],
+                        reflected(session.points()[0]))
+
+    def test_all_mirror_axes_can_propagate_one_edit_to_eight_octants(self):
+        points = [
+            (x, y, z)
+            for x in (1.0, -1.0)
+            for y in (2.0, -2.0)
+            for z in (3.0, -3.0)
+        ]
+        viewport, _model = _viewport(points, {0})
+        session = viewport.edit_session
+        session.set_mirror_enabled(True)
+        self.assertTrue(session.begin_modal())
+        session.preview_grab((0.5, 0.25, 0.75))
+        self.assertEqual(
+            set(session.points()),
+            {
+                (x, y, z)
+                for x in (1.5, -1.5)
+                for y in (2.25, -2.25)
+                for z in (3.75, -3.75)
+            })
+
+    def test_mirror_counterpart_is_highlighted_only_during_transform(self):
+        viewport, model = _viewport([
+            (1.0, 0.0, 0.0), (1.0, 1.0, 0.0), (1.0, 0.0, 1.0),
+            (-1.0, 0.0, 0.0), (-1.0, 1.0, 0.0), (-1.0, 0.0, 1.0),
+        ], {0, 1, 2})
+        model.polygons = [[0, 1, 2], [3, 4, 5]]
+        viewport.set_mirror_enabled(True)
+        self.assertTrue(viewport.edit_session.begin_modal())
+        self.assertEqual(
+            viewport._active_mirror_targets(),
+            ({3, 4, 5}, {1}))
+        viewport.edit_session.cancel_modal()
+        self.assertEqual(viewport._active_mirror_targets(), (set(), set()))
 
     def test_snap_to_origin_and_reference_vertex_uses_pixel_threshold(self):
         viewport, _model = _viewport(

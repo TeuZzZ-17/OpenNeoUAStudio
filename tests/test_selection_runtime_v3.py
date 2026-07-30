@@ -287,7 +287,7 @@ class SelectionRuntimeV3Tests(unittest.TestCase):
         finally:
             window.close()
 
-    def test_load_texture_updates_every_compatible_block_in_model(self):
+    def test_load_texture_updates_only_the_selected_material_block(self):
         family, obj, _model = _selection_family()
         first = AmeshBlock(
             class_id="amesh.class",
@@ -332,10 +332,10 @@ class SelectionRuntimeV3Tests(unittest.TestCase):
 
             self.assertEqual(
                 [block.texture.name for block in obj.base_object.ades],
-                ["MARBLE.ILBM", "MARBLE.ILBM"])
+                ["MARBLE.ILBM", "OTHER.ILBM"])
             command = window._edit_undo_stack[-1]
             self.assertEqual(command["kind"], "texture")
-            self.assertEqual(len(command["before"]), 2)
+            self.assertEqual(len(command["before"]), 1)
             window._undo_edit()
             self.assertEqual(
                 [block.texture.name for block in obj.base_object.ades],
@@ -343,7 +343,69 @@ class SelectionRuntimeV3Tests(unittest.TestCase):
             window._redo_edit()
             self.assertEqual(
                 [block.texture.name for block in obj.base_object.ades],
+                ["MARBLE.ILBM", "OTHER.ILBM"])
+        finally:
+            window.close()
+
+    def test_load_texture_updates_every_selected_material_block(self):
+        family, obj, _model = _selection_family()
+        obj.base_object.ades[:] = [
+            AmeshBlock(
+                class_id="amesh.class",
+                texture=TextureRef(
+                    class_id="ilbm.class", kind="ilbm",
+                    name=name),
+                atts=[AttsEntry(poly_id, 1, 2, 3, 4)],
+                olpl=[[(0, 0), (255, 0), (0, 255)]],
+            )
+            for poly_id, name in (
+                (0, "STONE.ILBM"), (1, "OTHER.ILBM"))
+        ]
+        rebuild_materials(obj, family)
+        window = AssemblyWindow()
+        try:
+            window._set_family(family)
+            window._show_model_editor()
+            window._selected_polys = {0, 1}
+            window._selected_poly = 0
+            window.viewport.set_highlight_polys({0, 1})
+            with patch.object(
+                    window, "_available_model_textures",
+                    return_value=["MARBLE.ILBM"]), \
+                    patch.object(
+                        window, "_choose_model_texture",
+                        return_value="MARBLE.ILBM"), \
+                    patch.object(
+                        window, "_ensure_model_texture_loaded",
+                        return_value="MARBLE.ILBM"):
+                window._load_model_texture()
+            self.assertEqual(
+                [block.texture.name for block in obj.base_object.ades],
                 ["MARBLE.ILBM", "MARBLE.ILBM"])
+            self.assertEqual(
+                len(window._edit_undo_stack[-1]["before"]), 2)
+        finally:
+            window.close()
+
+    def test_load_texture_warns_when_selected_segment_has_no_binding(self):
+        window, obj, _model = _prepare_window()
+        try:
+            obj.base_object.ades.clear()
+            rebuild_materials(obj, window._family)
+            window._mapping_index = MappingIndex(obj)
+            window._on_polygon_picked(0)
+
+            self.assertTrue(window.load_texture_button.isEnabled())
+            with patch.object(QMessageBox, "warning") as warning:
+                window._load_model_texture()
+
+            warning.assert_called_once()
+            title, message = warning.call_args.args[1:3]
+            self.assertEqual(title, "Texture cannot be replaced")
+            self.assertIn("Polygon #0", message)
+            self.assertIn("no ATTS material mapping", message)
+            self.assertIn("No unsupported material data was modified", message)
+            self.assertEqual(obj.base_object.ades, [])
         finally:
             window.close()
 

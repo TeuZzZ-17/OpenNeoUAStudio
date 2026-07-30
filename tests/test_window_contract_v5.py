@@ -1,5 +1,6 @@
 import os
 import unittest
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
@@ -136,8 +137,67 @@ class WindowContractV5Tests(unittest.TestCase):
             self.assertEqual(window.global_undo_button.styleSheet(), "")
             self.assertEqual(window.global_redo_button.styleSheet(), "")
             self.assertEqual(
-                window.mirror_x_check.text(), "Symmetry (Mirror X)")
-            self.assertFalse(window.mirror_x_check.isChecked())
+                window.symmetry_mirror_check.text(), "Symmetry Mirror")
+            self.assertFalse(window.symmetry_mirror_check.isChecked())
+            self.assertFalse(hasattr(window, "mirror_x_check"))
+            self.assertFalse(hasattr(window, "mirror_y_check"))
+            self.assertFalse(hasattr(window, "mirror_z_check"))
+            self.assertFalse(hasattr(window, "completeness_label"))
+            self.assertTrue(window.loaded_resource_label.font().bold())
+            self.assertGreaterEqual(
+                window.loaded_resource_label.font().pointSize(), 13)
+            self.assertEqual(
+                window.loaded_resource_label.text(), "No Resource Loaded")
+            editor_tab_center = window._right_tabs.tabBar().mapToGlobal(
+                window._right_tabs.tabBar().tabRect(1).center()).x()
+            status_center = window.editor_status_panel.mapToGlobal(
+                window.editor_status_panel.rect().center()).x()
+            self.assertLessEqual(abs(editor_tab_center - status_center), 2)
+            self.assertGreater(
+                window.editor_status_panel.width(),
+                window._right_tabs.tabBar().tabRect(1).width() * 2)
+            window._right_tabs.setCurrentWidget(window._editor_tabs)
+            self.app.processEvents()
+            self.assertEqual(
+                window.auto_align_check.geometry().center().y(),
+                window.symmetry_mirror_check.geometry().center().y())
+            window.symmetry_mirror_check.setChecked(True)
+            self.assertTrue(window.viewport._mirror_enabled)
+        finally:
+            window.close()
+
+    def test_editor_status_shows_only_resource_and_all_unsaved_edits(self):
+        window = AssemblyWindow()
+        try:
+            window._family = object()
+            window._selected_owner = "root"
+            window._owner_to_obj = {
+                "root": SimpleNamespace(display_name="VP_HUBI1.sklt")}
+            window._geom_dirty = {"root": object()}
+            window._uv_original = {}
+            window._vanm_uv_original = {}
+            window._texture_original = {("root", 1): object()}
+
+            window._update_editor_status()
+
+            self.assertEqual(
+                window.loaded_resource_label.text(), "VP_HUBI1.sklt")
+            self.assertEqual(
+                window.unsaved_edits_label.text(), "Unsave edits: 2")
+            self.assertIn(
+                "color: #ffffff",
+                window.unsaved_edits_label.styleSheet())
+            self.assertFalse(window.unsaved_edits_label.isHidden())
+            self.assertEqual(
+                window.loaded_resource_label.geometry().center().y(),
+                window.unsaved_edits_label.geometry().center().y())
+            visible_text = (
+                window.loaded_resource_label.text() + " "
+                + window.unsaved_edits_label.text())
+            for removed in (
+                    "Complete textured preview", "selected + children",
+                    "large family", "TEXTURE PREVIEW"):
+                self.assertNotIn(removed, visible_text)
         finally:
             window.close()
 
@@ -170,6 +230,44 @@ class WindowContractV5Tests(unittest.TestCase):
             self.assertEqual(window.resolve_tree.columnWidth(0), 260)
             self.assertEqual(window.resolve_tree.columnWidth(1), 70)
             self.assertEqual(window.resolve_tree.columnWidth(2), 165)
+        finally:
+            window.close()
+
+    def test_save_model_as_asks_for_base_filename_and_keeps_bundle_layout(
+            self):
+        window = AssemblyWindow()
+        try:
+            family = SimpleNamespace()
+            fam_obj = SimpleNamespace(
+                base_object=SimpleNamespace(name="OriginalModel"))
+            context = ("root", family, fam_obj, object(), object())
+            selected = Path("C:/chosen/CustomModel")
+            expected_base = selected.with_suffix(".BASE")
+            expected_skeleton = (
+                selected.parent / "Skeleton" / "ORIGINAL.sklt")
+            with patch.object(
+                    window, "_model_save_context",
+                    return_value=context), patch.object(
+                    window, "_bundle_skeleton_relative_path",
+                    return_value=Path("Skeleton/ORIGINAL.sklt")), patch.object(
+                    window, "_owner_vanm_uv_keys",
+                    return_value=set()), patch.object(
+                    assembly_window_module.QFileDialog,
+                    "getSaveFileName",
+                    return_value=(str(selected), "BASE model")), patch.object(
+                    window, "_write_model_files",
+                    return_value=True) as write, patch.object(
+                    window, "_sync_geometry_save_controls"), patch.object(
+                    window, "_notify"):
+                window._save_model_as()
+            write.assert_called_once_with(
+                "root", family, fam_obj,
+                expected_skeleton, expected_base,
+                ask_replace=True)
+            self.assertEqual(
+                window._bundle_targets["root"],
+                (expected_skeleton, expected_base))
+            self.assertEqual(window._last_directory, selected.parent)
         finally:
             window.close()
 

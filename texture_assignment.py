@@ -1,4 +1,4 @@
-"""Classification for safe logical material-binding replacement."""
+"""Classification for selection-scoped material-binding replacement."""
 
 from __future__ import annotations
 
@@ -10,6 +10,7 @@ class TextureBinding:
     block_index: int
     block: object
     binding_slot: str
+    selected_polys: frozenset[int]
 
 
 @dataclass(frozen=True)
@@ -47,23 +48,13 @@ class TextureAssignmentSelection:
 
 def classify_texture_assignment(
         mapping, selected_polys) -> TextureAssignmentSelection:
-    """Partition selected polygons without mutating BASE or viewport state."""
+    """Partition only selected polygons without expanding to sibling blocks."""
 
-    def binding_key(block_index: int, binding_slot: str, texture):
+    def binding_key(binding_slot: str, texture):
         kind = str(getattr(texture, "kind", "")).casefold()
-        name = str(getattr(texture, "name", ""))
-        logical_name = (
-            name.casefold() if name
-            else f"__unnamed_block_{block_index}")
-        return binding_slot, kind, logical_name
+        return binding_slot, kind
 
-    blocks = {}
-    for refs in mapping.refs.values():
-        for ref in refs:
-            blocks[(ref.block_index, id(ref.block))] = (
-                ref.block_index, ref.block)
-
-    grouped: dict[tuple[str, str, str], dict] = {}
+    grouped: dict[tuple[str, str], dict] = {}
     skipped: dict[int, str] = {}
     for poly_id in sorted({int(value) for value in selected_polys}):
         status = mapping.status(poly_id)
@@ -86,15 +77,18 @@ def classify_texture_assignment(
                 unsupported.append(kind or "unknown")
                 continue
             represented = True
-            key = binding_key(ref.block_index, binding_slot, texture)
+            key = binding_key(binding_slot, texture)
             record = grouped.setdefault(
                 key,
                 {
                     "selected": set(),
+                    "bindings": {},
                     "kind": kind,
-                    "name": str(getattr(texture, "name", "")),
                 })
             record["selected"].add(poly_id)
+            record["bindings"][
+                (ref.block_index, id(ref.block))] = (
+                    ref.block_index, ref.block)
         if not represented:
             skipped[poly_id] = (
                 "unsupported texture binding " + ", ".join(unsupported)
@@ -106,37 +100,43 @@ def classify_texture_assignment(
         binding_slot = key[0]
         bindings = []
         affected = set()
-        unsafe = False
-        for block_index, block in sorted(blocks.values()):
+        represented_selected = set()
+        binding_names = set()
+        for block_index, block in sorted(record["bindings"].values()):
             texture = getattr(block, binding_slot, None)
-            if texture is None or binding_key(
-                    block_index, binding_slot, texture) != key:
+            if texture is None or binding_key(binding_slot, texture) != key:
                 continue
             member_polys = {
                 entry.poly_id for entry in getattr(block, "atts", ())
                 if 0 <= entry.poly_id < mapping.poly_count
             }
-            if not member_polys or any(
+            selected_members = member_polys & record["selected"]
+            if not member_polys:
+                for poly_id in selected_members:
+                    skipped[poly_id] = "material has no valid polygons"
+                continue
+            if any(
                     len(mapping.refs.get(poly_id, ())) != 1
                     or mapping.refs[poly_id][0].block is not block
                     for poly_id in member_polys):
-                unsafe = True
-                break
+                for poly_id in selected_members:
+                    skipped[poly_id] = "material overlaps duplicate mapping"
+                continue
             bindings.append(TextureBinding(
-                block_index, block, binding_slot))
-            affected.update(member_polys)
-        if unsafe or not bindings or not affected:
-            reason = ("material overlaps duplicate mapping"
-                      if unsafe else "material has no valid polygons")
-            for poly_id in record["selected"]:
-                skipped[poly_id] = reason
+                block_index, block, binding_slot,
+                frozenset(selected_members)))
+            affected.update(selected_members)
+            represented_selected.update(selected_members)
+            binding_names.add(str(getattr(texture, "name", "")))
+        if not bindings or not affected:
             continue
+        names = sorted(binding_names, key=str.casefold)
         groups.append(TextureBindingGroup(
             bindings=tuple(bindings),
-            selected_polys=frozenset(record["selected"]),
+            selected_polys=frozenset(represented_selected),
             affected_polys=frozenset(affected),
             binding_kind=record["kind"],
-            binding_name=record["name"],
+            binding_name=(names[0] if len(names) == 1 else "<multiple>"),
         ))
 
     groups.sort(key=lambda group: (
