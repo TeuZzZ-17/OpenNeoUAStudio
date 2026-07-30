@@ -90,6 +90,344 @@ class TopologyDeleteResult:
     old_to_new_point: tuple[tuple[int, int], ...]
 
 
+@dataclass(frozen=True)
+class MirrorMatchResult:
+    """Deterministic point symmetry graph used by automatic Mirror Select."""
+
+    axes: tuple[int, ...]
+    tolerance: float
+    counterparts: tuple[tuple[int, tuple[int, ...]], ...]
+    unmatched: frozenset[int]
+    self_mirrored: frozenset[int]
+    ambiguous: tuple[tuple[int, tuple[int, ...]], ...]
+    ambiguous_vertices: frozenset[int]
+    components: tuple[tuple[int, ...], ...]
+    axis_pairs: tuple[tuple[int, tuple[tuple[int, int], ...]], ...]
+    axis_ambiguities: tuple[
+        tuple[int, tuple[tuple[int, tuple[int, ...]], ...]], ...]
+
+    @property
+    def recipient_indices(self) -> frozenset[int]:
+        return frozenset(
+            target
+            for _source, targets in self.counterparts
+            for target in targets)
+
+
+@dataclass(frozen=True)
+class MirrorPolygonMatchResult:
+    counterparts: tuple[tuple[int, tuple[int, ...]], ...]
+    unmatched: frozenset[int]
+    self_mirrored: frozenset[int]
+    ambiguous: tuple[tuple[int, tuple[int, ...]], ...]
+    point_match: MirrorMatchResult
+
+    @property
+    def recipient_indices(self) -> frozenset[int]:
+        return frozenset(
+            target
+            for _source, targets in self.counterparts
+            for target in targets)
+
+
+def normalize_mirror_axes(axes) -> tuple[int, ...]:
+    """Return unique model-space X/Y/Z indices in canonical order."""
+
+    values = set()
+    for axis in axes:
+        if isinstance(axis, str):
+            name = axis.strip().upper()
+            if name not in ("X", "Y", "Z"):
+                raise ValueError(f"invalid Mirror axis {axis!r}")
+            values.add("XYZ".index(name))
+        elif isinstance(axis, int) and axis in (0, 1, 2):
+            values.add(axis)
+        else:
+            raise ValueError(f"invalid Mirror axis {axis!r}")
+    return tuple(sorted(values))
+
+
+def mirror_tolerance(points, tolerance: float | None = None) -> float:
+    """Use an extent-relative tolerance for automatic Mirror Select."""
+
+    values = [tuple(float(value) for value in point) for point in points]
+    if tolerance is not None:
+        result = float(tolerance)
+        if not math.isfinite(result) or result <= 0.0:
+            raise ValueError("Mirror tolerance must be finite and positive")
+        return result
+    if not values:
+        return 1e-5
+    extent = max(
+        max(point[axis] for point in values)
+        - min(point[axis] for point in values)
+        for axis in range(3))
+    return max(1e-5, extent * 1e-5)
+
+
+def _reflected_point(point, axes, tolerance: float) -> Point3D:
+    values = [float(value) for value in point]
+    for axis in axes:
+        values[axis] = (
+            0.0 if abs(values[axis]) <= tolerance else -values[axis])
+    return tuple(values)
+
+
+def _point_candidates(points, desired, tolerance: float) -> tuple[int, ...]:
+    return tuple(
+        index for index, candidate in enumerate(points)
+        if all(
+            abs(candidate[axis] - desired[axis]) <= tolerance
+            for axis in range(3)))
+
+
+def match_mirror_points(
+        points, selection, axes, tolerance: float | None = None,
+        candidates=None,
+        ) -> MirrorMatchResult:
+    """Build one-to-one axis edges and symmetry components without guessing."""
+
+    values = [tuple(float(value) for value in point) for point in points]
+    active_axes = normalize_mirror_axes(axes)
+    selected = frozenset(int(index) for index in selection)
+    invalid = sorted(
+        index for index in selected if index < 0 or index >= len(values))
+    if invalid:
+        raise ValueError(
+            f"Mirror selection contains invalid point index {invalid[0]}")
+    eligible = (
+        set(range(len(values))) if candidates is None
+        else {int(index) for index in candidates})
+    invalid_candidates = sorted(
+        index for index in eligible if index < 0 or index >= len(values))
+    if invalid_candidates:
+        raise ValueError(
+            "Mirror candidates contain invalid point index "
+            f"{invalid_candidates[0]}")
+    eligible.update(selected)
+    resolved_tolerance = mirror_tolerance(values, tolerance)
+    adjacency = {index: set() for index in range(len(values))}
+    axis_maps: dict[int, dict[int, int]] = {}
+    ambiguities_by_axis: dict[int, dict[int, tuple[int, ...]]] = {}
+    ambiguous_vertices = set()
+
+    for axis in active_axes:
+        axis_map: dict[int, int] = {}
+        axis_ambiguous: dict[int, tuple[int, ...]] = {}
+        for index in sorted(eligible):
+            point = values[index]
+            if abs(point[axis]) <= resolved_tolerance:
+                axis_map[index] = index
+                continue
+            desired = _reflected_point(
+                point, (axis,), resolved_tolerance)
+            candidates = tuple(
+                candidate for candidate in _point_candidates(
+                    values, desired, resolved_tolerance)
+                if candidate != index and candidate in eligible)
+            if len(candidates) == 1:
+                axis_map[index] = candidates[0]
+            elif len(candidates) > 1:
+                axis_ambiguous[index] = candidates
+                ambiguous_vertices.add(index)
+                ambiguous_vertices.update(candidates)
+
+        # A valid edge must be a deterministic reciprocal one-to-one pair.
+        for source, target in tuple(axis_map.items()):
+            if source == target:
+                continue
+            if axis_map.get(target) != source:
+                candidates = tuple(sorted({
+                    target,
+                    *(axis_ambiguous.get(source, ())),
+                    *(axis_ambiguous.get(target, ())),
+                }))
+                axis_ambiguous[source] = candidates
+                ambiguous_vertices.add(source)
+                ambiguous_vertices.update(candidates)
+                axis_map.pop(source, None)
+                if axis_map.get(target) == source:
+                    axis_map.pop(target, None)
+
+        for source, target in axis_map.items():
+            if source != target:
+                adjacency[source].add(target)
+                adjacency[target].add(source)
+        axis_maps[axis] = axis_map
+        ambiguities_by_axis[axis] = axis_ambiguous
+
+    components = []
+    component_for = {}
+    visited = set()
+    for start in range(len(values)):
+        if start in visited:
+            continue
+        pending = [start]
+        component = []
+        while pending:
+            index = pending.pop()
+            if index in visited:
+                continue
+            visited.add(index)
+            component.append(index)
+            pending.extend(sorted(adjacency[index] - visited, reverse=True))
+        normalized = tuple(sorted(component))
+        component_index = len(components)
+        components.append(normalized)
+        for index in normalized:
+            component_for[index] = component_index
+
+    counterparts = []
+    unmatched = set()
+    self_mirrored = set()
+    selected_ambiguities = []
+    for source in sorted(selected):
+        source_ambiguities = sorted({
+            candidate
+            for axis in active_axes
+            for candidate in ambiguities_by_axis[axis].get(source, ())
+        })
+        if source_ambiguities:
+            selected_ambiguities.append(
+                (source, tuple(source_ambiguities)))
+            continue
+        if any(
+                axis_maps[axis].get(source) == source
+                for axis in active_axes):
+            self_mirrored.add(source)
+        component = components[component_for[source]]
+        targets = tuple(
+            index for index in component
+            if index not in selected
+            and index not in ambiguous_vertices)
+        if targets:
+            counterparts.append((source, targets))
+        elif source not in self_mirrored:
+            unmatched.add(source)
+
+    return MirrorMatchResult(
+        axes=active_axes,
+        tolerance=resolved_tolerance,
+        counterparts=tuple(counterparts),
+        unmatched=frozenset(unmatched),
+        self_mirrored=frozenset(self_mirrored),
+        ambiguous=tuple(selected_ambiguities),
+        ambiguous_vertices=frozenset(ambiguous_vertices),
+        components=tuple(components),
+        axis_pairs=tuple(
+            (axis, tuple(sorted(axis_maps[axis].items())))
+            for axis in active_axes),
+        axis_ambiguities=tuple(
+            (axis, tuple(sorted(ambiguities_by_axis[axis].items())))
+            for axis in active_axes),
+    )
+
+
+def _axis_masks(axes: tuple[int, ...]):
+    for mask in range(1, 1 << len(axes)):
+        yield tuple(
+            axis for bit, axis in enumerate(axes)
+            if mask & (1 << bit))
+
+
+def match_mirror_polygons(
+        points, polygons, selection, axes,
+        tolerance: float | None = None) -> MirrorPolygonMatchResult:
+    """Match polygon counterparts by mirrored vertex sets, not POL2 order."""
+
+    polygon_values = [tuple(int(index) for index in polygon)
+                      for polygon in polygons]
+    selected = frozenset(int(poly_id) for poly_id in selection)
+    invalid = sorted(
+        poly_id for poly_id in selected
+        if poly_id < 0 or poly_id >= len(polygon_values))
+    if invalid:
+        raise ValueError(
+            f"Mirror selection contains invalid polygon #{invalid[0]}")
+    source_vertices = {
+        index for poly_id in selected for index in polygon_values[poly_id]}
+    point_match = match_mirror_points(
+        points, source_vertices, axes, tolerance)
+    axis_maps = {
+        axis: dict(pairs) for axis, pairs in point_match.axis_pairs}
+    axis_ambiguities = {
+        axis: dict(entries)
+        for axis, entries in point_match.axis_ambiguities}
+    by_vertices: dict[tuple[int, frozenset[int]], list[int]] = {}
+    for poly_id, polygon in enumerate(polygon_values):
+        by_vertices.setdefault(
+            (len(polygon), frozenset(polygon)), []).append(poly_id)
+
+    matched_by_source: dict[int, set[int]] = {
+        poly_id: set() for poly_id in selected}
+    unmatched = set()
+    self_mirrored = set()
+    ambiguous: dict[int, set[int]] = {}
+    for source_poly in sorted(selected):
+        source_polygon = polygon_values[source_poly]
+        had_missing = False
+        for mask_axes in _axis_masks(point_match.axes):
+            target_vertices = list(source_polygon)
+            mask_ambiguous = set()
+            missing = False
+            for axis in mask_axes:
+                next_vertices = []
+                for vertex in target_vertices:
+                    candidates = axis_ambiguities[axis].get(vertex)
+                    if candidates:
+                        mask_ambiguous.update(candidates)
+                        missing = True
+                        continue
+                    target = axis_maps[axis].get(vertex)
+                    if target is None:
+                        missing = True
+                    else:
+                        next_vertices.append(target)
+                if missing:
+                    break
+                target_vertices = next_vertices
+            if mask_ambiguous:
+                ambiguous.setdefault(source_poly, set()).update(
+                    mask_ambiguous)
+                continue
+            if missing:
+                had_missing = True
+                continue
+            target_key = (
+                len(target_vertices), frozenset(target_vertices))
+            source_key = (
+                len(source_polygon), frozenset(source_polygon))
+            if target_key == source_key:
+                self_mirrored.add(source_poly)
+                continue
+            candidates = by_vertices.get(target_key, [])
+            if len(candidates) == 1:
+                matched_by_source[source_poly].add(candidates[0])
+            elif len(candidates) > 1:
+                ambiguous.setdefault(source_poly, set()).update(candidates)
+            else:
+                had_missing = True
+        if not matched_by_source[source_poly] \
+                and source_poly not in self_mirrored \
+                and source_poly not in ambiguous:
+            unmatched.add(source_poly)
+        elif had_missing and not matched_by_source[source_poly]:
+            unmatched.add(source_poly)
+
+    return MirrorPolygonMatchResult(
+        counterparts=tuple(
+            (source, tuple(sorted(targets)))
+            for source, targets in sorted(matched_by_source.items())
+            if targets),
+        unmatched=frozenset(unmatched),
+        self_mirrored=frozenset(self_mirrored),
+        ambiguous=tuple(
+            (source, tuple(sorted(candidates)))
+            for source, candidates in sorted(ambiguous.items())),
+        point_match=point_match,
+    )
+
+
 def _polygon_area_measure(points) -> float:
     """Squared Newell-normal length; zero means a degenerate polygon."""
 
@@ -593,7 +931,9 @@ class GeometryEditSession:
         self._modal_origin: list[Point3D] | None = None
         self._modal_pivot: tuple[float, float, float] | None = None
         self.mirror_enabled = False
-        self._mirror_components: list[tuple[int, ...]] | None = None
+        self.mirror_source_selection: set[int] = set()
+        self._modal_transform_selection: set[int] | None = None
+        self._mirror_match: MirrorMatchResult | None = None
         self._mirror_tolerance = 1e-5
 
     # -- coordinate helpers ---------------------------------------------------
@@ -632,6 +972,7 @@ class GeometryEditSession:
 
     def select_none(self) -> None:
         self.selection = set()
+        self.mirror_source_selection.clear()
 
     def set_selection(self, indices) -> None:
         """Replace the selection with validated POO2 vertex indices."""
@@ -646,6 +987,7 @@ class GeometryEditSession:
                 f"vertex selection contains invalid POO2 index {invalid[0]}"
             )
         self.selection = selected
+        self.mirror_source_selection.intersection_update(selected)
 
     def toggle(self, index: int) -> None:
         if index in self.selection:
@@ -656,10 +998,17 @@ class GeometryEditSession:
     def selection_pivot(self) -> tuple[float, float, float] | None:
         """Median-point pivot of the current selection, in model space."""
 
-        if not self.selection:
+        return self._selection_pivot(self.selection)
+
+    def _selection_pivot(
+            self, indices) -> tuple[float, float, float] | None:
+        selected = {
+            index for index in indices
+            if 0 <= index < len(self.model.points)}
+        if not selected:
             return None
         pts = self.model.points
-        sel = [pts[i] for i in sorted(self.selection) if i < len(pts)]
+        sel = [pts[i] for i in sorted(selected)]
         if not sel:
             return None
         n = float(len(sel))
@@ -682,105 +1031,54 @@ class GeometryEditSession:
             return False
         self._modal_origin = list(self.model.points)
         self._pending = list(self.model.points)
-        self._modal_pivot = self.selection_pivot()
-        self._mirror_components = None
+        sources = (
+            self.mirror_source_selection & self.selection
+            if self.mirror_enabled else set())
+        self._modal_transform_selection = (
+            sources if sources else set(self.selection))
+        self._modal_pivot = self._selection_pivot(
+            self._modal_transform_selection)
+        self._mirror_match = None
         return True
 
     def set_mirror_enabled(self, enabled: bool) -> None:
         self.mirror_enabled = bool(enabled)
-        self._mirror_components = None
+        self._mirror_match = None
 
-    def _enabled_mirror_axes(self) -> tuple[int, ...]:
-        return (0, 1, 2) if self.mirror_enabled else ()
+    def set_mirror_source_selection(self, indices) -> None:
+        sources = {
+            int(index) for index in indices
+            if 0 <= int(index) < len(self.model.points)}
+        self.mirror_source_selection = sources & self.selection
+        self._mirror_match = None
 
-    def _build_mirror_components(
-            self, origin: list[Point3D],
-            axes: tuple[int, ...]) -> list[tuple[int, ...]]:
-        """Build one-to-one symmetry orbits for the active coordinate planes."""
-
-        extent = max(
-            max(point[axis] for point in origin)
-            - min(point[axis] for point in origin)
-            for axis in range(3))
-        tolerance = max(1e-5, extent * 1e-5)
-        self._mirror_tolerance = tolerance
-        adjacency = {index: set() for index in range(len(origin))}
-        for axis in axes:
-            positives = [
-                index for index, point in enumerate(origin)
-                if point[axis] > tolerance]
-            negatives = {
-                index for index, point in enumerate(origin)
-                if point[axis] < -tolerance}
-            for positive in positives:
-                point = origin[positive]
-                candidates = [
-                    negative for negative in negatives
-                    if all(
-                        abs(
-                            origin[negative][coordinate]
-                            - (-point[coordinate]
-                               if coordinate == axis
-                               else point[coordinate]))
-                        <= tolerance
-                        for coordinate in range(3))
-                ]
-                if not candidates:
-                    continue
-                negative = min(candidates, key=lambda index: (
-                    sum(
-                        abs(
-                            origin[index][coordinate]
-                            - (-point[coordinate]
-                               if coordinate == axis
-                               else point[coordinate]))
-                        for coordinate in range(3)),
-                    index))
-                negatives.remove(negative)
-                adjacency[positive].add(negative)
-                adjacency[negative].add(positive)
-
-        components = []
-        visited = set()
-        for start in range(len(origin)):
-            if start in visited:
-                continue
-            pending = [start]
-            component = []
-            while pending:
-                index = pending.pop()
-                if index in visited:
-                    continue
-                visited.add(index)
-                component.append(index)
-                pending.extend(adjacency[index] - visited)
-            components.append(tuple(sorted(component)))
-        return components
+    def _current_mirror_match(
+            self, origin: list[Point3D]) -> MirrorMatchResult:
+        if self._mirror_match is None:
+            self._mirror_match = match_mirror_points(
+                origin, self._modal_transform_selection or (), (0, 1, 2),
+                candidates=self.selection)
+            self._mirror_tolerance = self._mirror_match.tolerance
+        return self._mirror_match
 
     def _apply_mirrors(self, pending: list[Point3D]) -> None:
-        """Propagate transformed vertices across every enabled symmetry plane."""
+        """Propagate the source transform across matching X/Y/Z counterparts."""
 
         origin = self._modal_origin
-        axes = self._enabled_mirror_axes()
-        if origin is None or not origin or not axes:
+        sources = self._modal_transform_selection or set()
+        if not self.mirror_enabled or origin is None or not sources:
             return
-        if self._mirror_components is None:
-            self._mirror_components = self._build_mirror_components(
-                origin, axes)
+        axes = (0, 1, 2)
+        match = self._current_mirror_match(origin)
         tolerance = self._mirror_tolerance
-        for component in self._mirror_components:
-            selected = [
-                index for index in component if index in self.selection]
-            if not selected:
+        for component in match.components:
+            component_sources = [
+                index for index in component if index in sources]
+            if not component_sources or any(
+                    index in match.ambiguous_vertices
+                    for index in component):
                 continue
-            source = min(selected, key=lambda index: (
-                tuple(
-                    0 if origin[index][axis] > tolerance
-                    else 1 if abs(origin[index][axis]) <= tolerance
-                    else 2
-                    for axis in axes),
-                index,
-            ))
+            source = min(component_sources)
             source_point = pending[source]
             for target in component:
                 values = list(source_point)
@@ -792,7 +1090,7 @@ class GeometryEditSession:
                     elif source_coordinate * target_coordinate < 0.0:
                         values[axis] = -values[axis]
                 pending[target] = tuple(values)
-        for index in self.selection:
+        for index in sources:
             if index >= len(origin):
                 continue
             values = list(pending[index])
@@ -801,23 +1099,11 @@ class GeometryEditSession:
                     values[axis] = 0.0
             pending[index] = tuple(values)
 
-    def mirror_recipient_indices(self) -> set[int]:
-        """Unselected vertices currently receiving a mirrored modal edit."""
-
-        origin = self._modal_origin
-        axes = self._enabled_mirror_axes()
-        if origin is None or not origin or not axes:
-            return set()
-        if self._mirror_components is None:
-            self._mirror_components = self._build_mirror_components(
-                origin, axes)
-        recipients = set()
-        for component in self._mirror_components:
-            if any(index in self.selection for index in component):
-                recipients.update(
-                    index for index in component
-                    if index not in self.selection)
-        return recipients
+    def _transform_selection(self) -> set[int]:
+        return (
+            set(self._modal_transform_selection)
+            if self._modal_transform_selection is not None
+            else set(self.selection))
 
     def preview_grab(self, delta_model, axis: str | None = None) -> None:
         if self._modal_origin is None:
@@ -830,7 +1116,7 @@ class GeometryEditSession:
         elif axis == "Z":
             dx = dy = 0.0
         pending = list(self._modal_origin)
-        for i in self.selection:
+        for i in self._transform_selection():
             if i < len(pending):
                 x, y, z = self._modal_origin[i]
                 pending[i] = (x + dx, y + dy, z + dz)
@@ -844,7 +1130,7 @@ class GeometryEditSession:
         if axis is None:
             return
         pending = list(self._modal_origin)
-        for i in self.selection:
+        for i in self._transform_selection():
             if i < len(pending):
                 pending[i] = rotate_around_axis(
                     self._modal_origin[i], axis, angle, self._modal_pivot
@@ -876,7 +1162,7 @@ class GeometryEditSession:
             return
         cx, cy, cz = self._modal_pivot
         pending = list(self._modal_origin)
-        for i in self.selection:
+        for i in self._transform_selection():
             if i < len(pending):
                 x, y, z = self._modal_origin[i]
                 pending[i] = (
@@ -907,7 +1193,8 @@ class GeometryEditSession:
         self._pending = None
         self._modal_origin = None
         self._modal_pivot = None
-        self._mirror_components = None
+        self._modal_transform_selection = None
+        self._mirror_match = None
 
     def commit_modal(self) -> bool:
         """Apply the preview; returns True when geometry actually changed."""

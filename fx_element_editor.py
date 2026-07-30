@@ -316,7 +316,9 @@ def build_fx_element_clipboard(
         fx_name=element.fx_name,
         source_kind=source_kind or element.source_kind,
         shared_state=(
-            "bilateral" if element.bilateral else "exclusive"),
+            "bilateral" if element.bilateral
+            else "selection" if element.shared_state == "selection"
+            else "exclusive"),
         bilateral=element.bilateral,
         block_indices=tuple(element.block_indices),
         atts_indices=tuple(element.atts_indices),
@@ -330,6 +332,67 @@ def build_fx_element_clipboard(
         material_signature=tuple(material_signature),
         animation=animation_snapshot,
     )
+
+
+def build_fx_elements_clipboard(
+        fam_obj: FamilyObject, elements,
+        animations: Mapping[str, VanmData] | None = None,
+        ) -> FxElementClipboard:
+    """Copy one or more complete FX elements as one mirrored selection."""
+
+    selected = tuple(elements)
+    if not selected:
+        raise GeometryClipboardError("select one or more complete FX elements")
+    if len(selected) == 1:
+        return build_fx_element_clipboard(
+            fam_obj, selected[0], animations)
+    owner = fam_obj.owner_path
+    if any(element.owner_path != owner for element in selected):
+        raise GeometryClipboardError(
+            "the selected FX elements do not share one editable owner")
+    if any(element.shared_state == "invalid" for element in selected):
+        raise GeometryClipboardError(
+            "the mirrored FX selection contains invalid geometry")
+    poly_ids = [
+        poly_id for element in selected for poly_id in element.poly_ids]
+    if len(set(poly_ids)) != len(poly_ids):
+        raise GeometryClipboardError(
+            "the mirrored FX selection contains overlapping elements")
+    fx_names = {element.fx_name for element in selected}
+    if len(fx_names) != 1:
+        raise GeometryClipboardError(
+            "FX1 and FX2 cannot be combined in one Paste FX Preview")
+
+    bounds = [
+        element.uv_bounds for element in selected
+        if element.uv_bounds is not None]
+    combined = FxElement(
+        owner_path=owner,
+        fx_name=selected[0].fx_name,
+        block_indices=tuple(
+            index for element in selected for index in element.block_indices),
+        atts_indices=tuple(
+            index for element in selected for index in element.atts_indices),
+        poly_ids=tuple(poly_ids),
+        vertex_indices=tuple(sorted({
+            index for element in selected for index in element.vertex_indices
+        })),
+        olpl_uvs=selected[0].olpl_uvs,
+        uv_bounds=(
+            (min(bound[0] for bound in bounds),
+             min(bound[1] for bound in bounds),
+             max(bound[2] for bound in bounds),
+             max(bound[3] for bound in bounds))
+            if bounds else None),
+        uv_source=selected[0].uv_source,
+        source_kind=selected[0].source_kind,
+        material_names=tuple(
+            name for element in selected for name in element.material_names),
+        shared_state="selection",
+        warnings=tuple(dict.fromkeys(
+            warning for element in selected for warning in element.warnings)),
+    )
+    return build_fx_element_clipboard(fam_obj, combined, animations)
 
 
 def detach_shared_fx_vertices(
@@ -450,14 +513,19 @@ def validate_fx_element_clipboard(
     if clipboard.fx_name not in ("FX1", "FX2") \
             or clipboard.source_kind not in ("direct", "VANM"):
         raise GeometryClipboardError("the FX clipboard type is invalid")
-    if clipboard.shared_state not in ("exclusive", "bilateral") \
+    if clipboard.shared_state not in (
+            "exclusive", "bilateral", "selection") \
             or clipboard.bilateral != (
                 clipboard.shared_state == "bilateral"):
         raise GeometryClipboardError("the FX clipboard grouping is invalid")
     if not clipboard.points or not clipboard.polygons:
         raise GeometryClipboardError("the FX clipboard is empty")
-    if clipboard.bilateral != (len(clipboard.polygons) == 2) \
-            or (not clipboard.bilateral and len(clipboard.polygons) != 1):
+    if (clipboard.shared_state == "exclusive"
+            and len(clipboard.polygons) != 1) \
+            or (clipboard.shared_state == "bilateral"
+                and len(clipboard.polygons) != 2) \
+            or (clipboard.shared_state == "selection"
+                and len(clipboard.polygons) < 2):
         raise GeometryClipboardError(
             "the FX clipboard polygon grouping is invalid")
     if tuple(

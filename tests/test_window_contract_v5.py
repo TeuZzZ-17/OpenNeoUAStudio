@@ -136,12 +136,15 @@ class WindowContractV5Tests(unittest.TestCase):
             self.assertNotIn("Go to polyID...", tool_labels)
             self.assertEqual(window.global_undo_button.styleSheet(), "")
             self.assertEqual(window.global_redo_button.styleSheet(), "")
-            self.assertEqual(
-                window.symmetry_mirror_check.text(), "Symmetry Mirror")
-            self.assertFalse(window.symmetry_mirror_check.isChecked())
             self.assertFalse(hasattr(window, "mirror_x_check"))
             self.assertFalse(hasattr(window, "mirror_y_check"))
             self.assertFalse(hasattr(window, "mirror_z_check"))
+            self.assertFalse(hasattr(window, "mirror_axis_checks"))
+            self.assertEqual(window._mirror_axes(), (0, 1, 2))
+            self.assertEqual(
+                window.mirror_select_check.text(), "Mirror Select")
+            self.assertFalse(hasattr(window, "mirror_copy_check"))
+            self.assertFalse(hasattr(window, "mirror_delete_check"))
             self.assertFalse(hasattr(window, "completeness_label"))
             self.assertTrue(window.loaded_resource_label.font().bold())
             self.assertGreaterEqual(
@@ -158,11 +161,6 @@ class WindowContractV5Tests(unittest.TestCase):
                 window._right_tabs.tabBar().tabRect(1).width() * 2)
             window._right_tabs.setCurrentWidget(window._editor_tabs)
             self.app.processEvents()
-            self.assertEqual(
-                window.auto_align_check.geometry().center().y(),
-                window.symmetry_mirror_check.geometry().center().y())
-            window.symmetry_mirror_check.setChecked(True)
-            self.assertTrue(window.viewport._mirror_enabled)
         finally:
             window.close()
 

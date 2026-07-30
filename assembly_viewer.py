@@ -496,7 +496,6 @@ class AssetViewport(QWidget):
         self._active_edit_vertex: int | None = None
         self._direct_grab_selected_only = False
         self._edit_pick_polygons = False
-        self._mirror_enabled = False
         self._edit_read_only_vertices: set[int] = set()
         self._edit_visible_vertices: set[int] = set()
         self._edit_visibility_ready = False
@@ -863,23 +862,6 @@ class AssetViewport(QWidget):
         if not enabled:
             self._precision_guides = ()
         self.update()
-
-    def set_mirror_enabled(self, enabled: bool) -> None:
-        self._mirror_enabled = bool(enabled)
-        if self._edit_session is not None:
-            self._edit_session.set_mirror_enabled(enabled)
-
-    def _active_mirror_targets(self) -> tuple[set[int], set[int]]:
-        session = self._edit_session
-        if session is None or not session.modal_active:
-            return set(), set()
-        recipients = session.mirror_recipient_indices()
-        polygons = set()
-        for poly_id, indices in enumerate(session.model.polygons):
-            vertices = set(indices)
-            if vertices and vertices.issubset(recipients):
-                polygons.add(poly_id)
-        return recipients, polygons
 
     @staticmethod
     def _bounds_features(points) -> tuple[tuple[float, float, float], ...]:
@@ -1520,7 +1502,6 @@ class AssetViewport(QWidget):
             matrix = _rotation_matrix((0, 0, 0), (1.0, 1.0, 1.0))
             pos = (0.0, 0.0, 0.0)
         self._edit_session = GeometryEditSession(fam_obj, matrix, pos)
-        self._edit_session.set_mirror_enabled(self._mirror_enabled)
         self._edit_owner = target
         self._edit_visible_vertices.clear()
         self._edit_visibility_ready = False
@@ -3052,8 +3033,6 @@ class AssetViewport(QWidget):
         source_polygons: dict[int, QPolygonF] = {}
         visible_faces: set[int] = set()
         highlight_paths: dict[int, QPainterPath] = {}
-        mirror_recipients, mirror_polys = self._active_mirror_targets()
-
         def draw_piece(face: ViewFace, piece_camera, piece_uvs,
                        image: QImage | None,
                        front_facing: bool) -> None:
@@ -3087,8 +3066,7 @@ class AssetViewport(QWidget):
             )
             poly_highlighted = bool(
                 not clean and face.primary
-                and (face.poly_id in self._highlight_polys
-                     or face.poly_id in mirror_polys))
+                and face.poly_id in self._highlight_polys)
             owner_highlighted = bool(
                 not clean
                 and self._selected_owner is not None
@@ -3328,19 +3306,16 @@ class AssetViewport(QWidget):
             self._draw_diagnostics_overlay(painter)
 
         if not clean and self._edit_session is not None:
-            self._draw_edit_overlay(
-                painter, target, camera, mirror_recipients)
+            self._draw_edit_overlay(painter, target, camera)
         elif not clean:
             self._draw_mode_label(painter, target, False)
 
     def _draw_edit_overlay(
             self, painter: QPainter, target: QRectF,
-            camera: dict,
-            mirror_recipients: set[int] | None = None) -> None:
+            camera: dict) -> None:
         session = self._edit_session
         if session is None:
             return
-        mirror_recipients = mirror_recipients or set()
         screen = self._edit_screen_points(target, camera)
         available = self._available_edit_vertices(screen)
 
@@ -3367,8 +3342,7 @@ class AssetViewport(QWidget):
         painter.setPen(QPen(QColor(20, 22, 26), 1.0))
         painter.setBrush(QColor(208, 212, 220))
         for index, point in enumerate(screen):
-            if index in session.selection or index in mirror_recipients \
-                    or index not in available:
+            if index in session.selection or index not in available:
                 continue
             painter.drawRect(QRectF(point.x() - 2.5, point.y() - 2.5,
                                     5.0, 5.0))
@@ -3388,7 +3362,7 @@ class AssetViewport(QWidget):
         }[self._direct_transform_mode]
         painter.setPen(QPen(mode_color.lighter(165), 1.8))
         painter.setBrush(mode_color)
-        for index in session.selection | mirror_recipients:
+        for index in session.selection:
             if index < len(screen):
                 point = screen[index]
                 radius = 5.5 if index == self._active_edit_vertex else 4.5

@@ -115,6 +115,7 @@ from fx_element_editor import (
     FxElementClipboard,
     append_fx_element_clipboard,
     build_fx_element_clipboard,
+    build_fx_elements_clipboard,
     detach_shared_fx_vertices,
     detect_fx_elements,
     validate_fx_element_clipboard,
@@ -138,6 +139,8 @@ from geometry_editor import (
     apply_delete_geometry,
     append_geometry_clipboard,
     build_geometry_clipboard,
+    match_mirror_points,
+    match_mirror_polygons,
     plan_delete_geometry,
 )
 from model_space_gizmo import ModelSpaceGizmo
@@ -435,6 +438,7 @@ class AssemblyWindow(QMainWindow):
         self._workbench_obj = None          # first skeleton-bearing FamilyObject
         self._selected_poly: int | None = None
         self._selected_polys: set[int] = set()
+        self._mirror_select_source_polys: set[int] = set()
         self._repair_plan: RepairPlan | None = None
         self._pending_repairs: list[RepairPlan] = []
         self._saved_repair_path: str | None = None
@@ -1505,6 +1509,7 @@ class AssemblyWindow(QMainWindow):
         intensity_row.addWidget(self.gizmo_intensity_spin)
         gizmo_layout.addLayout(intensity_row)
         transform_options = QGridLayout()
+        self._transform_options_layout = transform_options
         transform_options.setContentsMargins(0, 0, 0, 0)
         transform_options.setHorizontalSpacing(12)
         transform_options.setVerticalSpacing(3)
@@ -1516,18 +1521,18 @@ class AssemblyWindow(QMainWindow):
         self.auto_align_check.toggled.connect(
             self.viewport.set_auto_align_enabled)
         self.viewport.set_auto_align_enabled(True)
-        transform_options.addWidget(self.auto_align_check, 0, 0)
-        self.symmetry_mirror_check = QCheckBox("Symmetry Mirror")
-        self.symmetry_mirror_check.setChecked(False)
-        self.symmetry_mirror_check.setToolTip(
-            "Apply Move, Rotate and Scale to every matching counterpart "
-            "across the model's X, Y and Z symmetry planes.")
-        self.symmetry_mirror_check.toggled.connect(
-            self.viewport.set_mirror_enabled)
-        self.viewport.set_mirror_enabled(False)
-        transform_options.addWidget(
-            self.symmetry_mirror_check, 0, 1)
-        transform_options.setColumnStretch(1, 1)
+        transform_options.addWidget(self.auto_align_check, 0, 1)
+        self.mirror_select_check = QCheckBox("Mirror Select")
+        self.mirror_select_check.setChecked(False)
+        self.mirror_select_check.setEnabled(False)
+        self.mirror_select_check.setToolTip(
+            "Keep selected geometry and automatically add every matching "
+            "counterpart across the combined X, Y and Z symmetry planes.")
+        self.mirror_select_check.toggled.connect(
+            self._on_mirror_select_toggled)
+        transform_options.addWidget(self.mirror_select_check, 0, 0)
+        for column in range(3):
+            transform_options.setColumnStretch(column, 1)
         gizmo_layout.addLayout(transform_options)
         self.viewport.set_direct_transform("move", 0.50)
         self._apply_transform_mode_colors()
@@ -5097,13 +5102,31 @@ class AssemblyWindow(QMainWindow):
              and resolved.intersection(element.poly_ids)),
             None)
 
+    def _active_fx_elements(self) -> tuple[FxElement, ...]:
+        """Resolve an exact selection made only of complete FX elements."""
+
+        owner = self.viewport.edit_owner
+        resolved = self._resolved_geometry_polys()
+        if not owner or not resolved:
+            return ()
+        touched = tuple(
+            element for element in self._fx_elements
+            if element.owner_path == owner
+            and resolved.intersection(element.poly_ids))
+        if not touched or any(
+                not set(element.poly_ids).issubset(resolved)
+                for element in touched):
+            return ()
+        covered = {
+            poly_id for element in touched for poly_id in element.poly_ids}
+        return touched if covered == resolved else ()
+
     def _mixed_fx_selection_reason(
             self, element: FxElement | None) -> str:
         if element is None:
             return ""
-        extras = (
-            self._resolved_geometry_polys() - set(element.poly_ids))
-        if extras:
+        resolved = self._resolved_geometry_polys()
+        if resolved and not self._active_fx_elements():
             return (
                 "FX elements cannot be combined with other polygons in one "
                 "Copy, Cut or Delete operation")
@@ -5219,8 +5242,24 @@ class AssemblyWindow(QMainWindow):
             self.viewport.set_highlight_polys(set())
             self._sync_edit_action_states()
             return
+        identity = element.identity
         self._select_highlight_fx()
-        if self._editing_allowed() and element.shared_state == "shared":
+        if self._editing_allowed() and self._mirror_select_active():
+            source_polys = set(self._mirror_select_source_polys)
+            mirrored_polys = set(self._selected_polys)
+            self._detach_mirrored_shared_fx(self._selected_polys)
+            index = self._fx_combo_index(identity)
+            self.fx_combo.blockSignals(True)
+            self.fx_combo.setCurrentIndex(index)
+            self.fx_combo.blockSignals(False)
+            element = self._selected_fx_element() or element
+            self._mirror_select_source_polys = \
+                self._complete_fx_polygon_selection(source_polys)
+            self._set_mirror_polygon_selection(
+                element.owner_path, self._workbench_obj,
+                self._complete_fx_polygon_selection(mirrored_polys),
+                self._mirror_select_source_polys)
+        elif self._editing_allowed() and element.shared_state == "shared":
             element = self._detach_fx_for_editing(element) or element
         if element.editable and self._editing_allowed():
             self._edit_selected_fx()
@@ -5302,6 +5341,22 @@ class AssemblyWindow(QMainWindow):
             self._edit_redo_stack[:] = previous_redo
             self._notify(f"FX detach failed and was rolled back: {exc}.", 9000)
             return None
+
+    def _detach_mirrored_shared_fx(self, polygon_ids) -> bool:
+        """Detach every shared FX touched by Mirror Select before transforms."""
+
+        pending = {int(poly_id) for poly_id in polygon_ids}
+        while True:
+            shared = next((
+                element for element in self._fx_elements
+                if element.owner_path == self.viewport.edit_owner
+                and element.shared_state == "shared"
+                and pending.intersection(element.poly_ids)
+            ), None)
+            if shared is None:
+                return True
+            if self._detach_fx_for_editing(shared) is None:
+                return False
 
     def _can_delete_selected_fx_element(self) -> bool:
         element = self._selected_fx_element()
@@ -5603,8 +5658,13 @@ class AssemblyWindow(QMainWindow):
             if element is None:
                 return
         primary_poly = element.poly_ids[0]
+        source_polys = self._complete_fx_polygon_selection(element.poly_ids)
+        selected_polys = source_polys
+        if self._mirror_select_active():
+            self._mirror_select_source_polys = set(source_polys)
+            selected_polys = self._mirrored_polygon_selection(source_polys)
         self._selected_poly = primary_poly
-        self._selected_polys = set(element.poly_ids)
+        self._selected_polys = set(selected_polys)
         self.viewport.set_selected_polygon(primary_poly)
         self.viewport.set_highlight_polys(self._selected_polys)
         self._fill_polygon_inspector(primary_poly)
@@ -5630,10 +5690,25 @@ class AssemblyWindow(QMainWindow):
                 "references and cannot be edited safely."
             )
             return
-        self._select_highlight_fx()
+        if not (
+                self._mirror_select_active()
+                and self._selected_polys
+                and self._mirror_select_source_polys):
+            self._select_highlight_fx()
         self._remember_geometry_original(element.owner_path)
+        vertices = (
+            self._polygon_vertices(
+                self.viewport.edit_session.model, self._selected_polys)
+            if self._mirror_select_active()
+            and self.viewport.edit_session is not None
+            else set(element.vertex_indices))
         if self.viewport.enter_edit_mode_with_vertices(
-                element.owner_path, element.vertex_indices):
+                element.owner_path, vertices):
+            if self._mirror_select_active():
+                self._set_mirror_transform_source(
+                    self._polygon_vertices(
+                        self.viewport.edit_session.model,
+                        self._mirror_select_source_polys))
             self.viewport.configure_edit_interaction(
                 selected_only=True, pick_polygons=True)
             self.viewport.setFocus()
@@ -5790,13 +5865,38 @@ class AssemblyWindow(QMainWindow):
 
     def _on_polygon_picked(self, poly_id: int,
                            additive: bool = False) -> None:
-        if additive:
-            if poly_id in self._selected_polys:
-                self._selected_polys.remove(poly_id)
+        was_selected = poly_id in self._selected_polys
+        mirror_active = self._mirror_select_active()
+        if mirror_active:
+            if additive and was_selected:
+                self._mirror_select_source_polys.difference_update(
+                    self._mirrored_polygon_selection({poly_id}))
+            elif additive:
+                self._mirror_select_source_polys.add(poly_id)
             else:
-                self._selected_polys.add(poly_id)
+                self._mirror_select_source_polys = {poly_id}
+            self._mirror_select_source_polys = \
+                self._complete_fx_polygon_selection(
+                    self._mirror_select_source_polys)
+            self._selected_polys = self._mirrored_polygon_selection(
+                self._mirror_select_source_polys)
+            if self._editing_allowed():
+                mirrored_polys = set(self._selected_polys)
+                self._detach_mirrored_shared_fx(self._selected_polys)
+                self._mirror_select_source_polys = \
+                    self._complete_fx_polygon_selection(
+                        self._mirror_select_source_polys)
+                self._selected_polys = self._complete_fx_polygon_selection(
+                    mirrored_polys)
         else:
-            self._selected_polys = {poly_id}
+            self._mirror_select_source_polys.clear()
+            if additive:
+                if was_selected:
+                    self._selected_polys.remove(poly_id)
+                else:
+                    self._selected_polys.add(poly_id)
+            else:
+                self._selected_polys = {poly_id}
         self._selected_poly = (
             poly_id if poly_id in self._selected_polys else
             (min(self._selected_polys, default=None)))
@@ -5826,7 +5926,7 @@ class AssemblyWindow(QMainWindow):
         self.fx_combo.setCurrentIndex(
             self._fx_combo_index(element.identity) if element else 0)
         self.fx_combo.blockSignals(False)
-        if element is not None and not additive:
+        if element is not None and not additive and not mirror_active:
             if self._editing_allowed() \
                     and element.shared_state == "shared":
                 element = self._detach_fx_for_editing(element) or element
@@ -5840,8 +5940,15 @@ class AssemblyWindow(QMainWindow):
             owner, vertices = target
             self.viewport.enter_edit_mode_with_vertices(
                 owner, vertices, pick_polygons=True)
+            if mirror_active:
+                self._set_mirror_transform_source(
+                    self._polygon_vertices(
+                        self.viewport.edit_session.model,
+                        self._mirror_select_source_polys))
             self.viewport.configure_edit_interaction(
                 selected_only=False, pick_polygons=True)
+        elif mirror_active and self.viewport.edit_session is not None:
+            self.viewport.edit_session.select_none()
 
     def _fx_element_for_polygon(
             self, poly_id: int | None,
@@ -6213,6 +6320,10 @@ class AssemblyWindow(QMainWindow):
         self.transform_step_label.setText(settings["label"])
         self.transform_help_label.setText(settings["help"])
         self.auto_align_check.setVisible(mode == "move")
+        self._transform_options_layout.removeWidget(
+            self.mirror_select_check)
+        self._transform_options_layout.addWidget(
+            self.mirror_select_check, 0, 0)
         spin.blockSignals(True)
         spin.display_mode = mode
         spin.setRange(*settings["range"])
@@ -6236,6 +6347,37 @@ class AssemblyWindow(QMainWindow):
         slider.setToolTip(settings["tip"])
         slider.blockSignals(False)
         self.viewport.set_direct_transform(mode, spin.value())
+
+    def _mirror_axes(self) -> tuple[int, ...]:
+        return (0, 1, 2)
+
+    def _on_mirror_select_toggled(self, enabled: bool) -> None:
+        session = self.viewport.edit_session
+        if enabled:
+            if session is not None:
+                session.set_mirror_enabled(True)
+            self._expand_current_mirror_selection()
+        else:
+            source_vertices = (
+                set(session.mirror_source_selection)
+                if session is not None else set())
+            context = self._mirror_selection_context()
+            if context is not None and self._mirror_select_source_polys:
+                _session, owner, fam_obj = context
+                self._set_mirror_polygon_selection(
+                    owner, fam_obj,
+                    self._mirror_select_source_polys)
+            elif session is not None and source_vertices:
+                session.set_selection(source_vertices)
+                self._selected_polys.clear()
+                self._selected_poly = None
+                self._on_edit_selection_details_changed(
+                    source_vertices, "programmatic")
+            self._mirror_select_source_polys.clear()
+            if session is not None:
+                session.set_mirror_enabled(False)
+                session.set_mirror_source_selection(())
+        self._sync_edit_action_states()
 
     def _begin_gizmo_nudge(self, direction) -> None:
         if not self._editing_allowed():
@@ -6317,6 +6459,228 @@ class AssemblyWindow(QMainWindow):
             self.viewport.end_model_transform()
         self.viewport.setFocus()
 
+    def _mirror_selection_context(self):
+        session, owner, fam_obj = self._geometry_context()
+        if not self._editing_allowed() or session is None or owner is None:
+            return None
+        if fam_obj is None or fam_obj is not self._workbench_obj:
+            return None
+        if self.viewport.paste_preview_active:
+            return None
+        return session, owner, fam_obj
+
+    def _mirror_select_active(self) -> bool:
+        check = getattr(self, "mirror_select_check", None)
+        return bool(
+            check is not None and check.isChecked()
+            and self._mirror_selection_context() is not None)
+
+    def _complete_fx_polygon_selection(self, polygon_ids) -> set[int]:
+        """Keep every detected FX1/FX2 element structurally atomic."""
+
+        selected = {int(poly_id) for poly_id in polygon_ids}
+        for element in self._fx_elements:
+            if element.owner_path == self.viewport.edit_owner \
+                    and selected.intersection(element.poly_ids):
+                selected.update(element.poly_ids)
+        return selected
+
+    def _mirrored_fx_element_polygons(
+            self, selected_polys, point_match) -> set[int]:
+        """Resolve atomic FX counterparts hidden by bilateral POL2 ambiguity.
+
+        A bilateral FX1/FX2 element is stored as two opposite-winding POL2
+        faces that share one vertex set.  The generic polygon matcher correctly
+        treats the two mirrored target faces as ambiguous, but at FX-element
+        level they are one unique editable object.  Match those complete
+        elements by their reflected POO2 vertex sets without guessing between
+        genuinely distinct overlapping FX elements.
+        """
+
+        owner = self.viewport.edit_owner
+        selected = {int(poly_id) for poly_id in selected_polys}
+        if owner is None or not selected:
+            return set()
+        elements = [
+            element for element in self._fx_elements
+            if element.owner_path == owner
+            and element.shared_state != "invalid"
+            and element.vertex_indices
+        ]
+        sources = [
+            element for element in elements
+            if set(element.poly_ids).issubset(selected)
+        ]
+        if not sources:
+            return set()
+
+        by_vertices: dict[tuple[str, str, frozenset[int]], list[FxElement]] = {}
+        for element in elements:
+            key = (
+                element.fx_name,
+                element.source_kind,
+                frozenset(element.vertex_indices),
+            )
+            by_vertices.setdefault(key, []).append(element)
+
+        axis_maps = {
+            axis: dict(pairs) for axis, pairs in point_match.axis_pairs
+        }
+        axes = tuple(point_match.axes)
+        recipients: set[int] = set()
+        for source in sources:
+            source_vertices = tuple(source.vertex_indices)
+            source_key = frozenset(source_vertices)
+            for mask in range(1, 1 << len(axes)):
+                target_vertices = list(source_vertices)
+                valid = True
+                for bit, axis in enumerate(axes):
+                    if not (mask & (1 << bit)):
+                        continue
+                    axis_map = axis_maps.get(axis, {})
+                    remapped = []
+                    for vertex in target_vertices:
+                        target = axis_map.get(vertex)
+                        if target is None:
+                            valid = False
+                            break
+                        remapped.append(target)
+                    if not valid:
+                        break
+                    target_vertices = remapped
+                if not valid:
+                    continue
+                target_key = frozenset(target_vertices)
+                if target_key == source_key:
+                    continue
+                matches = by_vertices.get((
+                    source.fx_name, source.source_kind, target_key), ())
+                # One logical FX element may contain two bilateral faces, but
+                # two separate elements at the same coordinates remain truly
+                # ambiguous and must not be selected automatically.
+                if len(matches) == 1:
+                    recipients.update(matches[0].poly_ids)
+        return recipients
+
+    def _mirrored_polygon_selection(self, polygon_ids) -> set[int]:
+        context = self._mirror_selection_context()
+        if context is None:
+            return {int(poly_id) for poly_id in polygon_ids}
+        session, _owner, _fam_obj = context
+        selected = self._complete_fx_polygon_selection({
+            int(poly_id) for poly_id in polygon_ids
+            if 0 <= int(poly_id) < len(session.model.polygons)})
+        if not selected:
+            return set()
+        result = match_mirror_polygons(
+            session.model.points, session.model.polygons,
+            selected, self._mirror_axes())
+        recipients = set(result.recipient_indices)
+        recipients.update(self._mirrored_fx_element_polygons(
+            selected, result.point_match))
+        return self._complete_fx_polygon_selection(selected | recipients)
+
+    def _mirrored_vertex_selection(self, vertex_ids) -> set[int]:
+        context = self._mirror_selection_context()
+        if context is None:
+            return {int(vertex_id) for vertex_id in vertex_ids}
+        session, _owner, _fam_obj = context
+        selected = {
+            int(vertex_id) for vertex_id in vertex_ids
+            if 0 <= int(vertex_id) < len(session.model.points)}
+        if not selected:
+            return set()
+        result = match_mirror_points(
+            session.model.points, selected, self._mirror_axes())
+        return selected | set(result.recipient_indices)
+
+    @staticmethod
+    def _polygon_vertices(model, polygon_ids) -> set[int]:
+        return {
+            vertex
+            for poly_id in polygon_ids
+            if 0 <= poly_id < len(model.polygons)
+            for vertex in model.polygons[poly_id]}
+
+    def _set_mirror_transform_source(self, vertex_ids) -> None:
+        session = self.viewport.edit_session
+        if session is None:
+            return
+        session.set_mirror_enabled(
+            bool(self.mirror_select_check.isChecked()))
+        session.set_mirror_source_selection(vertex_ids)
+
+    def _set_mirror_polygon_selection(
+            self, owner: str, fam_obj, polygon_ids,
+            source_polygon_ids=()) -> None:
+        selected = {
+            int(poly_id) for poly_id in polygon_ids
+            if 0 <= int(poly_id) < len(fam_obj.skeleton.polygons)}
+        vertices = {
+            index for poly_id in selected
+            for index in fam_obj.skeleton.polygons[poly_id]}
+        self._selected_owner = owner
+        self._selected_polys = selected
+        self._selected_poly = min(selected, default=None)
+        session = self.viewport.edit_session
+        if session is not None and session.model is fam_obj.skeleton:
+            session.set_selection(vertices)
+            self._set_mirror_transform_source(
+                self._polygon_vertices(
+                    fam_obj.skeleton, source_polygon_ids))
+        self.viewport.set_selected_owner(owner)
+        self.viewport.set_selected_polygon(self._selected_poly)
+        self.viewport.set_highlight_polys(selected)
+        element = next((
+            candidate for candidate in self._fx_elements
+            if candidate.owner_path == owner
+            and set(candidate.poly_ids).issubset(selected)
+        ), None)
+        self.fx_combo.blockSignals(True)
+        self.fx_combo.setCurrentIndex(
+            self._fx_combo_index(element.identity) if element else 0)
+        self.fx_combo.blockSignals(False)
+        self._sync_poly_id_control()
+        self._fill_polygon_inspector(self._selected_poly)
+        self._update_repair_buttons()
+        self._sync_edit_action_states()
+        self.viewport.setFocus()
+
+    def _expand_current_mirror_selection(self) -> None:
+        context = self._mirror_selection_context()
+        if context is None:
+            return
+        session, owner, fam_obj = context
+        explicit_polys = {
+            poly_id for poly_id in self._selected_polys
+            if 0 <= poly_id < len(session.model.polygons)}
+        if explicit_polys:
+            sources = (
+                set(self._mirror_select_source_polys)
+                if self._mirror_select_source_polys
+                and self._mirror_select_source_polys.issubset(explicit_polys)
+                else set(explicit_polys))
+            sources = self._complete_fx_polygon_selection(sources)
+            self._mirror_select_source_polys = sources
+            expanded = self._mirrored_polygon_selection(sources)
+            if self._editing_allowed():
+                mirrored_polys = set(expanded)
+                self._detach_mirrored_shared_fx(expanded)
+                sources = self._complete_fx_polygon_selection(sources)
+                self._mirror_select_source_polys = sources
+                expanded = self._complete_fx_polygon_selection(
+                    mirrored_polys)
+            self._set_mirror_polygon_selection(
+                owner, fam_obj, expanded, sources)
+            return
+        selected_vertices = set(session.selection)
+        expanded = self._mirrored_vertex_selection(selected_vertices)
+        session.set_selection(expanded)
+        self._set_mirror_transform_source(selected_vertices)
+        self._selected_polys.clear()
+        self._on_edit_selection_details_changed(
+            expanded, "programmatic")
+
     def _unsafe_fx_geometry_polys(
             self, owner: str, selected_polys) -> set[int]:
         selected = set(selected_polys)
@@ -6340,16 +6704,13 @@ class AssemblyWindow(QMainWindow):
         if reason:
             self._notify(f"Copy refused: {reason}.", 7000)
             return
-        fx_element = self._active_fx_selection()
-        if fx_element is not None:
-            self._copy_fx_element(fx_element)
+        fx_elements = self._active_fx_elements()
+        if fx_elements:
+            self._copy_fx_elements(fx_elements)
             return
         owner = self.viewport.edit_owner
         fam_obj = self._owner_to_obj[owner]
-        element = self._active_fx_selection()
-        selected = (
-            set(element.poly_ids) if element is not None
-            else self._resolved_geometry_polys())
+        selected = self._resolved_geometry_polys()
         mapping = MappingIndex(fam_obj)
         try:
             clipboard = build_geometry_clipboard(
@@ -6375,6 +6736,13 @@ class AssemblyWindow(QMainWindow):
             "preview and press Paste, LMB or Enter to confirm.", 12000)
 
     def _copy_fx_element(self, element: FxElement) -> None:
+        self._copy_fx_elements((element,))
+
+    def _copy_fx_elements(self, elements) -> None:
+        elements = tuple(elements)
+        if not elements:
+            return
+        element = elements[0]
         family = self._family
         fam_obj = self._owner_to_obj.get(element.owner_path)
         if family is None or fam_obj is None:
@@ -6382,12 +6750,13 @@ class AssemblyWindow(QMainWindow):
                          8000)
             return
         try:
-            clipboard = build_fx_element_clipboard(
-                fam_obj, element, family.animations)
+            clipboard = build_fx_elements_clipboard(
+                fam_obj, elements, family.animations)
         except GeometryClipboardError as exc:
             self._notify(f"Copy FX refused: {exc}.", 9000)
             return
-        self._selected_polys = set(element.poly_ids)
+        self._selected_polys = {
+            poly_id for selected in elements for poly_id in selected.poly_ids}
         self.viewport.set_highlight_polys(self._selected_polys)
         self._geometry_clipboard = clipboard
         position = self._current_viewport_position()
@@ -6395,9 +6764,11 @@ class AssemblyWindow(QMainWindow):
         self._sync_edit_action_states()
         self.viewport.setFocus()
         descriptor = (
-            f"{element.fx_name} VANM Element"
-            if element.source_kind == "VANM"
-            else f"{element.fx_name} Element")
+            f"{len(elements)} mirrored {element.fx_name} "
+            f"{'VANM ' if element.source_kind == 'VANM' else ''}elements"
+            if len(elements) > 1 else
+            f"{element.fx_name} "
+            f"{'VANM ' if element.source_kind == 'VANM' else ''}Element")
         if not started:
             self._notify(
                 f"Copied {descriptor}, but its preview could not start: "
@@ -6450,6 +6821,13 @@ class AssemblyWindow(QMainWindow):
             # A vertex gesture replaces the older direct polygon-pick intent.
             # Complete polygons are then re-derived from the POO2 selection.
             self._selected_polys.clear()
+            self._mirror_select_source_polys.clear()
+            session = self.viewport.edit_session
+            if session is not None and self._mirror_select_active():
+                source_vertices = set(_vertices)
+                session.set_selection(
+                    self._mirrored_vertex_selection(source_vertices))
+                self._set_mirror_transform_source(source_vertices)
         resolved = self._resolved_geometry_polys()
         if self._selected_poly not in resolved:
             self._selected_poly = min(resolved, default=None)
@@ -6487,8 +6865,8 @@ class AssemblyWindow(QMainWindow):
                 return (
                     f"{element.fx_name} is structurally invalid")
             try:
-                build_fx_element_clipboard(
-                    fam_obj, element,
+                build_fx_elements_clipboard(
+                    fam_obj, self._active_fx_elements(),
                     self._family.animations if self._family else {})
             except GeometryClipboardError as exc:
                 return str(exc)
@@ -6960,9 +7338,7 @@ class AssemblyWindow(QMainWindow):
         owner = self.viewport.edit_owner
         fam_obj = self._owner_to_obj[owner]
         element = self._active_fx_selection()
-        selected = (
-            set(element.poly_ids) if element is not None
-            else self._resolved_geometry_polys())
+        selected = self._resolved_geometry_polys()
         mapping = MappingIndex(fam_obj)
         return plan_delete_geometry(
             fam_obj, selected, mapping,
@@ -7015,7 +7391,9 @@ class AssemblyWindow(QMainWindow):
         return self.can_copy_geometry() and self.can_delete_geometry()
 
     def _apply_delete_plan(self, owner: str, fam_obj, plan,
-                           *, label: str) -> int:
+                           *, label: str,
+                           preserve_polygons=(),
+                           preserve_vertices=()) -> int:
         model = fam_obj.skeleton
         before = self._capture_topology_state(owner)
         if before is None:
@@ -7029,25 +7407,43 @@ class AssemblyWindow(QMainWindow):
             self._remember_geometry_original(owner)
             result = apply_delete_geometry(
                 model, fam_obj.base_object.ades, plan)
+            polygon_remap = dict(result.old_to_new_polygon)
+            point_remap = dict(result.old_to_new_point)
+            remapped_polygons = {
+                polygon_remap[poly_id]
+                for poly_id in preserve_polygons
+                if poly_id in polygon_remap}
+            remapped_vertices = {
+                point_remap[point_id]
+                for point_id in preserve_vertices
+                if point_id in point_remap}
             active_session = self.viewport.edit_session
             if active_session is not None:
                 active_session.select_none()
             self._refresh_object_material_faces(fam_obj)
             self._selected_owner = owner
-            self._selected_polys.clear()
-            self._selected_poly = None
+            self._selected_polys = remapped_polygons
+            self._selected_poly = min(
+                remapped_polygons, default=None)
             self.viewport.refresh_family_materials()
             self._rebuild_workbench(self._family, owner)
             self._refresh_fx_elements()
             self.viewport.set_selected_owner(owner)
-            self.viewport.set_selected_polygon(None)
-            self.viewport.set_highlight_polys(set())
-            self.viewport.enter_edit_mode(owner)
-            self.viewport.configure_edit_interaction(
-                selected_only=True, pick_polygons=True)
+            self.viewport.set_selected_polygon(self._selected_poly)
+            self.viewport.set_highlight_polys(remapped_polygons)
+            if remapped_vertices:
+                self.viewport.enter_edit_mode_with_vertices(
+                    owner, remapped_vertices, pick_polygons=True)
+            else:
+                self.viewport.enter_edit_mode(owner)
+                self.viewport.configure_edit_interaction(
+                    selected_only=True, pick_polygons=True)
             session = self.viewport.edit_session
             if session is not None:
-                session.select_none()
+                if remapped_vertices:
+                    session.set_selection(remapped_vertices)
+                else:
+                    session.select_none()
                 session._undo.clear()
                 session._redo.clear()
             self._on_geometry_edited(owner)
@@ -7055,7 +7451,7 @@ class AssemblyWindow(QMainWindow):
             if after is None:
                 raise GeometryClipboardError(
                     "the committed topology could not be verified")
-            self._fill_polygon_inspector(None)
+            self._fill_polygon_inspector(self._selected_poly)
             self._sync_editor_context()
             self._record_edit_command({
                 "kind": "topology",
@@ -7087,6 +7483,7 @@ class AssemblyWindow(QMainWindow):
         if not self._require_editing("Delete Geometry"):
             return
         element = self._active_fx_selection()
+        fx_elements = self._active_fx_elements()
         try:
             plan = self._delete_geometry_plan()
         except GeometryClipboardError as exc:
@@ -7094,6 +7491,9 @@ class AssemblyWindow(QMainWindow):
             return
         count = len(plan.deleted_polygon_indices)
         question = (
+            f"Delete {len(fx_elements)} complete mirrored FX elements "
+            f"({count} polygon(s))?\n"
+            if len(fx_elements) > 1 else
             f"Delete the complete {element.fx_name} "
             f"{'VANM ' if element.source_kind == 'VANM' else ''}"
             f"FX element ({count} polygon(s))?\n"
@@ -7116,12 +7516,16 @@ class AssemblyWindow(QMainWindow):
             deleted = self._apply_delete_plan(
                 owner, fam_obj, plan,
                 label=(
+                    "Delete mirrored FX elements"
+                    if len(fx_elements) > 1 else
                     f"Delete {element.fx_name} FX"
                     if element is not None else "Delete Geometry"))
         except GeometryClipboardError as exc:
             self._notify(f"Delete refused: {exc}.", 8000)
             return
         deleted_message = (
+            f"Deleted {len(fx_elements)} complete mirrored FX elements. "
+            if len(fx_elements) > 1 else
             f"Deleted complete {element.fx_name} FX element. "
             if element is not None else
             f"Deleted {deleted} selected polygon(s). "
@@ -7138,14 +7542,13 @@ class AssemblyWindow(QMainWindow):
         owner = self.viewport.edit_owner
         fam_obj = self._owner_to_obj[owner]
         element = self._active_fx_selection()
-        selected = (
-            set(element.poly_ids) if element is not None
-            else self._resolved_geometry_polys())
+        fx_elements = self._active_fx_elements()
+        selected = self._resolved_geometry_polys()
         mapping = MappingIndex(fam_obj)
         try:
-            if element is not None:
-                clipboard = build_fx_element_clipboard(
-                    fam_obj, element,
+            if fx_elements:
+                clipboard = build_fx_elements_clipboard(
+                    fam_obj, fx_elements,
                     self._family.animations if self._family else {})
             else:
                 clipboard = build_geometry_clipboard(
@@ -7165,6 +7568,8 @@ class AssemblyWindow(QMainWindow):
             cut_count = self._apply_delete_plan(
                 owner, fam_obj, plan,
                 label=(
+                    "Cut mirrored FX elements"
+                    if len(fx_elements) > 1 else
                     f"Cut {element.fx_name} FX"
                     if element is not None else "Cut Geometry"))
         except GeometryClipboardError as exc:
@@ -7176,6 +7581,9 @@ class AssemblyWindow(QMainWindow):
         self._sync_edit_action_states()
         self._notify(
             (
+                f"Cut {len(fx_elements)} mirrored FX elements. "
+                "Press Paste to place the copied FX selection."
+                if len(fx_elements) > 1 else
                 f"Cut {element.fx_name} "
                 f"{'VANM ' if element.source_kind == 'VANM' else ''}"
                 "FX Element. Press Paste to place the copied FX."
@@ -7368,8 +7776,14 @@ class AssemblyWindow(QMainWindow):
             self._cut_geometry)
         cut_geometry.setEnabled(self.can_cut_geometry())
         if active_fx is not None:
+            active_fx_elements = self._active_fx_elements()
             delete_geometry = menu.addAction(
-                "Delete FX Element...", self._delete_selected_fx_element)
+                "Delete Mirrored FX Elements..."
+                if len(active_fx_elements) > 1 else
+                "Delete FX Element...",
+                self._delete_geometry
+                if len(active_fx_elements) > 1 else
+                self._delete_selected_fx_element)
             delete_geometry.setEnabled(self.can_delete_geometry())
         else:
             delete_geometry = menu.addAction("Delete", self._delete_geometry)
@@ -7464,6 +7878,11 @@ class AssemblyWindow(QMainWindow):
             # interaction configured by the main switch so all entry paths
             # behave identically.
             self._sync_editor_context()
+            if self.mirror_select_check.isChecked():
+                session = self.viewport.edit_session
+                if session is not None:
+                    session.set_mirror_enabled(True)
+                self._expand_current_mirror_selection()
         self._sync_gizmo_camera()
         self._sync_edit_action_states()
         self._notify("Edit Mode enabled." if active else
@@ -7527,6 +7946,15 @@ class AssemblyWindow(QMainWindow):
             f"{active_fx.fx_name} "
             f"{'VANM ' if active_fx.source_kind == 'VANM' else ''}Element"
             if active_fx is not None else "")
+        if hasattr(self, "mirror_select_check"):
+            base_enabled = bool(
+                editing and session is not None and not paste_preview)
+            self.mirror_select_check.setEnabled(base_enabled)
+            self.mirror_select_check.setToolTip(
+                "Keep selected geometry and automatically add every matching "
+                "X, Y and Z counterpart."
+                if base_enabled else
+                "Enable Edit Mode to use automatic mirrored selection.")
         if hasattr(self, "copy_geometry_action"):
             self.copy_geometry_action.setEnabled(can_copy)
             copy_tip = (
@@ -10204,7 +10632,25 @@ class AssemblyWindow(QMainWindow):
                 item.data(Qt.ItemDataRole.UserRole))
 
     def _on_polygon_deselected(self, poly_id: int) -> None:
-        self._selected_polys.discard(poly_id)
+        mirror_active = self._mirror_select_active()
+        if mirror_active:
+            self._mirror_select_source_polys.difference_update(
+                self._mirrored_polygon_selection({poly_id}))
+            self._selected_polys = self._mirrored_polygon_selection(
+                self._mirror_select_source_polys)
+        else:
+            self._selected_polys.discard(poly_id)
+        context = self._mirror_selection_context()
+        if context is not None:
+            session, _owner, fam_obj = context
+            vertices = self._polygon_vertices(
+                fam_obj.skeleton, self._selected_polys)
+            session.set_selection(vertices)
+            if mirror_active:
+                self._set_mirror_transform_source(
+                    self._polygon_vertices(
+                        fam_obj.skeleton,
+                        self._mirror_select_source_polys))
         self._selected_poly = min(self._selected_polys, default=None)
         self.viewport.set_selected_polygon(self._selected_poly)
         self.viewport.set_highlight_polys(self._selected_polys)
@@ -10224,7 +10670,11 @@ class AssemblyWindow(QMainWindow):
         """Clear every polygon/FX selection without changing the owner."""
 
         self._selected_polys.clear()
+        self._mirror_select_source_polys.clear()
         self._selected_poly = None
+        session = self.viewport.edit_session
+        if session is not None:
+            session.select_none()
         self.viewport.set_selected_polygon(None)
         self.viewport.set_highlight_polys(set())
         self._sync_poly_id_control()
