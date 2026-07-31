@@ -412,6 +412,7 @@ class AssemblyWindow(QMainWindow):
         self._last_output_directory: Path | None = None
         self._extra_roots: list[Path] = []
         self._wireframe_windows: list[QMainWindow] = []
+        self._collision_windows: list[QMainWindow] = []
         self._preview_windows: list[QDialog] = []
         # session-only manual texture/animation bindings: logical name -> path
         self._overrides: dict[str, str] = {}
@@ -1160,13 +1161,16 @@ class AssemblyWindow(QMainWindow):
         wireframe_action.triggered.connect(self._open_wireframe_editor)
         tools_menu.addSeparator()
         tools_menu.addAction(wireframe_action)
+        collision_action = QAction("Collision Editor", self)
+        collision_action.triggered.connect(self._open_collision_editor)
+        tools_menu.addAction(collision_action)
+        map_editor_action = QAction("Map Editor", self)
+        map_editor_action.triggered.connect(self._open_map_editor)
+        tools_menu.addAction(map_editor_action)
         self.mapping_repair_action = QAction("Mapping Repair...", self)
         self.mapping_repair_action.triggered.connect(
             self._show_mapping_repair)
         tools_menu.addAction(self.mapping_repair_action)
-        map_editor_action = QAction("Map Editor", self)
-        map_editor_action.triggered.connect(self._open_map_editor)
-        tools_menu.addAction(map_editor_action)
 
         diagnostics_menu = self.menuBar().addMenu("&Diagnostics")
         show_warnings = QAction("Warnings", self)
@@ -2238,6 +2242,27 @@ class AssemblyWindow(QMainWindow):
         def forget(*_args) -> None:
             if window in self._wireframe_windows:
                 self._wireframe_windows.remove(window)
+
+        window.destroyed.connect(forget)
+        window.show()
+        window.raise_()
+        window.activateWindow()
+
+    def _open_collision_editor(self) -> None:
+        try:
+            from collision_editor import CollisionEditorWindow
+        except Exception as exc:
+            QMessageBox.critical(
+                self, "Collision Editor unavailable",
+                f"The integrated editor could not be loaded.\n\n{exc}")
+            return
+        window = CollisionEditorWindow()
+        window.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose, True)
+        self._collision_windows.append(window)
+
+        def forget(*_args) -> None:
+            if window in self._collision_windows:
+                self._collision_windows.remove(window)
 
         window.destroyed.connect(forget)
         window.show()
