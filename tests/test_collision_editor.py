@@ -103,6 +103,22 @@ class CollisionEditorTests(unittest.TestCase):
         self.assertEqual(window.model_tree.topLevelItem(0).text(1), "0")
         self.assertEqual(window.model_tree.topLevelItem(1).text(1), "1")
 
+    def test_02_model_search_filters_names_and_restores_list(self):
+        window = self._window()
+        with patch("collision_editor.load_asset_family", return_value=_family()):
+            window.open_base("sample.base")
+        self.assertEqual(
+            window.model_search.placeholderText(), "Search model names...")
+        window.model_search.setText("Kid")
+        self.assertTrue(window.model_tree.topLevelItem(0).isHidden())
+        self.assertFalse(window.model_tree.topLevelItem(1).isHidden())
+        window.model_search.setText("root/kid[0]")
+        self.assertTrue(window.model_tree.topLevelItem(0).isHidden())
+        self.assertFalse(window.model_tree.topLevelItem(1).isHidden())
+        window.model_search.clear()
+        self.assertFalse(window.model_tree.topLevelItem(0).isHidden())
+        self.assertFalse(window.model_tree.topLevelItem(1).isHidden())
+
     def test_02_switch_model_without_closing_editor(self):
         window = self._window()
         with patch("collision_editor.load_asset_family", return_value=_family()):

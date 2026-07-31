@@ -67,6 +67,7 @@ from PySide6.QtWidgets import (
 
 from assembly_viewer import AssetViewport, VIEW_PRESETS
 from asset_family import AssetFamily, load_asset_family, load_manual_family
+from asset_tree_filter import filter_tree as filter_asset_tree
 from model_space_gizmo import ModelSpaceGizmo
 
 
@@ -1168,6 +1169,7 @@ class CollisionEditorWindow(QMainWindow):
         self._redo: list[tuple] = []
         self._radius_slider_active = False
         self._radius_spin_active = False
+        self._model_filter_expansion: dict[int, bool] | None = None
 
         self.viewport = CollisionViewport()
         self.viewport.spherePicked.connect(self._select_sphere)
@@ -1434,6 +1436,13 @@ class CollisionEditorWindow(QMainWindow):
             QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Expanding)
         source_layout = QVBoxLayout(source_panel)
         source_layout.addWidget(QLabel("Resources in archive"))
+        self.model_search = QLineEdit()
+        self.model_search.setPlaceholderText("Search model names...")
+        self.model_search.setClearButtonEnabled(True)
+        self.model_search.setToolTip(
+            "Filter models by name, internal path or owner path.")
+        self.model_search.textChanged.connect(self._filter_models)
+        source_layout.addWidget(self.model_search)
         source_layout.addWidget(self.model_tree, 1)
         self.source_label = QLabel("No source loaded.")
         self.source_label.setWordWrap(True)
@@ -1770,7 +1779,6 @@ class CollisionEditorWindow(QMainWindow):
     def _fill_models(self, family: AssetFamily):
         self.model_tree.clear()
         model_index = 0
-        first = None
         for obj in family.all_objects():
             if obj.skeleton is None:
                 continue
@@ -1786,11 +1794,25 @@ class CollisionEditorWindow(QMainWindow):
             item.setTextAlignment(
                 1, Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
             self.model_tree.addTopLevelItem(item)
-            first = first or item
             model_index += 1
         self.model_tree.resizeColumnToContents(1)
-        if first is not None:
-            self.model_tree.setCurrentItem(first)
+        self._filter_models(self.model_search.text())
+        for index in range(self.model_tree.topLevelItemCount()):
+            item = self.model_tree.topLevelItem(index)
+            if not item.isHidden():
+                self.model_tree.setCurrentItem(item)
+                break
+
+    def _filter_models(self, text: str) -> None:
+        self._model_filter_expansion = filter_asset_tree(
+            self.model_tree, text, self._model_item_search_metadata,
+            self._model_filter_expansion)
+
+    @staticmethod
+    def _model_item_search_metadata(item) -> str:
+        display_name = item.data(0, _MODEL_NAME_ROLE) or ""
+        owner_path = item.data(0, Qt.ItemDataRole.UserRole) or ""
+        return f"{display_name} {owner_path}"
 
     def _model_changed(self, current, _previous):
         if current is None or self.family is None:
