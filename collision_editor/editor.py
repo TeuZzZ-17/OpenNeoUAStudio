@@ -54,6 +54,7 @@ from PySide6.QtWidgets import (
     QSpinBox,
     QSplitter,
     QToolBar,
+    QToolButton,
     QTreeWidget,
     QTreeWidgetItem,
     QVBoxLayout,
@@ -122,23 +123,26 @@ def _radius_number(value: float) -> str:
 
 
 def effective_runtime_radius(project: "CollisionProject") -> float:
-    """Return the broad radius OpenUA exposes in the F10 debug overlay.
+    """Return the collision broad-phase extent used internally by OpenUA.
 
-    OpenUA keeps the authored ``radius`` as the compatibility/fallback value,
-    then expands the runtime broad-phase radius so every manual compound
-    sphere is enclosed.  The engine calculation is:
+    Manual ``coll_*`` spheres replace the vanilla Legacy Radius.  When at
+    least one compound sphere exists, the engine derives its internal broad
+    extent exclusively from those spheres using:
 
-    ``max(radius, length(coll_center) + coll_radius)``.
+    ``max(length(coll_center) + coll_radius)``.
 
-    Keeping this calculation in the editor makes the preview and project
-    summary explain apparently surprising values such as 90 becoming 117 in
-    game, without mutating the authored text output.
+    The returned value is *not* a visible red F10 collision sphere.  Legacy
+    Radius is used only when no manual compound spheres are present.  The
+    historical function name is kept as a small public-API compatibility shim.
     """
 
-    broad = (
-        max(0.0, float(project.legacy.radius))
-        if project.legacy is not None else 0.0
-    )
+    if not project.compound:
+        return (
+            max(0.0, float(project.legacy.radius))
+            if project.legacy is not None else 0.0
+        )
+
+    broad = 0.0
     for sphere in project.compound:
         if not all(math.isfinite(value) for value in (
                 sphere.x, sphere.y, sphere.z, sphere.radius)):
@@ -208,6 +212,11 @@ class CollisionProject:
     source_model: str = ""
     source_base: str = ""
     target_category: str = VEHICLE
+    # Visual-only preview of OpenUA's vp_scale_x/y/z.  These values never
+    # modify the source model and are never emitted as collision parameters.
+    model_scale_x: float = 1.0
+    model_scale_y: float = 1.0
+    model_scale_z: float = 1.0
     legacy: CollisionSphere | None = None
     compound: list[CollisionSphere] = field(default_factory=list)
 
@@ -223,7 +232,9 @@ class CollisionProject:
             )
         return (
             self.name, self.source_model, self.source_base,
-            self.target_category, one(self.legacy),
+            self.target_category,
+            self.model_scale_x, self.model_scale_y, self.model_scale_z,
+            one(self.legacy),
             tuple(one(sphere) for sphere in self.compound),
         )
 
@@ -231,7 +242,9 @@ class CollisionProject:
         def one(values):
             return None if values is None else CollisionSphere(*values)
         (self.name, self.source_model, self.source_base,
-         self.target_category, legacy, compound) = state
+         self.target_category,
+         self.model_scale_x, self.model_scale_y, self.model_scale_z,
+         legacy, compound) = state
         self.legacy = one(legacy)
         self.compound = [one(values) for values in compound]
 
@@ -635,15 +648,26 @@ class RadiusItemDelegate(QStyledItemDelegate):
         super().setModelData(editor, model, index)
 
 
+class CompactScaleSpinBox(QDoubleSpinBox):
+    """Keep scale precision while hiding meaningless trailing zeroes."""
+
+    def textFromValue(self, value: float) -> str:  # noqa: N802
+        text = self.locale().toString(value, "f", self.decimals())
+        decimal_point = self.locale().decimalPoint()
+        if decimal_point in text:
+            text = text.rstrip("0").rstrip(decimal_point)
+        return text
+
+
 class CollisionViewport(AssetViewport):
     """Existing AssetViewport plus the exact F10 three-ring overlay."""
 
     spherePicked = Signal(int)
-    sphereDragStarted = Signal(int)
-    sphereDragged = Signal(int)
-    sphereDragFinished = Signal(int)
     sphereContextMenuRequested = Signal(int, QPoint)
+    sphereNudgeRequested = Signal(object)
     RING_SEGMENTS = 12
+    SELECTED_HALO_WIDTH = 6.0
+    SELECTED_COLOR_WIDTH = 3.4
 
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
@@ -653,12 +677,94 @@ class CollisionViewport(AssetViewport):
             LEGACY: True, VEHICLE: True, WEAPON: True,
         }
         self._collision_show_model = True
-        self._sphere_drag_index = -1
-        self._sphere_drag_last = QPointF()
-        self._sphere_drag_started = False
         self._pick_cycle_point: QPointF | None = None
         self._pick_cycle_candidates: tuple[int, ...] = ()
         self._pick_cycle_offset = -1
+        self._model_preview_scale = (1.0, 1.0, 1.0)
+        self._model_preview_base_faces: list[
+            tuple[tuple[float, float, float], ...]] = []
+        self._model_preview_base_sen_boxes: list[
+            tuple[tuple[float, float, float], ...]] = []
+        self._model_preview_base_owner_bounds: dict[str, tuple] = {}
+
+    @property
+    def model_preview_scale(self) -> tuple[float, float, float]:
+        return self._model_preview_scale
+
+    def clear(self) -> None:
+        super().clear()
+        self._model_preview_base_faces = []
+        self._model_preview_base_sen_boxes = []
+        self._model_preview_base_owner_bounds = {}
+
+    def load_family(self, family, visible_owners=None, keep_camera=False,
+                    primary_owner=None) -> None:
+        """Load through AssetViewport, then apply a non-destructive scale.
+
+        The base viewport already resolves BASE/SKLT transforms, children and
+        textures.  Collision Editor only adds one final global axis scale,
+        matching the visual effect of vp_scale_x/y/z while leaving collision
+        sphere coordinates untouched.
+        """
+
+        super().load_family(
+            family, visible_owners, keep_camera=keep_camera,
+            primary_owner=primary_owner)
+        self._capture_unscaled_model_geometry()
+        self._apply_model_preview_scale()
+
+    def _capture_unscaled_model_geometry(self) -> None:
+        self._model_preview_base_faces = [
+            tuple(tuple(vertex) for vertex in face.vertices)
+            for face in self._faces
+        ]
+        self._model_preview_base_sen_boxes = [
+            tuple(tuple(point) for point in box)
+            for box in self._sen_boxes
+        ]
+        self._model_preview_base_owner_bounds = dict(self._owner_bounds)
+
+    @staticmethod
+    def _scaled_point(point, scale):
+        return (
+            point[0] * scale[0],
+            point[1] * scale[1],
+            point[2] * scale[2],
+        )
+
+    def _apply_model_preview_scale(self) -> None:
+        scale = self._model_preview_scale
+        if len(self._model_preview_base_faces) == len(self._faces):
+            for face, vertices in zip(
+                    self._faces, self._model_preview_base_faces):
+                face.vertices = [
+                    self._scaled_point(vertex, scale)
+                    for vertex in vertices
+                ]
+        if len(self._model_preview_base_sen_boxes) == len(self._sen_boxes):
+            self._sen_boxes = [
+                [self._scaled_point(point, scale) for point in box]
+                for box in self._model_preview_base_sen_boxes
+            ]
+        scaled_bounds = {}
+        for owner, bounds in self._model_preview_base_owner_bounds.items():
+            x0, y0, z0, x1, y1, z1 = bounds
+            a = self._scaled_point((x0, y0, z0), scale)
+            b = self._scaled_point((x1, y1, z1), scale)
+            scaled_bounds[owner] = (
+                min(a[0], b[0]), min(a[1], b[1]), min(a[2], b[2]),
+                max(a[0], b[0]), max(a[1], b[1]), max(a[2], b[2]),
+            )
+        self._owner_bounds = scaled_bounds
+        self.update()
+
+    def set_model_preview_scale(
+            self, x: float, y: float, z: float) -> None:
+        values = tuple(float(value) for value in (x, y, z))
+        if not all(math.isfinite(value) and value >= 0.0 for value in values):
+            return
+        self._model_preview_scale = values
+        self._apply_model_preview_scale()
 
     def set_collision_spheres(
         self, spheres: list[CollisionSphere], selected: int = -1,
@@ -779,6 +885,24 @@ class CollisionViewport(AssetViewport):
         if event.key() == Qt.Key.Key_Tab:
             event.accept()
             return
+        if self._collision_selected >= 0 and not (
+                event.modifiers() & (
+                    Qt.KeyboardModifier.ControlModifier
+                    | Qt.KeyboardModifier.AltModifier
+                    | Qt.KeyboardModifier.MetaModifier)):
+            directions = {
+                Qt.Key.Key_Left: (-1, 0, 0),
+                Qt.Key.Key_Right: (1, 0, 0),
+                Qt.Key.Key_Up: (0, 0, -1),
+                Qt.Key.Key_Down: (0, 0, 1),
+                Qt.Key.Key_PageUp: (0, -1, 0),
+                Qt.Key.Key_PageDown: (0, 1, 0),
+            }
+            direction = directions.get(event.key())
+            if direction is not None:
+                self.sphereNudgeRequested.emit(direction)
+                event.accept()
+                return
         super().keyPressEvent(event)
 
     def event(self, event) -> bool:  # noqa: N802
@@ -827,9 +951,11 @@ class CollisionViewport(AssetViewport):
             _index, sphere = selected_pair
             color = TYPE_COLORS[sphere.category]
             self._draw_collision_rings(
-                painter, sphere, QPen(QColor(255, 255, 255), 5.0))
+                painter, sphere, QPen(
+                    QColor(255, 255, 255), self.SELECTED_HALO_WIDTH))
             self._draw_collision_rings(
-                painter, sphere, QPen(color, 1.6))
+                painter, sphere, QPen(
+                    color, self.SELECTED_COLOR_WIDTH))
             center = self._project(self._camera_vertex(sphere.center))
             painter.setPen(QPen(QColor(255, 255, 255), 2.0))
             painter.setBrush(QColor(
@@ -841,10 +967,8 @@ class CollisionViewport(AssetViewport):
         if event.button() == Qt.MouseButton.LeftButton:
             index = self._hit_sphere(event.position())
             if index >= 0:
+                self.setFocus(Qt.FocusReason.MouseFocusReason)
                 self._collision_selected = index
-                self._sphere_drag_index = index
-                self._sphere_drag_last = event.position()
-                self._sphere_drag_started = False
                 self._camera_interacting = False
                 self._press_pos = None
                 self._last_mouse = event.position().toPoint()
@@ -868,55 +992,11 @@ class CollisionViewport(AssetViewport):
         if event.button() == Qt.MouseButton.LeftButton:
             index = self._hit_sphere(event.position(), cycle=False)
             self._collision_selected = index
-            self._sphere_drag_index = -1
-            self._sphere_drag_started = False
             self.spherePicked.emit(index)
             self.update()
             event.accept()
             return
         super().mouseDoubleClickEvent(event)
-
-    def mouseMoveEvent(self, event: QMouseEvent) -> None:  # noqa: N802
-        if self._sphere_drag_index >= 0 \
-                and event.buttons() & Qt.MouseButton.LeftButton:
-            current = event.position()
-            delta = current - self._sphere_drag_last
-            self._sphere_drag_last = current
-            sphere = self._collision_spheres[self._sphere_drag_index]
-            if sphere.category != LEGACY \
-                    and (delta.x() or delta.y()):
-                if not self._sphere_drag_started:
-                    self.sphereDragStarted.emit(self._sphere_drag_index)
-                    self._sphere_drag_started = True
-                denominator = max(
-                    0.2, 4.0 - self._camera_vertex(sphere.center)[2])
-                dx, dy, dz = self._screen_delta_to_world_at_depth(
-                    delta.x(), delta.y(), denominator)
-                sphere.x += dx
-                sphere.y += dy
-                sphere.z += dz
-                self.sphereDragged.emit(self._sphere_drag_index)
-                self.update()
-            self._last_mouse = current.toPoint()
-            event.accept()
-            return
-        super().mouseMoveEvent(event)
-
-    def mouseReleaseEvent(self, event: QMouseEvent) -> None:  # noqa: N802
-        if self._sphere_drag_index >= 0 \
-                and event.button() == Qt.MouseButton.LeftButton:
-            finished_index = self._sphere_drag_index
-            did_drag = self._sphere_drag_started
-            self._sphere_drag_index = -1
-            self._sphere_drag_started = False
-            self._camera_interacting = False
-            self._press_pos = None
-            self._last_mouse = event.position().toPoint()
-            if did_drag:
-                self.sphereDragFinished.emit(finished_index)
-            event.accept()
-            return
-        super().mouseReleaseEvent(event)
 
 
 class ImportCollisionDialog(QDialog):
@@ -1087,16 +1167,13 @@ class CollisionEditorWindow(QMainWindow):
         self._undo: list[tuple] = []
         self._redo: list[tuple] = []
         self._radius_slider_active = False
+        self._radius_spin_active = False
 
         self.viewport = CollisionViewport()
         self.viewport.spherePicked.connect(self._select_sphere)
-        self.viewport.sphereDragStarted.connect(
-            self._begin_mouse_sphere_drag)
-        self.viewport.sphereDragged.connect(self._mouse_sphere_dragged)
-        self.viewport.sphereDragFinished.connect(
-            self._finish_mouse_sphere_drag)
         self.viewport.sphereContextMenuRequested.connect(
             self._show_sphere_context_menu)
+        self.viewport.sphereNudgeRequested.connect(self._gizmo_nudge)
         self.viewport.statusMessage.connect(
             lambda text: self.statusBar().showMessage(text, 4500))
         self.model_tree = QTreeWidget()
@@ -1183,13 +1260,42 @@ class CollisionEditorWindow(QMainWindow):
         self.delete_action = QAction("Delete Sphere", self)
         self.delete_action.setShortcut(QKeySequence.StandardKey.Delete)
         self.delete_action.triggered.connect(self.delete_sphere)
+        self.change_to_legacy_action = QAction(
+            "Change to Legacy Radius", self)
+        self.change_to_vehicle_action = QAction(
+            "Change to Vehicle Collision", self)
+        self.change_to_weapon_action = QAction(
+            "Change to Weapon Collision", self)
+        self.change_to_legacy_action.triggered.connect(
+            lambda: self.change_sphere_type(LEGACY))
+        self.change_to_vehicle_action.triggered.connect(
+            lambda: self.change_sphere_type(VEHICLE))
+        self.change_to_weapon_action.triggered.connect(
+            lambda: self.change_sphere_type(WEAPON))
+        self.mirror_x_action = QAction("Mirror on X Axis", self)
+        self.mirror_y_action = QAction("Mirror on Y Axis", self)
+        self.mirror_z_action = QAction("Mirror on Z Axis", self)
+        self.mirror_x_action.triggered.connect(
+            lambda: self.mirror_selected_sphere("x"))
+        self.mirror_y_action.triggered.connect(
+            lambda: self.mirror_selected_sphere("y"))
+        self.mirror_z_action.triggered.connect(
+            lambda: self.mirror_selected_sphere("z"))
         self.reset_collisions_action = QAction("Reset Collisions", self)
         self.reset_collisions_action.triggered.connect(self.reset_collisions)
         for action in (
                 self.add_legacy_action, self.add_vehicle_action,
                 self.add_weapon_action, self.duplicate_action,
-                self.delete_action, self.reset_collisions_action):
+                self.delete_action):
             edit_menu.addAction(action)
+        change_type_menu = edit_menu.addMenu("Change Sphere Type")
+        self._populate_change_type_menu(change_type_menu)
+        self.change_type_action = change_type_menu.menuAction()
+        mirror_menu = edit_menu.addMenu("Mirror Selected Sphere")
+        mirror_menu.addAction(self.mirror_x_action)
+        mirror_menu.addAction(self.mirror_y_action)
+        mirror_menu.addAction(self.mirror_z_action)
+        edit_menu.addAction(self.reset_collisions_action)
 
         self.viewpoint_menu = self.menuBar().addMenu("Viewpoint")
         self.viewpoint_actions = {}
@@ -1237,16 +1343,84 @@ class CollisionEditorWindow(QMainWindow):
         for action in (
                 self.add_legacy_action, self.add_vehicle_action,
                 self.add_weapon_action, self.duplicate_action,
-                self.delete_action, self.reset_collisions_action):
+                self.delete_action):
             toolbar.addAction(action)
+        self.change_type_button = QToolButton()
+        self.change_type_button.setText("Change Sphere Type")
+        self.change_type_button.setToolTip(
+            "Choose exactly which collision category the selected sphere "
+            "should become.")
+        self.change_type_button.setPopupMode(
+            QToolButton.ToolButtonPopupMode.InstantPopup)
+        change_type_button_menu = QMenu(self.change_type_button)
+        self._populate_change_type_menu(change_type_button_menu)
+        self.change_type_button.setMenu(change_type_button_menu)
+        toolbar.addWidget(self.change_type_button)
+        self.mirror_sphere_button = QToolButton()
+        self.mirror_sphere_button.setText("Mirror Selected Sphere")
+        self.mirror_sphere_button.setToolTip(
+            "Duplicate the selected compound sphere on the opposite side "
+            "of the chosen model axis.")
+        self.mirror_sphere_button.setPopupMode(
+            QToolButton.ToolButtonPopupMode.InstantPopup)
+        mirror_button_menu = QMenu(self.mirror_sphere_button)
+        mirror_button_menu.addAction(self.mirror_x_action)
+        mirror_button_menu.addAction(self.mirror_y_action)
+        mirror_button_menu.addAction(self.mirror_z_action)
+        self.mirror_sphere_button.setMenu(mirror_button_menu)
+        toolbar.addWidget(self.mirror_sphere_button)
+        toolbar.addAction(self.reset_collisions_action)
         self.reset_view_action = QAction("Reset View", self)
         self.reset_view_action.triggered.connect(self._reset_view)
         toolbar.addAction(self.reset_view_action)
         toolbar.addSeparator()
         toolbar.addAction(self.undo_action)
         toolbar.addAction(self.redo_action)
+        self._build_model_preview_toolbar()
         self.viewport.manualCameraChanged.connect(
             self._on_manual_camera_changed)
+
+    def _build_model_preview_toolbar(self):
+        """Create a full-width second row for visual-only VP scaling."""
+
+        self.addToolBarBreak(Qt.ToolBarArea.TopToolBarArea)
+        toolbar = QToolBar("Model Preview Scale", self)
+        toolbar.setObjectName("modelPreviewScaleTools")
+        toolbar.setMovable(False)
+        self.addToolBar(Qt.ToolBarArea.TopToolBarArea, toolbar)
+        toolbar.addWidget(QLabel(" Model Preview Scale: "))
+        self.model_scale_spins = {}
+        for axis in ("X", "Y", "Z"):
+            toolbar.addWidget(QLabel(f" {axis} "))
+            spin = CompactScaleSpinBox()
+            spin.setRange(0.0, 1000.0)
+            spin.setDecimals(3)
+            spin.setSingleStep(0.1)
+            spin.setValue(1.0)
+            spin.setKeyboardTracking(False)
+            spin.setMinimumWidth(92)
+            spin.setMaximumWidth(118)
+            spin.setToolTip(
+                f"Visual-only vp_scale_{axis.lower()} preview. "
+                "The model changes size; collision spheres and exported "
+                "coll_* values are not transformed automatically.")
+            spin.valueChanged.connect(self._model_preview_scale_changed)
+            self.model_scale_spins[axis.lower()] = spin
+            toolbar.addWidget(spin)
+        self.model_scale_x_spin = self.model_scale_spins["x"]
+        self.model_scale_y_spin = self.model_scale_spins["y"]
+        self.model_scale_z_spin = self.model_scale_spins["z"]
+        toolbar.addSeparator()
+        self.reset_model_scale_button = QPushButton("Reset")
+        self.reset_model_scale_button.setToolTip(
+            "Reset the model preview to X 1.0, Y 1.0, Z 1.0.")
+        self.reset_model_scale_button.clicked.connect(
+            self._reset_model_preview_scale)
+        toolbar.addWidget(self.reset_model_scale_button)
+        self.model_preview_scale_toolbar = toolbar
+        # Compatibility alias retained for integrations that only used this
+        # attribute to locate the preview-scale controls.
+        self.model_preview_scale_box = toolbar
 
     def _build_ui(self):
         splitter = QSplitter(Qt.Orientation.Horizontal)
@@ -1379,13 +1553,20 @@ class CollisionEditorWindow(QMainWindow):
         self.radius_spin.setMinimum(1.0)
         self.radius_spin.setDecimals(0)
         self.radius_spin.setSingleStep(1.0)
-        self.radius_spin.editingFinished.connect(
+        self.radius_spin.setKeyboardTracking(True)
+        self.radius_spin.valueChanged.connect(
             self._radius_spin_changed)
+        self.radius_spin.editingFinished.connect(
+            self._finish_radius_spin_edit)
         self.radius_spin.setMinimumWidth(92)
         radius_layout.addWidget(self.radius_spin)
         right.addWidget(radius_box)
 
         transform_box = QGroupBox("Move Sphere")
+        transform_box.setToolTip(
+            "With the viewport focused: Left/Right move on X, Up/Down move "
+            "on Z, and Page Up/Page Down move on Y. Every key press uses "
+            "the current Move strength value.")
         transform_layout = QVBoxLayout(transform_box)
         transform_layout.setContentsMargins(6, 6, 6, 6)
         transform_layout.setSpacing(3)
@@ -1488,6 +1669,7 @@ class CollisionEditorWindow(QMainWindow):
     def undo(self):
         if not self._undo:
             return
+        self._radius_spin_active = False
         self._redo.append(self.project.snapshot())
         self.project.restore(self._undo.pop())
         self._selected = min(
@@ -1498,6 +1680,7 @@ class CollisionEditorWindow(QMainWindow):
     def redo(self):
         if not self._redo:
             return
+        self._radius_spin_active = False
         self._undo.append(self.project.snapshot())
         self.project.restore(self._redo.pop())
         self._selected = min(
@@ -1686,6 +1869,83 @@ class CollisionEditorWindow(QMainWindow):
         self._set_modified()
         self._sync_all()
 
+    def _populate_change_type_menu(self, menu: QMenu) -> None:
+        menu.addAction(self.change_to_legacy_action)
+        menu.addAction(self.change_to_vehicle_action)
+        menu.addAction(self.change_to_weapon_action)
+
+    def change_sphere_type(self, target_category: str):
+        """Convert the selected sphere to an explicitly chosen category."""
+
+        if target_category not in (LEGACY, VEHICLE, WEAPON):
+            raise ValueError(
+                f"Unsupported collision category: {target_category}")
+        sphere = self._selected_sphere()
+        if sphere is None or sphere.category == target_category:
+            return
+        if target_category == LEGACY and self.project.legacy is not None:
+            self.statusBar().showMessage(
+                "A project can contain only one Legacy Radius.", 5000)
+            return
+
+        previous_category = sphere.category
+        self._push_undo()
+        if target_category == LEGACY:
+            compound_index = self._selected_compound_index()
+            if compound_index is None:
+                return
+            del self.project.compound[compound_index]
+            sphere.category = LEGACY
+            sphere.x = sphere.y = sphere.z = 0.0
+            self.project.legacy = sphere
+            self._selected = 0
+            detail = (
+                " Positional offsets were reset because vanilla radius "
+                "has no offset.")
+        elif previous_category == LEGACY:
+            self.project.legacy = None
+            sphere.category = target_category
+            self.project.compound.insert(0, sphere)
+            self._selected = 0
+            detail = ""
+        else:
+            sphere.category = target_category
+            detail = ""
+
+        self._set_modified()
+        self._sync_all()
+        self.statusBar().showMessage(
+            f"{TYPE_LABELS[previous_category]} changed to "
+            f"{TYPE_LABELS[target_category]}.{detail}", 5000)
+
+    def mirror_selected_sphere(self, axis: str):
+        """Duplicate a compound sphere across the selected model axis."""
+
+        sphere = self._selected_sphere()
+        if sphere is None:
+            return
+        if sphere.category == LEGACY:
+            self.statusBar().showMessage(
+                "Legacy Radius is fixed at the origin and cannot be mirrored.",
+                5000)
+            return
+        if axis not in ("x", "y", "z"):
+            raise ValueError(f"Unsupported mirror axis: {axis}")
+        compound_index = self._selected_compound_index()
+        if compound_index is None:
+            return
+        self._push_undo()
+        mirrored = sphere.clone()
+        setattr(mirrored, axis, -getattr(mirrored, axis))
+        self.project.compound.insert(compound_index + 1, mirrored)
+        self._selected = (
+            (1 if self.project.legacy is not None else 0)
+            + compound_index + 1)
+        self._set_modified()
+        self._sync_all()
+        self.statusBar().showMessage(
+            f"Mirrored selected sphere across the {axis.upper()} axis.", 4000)
+
     def delete_sphere(self):
         sphere = self._selected_sphere()
         if sphere is None:
@@ -1731,6 +1991,12 @@ class CollisionEditorWindow(QMainWindow):
         menu.addSeparator()
         menu.addAction(self.duplicate_action)
         menu.addAction(self.delete_action)
+        change_type_menu = menu.addMenu("Change Sphere Type")
+        self._populate_change_type_menu(change_type_menu)
+        mirror_menu = menu.addMenu("Mirror Selected Sphere")
+        mirror_menu.addAction(self.mirror_x_action)
+        mirror_menu.addAction(self.mirror_y_action)
+        mirror_menu.addAction(self.mirror_z_action)
         menu.addSeparator()
         menu.addAction(self.reset_collisions_action)
         menu.addAction(self.reset_view_action)
@@ -1762,18 +2028,6 @@ class CollisionEditorWindow(QMainWindow):
         self._show_sphere_context_menu(
             index, self.sphere_tree.viewport().mapToGlobal(local_pos))
 
-    def _begin_mouse_sphere_drag(self, index: int):
-        self._selected = index
-        self._push_undo()
-
-    def _mouse_sphere_dragged(self, index: int):
-        self._selected = index
-        self._set_modified()
-
-    def _finish_mouse_sphere_drag(self, index: int):
-        self._selected = index
-        self._sync_all()
-
     def _selected_sphere(self):
         spheres = self.project.spheres()
         return spheres[self._selected] if 0 <= self._selected < len(
@@ -1789,6 +2043,7 @@ class CollisionEditorWindow(QMainWindow):
         return None
 
     def _select_sphere(self, index: int):
+        self._radius_spin_active = False
         self._selected = index
         self._sync_all()
 
@@ -1847,6 +2102,45 @@ class CollisionEditorWindow(QMainWindow):
             self.move_strength_slider.setMaximum(max(500, value))
             self.move_strength_slider.setValue(value)
 
+    def _model_preview_scale_changed(self, *_args):
+        if self._syncing:
+            return
+        values = (
+            self.model_scale_x_spin.value(),
+            self.model_scale_y_spin.value(),
+            self.model_scale_z_spin.value(),
+        )
+        current = (
+            self.project.model_scale_x,
+            self.project.model_scale_y,
+            self.project.model_scale_z,
+        )
+        if all(abs(a - b) < 1e-9 for a, b in zip(values, current)):
+            return
+        self._push_undo()
+        (self.project.model_scale_x,
+         self.project.model_scale_y,
+         self.project.model_scale_z) = values
+        self.viewport.set_model_preview_scale(*values)
+        self._set_modified()
+        self._sync_all()
+
+    def _reset_model_preview_scale(self):
+        current = (
+            self.project.model_scale_x,
+            self.project.model_scale_y,
+            self.project.model_scale_z,
+        )
+        if all(abs(value - 1.0) < 1e-9 for value in current):
+            return
+        self._push_undo()
+        self.project.model_scale_x = 1.0
+        self.project.model_scale_y = 1.0
+        self.project.model_scale_z = 1.0
+        self.viewport.set_model_preview_scale(1.0, 1.0, 1.0)
+        self._set_modified()
+        self._sync_all()
+
     def _gizmo_nudge(self, direction):
         sphere = self._selected_sphere()
         if sphere is None:
@@ -1888,6 +2182,7 @@ class CollisionEditorWindow(QMainWindow):
         sphere = self._selected_sphere()
         if sphere is None:
             return
+        self._radius_spin_active = False
         self._push_undo()
         self._radius_slider_active = True
 
@@ -1906,19 +2201,23 @@ class CollisionEditorWindow(QMainWindow):
     def _finish_radius_slider(self):
         self._radius_slider_active = False
 
-    def _radius_spin_changed(self):
+    def _radius_spin_changed(self, value: float):
         if self._syncing:
             return
         sphere = self._selected_sphere()
         if sphere is None:
             return
-        value = self.radius_spin.value()
         if abs(value - sphere.radius) < 1e-9:
             return
-        self._push_undo()
+        if not self._radius_spin_active:
+            self._push_undo()
+            self._radius_spin_active = True
         sphere.radius = round(value)
         self._set_modified()
         self._sync_all()
+
+    def _finish_radius_spin_edit(self):
+        self._radius_spin_active = False
 
     def _sphere_display_name(
             self, sphere: CollisionSphere,
@@ -1939,7 +2238,7 @@ class CollisionEditorWindow(QMainWindow):
             self.sphere_tree.clear()
             selected_item = None
             compound_index = 0
-            runtime_broad = effective_runtime_radius(self.project)
+            compound_mode = bool(self.project.compound)
             for flat_index, sphere in enumerate(self.project.spheres()):
                 current_compound = None
                 if sphere.category != LEGACY:
@@ -1966,13 +2265,11 @@ class CollisionEditorWindow(QMainWindow):
                 item.setTextAlignment(
                     2, Qt.AlignmentFlag.AlignRight
                     | Qt.AlignmentFlag.AlignVCenter)
-                if sphere.category == LEGACY \
-                        and runtime_broad > sphere.radius + 0.5:
+                if sphere.category == LEGACY and compound_mode:
                     message = (
-                        f"Authored radius: {_radius_number(sphere.radius)}. "
-                        f"OpenUA F10 broad radius: "
-                        f"{_radius_number(runtime_broad)}. The engine expands "
-                        "the broad radius to contain every compound sphere."
+                        "Legacy Radius is disabled at runtime because manual "
+                        "compound coll_* spheres are present. OpenUA F10 shows "
+                        "only the compound collision spheres for this object."
                     )
                     for column in range(3):
                         item.setToolTip(column, message)
@@ -1996,12 +2293,27 @@ class CollisionEditorWindow(QMainWindow):
         compound_index = self._selected_compound_index()
         selected = (self._sphere_display_name(sphere, compound_index)
                     if sphere is not None else "None")
+        compound_mode = bool(self.project.compound)
+        if self.project.legacy is None:
+            legacy_status = "Missing"
+        elif compound_mode:
+            legacy_status = "Disabled by compound collisions"
+        else:
+            legacy_status = "Active"
+        collision_mode = (
+            "OpenUA compound (Legacy Radius disabled)"
+            if compound_mode else "Vanilla Legacy Radius"
+        )
         lines = [
             f"Project: {self.project.name or '<unnamed>'}",
             f"Source model: {self.project.source_model or '<none>'}",
-            f"Legacy Radius: "
-            f"{'Present' if self.project.legacy is not None else 'Missing'}",
-            f"OpenUA F10 broad radius: "
+            "Model preview scale: "
+            f"X {_number(self.project.model_scale_x)}  "
+            f"Y {_number(self.project.model_scale_y)}  "
+            f"Z {_number(self.project.model_scale_z)}",
+            f"Collision mode: {collision_mode}",
+            f"Legacy Radius: {legacy_status}",
+            f"Internal broad-phase extent: "
             f"{_radius_number(effective_runtime_radius(self.project))}",
             f"Vehicle Collision Spheres: {vehicle_count}",
             f"Weapon Collision Spheres: {weapon_count}",
@@ -2013,15 +2325,19 @@ class CollisionEditorWindow(QMainWindow):
             action.setEnabled(False)
 
     def _preview_spheres(self) -> list[CollisionSphere]:
-        """Return editor spheres with the same broad red radius as F10."""
+        """Return collision preview matching the current OpenUA engine rule.
 
-        if self.project.legacy is None:
-            return self.project.spheres()
-        broad = effective_runtime_radius(self.project)
-        if broad <= self.project.legacy.radius + 1e-6:
-            return self.project.spheres()
+        Any authored compound ``coll_*`` sphere disables the visible/physical
+        Legacy Radius.  Keep an invisible clone in the list so editor selection
+        indexes remain stable while the red sphere disappears from viewport
+        drawing and picking.
+        """
+
+        spheres = self.project.spheres()
+        if self.project.legacy is None or not self.project.compound:
+            return spheres
         legacy_preview = self.project.legacy.clone()
-        legacy_preview.radius = broad
+        legacy_preview.visible = False
         return [legacy_preview] + list(self.project.compound)
 
     def _sync_all(self):
@@ -2029,9 +2345,17 @@ class CollisionEditorWindow(QMainWindow):
         blockers = [
             QSignalBlocker(widget) for widget in (
                 self.name_edit, self.target_combo, self.radius_slider,
-                self.radius_spin, self.visible_check)
+                self.radius_spin, self.visible_check,
+                self.model_scale_x_spin, self.model_scale_y_spin,
+                self.model_scale_z_spin)
         ]
         self.name_edit.setText(self.project.name)
+        self.model_scale_x_spin.setValue(self.project.model_scale_x)
+        self.model_scale_y_spin.setValue(self.project.model_scale_y)
+        self.model_scale_z_spin.setValue(self.project.model_scale_z)
+        self.viewport.set_model_preview_scale(
+            self.project.model_scale_x, self.project.model_scale_y,
+            self.project.model_scale_z)
         self.target_combo.setCurrentIndex(
             0 if self.project.target_category == VEHICLE else 1)
         sphere = self._selected_sphere()
@@ -2063,19 +2387,16 @@ class CollisionEditorWindow(QMainWindow):
             self.radius_slider.setValue(
                 self._radius_to_slider(sphere.radius))
             self.visible_check.setChecked(sphere.visible)
-            broad = effective_runtime_radius(self.project)
-            if sphere.category == LEGACY \
-                    and broad > sphere.radius + 0.5:
-                broad_text = _radius_number(broad)
-                self.runtime_radius_value.setText(f"F10 broad: {broad_text}")
+            if sphere.category == LEGACY and self.project.compound:
+                self.runtime_radius_value.setText(
+                    "Legacy disabled by compound coll_*")
                 self.runtime_radius_value.setToolTip(
-                    "OpenUA expands the runtime broad radius so it encloses "
-                    "all manual compound spheres. The authored radius in the "
-                    "script remains unchanged.")
+                    "Manual compound collision spheres replace Legacy Radius. "
+                    "OpenUA F10 shows only the compound spheres.")
                 self.runtime_radius_value.show()
                 self.radius_spin.setToolTip(
-                    f"Authored script radius. F10 currently shows the "
-                    f"effective broad radius {broad_text}.")
+                    "Stored authored radius. It is inactive while compound "
+                    "coll_* spheres are present.")
             else:
                 self.runtime_radius_value.clear()
                 self.runtime_radius_value.hide()
@@ -2090,6 +2411,21 @@ class CollisionEditorWindow(QMainWindow):
         self.duplicate_action.setEnabled(
             sphere is not None and sphere.category != LEGACY)
         self.delete_action.setEnabled(sphere is not None)
+        self.change_type_action.setEnabled(sphere is not None)
+        self.change_type_button.setEnabled(sphere is not None)
+        self.change_to_legacy_action.setEnabled(
+            sphere is not None and sphere.category != LEGACY
+            and self.project.legacy is None)
+        self.change_to_vehicle_action.setEnabled(
+            sphere is not None and sphere.category != VEHICLE)
+        self.change_to_weapon_action.setEnabled(
+            sphere is not None and sphere.category != WEAPON)
+        mirror_enabled = sphere is not None and sphere.category != LEGACY
+        for action in (
+                self.mirror_x_action, self.mirror_y_action,
+                self.mirror_z_action):
+            action.setEnabled(mirror_enabled)
+        self.mirror_sphere_button.setEnabled(mirror_enabled)
         self.reset_collisions_action.setEnabled(
             bool(self.project.spheres()))
         del blockers
