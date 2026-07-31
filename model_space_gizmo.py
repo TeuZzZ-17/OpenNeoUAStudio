@@ -67,6 +67,12 @@ class ModelSpaceGizmo(QWidget):
         self._repeat_timer = QTimer(self)
         self._repeat_timer.timeout.connect(self._repeat)
         self._handles: tuple[GizmoHandle, ...] = ()
+        # Optional visual tuning.  Defaults preserve the established gizmo
+        # geometry used by the other OpenUAStudio editors.
+        self._visual_extent_ratio = 0.72
+        self._visual_margin = 22.0
+        self._handle_scale = 1.0
+        self._line_scale = 1.0
 
     def sizeHint(self) -> QSize:  # noqa: N802 - Qt override
         return QSize(300, 300)
@@ -136,6 +142,28 @@ class ModelSpaceGizmo(QWidget):
         self._model_matrix = values
         self.update()
 
+    def set_visual_scale(
+            self, *, extent_ratio: float | None = None,
+            margin: float | None = None, handle_scale: float | None = None,
+            line_scale: float | None = None) -> None:
+        """Tune the gizmo drawing without changing transform semantics.
+
+        The Collision Editor uses a deliberately larger presentation, while
+        every existing caller keeps the historical defaults above.
+        """
+
+        if extent_ratio is not None:
+            self._visual_extent_ratio = max(0.25, min(1.2, float(
+                extent_ratio)))
+        if margin is not None:
+            self._visual_margin = max(4.0, float(margin))
+        if handle_scale is not None:
+            self._handle_scale = max(0.5, min(3.0, float(handle_scale)))
+        if line_scale is not None:
+            self._line_scale = max(0.5, min(3.0, float(line_scale)))
+        self._handles = ()
+        self.update()
+
     def hold_multiplier(self) -> float:
         return 1.0
 
@@ -185,8 +213,8 @@ class ModelSpaceGizmo(QWidget):
             cx, cy, depth = self._camera_direction(direction)
             denominator = max(1.45, 2.75 - depth * 0.36)
             active_axes = sum(value != 0 for value in direction)
-            radius = 14.0 if active_axes == 1 else (
-                11.0 if active_axes == 2 else 9.0)
+            radius = (14.0 if active_axes == 1 else (
+                11.0 if active_axes == 2 else 9.0)) * self._handle_scale
             projected.append((
                 direction, cx / denominator, -cy / denominator,
                 depth, radius))
@@ -195,11 +223,11 @@ class ModelSpaceGizmo(QWidget):
         # are clamped separately at paint time.
         max_x = max((abs(item[1]) for item in projected), default=1.0)
         max_y = max((abs(item[2]) for item in projected), default=1.0)
-        margin = 22.0
+        margin = self._visual_margin
         horizontal = max(1.0, self.width() * 0.5 - margin)
         vertical = max(1.0, self.height() * 0.5 - margin)
         extent = min(
-            min(self.width(), self.height()) * 0.72,
+            min(self.width(), self.height()) * self._visual_extent_ratio,
             horizontal / max(max_x, 1e-9),
             vertical / max(max_y, 1e-9),
         )
@@ -224,7 +252,7 @@ class ModelSpaceGizmo(QWidget):
             dx = point.x() - handle.position.x()
             dy = point.y() - handle.position.y()
             distance = math.hypot(dx, dy)
-            if distance <= handle.radius + 4.0:
+            if distance <= handle.radius + 4.0 * self._handle_scale:
                 candidates.append((distance, -handle.depth, handle.direction))
         return min(candidates)[2] if candidates else None
 
@@ -286,7 +314,8 @@ class ModelSpaceGizmo(QWidget):
                      else Qt.PenStyle.DashLine)
             painter.setPen(QPen(QColor(
                 color.red(), color.green(), color.blue(), alpha),
-                3.0 if sum(v != 0 for v in handle.direction) == 1 else 1.35,
+                (3.0 if sum(v != 0 for v in handle.direction) == 1
+                 else 1.35) * self._line_scale,
                 style))
             painter.drawLine(center, position)
             painter.setBrush(QColor(
@@ -315,11 +344,17 @@ class ModelSpaceGizmo(QWidget):
                 ux, uy = dx / length, dy / length
                 side_x, side_y = -uy, ux
                 tip = position
-                base = QPointF(tip.x() - ux * 15, tip.y() - uy * 15)
+                arrow_length = 15.0 * self._handle_scale
+                arrow_half_width = 7.0 * self._handle_scale
+                base = QPointF(
+                    tip.x() - ux * arrow_length,
+                    tip.y() - uy * arrow_length)
                 arrow = QPolygonF([
                     tip,
-                    QPointF(base.x() + side_x * 7, base.y() + side_y * 7),
-                    QPointF(base.x() - side_x * 7, base.y() - side_y * 7),
+                    QPointF(base.x() + side_x * arrow_half_width,
+                            base.y() + side_y * arrow_half_width),
+                    QPointF(base.x() - side_x * arrow_half_width,
+                            base.y() - side_y * arrow_half_width),
                 ])
                 painter.drawPolygon(arrow)
                 painter.setPen(QPen(QColor(238, 240, 245), 1.0))
@@ -335,10 +370,13 @@ class ModelSpaceGizmo(QWidget):
                     position + QPointF(-r, 0),
                 ]))
 
-        painter.setPen(QPen(QColor(235, 238, 245), 1.4))
+        painter.setPen(QPen(
+            QColor(235, 238, 245), 1.4 * self._line_scale))
         painter.setBrush(QColor(67, 72, 84))
+        center_half = 8.0 * self._handle_scale
         painter.drawRect(QRectF(
-            center.x() - 8, center.y() - 8, 16, 16))
+            center.x() - center_half, center.y() - center_half,
+            center_half * 2, center_half * 2))
         painter.end()
 
     def mouseMoveEvent(self, event: QMouseEvent) -> None:  # noqa: N802
