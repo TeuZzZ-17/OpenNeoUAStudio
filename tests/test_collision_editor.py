@@ -10,7 +10,7 @@ from PySide6.QtCore import QEvent, QPointF, Qt
 from PySide6.QtGui import QColor, QKeyEvent, QMouseEvent
 from PySide6.QtWidgets import (
     QAbstractItemView, QApplication, QHeaderView, QMessageBox, QSizePolicy,
-    QToolBar,
+    QToolBar, QToolButton,
 )
 
 from asset_family import AssetFamily, FamilyObject
@@ -593,13 +593,13 @@ class CollisionEditorTests(unittest.TestCase):
                 "View Preset"):
             self.assertIn(label, labels)
 
-    def test_43_mouse_drag_moves_sphere_without_changing_camera(self):
+    def test_43_mouse_drag_on_sphere_does_not_move_collision(self):
         viewport = CollisionViewport()
         viewport.resize(500, 350)
         sphere = CollisionSphere(VEHICLE, radius=0.7)
         viewport.set_collision_spheres([sphere], 0)
         press_point = viewport._ring_points(sphere, 0)[0]
-        yaw_pitch = (viewport._yaw, viewport._pitch)
+        original = sphere.center
         press = QMouseEvent(
             QEvent.Type.MouseButtonPress,
             press_point, press_point, press_point,
@@ -617,8 +617,8 @@ class CollisionEditorTests(unittest.TestCase):
             Qt.MouseButton.LeftButton, Qt.MouseButton.NoButton,
             Qt.KeyboardModifier.NoModifier)
         viewport.mouseReleaseEvent(release)
-        self.assertNotEqual(sphere.center, (0.0, 0.0, 0.0))
-        self.assertEqual((viewport._yaw, viewport._pitch), yaw_pitch)
+        self.assertEqual(sphere.center, original)
+        self.assertFalse(hasattr(viewport, "sphereDragStarted"))
 
     def test_44_sphere_labels_are_removed_and_move_uses_slider(self):
         window = self._window()
@@ -630,13 +630,14 @@ class CollisionEditorTests(unittest.TestCase):
         self.assertEqual(window.project.compound[0].z, 140.0)
         self.assertEqual(window.move_strength_value.text(), "140")
 
-    def test_45_center_handle_makes_direct_drag_easy(self):
+    def test_45_center_handle_still_selects_without_direct_drag(self):
         viewport = CollisionViewport()
         viewport.resize(500, 350)
         sphere = CollisionSphere(VEHICLE, radius=0.7)
-        viewport.set_collision_spheres([sphere], 0)
+        viewport.set_collision_spheres([sphere], -1)
+        selected = []
+        viewport.spherePicked.connect(selected.append)
         center = viewport._project(viewport._camera_vertex(sphere.center))
-        yaw_pitch = (viewport._yaw, viewport._pitch)
         press = QMouseEvent(
             QEvent.Type.MouseButtonPress, center, center, center,
             Qt.MouseButton.LeftButton, Qt.MouseButton.LeftButton,
@@ -648,13 +649,8 @@ class CollisionEditorTests(unittest.TestCase):
             Qt.MouseButton.NoButton, Qt.MouseButton.LeftButton,
             Qt.KeyboardModifier.NoModifier)
         viewport.mouseMoveEvent(move)
-        release = QMouseEvent(
-            QEvent.Type.MouseButtonRelease, target, target, target,
-            Qt.MouseButton.LeftButton, Qt.MouseButton.NoButton,
-            Qt.KeyboardModifier.NoModifier)
-        viewport.mouseReleaseEvent(release)
-        self.assertNotEqual(sphere.center, (0.0, 0.0, 0.0))
-        self.assertEqual((viewport._yaw, viewport._pitch), yaw_pitch)
+        self.assertEqual(selected, [0])
+        self.assertEqual(sphere.center, (0.0, 0.0, 0.0))
 
     def test_46_double_click_empty_space_deselects_every_sphere(self):
         window = self._window()
@@ -759,7 +755,7 @@ class CollisionEditorTests(unittest.TestCase):
         window.move_strength_spin.setValue(12)
         self.assertEqual(window.move_strength_slider.maximum(), 500)
 
-    def test_55_runtime_broad_radius_matches_openua_f10_formula(self):
+    def test_55_compound_disables_legacy_preview_and_f10_red_sphere(self):
         project = CollisionProject(
             name="Weasel", source_model="weasel.sklt",
             legacy=CollisionSphere(LEGACY, radius=90),
@@ -776,9 +772,21 @@ class CollisionEditorTests(unittest.TestCase):
         window.project = project
         window._selected = 0
         window._sync_all()
-        self.assertEqual(round(window.viewport._collision_spheres[0].radius), 117)
+        legacy_preview = window.viewport._collision_spheres[0]
+        self.assertEqual(legacy_preview.radius, 90)
+        self.assertFalse(legacy_preview.visible)
         self.assertEqual(window.sphere_tree.topLevelItem(0).text(1), "90")
-        self.assertIn("117", window.runtime_radius_value.text())
+        self.assertIn("disabled", window.runtime_radius_value.text().lower())
+        self.assertNotIn("117", window.runtime_radius_value.text())
+
+    def test_55b_compound_broad_extent_ignores_larger_legacy_radius(self):
+        project = CollisionProject(
+            legacy=CollisionSphere(LEGACY, radius=200),
+            compound=[CollisionSphere(VEHICLE, 0, 0, 0, 10)],
+        )
+        self.assertEqual(effective_runtime_radius(project), 10)
+        project.compound.clear()
+        self.assertEqual(effective_runtime_radius(project), 200)
 
     def test_56_selected_panel_is_compact_and_index_is_in_table(self):
         window = self._window()
@@ -807,6 +815,183 @@ class CollisionEditorTests(unittest.TestCase):
         self.assertIn("Vanilla Urban Assault", notice.text())
         self.assertIn("Legacy Radius only", notice.text())
         self.assertIn("OpenUA", notice.text())
+
+    def test_59_model_preview_scale_defaults_to_identity(self):
+        window = self._window()
+        self.assertEqual(
+            (window.project.model_scale_x, window.project.model_scale_y,
+             window.project.model_scale_z),
+            (1.0, 1.0, 1.0))
+        self.assertEqual(window.viewport.model_preview_scale, (1.0, 1.0, 1.0))
+        self.assertEqual(window.model_scale_x_spin.value(), 1.0)
+        self.assertEqual(window.model_scale_y_spin.value(), 1.0)
+        self.assertEqual(window.model_scale_z_spin.value(), 1.0)
+
+    def test_60_model_preview_scale_changes_model_not_collision_spheres(self):
+        family = _family()
+        window = self._window()
+        with patch("collision_editor.load_asset_family", return_value=family):
+            window.open_base("sample.base")
+        window.add_compound(VEHICLE)
+        sphere_before = window.project.compound[0].clone()
+        source_points = list(family.root_object.skeleton.points)
+        window.model_scale_x_spin.setValue(2.0)
+        window.model_scale_y_spin.setValue(1.5)
+        window.model_scale_z_spin.setValue(0.5)
+        self.assertEqual(window.viewport.model_preview_scale, (2.0, 1.5, 0.5))
+        self.assertEqual(window.project.compound[0].center, sphere_before.center)
+        self.assertEqual(window.project.compound[0].radius, sphere_before.radius)
+        self.assertEqual(family.root_object.skeleton.points, source_points)
+        bounds = window._model_bounds()
+        self.assertEqual(bounds, (-4.0, -1.5, -0.5, 4.0, 3.0, 0.5))
+
+    def test_61_suggested_sphere_uses_scaled_model_bounds(self):
+        family = _family()
+        window = self._window()
+        with patch("collision_editor.load_asset_family", return_value=family):
+            window.open_base("sample.base")
+        window.model_scale_x_spin.setValue(3.0)
+        window.model_scale_y_spin.setValue(1.0)
+        window.model_scale_z_spin.setValue(1.0)
+        window.create_suggested()
+        sphere = window.project.compound[0]
+        self.assertEqual(sphere.center, (0.0, 0.5, 0.0))
+        self.assertEqual(sphere.radius, 6.0)
+
+    def test_62_model_preview_scale_is_undoable_and_resettable(self):
+        window = self._window()
+        window.model_scale_x_spin.setValue(2.0)
+        self.assertEqual(window.project.model_scale_x, 2.0)
+        window.undo()
+        self.assertEqual(window.project.model_scale_x, 1.0)
+        window.redo()
+        self.assertEqual(window.project.model_scale_x, 2.0)
+        window._reset_model_preview_scale()
+        self.assertEqual(
+            (window.project.model_scale_x, window.project.model_scale_y,
+             window.project.model_scale_z),
+            (1.0, 1.0, 1.0))
+
+    def test_63_collision_export_does_not_emit_preview_scale(self):
+        project = _mixed_project()
+        project.model_scale_x = 2.0
+        project.model_scale_y = 1.5
+        project.model_scale_z = 0.5
+        output = export_collision_text(project)
+        self.assertNotIn("vp_scale", output)
+        self.assertNotIn("model_scale", output)
+        self.assertIn("coll_num = 2", output)
+
+    def test_64_project_summary_reports_visual_preview_scale(self):
+        window = self._window()
+        window.model_scale_x_spin.setValue(2.0)
+        window.model_scale_y_spin.setValue(1.5)
+        labels = [
+            action.text() for action in window.project_summary_menu.actions()]
+        self.assertIn("Model preview scale: X 2  Y 1.5  Z 1", labels)
+
+    def test_65_change_sphere_type_uses_explicit_target_menu(self):
+        window = self._window()
+        window.add_legacy()
+        window.add_compound(VEHICLE)
+        window.change_sphere_type(WEAPON)
+        self.assertEqual(window.project.compound[0].category, WEAPON)
+        window.change_sphere_type(LEGACY)
+        self.assertEqual(window.project.compound[0].category, WEAPON)
+        self.assertIsNotNone(window.project.legacy)
+        window._selected = 0
+        window.change_sphere_type(VEHICLE)
+        self.assertIsNone(window.project.legacy)
+        self.assertEqual(window.project.compound[0].category, VEHICLE)
+        window.change_sphere_type(WEAPON)
+        self.assertEqual(window.project.compound[0].category, WEAPON)
+
+    def test_66_radius_spin_updates_preview_while_value_changes(self):
+        window = self._window()
+        window.add_compound(VEHICLE)
+        window.radius_spin.setValue(123)
+        self.assertEqual(window.project.compound[0].radius, 123.0)
+        self.assertEqual(window.viewport._collision_spheres[0].radius, 123.0)
+        self.assertEqual(window.sphere_tree.topLevelItem(0).text(1), "123")
+        window._finish_radius_spin_edit()
+        window.undo()
+        self.assertNotEqual(window.project.compound[0].radius, 123.0)
+
+    def test_67_arrow_keys_request_nudges_at_current_strength(self):
+        window = self._window()
+        window.add_compound(VEHICLE)
+        window.move_strength_spin.setValue(7)
+        for key in (Qt.Key.Key_Right, Qt.Key.Key_Down):
+            event = QKeyEvent(
+                QEvent.Type.KeyPress, key,
+                Qt.KeyboardModifier.NoModifier)
+            QApplication.sendEvent(window.viewport, event)
+        self.assertEqual(window.project.compound[0].center, (7.0, 0.0, 7.0))
+
+    def test_68_model_preview_scale_uses_full_width_toolbar(self):
+        window = self._window()
+        toolbar = window.findChild(QToolBar, "modelPreviewScaleTools")
+        self.assertIsNotNone(toolbar)
+        self.assertEqual(window.reset_model_scale_button.text(), "Reset")
+        for spin in (
+                window.model_scale_x_spin, window.model_scale_y_spin,
+                window.model_scale_z_spin):
+            self.assertGreaterEqual(spin.minimumWidth(), 92)
+            self.assertEqual(spin.decimals(), 3)
+        window.model_scale_x_spin.setValue(1.2)
+        self.assertNotIn("00", window.model_scale_x_spin.text())
+        self.assertIs(window.model_preview_scale_box, toolbar)
+
+    def test_69_mirror_selected_sphere_supports_all_three_axes(self):
+        window = self._window()
+        window.project.compound = [
+            CollisionSphere(VEHICLE, 2.5, -3.0, 4.5, 10)]
+        window._selected = 0
+        window._sync_all()
+        window.mirror_selected_sphere("x")
+        self.assertEqual(window.project.compound[1].center, (-2.5, -3.0, 4.5))
+        window.mirror_selected_sphere("y")
+        self.assertEqual(window.project.compound[2].center, (-2.5, 3.0, 4.5))
+        window.mirror_selected_sphere("z")
+        self.assertEqual(window.project.compound[3].center, (-2.5, 3.0, -4.5))
+
+    def test_70_change_type_and_mirror_use_explicit_submenus(self):
+        window = self._window()
+        window.add_compound(VEHICLE)
+        toolbar = window.findChild(QToolBar, "collisionTools")
+        buttons = {
+            button.text(): button for button in toolbar.findChildren(QToolButton)
+        }
+        self.assertIn("Change Sphere Type", buttons)
+        self.assertIn("Mirror Selected Sphere", buttons)
+        change_labels = [
+            action.text() for action in
+            buttons["Change Sphere Type"].menu().actions()]
+        self.assertEqual(change_labels, [
+            "Change to Legacy Radius",
+            "Change to Vehicle Collision",
+            "Change to Weapon Collision",
+        ])
+        context = window._create_sphere_context_menu(0)
+        submenus = {
+            action.text(): action.menu() for action in context.actions()
+            if action.menu() is not None
+        }
+        self.assertIn("Change Sphere Type", submenus)
+        self.assertIn("Mirror Selected Sphere", submenus)
+        self.assertEqual(
+            [action.text() for action in
+             submenus["Change Sphere Type"].actions()], change_labels)
+
+    def test_71_selected_sphere_keeps_thick_color_inside_white_halo(self):
+        self.assertGreater(
+            CollisionViewport.SELECTED_COLOR_WIDTH, 1.0)
+        self.assertGreater(
+            CollisionViewport.SELECTED_HALO_WIDTH,
+            CollisionViewport.SELECTED_COLOR_WIDTH)
+        self.assertGreaterEqual(
+            CollisionViewport.SELECTED_HALO_WIDTH
+            - CollisionViewport.SELECTED_COLOR_WIDTH, 2.0)
 
 
 if __name__ == "__main__":
