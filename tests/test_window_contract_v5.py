@@ -164,6 +164,98 @@ class WindowContractV5Tests(unittest.TestCase):
         finally:
             window.close()
 
+    def test_file_menu_contains_only_the_asset_workbench_actions(self):
+        window = AssemblyWindow()
+        try:
+            labels = [
+                action.text() for action in window.file_menu.actions()
+                if not action.isSeparator()]
+            self.assertEqual(labels, ["Import", "Export", "Exit"])
+            self.assertEqual(
+                [action.text() for action in window.file_import_menu.actions()],
+                [
+                    "Import BAS Archive", "Import SKLT", "Import ILBM",
+                    "Import Asset Family",
+                ],
+            )
+            self.assertEqual(
+                [action.text() for action in window.file_export_menu.actions()],
+                [
+                    "Export Asset Family", "Export BASE", "Export SKLT",
+                    "Export ILBM", "Overwrite",
+                ],
+            )
+            self.assertEqual(window.open_base_action.shortcut().toString(), "")
+            toolbar_texts = [
+                action.text() for toolbar in window.findChildren(
+                    assembly_window_module.QToolBar)
+                for action in toolbar.actions() if action.text()]
+            self.assertNotIn("Import BAS Archive", toolbar_texts)
+            self.assertNotIn("Import Asset Family", toolbar_texts)
+            self.assertFalse(any(
+                "extra asset root" in label.casefold()
+                or "report" in label.casefold()
+                or label == "Reload"
+                for label in labels))
+        finally:
+            window.close()
+
+    def test_standalone_sklt_enables_only_relevant_exports(self):
+        window = AssemblyWindow()
+        try:
+            model = SimpleNamespace(original_data=b"FORM")
+            ref = SimpleNamespace(
+                path=Path("C:/UA/complete.sklt"),
+                status="manual", source="manual")
+            obj = SimpleNamespace(skeleton=model, skeleton_ref=ref)
+            family = SimpleNamespace(base_asset=None, textures={})
+            window._family = family
+            window._selected_owner = "root"
+            window._owner_to_obj = {"root": obj}
+            window.viewport.edit_owner = None
+            window.viewport.paste_preview_active = False
+
+            with patch.object(window, "can_export_sklt", return_value=True):
+                window._sync_geometry_save_controls()
+
+            self.assertTrue(window.save_sklt_action.isEnabled())
+            self.assertTrue(window.overwrite_action.isEnabled())
+            self.assertFalse(window.save_asset_family_action.isEnabled())
+            self.assertFalse(window.save_base_action.isEnabled())
+            self.assertFalse(window.save_ilbm_action.isEnabled())
+        finally:
+            window.close()
+
+    def test_import_bas_archive_routes_setbas_to_archive_loader(self):
+        window = AssemblyWindow()
+        try:
+            path = Path("C:/UA/Data/Objects/SET.BAS")
+            with patch.object(
+                    assembly_window_module.QFileDialog, "getOpenFileName",
+                    return_value=(str(path), "BAS archive")), patch.object(
+                    window, "open_setbas") as open_setbas, patch.object(
+                    window, "open_base") as open_base:
+                window.open_bas_archive_dialog()
+            open_setbas.assert_called_once_with(path)
+            open_base.assert_not_called()
+        finally:
+            window.close()
+
+    def test_import_bas_archive_routes_standalone_base_normally(self):
+        window = AssemblyWindow()
+        try:
+            path = Path("C:/UA/Data/Objects/ASKY2.BAS")
+            with patch.object(
+                    assembly_window_module.QFileDialog, "getOpenFileName",
+                    return_value=(str(path), "BAS archive")), patch.object(
+                    window, "open_setbas") as open_setbas, patch.object(
+                    window, "open_base") as open_base:
+                window.open_bas_archive_dialog()
+            open_base.assert_called_once_with(path)
+            open_setbas.assert_not_called()
+        finally:
+            window.close()
+
     def test_editor_status_shows_only_resource_and_all_unsaved_edits(self):
         window = AssemblyWindow()
         try:

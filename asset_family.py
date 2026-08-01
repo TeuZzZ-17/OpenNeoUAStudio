@@ -779,11 +779,20 @@ def load_manual_family(sklt_path: str | Path | None,
     family.search_roots = [str(r) for r in resolver.roots]
 
     if sklt_path is not None:
+        source_path = Path(sklt_path)
         fake = BaseObject()
-        fake.skeleton_name = Path(sklt_path).name
-        fam_obj = FamilyObject(base_object=fake)
+        fake.skeleton_name = source_path.name
+        fam_obj = FamilyObject(
+            base_object=fake,
+            skeleton_ref=ResolvedFile(
+                logical_name=source_path.name,
+                status="manual",
+                path=source_path,
+                source="manual",
+            ),
+        )
         try:
-            fam_obj.skeleton = parse_sklt_file(sklt_path)
+            fam_obj.skeleton = parse_sklt_file(source_path)
             family.warnings.extend(
                 f"{Path(sklt_path).name}: {w}" for w in fam_obj.skeleton.warnings
             )
