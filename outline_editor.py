@@ -86,7 +86,6 @@ class OutlineCanvas(QWidget):
         self._drag_start_index = -1
         self._drag_start_indices: list[int] = []
         self._drag_start_screen = QPointF()
-        self._drag_start_point: ProjectedPoint = (0.0, 0.0)
         self._drag_start_points: dict[int, ProjectedPoint] = {}
         self._drag_transform: tuple[QRectF, float, float, float, float, float] | None = None
         self._last_pan_pos = QPointF()
@@ -95,6 +94,8 @@ class OutlineCanvas(QWidget):
         self._empty_context_global = QPoint()
         self._zoom = 1.0
         self._pan = QPointF(0.0, 0.0)
+        self._view_bounds: tuple[float, float, float, float] | None = None
+        self._view_bounds_fixed: bool | None = None
         self._show_vertex_indices = False
         self._drag_snap_message = ""
         self._box_selecting = False
@@ -147,6 +148,13 @@ class OutlineCanvas(QWidget):
             self._selected_edge = sorted(self._selected_edges)[0]
         self._message = message or "No editable vertex data in this file."
         self._fixed_byte_space = fixed_byte_space
+        if (
+            self._view_bounds is None
+            or self._view_bounds_fixed != fixed_byte_space
+        ):
+            self._view_bounds = self._calculate_view_bounds(
+                self._points, fixed_byte_space)
+            self._view_bounds_fixed = fixed_byte_space
         self.update()
 
     def set_selected_index(self, index: int) -> None:
@@ -195,9 +203,16 @@ class OutlineCanvas(QWidget):
     def set_link_mode_active(self, enabled: bool) -> None:
         self._link_mode_active = bool(enabled)
 
-    def reset_view(self) -> None:
+    def reset_view(self, fit_content: bool = True) -> None:
         self._zoom = 1.0
         self._pan = QPointF(0.0, 0.0)
+        if fit_content:
+            self._view_bounds = self._calculate_view_bounds(
+                self._points, self._fixed_byte_space)
+            self._view_bounds_fixed = self._fixed_byte_space
+        else:
+            self._view_bounds = None
+            self._view_bounds_fixed = None
         self.update()
 
     def view_center_world(self) -> ProjectedPoint:
@@ -317,13 +332,13 @@ class OutlineCanvas(QWidget):
                 self._drag_start_index = index
                 self._drag_start_indices = self._drag_indices_for(index)
                 self._drag_transform = self._make_transform()
-                # Anchor drag to the actual vertex center, not to the slightly-offset
-                # mouse click position. This keeps the vertex visually glued to the cursor.
-                self._drag_start_screen = self._to_screen(self._points[index], self._drag_transform)
-                self._drag_start_point = self._points[index]
+                # Keep the original grab offset so the vertex remains attached
+                # to the cursor instead of jumping on the first move event.
+                self._drag_start_screen = event.position()
                 self._drag_start_points = {
                     drag_index: self._points[drag_index] for drag_index in self._drag_start_indices
                 }
+                self.setCursor(Qt.CursorShape.ClosedHandCursor)
                 self.update()
                 event.accept()
                 return
@@ -492,6 +507,7 @@ class OutlineCanvas(QWidget):
             self._drag_start_points.clear()
             self._drag_transform = None
             self._snap_preview_pairs.clear()
+            self.setCursor(Qt.CursorShape.ArrowCursor)
             self.update()
             event.accept()
             return
@@ -527,6 +543,7 @@ class OutlineCanvas(QWidget):
             self._transform_start_points.clear()
             self._drag_start_indices = []
             self._snap_preview_pairs.clear()
+            self.setCursor(Qt.CursorShape.ArrowCursor)
             self.update()
             if not was_moved:
                 x_value, z_value = self._from_screen(event.position())
@@ -548,7 +565,16 @@ class OutlineCanvas(QWidget):
             event.accept()
 
     def wheelEvent(self, event: QWheelEvent) -> None:  # noqa: N802 - Qt override
-        if not self._points:
+        if (
+            not self._points
+            or self._dragging_point
+            or self._transforming_selection
+            or self._box_selecting
+            or self._panning
+        ):
+            # Trackpads can emit wheel events while a button is held. Never
+            # let that change the view while the user is manipulating geometry.
+            event.accept()
             return
 
         cursor = event.position()
@@ -629,11 +655,11 @@ class OutlineCanvas(QWidget):
         self._drag_start_index = drag_indices[0]
         self._drag_start_indices = drag_indices
         self._drag_start_screen = screen_pos
-        self._drag_start_point = self._points[drag_indices[0]]
         self._drag_start_points = {
             drag_index: self._points[drag_index] for drag_index in self._drag_start_indices
         }
         self._drag_transform = self._make_transform()
+        self.setCursor(Qt.CursorShape.ClosedHandCursor)
 
     def _drag_indices_for(self, clicked_index: int) -> list[int]:
         drag_indices = set(self._selected_indices)
@@ -775,31 +801,40 @@ class OutlineCanvas(QWidget):
         min_world_y = min(top_left_world[1], bottom_right_world[1])
         max_world_y = max(top_left_world[1], bottom_right_world[1])
         world_span = max(max_world_x - min_world_x, max_world_y - min_world_y, 1.0)
-        grid_step = _nice_grid_step(world_span / 12.0)
-        if grid_step <= 0.0:
+        major_step = _nice_grid_step(world_span / 10.0)
+        if major_step <= 0.0:
             return
 
-        grid_pen = QPen(QColor(255, 255, 255, 18), 1.0)
+        minor_step = major_step / 5.0
         axis_pen = QPen(QColor(255, 204, 70, 95), 1.2)
-        painter.setPen(grid_pen)
 
-        start_x = math.floor(min_world_x / grid_step) * grid_step
-        x = start_x
-        while x <= max_world_x + grid_step:
-            if abs(x) > grid_step * 0.001:
-                p1 = self._to_screen((x, min_world_y), transform)
-                p2 = self._to_screen((x, max_world_y), transform)
-                painter.drawLine(p1, p2)
-            x += grid_step
+        def draw_lines(step: float, pen: QPen) -> None:
+            painter.setPen(pen)
+            for index in range(
+                math.floor(min_world_x / step),
+                math.ceil(max_world_x / step) + 1,
+            ):
+                value = index * step
+                if abs(value) <= step * 0.001:
+                    continue
+                painter.drawLine(
+                    self._to_screen((value, min_world_y), transform),
+                    self._to_screen((value, max_world_y), transform),
+                )
+            for index in range(
+                math.floor(min_world_y / step),
+                math.ceil(max_world_y / step) + 1,
+            ):
+                value = index * step
+                if abs(value) <= step * 0.001:
+                    continue
+                painter.drawLine(
+                    self._to_screen((min_world_x, value), transform),
+                    self._to_screen((max_world_x, value), transform),
+                )
 
-        start_y = math.floor(min_world_y / grid_step) * grid_step
-        y = start_y
-        while y <= max_world_y + grid_step:
-            if abs(y) > grid_step * 0.001:
-                p1 = self._to_screen((min_world_x, y), transform)
-                p2 = self._to_screen((max_world_x, y), transform)
-                painter.drawLine(p1, p2)
-            y += grid_step
+        draw_lines(minor_step, QPen(QColor(255, 255, 255, 20), 1.0))
+        draw_lines(major_step, QPen(QColor(255, 255, 255, 45), 1.1))
 
         painter.setPen(axis_pen)
         zero_x_top = self._to_screen((0.0, min_world_y), transform)
@@ -858,6 +893,28 @@ class OutlineCanvas(QWidget):
         self._snap_preview_pairs.extend(sorted(preview_pairs))
         self.update()
 
+    @staticmethod
+    def _calculate_view_bounds(
+        points: list[ProjectedPoint], fixed_byte_space: bool
+    ) -> tuple[float, float, float, float] | None:
+        if not points:
+            return None
+        if fixed_byte_space:
+            return 0.0, 255.0, 0.0, 255.0
+
+        min_x = min(point[0] for point in points)
+        max_x = max(point[0] for point in points)
+        min_y = min(point[1] for point in points)
+        max_y = max(point[1] for point in points)
+        span = max(max_x - min_x, max_y - min_y, 1.0)
+        padding = max(span * 0.12, 1.0)
+        return (
+            min_x - padding,
+            max_x + padding,
+            min_y - padding,
+            max_y + padding,
+        )
+
     def _make_transform(self) -> tuple[QRectF, float, float, float, float, float]:
         margin = 24.0
         rect = QRectF(
@@ -867,19 +924,17 @@ class OutlineCanvas(QWidget):
             max(1.0, self.height() - margin * 2.0),
         )
 
-        if self._fixed_byte_space:
-            min_x, max_x, min_y, max_y = 0.0, 255.0, 0.0, 255.0
+        if (
+            self._view_bounds is None
+            or self._view_bounds_fixed != self._fixed_byte_space
+        ):
+            self._view_bounds = self._calculate_view_bounds(
+                self._points, self._fixed_byte_space)
+            self._view_bounds_fixed = self._fixed_byte_space
+        if self._view_bounds is None:
+            min_x, max_x, min_y, max_y = 0.0, 1.0, 0.0, 1.0
         else:
-            min_x = min(point[0] for point in self._points)
-            max_x = max(point[0] for point in self._points)
-            min_y = min(point[1] for point in self._points)
-            max_y = max(point[1] for point in self._points)
-            if max_x - min_x < 0.001:
-                min_x -= 1.0
-                max_x += 1.0
-            if max_y - min_y < 0.001:
-                min_y -= 1.0
-                max_y += 1.0
+            min_x, max_x, min_y, max_y = self._view_bounds
 
         scale = min(rect.width() / (max_x - min_x), rect.height() / (max_y - min_y))
         scale *= self._zoom
@@ -1133,7 +1188,7 @@ class OutlineEditor(QWidget):
         self._last_auto_align_message = ""
         self._loaded_state = self._snapshot()
         self.mark_clean()
-        self.canvas.reset_view()
+        self.canvas.reset_view(fit_content=False)
         self._refresh_canvas()
         self._update_controls()
 

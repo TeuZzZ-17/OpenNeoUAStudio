@@ -25,6 +25,7 @@ from sklt_parser import (
     parse_sklt_file,
     save_sklt_with_poo2_pol2_structure,
 )
+from ilbm_parser import IlbmImage
 from uv_editor_widget import UVEditorWidget, UVLoop
 from uv_topology_editor import (
     UVTopologyError,
@@ -145,6 +146,31 @@ class UVPhase3Tests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         cls.app = QApplication.instance() or QApplication([])
+
+    def test_archive_only_texture_is_decoded_for_uv_preview(self):
+        family, obj = _two_polygon_family()
+        resource = type("Resource", (), {
+            "resource_name": "NEWSKY1.ILBM",
+            "decodable": True,
+        })()
+        archive = type("Archive", (), {
+            "find": lambda _self, _name, _class_id: [resource],
+        })()
+        family.setbas_archive = archive
+        image = IlbmImage(
+            source_name="NEWSKY1.ILBM", kind="ILBM", width=2, height=2,
+            palette=[(0, 0, 0), (255, 255, 255)], pixels=b"\0\1\1\0")
+        block = obj.base_object.ades[0]
+        block.texture.name = "NEWSKY1.ILBM"
+        window = _open_memory_window(family, obj)
+        try:
+            with patch(
+                    "assembly_window.decode_texture", return_value=image):
+                window._update_uv_editor(0)
+            self.assertIsNotNone(window.uv_editor._image)
+            self.assertFalse(window.uv_editor._image.isNull())
+        finally:
+            window.close()
 
     def test_multi_polygon_edit_updates_all_olpl_with_one_undo(self):
         family, obj = _two_polygon_family()

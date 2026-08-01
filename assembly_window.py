@@ -80,7 +80,6 @@ from asset_family import (
 )
 from anm_parser import AnmParseError, export_anm_bytes, parse_anm_bytes
 from asset_tree_filter import filter_tree as filter_asset_tree
-from asset_report import family_to_json, family_to_markdown
 from assembly_viewer import AssetViewport, VIEW_MODES, VIEW_PRESETS
 from base_mapping_editor import (
     MappingEditError,
@@ -146,6 +145,7 @@ from geometry_editor import (
 from model_space_gizmo import ModelSpaceGizmo
 from texture_catalog import build_texture_catalog
 from texture_assignment import classify_texture_assignment
+from texture_convert import TextureConvertError, write_image_as_ilbm
 from transform_dialogs import LiveRotateDialog, LiveScaleDialog
 from uv_editor_widget import UVEditorWidget, UVLoop
 from uv_topology_editor import (
@@ -205,6 +205,20 @@ def _display_path(path: str | Path) -> Path:
     """Return a stable absolute path for window-title display."""
 
     return Path(path).expanduser().resolve(strict=False)
+
+
+def _next_backup_path(source: Path) -> Path:
+    """Return a non-destructive .bak path beside a loose source file."""
+
+    candidate = source.with_name(source.name + ".bak")
+    if not candidate.exists():
+        return candidate
+    index = 1
+    while True:
+        candidate = source.with_name(source.name + f".{index}.bak")
+        if not candidate.exists():
+            return candidate
+        index += 1
 
 
 class _BundleCommitError(OSError):
@@ -446,7 +460,7 @@ class AssemblyWindow(QMainWindow):
         # geometry Edit Mode: owners with unsaved vertex edits
         self._geom_dirty: dict[str, object] = {}
         self._geom_original: dict[str, list[tuple[float, float, float]]] = {}
-        # Model/texture editor UV state; saved only through verified BASE Save As.
+        # Model/texture editor UV state; saved only through verified BASE exports.
         self._uv_ctx: tuple | None = None
         self._uv_contexts: dict[tuple[str, int, int], tuple] = {}
         self._uv_original: dict[tuple[str, int, int], list[tuple[int, int]]] = {}
@@ -477,7 +491,8 @@ class AssemblyWindow(QMainWindow):
         self._skip_model_switch_warning = False
         self._bundle_targets: dict[str, tuple[Path, Path]] = {}
         # Last successfully written standalone BASE per owner.  Subsequent
-        # Overwrite / Save As operations build on this verified snapshot so
+        # Overwrite / Export Asset Family operations build on this verified
+        # snapshot so
         # already-saved UV and texture edits are not lost after the dirty
         # markers are cleared.
         self._bundle_base_snapshots: dict[str, bytes] = {}
@@ -650,7 +665,7 @@ class AssemblyWindow(QMainWindow):
         self.repair_apply_button.clicked.connect(self._apply_repair_in_memory)
         self.repair_revert_button = QPushButton("Revert")
         self.repair_revert_button.clicked.connect(self._revert_repairs)
-        self.repair_save_button = QPushButton("Save As...")
+        self.repair_save_button = QPushButton("Export Repaired BASE")
         self.repair_save_button.clicked.connect(self._save_repaired_as)
         self.chunk_tree = QTreeWidget()
         self.chunk_tree.setHeaderLabels(["Chunk", "Size", "Offset"])
@@ -674,7 +689,7 @@ class AssemblyWindow(QMainWindow):
         self._build_layout()
         self._sync_geometry_save_controls()
         self.statusBar().showMessage(
-            "Model saves are verified; overwriting a loose skeleton requires "
+            "Model exports are verified; overwriting a loose skeleton requires "
             "confirmation and creates a .bak backup."
         )
 
@@ -973,34 +988,51 @@ class AssemblyWindow(QMainWindow):
         menu.exec(self.resolve_tree.viewport().mapToGlobal(position))
 
     def _build_toolbar(self) -> None:
-        # --- menus: everything advanced lives here, not on the toolbar ---
+        # --- File menu: explicit import/export workflow ---
         file_menu = self.menuBar().addMenu("&File")
         self.file_menu = file_menu
-        open_base = QAction("Open BASE...", self)
-        open_base.setShortcut(QKeySequence.StandardKey.Open)
-        open_base.triggered.connect(self.open_base_dialog)
-        file_menu.addAction(open_base)
-        open_family = QAction("Open Asset Family (manual)...", self)
-        open_family.triggered.connect(self.open_family_dialog)
-        file_menu.addAction(open_family)
-        open_setbas = QAction("Open BAS Archive", self)
-        open_setbas.triggered.connect(self.open_setbas_dialog)
-        file_menu.addAction(open_setbas)
-        add_root = QAction("Select extra asset root...", self)
-        add_root.triggered.connect(self.select_root_dialog)
-        file_menu.addAction(add_root)
+        self.open_base_action = QAction("Import BAS Archive", self)
+        self.open_base_action.triggered.connect(self.open_bas_archive_dialog)
+        self.open_sklt_action = QAction("Import SKLT", self)
+        self.open_sklt_action.triggered.connect(self.open_sklt_dialog)
+        self.open_ilbm_action = QAction("Import ILBM", self)
+        self.open_ilbm_action.triggered.connect(self.open_ilbm_dialog)
+        self.open_family_action = QAction("Import Asset Family", self)
+        self.open_family_action.triggered.connect(self.open_family_dialog)
+
+        self.file_import_menu = file_menu.addMenu("Import")
+        for action in (
+                self.open_base_action, self.open_sklt_action,
+                self.open_ilbm_action, self.open_family_action):
+            self.file_import_menu.addAction(action)
+
+        self.save_asset_family_action = QAction("Export Asset Family", self)
+        self.save_asset_family_action.setEnabled(False)
+        self.save_asset_family_action.triggered.connect(self._save_model_as)
+        self.save_base_action = QAction("Export BASE", self)
+        self.save_base_action.setEnabled(False)
+        self.save_base_action.triggered.connect(self._save_base_as)
+        self.save_sklt_action = QAction("Export SKLT", self)
+        self.save_sklt_action.setEnabled(False)
+        self.save_sklt_action.triggered.connect(self._save_sklt_as)
+        self.save_ilbm_action = QAction("Export ILBM", self)
+        self.save_ilbm_action.setEnabled(False)
+        self.save_ilbm_action.triggered.connect(self._save_ilbm_as)
+        self.overwrite_action = QAction("Overwrite", self)
+        self.overwrite_action.setEnabled(False)
+        self.overwrite_action.triggered.connect(self._overwrite_model)
+
+        self.file_export_menu = file_menu.addMenu("Export")
+        for action in (
+                self.save_asset_family_action, self.save_base_action,
+                self.save_sklt_action, self.save_ilbm_action,
+                self.overwrite_action):
+            self.file_export_menu.addAction(action)
+
         file_menu.addSeparator()
-        reload_action = QAction("Reload", self)
-        reload_action.setShortcut(QKeySequence.StandardKey.Refresh)
-        reload_action.triggered.connect(self.reload_family)
-        file_menu.addAction(reload_action)
-        file_menu.addSeparator()
-        export_md = QAction("Export Markdown report...", self)
-        export_md.triggered.connect(lambda: self.export_report("md"))
-        file_menu.addAction(export_md)
-        export_json = QAction("Export JSON report...", self)
-        export_json.triggered.connect(lambda: self.export_report("json"))
-        file_menu.addAction(export_json)
+        self.exit_action = QAction("Exit", self)
+        self.exit_action.triggered.connect(self.close)
+        file_menu.addAction(self.exit_action)
 
         edit_menu = self.menuBar().addMenu("&Edit")
         self.edit_menu = edit_menu
@@ -1091,15 +1123,6 @@ class AssemblyWindow(QMainWindow):
         self.edit_rotate_action.triggered.connect(
             self._rotate_selected_geometry)
         edit_menu.addAction(self.edit_rotate_action)
-        edit_menu.addSeparator()
-        self.overwrite_action = QAction("Overwrite", self)
-        self.overwrite_action.setEnabled(False)
-        self.overwrite_action.triggered.connect(self._overwrite_model)
-        edit_menu.addAction(self.overwrite_action)
-        self.save_as_action = QAction("Save As...", self)
-        self.save_as_action.setEnabled(False)
-        self.save_as_action.triggered.connect(self._save_model_as)
-        edit_menu.addAction(self.save_as_action)
 
         view_menu = self.menuBar().addMenu("&View")
         self.view_menu = view_menu
@@ -1205,10 +1228,6 @@ class AssemblyWindow(QMainWindow):
         toolbar.setMovable(False)
         self.addToolBar(Qt.ToolBarArea.TopToolBarArea, toolbar)
 
-        toolbar.addAction(open_base)
-        toolbar.addAction(open_setbas)
-        toolbar.addAction(reload_action)
-        toolbar.addSeparator()
 
         self.mode_combo = QComboBox()
         for mode in (candidate for candidate in VIEW_MODES
@@ -1640,10 +1659,10 @@ class AssemblyWindow(QMainWindow):
         self.model_save_button.setEnabled(False)
         self.model_save_button.clicked.connect(self._overwrite_model)
         save_buttons.addWidget(self.model_save_button, 0, 0)
-        self.model_save_as_button = QPushButton("Save As...")
+        self.model_save_as_button = QPushButton("Export Asset Family")
         self.model_save_as_button.setEnabled(False)
         self.model_save_as_button.setToolTip(
-            "Save the model and its BASE texture/mapping data together.")
+            "Export the selected BASE, SKLT, textures and animations together.")
         self.model_save_as_button.clicked.connect(self._save_model_as)
         save_buttons.addWidget(self.model_save_as_button, 0, 1)
         save_buttons.setColumnStretch(0, 1)
@@ -2277,16 +2296,10 @@ class AssemblyWindow(QMainWindow):
         behavior and avoids toolkit conflicts.
         """
 
-        if getattr(sys, "frozen", False):
-            command = [sys.executable, "--map-editor"]
-            working_directory = Path(sys.executable).resolve().parent
-        else:
-            main_path = Path(__file__).resolve().with_name("main.py")
-            command = [sys.executable, str(main_path), "--map-editor"]
-            working_directory = main_path.parent
-
         try:
-            subprocess.Popen(command, cwd=str(working_directory))
+            from main import launch_map_editor_process
+
+            launch_map_editor_process()
         except OSError as exc:
             QMessageBox.critical(
                 self,
@@ -2295,18 +2308,42 @@ class AssemblyWindow(QMainWindow):
                 f"{exc}",
             )
 
-    def open_base_dialog(self) -> None:
+    def open_bas_archive_dialog(self) -> None:
+        """Import SET.BAS through the archive browser, or a standalone BASE."""
+
         path, _ = QFileDialog.getOpenFileName(
-            self, "Open BASE asset", str(self._last_directory),
+            self, "Import BAS Archive", str(self._last_directory),
+            "Urban Assault BAS/BASE (*.bas *.base *.BAS *.BASE);;All files (*)",
+        )
+        if not path:
+            return
+        source = Path(path)
+        if source.name.casefold() == "set.bas":
+            self.open_setbas(source)
+        else:
+            self.open_base(source)
+
+    def open_base_dialog(self) -> None:
+        """Backward-compatible standalone BASE importer."""
+
+        path, _ = QFileDialog.getOpenFileName(
+            self, "Import BASE asset", str(self._last_directory),
             "Urban Assault BASE (*.base *.bas *.BASE *.BAS);;All files (*)",
         )
         if path:
-            self.open_base(path)
+            source = Path(path)
+            if source.name.casefold() == "set.bas":
+                self.open_setbas(source)
+            else:
+                self.open_base(source)
 
     def open_base(self, path: str | Path, *, confirm_discard: bool = True) -> None:
+        base_path = Path(path)
+        if base_path.name.casefold() == "set.bas" and confirm_discard:
+            self.open_setbas(base_path)
+            return
         if confirm_discard and not self._confirm_discard_geometry():
             return
-        base_path = Path(path)
         if self._family is None or self._family.base_path != base_path:
             # Overrides are per-asset session state; a different asset starts
             # clean so stale bindings cannot leak between files.
@@ -2327,38 +2364,30 @@ class AssemblyWindow(QMainWindow):
             return
         self._set_family(family)
 
-    def open_family_dialog(self) -> None:
-        sklt, _ = QFileDialog.getOpenFileName(
-            self, "Pick the skeleton (.sklt/.skl) - optional, Cancel to skip",
-            str(self._last_directory),
-            "Skeletons (*.sklt *.skl *.SKLT *.SKL);;All files (*)",
-        )
-        base, _ = QFileDialog.getOpenFileName(
-            self, "Pick the .base file - optional, Cancel to skip",
-            str(self._last_directory),
-            "Urban Assault BASE (*.base *.bas *.BASE *.BAS);;All files (*)",
-        )
-        textures, _ = QFileDialog.getOpenFileNames(
-            self, "Pick texture files (.ilbm/.ilb/.vbmp) - optional",
-            str(self._last_directory),
-            "ILBM/VBMP textures (*.ilbm *.ilb *.lbm *.iff *.vbmp "
-            "*.ILBM *.ILB *.LBM *.IFF *.VBMP);;All files (*)",
-        )
-        anms, _ = QFileDialog.getOpenFileNames(
-            self, "Pick animation files (.anm/.vanm) - optional",
-            str(self._last_directory),
-            "Animations (*.anm *.vanm *.ANM *.VANM);;All files (*)",
-        )
+    def _open_manual_asset_family(
+            self, sklt: str | Path | None = None,
+            base: str | Path | None = None,
+            textures: list[str | Path] | None = None,
+            anms: list[str | Path] | None = None) -> None:
+        textures = list(textures or [])
+        anms = list(anms or [])
         if not sklt and not base and not textures and not anms:
             return
         if not self._confirm_discard_geometry():
             return
-        if sklt:
-            self._last_directory = Path(sklt).parent
+        primary_path = base or sklt or (textures[0] if textures else None) \
+            or (anms[0] if anms else None)
+        if primary_path:
+            self._last_directory = Path(primary_path).parent
         try:
             family = load_manual_family(
-                sklt or None, textures, anms, base or None, self._extra_roots,
-                self._overrides, self._setbas,
+                str(sklt) if sklt else None,
+                [str(path) for path in textures],
+                [str(path) for path in anms],
+                str(base) if base else None,
+                self._extra_roots,
+                self._overrides,
+                self._setbas,
             )
         except Exception as exc:
             QMessageBox.critical(
@@ -2367,16 +2396,85 @@ class AssemblyWindow(QMainWindow):
             )
             return
         self._set_family(family)
-        primary_path = (
-            base or sklt or (textures[0] if textures else None)
-            or (anms[0] if anms else None)
-        )
         if primary_path:
             self._set_document_title(primary_path)
 
+    def open_sklt_dialog(self) -> None:
+        path, _ = QFileDialog.getOpenFileName(
+            self, "Import SKLT", str(self._last_directory),
+            "Skeletons (*.sklt *.skl *.SKLT *.SKL);;All files (*)",
+        )
+        if path:
+            self._open_manual_asset_family(sklt=path)
+
+    def open_ilbm_dialog(self) -> None:
+        path, _ = QFileDialog.getOpenFileName(
+            self, "Import ILBM", str(self._last_directory),
+            "ILBM textures (*.ilbm *.ilb *.lbm *.iff *.vbmp "
+            "*.ILBM *.ILB *.LBM *.IFF *.VBMP);;All files (*)",
+        )
+        if not path:
+            return
+        source = Path(path)
+        self._last_directory = source.parent
+        try:
+            from ilbm_parser import parse_ilbm_file
+
+            image = parse_ilbm_file(source)
+            if not image.has_body:
+                raise ValueError("the selected texture has no decodable BODY")
+            palette = image.palette
+            palette_source = "embedded CMAP" if palette is not None else ""
+            if palette is None and self._family is not None:
+                palette = self._family.external_palette
+                if palette is not None:
+                    palette_source = "loaded family palette"
+            if palette is None and self._setbas is not None:
+                palette, palette_source = self._setbas_palette()
+            qimage = _qimage_from_ilbm(image, palette)
+            if qimage is None or qimage.isNull():
+                raise ValueError("the selected texture decoded to an empty image")
+        except Exception as exc:
+            QMessageBox.warning(
+                self, "Texture preview failed",
+                f"No file was modified.\n\n{exc}",
+            )
+            return
+        self._show_image_preview(
+            f"Texture preview - {source.name}",
+            f"{source.name}  |  {image.width} x {image.height}  | "
+            f"{image.kind}",
+            qimage,
+            f"Palette: {palette_source or 'grayscale fallback'}",
+        )
+
+    def open_family_dialog(self) -> None:
+        sklt, _ = QFileDialog.getOpenFileName(
+            self, "Import skeleton (.sklt/.skl) - optional, Cancel to skip",
+            str(self._last_directory),
+            "Skeletons (*.sklt *.skl *.SKLT *.SKL);;All files (*)",
+        )
+        base, _ = QFileDialog.getOpenFileName(
+            self, "Import BASE file - optional, Cancel to skip",
+            str(self._last_directory),
+            "Urban Assault BASE (*.base *.bas *.BASE *.BAS);;All files (*)",
+        )
+        textures, _ = QFileDialog.getOpenFileNames(
+            self, "Import texture files (.ilbm/.ilb/.vbmp) - optional",
+            str(self._last_directory),
+            "ILBM/VBMP textures (*.ilbm *.ilb *.lbm *.iff *.vbmp "
+            "*.ILBM *.ILB *.LBM *.IFF *.VBMP);;All files (*)",
+        )
+        anms, _ = QFileDialog.getOpenFileNames(
+            self, "Import animation files (.anm/.vanm) - optional",
+            str(self._last_directory),
+            "Animations (*.anm *.vanm *.ANM *.VANM);;All files (*)",
+        )
+        self._open_manual_asset_family(sklt, base, textures, anms)
+
     def open_setbas_dialog(self) -> None:
         path, _ = QFileDialog.getOpenFileName(
-            self, "Open SET.BAS as read-only resource provider",
+            self, "Import SET.BAS as read-only resource provider",
             str(self._last_directory),
             "SET.BAS archives (SET.BAS *.bas *.BAS);;All files (*)",
         )
@@ -3973,52 +4071,6 @@ class AssemblyWindow(QMainWindow):
                 self, "ILBM conversion complete",
                 message + f"\n\nOutput: {output_folder}")
 
-    def select_root_dialog(self) -> None:
-        directory = QFileDialog.getExistingDirectory(
-            self, "Select an additional asset root directory",
-            str(self._last_directory),
-        )
-        if directory:
-            self._extra_roots.append(Path(directory))
-            self.statusBar().showMessage(
-                f"Added asset root: {directory} (Reload to apply)"
-            )
-
-    def reload_family(self) -> None:
-        if self._family and self._family.base_path:
-            # Pick up files added/removed on disk since the last scan.
-            from asset_resolver import DirectoryIndex
-
-            DirectoryIndex.clear_cache()
-            self.open_base(self._family.base_path)
-
-    def export_report(self, fmt: str) -> None:
-        if self._family is None:
-            QMessageBox.information(self, "No asset loaded",
-                                    "Load an asset family first.")
-            return
-        base_name = (self._family.base_path.stem
-                     if self._family.base_path else "asset_family")
-        suggested = self._last_directory / f"{base_name}_report.{fmt}"
-        path, _ = QFileDialog.getSaveFileName(
-            self, "Export technical report", str(suggested),
-            "Markdown (*.md);;JSON (*.json);;All files (*)"
-            if fmt == "md" else
-            "JSON (*.json);;Markdown (*.md);;All files (*)",
-        )
-        if not path:
-            return
-        workbench = self._workbench_report()
-        text = (family_to_markdown(self._family, None, workbench)
-                if Path(path).suffix.lower() != ".json"
-                else family_to_json(self._family, None, workbench))
-        try:
-            Path(path).write_text(text, encoding="utf-8")
-        except OSError as exc:
-            QMessageBox.warning(self, "Export failed", str(exc))
-            return
-        self.statusBar().showMessage(f"Report written to {path}")
-
     def _toggle_play(self, playing: bool) -> None:
         self.viewport.play_animation(playing)
         self.play_button.setText("Pause" if playing else "Play")
@@ -5076,35 +5128,6 @@ class AssemblyWindow(QMainWindow):
                 top.addChild(saved_row)
         self.resolve_tree.expandAll()
 
-    def _workbench_report(self) -> dict | None:
-        if self._mapping_index is None:
-            return None
-        wb: dict = {
-            "unmapped_polygons": self._mapping_index.unmapped,
-            "duplicate_mapped": self._mapping_index.duplicates,
-            "invalid_polyids": self._mapping_index.invalid,
-        }
-        if self._selected_poly is not None:
-            wb["selected_polygon"] = self._selected_poly
-            wb["selected_status"] = self._mapping_index.status(
-                self._selected_poly)
-            for ref in self._mapping_index.refs.get(self._selected_poly, []):
-                block = ref.block
-                wb["selected_material_block"] = ref.block_index
-                wb["selected_texture"] = (block.texture.name
-                                          if block.texture else None)
-                uvs = (block.olpl[ref.atts_index]
-                       if ref.atts_index < len(block.olpl) else [])
-                wb["selected_uvs"] = [list(uv) for uv in uvs]
-        if self._repair_plan is not None:
-            wb["repair_preview"] = self._repair_plan.describe()
-        if self._pending_repairs:
-            wb["pending_repairs"] = [p.describe()[0]
-                                     for p in self._pending_repairs]
-        if self._saved_repair_path:
-            wb["saved_repair_path"] = self._saved_repair_path
-        return wb
-
     # -- FX Elements ---------------------------------------------------------------
 
     def _selected_fx_element(self) -> FxElement | None:
@@ -6086,11 +6109,13 @@ class AssemblyWindow(QMainWindow):
         if editable_count:
             message = (
                 f"UV source: VANM. {editable_count} current frame group(s) "
-                "are editable and exported as verified ANM files by Save As. "
+                "are editable and exported as verified ANM files by Export "
+                "Asset Family. "
                 + "; ".join(dict.fromkeys(descriptions))
                 if element.source_kind == "VANM" else
                 f"UV source: OLPL. {editable_count} direct {element.fx_name} "
-                "loop(s) are editable and saved through verified BASE Save As.")
+                "loop(s) are editable and exported through verified BASE "
+                "output.")
         elif descriptions:
             message = (
                 "UV source: VANM. No writable fixed-size UV group is "
@@ -7039,6 +7064,8 @@ class AssemblyWindow(QMainWindow):
         return reason
 
     def can_save_as_geometry(self) -> bool:
+        """Whether a complete BASE + SKLT asset family can be exported."""
+
         owner = self.viewport.edit_owner or self._selected_owner
         fam_obj = self._owner_to_obj.get(owner) if owner else None
         family = self._family
@@ -7051,11 +7078,63 @@ class AssemblyWindow(QMainWindow):
         return bool(
             basic and not self._geometry_writer_reason(owner, fam_obj))
 
+    def _sklt_save_context(self, *, notify: bool = False):
+        """Return the selected writable skeleton without requiring BASE data."""
+
+        owner = self.viewport.edit_owner or self._selected_owner
+        family = self._family
+        fam_obj = self._owner_to_obj.get(owner) if owner else None
+        model = getattr(fam_obj, "skeleton", None)
+        if owner is None or family is None or fam_obj is None or model is None:
+            if notify:
+                QMessageBox.information(
+                    self, "Export unavailable",
+                    "Select a decoded SKLT model first.")
+            return None
+        if not getattr(model, "original_data", None):
+            if notify:
+                QMessageBox.information(
+                    self, "Export unavailable",
+                    "The selected model has no source SKLT bytes to rewrite.")
+            return None
+        return owner, family, fam_obj, model
+
+    def can_export_sklt(self) -> bool:
+        context = self._sklt_save_context()
+        return bool(
+            context is not None and not self.viewport.paste_preview_active)
+
+    def can_export_ilbm(self) -> bool:
+        family = self._family
+        return bool(
+            family is not None
+            and any(getattr(image, "has_body", False)
+                    for image in family.textures.values()))
+
+    def _standalone_sklt_source(self, fam_obj) -> Path | None:
+        """Loose source used only by a manual SKLT-only editing session."""
+
+        family = self._family
+        if family is None or getattr(family, "base_asset", None) is not None:
+            return None
+        ref = getattr(fam_obj, "skeleton_ref", None)
+        path = getattr(ref, "path", None)
+        if path is None:
+            return None
+        source = Path(path)
+        return source if (
+            source.suffix.casefold() in (".sklt", ".skl")
+            and source.is_file()
+        ) else None
+
     def can_overwrite_geometry(self) -> bool:
         owner = self.viewport.edit_owner or self._selected_owner
+        fam_obj = self._owner_to_obj.get(owner) if owner else None
+        if self.can_save_as_geometry() and owner in self._bundle_targets:
+            return True
         return bool(
-            self.can_save_as_geometry()
-            and owner in self._bundle_targets)
+            self.can_export_sklt() and fam_obj is not None
+            and self._standalone_sklt_source(fam_obj) is not None)
 
     def _is_embedded_geometry_source(self, fam_obj) -> bool:
         ref = getattr(fam_obj, "skeleton_ref", None)
@@ -7307,7 +7386,8 @@ class AssemblyWindow(QMainWindow):
                 f"{pasted_label} with "
                 f"{len(result.point_indices)} independent vertex/vertices."
                 + (
-                    " Embedded source: use Save As to export the edited model."
+                    " Embedded source: use Export Asset Family to export the "
+                    "edited model."
                     if self._is_embedded_geometry_source(fam_obj) else ""
                 ),
                 10000)
@@ -8086,12 +8166,17 @@ class AssemblyWindow(QMainWindow):
             self._sync_uv_add_vertex_button()
 
     def _sync_geometry_save_controls(self) -> None:
-        save_enabled = self.can_save_as_geometry()
+        family_export_enabled = self.can_save_as_geometry()
+        sklt_export_enabled = self.can_export_sklt()
+        ilbm_export_enabled = self.can_export_ilbm()
         overwrite_enabled = self.can_overwrite_geometry()
         self.model_save_button.setEnabled(overwrite_enabled)
-        self.model_save_as_button.setEnabled(save_enabled)
+        self.model_save_as_button.setEnabled(family_export_enabled)
+        self.save_asset_family_action.setEnabled(family_export_enabled)
+        self.save_base_action.setEnabled(family_export_enabled)
+        self.save_sklt_action.setEnabled(sklt_export_enabled)
+        self.save_ilbm_action.setEnabled(ilbm_export_enabled)
         self.overwrite_action.setEnabled(overwrite_enabled)
-        self.save_as_action.setEnabled(save_enabled)
         owner = self._selected_owner
         can_reset = bool(
             self._editing_allowed()
@@ -8504,6 +8589,44 @@ class AssemblyWindow(QMainWindow):
             relative = relative.with_suffix(".ANM")
         return relative
 
+    @staticmethod
+    def _bundle_texture_relative_path(name: str) -> Path:
+        logical = str(name).replace("\\", "/")
+        parts = []
+        for raw in logical.split("/"):
+            if not raw or raw in (".", ".."):
+                continue
+            clean = re.sub(r'[^A-Za-z0-9_. -]', "_", raw).strip()
+            if clean:
+                parts.append(clean)
+        relative = Path(*parts) if parts else Path("TEXTURE.ILBM")
+        if relative.suffix.lower() not in (
+                ".ilbm", ".ilb", ".lbm", ".iff", ".vbmp"):
+            relative = relative.with_suffix(".ILBM")
+        return relative
+
+    @staticmethod
+    def _matching_ref(mapping: dict, logical_name: str):
+        return next((value for key, value in mapping.items()
+                     if str(key).casefold() == str(logical_name).casefold()),
+                    None)
+
+    def _texture_export_source(self, family: AssetFamily, name: str):
+        """Return raw texture bytes and its loose source path when available."""
+
+        ref = self._matching_ref(family.texture_refs, name)
+        source = (Path(ref.path) if ref is not None
+                  and getattr(ref, "path", None) else None)
+        if source is not None and source.is_file():
+            return source.read_bytes(), source
+        archive = family.setbas_archive or self._setbas
+        if archive is not None:
+            resource = next((entry for entry in archive.find(
+                name, "ilbm.class") if entry.decodable), None)
+            if resource is not None:
+                return archive.payload_bytes(resource), None
+        return None, source
+
     def _bundle_base_edits(self, owner: str, fam_obj):
         texture_edits: list[TextureNameEdit] = []
         for (changed_owner, block_index, binding_slot), original in \
@@ -8545,8 +8668,9 @@ class AssemblyWindow(QMainWindow):
         if owner is None or fam_obj is None or model is None \
                 or tree is None:
             QMessageBox.information(
-                self, "Save unavailable",
-                "This model does not contain both model and BASE data.")
+                self, "Export unavailable",
+                "This model does not contain both model and BASE data to "
+                "export.")
             return None
         return owner, family, fam_obj, model, tree
 
@@ -8698,6 +8822,184 @@ class AssemblyWindow(QMainWindow):
             for name in source_fields:
                 setattr(current, name, copy.deepcopy(getattr(saved, name)))
 
+    @staticmethod
+    def _write_verified_sklt(model, output_path: str | Path):
+        """Write a SKLT copy and verify its geometry round-trip."""
+
+        original = parse_sklt_bytes(
+            model.original_data, "<model-save-baseline>")
+        structural = (
+            len(model.points) != len(original.points)
+            or model.polygons != original.polygons
+        )
+        if structural:
+            save_sklt_with_poo2_pol2_structure(
+                model, model.points, model.polygons, output_path)
+        else:
+            save_sklt_with_poo2_points(model, model.points, output_path)
+        verified = parse_sklt_file(output_path)
+        matches = (
+            len(verified.points) == len(model.points)
+            and verified.polygons == model.polygons
+            and all(
+                abs(a[axis] - b[axis])
+                <= 1e-3 + abs(b[axis]) * 1e-5
+                for a, b in zip(verified.points, model.points)
+                for axis in range(3)
+            )
+        )
+        if not matches:
+            raise MappingEditError(
+                "exported SKLT failed coordinate round-trip verification")
+        return verified
+
+    def _save_base_as(self) -> None:
+        context = self._model_save_context()
+        if context is None:
+            return
+        owner, family, fam_obj, _model, tree = context
+        base_label = fam_obj.base_object.name or "MODEL"
+        suggested = self._last_directory / f"{Path(base_label).stem}.BASE"
+        output, _selected_filter = QFileDialog.getSaveFileName(
+            self, "Export BASE", str(suggested),
+            "BASE model (*.BASE *.base);;All files (*)")
+        if not output:
+            return
+        target = Path(output)
+        if target.suffix.casefold() != ".base":
+            target = target.with_suffix(".BASE")
+        source = Path(family.base_path) if family.base_path else None
+        if source is not None and target.resolve() == source.resolve():
+            QMessageBox.warning(
+                self, "Choose another output file",
+                "Export BASE cannot replace the BASE currently open. "
+                "Choose a different destination.")
+            return
+        try:
+            standalone = self._bundle_base_snapshots.get(owner)
+            if standalone is None:
+                standalone = export_base_object_bytes(
+                    tree.data, fam_obj.base_object)
+            uv_edits, texture_edits = self._bundle_base_edits(owner, fam_obj)
+            structural_blocks = self._bundle_topology_states(
+                standalone, fam_obj)
+            notes = save_model_base_copy(
+                standalone, uv_edits, texture_edits, target,
+                structural_blocks=structural_blocks)
+        except (MappingEditError, OSError) as exc:
+            QMessageBox.critical(
+                self, "Export BASE failed - nothing written", str(exc))
+            return
+        self._last_directory = target.parent
+        self._log("BASE export: " + "; ".join(notes))
+        self._notify(f"BASE exported to {target}.", 8000)
+
+    def _save_sklt_as(self) -> None:
+        context = self._sklt_save_context(notify=True)
+        if context is None:
+            return
+        _owner, _family, fam_obj, model = context
+        relative = self._bundle_skeleton_relative_path(fam_obj)
+        suggested = self._last_directory / relative.name
+        output, _selected_filter = QFileDialog.getSaveFileName(
+            self, "Export SKLT", str(suggested),
+            "Skeleton (*.SKLT *.sklt);;All files (*)")
+        if not output:
+            return
+        target = Path(output)
+        if target.suffix.casefold() not in (".sklt", ".skl"):
+            target = target.with_suffix(".SKLT")
+        source_ref = getattr(fam_obj, "skeleton_ref", None)
+        source = getattr(source_ref, "path", None)
+        if source is not None and target.resolve() == Path(source).resolve():
+            QMessageBox.warning(
+                self, "Choose another output file",
+                "Export SKLT cannot replace the skeleton currently open. "
+                "Choose a different destination.")
+            return
+        try:
+            with tempfile.TemporaryDirectory(
+                    prefix="OpenUAStudio_sklt_") as temp_dir:
+                temporary = Path(temp_dir) / target.name
+                self._write_verified_sklt(model, temporary)
+                target.parent.mkdir(parents=True, exist_ok=True)
+                target.write_bytes(temporary.read_bytes())
+        except (MappingEditError, OSError, SkltParseError) as exc:
+            QMessageBox.critical(
+                self, "Export SKLT failed - nothing written", str(exc))
+            return
+        self._last_directory = target.parent
+        self._notify(f"SKLT exported to {target}.", 8000)
+
+    def _current_model_texture_name(self) -> str | None:
+        """Return the texture bound to the current polygon/UV selection."""
+
+        if self._uv_ctx is not None:
+            _fam_obj, block, _block_index, _atts_index, _poly_id = self._uv_ctx
+            texture = getattr(block, "texture", None) if block is not None else None
+            name = getattr(texture, "name", "") if texture is not None else ""
+            if name:
+                return str(name)
+        if self._selected_poly is None or self._mapping_index is None:
+            return None
+        refs = self._mapping_index.refs.get(self._selected_poly, [])
+        if len(refs) != 1:
+            return None
+        texture = getattr(refs[0].block, "texture", None)
+        name = getattr(texture, "name", "") if texture is not None else ""
+        return str(name) if name else None
+
+    def _save_ilbm_as(self) -> None:
+        if self._family is None:
+            self._notify("Import an asset family before exporting an ILBM.", 5000)
+            return
+        names = self._selected_texture_names()
+        if not names:
+            item = self.texture_list.currentItem()
+            name = item.data(Qt.ItemDataRole.UserRole) if item else None
+            if name:
+                names = [str(name)]
+        if not names:
+            current_name = self._current_model_texture_name()
+            if current_name:
+                names = [current_name]
+        if not names:
+            self._notify(
+                "Select a texture in the list or a textured polygon first.",
+                5000)
+            return
+        name = names[0]
+        loaded_name = self._ensure_model_texture_loaded(name)
+        image = (self._family.textures.get(loaded_name)
+                 if loaded_name is not None else None)
+        if image is None or not image.has_body:
+            self._notify("The selected texture is not decoded.", 5000)
+            return
+        safe_name = Path(name.replace("\\", "/")).stem or "texture"
+        suggested = self._last_directory / f"{safe_name}.ILBM"
+        output, _selected_filter = QFileDialog.getSaveFileName(
+            self, "Export ILBM", str(suggested),
+            "ILBM texture (*.ILBM *.ilbm);;All files (*)")
+        if not output:
+            return
+        target = Path(output)
+        if target.suffix.casefold() not in (".ilbm", ".ilb"):
+            target = target.with_suffix(".ILBM")
+        palette = image.palette
+        if palette is None:
+            palette = self._family.external_palette
+        if palette is None and self._setbas is not None:
+            palette, _palette_source = self._setbas_palette()
+        try:
+            result = write_image_as_ilbm(
+                image, target, palette, source=name)
+        except (TextureConvertError, OSError) as exc:
+            QMessageBox.critical(
+                self, "Export ILBM failed - nothing written", str(exc))
+            return
+        self._last_directory = target.parent
+        self._notify(f"ILBM exported to {result.output}.", 8000)
+
     def _save_model_as(self) -> None:
         context = self._model_save_context()
         if context is None:
@@ -8712,21 +9014,17 @@ class AssemblyWindow(QMainWindow):
             base_stem = Path(base_stem).stem or "MODEL"
         suggested = self._last_directory / f"{base_stem}.BASE"
         output, _selected_filter = QFileDialog.getSaveFileName(
-            self, "Save model as", str(suggested),
+            self, "Export Asset Family", str(suggested),
             "BASE model (*.BASE *.base);;All files (*.*)",
             options=QFileDialog.Option.DontConfirmOverwrite)
         if not output:
-            self._notify("Save As cancelled.", 3000)
+            self._notify("Asset-family export cancelled.", 3000)
             return
         base_target = Path(output)
         if base_target.suffix.casefold() != ".base":
             base_target = base_target.with_suffix(".BASE")
         output_root = base_target.parent
         skeleton_target = output_root / skeleton_relative
-        vanm_count = len({
-            name for name, _group_index
-            in self._owner_vanm_uv_keys(owner)})
-
         if self._write_model_files(
                 owner, family, fam_obj, skeleton_target, base_target,
                 ask_replace=True):
@@ -8734,90 +9032,225 @@ class AssemblyWindow(QMainWindow):
             self._last_directory = output_root
             self._sync_geometry_save_controls()
             self._notify(
-                f"Saved {skeleton_target.name}, {base_target.name}"
-                + (f" and {vanm_count} edited ANM file(s)."
-                   if vanm_count else "."),
-                9000)
+                f"Exported complete asset family rooted at "
+                f"{base_target.name}.", 9000)
 
     def _overwrite_model(self) -> None:
+        sklt_context = self._sklt_save_context()
+        if sklt_context is not None:
+            owner, _family, fam_obj, model = sklt_context
+            source = self._standalone_sklt_source(fam_obj)
+            if source is not None:
+                answer = QMessageBox.question(
+                    self, "Overwrite SKLT",
+                    f"Overwrite the imported skeleton?\n\n{source}\n\n"
+                    "A .bak copy will be created first.",
+                    QMessageBox.StandardButton.Yes
+                    | QMessageBox.StandardButton.No,
+                    QMessageBox.StandardButton.No,
+                )
+                if answer != QMessageBox.StandardButton.Yes:
+                    return
+                backup = _next_backup_path(source)
+                try:
+                    source.parent.mkdir(parents=True, exist_ok=True)
+                    shutil.copy2(source, backup)
+                    with tempfile.TemporaryDirectory(
+                            prefix="OpenUAStudio_overwrite_sklt_") as temp_dir:
+                        temporary = Path(temp_dir) / source.name
+                        self._write_verified_sklt(model, temporary)
+                        warnings = _commit_verified_files(
+                            [(temporary, source)])
+                except (MappingEditError, OSError, SkltParseError,
+                        _BundleCommitError) as exc:
+                    QMessageBox.critical(
+                        self, "Overwrite SKLT failed - original preserved",
+                        f"{exc}\n\nBackup: "
+                        f"{backup if backup.exists() else '-'}")
+                    return
+                self._geom_dirty.pop(owner, None)
+                self._geom_original.pop(owner, None)
+                self._topology_original.pop(owner, None)
+                details = f" Backup: {backup.name}."
+                if warnings:
+                    details += " " + " ".join(warnings)
+                self._sync_geometry_save_controls()
+                self._update_editor_status()
+                self._notify(
+                    f"SKLT overwritten safely: {source.name}.{details}",
+                    10000)
+                return
+
         context = self._model_save_context()
         if context is None:
             return
         owner, family, fam_obj, _model, _tree = context
         targets = self._bundle_targets.get(owner)
         if targets is None:
-            self._notify("Use Save As before Overwrite.", 5000)
+            self._notify("Export Asset Family before Overwrite.", 5000)
             return
         skeleton_target, base_target = targets
         if self._write_model_files(
                 owner, family, fam_obj, skeleton_target, base_target,
                 ask_replace=False):
             self._notify(
-                f"Overwritten {skeleton_target.name} and "
+                f"Overwritten complete asset family rooted at "
                 f"{base_target.name}.", 9000)
 
     def _write_model_files(self, owner: str, family: AssetFamily, fam_obj,
                            skeleton_target: Path, base_target: Path,
                            *, ask_replace: bool) -> bool:
-        """Write and verify the model plus its standalone BASE companion."""
+        """Export one complete selected asset family with safe verification."""
 
         model = fam_obj.skeleton
         tree = family.base_asset.tree
         source_archive_digest = hashlib.sha256(tree.data).digest()
-
-        ref = getattr(fam_obj, "skeleton_ref", None)
-        skeleton_source = (Path(ref.path) if ref is not None
-                           and getattr(ref, "path", None) else None)
         base_source = Path(family.base_path) if family.base_path else None
-        modified_animation_names = sorted({
-            name for name, _group_index in self._owner_vanm_uv_keys(owner)
-        }, key=str.casefold)
-        animation_exports = []
-        for name in modified_animation_names:
-            entry = self._animation_for_name(name)
-            if entry is None:
+
+        # Scope dependencies to the selected BASE object and its KIDS.  A
+        # SET.BAS session can contain hundreds of unrelated resources; an
+        # asset-family export must never dump the whole archive by accident.
+        family_objects = list(fam_obj.iter_tree())
+        skeleton_exports = []
+        skeleton_targets_by_key: dict[str, tuple[object, Path]] = {}
+        for object_index, current_obj in enumerate(family_objects):
+            current_model = getattr(current_obj, "skeleton", None)
+            if current_model is None:
                 QMessageBox.critical(
-                    self, "Save failed - current files unchanged",
-                    f"Modified VANM {name} is no longer loaded.")
+                    self, "Export failed - current files unchanged",
+                    f"Skeleton dependency for {current_obj.display_name} is "
+                    "unresolved; the asset family would be incomplete.")
                 return False
-            canonical, animation = entry
+            relative = self._bundle_skeleton_relative_path(current_obj)
+            target = (skeleton_target if object_index == 0
+                      else base_target.parent / relative)
+            key = str(target.resolve()).casefold()
+            previous = skeleton_targets_by_key.get(key)
+            if previous is not None:
+                previous_model, previous_target = previous
+                if previous_model is not current_model:
+                    QMessageBox.critical(
+                        self, "Export failed - current files unchanged",
+                        f"Two different skeletons resolve to the same output "
+                        f"path: {previous_target}")
+                    return False
+                continue
+            skeleton_targets_by_key[key] = (current_model, target)
+            ref = getattr(current_obj, "skeleton_ref", None)
+            source = (Path(ref.path) if ref is not None
+                      and getattr(ref, "path", None) else None)
+            skeleton_exports.append(
+                (current_obj, current_model, relative, target, source))
+
+        animation_names: set[str] = set()
+        texture_names: set[str] = set()
+        for current_obj in family_objects:
+            for block in current_obj.base_object.ades:
+                visual_blocks = (block.iter_visual_blocks()
+                                 if hasattr(block, "iter_visual_blocks")
+                                 else (block,))
+                for visual in visual_blocks:
+                    for texture in (
+                            getattr(visual, "texture", None),
+                            getattr(visual, "tracy_texture", None)):
+                        name = str(getattr(texture, "name", "") or "")
+                        if not name:
+                            continue
+                        if str(getattr(texture, "kind", "")).casefold() \
+                                == "bmpanim":
+                            animation_names.add(name)
+                        else:
+                            texture_names.add(name)
+
+        animation_exports = []
+        for canonical in sorted(animation_names, key=str.casefold):
+            animation = next((
+                value for key, value in family.animations.items()
+                if key.casefold() == canonical.casefold()), None)
+            if animation is None:
+                QMessageBox.critical(
+                    self, "Export failed - current files unchanged",
+                    f"Animation dependency {canonical} is unresolved; the "
+                    "asset family would be incomplete.")
+                return False
             animation_exports.append((
                 canonical, animation,
                 self._bundle_animation_relative_path(canonical),
             ))
-        forbidden = [path.resolve() for path in (skeleton_source, base_source)
-                     if path is not None and path.exists()]
-        for canonical, _animation, _relative in animation_exports:
-            ref_entry = next((
-                value for key, value in family.animation_refs.items()
+            texture_names.update(animation.bitmap_names)
+
+        texture_exports = []
+        for canonical in sorted(texture_names, key=str.casefold):
+            try:
+                raw_data, loose_source = self._texture_export_source(
+                    family, canonical)
+            except OSError as exc:
+                QMessageBox.critical(
+                    self, "Export failed - current files unchanged",
+                    f"Texture dependency {canonical} could not be read: "
+                    f"{exc}")
+                return False
+            image = next((
+                value for key, value in family.textures.items()
                 if key.casefold() == canonical.casefold()), None)
-            source = (
-                Path(ref_entry.path)
-                if ref_entry is not None and ref_entry.path else None)
+            if raw_data is None and image is None:
+                QMessageBox.critical(
+                    self, "Export failed - current files unchanged",
+                    f"Texture dependency {canonical} is unresolved; the asset "
+                    "family would be incomplete.")
+                return False
+            texture_exports.append((
+                canonical, raw_data, image,
+                self._bundle_texture_relative_path(canonical),
+                loose_source,
+            ))
+
+        forbidden = [
+            path.resolve() for path in (base_source,)
+            if path is not None and path.exists()]
+        for _obj, _model, _relative, _target, source in skeleton_exports:
             if source is not None and source.exists():
                 forbidden.append(source.resolve())
-        if skeleton_target.resolve() in forbidden \
-                or base_target.resolve() in forbidden:
-            QMessageBox.warning(
-                self, "Choose another output folder",
-                "Save As cannot replace the model currently open in the "
-                "editor. Choose another folder.")
-            return False
+        for canonical, _animation, _relative in animation_exports:
+            ref_entry = self._matching_ref(
+                family.animation_refs, canonical)
+            source = (Path(ref_entry.path)
+                      if ref_entry is not None and ref_entry.path else None)
+            if source is not None and source.exists():
+                forbidden.append(source.resolve())
+        for _canonical, _raw, _image, _relative, source in texture_exports:
+            if source is not None and source.exists():
+                forbidden.append(source.resolve())
+
+        skeleton_targets = [entry[3] for entry in skeleton_exports]
         animation_targets = [
             base_target.parent / relative
             for _name, _animation, relative in animation_exports]
-        if any(target.resolve() in forbidden for target in animation_targets):
+        texture_targets = [
+            base_target.parent / relative
+            for _name, _raw, _image, relative, _source in texture_exports]
+        all_targets = [
+            *skeleton_targets, base_target,
+            *animation_targets, *texture_targets]
+        target_keys = [str(path.resolve()).casefold() for path in all_targets]
+        if len(target_keys) != len(set(target_keys)):
+            QMessageBox.critical(
+                self, "Export failed - current files unchanged",
+                "Two asset dependencies resolve to the same output path. "
+                "Rename the conflicting source resources before exporting.")
+            return False
+        if any(target.resolve() in forbidden for target in all_targets):
             QMessageBox.warning(
                 self, "Choose another output folder",
-                "Save As cannot replace a VANM currently open in the editor. "
-                "Choose another folder.")
+                "Asset-family export cannot replace a BASE, skeleton, "
+                "texture or animation currently open in the editor. Choose "
+                "another folder.")
             return False
-        existing = [path for path in (
-                skeleton_target, base_target, *animation_targets)
-                    if path.exists()]
+
+        existing = [path for path in all_targets if path.exists()]
         if ask_replace and existing:
             answer = QMessageBox.warning(
-                self, "Replace saved files?",
+                self, "Replace exported files?",
                 "The following file(s) already exist:\n"
                 + "\n".join(str(path) for path in existing)
                 + "\n\nReplace them?",
@@ -8828,7 +9261,6 @@ class AssemblyWindow(QMainWindow):
                 return False
 
         verified_base_bytes: bytes | None = None
-        verified_animation_bytes: dict[str, bytes] = {}
         try:
             standalone = self._bundle_base_snapshots.get(owner)
             if standalone is None:
@@ -8840,35 +9272,24 @@ class AssemblyWindow(QMainWindow):
             with tempfile.TemporaryDirectory(
                     prefix="OpenUAStudio_bundle_") as temp_dir:
                 temp_root = Path(temp_dir)
-                temp_skeleton = temp_root / skeleton_target.name
-                temp_base = temp_root / base_target.name
-                temp_animations = []
-                original_model = parse_sklt_bytes(
-                    model.original_data, "<model-save-baseline>")
-                structural = (
-                    len(model.points) != len(original_model.points)
-                    or model.polygons != original_model.polygons
-                )
-                if structural:
-                    save_sklt_with_poo2_pol2_structure(
-                        model, model.points, model.polygons, temp_skeleton)
-                else:
-                    save_sklt_with_poo2_points(
-                        model, model.points, temp_skeleton)
-                verify = parse_sklt_file(temp_skeleton)
-                matches = (
-                    len(verify.points) == len(model.points)
-                    and verify.polygons == model.polygons
-                    and all(
-                        abs(a[axis] - b[axis])
-                        <= 1e-3 + abs(b[axis]) * 1e-5
-                        for a, b in zip(verify.points, model.points)
-                        for axis in range(3)
-                    )
-                )
-                if not matches:
-                    raise MappingEditError(
-                        "exported SKLT failed coordinate round-trip verification")
+                temp_base = temp_root / "BASE" / base_target.name
+                temp_base.parent.mkdir(parents=True, exist_ok=True)
+                temp_skeletons = []
+                primary_verify = None
+                for object_index, (
+                        _current_obj, current_model, relative, target,
+                        _source) in enumerate(skeleton_exports):
+                    temp_skeleton = temp_root / "SKLT" / relative
+                    temp_skeleton.parent.mkdir(parents=True, exist_ok=True)
+                    verified = self._write_verified_sklt(
+                        current_model, temp_skeleton)
+                    if object_index == 0:
+                        primary_verify = verified
+                    temp_skeletons.append((temp_skeleton, target))
+                if primary_verify is None:
+                    raise SkltParseError(
+                        "the selected asset has no verified skeleton")
+
                 notes = save_model_base_copy(
                     standalone, uv_edits, texture_edits, temp_base,
                     structural_blocks=structural_blocks)
@@ -8879,70 +9300,112 @@ class AssemblyWindow(QMainWindow):
                     reloaded_obj.skeleton if reloaded_obj is not None else None)
                 if reloaded_model is None:
                     reloaded_base = parse_base_bytes(
-                        verified_base_bytes, "<saved-family-base>")
+                        verified_base_bytes, "<exported-family-base>")
                     if reloaded_base.root is None:
                         raise MappingEditError(
-                            "saved BASE failed family reconstruction")
+                            "exported BASE failed family reconstruction")
                     reloaded_obj = FamilyObject(
                         base_object=reloaded_base.root,
-                        skeleton=verify,
+                        skeleton=primary_verify,
                         owner_path="root")
-                    reloaded_model = verify
+                    reloaded_model = primary_verify
                 if reloaded_model.polygons != model.polygons:
                     raise MappingEditError(
-                        "saved BASE/SKLT family failed topology reload")
+                        "exported BASE/SKLT family failed topology reload")
                 roundtrip_issues = [
                     issue for issue in diagnose_polygon_references(reloaded_obj)
-                    if "missing typed handler" not in issue
-                ]
+                    if "missing typed handler" not in issue]
                 if roundtrip_issues:
                     raise MappingEditError(
-                        "saved reference graph failed verification: "
+                        "exported reference graph failed verification: "
                         + "; ".join(roundtrip_issues[:4]))
                 if hashlib.sha256(tree.data).digest() \
                         != source_archive_digest:
                     raise MappingEditError(
                         "the read-only source BASE/SET.BAS bytes changed")
+
+                temp_animations = []
                 for canonical, animation, relative in animation_exports:
                     data = export_anm_bytes(animation)
                     verified = parse_anm_bytes(data, canonical)
                     if verified.texcoord_groups != animation.texcoord_groups:
                         raise AnmParseError(
                             f"{canonical} failed UV round-trip verification")
-                    temp_animation = temp_root / relative
+                    temp_animation = temp_root / "ANM" / relative
                     temp_animation.parent.mkdir(parents=True, exist_ok=True)
                     temp_animation.write_bytes(data)
                     target = base_target.parent / relative
                     temp_animations.append((temp_animation, target))
-                    verified_animation_bytes[canonical] = data
+
+                from ilbm_parser import parse_ilbm_bytes
+                temp_textures = []
+                for canonical, raw_data, image, relative, _source in \
+                        texture_exports:
+                    temp_texture = temp_root / "ILBM" / relative
+                    temp_texture.parent.mkdir(parents=True, exist_ok=True)
+                    parsed_raw = (parse_ilbm_bytes(raw_data, canonical)
+                                  if raw_data is not None else None)
+                    raw_is_loose_vbmp = (
+                        parsed_raw is not None
+                        and parsed_raw.kind == "VBMP"
+                        and relative.suffix.casefold() == ".vbmp")
+                    if parsed_raw is not None \
+                            and parsed_raw.kind == "ILBM":
+                        if not parsed_raw.has_body:
+                            raise TextureConvertError(
+                                f"{canonical}: ILBM has no decodable BODY")
+                        temp_texture.write_bytes(raw_data)
+                    elif raw_is_loose_vbmp:
+                        if not parsed_raw.has_body:
+                            raise TextureConvertError(
+                                f"{canonical}: VBMP has no decodable BODY")
+                        temp_texture.write_bytes(raw_data)
+                    else:
+                        export_image = image or parsed_raw
+                        if export_image is None or not export_image.has_body:
+                            raise TextureConvertError(
+                                f"{canonical}: texture has no decodable BODY")
+                        palette = (getattr(export_image, "palette", None)
+                                   or family.external_palette)
+                        if palette is None and self._setbas is not None:
+                            palette, _palette_source = self._setbas_palette()
+                        # Embedded SET.BAS textures are FORM VBMP. Loose
+                        # dependencies expect a standalone FORM ILBM.
+                        write_image_as_ilbm(
+                            export_image, temp_texture, palette,
+                            source=canonical)
+                    verified_texture = parse_ilbm_bytes(
+                        temp_texture.read_bytes(), canonical)
+                    if not verified_texture.has_body:
+                        raise TextureConvertError(
+                            f"{canonical}: exported texture failed verification")
+                    target = base_target.parent / relative
+                    temp_textures.append((temp_texture, target))
+
                 notes.extend(_commit_verified_files([
-                    (temp_skeleton, skeleton_target),
+                    *temp_skeletons,
                     (temp_base, base_target),
                     *temp_animations,
+                    *temp_textures,
                 ]))
         except _BundleCommitError as exc:
             title = (
-                "Save failed - current files unchanged"
+                "Export failed - current files unchanged"
                 if exc.rollback_complete else
-                "Save failed - inspect output files"
-            )
+                "Export failed - inspect output files")
             QMessageBox.critical(self, title, str(exc))
             return False
-        except (AnmParseError, MappingEditError, SkltParseError, OSError) as exc:
+        except (AnmParseError, MappingEditError, SkltParseError,
+                TextureConvertError, OSError) as exc:
             QMessageBox.critical(
-                self, "Save failed - current files unchanged", str(exc))
+                self, "Export failed - current files unchanged", str(exc))
             return False
 
-        # The write and round-trip verification succeeded.  The current
-        # in-memory state is now the clean baseline, not an unsaved edit.
-        # Keep the verified BASE bytes so later saves preserve committed UV
-        # and texture changes while applying only the new deltas.
         if verified_base_bytes is None:
-            # Defensive only: the normal successful path always assigns it.
             QMessageBox.critical(
-                self, "Save verification failed",
+                self, "Export verification failed",
                 "The files were written, but the verified BASE snapshot was "
-                "not retained. Reload the saved model before editing again.")
+                "not retained. Reload the exported model before editing again.")
             return False
         self._bundle_base_snapshots[owner] = verified_base_bytes
         self._adopt_saved_block_sources(fam_obj, verified_base_bytes)
@@ -8952,25 +9415,19 @@ class AssemblyWindow(QMainWindow):
         if owner in self._topology_original:
             current = self._capture_topology_state(owner)
             if current is not None:
-                self._topology_original[owner] = copy.deepcopy(current)
+                self._topology_original[owner] = current
         for key in [key for key in self._uv_original if key[0] == owner]:
             del self._uv_original[key]
         for key in [key for key in self._texture_original if key[0] == owner]:
             del self._texture_original[key]
-        for canonical, data in verified_animation_bytes.items():
-            entry = self._animation_for_name(canonical)
-            if entry is not None:
-                entry[1].original_data = data
-            for key in [
-                    key for key in self._vanm_uv_original
-                    if key[0].casefold() == canonical.casefold()]:
-                del self._vanm_uv_original[key]
-        self._uv_history_before = None
-
+        for key in [key for key in self._vanm_uv_original if key[0] == owner]:
+            del self._vanm_uv_original[key]
+        self._pending_repairs = []
+        self._repair_plan = None
         self._sync_geometry_save_controls()
         self._update_editor_status()
         self._sync_uv_add_vertex_button()
-        self._log("Model saved: " + "; ".join(notes[-3:]))
+        self._log("Asset family exported: " + "; ".join(notes[-3:]))
         return True
 
     def _uv_key(self) -> tuple[str, int, int] | None:
@@ -9360,7 +9817,8 @@ class AssemblyWindow(QMainWindow):
                     image = frame[0]
                     message = (
                         f"UV source: VANM current {frame[2]}. Coordinate edits "
-                        "are exported as a verified ANM file by Save As.")
+                        "are exported as a verified ANM file by Export Asset "
+                        "Family.")
                 elif ref.atts_index < len(block.olpl):
                     source_uvs = list(block.olpl[ref.atts_index])
                     message = "The current VANM frame group is unavailable."
@@ -9384,7 +9842,32 @@ class AssemblyWindow(QMainWindow):
                 else:
                     skipped.append((selected_poly, "VANM frame unavailable"))
                 continue
-            if (block.class_id or "").lower() != "amesh.class":
+            block_class = (block.class_id or "").lower()
+            if block_class == "area.class":
+                # Sky panels and other area.class faces use the texture OTL2
+                # outline directly. It is read-only, but belongs in the UV
+                # preview and must use the same lazy texture loader as amesh.
+                if ref.atts_index >= len(block.olpl):
+                    skipped.append((selected_poly, "missing OTL2 outline"))
+                    continue
+                uvs = list(block.olpl[ref.atts_index])
+                if not uvs or len(uvs) != len(model.polygons[selected_poly]):
+                    skipped.append((
+                        selected_poly, "POL2/OTL2 count mismatch"))
+                    continue
+                key = (self._workbench_obj.owner_path,
+                       ref.block_index, ref.atts_index)
+                loops.append(UVLoop(key, selected_poly, uvs, False))
+                if image is None:
+                    texture_name = texture.name if texture else ""
+                    if texture_name:
+                        loaded_name = self._ensure_model_texture_loaded(
+                            texture_name, show_error=False)
+                        image = self._texture_qimage(
+                            loaded_name or texture_name)
+                message = "area.class OTL2 preview (read-only)."
+                continue
+            if block_class != "amesh.class":
                 skipped.append((selected_poly, "non-amesh mapping"))
                 continue
             if ref.atts_index >= len(block.olpl):
@@ -9406,9 +9889,16 @@ class AssemblyWindow(QMainWindow):
             if image is None:
                 texture_name = (
                     texture.name if texture else "")
-                image = (
-                    self._texture_qimage(texture_name)
-                    if texture_name else None)
+                if texture_name:
+                    # Archive-only textures are decoded lazily when selected
+                    # in the resource list.  Polygon selection reaches the
+                    # UV editor directly, so request the same lazy load here
+                    # or the 3D viewport can be textured while UV stays on
+                    # its checkerboard.
+                    loaded_name = self._ensure_model_texture_loaded(
+                        texture_name, show_error=False)
+                    image = self._texture_qimage(
+                        loaded_name or texture_name)
 
         if loops:
             first_key = next(
@@ -10273,7 +10763,7 @@ class AssemblyWindow(QMainWindow):
         self._update_repair_buttons()
         self.statusBar().showMessage(
             f"Mapping repair ready for polygon #{plan.poly_id}. "
-            "Use Save As to keep it."
+            "Use Export Asset Family to keep it."
         )
 
     def _revert_repairs(self) -> None:
@@ -10294,7 +10784,7 @@ class AssemblyWindow(QMainWindow):
         source = self._family.base_path
         suggested = source.with_name(f"{source.stem}.fixed{source.suffix}")
         path, _ = QFileDialog.getSaveFileName(
-            self, "Save mapping as",
+            self, "Export mapping as",
             str(suggested),
             "Urban Assault BASE (*.base *.bas);;All files (*)",
         )
@@ -10304,13 +10794,13 @@ class AssemblyWindow(QMainWindow):
             notes = save_repaired_base(self._family, self._workbench_obj,
                                        self._pending_repairs, path)
         except MappingEditError as exc:
-            QMessageBox.critical(self, "Save failed - nothing written",
+            QMessageBox.critical(self, "Export failed - nothing written",
                                  str(exc))
             return
         self._saved_repair_path = path
         self._pending_repairs = []
         self._log("; ".join(notes))
-        self._notify(f"Mapping saved: {Path(path).name}.", 8000)
+        self._notify(f"Mapping exported: {Path(path).name}.", 8000)
         # Keep resolving against the original family's directories so the
         # reloaded copy finds its skeleton/textures even from a new folder.
         for root in (source.parent, source.parent.parent):

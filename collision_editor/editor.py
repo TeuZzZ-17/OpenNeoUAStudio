@@ -28,6 +28,7 @@ from PySide6.QtGui import (
     QMouseEvent,
     QPainter,
     QPen,
+    QPolygonF,
 )
 from PySide6.QtWidgets import (
     QAbstractItemView,
@@ -69,6 +70,16 @@ from assembly_viewer import AssetViewport, VIEW_PRESETS
 from asset_family import AssetFamily, load_asset_family, load_manual_family
 from asset_tree_filter import filter_tree as filter_asset_tree
 from model_space_gizmo import ModelSpaceGizmo
+from vp_manager import (
+    EmbeddedVPSet,
+    VPEmbeddedError,
+    VPParseError,
+    VPTable,
+    load_visproto,
+    normalize_base_name,
+    normalize_skeleton_name,
+    reconstruct_embedded_vps,
+)
 
 
 _PUBLIC_DEPENDENCY_DEFAULTS = {
@@ -92,11 +103,15 @@ TYPE_COLORS = {
     VEHICLE: QColor(60, 220, 60),
     WEAPON: QColor(60, 130, 235),
 }
+FIRE_POINT_COLOR = QColor(255, 190, 70)
+DEATH_DAMAGE_COLOR = QColor(255, 0, 255)
 SCRIPT_TYPES = (
     "new_vehicle", "modify_vehicle", "new_weapon", "modify_weapon",
 )
 _MODEL_NAME_ROLE = int(Qt.ItemDataRole.UserRole) + 1
 _SPHERE_INDEX_ROLE = int(Qt.ItemDataRole.UserRole) + 2
+_MODEL_VP_ROLE = int(Qt.ItemDataRole.UserRole) + 3
+_FIRE_POINT_INDEX_ROLE = int(Qt.ItemDataRole.UserRole) + 4
 _RADIUS_SLIDER_STEPS = 10000
 _RADIUS_LOG_MIN = -3.0
 _RADIUS_LOG_MAX = 6.0
@@ -105,8 +120,14 @@ _HEADER_RE = re.compile(
     r"\s+(-?\d+)\b", re.IGNORECASE,
 )
 _PARAM_RE = re.compile(
-    r"^(?P<indent>\s*)(?P<key>radius|coll_num|coll_act|coll_x|coll_y|"
-    r"coll_z|coll_radius)\s*=\s*(?P<value>[^;#\r\n]+)",
+    r"^(?P<indent>\s*)(?P<key>radius|overeof|fire_x|fire_y|fire_z|"
+    r"num_weapons|death_damage|death_damage_radius|coll_num|coll_act|"
+    r"coll_x|coll_y|coll_z|coll_radius)\s*=\s*(?P<value>[^;#\r\n]+)",
+    re.IGNORECASE,
+)
+_GENERIC_PARAM_RE = re.compile(
+    r"^(?P<indent>\s*)(?P<key>[A-Za-z_][A-Za-z0-9_]*)\s*=\s*"
+    r"(?P<value>[^;#\r\n]+)",
     re.IGNORECASE,
 )
 
@@ -121,6 +142,30 @@ def _radius_number(value: float) -> str:
     """Engine-safe whole-number radius used by lists and text output."""
 
     return str(int(round(value)))
+
+
+def fire_point_positions(project: "CollisionProject") -> list[tuple[float, float, float]]:
+    """Return the exact vanilla projectile spawn offsets for a vehicle.
+
+    Vanilla Urban Assault treats ``num_weapons`` values of zero and one as a
+    single muzzle at the authored ``fire_x/y/z`` position.  With two or more
+    weapons it distributes the muzzles evenly on local X from
+    ``-abs(fire_x)`` to ``+abs(fire_x)`` while preserving fire Y and Z.
+    """
+
+    count = max(1, int(project.num_weapons))
+    if count == 1:
+        xs = [float(project.fire_x)]
+    else:
+        extent = abs(float(project.fire_x))
+        xs = [
+            (index * 2.0 * extent / (count - 1)) - extent
+            for index in range(count)
+        ]
+    return [
+        (x, float(project.fire_y), float(project.fire_z))
+        for x in xs
+    ]
 
 
 def effective_runtime_radius(project: "CollisionProject") -> float:
@@ -218,6 +263,23 @@ class CollisionProject:
     model_scale_x: float = 1.0
     model_scale_y: float = 1.0
     model_scale_z: float = 1.0
+    # Vehicle-only ground alignment.  When enabled, the preview follows the
+    # engine placement rule ``actor_y = ground_y - overeof`` and the value is
+    # included in text export/application.
+    overeof_enabled: bool = False
+    overeof: float = 0.0
+    # Vanilla vehicle projectile-spawn preview.  These fields are written only
+    # when explicitly enabled and never modify the loaded BAS/SKLT asset.
+    fire_points_enabled: bool = False
+    fire_x: float = 0.0
+    fire_y: float = 0.0
+    fire_z: float = 0.0
+    num_weapons: int = 1
+    # OpenUA vehicle death-area damage.  It is an independent gameplay AoE,
+    # not a collision sphere and therefore never participates in coll_num.
+    death_damage_enabled: bool = False
+    death_damage: int = 0
+    death_damage_radius: float = 0.0
     legacy: CollisionSphere | None = None
     compound: list[CollisionSphere] = field(default_factory=list)
 
@@ -235,6 +297,11 @@ class CollisionProject:
             self.name, self.source_model, self.source_base,
             self.target_category,
             self.model_scale_x, self.model_scale_y, self.model_scale_z,
+            self.overeof_enabled, self.overeof,
+            self.fire_points_enabled,
+            self.fire_x, self.fire_y, self.fire_z, self.num_weapons,
+            self.death_damage_enabled,
+            self.death_damage, self.death_damage_radius,
             one(self.legacy),
             tuple(one(sphere) for sphere in self.compound),
         )
@@ -245,6 +312,11 @@ class CollisionProject:
         (self.name, self.source_model, self.source_base,
          self.target_category,
          self.model_scale_x, self.model_scale_y, self.model_scale_z,
+         self.overeof_enabled, self.overeof,
+         self.fire_points_enabled,
+         self.fire_x, self.fire_y, self.fire_z, self.num_weapons,
+         self.death_damage_enabled,
+         self.death_damage, self.death_damage_radius,
          legacy, compound) = state
         self.legacy = one(legacy)
         self.compound = [one(values) for values in compound]
@@ -263,6 +335,25 @@ class ScriptBlock:
     def label(self) -> str:
         suffix = f" — {self.name}" if self.name else ""
         return f"{self.kind} {self.object_id}{suffix}"
+
+
+@dataclass(frozen=True)
+class VehicleModelReference:
+    """One script definition that can resolve a visual prototype."""
+
+    block: ScriptBlock
+    vp_normal: int
+    scale_x: float = 1.0
+    scale_y: float = 1.0
+    scale_z: float = 1.0
+
+    @property
+    def label(self) -> str:
+        suffix = f" — {self.block.name}" if self.block.name else ""
+        return (
+            f"{self.block.kind} {self.block.object_id}{suffix}  "
+            f"[vp_normal {self.vp_normal}]"
+        )
 
 
 class CollisionScriptError(ValueError):
@@ -347,6 +438,157 @@ def _parameter_rows(lines: list[str], block: ScriptBlock):
     return rows
 
 
+def _generic_parameter_rows(lines: list[str], block: ScriptBlock):
+    """Return every active top-level ``key = value`` row in one block."""
+
+    rows = []
+    nested_depth = 0
+    for index in range(block.start_line + 1, block.end_line):
+        code = _active_code(lines[index])
+        token = code.split(None, 1)[0].lower() if code else ""
+        if _opens_nested_scope(token):
+            nested_depth += 1
+            continue
+        if token == "end" and nested_depth:
+            nested_depth -= 1
+            continue
+        if nested_depth or not code:
+            continue
+        match = _GENERIC_PARAM_RE.match(lines[index])
+        if match is None:
+            continue
+        rows.append((
+            index,
+            match.group("key").lower(),
+            match.group("value").strip().split()[0],
+            match.group("indent"),
+        ))
+    return rows
+
+
+def script_model_references(text: str) -> list[VehicleModelReference]:
+    """Read ``vp_normal`` references from new vehicles and weapons.
+
+    The final active assignment wins, matching Urban Assault script override
+    behavior. ``modify_vehicle`` and ``modify_weapon`` are deliberately
+    excluded because resolving inherited ``vp_normal`` would require the full
+    include chain rather than one source file. ``vp_scale_x/y/z`` are read as
+    visual-only preview values for both supported definition types.
+    """
+
+    lines = text.splitlines()
+    references: list[VehicleModelReference] = []
+    for block in find_script_blocks(text):
+        if block.kind not in ("new_vehicle", "new_weapon") \
+                or not block.complete:
+            continue
+        values = {
+            "vp_normal": None,
+            "vp_scale_x": 1.0,
+            "vp_scale_y": 1.0,
+            "vp_scale_z": 1.0,
+        }
+        for _line, key, raw, _indent in _generic_parameter_rows(lines, block):
+            if key not in values:
+                continue
+            try:
+                values[key] = float(raw)
+            except ValueError as exc:
+                raise CollisionScriptError(
+                    f"Non-numeric {key} in {block.kind} "
+                    f"{block.object_id}: {raw}") from exc
+        raw_vp = values["vp_normal"]
+        if raw_vp is None:
+            continue
+        if not math.isfinite(raw_vp):
+            raise CollisionScriptError(
+                f"Non-finite vp_normal in {block.kind} "
+                f"{block.object_id}: {raw_vp}")
+        vp_id = int(raw_vp)
+        if abs(raw_vp - vp_id) > 1e-9 or vp_id < 0:
+            raise CollisionScriptError(
+                f"Invalid vp_normal in {block.kind} "
+                f"{block.object_id}: {raw_vp}")
+        scales = (
+            float(values["vp_scale_x"]),
+            float(values["vp_scale_y"]),
+            float(values["vp_scale_z"]),
+        )
+        if not all(math.isfinite(value) and value >= 0.0 for value in scales):
+            raise CollisionScriptError(
+                f"Invalid vp_scale_x/y/z in {block.kind} "
+                f"{block.object_id}: {scales}")
+        references.append(VehicleModelReference(
+            block=block,
+            vp_normal=vp_id,
+            scale_x=scales[0],
+            scale_y=scales[1],
+            scale_z=scales[2],
+        ))
+    return references
+
+
+def vehicle_model_references(text: str) -> list[VehicleModelReference]:
+    """Compatibility helper returning only complete ``new_vehicle`` rows."""
+
+    return [
+        reference for reference in script_model_references(text)
+        if reference.block.kind == "new_vehicle"
+    ]
+
+
+def weapon_model_references(text: str) -> list[VehicleModelReference]:
+    """Return complete ``new_weapon`` rows with resolvable visual models."""
+
+    return [
+        reference for reference in script_model_references(text)
+        if reference.block.kind == "new_weapon"
+    ]
+
+
+def runtime_vp_table(
+        set_bas_path: str | Path,
+        embedded: EmbeddedVPSet,
+) -> tuple[VPTable, str, list[str]]:
+    """Resolve the same VP source precedence used by OpenUAStudio.
+
+    Loose ``VISPROTO.LST`` wins over the embedded table; the legacy Scripts
+    copy is only a fallback when neither of the stronger sources is usable.
+    Invalid optional files never replace a valid embedded database.
+    """
+
+    path = Path(set_bas_path)
+    set_root = path.parent.parent if path.parent.name.casefold() in (
+        "objects", "object") else path.parent
+    loose = set_root / "Loose" / "VISPROTO.LST"
+    scripts = set_root / "Scripts" / "VISPROTO.LST"
+    warnings: list[str] = []
+    if loose.is_file():
+        try:
+            return (
+                load_visproto(loose, require_terminator=True),
+                "Loose VISPROTO.LST",
+                warnings,
+            )
+        except (OSError, VPParseError) as exc:
+            warnings.append(
+                f"Invalid Loose VISPROTO.LST ignored: {exc}")
+    if embedded.entries:
+        return embedded.as_table(), "embedded visproto.base", warnings
+    if scripts.is_file():
+        try:
+            return (
+                load_visproto(scripts, require_terminator=False),
+                "fallback Scripts/VISPROTO.LST",
+                warnings,
+            )
+        except (OSError, VPParseError) as exc:
+            warnings.append(
+                f"Invalid Scripts/VISPROTO.LST ignored: {exc}")
+    raise CollisionScriptError(
+        "No usable VP database was found beside the selected SET.BAS.")
+
+
 def import_collision_block(
         text: str, block: ScriptBlock, compound_category: str,
 ) -> tuple[CollisionSphere | None, list[CollisionSphere], list[str]]:
@@ -398,10 +640,122 @@ def import_collision_block(
     return legacy, compounds, warnings
 
 
+def import_overeof_block(
+        text: str, block: ScriptBlock,
+) -> tuple[bool, float]:
+    """Read the active top-level vehicle ``overeof`` without changing the
+    established :func:`import_collision_block` return contract.
+
+    Commented lines are intentionally ignored by ``_parameter_rows`` exactly
+    as they are by Urban Assault.  If more than one active assignment exists,
+    the final one wins, matching normal script override behavior.
+    """
+
+    if not block.complete:
+        raise CollisionScriptError(
+            f"Parsing incompleto: manca end per {block.kind} "
+            f"{block.object_id}.")
+    enabled = False
+    value = 0.0
+    for _line, key, raw, _indent in _parameter_rows(
+            text.splitlines(), block):
+        if key != "overeof":
+            continue
+        try:
+            value = float(raw)
+        except ValueError as exc:
+            raise CollisionScriptError(
+                f"Valore non numerico per overeof: {raw}") from exc
+        enabled = True
+    return enabled, value
+
+
+def import_fire_points_block(
+        text: str, block: ScriptBlock,
+) -> tuple[bool, float, float, float, int]:
+    """Read active top-level vanilla vehicle fire-point parameters."""
+
+    if not block.complete:
+        raise CollisionScriptError(
+            f"Parsing incompleto: manca end per {block.kind} "
+            f"{block.object_id}.")
+    values = {
+        "fire_x": 0.0,
+        "fire_y": 0.0,
+        "fire_z": 0.0,
+        "num_weapons": 1.0,
+    }
+    enabled = False
+    for _line, key, raw, _indent in _parameter_rows(
+            text.splitlines(), block):
+        if key not in values:
+            continue
+        try:
+            values[key] = float(raw)
+        except ValueError as exc:
+            raise CollisionScriptError(
+                f"Valore non numerico per {key}: {raw}") from exc
+        enabled = True
+    return (
+        enabled,
+        values["fire_x"], values["fire_y"], values["fire_z"],
+        max(0, min(255, int(values["num_weapons"]))),
+    )
+
+
+def import_death_damage_block(
+        text: str, block: ScriptBlock,
+) -> tuple[bool, int, float]:
+    """Read the OpenUA vehicle death-damage AoE parameters."""
+
+    if not block.complete:
+        raise CollisionScriptError(
+            f"Parsing incompleto: manca end per {block.kind} "
+            f"{block.object_id}.")
+    damage = 0
+    radius = 0.0
+    enabled = False
+    for _line, key, raw, _indent in _parameter_rows(
+            text.splitlines(), block):
+        if key not in ("death_damage", "death_damage_radius"):
+            continue
+        try:
+            value = float(raw)
+        except ValueError as exc:
+            raise CollisionScriptError(
+                f"Valore non numerico per {key}: {raw}") from exc
+        if key == "death_damage":
+            damage = max(0, int(value))
+        else:
+            radius = max(0.0, value)
+        enabled = True
+    return enabled, damage, radius
+
+
 def collision_data_lines(project: CollisionProject) -> list[str]:
     lines: list[str] = []
     if project.legacy is not None:
         lines.append(f"radius = {_radius_number(project.legacy.radius)}")
+    if project.target_category == VEHICLE and project.overeof_enabled:
+        lines.append(f"overeof = {_number(project.overeof)}")
+    if project.target_category == VEHICLE and project.fire_points_enabled:
+        if lines:
+            lines.append("")
+        lines.extend([
+            f"fire_x = {_number(project.fire_x)}",
+            f"fire_y = {_number(project.fire_y)}",
+            f"fire_z = {_number(project.fire_z)}",
+            f"num_weapons = {max(0, min(255, int(project.num_weapons)))}",
+        ])
+    if project.target_category == VEHICLE and project.death_damage_enabled:
+        if lines:
+            lines.append("")
+        lines.extend([
+            "; OpenUA-only death damage AoE",
+            f"death_damage = {max(0, int(project.death_damage))}",
+            "death_damage_radius = "
+            f"{_number(project.death_damage_radius)}",
+        ])
     if project.compound:
         if lines:
             lines.append("")
@@ -441,8 +795,9 @@ def plan_script_update(
     project: CollisionProject,
     *,
     comment_missing: bool = True,
+    replace_all_managed: bool = False,
 ) -> tuple[str, str, str]:
-    """Patch only collision keys in one unambiguous script definition."""
+    """Patch only supported spatial/gameplay keys in one script block."""
 
     matches = [
         block for block in find_script_blocks(text)
@@ -463,6 +818,15 @@ def plan_script_update(
     lines = text.splitlines()
     rows = _parameter_rows(lines, block)
     radius_rows = [row for row in rows if row[1] == "radius"]
+    overeof_rows = [row for row in rows if row[1] == "overeof"]
+    fire_rows = [
+        row for row in rows
+        if row[1] in ("fire_x", "fire_y", "fire_z", "num_weapons")
+    ]
+    death_damage_rows = [
+        row for row in rows
+        if row[1] in ("death_damage", "death_damage_radius")
+    ]
     coll_rows = [row for row in rows if row[1].startswith("coll_")]
     indent = next(
         (row[3] for row in rows if row[3]),
@@ -471,6 +835,41 @@ def plan_script_update(
     replace: dict[int, list[str]] = {}
     delete: set[int] = set()
     insert_before_end: list[str] = []
+
+    if replace_all_managed:
+        # The loaded-script workflow treats the editor state as the canonical
+        # source for every parameter it manages.  Remove all active managed
+        # assignments from the selected block, then insert one clean block.
+        # Commented historical lines stay untouched because the game ignores
+        # them and deleting user notes silently would be destructive.
+        delete.update(row[0] for row in rows)
+        canonical = [
+            line for line in collision_data_lines(project)
+            if line != "; OpenUA-only death damage AoE"
+        ]
+        insert_before_end.extend(
+            indent + line if line else "" for line in canonical)
+
+        output: list[str] = []
+        for index, line in enumerate(lines):
+            if index == block.end_line and insert_before_end:
+                while output and not output[-1].strip():
+                    output.pop()
+                if output and output[-1].strip():
+                    output.append("")
+                output.extend(insert_before_end)
+                if output and output[-1].strip():
+                    output.append("")
+            if index in delete:
+                continue
+            output.append(line)
+        updated = newline.join(output) + (newline if had_final_newline else "")
+        preview = "".join(difflib.unified_diff(
+            text.splitlines(keepends=True),
+            updated.splitlines(keepends=True),
+            fromfile="current", tofile="Collision Editor preview",
+        ))
+        return updated, preview, block.name
 
     def replace_group(rows_to_replace, new_lines, disabled_label):
         if new_lines:
@@ -507,6 +906,37 @@ def plan_script_update(
                 f"coll_radius = {_radius_number(sphere.radius)}",
             ])
     replace_group(radius_rows, legacy_lines, "legacy radius")
+    # Overeof is a separate vanilla ground-alignment parameter, not a
+    # collision sphere.  Preserve existing script data unless the user has
+    # explicitly enabled management of it in a vehicle project.
+    if "vehicle" in kind and project.overeof_enabled:
+        replace_group(
+            overeof_rows,
+            [f"overeof = {_number(project.overeof)}"],
+            "overeof",
+        )
+    if "vehicle" in kind and project.fire_points_enabled:
+        replace_group(
+            fire_rows,
+            [
+                f"fire_x = {_number(project.fire_x)}",
+                f"fire_y = {_number(project.fire_y)}",
+                f"fire_z = {_number(project.fire_z)}",
+                "num_weapons = "
+                f"{max(0, min(255, int(project.num_weapons)))}",
+            ],
+            "fire points",
+        )
+    if "vehicle" in kind and project.death_damage_enabled:
+        replace_group(
+            death_damage_rows,
+            [
+                f"death_damage = {max(0, int(project.death_damage))}",
+                "death_damage_radius = "
+                f"{_number(project.death_damage_radius)}",
+            ],
+            "OpenUA death damage",
+        )
     replace_group(coll_rows, compound_lines, "compound collisions")
 
     output: list[str] = []
@@ -578,6 +1008,30 @@ def validate_project(
         errors.append("Nessun modello è caricato.")
     if not project.compound:
         warnings.append("Il progetto non contiene sfere compound.")
+    if (project.target_category == VEHICLE and project.compound
+            and not project.overeof_enabled):
+        warnings.append(
+            "Overeof non incluso: le collisioni compound non sostituiscono "
+            "l'allineamento verticale al terreno. Mantieni o ripristina "
+            "l'overeof vanilla nello script del veicolo.")
+    if (project.target_category == VEHICLE and project.overeof_enabled
+            and not math.isfinite(project.overeof)):
+        errors.append("Overeof deve essere un numero finito.")
+    if project.target_category == VEHICLE and project.fire_points_enabled:
+        if not all(math.isfinite(value) for value in (
+                project.fire_x, project.fire_y, project.fire_z)):
+            errors.append("Fire X/Y/Z devono essere numeri finiti.")
+        if not (0 <= int(project.num_weapons) <= 255):
+            errors.append("Num Weapons deve essere compreso tra 0 e 255.")
+    if project.target_category == VEHICLE and project.death_damage_enabled:
+        if int(project.death_damage) <= 0:
+            errors.append(
+                "Death Damage deve essere maggiore di 0 quando è incluso.")
+        if (not math.isfinite(project.death_damage_radius)
+                or project.death_damage_radius <= 0.0):
+            errors.append(
+                "Death Damage Radius deve essere maggiore di 0 quando è "
+                "incluso.")
     for index, sphere in enumerate(project.spheres()):
         if not all(math.isfinite(value) for value in (
                 sphere.x, sphere.y, sphere.z, sphere.radius)):
@@ -602,9 +1056,11 @@ class CollisionMoveGizmo(ModelSpaceGizmo):
 
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
+        # Keep the controls visually bold while allowing the properties
+        # column to fit on a 1080p desktop without vertical scrolling.
         self.set_visual_scale(
-            extent_ratio=0.94, margin=12.0,
-            handle_scale=1.55, line_scale=1.35)
+            extent_ratio=0.98, margin=8.0,
+            handle_scale=1.50, line_scale=1.35)
 
     @property
     def directions(self) -> tuple[tuple[int, int, int], ...]:
@@ -614,10 +1070,10 @@ class CollisionMoveGizmo(ModelSpaceGizmo):
         )
 
     def sizeHint(self) -> QSize:  # noqa: N802
-        return QSize(340, 255)
+        return QSize(320, 175)
 
     def minimumSizeHint(self) -> QSize:  # noqa: N802
-        return QSize(285, 220)
+        return QSize(260, 165)
 
 
 class RadiusItemDelegate(QStyledItemDelegate):
@@ -664,6 +1120,7 @@ class CollisionViewport(AssetViewport):
     """Existing AssetViewport plus the exact F10 three-ring overlay."""
 
     spherePicked = Signal(int)
+    firePointPicked = Signal(int)
     sphereContextMenuRequested = Signal(int, QPoint)
     sphereNudgeRequested = Signal(object)
     RING_SEGMENTS = 12
@@ -682,6 +1139,18 @@ class CollisionViewport(AssetViewport):
         self._pick_cycle_candidates: tuple[int, ...] = ()
         self._pick_cycle_offset = -1
         self._model_preview_scale = (1.0, 1.0, 1.0)
+        self._ground_alignment_available = True
+        self._ground_alignment_authored = False
+        self._ground_alignment_source_loaded = False
+        self._overeof = 0.0
+        self._ground_simulation_visible = True
+        self._overeof_visible = True
+        self._fire_points: list[tuple[float, float, float]] = []
+        self._fire_point_selected = -1
+        self._fire_points_visible = True
+        self._death_damage_radius = 0.0
+        self._death_damage_center = (0.0, 0.0, 0.0)
+        self._death_damage_visible = True
         self._model_preview_base_faces: list[
             tuple[tuple[float, float, float], ...]] = []
         self._model_preview_base_sen_boxes: list[
@@ -692,8 +1161,25 @@ class CollisionViewport(AssetViewport):
     def model_preview_scale(self) -> tuple[float, float, float]:
         return self._model_preview_scale
 
+    @property
+    def overeof_preview_offset(self) -> float:
+        """World-Y translation matching ``ground_y - overeof``."""
+
+        if not (self._ground_alignment_available
+                and self._ground_alignment_authored):
+            return 0.0
+        return -self._overeof
+
+    @property
+    def overeof_value(self) -> float:
+        return self._overeof
+
     def clear(self) -> None:
         super().clear()
+        self._ground_alignment_source_loaded = False
+        self._fire_points = []
+        self._fire_point_selected = -1
+        self._death_damage_radius = 0.0
         self._model_preview_base_faces = []
         self._model_preview_base_sen_boxes = []
         self._model_preview_base_owner_bounds = {}
@@ -711,6 +1197,7 @@ class CollisionViewport(AssetViewport):
         super().load_family(
             family, visible_owners, keep_camera=keep_camera,
             primary_owner=primary_owner)
+        self._ground_alignment_source_loaded = True
         self._capture_unscaled_model_geometry()
         self._apply_model_preview_scale()
 
@@ -733,30 +1220,58 @@ class CollisionViewport(AssetViewport):
             point[2] * scale[2],
         )
 
-    def _apply_model_preview_scale(self) -> None:
+    def _preview_point(self, point):
+        scaled = self._scaled_point(point, self._model_preview_scale)
+        return (
+            scaled[0],
+            scaled[1] + self.overeof_preview_offset,
+            scaled[2],
+        )
+
+    def local_scaled_owner_bounds(self, owner: str | None):
+        """Return scaled model-space bounds without the visual ground offset.
+
+        Collision coordinates are authored relative to the actor origin.
+        Suggested spheres and validation must therefore ignore the temporary
+        world placement produced by ``overeof``.
+        """
+
+        bounds = self._model_preview_base_owner_bounds.get(owner)
+        if bounds is None:
+            return None
+        x0, y0, z0, x1, y1, z1 = bounds
         scale = self._model_preview_scale
+        a = self._scaled_point((x0, y0, z0), scale)
+        b = self._scaled_point((x1, y1, z1), scale)
+        return (
+            min(a[0], b[0]), min(a[1], b[1]), min(a[2], b[2]),
+            max(a[0], b[0]), max(a[1], b[1]), max(a[2], b[2]),
+        )
+
+    def _apply_model_preview_scale(self) -> None:
         if len(self._model_preview_base_faces) == len(self._faces):
             for face, vertices in zip(
                     self._faces, self._model_preview_base_faces):
                 face.vertices = [
-                    self._scaled_point(vertex, scale)
-                    for vertex in vertices
+                    self._preview_point(vertex) for vertex in vertices
                 ]
         if len(self._model_preview_base_sen_boxes) == len(self._sen_boxes):
             self._sen_boxes = [
-                [self._scaled_point(point, scale) for point in box]
+                [self._preview_point(point) for point in box]
                 for box in self._model_preview_base_sen_boxes
             ]
-        scaled_bounds = {}
-        for owner, bounds in self._model_preview_base_owner_bounds.items():
+        preview_bounds = {}
+        offset_y = self.overeof_preview_offset
+        for owner in self._model_preview_base_owner_bounds:
+            bounds = self.local_scaled_owner_bounds(owner)
+            if bounds is None:
+                continue
             x0, y0, z0, x1, y1, z1 = bounds
-            a = self._scaled_point((x0, y0, z0), scale)
-            b = self._scaled_point((x1, y1, z1), scale)
-            scaled_bounds[owner] = (
-                min(a[0], b[0]), min(a[1], b[1]), min(a[2], b[2]),
-                max(a[0], b[0]), max(a[1], b[1]), max(a[2], b[2]),
+            preview_bounds[owner] = (
+                x0, y0 + offset_y, z0,
+                x1, y1 + offset_y, z1,
             )
-        self._owner_bounds = scaled_bounds
+        self._owner_bounds = preview_bounds
         self.update()
 
     def set_model_preview_scale(
@@ -766,6 +1281,50 @@ class CollisionViewport(AssetViewport):
             return
         self._model_preview_scale = values
         self._apply_model_preview_scale()
+
+    def set_ground_alignment(
+            self, available: bool, authored: bool, overeof: float) -> None:
+        value = float(overeof)
+        if not math.isfinite(value):
+            return
+        self._ground_alignment_available = bool(available)
+        self._ground_alignment_authored = bool(authored)
+        self._overeof = value
+        self._apply_model_preview_scale()
+
+    def set_ground_simulation_visible(self, visible: bool) -> None:
+        self._ground_simulation_visible = bool(visible)
+        self.update()
+
+    def set_overeof_visible(self, visible: bool) -> None:
+        self._overeof_visible = bool(visible)
+        self.update()
+
+    def set_fire_points(
+            self, points: list[tuple[float, float, float]],
+            selected: int = -1) -> None:
+        self._fire_points = [
+            tuple(float(value) for value in point) for point in points
+        ]
+        self._fire_point_selected = (
+            selected if 0 <= selected < len(self._fire_points) else -1)
+        self.update()
+
+    def set_fire_points_visible(self, visible: bool) -> None:
+        self._fire_points_visible = bool(visible)
+        self.update()
+
+    def set_death_damage_preview(
+            self, radius: float, center: tuple[float, float, float]) -> None:
+        value = float(radius)
+        self._death_damage_radius = (
+            value if math.isfinite(value) and value > 0.0 else 0.0)
+        self._death_damage_center = tuple(float(item) for item in center)
+        self.update()
+
+    def set_death_damage_visible(self, visible: bool) -> None:
+        self._death_damage_visible = bool(visible)
+        self.update()
 
     def set_collision_spheres(
         self, spheres: list[CollisionSphere], selected: int = -1,
@@ -785,13 +1344,61 @@ class CollisionViewport(AssetViewport):
     def set_textures_visible(self, visible: bool):
         self.set_mode("textured" if visible else "solid")
 
+    def _ground_grid_spec(self) -> tuple[float, float, float]:
+        size = 1.4 / max(abs(self._scale), 1e-9)
+        return self._center[0], self._center[2], size
+
+    def _draw_grid(self, painter: QPainter, target: QRectF, camera: dict) -> None:
+        """Draw a fixed Y=0 ground plane instead of a model-centered grid."""
+
+        if not (self._ground_alignment_available
+                and self._ground_alignment_source_loaded
+                and self._ground_simulation_visible):
+            return
+        center_x, center_z, size = self._ground_grid_spec()
+        corners_world = (
+            (center_x - size, 0.0, center_z - size),
+            (center_x + size, 0.0, center_z - size),
+            (center_x + size, 0.0, center_z + size),
+            (center_x - size, 0.0, center_z + size),
+        )
+        corners = QPolygonF([
+            self._project(self._camera_vertex(point), target, camera)
+            for point in corners_world
+        ])
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.setBrush(QColor(34, 118, 132, 42))
+        painter.drawPolygon(corners)
+
+        steps = 8
+        for i in range(-steps, steps + 1):
+            offset = i * size / steps
+            major = i == 0
+            painter.setPen(QPen(
+                QColor(70, 170, 180, 150 if major else 86),
+                1.25 if major else 0.8,
+            ))
+            for start, end in (
+                ((center_x + offset, 0.0, center_z - size),
+                 (center_x + offset, 0.0, center_z + size)),
+                ((center_x - size, 0.0, center_z + offset),
+                 (center_x + size, 0.0, center_z + offset)),
+            ):
+                a = self._project(
+                    self._camera_vertex(start), target, camera)
+                b = self._project(
+                    self._camera_vertex(end), target, camera)
+                painter.drawLine(a, b)
+
     def _is_sphere_drawn(self, sphere: CollisionSphere) -> bool:
         return (
             sphere.visible and self._collision_show.get(sphere.category, True)
             and sphere.radius > 0 and math.isfinite(sphere.radius)
         )
 
-    def _ring_points(self, sphere: CollisionSphere, axis: int):
+    def _ring_world_points(
+            self, sphere: CollisionSphere, axis: int
+    ) -> list[tuple[float, float, float]]:
         points = []
         for step in range(self.RING_SEGMENTS + 1):
             angle = 2.0 * math.pi * step / self.RING_SEGMENTS
@@ -803,12 +1410,38 @@ class CollisionViewport(AssetViewport):
                 world = (sphere.x + ca, sphere.y, sphere.z + sa)
             else:
                 world = (sphere.x, sphere.y + ca, sphere.z + sa)
-            camera = self._camera_vertex(world)
-            # AssetViewport clamps near projection instead of exposing a
-            # clip result.  Its normal editing camera keeps model geometry in
-            # front, so use the same projection for exact coordinate parity.
-            points.append(self._project(camera))
+            points.append(world)
         return points
+
+    def _ring_points(self, sphere: CollisionSphere, axis: int):
+        # Public/test helper retains the historical projected-point contract.
+        return [
+            self._project(self._camera_vertex(world))
+            for world in self._ring_world_points(sphere, axis)
+        ]
+
+    @staticmethod
+    def _camera_point_is_projectable(camera_point) -> bool:
+        # AssetViewport uses a camera distance of 4 and clamps its denominator
+        # at 0.2. OpenUA F10 instead drops points behind the near plane.
+        # Applying the equivalent rejection here prevents large AoE spheres
+        # from producing diagonal lines across the entire viewport.
+        return 4.0 - float(camera_point[2]) > 0.2
+
+    def _project_visible_world(self, world):
+        camera_point = self._camera_vertex(world)
+        if not self._camera_point_is_projectable(camera_point):
+            return None
+        screen = self._project(camera_point)
+        # OpenUA F10 also rejects projected points beyond a small screen
+        # margin, then restarts the ring at the next valid point. Without
+        # this guard, very large AoE radii can still draw long cross-screen
+        # chords even though the world-space radius itself is correct.
+        margin = 64.0
+        if not (-margin <= screen.x() <= self.width() + margin
+                and -margin <= screen.y() <= self.height() + margin):
+            return None
+        return screen
 
     def _screen_radius(self, sphere: CollisionSphere) -> float:
         center = self._project(self._camera_vertex(sphere.center))
@@ -886,7 +1519,8 @@ class CollisionViewport(AssetViewport):
         if event.key() == Qt.Key.Key_Tab:
             event.accept()
             return
-        if self._collision_selected >= 0 and not (
+        if (self._collision_selected >= 0
+                or self._fire_point_selected >= 0) and not (
                 event.modifiers() & (
                     Qt.KeyboardModifier.ControlModifier
                     | Qt.KeyboardModifier.AltModifier
@@ -918,9 +1552,145 @@ class CollisionViewport(AssetViewport):
     ) -> None:
         painter.setPen(pen)
         for axis in range(3):
-            points = self._ring_points(sphere, axis)
-            for start, end in zip(points, points[1:]):
-                painter.drawLine(start, end)
+            projected = [
+                self._project_visible_world(world)
+                for world in self._ring_world_points(sphere, axis)
+            ]
+            for start, end in zip(projected, projected[1:]):
+                # Match OpenUA's F10 conversion: a segment is emitted only
+                # when both endpoints survive near-plane projection.
+                if start is not None and end is not None:
+                    painter.drawLine(start, end)
+
+    def _draw_ground_alignment_overlay(self, painter: QPainter) -> None:
+        if not (self._ground_alignment_available
+                and self._ground_alignment_source_loaded):
+            return
+        camera = self._camera_state()
+        target = QRectF(self.rect())
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+        if self._ground_simulation_visible:
+            _center_x, _center_z, size = self._ground_grid_spec()
+            label_world = (
+                self._center[0] - size, 0.0, self._center[2] - size)
+            label_point = self._project(
+                self._camera_vertex(label_world), target, camera)
+            painter.setPen(QPen(QColor(125, 225, 230, 230), 1.2))
+            painter.drawText(
+                label_point + QPointF(8.0, -8.0),
+                "Ground Simulation / Y = 0",
+            )
+
+        if not (self._ground_alignment_authored and self._overeof_visible):
+            return
+        origin_world = (0.0, self.overeof_preview_offset, 0.0)
+        ground_world = (0.0, 0.0, 0.0)
+        origin = self._project(
+            self._camera_vertex(origin_world), target, camera)
+        ground = self._project(
+            self._camera_vertex(ground_world), target, camera)
+        pen = QPen(QColor(255, 190, 80, 235), 2.2)
+        pen.setStyle(Qt.PenStyle.DashLine)
+        painter.setPen(pen)
+        painter.drawLine(origin, ground)
+        painter.setBrush(QColor(255, 190, 80, 235))
+        painter.drawEllipse(origin, 4.0, 4.0)
+        painter.drawEllipse(ground, 4.0, 4.0)
+        midpoint = QPointF(
+            (origin.x() + ground.x()) * 0.5,
+            (origin.y() + ground.y()) * 0.5,
+        )
+        painter.drawText(
+            midpoint + QPointF(7.0, -6.0),
+            f"overeof = {_number(self._overeof)}",
+        )
+
+    def _draw_death_damage_overlay(self, painter: QPainter) -> None:
+        if not (self._ground_alignment_source_loaded
+                and self._death_damage_visible
+                and self._death_damage_radius > 0.0):
+            return
+        sphere = CollisionSphere(
+            VEHICLE,
+            self._death_damage_center[0],
+            self._death_damage_center[1],
+            self._death_damage_center[2],
+            self._death_damage_radius,
+        )
+        pen = QPen(DEATH_DAMAGE_COLOR, 2.2)
+        pen.setStyle(Qt.PenStyle.DashLine)
+        self._draw_collision_rings(painter, sphere, pen)
+        center = self._project_visible_world(sphere.center)
+        if center is None:
+            return
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+        painter.setPen(QPen(DEATH_DAMAGE_COLOR, 1.5))
+        painter.setBrush(DEATH_DAMAGE_COLOR)
+        painter.drawEllipse(center, 4.5, 4.5)
+        painter.drawText(
+            center + QPointF(8.0, -8.0),
+            f"Death Damage AoE / {_number(sphere.radius)}",
+        )
+
+    def _fire_point_screen_positions(self):
+        return [self._project_visible_world(point) for point in self._fire_points]
+
+    def _hit_fire_point(self, point: QPointF) -> int:
+        if not (self._ground_alignment_source_loaded
+                and self._fire_points_visible):
+            return -1
+        candidates = []
+        for index, screen in enumerate(self._fire_point_screen_positions()):
+            if screen is None:
+                continue
+            distance = math.hypot(point.x() - screen.x(), point.y() - screen.y())
+            if distance <= 16.0:
+                candidates.append((distance, index))
+        return min(candidates)[1] if candidates else -1
+
+    @staticmethod
+    def _draw_fire_marker(
+            painter: QPainter, screen: QPointF, pen: QPen,
+            brush: QColor, extent: float) -> None:
+        painter.setPen(pen)
+        painter.setBrush(brush)
+        painter.drawEllipse(screen, extent * 0.6, extent * 0.6)
+        painter.drawLine(
+            QPointF(screen.x() - extent, screen.y()),
+            QPointF(screen.x() + extent, screen.y()))
+        painter.drawLine(
+            QPointF(screen.x(), screen.y() - extent),
+            QPointF(screen.x(), screen.y() + extent))
+
+    def _draw_fire_points_overlay(self, painter: QPainter) -> None:
+        if not (self._ground_alignment_source_loaded
+                and self._fire_points_visible and self._fire_points):
+            return
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+        fill = QColor(
+            FIRE_POINT_COLOR.red(), FIRE_POINT_COLOR.green(),
+            FIRE_POINT_COLOR.blue(), 225)
+        rack_selected = (
+            self._fire_point_selected >= 0 and len(self._fire_points) > 1)
+        for index, screen in enumerate(self._fire_point_screen_positions()):
+            if screen is None:
+                continue
+            is_primary = index == self._fire_point_selected
+            if is_primary or rack_selected:
+                self._draw_fire_marker(
+                    painter, screen,
+                    QPen(QColor(255, 255, 255),
+                         6.0 if is_primary else 4.5),
+                    QColor(255, 255, 255, 235),
+                    11.0 if is_primary else 10.5)
+            self._draw_fire_marker(
+                painter, screen, QPen(FIRE_POINT_COLOR, 2.4), fill, 10.0)
+            painter.setPen(QPen(
+                QColor(255, 255, 255)
+                if (is_primary or rack_selected) else FIRE_POINT_COLOR,
+                1.5))
+            painter.drawText(
+                screen + QPointF(9.0, -9.0), f"F{index + 1}")
 
     def paintEvent(self, event) -> None:  # noqa: N802
         if self._collision_show_model:
@@ -928,6 +1698,9 @@ class CollisionViewport(AssetViewport):
         else:
             painter = QPainter(self)
             painter.fillRect(self.rect(), QColor(24, 26, 32))
+            if self._show_grid:
+                self._draw_grid(
+                    painter, QRectF(self.rect()), self._camera_state())
             painter.setPen(QColor(130, 135, 145))
             painter.drawText(
                 QRectF(self.rect()), Qt.AlignmentFlag.AlignCenter,
@@ -936,6 +1709,7 @@ class CollisionViewport(AssetViewport):
             painter.end()
 
         painter = QPainter(self)
+        self._draw_ground_alignment_overlay(painter)
         # OpenUA F10 uses unfilled, aliased one-pixel lines and 12 segments.
         painter.setRenderHint(QPainter.RenderHint.Antialiasing, False)
         selected_pair = None
@@ -948,6 +1722,8 @@ class CollisionViewport(AssetViewport):
             color = TYPE_COLORS[sphere.category]
             self._draw_collision_rings(
                 painter, sphere, QPen(color, 1.0))
+        self._draw_death_damage_overlay(painter)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing, False)
         if selected_pair is not None:
             _index, sphere = selected_pair
             color = TYPE_COLORS[sphere.category]
@@ -962,14 +1738,28 @@ class CollisionViewport(AssetViewport):
             painter.setBrush(QColor(
                 color.red(), color.green(), color.blue(), 235))
             painter.drawEllipse(center, 6.0, 6.0)
+        self._draw_fire_points_overlay(painter)
         painter.end()
 
     def mousePressEvent(self, event: QMouseEvent) -> None:  # noqa: N802
         if event.button() == Qt.MouseButton.LeftButton:
+            fire_index = self._hit_fire_point(event.position())
+            if fire_index >= 0:
+                self.setFocus(Qt.FocusReason.MouseFocusReason)
+                self._fire_point_selected = fire_index
+                self._collision_selected = -1
+                self._camera_interacting = False
+                self._press_pos = None
+                self._last_mouse = event.position().toPoint()
+                self.firePointPicked.emit(fire_index)
+                self.update()
+                event.accept()
+                return
             index = self._hit_sphere(event.position())
             if index >= 0:
                 self.setFocus(Qt.FocusReason.MouseFocusReason)
                 self._collision_selected = index
+                self._fire_point_selected = -1
                 self._camera_interacting = False
                 self._press_pos = None
                 self._last_mouse = event.position().toPoint()
@@ -978,9 +1768,20 @@ class CollisionViewport(AssetViewport):
                 event.accept()
                 return
         if event.button() == Qt.MouseButton.RightButton:
+            fire_index = self._hit_fire_point(event.position())
+            if fire_index >= 0:
+                self._fire_point_selected = fire_index
+                self._collision_selected = -1
+                self.firePointPicked.emit(fire_index)
+                self.update()
+                self.sphereContextMenuRequested.emit(
+                    -1, event.globalPosition().toPoint())
+                event.accept()
+                return
             index = self._hit_sphere(event.position(), cycle=False)
             if index >= 0:
                 self._collision_selected = index
+                self._fire_point_selected = -1
                 self.spherePicked.emit(index)
                 self.update()
             self.sphereContextMenuRequested.emit(
@@ -991,9 +1792,18 @@ class CollisionViewport(AssetViewport):
 
     def mouseDoubleClickEvent(self, event: QMouseEvent) -> None:  # noqa: N802
         if event.button() == Qt.MouseButton.LeftButton:
-            index = self._hit_sphere(event.position(), cycle=False)
-            self._collision_selected = index
-            self.spherePicked.emit(index)
+            fire_index = self._hit_fire_point(event.position())
+            if fire_index >= 0:
+                self._fire_point_selected = fire_index
+                self._collision_selected = -1
+                self.firePointPicked.emit(fire_index)
+            else:
+                index = self._hit_sphere(event.position(), cycle=False)
+                self._collision_selected = index
+                self._fire_point_selected = -1
+                self.spherePicked.emit(index)
+                if index < 0:
+                    self.firePointPicked.emit(-1)
             self.update()
             event.accept()
             return
@@ -1003,7 +1813,7 @@ class CollisionViewport(AssetViewport):
 class ImportCollisionDialog(QDialog):
     def __init__(self, parent, path: Path, text: str) -> None:
         super().__init__(parent)
-        self.setWindowTitle("Import Existing Collisions")
+        self.setWindowTitle("Import Collision Text")
         self.resize(620, 390)
         self.path = path
         self.text = text
@@ -1020,13 +1830,11 @@ class ImportCollisionDialog(QDialog):
         form.addRow("Definition", self.block_combo)
         form.addRow("Interpret coll_* as", self.category_combo)
         layout.addLayout(form)
-        note = QLabel(
-            "Green/blue is editor-only. Imported coll_* data is unchanged.")
-        note.setWordWrap(True)
-        layout.addWidget(note)
         buttons = QDialogButtonBox(
             QDialogButtonBox.StandardButton.Open
             | QDialogButtonBox.StandardButton.Cancel)
+        buttons.button(
+            QDialogButtonBox.StandardButton.Open).setText("Import")
         buttons.accepted.connect(self.accept)
         buttons.rejected.connect(self.reject)
         layout.addWidget(buttons)
@@ -1038,10 +1846,132 @@ class ImportCollisionDialog(QDialog):
         )
 
 
-class ApplyScriptDialog(QDialog):
-    def __init__(self, parent, project: CollisionProject) -> None:
+class OpenScriptObjectDialog(QDialog):
+    """Choose one vehicle/weapon definition and the SET.BAS VP database."""
+
+    def __init__(
+            self, parent, script_path: Path,
+            references: list[VehicleModelReference],
+            current_set_bas: Path | None = None,
+    ) -> None:
         super().__init__(parent)
-        self.setWindowTitle("Apply Collisions to Script")
+        self.setWindowTitle("Import Vehicle / Weapon from Script")
+        self.resize(720, 300)
+        self._all_references = list(references)
+        layout = QVBoxLayout(self)
+        path_label = QLabel(str(script_path))
+        path_label.setWordWrap(True)
+        layout.addWidget(path_label)
+        form = QGridLayout()
+        form.setHorizontalSpacing(8)
+        form.setVerticalSpacing(6)
+        self.search_edit = QLineEdit()
+        self.search_edit.setPlaceholderText("Search by name or numeric ID")
+        self.block_combo = QComboBox()
+        self.vp_label = QLabel("—")
+        self.set_path_edit = QLineEdit()
+        self.set_path_edit.setPlaceholderText("Select the SET.BAS VP database")
+        if current_set_bas is not None:
+            self.set_path_edit.setText(str(current_set_bas))
+        browse = QPushButton("Browse")
+        browse.clicked.connect(self._browse_set)
+        form.addWidget(QLabel("Search"), 0, 0)
+        form.addWidget(self.search_edit, 0, 1, 1, 2)
+        form.addWidget(QLabel("Definition"), 1, 0)
+        form.addWidget(self.block_combo, 1, 1, 1, 2)
+        form.addWidget(QLabel("Resolved VP"), 2, 0)
+        form.addWidget(self.vp_label, 2, 1, 1, 2)
+        form.addWidget(QLabel("SET.BAS database"), 3, 0)
+        form.addWidget(self.set_path_edit, 3, 1)
+        form.addWidget(browse, 3, 2)
+        layout.addLayout(form)
+        buttons = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Open
+            | QDialogButtonBox.StandardButton.Cancel)
+        buttons.button(
+            QDialogButtonBox.StandardButton.Open).setText("Import")
+        self.open_button = buttons.button(
+            QDialogButtonBox.StandardButton.Open)
+        buttons.accepted.connect(self._accept_if_valid)
+        buttons.rejected.connect(self.reject)
+        layout.addWidget(buttons)
+        self.search_edit.textChanged.connect(self._filter_references)
+        self.block_combo.currentIndexChanged.connect(self._sync_reference)
+        self._filter_references()
+
+    def _browse_set(self):
+        path, _ = QFileDialog.getOpenFileName(
+            self, "Select SET.BAS VP database",
+            self.set_path_edit.text(),
+            "SET.BAS archive (SET.BAS *.bas *.BAS);;All files (*)")
+        if path:
+            self.set_path_edit.setText(path)
+
+    def _filter_references(self, *_args):
+        query = self.search_edit.text().strip().casefold()
+        terms = [part for part in query.split() if part]
+        current = self.block_combo.currentData()
+        with QSignalBlocker(self.block_combo):
+            self.block_combo.clear()
+            for reference in self._all_references:
+                block = reference.block
+                haystack = (
+                    f"{block.kind} {block.object_id} {block.name} "
+                    f"vp_normal {reference.vp_normal}"
+                ).casefold()
+                if query.isdigit():
+                    if block.object_id != int(query):
+                        continue
+                elif terms and not all(term in haystack for term in terms):
+                    continue
+                self.block_combo.addItem(reference.label, reference)
+            if current is not None:
+                for index in range(self.block_combo.count()):
+                    candidate = self.block_combo.itemData(index)
+                    if candidate == current:
+                        self.block_combo.setCurrentIndex(index)
+                        break
+        self._sync_reference()
+
+    def _sync_reference(self, *_args):
+        reference = self.block_combo.currentData()
+        self.vp_label.setText(
+            f"vp_normal = {reference.vp_normal}"
+            if reference is not None else "No matching definition")
+        self.open_button.setEnabled(reference is not None)
+
+    def _accept_if_valid(self):
+        if self.block_combo.currentData() is None:
+            QMessageBox.warning(
+                self, "Definition required",
+                "Choose a vehicle or weapon definition first.")
+            return
+        path = Path(self.set_path_edit.text())
+        if not path.is_file():
+            QMessageBox.warning(
+                self, "SET.BAS required",
+                "Select the SET.BAS archive that defines the selected VP.")
+            return
+        self.accept()
+
+    def selected(self) -> tuple[VehicleModelReference, Path]:
+        return self.block_combo.currentData(), Path(self.set_path_edit.text())
+
+
+# Compatibility alias for integrations importing the previous class name.
+OpenVehicleScriptDialog = OpenScriptObjectDialog
+
+
+class ApplyScriptDialog(QDialog):
+    def __init__(
+            self, parent, project: CollisionProject, *,
+            replace_all_managed: bool = False,
+            initial_path: str | Path | None = None,
+            initial_kind: str | None = None,
+            initial_id: int | None = None,
+    ) -> None:
+        super().__init__(parent)
+        self.setWindowTitle("Apply to Existing Script")
         self.resize(820, 620)
         self.project = project
         self.updated_text = ""
@@ -1049,11 +1979,16 @@ class ApplyScriptDialog(QDialog):
         self._source_text = ""
         self._source_encoding = "utf-8"
         self._source_bom = False
+        self.replace_all_managed = bool(replace_all_managed)
+        self._script_blocks: list[ScriptBlock] = []
         layout = QVBoxLayout(self)
         form = QGridLayout()
         self.path_edit = QLineEdit()
-        browse = QPushButton("Browse...")
+        browse = QPushButton("Browse")
         browse.clicked.connect(self._browse)
+        self.search_edit = QLineEdit()
+        self.search_edit.setPlaceholderText("Search by name or numeric ID")
+        self.block_combo = QComboBox()
         self.kind_combo = QComboBox()
         self.kind_combo.addItems(SCRIPT_TYPES)
         default_kind = (
@@ -1066,18 +2001,35 @@ class ApplyScriptDialog(QDialog):
         self.comment_missing = QCheckBox(
             "Comment existing collision data when absent in the project")
         self.comment_missing.setChecked(True)
+        if self.replace_all_managed:
+            self.setWindowTitle("Overwrite Loaded Definition")
+            self.comment_missing.setText(
+                "Replace all active Collision Editor parameters with the "
+                "current values")
+            self.comment_missing.setChecked(True)
+            self.comment_missing.setEnabled(False)
+            self.comment_missing.setToolTip(
+                "The loaded vehicle block is rewritten canonically only for "
+                "parameters managed by Collision Editor. Unrelated script "
+                "data and comments are preserved.")
         form.addWidget(QLabel("Script"), 0, 0)
         form.addWidget(self.path_edit, 0, 1)
         form.addWidget(browse, 0, 2)
-        form.addWidget(QLabel("Block type"), 1, 0)
-        form.addWidget(self.kind_combo, 1, 1, 1, 2)
-        form.addWidget(QLabel("Numeric ID"), 2, 0)
-        form.addWidget(self.id_spin, 2, 1, 1, 2)
-        form.addWidget(QLabel("Detected name"), 3, 0)
-        form.addWidget(self.detected_name, 3, 1, 1, 2)
-        form.addWidget(self.comment_missing, 4, 0, 1, 3)
+        form.addWidget(QLabel("Search"), 1, 0)
+        form.addWidget(self.search_edit, 1, 1, 1, 2)
+        form.addWidget(QLabel("Definition"), 2, 0)
+        form.addWidget(self.block_combo, 2, 1, 1, 2)
+        form.addWidget(QLabel("Block type"), 3, 0)
+        form.addWidget(self.kind_combo, 3, 1, 1, 2)
+        form.addWidget(QLabel("Numeric ID"), 4, 0)
+        form.addWidget(self.id_spin, 4, 1, 1, 2)
+        form.addWidget(QLabel("Detected name"), 5, 0)
+        form.addWidget(self.detected_name, 5, 1, 1, 2)
+        form.addWidget(self.comment_missing, 6, 0, 1, 3)
         layout.addLayout(form)
-        layout.addWidget(QLabel("Preview (only radius/coll_* may change)"))
+        layout.addWidget(QLabel(
+            "Preview (only supported spatial/collision parameters may "
+            "change)"))
         self.preview = QPlainTextEdit()
         self.preview.setReadOnly(True)
         layout.addWidget(self.preview, 1)
@@ -1091,9 +2043,15 @@ class ApplyScriptDialog(QDialog):
         self.apply_button = self.buttons.button(
             QDialogButtonBox.StandardButton.Apply)
         self.apply_button.setEnabled(False)
-        self.buttons.accepted.connect(self._apply)
+        # Apply has ApplyRole, so QDialogButtonBox.accepted is not emitted
+        # for it.  Connect the actual button or the dialog only previews and
+        # never writes the selected script.
+        self.apply_button.clicked.connect(self._apply)
         self.buttons.rejected.connect(self.reject)
         layout.addWidget(self.buttons)
+        self.search_edit.textChanged.connect(self._filter_script_blocks)
+        self.block_combo.currentIndexChanged.connect(
+            self._sync_selected_script_block)
         for widget_signal in (
             self.path_edit.textChanged,
             self.kind_combo.currentTextChanged,
@@ -1101,6 +2059,14 @@ class ApplyScriptDialog(QDialog):
             self.comment_missing.toggled,
         ):
             widget_signal.connect(self.refresh_preview)
+        if initial_path is not None:
+            self.path_edit.setText(str(initial_path))
+        if initial_kind is not None:
+            self.kind_combo.setCurrentText(initial_kind)
+        if initial_id is not None:
+            self.id_spin.setValue(int(initial_id))
+        self._load_script_blocks()
+        self.refresh_preview()
 
     def _browse(self):
         path, _ = QFileDialog.getOpenFileName(
@@ -1109,10 +2075,74 @@ class ApplyScriptDialog(QDialog):
         if path:
             self.path_edit.setText(path)
 
+    def _load_script_blocks(self, *_args) -> None:
+        path = Path(self.path_edit.text())
+        self._script_blocks = []
+        if path.is_file():
+            try:
+                source_text, _encoding, _bom = read_script_file(path)
+                self._script_blocks = find_script_blocks(source_text)
+            except (OSError, UnicodeError):
+                pass
+        self._filter_script_blocks(refresh=False)
+
+    def _filter_script_blocks(self, *_args, refresh: bool = True) -> None:
+        query = self.search_edit.text().strip().casefold()
+        terms = [part for part in query.split() if part]
+        current = self.block_combo.currentData()
+        preferred = (
+            self.kind_combo.currentText().casefold(), self.id_spin.value())
+        matches = []
+        for block in self._script_blocks:
+            haystack = (
+                f"{block.kind} {block.object_id} {block.name}"
+            ).casefold()
+            if query.isdigit():
+                if block.object_id != int(query):
+                    continue
+            elif terms and not all(term in haystack for term in terms):
+                continue
+            matches.append(block)
+        with QSignalBlocker(self.block_combo):
+            self.block_combo.clear()
+            for block in matches:
+                self.block_combo.addItem(block.label, block)
+            selected = None
+            for index, block in enumerate(matches):
+                if (block.kind.casefold(), block.object_id) == preferred:
+                    selected = index
+                    break
+            if selected is None and current in matches:
+                selected = matches.index(current)
+            if selected is None and matches:
+                selected = 0
+            if selected is not None:
+                self.block_combo.setCurrentIndex(selected)
+        block = self.block_combo.currentData()
+        if block is not None and (
+                self.kind_combo.currentText().casefold() != block.kind.casefold()
+                or self.id_spin.value() != block.object_id):
+            with QSignalBlocker(self.kind_combo), QSignalBlocker(self.id_spin):
+                self.kind_combo.setCurrentText(block.kind)
+                self.id_spin.setValue(block.object_id)
+        if refresh:
+            self.refresh_preview()
+
+    def _sync_selected_script_block(self, *_args) -> None:
+        block = self.block_combo.currentData()
+        if block is None:
+            self.refresh_preview()
+            return
+        with QSignalBlocker(self.kind_combo), QSignalBlocker(self.id_spin):
+            self.kind_combo.setCurrentText(block.kind)
+            self.id_spin.setValue(block.object_id)
+        self.refresh_preview()
+
     def refresh_preview(self, *_args):
         self.error_label.clear()
         self.preview.clear()
         self.apply_button.setEnabled(False)
+        self._load_script_blocks()
         path = Path(self.path_edit.text())
         if not path.is_file():
             self.detected_name.setText("—")
@@ -1126,6 +2156,7 @@ class ApplyScriptDialog(QDialog):
                 self.id_spin.value(),
                 self.project,
                 comment_missing=self.comment_missing.isChecked(),
+                replace_all_managed=self.replace_all_managed,
             )
         except (OSError, UnicodeError, CollisionScriptError) as exc:
             self.detected_name.setText("—")
@@ -1160,8 +2191,15 @@ class CollisionEditorWindow(QMainWindow):
         self.resize(1100, 720)
         self.project = CollisionProject()
         self.family: AssetFamily | None = None
+        self._vp_embedded: EmbeddedVPSet | None = None
+        self._vp_table: VPTable | None = None
+        self._vp_table_source: str = ""
+        self._active_script_path: Path | None = None
+        self._active_script_kind: str = ""
+        self._active_script_id: int | None = None
         self._current_owner: str | None = None
         self._selected = -1
+        self._selected_fire_point = -1
         self._modified = False
         self._syncing = False
         self._last_directory = Path.home()
@@ -1169,10 +2207,13 @@ class CollisionEditorWindow(QMainWindow):
         self._redo: list[tuple] = []
         self._radius_slider_active = False
         self._radius_spin_active = False
+        self._overeof_spin_active = False
+        self._vehicle_preview_active_edits: set[str] = set()
         self._model_filter_expansion: dict[int, bool] | None = None
 
         self.viewport = CollisionViewport()
         self.viewport.spherePicked.connect(self._select_sphere)
+        self.viewport.firePointPicked.connect(self._select_fire_point)
         self.viewport.sphereContextMenuRequested.connect(
             self._show_sphere_context_menu)
         self.viewport.sphereNudgeRequested.connect(self._gizmo_nudge)
@@ -1184,7 +2225,8 @@ class CollisionEditorWindow(QMainWindow):
             QAbstractItemView.SelectionMode.SingleSelection)
         self.model_tree.currentItemChanged.connect(self._model_changed)
         self.sphere_tree = QTreeWidget()
-        self.sphere_tree.setHeaderLabels(["Sphere", "Radius", "Index"])
+        self.sphere_tree.setHeaderLabels(
+            ["Sphere", "Radius", "Visible", "Index"])
         self.sphere_tree.setSelectionMode(
             QAbstractItemView.SelectionMode.SingleSelection)
         self.sphere_tree.setEditTriggers(
@@ -1198,6 +2240,13 @@ class CollisionEditorWindow(QMainWindow):
             self._sphere_tree_double_clicked)
         self.sphere_tree.itemChanged.connect(
             self._sphere_tree_item_changed)
+        self.fire_point_tree = QTreeWidget()
+        self.fire_point_tree.setHeaderLabels(["Point", "X", "Y", "Z"])
+        self.fire_point_tree.setSelectionMode(
+            QAbstractItemView.SelectionMode.SingleSelection)
+        self.fire_point_tree.currentItemChanged.connect(
+            self._fire_point_tree_selection_changed)
+
         self.sphere_tree.setContextMenuPolicy(
             Qt.ContextMenuPolicy.CustomContextMenu)
         self.sphere_tree.customContextMenuRequested.connect(
@@ -1213,26 +2262,62 @@ class CollisionEditorWindow(QMainWindow):
     def _build_actions(self):
         file_menu = self.menuBar().addMenu("&File")
         self.file_menu = file_menu
-        self.open_base_action = QAction("Open BAS Archive...", self)
+        self.open_base_action = QAction("Import BAS Archive", self)
         self.open_base_action.setShortcut(QKeySequence.StandardKey.Open)
         self.open_base_action.triggered.connect(self.open_base_dialog)
-        file_menu.addAction(self.open_base_action)
-        self.open_sklt_action = QAction("Open SKLT...", self)
+        self.open_sklt_action = QAction("Import SKLT", self)
         self.open_sklt_action.triggered.connect(self.open_sklt_dialog)
-        file_menu.addAction(self.open_sklt_action)
+        self.open_vehicle_script_action = QAction(
+            "Import Vehicle / Weapon from Script", self)
+        self.open_vehicle_script_action.setIconText("Import Script Object")
+        self.open_vehicle_script_action.triggered.connect(
+            self.open_vehicle_script_dialog)
+        self.import_action = QAction("Import Collision Text", self)
+        self.import_action.setIconText("Import Collision Text")
+        self.import_action.triggered.connect(self.import_collisions)
+
+        self.file_import_menu = file_menu.addMenu("Import")
+        for action in (
+                self.open_base_action, self.open_sklt_action,
+                self.open_vehicle_script_action, self.import_action):
+            self.file_import_menu.addAction(action)
+
+        self.export_action = QAction("Export Collision Text", self)
+        self.export_action.setIconText("Export Collision Text")
+        self.export_action.triggered.connect(self.export_text)
+        self.copy_output_action = QAction(
+            "Copy Output to Clipboard", self)
+        self.copy_output_action.triggered.connect(self.copy_output)
+
+        self.file_export_menu = file_menu.addMenu("Export")
+        for action in (self.export_action, self.copy_output_action):
+            self.file_export_menu.addAction(action)
+
+        self.apply_script_action = QAction(
+            "Apply to Existing Script", self)
+        self.apply_script_action.setIconText("Apply to Existing Script")
+        self.apply_script_action.triggered.connect(self.apply_to_script)
+        self.save_loaded_script_action = QAction("Overwrite", self)
+        self.save_loaded_script_action.setIconText("Overwrite")
+        self.save_loaded_script_action.setToolTip(
+            "Overwrite the vehicle or weapon definition previously imported "
+            "from a script. A backup and preview are still provided.")
+        self.save_loaded_script_action.triggered.connect(
+            self.overwrite_loaded_script)
+        self.overwrite_loaded_action = self.save_loaded_script_action
+
+        self.file_script_menu = file_menu.addMenu("Script")
+        self.file_script_menu.addAction(self.apply_script_action)
+        self.file_script_menu.addAction(self.save_loaded_script_action)
+
         file_menu.addSeparator()
-        import_action = QAction("Import Existing Collisions...", self)
-        import_action.triggered.connect(self.import_collisions)
-        file_menu.addAction(import_action)
-        export_action = QAction("Export Collision Text...", self)
-        export_action.triggered.connect(self.export_text)
-        file_menu.addAction(export_action)
-        copy_action = QAction("Copy Output to Clipboard", self)
-        copy_action.triggered.connect(self.copy_output)
-        file_menu.addAction(copy_action)
-        apply_action = QAction("Apply to Existing Script...", self)
-        apply_action.triggered.connect(self.apply_to_script)
-        file_menu.addAction(apply_action)
+        self.exit_action = QAction("Exit", self)
+        self.exit_action.triggered.connect(self.close)
+        file_menu.addAction(self.exit_action)
+        self.create_suggested_action = QAction(
+            "Create Suggested Sphere", self)
+        self.create_suggested_action.triggered.connect(
+            self.create_suggested)
 
         edit_menu = self.menuBar().addMenu("&Edit")
         self.undo_action = QAction("Undo", self)
@@ -1310,6 +2395,14 @@ class CollisionEditorWindow(QMainWindow):
              self.viewport.set_collision_category_visible(VEHICLE, value)),
             ("Show Weapon Collisions", True, lambda value:
              self.viewport.set_collision_category_visible(WEAPON, value)),
+            ("Show Ground Simulation", True,
+             self.viewport.set_ground_simulation_visible),
+            ("Show Overeof", True,
+             self.viewport.set_overeof_visible),
+            ("Show Fire Points", True,
+             self.viewport.set_fire_points_visible),
+            ("Show Death Damage AoE", True,
+             self.viewport.set_death_damage_visible),
         )
         for text, checked, slot in viewpoint_options:
             action = QAction(text, self)
@@ -1331,17 +2424,6 @@ class CollisionEditorWindow(QMainWindow):
         toolbar.setObjectName("collisionTools")
         toolbar.setMovable(False)
         self.addToolBar(Qt.ToolBarArea.TopToolBarArea, toolbar)
-        toolbar.addWidget(QLabel(" View preset: "))
-        self.toolbar_view_preset_combo = QComboBox()
-        self.toolbar_view_preset_combo.addItems(VIEW_PRESETS)
-        self.toolbar_view_preset_combo.currentTextChanged.connect(
-            self._on_view_preset_changed)
-        toolbar.addWidget(self.toolbar_view_preset_combo)
-        toolbar.addSeparator()
-        for action in (
-                self.open_base_action, self.open_sklt_action):
-            toolbar.addAction(action)
-        toolbar.addSeparator()
         for action in (
                 self.add_legacy_action, self.add_vehicle_action,
                 self.add_weapon_action, self.duplicate_action,
@@ -1390,6 +2472,13 @@ class CollisionEditorWindow(QMainWindow):
         toolbar.setObjectName("modelPreviewScaleTools")
         toolbar.setMovable(False)
         self.addToolBar(Qt.ToolBarArea.TopToolBarArea, toolbar)
+        toolbar.addWidget(QLabel(" View preset: "))
+        self.toolbar_view_preset_combo = QComboBox()
+        self.toolbar_view_preset_combo.addItems(VIEW_PRESETS)
+        self.toolbar_view_preset_combo.currentTextChanged.connect(
+            self._on_view_preset_changed)
+        toolbar.addWidget(self.toolbar_view_preset_combo)
+        toolbar.addSeparator()
         toolbar.addWidget(QLabel(" Model Preview Scale: "))
         self.model_scale_spins = {}
         for axis in ("X", "Y", "Z"):
@@ -1419,6 +2508,18 @@ class CollisionEditorWindow(QMainWindow):
         self.reset_model_scale_button.clicked.connect(
             self._reset_model_preview_scale)
         toolbar.addWidget(self.reset_model_scale_button)
+        toolbar.addSeparator()
+        # Keep the output/apply workflow on the full-width toolbar. These
+        # actions are shared with the File menu, so there is one execution
+        # path and no duplicate button logic hiding at the bottom of the
+        # properties panel.
+        for action in (
+                self.create_suggested_action,
+                self.export_action,
+                self.copy_output_action,
+                self.import_action,
+                self.apply_script_action):
+            toolbar.addAction(action)
         self.model_preview_scale_toolbar = toolbar
         # Compatibility alias retained for integrations that only used this
         # attribute to locate the preview-scale controls.
@@ -1470,7 +2571,7 @@ class CollisionEditorWindow(QMainWindow):
         properties = QWidget()
         right = QVBoxLayout(properties)
         right.setContentsMargins(4, 3, 4, 3)
-        right.setSpacing(2)
+        right.setSpacing(1)
         project_box = QGroupBox("Project")
         project_form = QFormLayout(project_box)
         project_form.setContentsMargins(6, 5, 6, 5)
@@ -1500,7 +2601,165 @@ class CollisionEditorWindow(QMainWindow):
         project_form.addRow(self.vanilla_collision_notice)
         right.addWidget(project_box)
 
-        selected_box = QGroupBox("Selected Sphere")
+        self.ground_alignment_box = QGroupBox("Ground Alignment")
+        ground_layout = QVBoxLayout(self.ground_alignment_box)
+        ground_layout.setContentsMargins(6, 4, 6, 4)
+        ground_layout.setSpacing(3)
+        ground_controls = QGridLayout()
+        ground_controls.setHorizontalSpacing(5)
+        ground_controls.setVerticalSpacing(3)
+        self.overeof_check = QCheckBox("Include Overeof")
+        self.overeof_check.setToolTip(
+            "When enabled, the model and collision preview follow the "
+            "OpenUA placement rule actor_y = ground_y - overeof, and the "
+            "value is included in vehicle text output.")
+        self.overeof_check.toggled.connect(
+            self._overeof_enabled_changed)
+        ground_controls.addWidget(self.overeof_check, 0, 0)
+        self.overeof_spin = self._coordinate_spin()
+        # Overeof is authored as a practical placement value. One visible
+        # decimal keeps useful half/tenth-unit precision without presenting
+        # noisy values such as 20,0000 in the compact properties panel.
+        self.overeof_spin.setDecimals(1)
+        self.overeof_spin.setSingleStep(1.0)
+        self.overeof_spin.setKeyboardTracking(True)
+        self.overeof_spin.setMinimumWidth(105)
+        self.overeof_spin.valueChanged.connect(
+            self._overeof_value_changed)
+        self.overeof_spin.editingFinished.connect(
+            self._finish_overeof_edit)
+        ground_controls.addWidget(self.overeof_spin, 0, 1)
+        self.suggest_overeof_button = QPushButton("Suggest from Model")
+        self.suggest_overeof_button.setToolTip(
+            "Use the lowest scaled model point as a starting Overeof "
+            "estimate. The result remains manually editable.")
+        self.suggest_overeof_button.clicked.connect(
+            self._suggest_overeof_from_bounds)
+        ground_controls.addWidget(self.suggest_overeof_button, 1, 0)
+        self.reset_overeof_button = QPushButton("Reset")
+        self.reset_overeof_button.setToolTip(
+            "Reset Overeof preview to 0 and omit it from output.")
+        self.reset_overeof_button.clicked.connect(self._reset_overeof)
+        ground_controls.addWidget(self.reset_overeof_button, 1, 1)
+        ground_controls.setColumnStretch(1, 1)
+        ground_layout.addLayout(ground_controls)
+        self.ground_alignment_notice = QLabel("")
+        self.ground_alignment_notice.hide()
+        right.addWidget(self.ground_alignment_box)
+
+        self.fire_points_box = QGroupBox("Fire Points (Vanilla)")
+        fire_layout = QVBoxLayout(self.fire_points_box)
+        fire_layout.setContentsMargins(6, 4, 6, 4)
+        fire_layout.setSpacing(3)
+        self.fire_points_check = QCheckBox("Include Fire Points")
+        self.fire_points_check.setToolTip(
+            "Include vanilla fire_x, fire_y, fire_z and num_weapons in "
+            "output and show their exact projectile spawn positions.")
+        self.fire_points_check.toggled.connect(
+            self._fire_points_enabled_changed)
+        fire_layout.addWidget(self.fire_points_check)
+        fire_grid = QGridLayout()
+        fire_grid.setHorizontalSpacing(5)
+        fire_grid.setVerticalSpacing(3)
+        self.fire_point_spins = {}
+        for index, axis in enumerate(("X", "Y", "Z")):
+            row, pair = divmod(index, 2)
+            fire_grid.addWidget(QLabel(axis), row, pair * 2)
+            spin = CompactScaleSpinBox()
+            spin.setRange(-1_000_000.0, 1_000_000.0)
+            spin.setDecimals(3)
+            spin.setSingleStep(1.0)
+            spin.setKeyboardTracking(True)
+            spin.setMinimumWidth(72)
+            spin.setToolTip(
+                f"Vanilla fire_{axis.lower()} projectile spawn offset.")
+            key = f"fire_{axis.lower()}"
+            spin.valueChanged.connect(
+                lambda value, field=key:
+                self._fire_point_value_changed(field, value))
+            spin.editingFinished.connect(
+                lambda field=key: self._finish_vehicle_preview_edit(field))
+            self.fire_point_spins[axis.lower()] = spin
+            fire_grid.addWidget(spin, row, pair * 2 + 1)
+        self.fire_x_spin = self.fire_point_spins["x"]
+        self.fire_y_spin = self.fire_point_spins["y"]
+        self.fire_z_spin = self.fire_point_spins["z"]
+        fire_grid.addWidget(QLabel("Weapons"), 1, 2)
+        self.num_weapons_spin = QSpinBox()
+        self.num_weapons_spin.setRange(0, 255)
+        self.num_weapons_spin.setValue(1)
+        self.num_weapons_spin.setMinimumWidth(72)
+        self.num_weapons_spin.setToolTip(
+            "Vanilla num_weapons. Values 0 and 1 produce one point; two "
+            "or more points stay evenly distributed and symmetric on X.")
+        self.num_weapons_spin.valueChanged.connect(
+            self._num_weapons_changed)
+        self.num_weapons_spin.editingFinished.connect(
+            lambda: self._finish_vehicle_preview_edit("num_weapons"))
+        fire_grid.addWidget(self.num_weapons_spin, 1, 3)
+        fire_grid.setColumnStretch(1, 1)
+        fire_grid.setColumnStretch(3, 1)
+        fire_layout.addLayout(fire_grid)
+        self.fire_point_notice = QLabel("")
+        self.fire_point_notice.hide()
+        self.fire_point_tree.setMinimumHeight(90)
+        self.fire_point_tree.setMaximumHeight(135)
+        fire_header = self.fire_point_tree.header()
+        fire_header.setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
+        for column in (1, 2, 3):
+            fire_header.setSectionResizeMode(
+                column, QHeaderView.ResizeMode.ResizeToContents)
+            self.fire_point_tree.headerItem().setTextAlignment(
+                column, Qt.AlignmentFlag.AlignRight
+                | Qt.AlignmentFlag.AlignVCenter)
+        fire_layout.addWidget(self.fire_point_tree)
+        right.addWidget(self.fire_points_box)
+
+        self.death_damage_box = QGroupBox("Death Damage AoE (OpenUA)")
+        death_layout = QGridLayout(self.death_damage_box)
+        death_layout.setContentsMargins(6, 4, 6, 4)
+        death_layout.setHorizontalSpacing(5)
+        death_layout.setVerticalSpacing(3)
+        self.death_damage_check = QCheckBox("Include Death Damage AoE")
+        self.death_damage_check.setToolTip(
+            "Include OpenUA death_damage and death_damage_radius. The "
+            "fuchsia dashed sphere is gameplay AoE, not a collision.")
+        self.death_damage_check.toggled.connect(
+            self._death_damage_enabled_changed)
+        death_layout.addWidget(self.death_damage_check, 0, 0, 1, 4)
+        death_layout.addWidget(QLabel("Damage"), 1, 0)
+        self.death_damage_spin = QSpinBox()
+        self.death_damage_spin.setRange(0, 2_000_000_000)
+        self.death_damage_spin.setSingleStep(100)
+        self.death_damage_spin.setMinimumWidth(88)
+        self.death_damage_spin.valueChanged.connect(
+            self._death_damage_value_changed)
+        self.death_damage_spin.editingFinished.connect(
+            lambda: self._finish_vehicle_preview_edit("death_damage"))
+        death_layout.addWidget(self.death_damage_spin, 1, 1)
+        death_layout.addWidget(QLabel("Radius"), 1, 2)
+        self.death_damage_radius_spin = CompactScaleSpinBox()
+        self.death_damage_radius_spin.setRange(0.0, 1_000_000.0)
+        self.death_damage_radius_spin.setDecimals(1)
+        self.death_damage_radius_spin.setSingleStep(1.0)
+        self.death_damage_radius_spin.setKeyboardTracking(True)
+        self.death_damage_radius_spin.setMinimumWidth(82)
+        self.death_damage_radius_spin.valueChanged.connect(
+            self._death_damage_radius_changed)
+        self.death_damage_radius_spin.editingFinished.connect(
+            lambda: self._finish_vehicle_preview_edit(
+                "death_damage_radius"))
+        death_layout.addWidget(self.death_damage_radius_spin, 1, 3)
+        death_note = QLabel("OpenUA only")
+        death_note.setStyleSheet("color: #e1aa62; font-size: 10px;")
+        death_layout.addWidget(death_note, 2, 0, 1, 4)
+        self.death_damage_notice = death_note
+        death_layout.setColumnStretch(1, 1)
+        death_layout.setColumnStretch(3, 1)
+        right.addWidget(self.death_damage_box)
+
+        selected_box = QGroupBox("Selected Element")
+        self.selected_box = selected_box
         selected_layout = QHBoxLayout(selected_box)
         selected_layout.setContentsMargins(6, 4, 6, 4)
         selected_layout.setSpacing(5)
@@ -1510,6 +2769,7 @@ class CollisionEditorWindow(QMainWindow):
         self.index_value = QLabel("None")
         self.type_value.hide()
         self.index_value.hide()
+        self.selected_element_label = QLabel("None")
         self.visible_check = QCheckBox("Active / visible")
         self.visible_check.toggled.connect(self._visibility_changed)
         self.runtime_radius_value = QLabel("")
@@ -1517,14 +2777,15 @@ class CollisionEditorWindow(QMainWindow):
             Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
         self.runtime_radius_value.setStyleSheet("color: #d9a35f;")
         self.runtime_radius_value.hide()
-        selected_layout.addWidget(self.visible_check)
+        selected_layout.addWidget(self.selected_element_label)
         selected_layout.addStretch(1)
+        selected_layout.addWidget(self.visible_check)
         selected_layout.addWidget(self.runtime_radius_value)
 
         spheres_box = QGroupBox("Spheres")
         spheres_layout = QVBoxLayout(spheres_box)
         self.spheres_box = spheres_box
-        self.sphere_tree.setMinimumHeight(180)
+        self.sphere_tree.setMinimumHeight(150)
         self.sphere_tree.setSizePolicy(
             QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
         spheres_box.setSizePolicy(
@@ -1536,10 +2797,14 @@ class CollisionEditorWindow(QMainWindow):
             1, QHeaderView.ResizeMode.ResizeToContents)
         sphere_header.setSectionResizeMode(
             2, QHeaderView.ResizeMode.ResizeToContents)
+        sphere_header.setSectionResizeMode(
+            3, QHeaderView.ResizeMode.ResizeToContents)
         self.sphere_tree.headerItem().setTextAlignment(
             1, Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
         self.sphere_tree.headerItem().setTextAlignment(
             2, Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+        self.sphere_tree.headerItem().setTextAlignment(
+            3, Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
         self.sphere_tree.headerItem().setToolTip(
             1, "Double-click a Radius value to edit the sphere size.")
         spheres_layout.addWidget(self.sphere_tree, 1)
@@ -1571,18 +2836,21 @@ class CollisionEditorWindow(QMainWindow):
         radius_layout.addWidget(self.radius_spin)
         right.addWidget(radius_box)
 
-        transform_box = QGroupBox("Move Sphere")
+        transform_box = QGroupBox("Move Element")
+        self.transform_box = transform_box
         transform_box.setToolTip(
+            "Move the selected compound sphere or Fire Point. "
             "With the viewport focused: Left/Right move on X, Up/Down move "
             "on Z, and Page Up/Page Down move on Y. Every key press uses "
             "the current Move strength value.")
         transform_layout = QVBoxLayout(transform_box)
-        transform_layout.setContentsMargins(6, 6, 6, 6)
-        transform_layout.setSpacing(3)
+        transform_layout.setContentsMargins(5, 3, 5, 3)
+        transform_layout.setSpacing(2)
         self.gizmo = CollisionMoveGizmo()
-        self.gizmo.setMinimumSize(285, 220)
+        self.gizmo.setMinimumSize(260, 165)
+        self.gizmo.setMaximumHeight(175)
         self.gizmo.setSizePolicy(
-            QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
+            QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
         self.gizmo.directionTriggered.connect(self._gizmo_nudge)
         transform_layout.addWidget(self.gizmo, 1)
         strength_row = QHBoxLayout()
@@ -1602,29 +2870,13 @@ class CollisionEditorWindow(QMainWindow):
         strength_row.addWidget(self.move_strength_slider, 1)
         strength_row.addWidget(self.move_strength_spin)
         transform_layout.addLayout(strength_row)
+        transform_box.setMaximumHeight(235)
         transform_box.setSizePolicy(
-            QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Preferred)
+            QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Fixed)
         right.addWidget(transform_box)
         right.addWidget(spheres_box, 1)
         right.addWidget(selected_box)
 
-        suggested = QPushButton("Create Suggested Sphere")
-        suggested.clicked.connect(self.create_suggested)
-        right.addWidget(suggested)
-        output_row = QGridLayout()
-        for position, (text, slot) in enumerate((
-            ("Export Collision Text", self.export_text),
-            ("Copy Output to Clipboard", self.copy_output),
-            ("Import Existing", self.import_collisions),
-            ("Apply to Script", self.apply_to_script),
-        )):
-            button = QPushButton(text)
-            button.clicked.connect(slot)
-            button.setSizePolicy(
-                QSizePolicy.Policy.Ignored,
-                QSizePolicy.Policy.Fixed)
-            output_row.addWidget(button, position // 2, position % 2)
-        right.addLayout(output_row)
         properties_scroll = QScrollArea()
         properties_scroll.setWidgetResizable(True)
         properties_scroll.setFrameShape(QFrame.Shape.NoFrame)
@@ -1679,6 +2931,7 @@ class CollisionEditorWindow(QMainWindow):
         if not self._undo:
             return
         self._radius_spin_active = False
+        self._vehicle_preview_active_edits.clear()
         self._redo.append(self.project.snapshot())
         self.project.restore(self._undo.pop())
         self._selected = min(
@@ -1690,6 +2943,7 @@ class CollisionEditorWindow(QMainWindow):
         if not self._redo:
             return
         self._radius_spin_active = False
+        self._vehicle_preview_active_edits.clear()
         self._undo.append(self.project.snapshot())
         self.project.restore(self._redo.pop())
         self._selected = min(
@@ -1720,41 +2974,300 @@ class CollisionEditorWindow(QMainWindow):
 
     def open_base_dialog(self):
         path, _ = QFileDialog.getOpenFileName(
-            self, "Open BAS Archive", str(self._last_directory),
+            self, "Import BAS Archive", str(self._last_directory),
             "BAS archives (SET.BAS *.bas *.BAS);;All files (*)")
         if path:
             self.open_base(path)
 
+    def _current_set_bas_path(self) -> Path | None:
+        if self._vp_embedded is None:
+            return None
+        return Path(self._vp_embedded.source_path)
+
+    def _clear_script_link(self) -> None:
+        self._active_script_path = None
+        self._active_script_kind = ""
+        self._active_script_id = None
+
+    def open_vehicle_script_dialog(self):
+        path, _ = QFileDialog.getOpenFileName(
+            self, "Import vehicle / weapon definition",
+            str(self._last_directory),
+            "OpenUA scripts (*.txt *.scr *.ini *.ldf);;All files (*)")
+        if path:
+            self.open_vehicle_script(path)
+
+    def open_vehicle_script(
+            self, path: str | Path, *, vehicle_id: int | None = None,
+            object_id: int | None = None, object_kind: str | None = None,
+            set_bas_path: str | Path | None = None) -> bool:
+        """Load one ``new_vehicle`` or ``new_weapon`` through ``vp_normal``.
+
+        ``vehicle_id`` remains as a compatibility argument and implies
+        ``new_vehicle``. New callers may use ``object_id`` plus ``object_kind``.
+        The linked asset and script are read-only until an explicit Apply or
+        Overwrite action is confirmed.
+        """
+
+        script_path = Path(path)
+        try:
+            text, _encoding, _bom = read_script_file(script_path)
+            references = script_model_references(text)
+        except (OSError, UnicodeError, CollisionScriptError) as exc:
+            QMessageBox.critical(
+                self, "Script object load failed", str(exc))
+            return False
+        if not references:
+            QMessageBox.warning(
+                self, "No resolvable definition",
+                "No complete new_vehicle or new_weapon block with an active "
+                "vp_normal was found. modify_* inheritance is not guessed.")
+            return False
+
+        reference = None
+        requested_id = object_id
+        requested_kind = object_kind.lower() if object_kind else None
+        if vehicle_id is not None:
+            requested_id = int(vehicle_id)
+            requested_kind = "new_vehicle"
+        if requested_id is not None:
+            matches = [
+                candidate for candidate in references
+                if candidate.block.object_id == int(requested_id)
+                and (requested_kind is None
+                     or candidate.block.kind == requested_kind)
+            ]
+            if len(matches) != 1:
+                kind_text = requested_kind or "new_vehicle/new_weapon"
+                QMessageBox.warning(
+                    self, "Definition not found",
+                    f"Expected exactly one {kind_text} {requested_id} with "
+                    "vp_normal.")
+                return False
+            reference = matches[0]
+
+        current_set = self._current_set_bas_path()
+        chosen_set = Path(set_bas_path) if set_bas_path is not None else current_set
+        if reference is None or chosen_set is None:
+            dialog = OpenScriptObjectDialog(
+                self, script_path, references, current_set)
+            if dialog.exec() != QDialog.DialogCode.Accepted:
+                return False
+            reference, chosen_set = dialog.selected()
+
+        chosen_set = Path(chosen_set)
+        if current_set is None or current_set.resolve() != chosen_set.resolve():
+            if not self.open_base(chosen_set):
+                return False
+        if self._vp_embedded is None or self._vp_table is None:
+            QMessageBox.critical(
+                self, "VP database unavailable",
+                "The selected archive did not expose a SET.BAS VP table.")
+            return False
+        if not 0 <= reference.vp_normal < len(self._vp_table.entries):
+            QMessageBox.critical(
+                self, "VP out of range",
+                f"vp_normal {reference.vp_normal} is outside the SET.BAS "
+                f"database (0..{len(self._vp_table.entries) - 1}).")
+            return False
+        if not self._select_model_by_vp(reference.vp_normal):
+            entry = self._vp_table.entry(reference.vp_normal)
+            QMessageBox.critical(
+                self, "VP model unavailable",
+                f"VP {reference.vp_normal} resolves to "
+                f"{entry.base_name}, but its SKLT could not be selected "
+                "from the loaded SET.BAS family. The active VP table may "
+                "reference a loose BASE that is not embedded in this SET.")
+            return False
+
+        block = reference.block
+        target_category = (
+            WEAPON if block.kind == "new_weapon" else VEHICLE)
+        try:
+            legacy, compounds, warnings = import_collision_block(
+                text, block, target_category)
+            if target_category == VEHICLE:
+                overeof_enabled, overeof = import_overeof_block(text, block)
+                (fire_enabled, fire_x, fire_y, fire_z,
+                 num_weapons) = import_fire_points_block(text, block)
+                (death_enabled, death_damage,
+                 death_radius) = import_death_damage_block(text, block)
+            else:
+                overeof_enabled, overeof = False, 0.0
+                fire_enabled, fire_x, fire_y, fire_z = False, 0.0, 0.0, 0.0
+                num_weapons = 1
+                death_enabled, death_damage, death_radius = False, 0, 0.0
+        except CollisionScriptError as exc:
+            QMessageBox.critical(
+                self, "Script parameter import failed", str(exc))
+            return False
+
+        current_item = self.model_tree.currentItem()
+        source_model = (
+            current_item.data(0, _MODEL_NAME_ROLE)
+            if current_item is not None else "")
+        fallback_name = (
+            "Weapon" if target_category == WEAPON else "Vehicle")
+        self.project = CollisionProject(
+            name=block.name or f"{fallback_name}_{block.object_id}",
+            source_model=source_model,
+            source_base=chosen_set.name,
+            target_category=target_category,
+            model_scale_x=reference.scale_x,
+            model_scale_y=reference.scale_y,
+            model_scale_z=reference.scale_z,
+            overeof_enabled=overeof_enabled,
+            overeof=overeof,
+            fire_points_enabled=fire_enabled,
+            fire_x=fire_x,
+            fire_y=fire_y,
+            fire_z=fire_z,
+            num_weapons=num_weapons,
+            death_damage_enabled=death_enabled,
+            death_damage=death_damage,
+            death_damage_radius=death_radius,
+            legacy=legacy,
+            compound=compounds,
+        )
+        self._active_script_path = script_path
+        self._active_script_kind = block.kind
+        self._active_script_id = block.object_id
+        self._selected = 0 if self.project.spheres() else -1
+        self._selected_fire_point = -1
+        self._undo.clear()
+        self._redo.clear()
+        self._last_directory = script_path.parent
+        self._set_modified(False)
+        self.source_label.setText(
+            f"{chosen_set.name}\nVP {reference.vp_normal}: "
+            f"{source_model or '<model>'}\n"
+            f"VP source: {self._vp_table_source}\n"
+            f"Script: {script_path.name} — {block.kind} {block.object_id}")
+        self._sync_all()
+        message = (
+            f"Loaded {block.kind} {block.object_id} through VP "
+            f"{reference.vp_normal} with preview scale "
+            f"{_number(reference.scale_x)}/"
+            f"{_number(reference.scale_y)}/"
+            f"{_number(reference.scale_z)}.")
+        if warnings:
+            message += " " + " ".join(warnings)
+        self.statusBar().showMessage(message, 7000)
+        return True
+
+    def _select_model_by_vp(self, vp_id: int) -> bool:
+        matches = []
+        for index in range(self.model_tree.topLevelItemCount()):
+            item = self.model_tree.topLevelItem(index)
+            vp_ids = item.data(0, _MODEL_VP_ROLE) or ()
+            if int(vp_id) in vp_ids:
+                matches.append(item)
+        if not matches:
+            return False
+        # VP slots are unique.  If a malformed archive exposes more than one
+        # candidate, prefer the root object whose source offset matched the
+        # embedded VP entry and keep the operation deterministic.
+        self.model_tree.setCurrentItem(matches[0])
+        return True
+
+    def overwrite_loaded_script(self):
+        if (self._active_script_path is None
+                or self._active_script_id is None
+                or not self._active_script_kind):
+            QMessageBox.information(
+                self, "No linked script definition",
+                "Import a vehicle or weapon from a script first. For an "
+                "arbitrary target, use Apply to Existing Script.")
+            return
+        expected_category = (
+            WEAPON if "weapon" in self._active_script_kind else VEHICLE)
+        if self.project.target_category != expected_category:
+            QMessageBox.warning(
+                self, "Target category mismatch",
+                "The linked script definition and current project category "
+                "do not match.")
+            return
+        if not self._validate_for_output():
+            return
+        dialog = ApplyScriptDialog(
+            self, self.project,
+            replace_all_managed=True,
+            initial_path=self._active_script_path,
+            initial_kind=self._active_script_kind,
+            initial_id=self._active_script_id,
+        )
+        dialog.path_edit.setReadOnly(True)
+        dialog.search_edit.setEnabled(False)
+        dialog.block_combo.setEnabled(False)
+        dialog.kind_combo.setEnabled(False)
+        dialog.id_spin.setEnabled(False)
+        if dialog.exec() == QDialog.DialogCode.Accepted:
+            self._set_modified(False)
+            self.statusBar().showMessage(
+                f"Loaded definition overwritten. Backup: "
+                f"{dialog.backup_path}", 7000)
+
+    def save_loaded_vehicle_script(self):
+        """Compatibility alias for the previous vehicle-only action."""
+
+        self.overwrite_loaded_script()
+
     def open_base(self, path: str | Path):
+        self._clear_script_link()
+        path = Path(path)
+        embedded = None
+        vp_table = None
+        vp_source = ""
+        vp_warnings: list[str] = []
+        if path.name.casefold() == "set.bas":
+            try:
+                embedded = reconstruct_embedded_vps(path)
+                vp_table, vp_source, vp_warnings = runtime_vp_table(
+                    path, embedded)
+            except (VPEmbeddedError, OSError, ValueError,
+                    CollisionScriptError) as exc:
+                QMessageBox.critical(
+                    self, "VP database unavailable",
+                    "SET.BAS was found, but its visual-prototype table could "
+                    f"not be reconstructed.\n\n{exc}")
+                return False
         try:
             family = _public_dependency(
                 "load_asset_family", load_asset_family)(path)
         except Exception as exc:
             QMessageBox.critical(
                 self, "Load failed", f"No file was modified.\n\n{exc}")
-            return
+            return False
         if not any(obj.skeleton is not None for obj in family.all_objects()):
             QMessageBox.warning(
                 self, "No models",
                 "The BASE was parsed, but no SKLT model could be resolved.")
         self.family = family
-        self._last_directory = Path(path).parent
-        self.project.source_base = Path(path).name
+        self._vp_embedded = embedded
+        self._vp_table = vp_table
+        self._vp_table_source = vp_source
+        self._last_directory = path.parent
+        self.project.source_base = path.name
         self._fill_models(family)
         self.source_label.setText(
-            f"{Path(path).name}\n"
+            f"{path.name}\n"
             f"{len([o for o in family.all_objects() if o.skeleton])} models; "
-            f"{len(family.textures)} textures loaded")
+            f"{len(family.textures)} textures loaded"
+            + (f"\nVP source: {vp_source}" if vp_source else ""))
+        if vp_warnings:
+            self.statusBar().showMessage(" ".join(vp_warnings), 9000)
         self._set_modified()
+        return True
 
     def open_sklt_dialog(self):
         path, _ = QFileDialog.getOpenFileName(
-            self, "Open external SKLT", str(self._last_directory),
+            self, "Import external SKLT", str(self._last_directory),
             "Skeletons (*.sklt *.skl *.SKLT *.SKL);;All files (*)")
         if path:
             self.open_sklt(path)
 
     def open_sklt(self, path: str | Path):
+        self._clear_script_link()
         try:
             family = _public_dependency(
                 "load_manual_family", load_manual_family)(path, [], [])
@@ -1768,6 +3281,9 @@ class CollisionEditorWindow(QMainWindow):
                 "\n".join(family.warnings) or "The model could not be loaded.")
             return
         self.family = family
+        self._vp_embedded = None
+        self._vp_table = None
+        self._vp_table_source = ""
         self._last_directory = Path(path).parent
         self.project.source_base = ""
         self._fill_models(family)
@@ -1779,18 +3295,67 @@ class CollisionEditorWindow(QMainWindow):
     def _fill_models(self, family: AssetFamily):
         self.model_tree.clear()
         model_index = 0
+        vp_ids_by_offset: dict[int, list[int]] = {}
+        vp_ids_by_skeleton: dict[str, list[int]] = {}
+        if self._vp_embedded is not None and self._vp_table is not None:
+            embedded_by_base: dict[str, list] = {}
+            for entry in self._vp_embedded.entries:
+                embedded_by_base.setdefault(
+                    normalize_base_name(entry.base_name), []).append(entry)
+            for active_entry in self._vp_table.entries:
+                candidates = embedded_by_base.get(
+                    normalize_base_name(active_entry.base_name), [])
+                selected_entry = None
+                # Repeated dummy/BASE assignments are common.  Preserve the
+                # positional match when the active table and embedded table
+                # agree at this slot; otherwise accept only a unique match.
+                if active_entry.index < len(self._vp_embedded.entries):
+                    positional = self._vp_embedded.entries[active_entry.index]
+                    if (normalize_base_name(positional.base_name)
+                            == normalize_base_name(active_entry.base_name)):
+                        selected_entry = positional
+                if selected_entry is None and len(candidates) == 1:
+                    selected_entry = candidates[0]
+                if selected_entry is None:
+                    continue
+                if selected_entry.source_objt_offset >= 0:
+                    vp_ids_by_offset.setdefault(
+                        selected_entry.source_objt_offset, []).append(
+                            active_entry.index)
+                key = normalize_skeleton_name(selected_entry.skeleton_name)
+                if key:
+                    vp_ids_by_skeleton.setdefault(key, []).append(
+                        active_entry.index)
         for obj in family.all_objects():
             if obj.skeleton is None:
                 continue
+            source_offset = int(getattr(
+                obj.base_object, "source_objt_offset", -1))
+            vp_ids = list(vp_ids_by_offset.get(source_offset, []))
+            if not vp_ids and not vp_ids_by_offset:
+                skeleton_key = normalize_skeleton_name(
+                    obj.base_object.skeleton_name or "")
+                candidates = vp_ids_by_skeleton.get(skeleton_key, [])
+                if candidates:
+                    vp_ids = list(dict.fromkeys(candidates))
+            if not vp_ids and self._vp_embedded is None:
+                vp_ids = [model_index]
+            vp_ids = sorted(set(vp_ids))
+            exact_vp = bool(vp_ids)
+            vp_text = ", ".join(map(str, vp_ids)) if vp_ids else "—"
             item = QTreeWidgetItem([
                 obj.base_object.skeleton_name or obj.owner_path,
-                str(model_index),
+                vp_text,
             ])
             full_path = obj.base_object.skeleton_name or obj.owner_path
             item.setData(0, Qt.ItemDataRole.UserRole, obj.owner_path)
             item.setData(0, _MODEL_NAME_ROLE, obj.display_name)
+            item.setData(
+                0, _MODEL_VP_ROLE, tuple(vp_ids) if exact_vp else ())
             item.setToolTip(0, full_path)
-            item.setToolTip(1, f"VP {model_index}")
+            item.setToolTip(
+                1, f"VP {vp_text}" if exact_vp
+                else "Child model without its own VP slot")
             item.setTextAlignment(
                 1, Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
             self.model_tree.addTopLevelItem(item)
@@ -1830,7 +3395,7 @@ class CollisionEditorWindow(QMainWindow):
         self._sync_all()
 
     def _model_bounds(self):
-        return self.viewport._owner_bounds.get(self._current_owner)
+        return self.viewport.local_scaled_owner_bounds(self._current_owner)
 
     def _default_sphere(self, category: str) -> CollisionSphere:
         bounds = self._model_bounds()
@@ -1853,6 +3418,7 @@ class CollisionEditorWindow(QMainWindow):
             sphere.x = sphere.y = sphere.z = 0.0
             self.project.legacy = sphere
         self._selected = 0
+        self._selected_fire_point = -1
         self._set_modified()
         self._sync_all()
 
@@ -1860,6 +3426,7 @@ class CollisionEditorWindow(QMainWindow):
         self._push_undo()
         self.project.compound.append(self._default_sphere(category))
         self._selected = len(self.project.spheres()) - 1
+        self._selected_fire_point = -1
         self._set_modified()
         self._sync_all()
 
@@ -1888,6 +3455,7 @@ class CollisionEditorWindow(QMainWindow):
         self._selected = (
             (1 if self.project.legacy is not None else 0)
             + compound_index + 1)
+        self._selected_fire_point = -1
         self._set_modified()
         self._sync_all()
 
@@ -1934,6 +3502,7 @@ class CollisionEditorWindow(QMainWindow):
             sphere.category = target_category
             detail = ""
 
+        self._selected_fire_point = -1
         self._set_modified()
         self._sync_all()
         self.statusBar().showMessage(
@@ -1963,6 +3532,7 @@ class CollisionEditorWindow(QMainWindow):
         self._selected = (
             (1 if self.project.legacy is not None else 0)
             + compound_index + 1)
+        self._selected_fire_point = -1
         self._set_modified()
         self._sync_all()
         self.statusBar().showMessage(
@@ -1982,6 +3552,7 @@ class CollisionEditorWindow(QMainWindow):
             del self.project.compound[compound_index]
         self._selected = min(
             self._selected, len(self.project.spheres()) - 1)
+        self._selected_fire_point = -1
         self._set_modified()
         self._sync_all()
 
@@ -2067,7 +3638,24 @@ class CollisionEditorWindow(QMainWindow):
     def _select_sphere(self, index: int):
         self._radius_spin_active = False
         self._selected = index
+        self._selected_fire_point = -1
         self._sync_all()
+
+    def _select_fire_point(self, index: int):
+        self._radius_spin_active = False
+        point_count = len(fire_point_positions(self.project))
+        self._selected_fire_point = (
+            index if (self.project.fire_points_enabled
+                      and 0 <= index < point_count) else -1)
+        self._selected = -1
+        self._sync_all()
+
+    def _fire_point_tree_selection_changed(self, current, _previous):
+        if self._syncing or current is None:
+            return
+        index = current.data(0, _FIRE_POINT_INDEX_ROLE)
+        if isinstance(index, int):
+            self._select_fire_point(index)
 
     def _sphere_tree_selection_changed(self, current, _previous):
         if self._syncing or current is None:
@@ -2163,20 +3751,224 @@ class CollisionEditorWindow(QMainWindow):
         self._set_modified()
         self._sync_all()
 
+    def _overeof_enabled_changed(self, enabled: bool):
+        if self._syncing or self.project.target_category != VEHICLE:
+            return
+        enabled = bool(enabled)
+        if enabled == self.project.overeof_enabled:
+            return
+        self._overeof_spin_active = False
+        self._push_undo()
+        self.project.overeof_enabled = enabled
+        self._set_modified()
+        self._sync_all()
+
+    def _overeof_value_changed(self, value: float):
+        if self._syncing or self.project.target_category != VEHICLE:
+            return
+        value = float(value)
+        if not math.isfinite(value) or abs(value - self.project.overeof) < 1e-9:
+            return
+        if not self._overeof_spin_active:
+            self._push_undo()
+            self._overeof_spin_active = True
+        self.project.overeof = value
+        self.project.overeof_enabled = True
+        self._set_modified()
+        self._sync_all()
+
+    def _finish_overeof_edit(self):
+        self._overeof_spin_active = False
+
+    def _suggest_overeof_from_bounds(self):
+        bounds = self._model_bounds()
+        if bounds is None:
+            QMessageBox.warning(
+                self, "No model", "Load and select a model first.")
+            return
+        # OpenUA places the actor origin at ground_y - overeof.  In the
+        # model convention used by UA the lowest point is the maximum local Y.
+        suggested = float(bounds[4])
+        if (self.project.overeof_enabled
+                and abs(self.project.overeof - suggested) < 1e-9):
+            return
+        self._overeof_spin_active = False
+        self._push_undo()
+        self.project.overeof = suggested
+        self.project.overeof_enabled = True
+        self._set_modified()
+        self._sync_all()
+        self.statusBar().showMessage(
+            "Suggested Overeof uses the lowest scaled model point; verify "
+            "the final terrain contact in-game.", 7000)
+
+    def _reset_overeof(self):
+        if (not self.project.overeof_enabled
+                and abs(self.project.overeof) < 1e-9):
+            return
+        self._overeof_spin_active = False
+        self._push_undo()
+        self.project.overeof_enabled = False
+        self.project.overeof = 0.0
+        self._set_modified()
+        self._sync_all()
+
+    def _begin_vehicle_preview_edit(self, field: str) -> None:
+        if field not in self._vehicle_preview_active_edits:
+            self._push_undo()
+            self._vehicle_preview_active_edits.add(field)
+
+    def _finish_vehicle_preview_edit(self, field: str) -> None:
+        self._vehicle_preview_active_edits.discard(field)
+
+    def _fire_points_enabled_changed(self, enabled: bool) -> None:
+        if self._syncing or self.project.target_category != VEHICLE:
+            return
+        enabled = bool(enabled)
+        if enabled == self.project.fire_points_enabled:
+            return
+        self._vehicle_preview_active_edits.clear()
+        self._push_undo()
+        self.project.fire_points_enabled = enabled
+        if not enabled:
+            self._selected_fire_point = -1
+        self._set_modified()
+        self._sync_all()
+
+    def _fire_point_value_changed(self, field: str, value: float) -> None:
+        if self._syncing or self.project.target_category != VEHICLE:
+            return
+        value = float(value)
+        if not math.isfinite(value):
+            return
+        current = float(getattr(self.project, field))
+        if abs(current - value) < 1e-9:
+            return
+        self._begin_vehicle_preview_edit(field)
+        setattr(self.project, field, value)
+        self.project.fire_points_enabled = True
+        self._set_modified()
+        self._sync_all()
+
+    def _num_weapons_changed(self, value: int) -> None:
+        if self._syncing or self.project.target_category != VEHICLE:
+            return
+        value = max(0, min(255, int(value)))
+        if value == self.project.num_weapons:
+            return
+        self._begin_vehicle_preview_edit("num_weapons")
+        self.project.num_weapons = value
+        self.project.fire_points_enabled = True
+        point_count = max(1, value)
+        if self._selected_fire_point >= point_count:
+            self._selected_fire_point = point_count - 1
+        self._set_modified()
+        self._sync_all()
+
+    def _death_damage_enabled_changed(self, enabled: bool) -> None:
+        if self._syncing or self.project.target_category != VEHICLE:
+            return
+        enabled = bool(enabled)
+        if enabled == self.project.death_damage_enabled:
+            return
+        self._vehicle_preview_active_edits.clear()
+        self._push_undo()
+        self.project.death_damage_enabled = enabled
+        self._set_modified()
+        self._sync_all()
+
+    def _death_damage_value_changed(self, value: int) -> None:
+        if self._syncing or self.project.target_category != VEHICLE:
+            return
+        value = max(0, int(value))
+        if value == self.project.death_damage:
+            return
+        self._begin_vehicle_preview_edit("death_damage")
+        self.project.death_damage = value
+        self.project.death_damage_enabled = True
+        self._set_modified()
+        self._sync_all()
+
+    def _death_damage_radius_changed(self, value: float) -> None:
+        if self._syncing or self.project.target_category != VEHICLE:
+            return
+        value = max(0.0, float(value))
+        if (not math.isfinite(value)
+                or abs(value - self.project.death_damage_radius) < 1e-9):
+            return
+        self._begin_vehicle_preview_edit("death_damage_radius")
+        self.project.death_damage_radius = value
+        self.project.death_damage_enabled = True
+        self._set_modified()
+        self._sync_all()
+
     def _gizmo_nudge(self, direction):
         sphere = self._selected_sphere()
-        if sphere is None:
-            return
         step = float(self.move_strength_spin.value())
-        if sphere.category == LEGACY:
-            self.statusBar().showMessage(
-                "Legacy Radius has no script offset and remains at origin.",
-                5000)
+        if sphere is not None:
+            if sphere.category == LEGACY:
+                self.statusBar().showMessage(
+                    "Legacy Radius has no script offset and remains at origin.",
+                    5000)
+                return
+            self._push_undo()
+            sphere.x += direction[0] * step
+            sphere.y += direction[1] * step
+            sphere.z += direction[2] * step
+            self._set_modified()
+            self._sync_all()
             return
+
+        index = self._selected_fire_point
+        points = fire_point_positions(self.project)
+        if not (self.project.fire_points_enabled
+                and 0 <= index < len(points)):
+            return
+
+        dx = float(direction[0]) * step
+        dy = float(direction[1]) * step
+        dz = float(direction[2]) * step
+        count = max(1, int(self.project.num_weapons))
+        factor = None
+        if dx and count > 1:
+            factor = -1.0 + (2.0 * index / (count - 1))
+            if abs(factor) <= 1e-9 and not (dy or dz):
+                self.statusBar().showMessage(
+                    "The center Fire Point of an odd vanilla rack is "
+                    "locked to X = 0. Select another point to change "
+                    "the symmetric spacing.", 6500)
+                return
+
         self._push_undo()
-        sphere.x += direction[0] * step
-        sphere.y += direction[1] * step
-        sphere.z += direction[2] * step
+        changed = False
+        if dy:
+            self.project.fire_y += dy
+            changed = True
+        if dz:
+            self.project.fire_z += dz
+            changed = True
+        if dx:
+            if count == 1:
+                self.project.fire_x += dx
+                changed = True
+            elif factor is not None and abs(factor) <= 1e-9:
+                self.statusBar().showMessage(
+                    "The center Fire Point of an odd vanilla rack is "
+                    "locked to X = 0. Y/Z movement still moved the full "
+                    "rack.", 6500)
+            else:
+                current_x = factor * abs(float(self.project.fire_x))
+                new_extent = max(0.0, (current_x + dx) / factor)
+                sign = -1.0 if self.project.fire_x < 0.0 else 1.0
+                self.project.fire_x = sign * new_extent
+                changed = True
+                self.statusBar().showMessage(
+                    "Vanilla multi-weapon Fire Points stay symmetric; "
+                    "X movement changed the spacing of the full rack.",
+                    5000)
+        if not changed:
+            return
+        self.project.fire_points_enabled = True
         self._set_modified()
         self._sync_all()
 
@@ -2273,6 +4065,7 @@ class CollisionEditorWindow(QMainWindow):
                 item = QTreeWidgetItem([
                     TYPE_LABELS[sphere.category],
                     _radius_number(sphere.radius),
+                    "Visible" if sphere.visible else "",
                     index_text,
                 ])
                 item.setFlags(
@@ -2287,13 +4080,16 @@ class CollisionEditorWindow(QMainWindow):
                 item.setTextAlignment(
                     2, Qt.AlignmentFlag.AlignRight
                     | Qt.AlignmentFlag.AlignVCenter)
+                item.setTextAlignment(
+                    3, Qt.AlignmentFlag.AlignRight
+                    | Qt.AlignmentFlag.AlignVCenter)
                 if sphere.category == LEGACY and compound_mode:
                     message = (
                         "Legacy Radius is disabled at runtime because manual "
                         "compound coll_* spheres are present. OpenUA F10 shows "
                         "only the compound collision spheres for this object."
                     )
-                    for column in range(3):
+                    for column in range(4):
                         item.setToolTip(column, message)
                 self.sphere_tree.addTopLevelItem(item)
                 if flat_index == self._selected:
@@ -2304,6 +4100,30 @@ class CollisionEditorWindow(QMainWindow):
                 self.sphere_tree.setCurrentItem(None)
                 self.sphere_tree.clearSelection()
 
+    def _refresh_fire_point_tree(self, points):
+        with QSignalBlocker(self.fire_point_tree):
+            self.fire_point_tree.clear()
+            selected_item = None
+            for index, point in enumerate(points):
+                item = QTreeWidgetItem([
+                    f"F{index + 1}",
+                    _number(point[0]), _number(point[1]), _number(point[2]),
+                ])
+                item.setData(0, _FIRE_POINT_INDEX_ROLE, index)
+                item.setForeground(0, QBrush(FIRE_POINT_COLOR))
+                for column in (1, 2, 3):
+                    item.setTextAlignment(
+                        column, Qt.AlignmentFlag.AlignRight
+                        | Qt.AlignmentFlag.AlignVCenter)
+                self.fire_point_tree.addTopLevelItem(item)
+                if index == self._selected_fire_point:
+                    selected_item = item
+            if selected_item is not None:
+                self.fire_point_tree.setCurrentItem(selected_item)
+            else:
+                self.fire_point_tree.setCurrentItem(None)
+                self.fire_point_tree.clearSelection()
+
     def _refresh_project_summary_menu(self):
         menu = self.project_summary_menu
         menu.clear()
@@ -2313,8 +4133,15 @@ class CollisionEditorWindow(QMainWindow):
             sphere.category == WEAPON for sphere in self.project.compound)
         sphere = self._selected_sphere()
         compound_index = self._selected_compound_index()
-        selected = (self._sphere_display_name(sphere, compound_index)
-                    if sphere is not None else "None")
+        if sphere is not None:
+            selected = self._sphere_display_name(sphere, compound_index)
+        elif (self.project.target_category == VEHICLE
+              and self.project.fire_points_enabled
+              and 0 <= self._selected_fire_point
+              < len(fire_point_positions(self.project))):
+            selected = f"Fire Point F{self._selected_fire_point + 1}"
+        else:
+            selected = "None"
         compound_mode = bool(self.project.compound)
         if self.project.legacy is None:
             legacy_status = "Missing"
@@ -2329,10 +4156,36 @@ class CollisionEditorWindow(QMainWindow):
         lines = [
             f"Project: {self.project.name or '<unnamed>'}",
             f"Source model: {self.project.source_model or '<none>'}",
+            "Linked script object: "
+            + (f"{self._active_script_path.name} — "
+               f"{self._active_script_kind} {self._active_script_id}"
+               if (self._active_script_path is not None
+                   and self._active_script_id is not None)
+               else "Not linked"),
             "Model preview scale: "
             f"X {_number(self.project.model_scale_x)}  "
             f"Y {_number(self.project.model_scale_y)}  "
             f"Z {_number(self.project.model_scale_z)}",
+            "Ground alignment: "
+            + ("Not shown for weapon target"
+               if self.project.target_category == WEAPON
+               else (f"Overeof {_number(self.project.overeof)}"
+                     if self.project.overeof_enabled
+                     else "Overeof not included")),
+            "Fire points: "
+            + (f"{max(1, int(self.project.num_weapons))} at "
+               f"({_number(self.project.fire_x)}, "
+               f"{_number(self.project.fire_y)}, "
+               f"{_number(self.project.fire_z)})"
+               if (self.project.target_category == VEHICLE
+                   and self.project.fire_points_enabled)
+               else "Not included"),
+            "Death Damage AoE: "
+            + (f"damage {int(self.project.death_damage)}, radius "
+               f"{_number(self.project.death_damage_radius)}"
+               if (self.project.target_category == VEHICLE
+                   and self.project.death_damage_enabled)
+               else "Not included"),
             f"Collision mode: {collision_mode}",
             f"Legacy Radius: {legacy_status}",
             f"Internal broad-phase extent: "
@@ -2340,7 +4193,7 @@ class CollisionEditorWindow(QMainWindow):
             f"Vehicle Collision Spheres: {vehicle_count}",
             f"Weapon Collision Spheres: {weapon_count}",
             f"Total Compound Spheres: {len(self.project.compound)}",
-            f"Selected Sphere: {selected}",
+            f"Selected Element: {selected}",
         ]
         for line in lines:
             action = menu.addAction(line)
@@ -2355,12 +4208,20 @@ class CollisionEditorWindow(QMainWindow):
         drawing and picking.
         """
 
-        spheres = self.project.spheres()
-        if self.project.legacy is None or not self.project.compound:
-            return spheres
-        legacy_preview = self.project.legacy.clone()
-        legacy_preview.visible = False
-        return [legacy_preview] + list(self.project.compound)
+        offset_y = (
+            -self.project.overeof
+            if (self.project.target_category == VEHICLE
+                and self.project.overeof_enabled)
+            else 0.0
+        )
+        previews = []
+        for sphere in self.project.spheres():
+            preview = sphere.clone()
+            preview.y += offset_y
+            previews.append(preview)
+        if self.project.legacy is not None and self.project.compound:
+            previews[0].visible = False
+        return previews
 
     def _sync_all(self):
         self._syncing = True
@@ -2369,7 +4230,11 @@ class CollisionEditorWindow(QMainWindow):
                 self.name_edit, self.target_combo, self.radius_slider,
                 self.radius_spin, self.visible_check,
                 self.model_scale_x_spin, self.model_scale_y_spin,
-                self.model_scale_z_spin)
+                self.model_scale_z_spin, self.overeof_check,
+                self.overeof_spin, self.fire_points_check,
+                self.fire_x_spin, self.fire_y_spin, self.fire_z_spin,
+                self.num_weapons_spin, self.death_damage_check,
+                self.death_damage_spin, self.death_damage_radius_spin)
         ]
         self.name_edit.setText(self.project.name)
         self.model_scale_x_spin.setValue(self.project.model_scale_x)
@@ -2378,18 +4243,77 @@ class CollisionEditorWindow(QMainWindow):
         self.viewport.set_model_preview_scale(
             self.project.model_scale_x, self.project.model_scale_y,
             self.project.model_scale_z)
-        self.target_combo.setCurrentIndex(
-            0 if self.project.target_category == VEHICLE else 1)
+        vehicle_mode = self.project.target_category == VEHICLE
+        fire_count = (len(fire_point_positions(self.project))
+                      if (vehicle_mode and self.project.fire_points_enabled)
+                      else 0)
+        if not (0 <= self._selected_fire_point < fire_count):
+            self._selected_fire_point = -1
+        self.viewport.set_ground_alignment(
+            vehicle_mode, self.project.overeof_enabled,
+            self.project.overeof)
+        self.target_combo.setCurrentIndex(0 if vehicle_mode else 1)
+        self.ground_alignment_box.setVisible(vehicle_mode)
+        self.overeof_check.setChecked(
+            vehicle_mode and self.project.overeof_enabled)
+        self.overeof_spin.setValue(self.project.overeof)
+        self.overeof_spin.setEnabled(
+            vehicle_mode and self.project.overeof_enabled)
+        self.suggest_overeof_button.setEnabled(
+            vehicle_mode and self._model_bounds() is not None)
+        self.reset_overeof_button.setEnabled(
+            vehicle_mode and (self.project.overeof_enabled
+                              or abs(self.project.overeof) > 1e-9))
+        self.fire_points_box.setVisible(vehicle_mode)
+        self.death_damage_box.setVisible(vehicle_mode)
+        self.fire_points_check.setChecked(
+            vehicle_mode and self.project.fire_points_enabled)
+        self.fire_x_spin.setValue(self.project.fire_x)
+        self.fire_y_spin.setValue(self.project.fire_y)
+        self.fire_z_spin.setValue(self.project.fire_z)
+        self.num_weapons_spin.setValue(
+            max(0, min(255, int(self.project.num_weapons))))
+        fire_controls_enabled = (
+            vehicle_mode and self.project.fire_points_enabled)
+        for widget in (
+                self.fire_x_spin, self.fire_y_spin, self.fire_z_spin,
+                self.num_weapons_spin):
+            widget.setEnabled(fire_controls_enabled)
+        self.death_damage_check.setChecked(
+            vehicle_mode and self.project.death_damage_enabled)
+        self.death_damage_spin.setValue(
+            max(0, int(self.project.death_damage)))
+        self.death_damage_radius_spin.setValue(
+            max(0.0, float(self.project.death_damage_radius)))
+        death_controls_enabled = (
+            vehicle_mode and self.project.death_damage_enabled)
+        self.death_damage_spin.setEnabled(death_controls_enabled)
+        self.death_damage_radius_spin.setEnabled(death_controls_enabled)
         sphere = self._selected_sphere()
+        fire_selected = (
+            vehicle_mode and self.project.fire_points_enabled
+            and 0 <= self._selected_fire_point
+            < len(fire_point_positions(self.project)))
         enabled = sphere is not None
         for widget in (
                 self.radius_slider, self.radius_spin, self.visible_check):
             widget.setEnabled(enabled)
+        self.visible_check.setVisible(enabled)
         self.gizmo.setEnabled(
-            sphere is not None and sphere.category != LEGACY)
+            (sphere is not None and sphere.category != LEGACY)
+            or fire_selected)
+        self.transform_box.setTitle(
+            "Move Fire Point" if fire_selected else "Move Sphere")
         if sphere is None:
-            self.type_value.setText("None")
-            self.index_value.setText("None")
+            if fire_selected:
+                self.type_value.setText("Fire Point")
+                self.index_value.setText(str(self._selected_fire_point))
+                self.selected_element_label.setText(
+                    f"Fire Point F{self._selected_fire_point + 1}")
+            else:
+                self.type_value.setText("None")
+                self.index_value.setText("None")
+                self.selected_element_label.setText("None")
             self.radius_spin.setValue(1.0)
             self.radius_slider.setValue(0)
             self.visible_check.setChecked(False)
@@ -2397,6 +4321,9 @@ class CollisionEditorWindow(QMainWindow):
             self.runtime_radius_value.hide()
             self.radius_spin.setToolTip("")
         else:
+            self.selected_element_label.setText(
+                self._sphere_display_name(
+                    sphere, self._selected_compound_index()))
             self.type_value.setText(TYPE_LABELS[sphere.category])
             if sphere.category == LEGACY:
                 index_text = "Legacy"
@@ -2427,9 +4354,32 @@ class CollisionEditorWindow(QMainWindow):
         self._refresh_project_summary_menu()
         self.viewport.set_collision_spheres(
             self._preview_spheres(), self._selected)
+        preview_offset_y = (
+            -self.project.overeof
+            if (vehicle_mode and self.project.overeof_enabled)
+            else 0.0)
+        authored_points = []
+        points = []
+        if vehicle_mode and self.project.fire_points_enabled:
+            authored_points = fire_point_positions(self.project)
+            points = [
+                (x, y + preview_offset_y, z)
+                for x, y, z in authored_points
+            ]
+        self._refresh_fire_point_tree(authored_points)
+        self.viewport.set_fire_points(points, self._selected_fire_point)
+        death_radius = (
+            self.project.death_damage_radius
+            if (vehicle_mode and self.project.death_damage_enabled)
+            else 0.0)
+        self.viewport.set_death_damage_preview(
+            death_radius, (0.0, preview_offset_y, 0.0))
         self._sync_gizmo_camera()
         self.undo_action.setEnabled(bool(self._undo))
         self.redo_action.setEnabled(bool(self._redo))
+        self.save_loaded_script_action.setEnabled(
+            self._active_script_path is not None
+            and self._active_script_id is not None)
         self.duplicate_action.setEnabled(
             sphere is not None and sphere.category != LEGACY)
         self.delete_action.setEnabled(sphere is not None)
@@ -2524,23 +4474,49 @@ class CollisionEditorWindow(QMainWindow):
         try:
             legacy, compound, warnings = import_collision_block(
                 text, block, category)
+            overeof_enabled, overeof = import_overeof_block(text, block)
+            fire_enabled, fire_x, fire_y, fire_z, num_weapons = (
+                import_fire_points_block(text, block))
+            death_enabled, death_damage, death_radius = (
+                import_death_damage_block(text, block))
         except CollisionScriptError as exc:
             QMessageBox.warning(self, "Import failed", str(exc))
             return
+        self._clear_script_link()
         self._push_undo()
         self.project.legacy = legacy
         self.project.compound = compound
         self.project.target_category = (
             WEAPON if "weapon" in block.kind else VEHICLE)
+        self.project.overeof_enabled = (
+            self.project.target_category == VEHICLE and overeof_enabled)
+        self.project.overeof = (
+            overeof if self.project.overeof_enabled else 0.0)
+        vehicle_block = self.project.target_category == VEHICLE
+        self.project.fire_points_enabled = vehicle_block and fire_enabled
+        self.project.fire_x = fire_x if vehicle_block else 0.0
+        self.project.fire_y = fire_y if vehicle_block else 0.0
+        self.project.fire_z = fire_z if vehicle_block else 0.0
+        self.project.num_weapons = num_weapons if vehicle_block else 1
+        self.project.death_damage_enabled = vehicle_block and death_enabled
+        self.project.death_damage = death_damage if vehicle_block else 0
+        self.project.death_damage_radius = (
+            death_radius if vehicle_block else 0.0)
         if block.name:
             self.project.name = block.name
         self._selected = 0 if self.project.spheres() else -1
+        self._selected_fire_point = -1
         self._last_directory = Path(path).parent
         self._set_modified()
         self._sync_all()
         message = (
             f"Imported {len(compound)} compound sphere(s)"
-            + (" and Legacy Radius." if legacy else "."))
+            + (" and Legacy Radius" if legacy else "")
+            + (" and Overeof" if self.project.overeof_enabled else "")
+            + (" and Fire Points" if self.project.fire_points_enabled else "")
+            + (" and Death Damage AoE"
+               if self.project.death_damage_enabled else "")
+            + ".")
         if warnings:
             message += "\n\n" + "\n".join(warnings)
             QMessageBox.warning(self, "Imported with warnings", message)
@@ -2550,7 +4526,14 @@ class CollisionEditorWindow(QMainWindow):
     def apply_to_script(self):
         if not self._validate_for_output():
             return
-        dialog = ApplyScriptDialog(self, self.project)
+        path, _ = QFileDialog.getOpenFileName(
+            self, "Apply to Existing Script", str(self._last_directory),
+            "OpenUA scripts (*.txt *.scr *.ini *.ldf);;All files (*)")
+        if not path:
+            return
+        self._last_directory = Path(path).parent
+        dialog = ApplyScriptDialog(
+            self, self.project, initial_path=path)
         if dialog.exec() == QDialog.DialogCode.Accepted:
             self.statusBar().showMessage(
                 f"Script updated. Backup: {dialog.backup_path}", 10000)
@@ -2558,7 +4541,7 @@ class CollisionEditorWindow(QMainWindow):
     def closeEvent(self, event: QCloseEvent) -> None:  # noqa: N802
         if self._modified:
             answer = QMessageBox.question(
-                self, "Unsaved Collision Editor project",
+                self, "Unexported Collision Editor project",
                 "The collision project has unexported changes. Close anyway?",
                 QMessageBox.StandardButton.Yes
                 | QMessageBox.StandardButton.No,
