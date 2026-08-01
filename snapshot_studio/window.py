@@ -4,9 +4,24 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from PySide6.QtWidgets import QMenu
+from PySide6.QtCore import Qt
+from PySide6.QtWidgets import (
+    QDoubleSpinBox,
+    QFrame,
+    QGroupBox,
+    QHBoxLayout,
+    QLabel,
+    QMenu,
+    QMessageBox,
+    QPushButton,
+    QToolBar,
+)
 
 from assembly_window import AssemblyWindow
+from editor_widgets import (
+    ViewportWidthScrollArea as _ViewportWidthScrollArea,
+)
+from snapshot_studio.batch_export import VPSnapshotBatchPanel
 
 
 WINDOW_TITLE = "OpenUAStudio - Snapshot Studio"
@@ -32,15 +47,13 @@ class SnapshotStudioWindow(AssemblyWindow):
     )
 
     def __init__(self, parent=None) -> None:
-        # Base initialization still uses the normal nested workbench contract.
-        # The flag prevents subclass hooks from changing that construction.
         self._snapshot_workspace_configured = False
         super().__init__(parent)
         self._configure_snapshot_workspace()
         self._set_document_title(None)
         self.statusBar().showMessage(
-            "Snapshot Studio: choose a model in BAS Manager, compose the "
-            "view in Snapshot, then export the image. Editing is disabled."
+            "Snapshot Studio: compose one image or export every renderable "
+            "VP and embedded SKLT model. Editing is disabled."
         )
 
     def _configure_snapshot_workspace(self) -> None:
@@ -52,7 +65,6 @@ class SnapshotStudioWindow(AssemblyWindow):
         snapshot_panel = self._snapshot_panel
         bas_panel = self._bas_panel
 
-        # Avoid transient tab-change callbacks while shared pages are moved.
         for tabs in (right_tabs, resources_tabs, visuals_tabs):
             tabs.blockSignals(True)
         try:
@@ -64,21 +76,33 @@ class SnapshotStudioWindow(AssemblyWindow):
             if bas_index >= 0:
                 resources_tabs.removeTab(bas_index)
 
-            # Preserve ownership references to the detached shared containers.
-            # No parser, loader, viewport or renderer is copied.
             self._detached_resources_tabs = resources_tabs
             self._detached_editor_tabs = self._editor_tabs
             self._detached_visuals_tabs = visuals_tabs
 
+            # Reuse the same width-synchronised scroll page as Model Editor.
+            # It keeps the page exactly as wide as the visible viewport, so
+            # controls reflow instead of being clipped horizontally. Vertical
+            # scrolling appears only when the available height is insufficient.
+            snapshot_scroll = _ViewportWidthScrollArea()
+            snapshot_scroll.setObjectName("snapshotStudioScroll")
+            snapshot_scroll.setWidgetResizable(True)
+            snapshot_scroll.setFrameShape(QFrame.Shape.NoFrame)
+            snapshot_scroll.setHorizontalScrollBarPolicy(
+                Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+            snapshot_scroll.setVerticalScrollBarPolicy(
+                Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+            snapshot_scroll.setWidget(snapshot_panel)
+            self._snapshot_scroll = snapshot_scroll
+
             right_tabs.clear()
-            right_tabs.addTab(snapshot_panel, "Snapshot")
+            right_tabs.addTab(snapshot_scroll, "Snapshot")
             right_tabs.addTab(bas_panel, "BAS Manager")
-            right_tabs.setCurrentWidget(snapshot_panel)
+            right_tabs.setCurrentWidget(snapshot_scroll)
         finally:
             for tabs in (right_tabs, resources_tabs, visuals_tabs):
                 tabs.blockSignals(False)
 
-        # Snapshot Studio exports images only, never model structures.
         self.edit_menu.menuAction().setVisible(False)
         self.file_export_menu.menuAction().setVisible(False)
         self.mapping_repair_action.setVisible(False)
@@ -89,9 +113,6 @@ class SnapshotStudioWindow(AssemblyWindow):
                 self.map_editor_action):
             action.setVisible(False)
 
-        # Snapshot mode deliberately disables editor-only viewport filters.
-        # Hide those unavailable entries instead of leaving grey commands in
-        # the View menu. Backface Cull and Reset Camera remain available.
         for action in (
                 self.sen_check,
                 self.owner_bounds_check,
@@ -102,8 +123,6 @@ class SnapshotStudioWindow(AssemblyWindow):
                 self.mapping_diag_check):
             action.setVisible(False)
 
-        self.global_undo_button.setVisible(False)
-        self.global_redo_button.setVisible(False)
         for name in self._EDIT_ACTION_NAMES:
             action = getattr(self, name, None)
             if action is None:
@@ -116,41 +135,144 @@ class SnapshotStudioWindow(AssemblyWindow):
             action.setEnabled(False)
             action.setVisible(False)
 
+        self._configure_snapshot_controls()
+        self._install_batch_panel()
+
         self._snapshot_workspace_configured = True
         self._force_view_only()
         self._on_right_tab_changed(right_tabs.currentIndex())
 
-    def _snapshot_panel_is_active(self) -> bool:
-        """Keep the whole focused workspace in safe Snapshot/View mode."""
+    def _configure_snapshot_controls(self) -> None:
+        """Create focused VANM controls and hide, but never destroy, toolbars.
 
+        AssemblyWindow still uses hidden toolbar widgets such as mode_combo
+        internally while entering Snapshot mode.  Removing the QToolBars can
+        destroy their QWidgetAction-owned controls in PySide6, leaving the
+        shared lifecycle with invalid C++ objects.  Snapshot Studio therefore
+        keeps the inherited toolbars alive but invisible and uses dedicated
+        controls in the right panel.
+        """
+
+        animation_box = next(
+            (
+                box for box in self._snapshot_panel.findChildren(QGroupBox)
+                if box.title() == "Animation frame"
+            ),
+            None,
+        )
+        self._snapshot_studio_box = next(
+            (
+                box for box in self._snapshot_panel.findChildren(QGroupBox)
+                if box.title() == "Photo Studio"
+            ),
+            None,
+        )
+
+        # Keep the original toolbar-owned controls alive inside hidden
+        # toolbars.  The visible Snapshot controls below are independent
+        # widgets wired to the same existing viewport methods.
+        self._toolbar_play_button = self.play_button
+        self._toolbar_step_button = self.step_button
+        self._toolbar_speed_spin = self.speed_spin
+
+        self.play_button = QPushButton("Play")
+        self.play_button.setCheckable(True)
+        self.play_button.setEnabled(False)
+        self.play_button.toggled.connect(self._toggle_play)
+
+        self.step_button = QPushButton(">>")
+        self.step_button.setEnabled(False)
+        self.step_button.clicked.connect(self.viewport.step_animation)
+
+        self.speed_spin = QDoubleSpinBox()
+        self.speed_spin.setRange(0.05, 8.0)
+        self.speed_spin.setSingleStep(0.25)
+        self.speed_spin.setValue(
+            self._toolbar_speed_spin.value())
+        self.speed_spin.setMaximumWidth(96)
+        self.speed_spin.valueChanged.connect(
+            self._on_animation_speed_changed)
+
+        if animation_box is not None:
+            vanm_row = QHBoxLayout()
+            vanm_row.setSpacing(4)
+            vanm_row.addWidget(QLabel("VANM preview:"))
+            vanm_row.addWidget(self.play_button)
+            vanm_row.addWidget(self.step_button)
+            vanm_row.addWidget(QLabel("Speed:"))
+            vanm_row.addWidget(self.speed_spin)
+            vanm_row.addStretch(1)
+            animation_box.layout().insertLayout(0, vanm_row)
+
+        self.global_undo_button.setVisible(False)
+        self.global_redo_button.setVisible(False)
+        self.global_undo_button.setEnabled(False)
+        self.global_redo_button.setEnabled(False)
+
+        # Hiding removes the bars visually while preserving every inherited
+        # control required by AssemblyWindow's internal Snapshot lifecycle.
+        for toolbar in self.findChildren(QToolBar):
+            toolbar.hide()
+
+        self._sync_animation_controls()
+
+    def _install_batch_panel(self) -> None:
+        """Add the compact complete-model batch controller."""
+
+        self.vp_batch_panel = VPSnapshotBatchPanel(self)
+        snapshot_layout = self._snapshot_panel.layout()
+        snapshot_layout.insertWidget(1, self.vp_batch_panel)
+        # Recompute the page minimum after the batch controls are inserted.
+        # The surrounding QScrollArea will then provide vertical scrolling
+        # whenever the window is not tall enough.
+        self._snapshot_panel.adjustSize()
+
+    def open_setbas(self, path: str | Path) -> None:
+        super().open_setbas(path)
+        if hasattr(self, "vp_batch_panel"):
+            self.vp_batch_panel.refresh()
+
+    def _sync_vp_controls(self) -> None:
+        super()._sync_vp_controls()
+        panel = getattr(self, "vp_batch_panel", None)
+        if panel is not None:
+            panel.refresh()
+
+    def closeEvent(self, event) -> None:  # noqa: N802
+        panel = getattr(self, "vp_batch_panel", None)
+        if panel is not None and panel.is_running:
+            panel.request_cancel()
+            QMessageBox.information(
+                self,
+                "Snapshot batch in progress",
+                "Cancellation was requested. Wait for the current image "
+                "to finish before closing Snapshot Studio.",
+            )
+            event.ignore()
+            return
+        super().closeEvent(event)
+
+    def _snapshot_panel_is_active(self) -> bool:
         if not self._snapshot_workspace_configured:
             return super()._snapshot_panel_is_active()
         return True
 
     def _raise_setbas_tab(self) -> None:
-        """Bring the direct BAS Manager tab to the front."""
-
         if not self._snapshot_workspace_configured:
             return super()._raise_setbas_tab()
         self._right_tabs.setCurrentWidget(self._bas_panel)
 
     def _focus_assets_for_owner(
             self, owner: str | None, switch_tabs: bool = True) -> None:
-        """Keep selection state without opening detached resource tabs."""
-
         super()._focus_assets_for_owner(owner, switch_tabs=False)
 
     def _open_visual_texture(
             self, name: str, *, show_preview: bool = False,
             switch_tabs: bool = True) -> None:
-        """Resolve or preview textures without exposing hidden tabs."""
-
         super()._open_visual_texture(
             name, show_preview=show_preview, switch_tabs=False)
 
     def _force_view_only(self) -> None:
-        """Exit and disable every inherited model-edit entry path."""
-
         viewport = getattr(self, "viewport", None)
         if viewport is not None:
             if viewport.paste_preview_active:
@@ -166,6 +288,13 @@ class SnapshotStudioWindow(AssemblyWindow):
             action.setShortcuts([])
             action.setEnabled(False)
             action.setVisible(False)
+
+        for button_name in (
+                "global_undo_button", "global_redo_button"):
+            button = getattr(self, button_name, None)
+            if button is not None:
+                button.setVisible(False)
+                button.setEnabled(False)
 
     def _editing_allowed(self) -> bool:
         return False
@@ -191,8 +320,6 @@ class SnapshotStudioWindow(AssemblyWindow):
             self._force_view_only()
 
     def _create_viewport_context_menu(self, _position=None) -> QMenu:
-        """Expose only a camera-safe action in the Snapshot viewport."""
-
         menu = QMenu(self.viewport)
         reset_camera = menu.addAction(
             "Reset camera", self._reset_view_and_gizmo)
