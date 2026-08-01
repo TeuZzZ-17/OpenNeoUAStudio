@@ -794,21 +794,12 @@ class AssemblyWindow(QMainWindow):
         self._setbas_context_item = item
         resources = self._setbas_selected_resources()
         kind = item.data(0, _BAS_KIND_ROLE) if item is not None else None
-        preview = menu.addAction(
-            "Preview BASE" if kind == "base" else "Preview")
-        preview.setEnabled(
-            kind == "base"
-            or (len(resources) == 1
-                and resources[0].class_id.lower()
-                in ("sklt.class", "ilbm.class", "bmpanim.class")))
-        preview.triggered.connect(
-            lambda: self._preview_setbas_resource(item))
         extract = menu.addAction(
             f"Extract selected... ({len(resources)})" if len(resources) > 1
             else "Extract selected...")
         extract.setEnabled(bool(resources))
         extract.triggered.connect(self._extract_setbas_selected)
-        menu.addAction("Extract entire archive...",
+        menu.addAction("Extract archive",
                        self._extract_setbas_archive).setEnabled(
                            self._setbas is not None)
         if resources:
@@ -1159,7 +1150,7 @@ class AssemblyWindow(QMainWindow):
         tools_menu = self.menuBar().addMenu("&Tools")
         self.tools_menu = tools_menu
         setbas_tools_menu = tools_menu.addMenu("BAS Archive")
-        extract_setbas_action = QAction("Extract current archive...", self)
+        extract_setbas_action = QAction("Extract archive", self)
         extract_setbas_action.triggered.connect(self._extract_setbas_archive)
         setbas_tools_menu.addAction(extract_setbas_action)
         metadata_action = QAction("Export scene metadata...", self)
@@ -1391,7 +1382,7 @@ class AssemblyWindow(QMainWindow):
             self._extract_setbas_selected)
         self.setbas_extract_button.setEnabled(False)
         setbas_buttons.addWidget(self.setbas_extract_button, 0, 1)
-        self.setbas_extract_all_button = QPushButton("Extract archive...")
+        self.setbas_extract_all_button = QPushButton("Extract archive")
         self.setbas_extract_all_button.clicked.connect(
             self._extract_setbas_archive)
         self.setbas_extract_all_button.setEnabled(False)
