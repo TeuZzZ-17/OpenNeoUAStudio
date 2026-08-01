@@ -2,19 +2,20 @@ import os
 from pathlib import Path
 import tempfile
 import unittest
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 from PySide6.QtCore import QEvent, QPointF, Qt
 from PySide6.QtGui import QColor, QKeyEvent, QMouseEvent
 from PySide6.QtWidgets import (
-    QAbstractItemView, QApplication, QHeaderView, QMessageBox, QSizePolicy,
-    QToolBar, QToolButton,
+    QAbstractItemView, QApplication, QDialog, QHeaderView, QMessageBox, QSizePolicy,
+    QPushButton, QToolBar, QToolButton,
 )
 
 from asset_family import AssetFamily, FamilyObject
 from base_parser import BaseObject
+import collision_editor.editor as editor_module
 from collision_editor import (
     ApplyScriptDialog,
     CollisionEditorWindow,
@@ -22,19 +23,29 @@ from collision_editor import (
     CollisionScriptError,
     CollisionSphere,
     CollisionViewport,
+    OpenScriptObjectDialog,
     LEGACY,
     VEHICLE,
     WEAPON,
     TYPE_COLORS,
+    DEATH_DAMAGE_COLOR,
     VIEW_PRESETS,
     create_backup,
     effective_runtime_radius,
     export_collision_text,
+    fire_point_positions,
     find_script_blocks,
     import_collision_block,
+    import_death_damage_block,
+    import_fire_points_block,
+    import_overeof_block,
     plan_script_update,
     read_script_file,
+    runtime_vp_table,
+    script_model_references,
     validate_project,
+    vehicle_model_references,
+    weapon_model_references,
     write_script_file,
 )
 from sklt_parser import SkltModel
@@ -358,6 +369,26 @@ class CollisionEditorTests(unittest.TestCase):
             self.assertEqual(path.read_text(encoding="utf-8"), original)
             self.assertFalse(Path(str(path) + ".bak").exists())
 
+    def test_25b_apply_dialog_searches_and_writes_when_apply_is_clicked(self):
+        with tempfile.TemporaryDirectory() as temp:
+            path = Path(temp) / "Vehicles.txt"
+            path.write_text(
+                "new_vehicle 1\n name = Wasp\n radius = 2\nend\n"
+                "modify_vehicle 14\n name = Dragonfly\n radius = 3\nend\n",
+                encoding="utf-8")
+            dialog = ApplyScriptDialog(
+                None, _mixed_project(), initial_path=path)
+            self.addCleanup(dialog.close)
+            dialog.search_edit.setText("dragonfly")
+            self.assertEqual(dialog.block_combo.count(), 1)
+            self.assertEqual(dialog.id_spin.value(), 14)
+            self.assertEqual(dialog.detected_name.text(), "Dragonfly")
+            self.assertTrue(dialog.apply_button.isEnabled())
+            dialog.apply_button.click()
+            self.assertEqual(dialog.result(), QDialog.DialogCode.Accepted)
+            self.assertTrue(Path(str(path) + ".bak").is_file())
+            self.assertIn("coll_num", path.read_text(encoding="utf-8"))
+
     def test_26_validation_reports_missing_name_model_and_bad_radius(self):
         project = CollisionProject(
             legacy=CollisionSphere(LEGACY, radius=0))
@@ -429,6 +460,9 @@ class CollisionEditorTests(unittest.TestCase):
         self.assertIn("Add Legacy Radius", labels)
         self.assertEqual(
             window.toolbar_view_preset_combo.count(), len(VIEW_PRESETS))
+        self.assertIs(
+            window.toolbar_view_preset_combo.parentWidget(),
+            window.model_preview_scale_toolbar)
 
     def test_32_model_list_has_only_internal_path_and_vp(self):
         window = self._window()
@@ -438,8 +472,8 @@ class CollisionEditorTests(unittest.TestCase):
             for index in range(2)
         ], ["Internal path", "VP"])
         file_labels = [
-            action.text() for action in window.file_menu.actions()]
-        self.assertIn("Open BAS Archive...", file_labels)
+            action.text() for action in window.file_import_menu.actions()]
+        self.assertIn("Import BAS Archive", file_labels)
         self.assertNotIn("Open BASE...", file_labels)
 
     def test_33_sphere_list_selects_named_sphere_and_shows_radius(self):
@@ -453,20 +487,33 @@ class CollisionEditorTests(unittest.TestCase):
         self.assertEqual(
             window.sphere_tree.topLevelItem(1).text(0),
             "Vehicle Collision")
-        self.assertEqual(window.sphere_tree.topLevelItem(1).text(2), "0")
+        self.assertEqual(window.sphere_tree.topLevelItem(1).text(2), "Visible")
+        self.assertEqual(window.sphere_tree.topLevelItem(1).text(3), "0")
         third = window.sphere_tree.topLevelItem(2)
         window.sphere_tree.setCurrentItem(third)
         self.assertEqual(window._selected, 2)
         self.assertEqual(window.type_value.text(), "Weapon Collision")
-        self.assertEqual(third.text(2), "1")
+        self.assertEqual(third.text(2), "Visible")
+        self.assertEqual(third.text(3), "1")
         self.assertEqual(
             float(third.text(1)), window.project.compound[1].radius)
+        window.sphere_tree.setCurrentItem(
+            window.sphere_tree.topLevelItem(1))
+        window.visible_check.setChecked(False)
+        self.assertEqual(window.sphere_tree.topLevelItem(1).text(2), "")
+        window.visible_check.setChecked(True)
+        self.assertEqual(
+            window.sphere_tree.topLevelItem(1).text(2), "Visible")
 
-    def test_34_move_gizmo_is_large_six_axis_and_tracks_camera(self):
+    def test_34_move_gizmo_is_compact_but_readable_and_tracks_camera(self):
         window = self._window()
-        self.assertGreaterEqual(window.gizmo.minimumWidth(), 285)
-        self.assertGreaterEqual(window.gizmo.minimumHeight(), 220)
-        self.assertGreater(window.gizmo.maximumHeight(), 10000)
+        self.assertGreaterEqual(window.gizmo.minimumWidth(), 260)
+        self.assertGreaterEqual(window.gizmo.minimumHeight(), 165)
+        self.assertLessEqual(window.gizmo.maximumHeight(), 175)
+        self.assertLessEqual(window.transform_box.maximumHeight(), 235)
+        self.assertEqual(
+            window.gizmo.sizePolicy().verticalPolicy(),
+            QSizePolicy.Policy.Fixed)
         self.assertGreater(window.gizmo._handle_scale, 1.0)
         self.assertEqual(window.gizmo.directions, (
             (0, 0, 1), (0, 1, 0), (1, 0, 0),
@@ -543,13 +590,17 @@ class CollisionEditorTests(unittest.TestCase):
         self.assertLess(
             labels.index("Map Editor"), labels.index("Mapping Repair..."))
 
-    def test_39_toolbar_open_undo_redo_follow_view_preset(self):
+    def test_39_toolbar_hides_file_import_actions_but_keeps_undo_redo(self):
         window = self._window()
         toolbar = window.findChild(QToolBar, "collisionTools")
         labels = [action.text() for action in toolbar.actions()]
-        self.assertLess(
-            labels.index("Open BAS Archive..."),
-            labels.index("Open SKLT..."))
+        self.assertNotIn("Import BAS Archive", labels)
+        self.assertNotIn("Import SKLT", labels)
+        self.assertNotIn("Script Object", labels)
+        file_labels = [
+            action.text() for action in window.file_import_menu.actions()]
+        self.assertIn("Import BAS Archive", file_labels)
+        self.assertIn("Import SKLT", file_labels)
         self.assertLess(labels.index("Reset View"), labels.index("Undo"))
         self.assertLess(labels.index("Undo"), labels.index("Redo"))
         self.assertEqual(window.undo_action.iconText(), "< Undo")
@@ -605,7 +656,7 @@ class CollisionEditorTests(unittest.TestCase):
                 "Undo", "Redo", "Add Legacy Radius",
                 "Add Vehicle Collision", "Add Weapon Collision",
                 "Duplicate Sphere", "Delete Sphere", "Reset Collisions",
-                "Reset View", "Open BAS Archive...", "Open SKLT...",
+                "Reset View", "Import BAS Archive", "Import SKLT",
                 "View Preset"):
             self.assertIn(label, labels)
 
@@ -685,7 +736,8 @@ class CollisionEditorTests(unittest.TestCase):
 
     def test_47_sphere_list_uses_all_available_vertical_space(self):
         window = self._window()
-        self.assertGreaterEqual(window.sphere_tree.minimumHeight(), 180)
+        self.assertGreaterEqual(window.sphere_tree.minimumHeight(), 150)
+        self.assertLessEqual(window.sphere_tree.minimumHeight(), 160)
         self.assertGreater(window.sphere_tree.maximumHeight(), 10000)
         self.assertEqual(
             window.sphere_tree.sizePolicy().verticalPolicy(),
@@ -700,7 +752,7 @@ class CollisionEditorTests(unittest.TestCase):
         window.duplicate_sphere()
         window.duplicate_sphere()
         indices = [
-            window.sphere_tree.topLevelItem(index).text(2)
+            window.sphere_tree.topLevelItem(index).text(3)
             for index in range(window.sphere_tree.topLevelItemCount())]
         self.assertEqual(indices, ["0", "1", "2"])
         self.assertTrue(all(
@@ -809,8 +861,9 @@ class CollisionEditorTests(unittest.TestCase):
         window.add_compound(VEHICLE)
         self.assertTrue(window.type_value.isHidden())
         self.assertTrue(window.index_value.isHidden())
-        self.assertEqual(window.sphere_tree.columnCount(), 3)
-        self.assertEqual(window.sphere_tree.headerItem().text(2), "Index")
+        self.assertEqual(window.sphere_tree.columnCount(), 4)
+        self.assertEqual(window.sphere_tree.headerItem().text(2), "Visible")
+        self.assertEqual(window.sphere_tree.headerItem().text(3), "Index")
 
     def test_57_vp_values_are_right_aligned_without_widening_panel(self):
         window = self._window()
@@ -1008,6 +1061,593 @@ class CollisionEditorTests(unittest.TestCase):
         self.assertGreaterEqual(
             CollisionViewport.SELECTED_HALO_WIDTH
             - CollisionViewport.SELECTED_COLOR_WIDTH, 2.0)
+
+
+    def test_72_overeof_defaults_to_unmanaged_vehicle_ground_preview(self):
+        window = self._window()
+        self.assertFalse(window.project.overeof_enabled)
+        self.assertEqual(window.project.overeof, 0.0)
+        self.assertEqual(window.viewport.overeof_preview_offset, 0.0)
+        self.assertEqual(
+            window.ground_alignment_box.title(), "Ground Alignment")
+        self.assertEqual(window.ground_alignment_notice.text(), "")
+        self.assertTrue(window.ground_alignment_notice.isHidden())
+        self.assertIn("Show Ground Simulation", window.viewpoint_actions)
+        self.assertIn("Show Overeof", window.viewpoint_actions)
+        self.assertTrue(window.viewpoint_actions["Show Overeof"].isChecked())
+
+    def test_73_vehicle_export_includes_overeof_only_when_enabled(self):
+        project = CollisionProject(
+            name="Tank", source_model="tank.sklt",
+            target_category=VEHICLE,
+            overeof_enabled=True, overeof=12.5,
+            compound=[CollisionSphere(VEHICLE, 0, 0, 0, 20)],
+        )
+        output = export_collision_text(project)
+        self.assertIn("overeof = 12.5", output)
+        project.overeof_enabled = False
+        self.assertNotIn("overeof", export_collision_text(project))
+        project.overeof_enabled = True
+        project.target_category = WEAPON
+        self.assertNotIn("overeof", export_collision_text(project))
+
+    def test_74_import_overeof_ignores_commented_values(self):
+        text = (
+            "new_vehicle 8\n ; overeof = 99\n overeof = 12.5\n"
+            " coll_num = 0\nend\n")
+        block = find_script_blocks(text)[0]
+        enabled, value = import_overeof_block(text, block)
+        self.assertTrue(enabled)
+        self.assertEqual(value, 12.5)
+        commented = "new_vehicle 8\n ; overeof = 99\nend\n"
+        enabled, value = import_overeof_block(
+            commented, find_script_blocks(commented)[0])
+        self.assertFalse(enabled)
+        self.assertEqual(value, 0.0)
+
+    def test_75_script_update_manages_overeof_only_when_explicit(self):
+        text = (
+            "new_vehicle 3\n radius = 35\n overeof = 7\n"
+            " coll_num = 0\nend\n")
+        project = CollisionProject(
+            name="Unit", source_model="unit.sklt",
+            target_category=VEHICLE,
+            overeof_enabled=True, overeof=14,
+        )
+        updated, _preview, _name = plan_script_update(
+            text, "new_vehicle", 3, project)
+        self.assertIn("overeof = 14", updated)
+        project.overeof_enabled = False
+        preserved, _preview, _name = plan_script_update(
+            text, "new_vehicle", 3, project)
+        self.assertIn("overeof = 7", preserved)
+        self.assertNotIn("disabled: overeof", preserved)
+
+    def test_76_overeof_moves_preview_model_and_spheres_not_authored_data(self):
+        family = _family()
+        window = self._window()
+        with patch("collision_editor.load_asset_family", return_value=family):
+            window.open_base("sample.base")
+        window.project.compound = [
+            CollisionSphere(VEHICLE, 1.0, 2.0, 3.0, 4.0)]
+        window.project.overeof_enabled = True
+        window.project.overeof = 12.0
+        source_vertex_y = (
+            window.viewport._model_preview_base_faces[0][0][1])
+        window._sync_all()
+        self.assertEqual(window.viewport.overeof_preview_offset, -12.0)
+        self.assertEqual(
+            window.viewport._faces[0].vertices[0][1], source_vertex_y - 12.0)
+        self.assertEqual(window.project.compound[0].y, 2.0)
+        self.assertEqual(window.viewport._collision_spheres[0].y, -10.0)
+        self.assertEqual(
+            window._model_bounds(),
+            (-2.0, -1.0, -1.0, 2.0, 2.0, 1.0))
+
+    def test_77_suggest_overeof_uses_scaled_lowest_model_point(self):
+        family = _family()
+        window = self._window()
+        with patch("collision_editor.load_asset_family", return_value=family):
+            window.open_base("sample.base")
+        window.model_scale_y_spin.setValue(1.5)
+        window._suggest_overeof_from_bounds()
+        self.assertTrue(window.project.overeof_enabled)
+        self.assertEqual(window.project.overeof, 3.0)
+        self.assertEqual(window.viewport.overeof_preview_offset, -3.0)
+        window.undo()
+        self.assertFalse(window.project.overeof_enabled)
+        self.assertEqual(window.project.overeof, 0.0)
+
+    def test_78_overeof_numeric_edit_is_live_undoable_and_resettable(self):
+        window = self._window()
+        window.overeof_check.setChecked(True)
+        window.overeof_spin.setValue(18.5)
+        self.assertTrue(window.project.overeof_enabled)
+        self.assertEqual(window.project.overeof, 18.5)
+        self.assertEqual(window.viewport.overeof_preview_offset, -18.5)
+        window._finish_overeof_edit()
+        window.undo()
+        self.assertNotEqual(window.project.overeof, 18.5)
+        window._reset_overeof()
+        self.assertFalse(window.project.overeof_enabled)
+        self.assertEqual(window.project.overeof, 0.0)
+
+    def test_79_weapon_target_hides_ground_editor_and_ground_plane(self):
+        window = self._window()
+        window.project.target_category = WEAPON
+        window.project.overeof_enabled = True
+        window.project.overeof = 20.0
+        window._sync_all()
+        self.assertTrue(window.ground_alignment_box.isHidden())
+        self.assertEqual(window.viewport.overeof_preview_offset, 0.0)
+        self.assertFalse(window.viewport._ground_alignment_available)
+
+    def test_80_compound_vehicle_without_overeof_gets_safety_warning(self):
+        project = CollisionProject(
+            name="Unit", source_model="unit.sklt",
+            target_category=VEHICLE,
+            compound=[CollisionSphere(VEHICLE, radius=10)],
+        )
+        _errors, warnings = validate_project(project, None)
+        self.assertTrue(any("Overeof" in warning for warning in warnings))
+        project.overeof_enabled = True
+        _errors, warnings = validate_project(project, None)
+        self.assertFalse(any("Overeof" in warning for warning in warnings))
+
+    def test_81_project_summary_reports_ground_alignment(self):
+        window = self._window()
+        window.project.overeof_enabled = True
+        window.project.overeof = 12.5
+        window._sync_all()
+        labels = [
+            action.text() for action in window.project_summary_menu.actions()]
+        self.assertIn("Ground alignment: Overeof 12.5", labels)
+
+    def test_82_overeof_spin_uses_one_visible_decimal(self):
+        window = self._window()
+        self.assertEqual(window.overeof_spin.decimals(), 1)
+        window.overeof_check.setChecked(True)
+        window.overeof_spin.setValue(20.0)
+        self.assertNotIn("0000", window.overeof_spin.text())
+
+    def test_83_output_actions_follow_scale_reset_on_toolbar(self):
+        window = self._window()
+        toolbar = window.model_preview_scale_toolbar
+        actions = toolbar.actions()
+        reset_index = next(
+            index for index, action in enumerate(actions)
+            if toolbar.widgetForAction(action)
+            is window.reset_model_scale_button)
+        output_actions = (
+            window.create_suggested_action,
+            window.export_action,
+            window.copy_output_action,
+            window.import_action,
+            window.apply_script_action,
+        )
+        for action in output_actions:
+            self.assertIn(action, actions)
+            self.assertGreater(actions.index(action), reset_index)
+        central_button_texts = {
+            button.text() for button in
+            window.centralWidget().findChildren(QPushButton)}
+        self.assertNotIn("Create Suggested Sphere", central_button_texts)
+        self.assertNotIn("Export Collision Text", central_button_texts)
+        self.assertNotIn("Copy Output to Clipboard", central_button_texts)
+        self.assertNotIn("Import Collision Text", central_button_texts)
+        self.assertNotIn("Apply to Existing Script", central_button_texts)
+
+    def test_82_ground_simulation_is_hidden_until_source_is_loaded(self):
+        viewport = CollisionViewport()
+        self.assertFalse(viewport._ground_alignment_source_loaded)
+        viewport.clear()
+        self.assertFalse(viewport._ground_alignment_source_loaded)
+
+    def test_83_ground_simulation_is_enabled_after_family_load(self):
+        source = Path(editor_module.__file__).read_text(encoding="utf-8")
+        self.assertIn("self._ground_alignment_source_loaded = True", source)
+        self.assertIn("and self._ground_alignment_source_loaded", source)
+
+    def test_84_fire_point_distribution_matches_vanilla_runtime(self):
+        project = CollisionProject(
+            fire_points_enabled=True,
+            fire_x=30.0, fire_y=-10.0, fire_z=50.0,
+            num_weapons=4,
+        )
+        self.assertEqual(fire_point_positions(project), [
+            (-30.0, -10.0, 50.0),
+            (-10.0, -10.0, 50.0),
+            (10.0, -10.0, 50.0),
+            (30.0, -10.0, 50.0),
+        ])
+        project.num_weapons = 1
+        project.fire_x = -12.0
+        self.assertEqual(
+            fire_point_positions(project), [(-12.0, -10.0, 50.0)])
+
+    def test_85_export_fire_points_and_death_aoe_are_separate_from_coll_num(self):
+        project = CollisionProject(
+            name="Wasp", source_model="wasp.sklt",
+            target_category=VEHICLE,
+            fire_points_enabled=True,
+            fire_x=25.0, fire_y=-8.0, fire_z=40.0,
+            num_weapons=2,
+            death_damage_enabled=True,
+            death_damage=5000,
+            death_damage_radius=300.0,
+            compound=[CollisionSphere(VEHICLE, radius=20.0)],
+        )
+        output = export_collision_text(project)
+        self.assertIn("fire_x = 25", output)
+        self.assertIn("fire_y = -8", output)
+        self.assertIn("fire_z = 40", output)
+        self.assertIn("num_weapons = 2", output)
+        self.assertIn("; OpenUA-only death damage AoE", output)
+        self.assertIn("death_damage = 5000", output)
+        self.assertIn("death_damage_radius = 300", output)
+        self.assertIn("coll_num = 1", output)
+        self.assertEqual(output.count("coll_act ="), 1)
+
+    def test_86_import_fire_and_death_parameters_ignores_comments(self):
+        text = (
+            "new_vehicle 8\n"
+            " ; fire_x = 999\n fire_x = 30\n fire_y = -5\n"
+            " fire_z = 44\n num_weapons = 3\n"
+            " ; death_damage = 1\n death_damage = 7000\n"
+            " death_damage_radius = 250\nend\n"
+        )
+        block = find_script_blocks(text)[0]
+        self.assertEqual(
+            import_fire_points_block(text, block),
+            (True, 30.0, -5.0, 44.0, 3),
+        )
+        self.assertEqual(
+            import_death_damage_block(text, block),
+            (True, 7000, 250.0),
+        )
+
+    def test_87_script_update_preserves_unmanaged_fire_and_death_data(self):
+        text = (
+            "new_vehicle 3\n fire_x = 12\n fire_y = 2\n fire_z = 4\n"
+            " num_weapons = 2\n death_damage = 1000\n"
+            " death_damage_radius = 90\nend\n"
+        )
+        project = CollisionProject(
+            name="Unit", source_model="unit.sklt",
+            target_category=VEHICLE,
+        )
+        preserved, _preview, _name = plan_script_update(
+            text, "new_vehicle", 3, project)
+        self.assertIn("fire_x = 12", preserved)
+        self.assertIn("death_damage_radius = 90", preserved)
+
+        project.fire_points_enabled = True
+        project.fire_x = 30
+        project.fire_y = -6
+        project.fire_z = 50
+        project.num_weapons = 4
+        project.death_damage_enabled = True
+        project.death_damage = 5000
+        project.death_damage_radius = 300
+        updated, _preview, _name = plan_script_update(
+            text, "new_vehicle", 3, project)
+        self.assertIn("fire_x = 30", updated)
+        self.assertIn("num_weapons = 4", updated)
+        self.assertIn("death_damage = 5000", updated)
+        self.assertIn("death_damage_radius = 300", updated)
+
+    def test_88_vehicle_spatial_controls_live_in_right_column(self):
+        window = self._window()
+        self.assertIsNone(
+            window.findChild(QToolBar, "vehicleSpatialPreviewTools"))
+        self.assertEqual(
+            window.fire_points_box.title(), "Fire Points (Vanilla)")
+        self.assertEqual(
+            window.death_damage_box.title(), "Death Damage AoE (OpenUA)")
+        self.assertEqual(
+            window.fire_points_check.text(), "Include Fire Points")
+        self.assertEqual(
+            window.death_damage_check.text(), "Include Death Damage AoE")
+        self.assertIn("Show Fire Points", window.viewpoint_actions)
+        self.assertIn("Show Death Damage AoE", window.viewpoint_actions)
+        self.assertFalse(window.fire_points_box.isHidden())
+        self.assertFalse(window.death_damage_box.isHidden())
+        window.project.target_category = WEAPON
+        window._sync_all()
+        self.assertTrue(window.fire_points_box.isHidden())
+        self.assertTrue(window.death_damage_box.isHidden())
+
+    def test_89_death_damage_validation_requires_positive_damage_and_radius(self):
+        project = CollisionProject(
+            name="Unit", source_model="unit.sklt",
+            target_category=VEHICLE,
+            death_damage_enabled=True,
+            death_damage=0,
+            death_damage_radius=0.0,
+        )
+        errors, _warnings = validate_project(project, None)
+        self.assertTrue(any("Death Damage" in error for error in errors))
+        project.death_damage = 5000
+        project.death_damage_radius = 300
+        errors, _warnings = validate_project(project, None)
+        self.assertFalse(any("Death Damage" in error for error in errors))
+
+    def test_90_vehicle_model_reference_reads_vp_and_preview_scale(self):
+        text = (
+            "new_vehicle 17\n"
+            " name = Wasp\n"
+            " vp_normal = 42\n"
+            " vp_scale_x = 2\n"
+            " vp_scale_y = 1.5\n"
+            " vp_scale_z = 0.75\n"
+            "end\n"
+            "modify_vehicle 17\n vp_normal = 99\nend\n"
+        )
+        references = vehicle_model_references(text)
+        self.assertEqual(len(references), 1)
+        reference = references[0]
+        self.assertEqual(reference.block.object_id, 17)
+        self.assertEqual(reference.vp_normal, 42)
+        self.assertEqual(
+            (reference.scale_x, reference.scale_y, reference.scale_z),
+            (2.0, 1.5, 0.75),
+        )
+
+    def test_90b_script_model_references_include_weapons_and_scales(self):
+        text = (
+            "new_vehicle 1\n name = Wasp\n vp_normal = 30\nend\n"
+            "new_weapon 1\n name = Rocket\n vp_normal = 91\n"
+            " vp_scale_x = 1.25\n vp_scale_y = 0.5\n"
+            " vp_scale_z = 3\nend\n"
+            "modify_weapon 1\n vp_normal = 999\nend\n"
+        )
+        references = script_model_references(text)
+        self.assertEqual(
+            [(item.block.kind, item.block.object_id, item.vp_normal)
+             for item in references],
+            [("new_vehicle", 1, 30), ("new_weapon", 1, 91)],
+        )
+        weapons = weapon_model_references(text)
+        self.assertEqual(len(weapons), 1)
+        self.assertEqual(
+            (weapons[0].scale_x, weapons[0].scale_y, weapons[0].scale_z),
+            (1.25, 0.5, 3.0),
+        )
+
+    def test_90c_tutorial_labels_are_removed_but_openua_marker_remains(self):
+        window = self._window()
+        self.assertTrue(window.ground_alignment_notice.isHidden())
+        self.assertTrue(window.fire_point_notice.isHidden())
+        self.assertEqual(window.death_damage_notice.text(), "OpenUA only")
+        self.assertIn("#e1aa62", window.death_damage_notice.styleSheet())
+
+    def test_90d_file_action_names_are_compact(self):
+        window = self._window()
+        self.assertEqual(window.open_base_action.text(), "Import BAS Archive")
+        self.assertEqual(window.open_sklt_action.text(), "Import SKLT")
+        self.assertEqual(
+            window.open_vehicle_script_action.text(),
+            "Import Vehicle / Weapon from Script")
+        self.assertEqual(window.import_action.text(), "Import Collision Text")
+        self.assertEqual(window.export_action.text(), "Export Collision Text")
+        self.assertEqual(
+            window.apply_script_action.text(), "Apply to Existing Script")
+        self.assertEqual(window.save_loaded_script_action.text(), "Overwrite")
+
+    def test_90e_script_dialog_filters_by_exact_id_or_name(self):
+        text = (
+            "new_vehicle 1\n name = Wasp\n vp_normal = 30\nend\n"
+            "new_vehicle 10\n name = Firefly\n vp_normal = 48\nend\n"
+            "new_weapon 1\n name = Rocket\n vp_normal = 91\nend\n"
+        )
+        dialog = OpenScriptObjectDialog(
+            None, Path("objects.txt"), script_model_references(text))
+        self.addCleanup(dialog.close)
+        self.assertEqual(
+            dialog.windowTitle(), "Import Vehicle / Weapon from Script")
+        self.assertEqual(dialog.open_button.text(), "Import")
+        dialog.search_edit.setText("rocket")
+        self.assertEqual(dialog.block_combo.count(), 1)
+        self.assertEqual(
+            dialog.block_combo.currentData().block.kind, "new_weapon")
+        dialog.search_edit.setText("1")
+        self.assertEqual(dialog.block_combo.count(), 2)
+        self.assertTrue(all(
+            dialog.block_combo.itemData(index).block.object_id == 1
+            for index in range(dialog.block_combo.count())))
+
+    def test_90f_selected_multi_fire_rack_draws_white_halo_on_every_point(self):
+        viewport = CollisionViewport()
+        viewport._ground_alignment_source_loaded = True
+        viewport.set_fire_points([(0, 0, 0), (10, 0, 0)], selected=0)
+        painter = MagicMock()
+        screens = [QPointF(20, 20), QPointF(60, 20)]
+        with patch.object(
+                viewport, "_fire_point_screen_positions",
+                return_value=screens), patch.object(
+                viewport, "_draw_fire_marker") as draw_marker:
+            viewport._draw_fire_points_overlay(painter)
+        self.assertEqual(draw_marker.call_count, 4)
+        white_calls = [
+            call for call in draw_marker.call_args_list
+            if call.args[2].color() == QColor(255, 255, 255)
+        ]
+        self.assertEqual(len(white_calls), 2)
+
+    def test_91_canonical_save_replaces_all_active_managed_parameters(self):
+        text = (
+            "new_vehicle 17\n"
+            " name = Wasp\n"
+            " vp_normal = 42\n"
+            " radius = 10\n"
+            " radius = 20\n"
+            " fire_x = 999\n"
+            " coll_num = 1\n"
+            " coll_act = 0\n"
+            " coll_x = 3\n"
+            " coll_y = 4\n"
+            " coll_z = 5\n"
+            " coll_radius = 6\n"
+            " ; radius = 777\n"
+            " mass = 300\n"
+            "end\n"
+        )
+        project = CollisionProject(
+            name="Wasp", source_model="wasp.sklt",
+            target_category=VEHICLE,
+            overeof_enabled=True, overeof=12,
+            fire_points_enabled=True,
+            fire_x=30, fire_y=-5, fire_z=44, num_weapons=2,
+            death_damage_enabled=True,
+            death_damage=5000, death_damage_radius=300,
+            compound=[CollisionSphere(VEHICLE, 1, 2, 3, 40)],
+        )
+        updated, _preview, _name = plan_script_update(
+            text, "new_vehicle", 17, project,
+            replace_all_managed=True,
+        )
+        self.assertNotIn("radius = 10", updated)
+        self.assertNotIn("radius = 20", updated)
+        self.assertNotIn("fire_x = 999", updated)
+        self.assertEqual(updated.count("coll_num ="), 1)
+        self.assertEqual(updated.count("coll_act ="), 1)
+        self.assertIn("fire_x = 30", updated)
+        self.assertIn("death_damage_radius = 300", updated)
+        self.assertIn("mass = 300", updated)
+        self.assertIn("vp_normal = 42", updated)
+        self.assertIn("; radius = 777", updated)
+
+    def test_92_script_object_actions_remain_in_file_menu(self):
+        window = self._window()
+        self.assertEqual(
+            window.open_vehicle_script_action.text(),
+            "Import Vehicle / Weapon from Script")
+        self.assertEqual(window.save_loaded_script_action.text(), "Overwrite")
+        self.assertIn(
+            window.open_vehicle_script_action,
+            window.file_import_menu.actions())
+        self.assertIn(
+            window.save_loaded_script_action,
+            window.file_script_menu.actions())
+        self.assertFalse(window.save_loaded_script_action.isEnabled())
+
+    def test_93_runtime_vp_table_prefers_loose_visproto(self):
+        from vp_manager import EmbeddedVPEntry, EmbeddedVPSet
+
+        with tempfile.TemporaryDirectory() as tmp:
+            set_root = Path(tmp) / "Set1"
+            objects = set_root / "OBJECTS"
+            loose = set_root / "Loose"
+            objects.mkdir(parents=True)
+            loose.mkdir()
+            set_bas = objects / "SET.BAS"
+            set_bas.write_bytes(b"placeholder")
+            (loose / "VISPROTO.LST").write_text(
+                "Custom.base\n>\n", encoding="utf-8")
+            embedded = EmbeddedVPSet(
+                source_path=set_bas,
+                container_source_offset=0,
+                entries=(EmbeddedVPEntry(
+                    0, "Embedded.base", "Skeleton/Embedded.sklt", 1),),
+            )
+            table, source, warnings = runtime_vp_table(set_bas, embedded)
+            self.assertEqual(table.entry(0).base_name, "Custom.base")
+            self.assertEqual(source, "Loose VISPROTO.LST")
+            self.assertEqual(warnings, [])
+
+
+    def test_94_view_preset_precedes_model_scale_on_second_toolbar(self):
+        window = self._window()
+        toolbar = window.model_preview_scale_toolbar
+        widgets = [
+            toolbar.widgetForAction(action) for action in toolbar.actions()]
+        preset_index = widgets.index(window.toolbar_view_preset_combo)
+        scale_index = widgets.index(window.model_scale_x_spin)
+        self.assertLess(preset_index, scale_index)
+        collision_toolbar = window.findChild(QToolBar, "collisionTools")
+        self.assertNotIn(
+            window.toolbar_view_preset_combo,
+            collision_toolbar.findChildren(type(window.toolbar_view_preset_combo)))
+
+    def test_95_fire_points_are_listed_and_selectable(self):
+        window = self._window()
+        window.project.fire_points_enabled = True
+        window.project.fire_x = 30.0
+        window.project.fire_y = -6.0
+        window.project.fire_z = 35.0
+        window.project.num_weapons = 2
+        window._sync_all()
+        self.assertEqual(window.fire_point_tree.topLevelItemCount(), 2)
+        second = window.fire_point_tree.topLevelItem(1)
+        window.fire_point_tree.setCurrentItem(second)
+        self.assertEqual(window._selected_fire_point, 1)
+        self.assertEqual(window._selected, -1)
+        self.assertTrue(window.gizmo.isEnabled())
+        self.assertEqual(window.transform_box.title(), "Move Fire Point")
+        self.assertEqual(window.viewport._fire_point_selected, 1)
+
+    def test_96_gizmo_moves_vanilla_fire_rack_without_inventing_offsets(self):
+        window = self._window()
+        window.project.fire_points_enabled = True
+        window.project.fire_x = 30.0
+        window.project.fire_y = -6.0
+        window.project.fire_z = 35.0
+        window.project.num_weapons = 2
+        window._select_fire_point(1)
+        window.move_strength_spin.setValue(5)
+        window._gizmo_nudge((1, 0, 0))
+        window._gizmo_nudge((0, -1, 0))
+        window._gizmo_nudge((0, 0, 1))
+        self.assertEqual(window.project.fire_x, 35.0)
+        self.assertEqual(window.project.fire_y, -11.0)
+        self.assertEqual(window.project.fire_z, 40.0)
+        self.assertEqual(fire_point_positions(window.project), [
+            (-35.0, -11.0, 40.0),
+            (35.0, -11.0, 40.0),
+        ])
+
+    def test_97_center_fire_point_cannot_break_vanilla_symmetry(self):
+        window = self._window()
+        window.project.fire_points_enabled = True
+        window.project.fire_x = 30.0
+        window.project.num_weapons = 3
+        window._select_fire_point(1)
+        window._gizmo_nudge((1, 0, 0))
+        self.assertEqual(window.project.fire_x, 30.0)
+        self.assertEqual(fire_point_positions(window.project)[1][0], 0.0)
+
+    def test_98_selected_fire_point_uses_white_outline_state(self):
+        viewport = CollisionViewport()
+        viewport.set_fire_points([(1.0, 2.0, 3.0)], selected=0)
+        self.assertEqual(viewport._fire_point_selected, 0)
+        viewport.set_fire_points([(1.0, 2.0, 3.0)], selected=-1)
+        self.assertEqual(viewport._fire_point_selected, -1)
+
+    def test_99_death_aoe_uses_engine_fuchsia_and_near_plane_rejection(self):
+        self.assertEqual(DEATH_DAMAGE_COLOR, QColor(255, 0, 255))
+        self.assertTrue(
+            CollisionViewport._camera_point_is_projectable((0, 0, 3.7)))
+        self.assertFalse(
+            CollisionViewport._camera_point_is_projectable((0, 0, 3.9)))
+        self.assertFalse(
+            CollisionViewport._camera_point_is_projectable((0, 0, 5.0)))
+
+    def test_100_selecting_a_sphere_clears_fire_point_selection(self):
+        window = self._window()
+        window.project.fire_points_enabled = True
+        window.project.fire_x = 30.0
+        window.project.num_weapons = 2
+        window._select_fire_point(1)
+        self.assertEqual(window._selected_fire_point, 1)
+        window.add_compound(VEHICLE)
+        self.assertEqual(window._selected_fire_point, -1)
+        self.assertGreaterEqual(window._selected, 0)
+
+    def test_101_death_aoe_projection_rejects_far_offscreen_points(self):
+        viewport = CollisionViewport()
+        viewport.resize(640, 480)
+        self.assertIsNone(
+            viewport._project_visible_world((1_000_000.0, 0.0, 0.0)))
 
 
 if __name__ == "__main__":

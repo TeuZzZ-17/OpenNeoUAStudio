@@ -22,6 +22,9 @@ Run from source:
 python main.py
 ```
 
+On normal startup, OpenUAStudio first shows a tool selector for the Main
+Suite, Map Editor, Collision Editor, or Wireframe Editor.
+
 A precompiled Windows executable may also be included in the repository for convenience.
 
 ## License

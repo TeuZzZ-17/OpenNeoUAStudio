@@ -16,15 +16,14 @@ from PySide6.QtWidgets import (
     QCheckBox,
     QFileDialog,
     QFormLayout,
+    QGridLayout,
+    QGroupBox,
     QLabel,
     QListWidget,
     QMainWindow,
     QMessageBox,
     QSplitter,
-    QStackedWidget,
     QToolBar,
-    QTreeWidget,
-    QTreeWidgetItem,
     QVBoxLayout,
     QWidget,
 )
@@ -39,9 +38,6 @@ from sklt_parser import (
     save_sklt_with_poo2_pol2_structure,
     save_sklt_with_poo2_points,
 )
-from viewer import WireframeViewer
-
-
 APP_TITLE = "OpenUAStudio - Wireframe Editor"
 
 
@@ -55,28 +51,24 @@ class WireframeEditorWindow(QMainWindow):
         self._current_file_path: Path | None = None
         self._skip_save_confirmation_this_session = False
 
-        self.viewer = WireframeViewer()
         self.outline_editor = OutlineEditor()
+        self.outline_editor.show_indices_check.setChecked(True)
         self.outline_editor.dirtyChanged.connect(self._outline_dirty_changed)
         self.outline_editor.geometryChanged.connect(self._outline_geometry_changed)
         self.outline_editor.undoRedoChanged.connect(self._update_edit_controls)
         self.outline_editor.resetApplied.connect(self._outline_reset_applied)
         self.outline_editor.selectionChanged.connect(self._outline_selection_changed)
-        self.file_value = QLabel("No file loaded")
+        self.file_value = QLabel("No file imported")
         self.file_value.setWordWrap(True)
-        self.edit_mode_value = QLabel("No editable 2D mode")
+        self.edit_mode_value = QLabel("No editable geometry")
         self.points_value = QLabel("0")
         self.polygons_value = QLabel("0")
-        self.rendered_polygons_value = QLabel("0")
         self.sensors_value = QLabel("0")
-        self.outline_points_value = QLabel("0")
-        self.outline_groups_value = QLabel("0")
         self.outline_lines_value = QLabel("0")
-        self.chunk_tree = QTreeWidget()
-        self.warning_title_label = QLabel("Warnings")
-        self.warning_status_label = QLabel("No parsing warnings.")
+        self.selection_value = QLabel("No selection")
+        self.status_value = QLabel("Ready to import a file")
+        self.warning_status_label = QLabel("No warnings")
         self.warning_list = QListWidget()
-        self.view_stack: QStackedWidget | None = None
         self.new_action: QAction | None = None
         self.save_action: QAction | None = None
         self.save_as_action: QAction | None = None
@@ -100,49 +92,122 @@ class WireframeEditorWindow(QMainWindow):
         self.add_pentagon_action: QAction | None = None
         self.add_circle_action: QAction | None = None
         self.edit_toolbar: QToolBar | None = None
-        self.mode_3d_check = QCheckBox("3D Mode")
-        self.mode_3d_check.toggled.connect(self._set_3d_mode)
 
         self._build_ui()
         self._build_menu()
         self._build_edit_toolbar()
-        self._set_3d_mode(False)
         self._update_save_controls()
         self._update_edit_controls()
         self.statusBar().showMessage("Ready")
 
     def _build_ui(self) -> None:
         side_panel = QWidget()
+        side_panel.setObjectName("wireframeInfoPanel")
+        side_panel.setMinimumWidth(250)
+        side_panel.setStyleSheet(
+            """
+            QLabel#panelTitle {
+                color: #f2f4f7;
+                font-size: 16px;
+                font-weight: 600;
+            }
+            QLabel#panelSubtitle, QLabel#mutedValue {
+                color: #98a2ad;
+            }
+            QLabel#metricValue {
+                color: #f1c66d;
+                font-size: 16px;
+                font-weight: 600;
+            }
+            QGroupBox {
+                margin-top: 8px;
+                padding-top: 5px;
+                font-weight: 600;
+            }
+            QGroupBox::title {
+                subcontrol-origin: margin;
+                left: 8px;
+                padding: 0 4px;
+            }
+            QListWidget {
+                border: 1px solid #3a414a;
+                border-radius: 4px;
+                padding: 3px;
+            }
+            """
+        )
         side_layout = QVBoxLayout(side_panel)
+        side_layout.setContentsMargins(10, 8, 8, 8)
+        side_layout.setSpacing(6)
 
-        metadata = QFormLayout()
-        metadata.addRow("File:", self.file_value)
-        metadata.addRow("Mode:", self.edit_mode_value)
-        metadata.addRow("POO2 vertices:", self.points_value)
-        metadata.addRow("POL2 polygons:", self.polygons_value)
-        metadata.addRow("Rendered polygons:", self.rendered_polygons_value)
-        metadata.addRow("SEN2 vertices:", self.sensors_value)
-        metadata.addRow("2D lines:", self.outline_lines_value)
-        side_layout.addLayout(metadata)
+        title = QLabel("Wireframe Overview")
+        title.setObjectName("panelTitle")
+        subtitle = QLabel("Edit the geometry and export a clean SKLT/SKL file.")
+        subtitle.setObjectName("panelSubtitle")
+        subtitle.setWordWrap(True)
+        side_layout.addWidget(title)
+        side_layout.addWidget(subtitle)
 
-        self.chunk_tree.setHeaderLabels(["Chunk", "Size", "Offset"])
-        self.chunk_tree.setRootIsDecorated(False)
-        self.chunk_tree.setAlternatingRowColors(True)
-        side_layout.addWidget(self.chunk_tree, 3)
+        asset_box = QGroupBox("Asset")
+        asset_layout = QFormLayout(asset_box)
+        asset_layout.setContentsMargins(8, 6, 8, 8)
+        asset_layout.setVerticalSpacing(5)
+        self.file_value.setObjectName("mutedValue")
+        asset_layout.addRow("File", self.file_value)
+        asset_layout.addRow("Type", self.edit_mode_value)
+        asset_layout.addRow("Status", self.status_value)
+        side_layout.addWidget(asset_box)
 
-        side_layout.addWidget(self.warning_status_label)
-        side_layout.addWidget(self.warning_title_label)
+        geometry_box = QGroupBox("Geometry")
+        geometry_layout = QGridLayout(geometry_box)
+        geometry_layout.setContentsMargins(8, 7, 8, 8)
+        geometry_layout.setHorizontalSpacing(8)
+        geometry_layout.setVerticalSpacing(7)
+        metrics = (
+            ("Vertices", self.points_value),
+            ("Shapes", self.polygons_value),
+            ("Connections", self.outline_lines_value),
+            ("Sensors", self.sensors_value),
+        )
+        for index, (label, value) in enumerate(metrics):
+            row, column = divmod(index, 2)
+            caption = QLabel(label)
+            value.setObjectName("metricValue")
+            value.setAlignment(
+                Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+            geometry_layout.addWidget(caption, row, column * 2)
+            geometry_layout.addWidget(value, row, column * 2 + 1)
+        geometry_layout.setColumnStretch(1, 1)
+        geometry_layout.setColumnStretch(3, 1)
+        side_layout.addWidget(geometry_box)
+
+        selection_box = QGroupBox("Selection")
+        selection_layout = QVBoxLayout(selection_box)
+        selection_layout.setContentsMargins(8, 6, 8, 8)
+        self.selection_value.setObjectName("metricValue")
+        selection_layout.addWidget(self.selection_value)
+        selection_hint = QLabel("Click a vertex or connection to edit it.")
+        selection_hint.setObjectName("mutedValue")
+        selection_hint.setWordWrap(True)
+        selection_layout.addWidget(selection_hint)
+        side_layout.addWidget(selection_box)
+
+        self.warning_box = QGroupBox("Review")
+        warning_layout = QVBoxLayout(self.warning_box)
+        warning_layout.setContentsMargins(8, 6, 8, 8)
+        warning_layout.setSpacing(5)
+        self.warning_status_label.setObjectName("mutedValue")
+        self.warning_status_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        warning_layout.addWidget(
+            self.warning_status_label, 1, Qt.AlignmentFlag.AlignCenter)
         self.warning_list.setAlternatingRowColors(True)
-        side_layout.addWidget(self.warning_list, 2)
-        self.warning_title_label.setVisible(False)
+        self.warning_list.setMinimumHeight(70)
+        warning_layout.addWidget(self.warning_list)
         self.warning_list.setVisible(False)
-
-        self.view_stack = QStackedWidget()
-        self.view_stack.addWidget(self.outline_editor)
-        self.view_stack.addWidget(self.viewer)
+        side_layout.addWidget(self.warning_box, 1)
 
         splitter = QSplitter(Qt.Orientation.Horizontal)
-        splitter.addWidget(self.view_stack)
+        splitter.addWidget(self.outline_editor)
         splitter.addWidget(side_panel)
         splitter.setStretchFactor(0, 4)
         splitter.setStretchFactor(1, 1)
@@ -151,35 +216,36 @@ class WireframeEditorWindow(QMainWindow):
 
     def _build_menu(self) -> None:
         file_menu = self.menuBar().addMenu("&File")
+        self.file_menu = file_menu
 
         self.new_action = QAction("&New", self)
         self.new_action.setShortcut(QKeySequence.StandardKey.New)
         self.new_action.triggered.connect(self.new_file)
         file_menu.addAction(self.new_action)
 
-        open_action = QAction("&Load", self)
-        open_action.setShortcut(QKeySequence.StandardKey.Open)
-        open_action.triggered.connect(self.open_dialog)
-        file_menu.addAction(open_action)
+        self.import_action = QAction("&Import", self)
+        self.import_action.setShortcut(QKeySequence.StandardKey.Open)
+        self.import_action.triggered.connect(self.open_dialog)
 
-        file_menu.addSeparator()
-
-        self.save_action = QAction("&Save", self)
+        self.save_action = QAction("&Export", self)
         self.save_action.setShortcut(QKeySequence.StandardKey.Save)
         self.save_action.triggered.connect(self.save_current_file)
-        file_menu.addAction(self.save_action)
+        self.export_action = self.save_action
 
-        self.save_as_action = QAction("Save &As...", self)
+        self.save_as_action = QAction("Export &As...", self)
         self.save_as_action.setShortcut(QKeySequence.StandardKey.SaveAs)
         self.save_as_action.triggered.connect(self.save_outline_as)
+        self.export_as_action = self.save_as_action
+
+        file_menu.addAction(self.import_action)
+        file_menu.addAction(self.save_action)
         file_menu.addAction(self.save_as_action)
 
         file_menu.addSeparator()
 
-        exit_action = QAction("E&xit", self)
-        exit_action.setShortcut(QKeySequence.StandardKey.Quit)
-        exit_action.triggered.connect(self.close)
-        file_menu.addAction(exit_action)
+        self.exit_action = QAction("E&xit", self)
+        self.exit_action.triggered.connect(self.close)
+        file_menu.addAction(self.exit_action)
 
         edit_menu = self.menuBar().addMenu("&Edit")
 
@@ -277,28 +343,9 @@ class WireframeEditorWindow(QMainWindow):
         self.edit_toolbar.setFloatable(False)
 
         self.outline_editor.show_indices_check.setText("Vertex IDs")
-        self.outline_editor.show_indices_check.toggled.connect(self.viewer.set_show_vertex_indices)
         self.edit_toolbar.addWidget(self.outline_editor.show_indices_check)
         self.edit_toolbar.addSeparator()
         self.edit_toolbar.addWidget(self.outline_editor.auto_align_check)
-        self.edit_toolbar.addSeparator()
-        self.edit_toolbar.addWidget(self.mode_3d_check)
-        self.edit_toolbar.addSeparator()
-        self.edit_toolbar.addWidget(QLabel("Vertex:"))
-        self.edit_toolbar.addWidget(self.outline_editor.selected_label)
-        self.edit_toolbar.addSeparator()
-
-        for label, spinbox in (
-            ("X:", self.outline_editor.x_spin),
-            ("Y:", self.outline_editor.y_spin),
-            ("Z:", self.outline_editor.z_spin),
-        ):
-            spinbox.setMaximumWidth(120)
-            self.edit_toolbar.addWidget(QLabel(label))
-            self.edit_toolbar.addWidget(spinbox)
-
-        self.edit_toolbar.addSeparator()
-        self.edit_toolbar.addWidget(self.outline_editor.status_label)
         self.addToolBar(Qt.ToolBarArea.TopToolBarArea, self.edit_toolbar)
 
     def _set_transform_mode(self, mode: str) -> None:
@@ -313,15 +360,20 @@ class WireframeEditorWindow(QMainWindow):
         if not self.outline_editor.is_dirty:
             return True
         title = self._current_file_path.name if self._current_file_path else "current file"
-        reply = QMessageBox.question(
-            self,
-            "Save changes?",
-            f"Save changes to {title} before continuing?",
+        message_box = QMessageBox(self)
+        message_box.setIcon(QMessageBox.Icon.Question)
+        message_box.setWindowTitle("Export changes?")
+        message_box.setText(
+            f"Export changes to {title} before continuing?")
+        message_box.setStandardButtons(
             QMessageBox.StandardButton.Save
             | QMessageBox.StandardButton.Discard
-            | QMessageBox.StandardButton.Cancel,
-            QMessageBox.StandardButton.Save,
-        )
+            | QMessageBox.StandardButton.Cancel)
+        message_box.setDefaultButton(QMessageBox.StandardButton.Save)
+        export_button = message_box.button(QMessageBox.StandardButton.Save)
+        if export_button:
+            export_button.setText("Export")
+        reply = message_box.exec()
         if reply == QMessageBox.StandardButton.Cancel:
             return False
         if reply == QMessageBox.StandardButton.Discard:
@@ -357,7 +409,7 @@ class WireframeEditorWindow(QMainWindow):
     def open_dialog(self) -> None:
         path, _ = QFileDialog.getOpenFileName(
             self,
-            "Load file",
+            "Import file",
             str(self._last_directory),
             "Urban Assault skeletons (*.sklt *.SKLT *.skl *.SKL);;All files (*)",
         )
@@ -380,13 +432,13 @@ class WireframeEditorWindow(QMainWindow):
             self._write_edited_file(self._current_file_path)
             saved_model = parse_sklt_file(self._current_file_path)
         except SkltParseError as exc:
-            QMessageBox.warning(self, "Could not save file", str(exc))
-            self.statusBar().showMessage("Save failed")
+            QMessageBox.warning(self, "Could not export file", str(exc))
+            self.statusBar().showMessage("Export failed")
             return
 
         save_label = "OTL2 outline" if save_mode == "otl2" else "wireframe"
-        message = f"Saved edited {save_label} to {self._current_file_path.name}."
-        QMessageBox.information(self, "File saved", message)
+        message = f"Exported edited {save_label} to {self._current_file_path.name}."
+        QMessageBox.information(self, "File exported", message)
         self._show_model(saved_model, self._current_file_path)
 
     def save_outline_as(self) -> None:
@@ -394,7 +446,7 @@ class WireframeEditorWindow(QMainWindow):
             QMessageBox.information(
                 self,
                 "No editable data",
-                "This file has no editable OTL2/OLPL outline or projected POO2/POL2 vertex data to save.",
+                "This file has no editable OTL2/OLPL outline or projected POO2/POL2 vertex data to export.",
             )
             return
 
@@ -403,7 +455,7 @@ class WireframeEditorWindow(QMainWindow):
         save_label = "OTL2 outline" if save_mode == "otl2" else "wireframe"
         path, _ = QFileDialog.getSaveFileName(
             self,
-            f"Save edited {save_label} as",
+            f"Export edited {save_label} as",
             str(suggested),
             "Urban Assault skeletons (*.sklt *.SKLT *.skl *.SKL);;All files (*)",
         )
@@ -416,7 +468,7 @@ class WireframeEditorWindow(QMainWindow):
                 self,
                 "Choose a different file",
                 "Direct overwrite of the loaded original is disabled. "
-                "Choose a different Save As destination.",
+                "Choose a different Export As destination.",
             )
             return
 
@@ -424,12 +476,12 @@ class WireframeEditorWindow(QMainWindow):
             self._write_edited_file(output_path)
             saved_model = parse_sklt_file(output_path)
         except SkltParseError as exc:
-            QMessageBox.warning(self, "Could not save file", str(exc))
-            self.statusBar().showMessage("Save As failed")
+            QMessageBox.warning(self, "Could not export file", str(exc))
+            self.statusBar().showMessage("Export As failed")
             return
 
-        message = f"Saved edited {save_label} to {output_path.name}."
-        QMessageBox.information(self, "Outline saved", message)
+        message = f"Exported edited {save_label} to {output_path.name}."
+        QMessageBox.information(self, "Outline exported", message)
 
         self._last_directory = output_path.parent
         self._current_file_path = output_path
@@ -437,7 +489,7 @@ class WireframeEditorWindow(QMainWindow):
 
     def _write_edited_file(self, output_path: Path) -> Path | None:
         if not self._current_model:
-            raise SkltParseError("No SKLT file is loaded.")
+            raise SkltParseError("No SKLT file is imported.")
 
         save_mode = self.outline_editor.save_mode
         if save_mode == "otl2":
@@ -455,7 +507,7 @@ class WireframeEditorWindow(QMainWindow):
             return save_sklt_with_poo2_points(
                 self._current_model, self.outline_editor.projected_points, output_path
             )
-        raise SkltParseError("No editable data is available to save.")
+        raise SkltParseError("No editable data is available to export.")
 
     def _confirm_save_over_original(self) -> bool:
         if self._skip_save_confirmation_this_session:
@@ -464,14 +516,17 @@ class WireframeEditorWindow(QMainWindow):
         message_box = QMessageBox(self)
         message_box.setIcon(QMessageBox.Icon.Warning)
         message_box.setWindowTitle("Overwrite loaded file?")
-        message_box.setText("Save will modify the currently loaded SKLT/SKL file.")
+        message_box.setText("Export will modify the currently loaded SKLT/SKL file.")
         message_box.setInformativeText(
-            "Save only when you are ready to overwrite the loaded file."
+            "Export only when you are ready to overwrite the loaded file."
         )
         message_box.setStandardButtons(
             QMessageBox.StandardButton.Save | QMessageBox.StandardButton.Cancel
         )
         message_box.setDefaultButton(QMessageBox.StandardButton.Cancel)
+        export_button = message_box.button(QMessageBox.StandardButton.Save)
+        if export_button:
+            export_button.setText("Export")
         checkbox = QCheckBox("Do not ask again this session")
         message_box.setCheckBox(checkbox)
 
@@ -487,8 +542,8 @@ class WireframeEditorWindow(QMainWindow):
         try:
             model = parse_sklt_file(file_path)
         except SkltParseError as exc:
-            QMessageBox.warning(self, "Could not load file", str(exc))
-            self.statusBar().showMessage("Load failed")
+            QMessageBox.warning(self, "Could not import file", str(exc))
+            self.statusBar().showMessage("Import failed")
             return
         except Exception as exc:
             QMessageBox.critical(
@@ -496,7 +551,7 @@ class WireframeEditorWindow(QMainWindow):
                 "Unexpected parsing error",
                 f"The file was not modified.\n\n{exc}",
             )
-            self.statusBar().showMessage("Load failed safely")
+            self.statusBar().showMessage("Import failed safely")
             return
 
         self._last_directory = file_path.parent
@@ -505,50 +560,30 @@ class WireframeEditorWindow(QMainWindow):
 
     def _show_model(self, model: SkltModel, file_path: Path) -> None:
         self._current_model = model
-        self.viewer.set_model(model)
         self.outline_editor.set_model(model)
-        self.mode_3d_check.setChecked(False)
-        self._set_3d_mode(False)
         self.file_value.setText(file_path.name)
         self.file_value.setToolTip(str(file_path))
         self.sensors_value.setText(str(len(model.sensors)))
-        self.outline_points_value.setText(str(len(model.outline_points)))
-        self.outline_groups_value.setText(
-            f"{model.parsed_outline_group_count} / {model.rendered_outline_group_count}"
-        )
         self._update_metadata_from_editor()
-
-        self.chunk_tree.clear()
-        for chunk in model.chunks:
-            size_text = str(chunk.declared_size)
-            if chunk.actual_size != chunk.declared_size:
-                size_text = f"{chunk.actual_size} / {chunk.declared_size}"
-            item = QTreeWidgetItem(
-                [
-                    f"{'  ' * chunk.depth}{chunk.display_name}",
-                    size_text,
-                    f"0x{chunk.offset:X}",
-                ]
-            )
-            self.chunk_tree.addTopLevelItem(item)
-        self.chunk_tree.resizeColumnToContents(0)
 
         self.warning_list.clear()
         if model.warnings:
             self.warning_list.addItems(model.warnings)
-            self.warning_title_label.setVisible(True)
+            self.warning_status_label.setText(
+                f"{len(model.warnings)} item(s) to review before export.")
+            self.warning_status_label.setAlignment(
+                Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
             self.warning_list.setVisible(True)
-            self.warning_status_label.setVisible(False)
         else:
-            self.warning_title_label.setVisible(False)
+            self.warning_status_label.setText("No warnings")
+            self.warning_status_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
             self.warning_list.setVisible(False)
-            self.warning_status_label.setVisible(True)
 
         self._update_window_title()
         self._update_save_controls()
         self._update_edit_controls()
         self.statusBar().showMessage(
-            f"Loaded {file_path.name}: {len(model.points)} vertices, "
+            f"Imported {file_path.name}: {len(model.points)} vertices, "
             f"{model.rendered_polygon_count} rendered polygons, "
             f"{len(model.warnings)} warning(s)"
         )
@@ -558,12 +593,9 @@ class WireframeEditorWindow(QMainWindow):
         self._update_save_controls()
 
     def _outline_selection_changed(self, index: int) -> None:
-        self.viewer.set_selected_index(index)
         self._update_edit_controls()
 
     def _outline_geometry_changed(self) -> None:
-        self.viewer.set_points(self.outline_editor.projected_points)
-        self.viewer.set_edges(self.outline_editor.polygons)
         self._update_metadata_from_editor()
 
     def _outline_reset_applied(self) -> None:
@@ -571,21 +603,24 @@ class WireframeEditorWindow(QMainWindow):
             self._outline_geometry_changed()
 
     def _update_metadata_from_editor(self) -> None:
-        self.edit_mode_value.setText(self.outline_editor.edit_mode_text)
+        mode_labels = {
+            "otl2": "2D Outline",
+            "poo2": "HUD Wireframe",
+            "none": "No editable geometry",
+        }
+        self.edit_mode_value.setText(
+            mode_labels.get(self.outline_editor.save_mode, "No editable geometry"))
         if self.outline_editor.save_mode == "poo2":
             self.points_value.setText(str(self.outline_editor.editable_point_count))
             self.polygons_value.setText(str(self.outline_editor.editable_polygon_count))
-            self.rendered_polygons_value.setText(str(self.outline_editor.editable_polygon_count))
             self.outline_lines_value.setText(str(self.outline_editor.editable_line_count))
         elif self._current_model:
-            self.points_value.setText(str(len(self._current_model.points)))
-            self.polygons_value.setText(str(self._current_model.parsed_polygon_count))
-            self.rendered_polygons_value.setText(str(self._current_model.rendered_polygon_count))
+            self.points_value.setText(str(self.outline_editor.editable_point_count))
+            self.polygons_value.setText(str(self.outline_editor.editable_polygon_count))
             self.outline_lines_value.setText(str(self.outline_editor.editable_line_count))
         else:
             self.points_value.setText("0")
             self.polygons_value.setText("0")
-            self.rendered_polygons_value.setText("0")
             self.outline_lines_value.setText("0")
 
     def _update_save_controls(self) -> None:
@@ -595,6 +630,15 @@ class WireframeEditorWindow(QMainWindow):
             self.save_action.setEnabled(can_save)
         if self.save_as_action:
             self.save_as_action.setEnabled(can_save_as)
+        self._update_status_value()
+
+    def _update_status_value(self) -> None:
+        if self._current_model is None:
+            self.status_value.setText("Ready to import a file")
+        elif self.outline_editor.is_dirty:
+            self.status_value.setText("Changes to export")
+        else:
+            self.status_value.setText("Ready")
 
     def _update_edit_controls(self) -> None:
         if self.undo_action:
@@ -602,10 +646,8 @@ class WireframeEditorWindow(QMainWindow):
         if self.redo_action:
             self.redo_action.setEnabled(self.outline_editor.can_redo)
         can_edit_structure = self.outline_editor.save_mode == "poo2"
-        has_selection = self.outline_editor.has_vertex_selection
         has_single_selection = self.outline_editor.selected_index >= 0 and self.outline_editor.selected_vertex_count == 1
         has_any_selection = self.outline_editor.has_vertex_selection or self.outline_editor.has_selected_link
-        has_link_selection = self.outline_editor.has_selected_link
         if self.copy_action:
             self.copy_action.setEnabled(can_edit_structure and has_any_selection)
         if self.cut_action:
@@ -643,6 +685,20 @@ class WireframeEditorWindow(QMainWindow):
             if action:
                 action.setEnabled(can_edit_structure)
 
+        selected_vertices = self.outline_editor.selected_vertex_count
+        selected_links = self.outline_editor.selected_edge_count
+        selection_parts = []
+        if selected_vertices:
+            selection_parts.append(
+                f"{selected_vertices} vertex"
+                + ("" if selected_vertices == 1 else "es"))
+        if selected_links:
+            selection_parts.append(
+                f"{selected_links} connection"
+                + ("" if selected_links == 1 else "s"))
+        self.selection_value.setText(
+            " + ".join(selection_parts) if selection_parts else "No selection")
+
     def _update_window_title(self) -> None:
         dirty_marker = " *" if self.outline_editor.is_dirty else ""
         if self._current_file_path:
@@ -660,25 +716,7 @@ class WireframeEditorWindow(QMainWindow):
         self.setWindowTitle(APP_TITLE)
 
     def reset_active_view(self) -> None:
-        # Reset must restore the loaded point data in both 2D and 3D mode.
-        # The 3D checkbox is only a preview toggle, not a separate edit state.
         self.outline_editor.reset_to_loaded()
-        if self.mode_3d_check.isChecked():
-            self.viewer.reset_view()
-
-    def _set_3d_mode(self, enabled: bool) -> None:
-        if not self.view_stack:
-            return
-        if enabled:
-            self.viewer.set_points(self.outline_editor.projected_points)
-            self.viewer.set_edges(self.outline_editor.polygons)
-            self.viewer.set_selected_index(self.outline_editor.selected_index)
-            self.viewer.set_show_vertex_indices(self.outline_editor.show_indices_check.isChecked())
-            self.view_stack.setCurrentWidget(self.viewer)
-            self.edit_mode_value.setText("3D Wireframe Preview")
-        else:
-            self.view_stack.setCurrentWidget(self.outline_editor)
-            self._update_metadata_from_editor()
 
 
 def main() -> int:
