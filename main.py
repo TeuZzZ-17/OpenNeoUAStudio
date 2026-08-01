@@ -17,8 +17,8 @@ from pathlib import Path
 
 APP_TITLE = "OpenUAStudio"
 MAP_EDITOR_FLAG = "--map-editor"
+MAIN_SUITE_TOOL = "main_suite"  # backward-compatible internal key
 MODEL_EDITOR_TOOL = "model_editor"
-LEGACY_MAIN_SUITE_TOOL = "main_suite"
 SNAPSHOT_STUDIO_TOOL = "snapshot_studio"
 MAP_EDITOR_TOOL = "map_editor"
 COLLISION_EDITOR_TOOL = "collision_editor"
@@ -79,7 +79,7 @@ def _show_qt_tool(app, tool: str, startup_path: str | None) -> int:
 
     global _active_window
 
-    if tool in {MODEL_EDITOR_TOOL, LEGACY_MAIN_SUITE_TOOL}:
+    if tool in {MODEL_EDITOR_TOOL, MAIN_SUITE_TOOL}:
         from model_editor import ModelEditorWindow
 
         window = ModelEditorWindow()
