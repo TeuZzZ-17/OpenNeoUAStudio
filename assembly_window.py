@@ -1157,6 +1157,7 @@ class AssemblyWindow(QMainWindow):
         view_menu.addAction(self.reset_camera_action)
 
         tools_menu = self.menuBar().addMenu("&Tools")
+        self.tools_menu = tools_menu
         setbas_tools_menu = tools_menu.addMenu("BAS Archive")
         extract_setbas_action = QAction("Extract current archive...", self)
         extract_setbas_action.triggered.connect(self._extract_setbas_archive)
@@ -1180,16 +1181,18 @@ class AssemblyWindow(QMainWindow):
         conv_to_ilbm.triggered.connect(self._convert_png_to_ilbm_dialog)
         conversion_menu.addAction(conv_to_ilbm)
 
-        wireframe_action = QAction("Wireframe Editor", self)
-        wireframe_action.triggered.connect(self._open_wireframe_editor)
-        tools_menu.addSeparator()
-        tools_menu.addAction(wireframe_action)
-        collision_action = QAction("Collision Editor", self)
-        collision_action.triggered.connect(self._open_collision_editor)
-        tools_menu.addAction(collision_action)
-        map_editor_action = QAction("Map Editor", self)
-        map_editor_action.triggered.connect(self._open_map_editor)
-        tools_menu.addAction(map_editor_action)
+        self.wireframe_editor_action = QAction("Wireframe Editor", self)
+        self.wireframe_editor_action.triggered.connect(
+            self._open_wireframe_editor)
+        self.integrated_editors_separator = tools_menu.addSeparator()
+        tools_menu.addAction(self.wireframe_editor_action)
+        self.collision_editor_action = QAction("Collision Editor", self)
+        self.collision_editor_action.triggered.connect(
+            self._open_collision_editor)
+        tools_menu.addAction(self.collision_editor_action)
+        self.map_editor_action = QAction("Map Editor", self)
+        self.map_editor_action.triggered.connect(self._open_map_editor)
+        tools_menu.addAction(self.map_editor_action)
         self.mapping_repair_action = QAction("Mapping Repair...", self)
         self.mapping_repair_action.triggered.connect(
             self._show_mapping_repair)
@@ -4237,6 +4240,23 @@ class AssemblyWindow(QMainWindow):
         if self.viewport.is_edit_mode:
             self.viewport.exit_edit_mode()
 
+    def _snapshot_panel_is_active(self) -> bool:
+        """Return whether the shared Snapshot panel is currently visible.
+
+        The standard workbench keeps Snapshot inside the nested Visuals tabs.
+        Focused workspaces can override this small routing hook while reusing
+        the same Snapshot-mode lifecycle and renderer.
+        """
+
+        tabs = getattr(self, "_right_tabs", None)
+        snapshot_panel = getattr(self, "_snapshot_panel", None)
+        visuals_tabs = getattr(self, "_visuals_tabs", None)
+        return bool(
+            tabs is not None and visuals_tabs is not None
+            and snapshot_panel is not None
+            and tabs.currentWidget() is visuals_tabs
+            and visuals_tabs.currentWidget() is snapshot_panel)
+
     def _on_right_tab_changed(self, index: int) -> None:
         if self.viewport.paste_preview_active:
             self._right_tabs.blockSignals(True)
@@ -4251,12 +4271,7 @@ class AssemblyWindow(QMainWindow):
             return
         self._sync_animation_controls()
         tabs = getattr(self, "_right_tabs", None)
-        snapshot_panel = getattr(self, "_snapshot_panel", None)
-        visuals_tabs = getattr(self, "_visuals_tabs", None)
-        entering = (tabs is not None and visuals_tabs is not None
-                    and snapshot_panel is not None
-                    and tabs.currentWidget() is visuals_tabs
-                    and visuals_tabs.currentWidget() is snapshot_panel)
+        entering = self._snapshot_panel_is_active()
         if entering and not self._snapshot_mode_active:
             self._snapshot_mode_active = True
             self.viewport.begin_snapshot_mode(self._snapshot_background())

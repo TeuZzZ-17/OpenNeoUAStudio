@@ -9,17 +9,15 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from PySide6.QtCore import QSize, Qt, Signal
+from PySide6.QtCore import Qt, Signal
 from PySide6.QtWidgets import (
     QDialog,
+    QFrame,
     QHBoxLayout,
     QLabel,
-    QListWidget,
-    QListWidgetItem,
     QPushButton,
     QSizePolicy,
     QVBoxLayout,
-    QWidget,
 )
 
 
@@ -34,10 +32,16 @@ class ToolOption:
 
 TOOL_OPTIONS = (
     ToolOption(
-        "main_suite",
-        "Main Suite",
-        "General asset workbench for BASE, SKLT, SET.BAS, textures, "
-        "animations, and integrated tools.",
+        "model_editor",
+        "Model Editor",
+        "View, inspect, and edit textured Urban Assault 3D models, asset "
+        "families, UVs, materials, and animations.",
+    ),
+    ToolOption(
+        "snapshot_studio",
+        "Snapshot Studio",
+        "Load textured models and create clean presentation snapshots with "
+        "camera presets, animation controls, and export options.",
     ),
     ToolOption(
         "map_editor",
@@ -59,15 +63,148 @@ TOOL_OPTIONS = (
 )
 
 
-class _ToolCard(QWidget):
-    """Clickable item widget used inside the tool list."""
+class _ToolCard(QFrame):
+    """One fixed workspace card inside the static launcher panel."""
 
-    clicked = Signal()
+    clicked = Signal(str)
+    double_clicked = Signal(str)
 
-    def mousePressEvent(self, event) -> None:
+    def __init__(self, option: ToolOption, parent=None) -> None:
+        super().__init__(parent)
+        self._key = option.key
+        self.setObjectName("toolCard")
+        self.setProperty("selected", False)
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
+        self.setToolTip(option.description)
+        self.setFixedHeight(72)
+
+        card_layout = QVBoxLayout(self)
+        card_layout.setContentsMargins(13, 8, 13, 8)
+        card_layout.setSpacing(3)
+
+        title = QLabel(option.title)
+        title.setObjectName("toolTitle")
+        title.setAttribute(
+            Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
+
+        description = QLabel(option.description)
+        description.setObjectName("toolDescription")
+        description.setWordWrap(True)
+        description.setAttribute(
+            Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
+
+        card_layout.addWidget(title)
+        card_layout.addWidget(description)
+
+    @property
+    def key(self) -> str:
+        return self._key
+
+    def set_selected(self, selected: bool) -> None:
+        """Refresh the card's selected-state stylesheet."""
+
+        if bool(self.property("selected")) == selected:
+            return
+        self.setProperty("selected", selected)
+        style = self.style()
+        style.unpolish(self)
+        style.polish(self)
+        self.update()
+
+    def mousePressEvent(self, event) -> None:  # noqa: N802 - Qt override
         if event.button() == Qt.MouseButton.LeftButton:
-            self.clicked.emit()
+            self.clicked.emit(self._key)
+            self.setFocus(Qt.FocusReason.MouseFocusReason)
+            event.accept()
+            return
         super().mousePressEvent(event)
+
+    def mouseDoubleClickEvent(self, event) -> None:  # noqa: N802
+        if event.button() == Qt.MouseButton.LeftButton:
+            self.double_clicked.emit(self._key)
+            event.accept()
+            return
+        super().mouseDoubleClickEvent(event)
+
+    def keyPressEvent(self, event) -> None:  # noqa: N802 - Qt override
+        if event.key() in (Qt.Key.Key_Space, Qt.Key.Key_Select):
+            self.clicked.emit(self._key)
+            event.accept()
+            return
+        if event.key() in (Qt.Key.Key_Return, Qt.Key.Key_Enter):
+            self.double_clicked.emit(self._key)
+            event.accept()
+            return
+        super().keyPressEvent(event)
+
+
+class _StaticToolPanel(QFrame):
+    """True static workspace panel with no item-view scrolling machinery."""
+
+    double_activated = Signal(str)
+
+    def __init__(self, options: tuple[ToolOption, ...], parent=None) -> None:
+        super().__init__(parent)
+        self.setObjectName("toolList")
+        self.setSizePolicy(
+            QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+
+        self._cards: list[_ToolCard] = []
+        self._current_index = -1
+
+        panel_layout = QVBoxLayout(self)
+        panel_layout.setContentsMargins(6, 6, 6, 6)
+        panel_layout.setSpacing(5)
+
+        for option in options:
+            card = _ToolCard(option, self)
+            card.clicked.connect(self.set_current_key)
+            card.double_clicked.connect(self._activate_key)
+            panel_layout.addWidget(card)
+            self._cards.append(card)
+
+        card_height = 72
+        spacing = panel_layout.spacing() * max(0, len(self._cards) - 1)
+        margins = (
+            panel_layout.contentsMargins().top()
+            + panel_layout.contentsMargins().bottom()
+        )
+        self.setFixedHeight(card_height * len(self._cards) + spacing + margins)
+        self.set_current_row(0)
+
+    def count(self) -> int:
+        """Compatibility helper retained for selector tests."""
+
+        return len(self._cards)
+
+    def current_row(self) -> int:
+        return self._current_index
+
+    def set_current_row(self, row: int) -> None:
+        if not 0 <= row < len(self._cards):
+            return
+        self._set_current_index(row)
+
+    def current_key(self) -> str | None:
+        if not 0 <= self._current_index < len(self._cards):
+            return None
+        return self._cards[self._current_index].key
+
+    def set_current_key(self, key: str) -> None:
+        for index, card in enumerate(self._cards):
+            if card.key == key:
+                self._set_current_index(index)
+                return
+
+    def _set_current_index(self, index: int) -> None:
+        self._current_index = index
+        for card_index, card in enumerate(self._cards):
+            card.set_selected(card_index == index)
+
+    def _activate_key(self, key: str) -> None:
+        self.set_current_key(key)
+        self.double_activated.emit(key)
 
 
 class StartupToolSelector(QDialog):
@@ -77,8 +214,8 @@ class StartupToolSelector(QDialog):
         super().__init__(parent)
         self.setWindowTitle("OpenUAStudio - Select Tool")
         self.setModal(True)
-        self.setMinimumSize(620, 470)
-        self.resize(700, 540)
+        self.setMinimumSize(720, 720)
+        self.resize(760, 760)
         self.setWindowFlag(Qt.WindowType.WindowContextHelpButtonHint, False)
 
         layout = QVBoxLayout(self)
@@ -98,23 +235,20 @@ class StartupToolSelector(QDialog):
         subtitle.setWordWrap(True)
         layout.addWidget(subtitle)
 
-        self.tool_list = QListWidget()
-        self.tool_list.setObjectName("toolList")
-        self.tool_list.setSelectionMode(
-            QListWidget.SelectionMode.SingleSelection)
-        self.tool_list.setSpacing(5)
-        self.tool_list.setUniformItemSizes(True)
-        self.tool_list.setAlternatingRowColors(False)
-        self.tool_list.itemDoubleClicked.connect(
-            lambda _item: self.accept())
-        layout.addWidget(self.tool_list, 1)
+        # This is a plain fixed QWidget layout, not a QListWidget/QAbstractItemView.
+        # Selection can therefore never scroll, reposition or hide another card.
+        self.tool_list = _StaticToolPanel(TOOL_OPTIONS, self)
+        self.tool_list.double_activated.connect(
+            lambda _key: self.accept())
+        layout.addWidget(self.tool_list)
 
         note = QLabel(
-            "Additional utilities remain available from the Main Suite."
+            "Each workspace shares the same OpenUAStudio asset pipeline."
         )
         note.setObjectName("selectorNote")
         note.setWordWrap(True)
         layout.addWidget(note)
+        layout.addStretch(1)
 
         buttons_layout = QHBoxLayout()
         buttons_layout.addStretch(1)
@@ -128,7 +262,6 @@ class StartupToolSelector(QDialog):
         buttons_layout.addWidget(self.open_button)
         layout.addLayout(buttons_layout)
 
-        self._populate_tools()
         self.setStyleSheet(
             """
             QDialog {
@@ -146,19 +279,20 @@ class StartupToolSelector(QDialog):
             QLabel#selectorNote {
                 color: #8f9ca5;
             }
-            QListWidget#toolList {
+            QFrame#toolList {
                 background: #171c20;
                 border: 1px solid #3b464d;
                 border-radius: 6px;
-                outline: none;
-                padding: 6px;
             }
-            QListWidget#toolList::item {
+            QFrame#toolCard {
+                background: transparent;
                 border: 1px solid transparent;
                 border-radius: 5px;
-                padding: 5px;
             }
-            QListWidget#toolList::item:selected {
+            QFrame#toolCard:hover {
+                background: #202b31;
+            }
+            QFrame#toolCard[selected="true"] {
                 background: #28566a;
                 border: 1px solid #69c9e8;
             }
@@ -166,10 +300,14 @@ class StartupToolSelector(QDialog):
                 color: #f2f5f7;
                 font-size: 13px;
                 font-weight: 600;
+                background: transparent;
+                border: none;
             }
             QLabel#toolDescription {
                 color: #b9c4ca;
                 font-size: 11px;
+                background: transparent;
+                border: none;
             }
             QPushButton {
                 min-width: 92px;
@@ -188,45 +326,7 @@ class StartupToolSelector(QDialog):
             }
             """)
 
-    def _populate_tools(self) -> None:
-        for option in TOOL_OPTIONS:
-            item = QListWidgetItem()
-            item.setData(Qt.ItemDataRole.UserRole, option.key)
-            item.setToolTip(option.description)
-            item.setSizeHint(QSize(0, 72))
-
-            card = _ToolCard()
-            card.setAttribute(
-                Qt.WidgetAttribute.WA_TranslucentBackground, True)
-            card.setCursor(Qt.CursorShape.PointingHandCursor)
-            card_layout = QVBoxLayout(card)
-            card_layout.setContentsMargins(8, 5, 8, 5)
-            card_layout.setSpacing(3)
-
-            title = QLabel(option.title)
-            title.setObjectName("toolTitle")
-            title.setAttribute(
-                Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
-            description = QLabel(option.description)
-            description.setObjectName("toolDescription")
-            description.setWordWrap(True)
-            description.setAttribute(
-                Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
-            card_layout.addWidget(title)
-            card_layout.addWidget(description)
-
-            self.tool_list.addItem(item)
-            self.tool_list.setItemWidget(item, card)
-            card.clicked.connect(
-                lambda item=item: self.tool_list.setCurrentItem(item))
-
-        self.tool_list.setCurrentRow(0)
-
     def selected_tool(self) -> str | None:
-        """Return the selected tool key, if a row is selected."""
+        """Return the selected tool key, if a card is selected."""
 
-        item = self.tool_list.currentItem()
-        if item is None:
-            return None
-        value = item.data(Qt.ItemDataRole.UserRole)
-        return str(value) if value is not None else None
+        return self.tool_list.current_key()
