@@ -17,7 +17,9 @@ from pathlib import Path
 
 APP_TITLE = "OpenUAStudio"
 MAP_EDITOR_FLAG = "--map-editor"
-MAIN_SUITE_TOOL = "main_suite"
+MODEL_EDITOR_TOOL = "model_editor"
+LEGACY_MAIN_SUITE_TOOL = "main_suite"
+SNAPSHOT_STUDIO_TOOL = "snapshot_studio"
 MAP_EDITOR_TOOL = "map_editor"
 COLLISION_EDITOR_TOOL = "collision_editor"
 WIREFRAME_EDITOR_TOOL = "wireframe_editor"
@@ -28,7 +30,7 @@ _active_window = None
 def _open_startup_path(window, value: str) -> None:
     """Route the documented command-line file types to the matching UI.
 
-    ``SET.BAS`` is both a ``.BAS`` filename and a resource archive.  Sending
+    ``SET.BAS`` is both a ``.BAS`` filename and a resource archive. Sending
     it through ``open_base`` happens to expose some geometry, but skips the
     archive browser/provider state that the File menu initializes.
     """
@@ -77,11 +79,17 @@ def _show_qt_tool(app, tool: str, startup_path: str | None) -> int:
 
     global _active_window
 
-    if tool == MAIN_SUITE_TOOL:
-        from assembly_window import AssemblyWindow
+    if tool in {MODEL_EDITOR_TOOL, LEGACY_MAIN_SUITE_TOOL}:
+        from model_editor import ModelEditorWindow
 
-        window = AssemblyWindow()
-        window.setWindowTitle(APP_TITLE)
+        window = ModelEditorWindow()
+        window.show()
+        if startup_path:
+            _open_startup_path(window, startup_path)
+    elif tool == SNAPSHOT_STUDIO_TOOL:
+        from snapshot_studio import SnapshotStudioWindow
+
+        window = SnapshotStudioWindow()
         window.show()
         if startup_path:
             _open_startup_path(window, startup_path)
