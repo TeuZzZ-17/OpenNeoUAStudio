@@ -34,10 +34,16 @@ class ToolOption:
 
 TOOL_OPTIONS = (
     ToolOption(
-        "main_suite",
-        "Main Suite",
-        "General asset workbench for BASE, SKLT, SET.BAS, textures, "
-        "animations, and integrated tools.",
+        "model_editor",
+        "Model Editor",
+        "View, inspect, and edit textured Urban Assault 3D models, asset "
+        "families, UVs, materials, and animations.",
+    ),
+    ToolOption(
+        "snapshot_studio",
+        "Snapshot Studio",
+        "Load textured models and create clean presentation snapshots with "
+        "camera presets, animation controls, and export options.",
     ),
     ToolOption(
         "map_editor",
@@ -77,8 +83,8 @@ class StartupToolSelector(QDialog):
         super().__init__(parent)
         self.setWindowTitle("OpenUAStudio - Select Tool")
         self.setModal(True)
-        self.setMinimumSize(620, 470)
-        self.resize(700, 540)
+        self.setMinimumSize(620, 540)
+        self.resize(700, 610)
         self.setWindowFlag(Qt.WindowType.WindowContextHelpButtonHint, False)
 
         layout = QVBoxLayout(self)
@@ -110,7 +116,7 @@ class StartupToolSelector(QDialog):
         layout.addWidget(self.tool_list, 1)
 
         note = QLabel(
-            "Additional utilities remain available from the Main Suite."
+            "Each workspace shares the same OpenUAStudio asset pipeline."
         )
         note.setObjectName("selectorNote")
         note.setWordWrap(True)
