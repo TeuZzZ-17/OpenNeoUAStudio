@@ -49,6 +49,8 @@ class SkltModel:
     poo2_payload_size: int = 0
     pol2_payload_offset: int | None = None
     pol2_payload_size: int = 0
+    sen2_payload_offset: int | None = None
+    sen2_payload_size: int = 0
     otl2_payload_offset: int | None = None
     otl2_payload_size: int = 0
     points: list[Point3D] = field(default_factory=list)
@@ -193,6 +195,8 @@ def parse_sklt_bytes(data: bytes, source_name: str = "<memory>") -> SkltModel:
         model.warnings.append("No POO2 chunk was found.")
 
     if sen2_payload is not None:
+        model.sen2_payload_offset = sen2_payload[1]
+        model.sen2_payload_size = sen2_payload[2]
         model.sensors = _parse_point_chunk(sen2_payload[0], "SEN2", model.warnings)
     elif sens_payload is not None:
         model.sensors = _parse_legacy_point_chunk(
@@ -233,6 +237,96 @@ def parse_sklt_bytes(data: bytes, source_name: str = "<memory>") -> SkltModel:
         model.warnings.append("OLPL was found, but OTL2 was not found.")
 
     return model
+
+
+def _fit_axis_aligned_affine(
+    source: list[Point3D], target: list[Point3D], axis: int
+) -> tuple[float, float] | None:
+    """Fit ``target = source * scale + offset`` for one POO2 axis.
+
+    OpenUAStudio's whole-model Scale operation is axis-aligned in model space
+    and keeps point order unchanged.  A selective or otherwise non-affine edit
+    must not alter SEN2, so the fit is accepted only when every POO2 point
+    agrees within a small float-rounding tolerance and the scale is positive.
+    """
+
+    if not source or len(source) != len(target):
+        return None
+
+    src = [float(point[axis]) for point in source]
+    dst = [float(point[axis]) for point in target]
+    if not all(math.isfinite(value) for value in (*src, *dst)):
+        return None
+
+    magnitude = max(
+        1.0,
+        *(abs(value) for value in src),
+        *(abs(value) for value in dst),
+    )
+    tolerance = max(1e-4, magnitude * 1e-5)
+    low = min(range(len(src)), key=src.__getitem__)
+    high = max(range(len(src)), key=src.__getitem__)
+    span = src[high] - src[low]
+
+    if abs(span) <= tolerance:
+        if max(dst) - min(dst) > tolerance:
+            return None
+        return 1.0, dst[0] - src[0]
+
+    scale = (dst[high] - dst[low]) / span
+    offset = dst[low] - scale * src[low]
+    if not math.isfinite(scale) or not math.isfinite(offset) or scale <= 0.0:
+        return None
+
+    if any(
+        abs((scale * original + offset) - edited) > tolerance
+        for original, edited in zip(src, dst)
+    ):
+        return None
+    return scale, offset
+
+
+def sen2_points_for_poo2(
+    model: SkltModel, points: list[Point3D]
+) -> list[Point3D]:
+    """Return SEN2 transformed with a proven whole-model POO2 scale/move.
+
+    Existing SEN2 points are preserved for selective edits, topology changes,
+    rotations or any transformation that cannot be proven to be one positive
+    axis-aligned affine operation over the complete POO2 point set.
+    """
+
+    fallback = [tuple(point) for point in model.sensors]
+    if (
+        model.sen2_payload_offset is None
+        or model.sen2_payload_size <= 0
+        or not model.original_data
+    ):
+        return fallback
+
+    original = parse_sklt_bytes(model.original_data, "<sen2-save-baseline>")
+    if (
+        not original.points
+        or not original.sensors
+        or len(points) != len(original.points)
+        or len(fallback) != len(original.sensors)
+    ):
+        return fallback
+
+    transforms = [
+        _fit_axis_aligned_affine(original.points, points, axis)
+        for axis in range(3)
+    ]
+    if any(transform is None for transform in transforms):
+        return fallback
+
+    result: list[Point3D] = []
+    for sensor in original.sensors:
+        result.append(tuple(
+            transforms[axis][0] * sensor[axis] + transforms[axis][1]
+            for axis in range(3)
+        ))
+    return result
 
 
 def save_sklt_with_otl2_points(
@@ -294,6 +388,21 @@ def save_sklt_with_poo2_points(
             raise SkltParseError("POO2 coordinates must be finite float values.")
         struct.pack_into(">fff", edited, payload_offset + index * 12, x, y, z)
 
+    if model.sen2_payload_offset is not None and model.sen2_payload_size > 0:
+        sensors = sen2_points_for_poo2(model, points)
+        if len(sensors) * 12 != model.sen2_payload_size:
+            raise SkltParseError(
+                "SEN2 point count changed; refusing to save because the chunk "
+                "size must stay unchanged."
+            )
+        for index, point in enumerate(sensors):
+            if not all(math.isfinite(value) for value in point):
+                raise SkltParseError(
+                    "SEN2 coordinates must be finite float values.")
+            struct.pack_into(
+                ">fff", edited,
+                model.sen2_payload_offset + index * 12, *point)
+
     destination = Path(output_path)
     destination.parent.mkdir(parents=True, exist_ok=True)
 
@@ -328,6 +437,9 @@ def save_sklt_with_poo2_pol2_structure(
         b"POO2": _encode_poo2(points),
         b"POL2": _encode_pol2(polygons, len(points)),
     }
+    if model.sen2_payload_offset is not None and model.sen2_payload_size > 0:
+        replacements[b"SEN2"] = _encode_poo2(
+            sen2_points_for_poo2(model, points))
     edited = _rewrite_first_chunk_payloads(model.original_data, replacements)
 
     destination = Path(output_path)
