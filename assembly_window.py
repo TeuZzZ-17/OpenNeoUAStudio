@@ -132,6 +132,7 @@ from sklt_parser import (
     parse_sklt_file,
     save_sklt_with_poo2_points,
     save_sklt_with_poo2_pol2_structure,
+    sen2_points_for_poo2,
 )
 from geometry_editor import (
     GeometryClipboardError,
@@ -8844,9 +8845,17 @@ class AssemblyWindow(QMainWindow):
         else:
             save_sklt_with_poo2_points(model, model.points, output_path)
         verified = parse_sklt_file(output_path)
+        expected_sensors = sen2_points_for_poo2(model, model.points)
         matches = (
             len(verified.points) == len(model.points)
             and verified.polygons == model.polygons
+            and len(verified.sensors) == len(expected_sensors)
+            and all(
+                abs(a[axis] - b[axis])
+                <= 1e-3 + abs(b[axis]) * 1e-5
+                for a, b in zip(verified.sensors, expected_sensors)
+                for axis in range(3)
+            )
             and all(
                 abs(a[axis] - b[axis])
                 <= 1e-3 + abs(b[axis]) * 1e-5
