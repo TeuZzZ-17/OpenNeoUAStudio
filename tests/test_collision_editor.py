@@ -1706,13 +1706,17 @@ class CollisionEditorTests(unittest.TestCase):
 
         viewport = CollisionViewport()
         viewport._ground_alignment_source_loaded = True
-        viewport.set_tracer_points([(0.0, 0.0, 0.0)])
+        viewport.set_tracer_points(
+            [(-10.0, 0.0, 0.0), (10.0, 0.0, 0.0)], selected=1)
         painter = MagicMock()
         with patch.object(
                 viewport, "_tracer_point_screen_positions",
-                return_value=[QPointF(20, 20)]):
+                return_value=[QPointF(20, 20), QPointF(40, 20)]):
             viewport._draw_tracer_points_overlay(painter)
         painter.setBrush.assert_any_call(TRACER_POINT_COLOR)
+        # A linked two-MGUN rack draws the white selection halo for both
+        # origins (outer + inner ellipse per point = four ellipse draws).
+        self.assertEqual(painter.drawEllipse.call_count, 4)
 
     def test_98c_tracer_point_gizmo_moves_the_runtime_symmetric_rack(self):
         window = self._window()
