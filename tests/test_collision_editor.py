@@ -28,7 +28,8 @@ from collision_editor import (
     VEHICLE,
     WEAPON,
     TYPE_COLORS,
-    DEATH_DAMAGE_COLOR,
+    FIRE_POINT_COLOR,
+    TRACER_POINT_COLOR,
     VIEW_PRESETS,
     create_backup,
     effective_runtime_radius,
@@ -36,9 +37,9 @@ from collision_editor import (
     fire_point_positions,
     find_script_blocks,
     import_collision_block,
-    import_death_damage_block,
     import_fire_points_block,
     import_overeof_block,
+    import_tracer_points_block,
     plan_script_update,
     read_script_file,
     runtime_vp_table,
@@ -47,6 +48,7 @@ from collision_editor import (
     vehicle_model_references,
     weapon_model_references,
     write_script_file,
+    tracer_point_positions,
 )
 from sklt_parser import SkltModel
 
@@ -1265,16 +1267,35 @@ class CollisionEditorTests(unittest.TestCase):
         self.assertEqual(
             fire_point_positions(project), [(-12.0, -10.0, 50.0)])
 
-    def test_85_export_fire_points_and_death_aoe_are_separate_from_coll_num(self):
+    def test_84b_tracer_point_distribution_matches_openua_runtime(self):
+        project = CollisionProject(
+            tracer_points_enabled=True,
+            mgun_tracer_offset_x=10.0,
+            mgun_tracer_offset_y=-15.0,
+            mgun_tracer_offset_z=35.0,
+            num_mguns=2,
+        )
+        self.assertEqual(tracer_point_positions(project), [
+            (-10.0, -15.0, 35.0),
+            (10.0, -15.0, 35.0),
+        ])
+        project.num_mguns = 1
+        project.mgun_tracer_offset_x = -8.0
+        self.assertEqual(
+            tracer_point_positions(project), [(-8.0, -15.0, 35.0)])
+
+    def test_85_export_fire_and_tracer_points_are_separate_from_coll_num(self):
         project = CollisionProject(
             name="Wasp", source_model="wasp.sklt",
             target_category=VEHICLE,
             fire_points_enabled=True,
             fire_x=25.0, fire_y=-8.0, fire_z=40.0,
             num_weapons=2,
-            death_damage_enabled=True,
-            death_damage=5000,
-            death_damage_radius=300.0,
+            tracer_points_enabled=True,
+            mgun_tracer_offset_x=10.0,
+            mgun_tracer_offset_y=-15.0,
+            mgun_tracer_offset_z=35.0,
+            num_mguns=2,
             compound=[CollisionSphere(VEHICLE, radius=20.0)],
         )
         output = export_collision_text(project)
@@ -1282,19 +1303,24 @@ class CollisionEditorTests(unittest.TestCase):
         self.assertIn("fire_y = -8", output)
         self.assertIn("fire_z = 40", output)
         self.assertIn("num_weapons = 2", output)
-        self.assertIn("; OpenUA-only death damage AoE", output)
-        self.assertIn("death_damage = 5000", output)
-        self.assertIn("death_damage_radius = 300", output)
+        self.assertIn("; OpenUA-only MGUN tracer points", output)
+        self.assertIn("mgun_tracer_offset_x = 10", output)
+        self.assertIn("mgun_tracer_offset_y = -15", output)
+        self.assertIn("mgun_tracer_offset_z = 35", output)
+        self.assertIn("num_mguns = 2", output)
+        self.assertNotIn("death_damage", output)
         self.assertIn("coll_num = 1", output)
         self.assertEqual(output.count("coll_act ="), 1)
 
-    def test_86_import_fire_and_death_parameters_ignores_comments(self):
+    def test_86_import_fire_and_tracer_parameters_ignores_comments(self):
         text = (
             "new_vehicle 8\n"
             " ; fire_x = 999\n fire_x = 30\n fire_y = -5\n"
             " fire_z = 44\n num_weapons = 3\n"
-            " ; death_damage = 1\n death_damage = 7000\n"
-            " death_damage_radius = 250\nend\n"
+            " ; mgun_tracer_offset_x = 999\n"
+            " mgun_tracer_offset_x = 10\n"
+            " mgun_tracer_offset_y = -15\n"
+            " mgun_tracer_offset_z = 35\n num_mguns = 2\nend\n"
         )
         block = find_script_blocks(text)[0]
         self.assertEqual(
@@ -1302,11 +1328,30 @@ class CollisionEditorTests(unittest.TestCase):
             (True, 30.0, -5.0, 44.0, 3),
         )
         self.assertEqual(
-            import_death_damage_block(text, block),
-            (True, 7000, 250.0),
+            import_tracer_points_block(text, block),
+            (True, 10.0, -15.0, 35.0, 2),
         )
 
-    def test_87_script_update_preserves_unmanaged_fire_and_death_data(self):
+    def test_86b_partial_tracer_offsets_use_engine_defaults(self):
+        text = (
+            "new_vehicle 8\n num_mguns = 2\n"
+            " mgun_tracer_offset_z = 35\nend\n"
+        )
+        block = find_script_blocks(text)[0]
+        self.assertEqual(
+            import_tracer_points_block(text, block, 40.0),
+            (True, 10.0, -10.0, 35.0, 2),
+        )
+
+    def test_86c_num_mguns_alone_does_not_enable_tracer_management(self):
+        text = "new_vehicle 8\n num_mguns = 2\nend\n"
+        block = find_script_blocks(text)[0]
+        self.assertEqual(
+            import_tracer_points_block(text, block, 40.0),
+            (False, 10.0, -10.0, 40.0, 2),
+        )
+
+    def test_87_script_update_preserves_unmanaged_obsolete_data(self):
         text = (
             "new_vehicle 3\n fire_x = 12\n fire_y = 2\n fire_z = 4\n"
             " num_weapons = 2\n death_damage = 1000\n"
@@ -1326,15 +1371,20 @@ class CollisionEditorTests(unittest.TestCase):
         project.fire_y = -6
         project.fire_z = 50
         project.num_weapons = 4
-        project.death_damage_enabled = True
-        project.death_damage = 5000
-        project.death_damage_radius = 300
+        project.tracer_points_enabled = True
+        project.mgun_tracer_offset_x = 10
+        project.mgun_tracer_offset_y = -15
+        project.mgun_tracer_offset_z = 35
+        project.num_mguns = 2
         updated, _preview, _name = plan_script_update(
             text, "new_vehicle", 3, project)
         self.assertIn("fire_x = 30", updated)
         self.assertIn("num_weapons = 4", updated)
-        self.assertIn("death_damage = 5000", updated)
-        self.assertIn("death_damage_radius = 300", updated)
+        self.assertIn("mgun_tracer_offset_x = 10", updated)
+        self.assertIn("mgun_tracer_offset_y = -15", updated)
+        self.assertIn("mgun_tracer_offset_z = 35", updated)
+        self.assertIn("num_mguns = 2", updated)
+        self.assertIn("death_damage_radius = 90", updated)
 
     def test_88_vehicle_spatial_controls_live_in_right_column(self):
         window = self._window()
@@ -1343,34 +1393,37 @@ class CollisionEditorTests(unittest.TestCase):
         self.assertEqual(
             window.fire_points_box.title(), "Fire Points (Vanilla)")
         self.assertEqual(
-            window.death_damage_box.title(), "Death Damage AoE (OpenUA)")
+            window.tracer_points_box.title(), "Tracer Points (OpenUA)")
         self.assertEqual(
             window.fire_points_check.text(), "Include Fire Points")
         self.assertEqual(
-            window.death_damage_check.text(), "Include Death Damage AoE")
+            window.tracer_points_check.text(), "Include Tracer Points")
         self.assertIn("Show Fire Points", window.viewpoint_actions)
-        self.assertIn("Show Death Damage AoE", window.viewpoint_actions)
+        self.assertIn("Show Tracer Points", window.viewpoint_actions)
+        self.assertNotIn("Show Death Damage AoE", window.viewpoint_actions)
         self.assertFalse(window.fire_points_box.isHidden())
-        self.assertFalse(window.death_damage_box.isHidden())
+        self.assertFalse(window.tracer_points_box.isHidden())
         window.project.target_category = WEAPON
         window._sync_all()
         self.assertTrue(window.fire_points_box.isHidden())
-        self.assertTrue(window.death_damage_box.isHidden())
+        self.assertTrue(window.tracer_points_box.isHidden())
 
-    def test_89_death_damage_validation_requires_positive_damage_and_radius(self):
+    def test_89_tracer_point_validation_matches_engine_bounds(self):
         project = CollisionProject(
             name="Unit", source_model="unit.sklt",
             target_category=VEHICLE,
-            death_damage_enabled=True,
-            death_damage=0,
-            death_damage_radius=0.0,
+            tracer_points_enabled=True,
+            mgun_tracer_offset_x=6001.0,
+            num_mguns=0,
         )
         errors, _warnings = validate_project(project, None)
-        self.assertTrue(any("Death Damage" in error for error in errors))
-        project.death_damage = 5000
-        project.death_damage_radius = 300
+        self.assertTrue(any("MGUN Tracer Offset" in error for error in errors))
+        self.assertTrue(any("Num MGUNs" in error for error in errors))
+        project.mgun_tracer_offset_x = 6000.0
+        project.num_mguns = 2
         errors, _warnings = validate_project(project, None)
-        self.assertFalse(any("Death Damage" in error for error in errors))
+        self.assertFalse(any("MGUN Tracer" in error for error in errors))
+        self.assertFalse(any("Num MGUNs" in error for error in errors))
 
     def test_90_vehicle_model_reference_reads_vp_and_preview_scale(self):
         text = (
@@ -1418,8 +1471,8 @@ class CollisionEditorTests(unittest.TestCase):
         window = self._window()
         self.assertTrue(window.ground_alignment_notice.isHidden())
         self.assertTrue(window.fire_point_notice.isHidden())
-        self.assertEqual(window.death_damage_notice.text(), "OpenUA only")
-        self.assertIn("#e1aa62", window.death_damage_notice.styleSheet())
+        self.assertEqual(window.tracer_points_notice.text(), "OpenUA only")
+        self.assertIn("#e1aa62", window.tracer_points_notice.styleSheet())
 
     def test_90d_file_action_names_are_compact(self):
         window = self._window()
@@ -1482,6 +1535,8 @@ class CollisionEditorTests(unittest.TestCase):
             " radius = 10\n"
             " radius = 20\n"
             " fire_x = 999\n"
+            " mgun_tracer_offset_x = 999\n"
+            " num_mguns = 8\n"
             " coll_num = 1\n"
             " coll_act = 0\n"
             " coll_x = 3\n"
@@ -1498,8 +1553,11 @@ class CollisionEditorTests(unittest.TestCase):
             overeof_enabled=True, overeof=12,
             fire_points_enabled=True,
             fire_x=30, fire_y=-5, fire_z=44, num_weapons=2,
-            death_damage_enabled=True,
-            death_damage=5000, death_damage_radius=300,
+            tracer_points_enabled=True,
+            mgun_tracer_offset_x=10,
+            mgun_tracer_offset_y=-15,
+            mgun_tracer_offset_z=35,
+            num_mguns=2,
             compound=[CollisionSphere(VEHICLE, 1, 2, 3, 40)],
         )
         updated, _preview, _name = plan_script_update(
@@ -1509,10 +1567,13 @@ class CollisionEditorTests(unittest.TestCase):
         self.assertNotIn("radius = 10", updated)
         self.assertNotIn("radius = 20", updated)
         self.assertNotIn("fire_x = 999", updated)
+        self.assertNotIn("mgun_tracer_offset_x = 999", updated)
+        self.assertNotIn("num_mguns = 8", updated)
         self.assertEqual(updated.count("coll_num ="), 1)
         self.assertEqual(updated.count("coll_act ="), 1)
         self.assertIn("fire_x = 30", updated)
-        self.assertIn("death_damage_radius = 300", updated)
+        self.assertIn("mgun_tracer_offset_z = 35", updated)
+        self.assertIn("num_mguns = 2", updated)
         self.assertIn("mass = 300", updated)
         self.assertIn("vp_normal = 42", updated)
         self.assertIn("; radius = 777", updated)
@@ -1623,8 +1684,53 @@ class CollisionEditorTests(unittest.TestCase):
         viewport.set_fire_points([(1.0, 2.0, 3.0)], selected=-1)
         self.assertEqual(viewport._fire_point_selected, -1)
 
-    def test_99_death_aoe_uses_engine_fuchsia_and_near_plane_rejection(self):
-        self.assertEqual(DEATH_DAMAGE_COLOR, QColor(255, 0, 255))
+    def test_98b_tracer_points_are_listed_selectable_and_use_yellow_dots(self):
+        window = self._window()
+        window.project.tracer_points_enabled = True
+        window.project.mgun_tracer_offset_x = 10.0
+        window.project.mgun_tracer_offset_y = -15.0
+        window.project.mgun_tracer_offset_z = 35.0
+        window.project.num_mguns = 2
+        window._sync_all()
+        self.assertEqual(window.tracer_point_tree.topLevelItemCount(), 2)
+        second = window.tracer_point_tree.topLevelItem(1)
+        window.tracer_point_tree.setCurrentItem(second)
+        self.assertEqual(window._selected_tracer_point, 1)
+        self.assertEqual(window.transform_box.title(), "Move Tracer Point")
+        self.assertEqual(window.viewport._tracer_point_selected, 1)
+
+        viewport = CollisionViewport()
+        viewport._ground_alignment_source_loaded = True
+        viewport.set_tracer_points([(0.0, 0.0, 0.0)])
+        painter = MagicMock()
+        with patch.object(
+                viewport, "_tracer_point_screen_positions",
+                return_value=[QPointF(20, 20)]):
+            viewport._draw_tracer_points_overlay(painter)
+        painter.setBrush.assert_any_call(TRACER_POINT_COLOR)
+
+    def test_98c_tracer_point_gizmo_moves_the_runtime_symmetric_rack(self):
+        window = self._window()
+        window.project.tracer_points_enabled = True
+        window.project.mgun_tracer_offset_x = 10.0
+        window.project.mgun_tracer_offset_y = -15.0
+        window.project.mgun_tracer_offset_z = 35.0
+        window.project.num_mguns = 2
+        window._select_tracer_point(1)
+        window.move_strength_spin.setValue(5)
+        window._gizmo_nudge((1, 0, 0))
+        window._gizmo_nudge((0, -1, 0))
+        window._gizmo_nudge((0, 0, 1))
+        self.assertEqual(tracer_point_positions(window.project), [
+            (-15.0, -20.0, 40.0),
+            (15.0, -20.0, 40.0),
+        ])
+        window.undo()
+        self.assertEqual(window.project.mgun_tracer_offset_z, 35.0)
+
+    def test_99_point_colors_and_near_plane_rejection(self):
+        self.assertEqual(FIRE_POINT_COLOR, QColor(235, 60, 60))
+        self.assertEqual(TRACER_POINT_COLOR, QColor(255, 215, 60))
         self.assertTrue(
             CollisionViewport._camera_point_is_projectable((0, 0, 3.7)))
         self.assertFalse(
@@ -1643,7 +1749,7 @@ class CollisionEditorTests(unittest.TestCase):
         self.assertEqual(window._selected_fire_point, -1)
         self.assertGreaterEqual(window._selected, 0)
 
-    def test_101_death_aoe_projection_rejects_far_offscreen_points(self):
+    def test_101_overlay_projection_rejects_far_offscreen_points(self):
         viewport = CollisionViewport()
         viewport.resize(640, 480)
         self.assertIsNone(
