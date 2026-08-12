@@ -3028,8 +3028,8 @@ class CollisionEditorWindow(QMainWindow):
         transform_box.setSizePolicy(
             QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Fixed)
         right.addWidget(transform_box)
+        right.insertWidget(0, selected_box)
         right.addWidget(spheres_box, 1)
-        right.addWidget(selected_box)
 
         properties_scroll = QScrollArea()
         properties_scroll.setWidgetResizable(True)

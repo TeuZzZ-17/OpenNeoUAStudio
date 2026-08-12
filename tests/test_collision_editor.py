@@ -748,6 +748,11 @@ class CollisionEditorTests(unittest.TestCase):
             window.spheres_box.sizePolicy().verticalPolicy(),
             QSizePolicy.Policy.Expanding)
 
+    def test_selected_element_panel_is_at_top_of_properties(self):
+        window = self._window()
+        properties_layout = window.selected_box.parentWidget().layout()
+        self.assertEqual(properties_layout.indexOf(window.selected_box), 0)
+
     def test_48_identical_spheres_keep_distinct_dense_indices(self):
         window = self._window()
         window.add_compound(VEHICLE)
