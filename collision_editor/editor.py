@@ -1760,7 +1760,11 @@ class CollisionViewport(AssetViewport):
         for index, screen in enumerate(self._tracer_point_screen_positions()):
             if screen is None:
                 continue
-            selected = index == self._tracer_point_selected
+            # MGUN tracer origins are one linked runtime rack: editing any
+            # point changes the shared X extent and/or the common Y/Z offsets.
+            # Keep the clicked index for X-direction semantics, but visualize
+            # the whole rack as selected so the overlay matches what will move.
+            selected = self._tracer_point_selected >= 0
             if selected:
                 painter.setPen(QPen(QColor(255, 255, 255), 2.5))
                 painter.setBrush(QColor(255, 255, 255, 235))
