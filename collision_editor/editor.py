@@ -104,7 +104,6 @@ TYPE_COLORS = {
     WEAPON: QColor(60, 130, 235),
 }
 FIRE_POINT_COLOR = QColor(235, 60, 60)
-TRACER_POINT_COLOR = QColor(255, 215, 60)
 SCRIPT_TYPES = (
     "new_vehicle", "modify_vehicle", "new_weapon", "modify_weapon",
 )
@@ -112,7 +111,6 @@ _MODEL_NAME_ROLE = int(Qt.ItemDataRole.UserRole) + 1
 _SPHERE_INDEX_ROLE = int(Qt.ItemDataRole.UserRole) + 2
 _MODEL_VP_ROLE = int(Qt.ItemDataRole.UserRole) + 3
 _FIRE_POINT_INDEX_ROLE = int(Qt.ItemDataRole.UserRole) + 4
-_TRACER_POINT_INDEX_ROLE = int(Qt.ItemDataRole.UserRole) + 5
 _RADIUS_SLIDER_STEPS = 10000
 _RADIUS_LOG_MIN = -3.0
 _RADIUS_LOG_MAX = 6.0
@@ -169,30 +167,6 @@ def fire_point_positions(project: "CollisionProject") -> list[tuple[float, float
     ]
 
 
-def tracer_point_positions(
-        project: "CollisionProject",
-) -> list[tuple[float, float, float]]:
-    """Return the exact OpenUA MGUN tracer origins in model space.
-
-    One MGUN uses the authored X/Y/Z offset directly.  Two or more MGUNs use
-    the absolute X value as a symmetric half-spacing and preserve the common
-    Y/Z offsets, matching ``ypabact_GetMinigunTracerOrigin``.
-    """
-
-    count = max(1, int(project.num_mguns))
-    if count == 1:
-        xs = [float(project.mgun_tracer_offset_x)]
-    else:
-        extent = abs(float(project.mgun_tracer_offset_x))
-        xs = [
-            (index * 2.0 * extent / (count - 1)) - extent
-            for index in range(count)
-        ]
-    return [
-        (x, float(project.mgun_tracer_offset_y),
-         float(project.mgun_tracer_offset_z))
-        for x in xs
-    ]
 
 
 def effective_runtime_radius(project: "CollisionProject") -> float:
@@ -302,13 +276,6 @@ class CollisionProject:
     fire_y: float = 0.0
     fire_z: float = 0.0
     num_weapons: int = 1
-    # OpenUA MGUN tracer origins. These are visual spawn offsets and never
-    # participate in coll_num or alter the actual hitscan calculation.
-    tracer_points_enabled: bool = False
-    mgun_tracer_offset_x: float = 0.0
-    mgun_tracer_offset_y: float = 0.0
-    mgun_tracer_offset_z: float = 0.0
-    num_mguns: int = 1
     legacy: CollisionSphere | None = None
     compound: list[CollisionSphere] = field(default_factory=list)
 
@@ -329,9 +296,6 @@ class CollisionProject:
             self.overeof_enabled, self.overeof,
             self.fire_points_enabled,
             self.fire_x, self.fire_y, self.fire_z, self.num_weapons,
-            self.tracer_points_enabled,
-            self.mgun_tracer_offset_x, self.mgun_tracer_offset_y,
-            self.mgun_tracer_offset_z, self.num_mguns,
             one(self.legacy),
             tuple(one(sphere) for sphere in self.compound),
         )
@@ -345,9 +309,6 @@ class CollisionProject:
          self.overeof_enabled, self.overeof,
          self.fire_points_enabled,
          self.fire_x, self.fire_y, self.fire_z, self.num_weapons,
-         self.tracer_points_enabled,
-         self.mgun_tracer_offset_x, self.mgun_tracer_offset_y,
-         self.mgun_tracer_offset_z, self.num_mguns,
          legacy, compound) = state
         self.legacy = one(legacy)
         self.compound = [one(values) for values in compound]
@@ -631,7 +592,6 @@ def import_collision_block(
 
     lines = text.splitlines()
     rows = _parameter_rows(lines, block)
-    generic_rows = _generic_parameter_rows(lines, block)
     legacy = None
     expected = None
     current = None
@@ -735,49 +695,6 @@ def import_fire_points_block(
     )
 
 
-def import_tracer_points_block(
-        text: str, block: ScriptBlock, runtime_radius: float = 20.0,
-) -> tuple[bool, float, float, float, int]:
-    """Read active OpenUA MGUN tracer-origin parameters."""
-
-    if not block.complete:
-        raise CollisionScriptError(
-            f"Parsing incompleto: manca end per {block.kind} "
-            f"{block.object_id}.")
-    values = {
-        "mgun_tracer_offset_x": None,
-        "mgun_tracer_offset_y": None,
-        "mgun_tracer_offset_z": None,
-        "num_mguns": 1.0,
-    }
-    offset_seen = False
-    for _line, key, raw, _indent in _generic_parameter_rows(
-            text.splitlines(), block):
-        if key not in values:
-            continue
-        try:
-            values[key] = float(raw)
-        except ValueError as exc:
-            raise CollisionScriptError(
-                f"Valore non numerico per {key}: {raw}") from exc
-        if key.startswith("mgun_tracer_offset_"):
-            offset_seen = True
-    radius = (
-        float(runtime_radius)
-        if math.isfinite(runtime_radius) and runtime_radius > 0.0 else 20.0)
-    count = max(1, min(255, int(values["num_mguns"])))
-    return (
-        offset_seen,
-        (values["mgun_tracer_offset_x"]
-         if values["mgun_tracer_offset_x"] is not None
-         else radius * 0.25 if count > 1 else 0.0),
-        (values["mgun_tracer_offset_y"]
-         if values["mgun_tracer_offset_y"] is not None
-         else -radius * 0.25),
-        (values["mgun_tracer_offset_z"]
-         if values["mgun_tracer_offset_z"] is not None else radius),
-        count,
-    )
 
 
 def collision_data_lines(project: CollisionProject) -> list[str]:
@@ -794,19 +711,6 @@ def collision_data_lines(project: CollisionProject) -> list[str]:
             f"fire_y = {_number(project.fire_y)}",
             f"fire_z = {_number(project.fire_z)}",
             f"num_weapons = {max(0, min(255, int(project.num_weapons)))}",
-        ])
-    if project.target_category == VEHICLE and project.tracer_points_enabled:
-        if lines:
-            lines.append("")
-        lines.extend([
-            "; OpenUA-only MGUN tracer points",
-            "mgun_tracer_offset_x = "
-            f"{_number(project.mgun_tracer_offset_x)}",
-            "mgun_tracer_offset_y = "
-            f"{_number(project.mgun_tracer_offset_y)}",
-            "mgun_tracer_offset_z = "
-            f"{_number(project.mgun_tracer_offset_z)}",
-            f"num_mguns = {max(1, min(255, int(project.num_mguns)))}",
         ])
     if project.compound:
         if lines:
@@ -869,18 +773,11 @@ def plan_script_update(
     had_final_newline = text.endswith(("\n", "\r"))
     lines = text.splitlines()
     rows = _parameter_rows(lines, block)
-    generic_rows = _generic_parameter_rows(lines, block)
     radius_rows = [row for row in rows if row[1] == "radius"]
     overeof_rows = [row for row in rows if row[1] == "overeof"]
     fire_rows = [
         row for row in rows
         if row[1] in ("fire_x", "fire_y", "fire_z", "num_weapons")
-    ]
-    tracer_rows = [
-        row for row in generic_rows
-        if row[1] in (
-            "mgun_tracer_offset_x", "mgun_tracer_offset_y",
-            "mgun_tracer_offset_z", "num_mguns")
     ]
     coll_rows = [row for row in rows if row[1].startswith("coll_")]
     indent = next(
@@ -898,8 +795,6 @@ def plan_script_update(
         # Commented historical lines stay untouched because the game ignores
         # them and deleting user notes silently would be destructive.
         delete.update(row[0] for row in rows)
-        if project.tracer_points_enabled:
-            delete.update(row[0] for row in tracer_rows)
         canonical = collision_data_lines(project)
         insert_before_end.extend(
             indent + line if line else "" for line in canonical)
@@ -980,20 +875,6 @@ def plan_script_update(
                 f"{max(0, min(255, int(project.num_weapons)))}",
             ],
             "fire points",
-        )
-    if "vehicle" in kind and project.tracer_points_enabled:
-        replace_group(
-            tracer_rows,
-            [
-                "mgun_tracer_offset_x = "
-                f"{_number(project.mgun_tracer_offset_x)}",
-                "mgun_tracer_offset_y = "
-                f"{_number(project.mgun_tracer_offset_y)}",
-                "mgun_tracer_offset_z = "
-                f"{_number(project.mgun_tracer_offset_z)}",
-                f"num_mguns = {max(1, min(255, int(project.num_mguns)))}",
-            ],
-            "OpenUA MGUN tracer points",
         )
     replace_group(coll_rows, compound_lines, "compound collisions")
 
@@ -1081,20 +962,6 @@ def validate_project(
             errors.append("Fire X/Y/Z devono essere numeri finiti.")
         if not (0 <= int(project.num_weapons) <= 255):
             errors.append("Num Weapons deve essere compreso tra 0 e 255.")
-    if project.target_category == VEHICLE and project.tracer_points_enabled:
-        offsets = (
-            project.mgun_tracer_offset_x,
-            project.mgun_tracer_offset_y,
-            project.mgun_tracer_offset_z,
-        )
-        if not all(math.isfinite(value) for value in offsets):
-            errors.append("MGUN Tracer Offset X/Y/Z devono essere numeri finiti.")
-        elif any(abs(value) > 6000.0 for value in offsets):
-            errors.append(
-                "MGUN Tracer Offset X/Y/Z devono essere compresi tra "
-                "-6000 e 6000.")
-        if not (1 <= int(project.num_mguns) <= 255):
-            errors.append("Num MGUNs deve essere compreso tra 1 e 255.")
     for index, sphere in enumerate(project.spheres()):
         if not all(math.isfinite(value) for value in (
                 sphere.x, sphere.y, sphere.z, sphere.radius)):
@@ -1184,7 +1051,6 @@ class CollisionViewport(AssetViewport):
 
     spherePicked = Signal(int)
     firePointPicked = Signal(int)
-    tracerPointPicked = Signal(int)
     sphereContextMenuRequested = Signal(int, QPoint)
     sphereNudgeRequested = Signal(object)
     RING_SEGMENTS = 12
@@ -1212,9 +1078,6 @@ class CollisionViewport(AssetViewport):
         self._fire_points: list[tuple[float, float, float]] = []
         self._fire_point_selected = -1
         self._fire_points_visible = True
-        self._tracer_points: list[tuple[float, float, float]] = []
-        self._tracer_point_selected = -1
-        self._tracer_points_visible = True
         self._model_preview_base_faces: list[
             tuple[tuple[float, float, float], ...]] = []
         self._model_preview_base_sen_boxes: list[
@@ -1244,8 +1107,6 @@ class CollisionViewport(AssetViewport):
         self._fire_points = []
         self._fire_point_selected = -1
         self._collision_selected = -1
-        self._tracer_points = []
-        self._tracer_point_selected = -1
         self._model_preview_base_faces = []
         self._model_preview_base_sen_boxes = []
         self._model_preview_base_owner_bounds = {}
@@ -1380,19 +1241,7 @@ class CollisionViewport(AssetViewport):
         self._fire_points_visible = bool(visible)
         self.update()
 
-    def set_tracer_points(
-            self, points: list[tuple[float, float, float]],
-            selected: int = -1) -> None:
-        self._tracer_points = [
-            tuple(float(value) for value in point) for point in points
-        ]
-        self._tracer_point_selected = (
-            selected if 0 <= selected < len(self._tracer_points) else -1)
-        self.update()
 
-    def set_tracer_points_visible(self, visible: bool) -> None:
-        self._tracer_points_visible = bool(visible)
-        self.update()
 
     def set_collision_spheres(
         self, spheres: list[CollisionSphere], selected: int = -1,
@@ -1588,8 +1437,7 @@ class CollisionViewport(AssetViewport):
             event.accept()
             return
         if (self._collision_selected >= 0
-                or self._fire_point_selected >= 0
-                or self._tracer_point_selected >= 0) and not (
+                or self._fire_point_selected >= 0) and not (
                 event.modifiers() & (
                     Qt.KeyboardModifier.ControlModifier
                     | Qt.KeyboardModifier.AltModifier
@@ -1677,10 +1525,6 @@ class CollisionViewport(AssetViewport):
     def _fire_point_screen_positions(self):
         return [self._project_visible_world(point) for point in self._fire_points]
 
-    def _tracer_point_screen_positions(self):
-        return [
-            self._project_visible_world(point) for point in self._tracer_points
-        ]
 
     def _hit_fire_point(self, point: QPointF) -> int:
         if not (self._ground_alignment_source_loaded
@@ -1695,18 +1539,6 @@ class CollisionViewport(AssetViewport):
                 candidates.append((distance, index))
         return min(candidates)[1] if candidates else -1
 
-    def _hit_tracer_point(self, point: QPointF) -> int:
-        if not (self._ground_alignment_source_loaded
-                and self._tracer_points_visible):
-            return -1
-        candidates = []
-        for index, screen in enumerate(self._tracer_point_screen_positions()):
-            if screen is None:
-                continue
-            distance = math.hypot(point.x() - screen.x(), point.y() - screen.y())
-            if distance <= 13.0:
-                candidates.append((distance, index))
-        return min(candidates)[1] if candidates else -1
 
     @staticmethod
     def _draw_fire_marker(
@@ -1752,30 +1584,6 @@ class CollisionViewport(AssetViewport):
             painter.drawText(
                 screen + QPointF(9.0, -9.0), f"F{index + 1}")
 
-    def _draw_tracer_points_overlay(self, painter: QPainter) -> None:
-        if not (self._ground_alignment_source_loaded
-                and self._tracer_points_visible and self._tracer_points):
-            return
-        painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
-        for index, screen in enumerate(self._tracer_point_screen_positions()):
-            if screen is None:
-                continue
-            # MGUN tracer origins are one linked runtime rack: editing any
-            # point changes the shared X extent and/or the common Y/Z offsets.
-            # Keep the clicked index for X-direction semantics, but visualize
-            # the whole rack as selected so the overlay matches what will move.
-            selected = self._tracer_point_selected >= 0
-            if selected:
-                painter.setPen(QPen(QColor(255, 255, 255), 2.5))
-                painter.setBrush(QColor(255, 255, 255, 235))
-                painter.drawEllipse(screen, 8.0, 8.0)
-            painter.setPen(QPen(TRACER_POINT_COLOR, 1.8))
-            painter.setBrush(TRACER_POINT_COLOR)
-            painter.drawEllipse(screen, 5.0, 5.0)
-            painter.setPen(QPen(
-                QColor(255, 255, 255) if selected else TRACER_POINT_COLOR,
-                1.3))
-            painter.drawText(screen + QPointF(8.0, -7.0), f"T{index + 1}")
 
     def paintEvent(self, event) -> None:  # noqa: N802
         if self._collision_show_model:
@@ -1822,30 +1630,15 @@ class CollisionViewport(AssetViewport):
             painter.setBrush(QColor(
                 color.red(), color.green(), color.blue(), 235))
             painter.drawEllipse(center, 6.0, 6.0)
-        self._draw_tracer_points_overlay(painter)
         self._draw_fire_points_overlay(painter)
         painter.end()
 
     def mousePressEvent(self, event: QMouseEvent) -> None:  # noqa: N802
         if event.button() == Qt.MouseButton.LeftButton:
-            tracer_index = self._hit_tracer_point(event.position())
-            if tracer_index >= 0:
-                self.setFocus(Qt.FocusReason.MouseFocusReason)
-                self._tracer_point_selected = tracer_index
-                self._fire_point_selected = -1
-                self._collision_selected = -1
-                self._camera_interacting = False
-                self._press_pos = None
-                self._last_mouse = event.position().toPoint()
-                self.tracerPointPicked.emit(tracer_index)
-                self.update()
-                event.accept()
-                return
             fire_index = self._hit_fire_point(event.position())
             if fire_index >= 0:
                 self.setFocus(Qt.FocusReason.MouseFocusReason)
                 self._fire_point_selected = fire_index
-                self._tracer_point_selected = -1
                 self._collision_selected = -1
                 self._camera_interacting = False
                 self._press_pos = None
@@ -1859,7 +1652,6 @@ class CollisionViewport(AssetViewport):
                 self.setFocus(Qt.FocusReason.MouseFocusReason)
                 self._collision_selected = index
                 self._fire_point_selected = -1
-                self._tracer_point_selected = -1
                 self._camera_interacting = False
                 self._press_pos = None
                 self._last_mouse = event.position().toPoint()
@@ -1868,21 +1660,9 @@ class CollisionViewport(AssetViewport):
                 event.accept()
                 return
         if event.button() == Qt.MouseButton.RightButton:
-            tracer_index = self._hit_tracer_point(event.position())
-            if tracer_index >= 0:
-                self._tracer_point_selected = tracer_index
-                self._fire_point_selected = -1
-                self._collision_selected = -1
-                self.tracerPointPicked.emit(tracer_index)
-                self.update()
-                self.sphereContextMenuRequested.emit(
-                    -1, event.globalPosition().toPoint())
-                event.accept()
-                return
             fire_index = self._hit_fire_point(event.position())
             if fire_index >= 0:
                 self._fire_point_selected = fire_index
-                self._tracer_point_selected = -1
                 self._collision_selected = -1
                 self.firePointPicked.emit(fire_index)
                 self.update()
@@ -1894,7 +1674,6 @@ class CollisionViewport(AssetViewport):
             if index >= 0:
                 self._collision_selected = index
                 self._fire_point_selected = -1
-                self._tracer_point_selected = -1
                 self.spherePicked.emit(index)
                 self.update()
             self.sphereContextMenuRequested.emit(
@@ -1905,30 +1684,18 @@ class CollisionViewport(AssetViewport):
 
     def mouseDoubleClickEvent(self, event: QMouseEvent) -> None:  # noqa: N802
         if event.button() == Qt.MouseButton.LeftButton:
-            tracer_index = self._hit_tracer_point(event.position())
-            if tracer_index >= 0:
-                self._tracer_point_selected = tracer_index
-                self._fire_point_selected = -1
-                self._collision_selected = -1
-                self.tracerPointPicked.emit(tracer_index)
-                self.update()
-                event.accept()
-                return
             fire_index = self._hit_fire_point(event.position())
             if fire_index >= 0:
                 self._fire_point_selected = fire_index
-                self._tracer_point_selected = -1
                 self._collision_selected = -1
                 self.firePointPicked.emit(fire_index)
             else:
                 index = self._hit_sphere(event.position(), cycle=False)
                 self._collision_selected = index
                 self._fire_point_selected = -1
-                self._tracer_point_selected = -1
                 self.spherePicked.emit(index)
                 if index < 0:
                     self.firePointPicked.emit(-1)
-                    self.tracerPointPicked.emit(-1)
             self.update()
             event.accept()
             return
@@ -2325,7 +2092,6 @@ class CollisionEditorWindow(QMainWindow):
         self._current_owner: str | None = None
         self._selected = -1
         self._selected_fire_point = -1
-        self._selected_tracer_point = -1
         self._modified = False
         self._syncing = False
         self._last_directory = Path.home()
@@ -2340,7 +2106,6 @@ class CollisionEditorWindow(QMainWindow):
         self.viewport = CollisionViewport()
         self.viewport.spherePicked.connect(self._select_sphere)
         self.viewport.firePointPicked.connect(self._select_fire_point)
-        self.viewport.tracerPointPicked.connect(self._select_tracer_point)
         self.viewport.sphereContextMenuRequested.connect(
             self._show_sphere_context_menu)
         self.viewport.sphereNudgeRequested.connect(self._gizmo_nudge)
@@ -2373,12 +2138,6 @@ class CollisionEditorWindow(QMainWindow):
             QAbstractItemView.SelectionMode.SingleSelection)
         self.fire_point_tree.currentItemChanged.connect(
             self._fire_point_tree_selection_changed)
-        self.tracer_point_tree = QTreeWidget()
-        self.tracer_point_tree.setHeaderLabels(["Point", "X", "Y", "Z"])
-        self.tracer_point_tree.setSelectionMode(
-            QAbstractItemView.SelectionMode.SingleSelection)
-        self.tracer_point_tree.currentItemChanged.connect(
-            self._tracer_point_tree_selection_changed)
 
         self.sphere_tree.setContextMenuPolicy(
             Qt.ContextMenuPolicy.CustomContextMenu)
@@ -2534,8 +2293,6 @@ class CollisionEditorWindow(QMainWindow):
              self.viewport.set_overeof_visible),
             ("Show Fire Points", True,
              self.viewport.set_fire_points_visible),
-            ("Show Tracer Points", True,
-             self.viewport.set_tracer_points_visible),
         )
         for text, checked, slot in viewpoint_options:
             action = QAction(text, self)
@@ -2848,73 +2605,6 @@ class CollisionEditorWindow(QMainWindow):
         fire_layout.addWidget(self.fire_point_tree)
         right.addWidget(self.fire_points_box)
 
-        self.tracer_points_box = QGroupBox("Tracer Points (OpenUA)")
-        tracer_layout = QVBoxLayout(self.tracer_points_box)
-        tracer_layout.setContentsMargins(6, 4, 6, 4)
-        tracer_layout.setSpacing(3)
-        self.tracer_points_check = QCheckBox("Include Tracer Points")
-        self.tracer_points_check.setToolTip(
-            "Include OpenUA mgun_tracer_offset_x/y/z and num_mguns in "
-            "output and show the exact visual tracer origins.")
-        self.tracer_points_check.toggled.connect(
-            self._tracer_points_enabled_changed)
-        tracer_layout.addWidget(self.tracer_points_check)
-        tracer_grid = QGridLayout()
-        tracer_grid.setHorizontalSpacing(5)
-        tracer_grid.setVerticalSpacing(3)
-        self.tracer_point_spins = {}
-        for index, axis in enumerate(("X", "Y", "Z")):
-            row, pair = divmod(index, 2)
-            tracer_grid.addWidget(QLabel(axis), row, pair * 2)
-            spin = CompactScaleSpinBox()
-            spin.setRange(-6000.0, 6000.0)
-            spin.setDecimals(3)
-            spin.setSingleStep(1.0)
-            spin.setKeyboardTracking(True)
-            spin.setMinimumWidth(72)
-            key = f"mgun_tracer_offset_{axis.lower()}"
-            spin.setToolTip(f"OpenUA {key} visual tracer-origin offset.")
-            spin.valueChanged.connect(
-                lambda value, field=key:
-                self._tracer_point_value_changed(field, value))
-            spin.editingFinished.connect(
-                lambda field=key: self._finish_vehicle_preview_edit(field))
-            self.tracer_point_spins[axis.lower()] = spin
-            tracer_grid.addWidget(spin, row, pair * 2 + 1)
-        self.tracer_x_spin = self.tracer_point_spins["x"]
-        self.tracer_y_spin = self.tracer_point_spins["y"]
-        self.tracer_z_spin = self.tracer_point_spins["z"]
-        tracer_grid.addWidget(QLabel("MGUNs"), 1, 2)
-        self.num_mguns_spin = QSpinBox()
-        self.num_mguns_spin.setRange(1, 255)
-        self.num_mguns_spin.setValue(1)
-        self.num_mguns_spin.setMinimumWidth(72)
-        self.num_mguns_spin.setToolTip(
-            "OpenUA num_mguns. Multiple Tracer Points are distributed "
-            "evenly and symmetrically from -X to +X.")
-        self.num_mguns_spin.valueChanged.connect(self._num_mguns_changed)
-        self.num_mguns_spin.editingFinished.connect(
-            lambda: self._finish_vehicle_preview_edit("num_mguns"))
-        tracer_grid.addWidget(self.num_mguns_spin, 1, 3)
-        tracer_grid.setColumnStretch(1, 1)
-        tracer_grid.setColumnStretch(3, 1)
-        tracer_layout.addLayout(tracer_grid)
-        self.tracer_points_notice = QLabel("OpenUA only")
-        self.tracer_points_notice.setStyleSheet(
-            "color: #e1aa62; font-size: 10px;")
-        tracer_layout.addWidget(self.tracer_points_notice)
-        self.tracer_point_tree.setMinimumHeight(72)
-        self.tracer_point_tree.setMaximumHeight(120)
-        tracer_header = self.tracer_point_tree.header()
-        tracer_header.setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
-        for column in (1, 2, 3):
-            tracer_header.setSectionResizeMode(
-                column, QHeaderView.ResizeMode.ResizeToContents)
-            self.tracer_point_tree.headerItem().setTextAlignment(
-                column, Qt.AlignmentFlag.AlignRight
-                | Qt.AlignmentFlag.AlignVCenter)
-        tracer_layout.addWidget(self.tracer_point_tree)
-        right.addWidget(self.tracer_points_box)
 
         selected_box = QGroupBox("Selected Element")
         self.selected_box = selected_box
@@ -3248,17 +2938,10 @@ class CollisionEditorWindow(QMainWindow):
                 overeof_enabled, overeof = import_overeof_block(text, block)
                 (fire_enabled, fire_x, fire_y, fire_z,
                  num_weapons) = import_fire_points_block(text, block)
-                tracer_probe = CollisionProject(
-                    legacy=legacy, compound=compounds)
-                (tracer_enabled, tracer_x, tracer_y, tracer_z,
-                 num_mguns) = import_tracer_points_block(
-                    text, block, effective_runtime_radius(tracer_probe))
             else:
                 overeof_enabled, overeof = False, 0.0
                 fire_enabled, fire_x, fire_y, fire_z = False, 0.0, 0.0, 0.0
                 num_weapons = 1
-                tracer_enabled = False
-                tracer_x, tracer_y, tracer_z, num_mguns = 0.0, 0.0, 0.0, 1
         except CollisionScriptError as exc:
             QMessageBox.critical(
                 self, "Script parameter import failed", str(exc))
@@ -3285,11 +2968,6 @@ class CollisionEditorWindow(QMainWindow):
             fire_y=fire_y,
             fire_z=fire_z,
             num_weapons=num_weapons,
-            tracer_points_enabled=tracer_enabled,
-            mgun_tracer_offset_x=tracer_x,
-            mgun_tracer_offset_y=tracer_y,
-            mgun_tracer_offset_z=tracer_z,
-            num_mguns=num_mguns,
             legacy=legacy,
             compound=compounds,
         )
@@ -3298,7 +2976,6 @@ class CollisionEditorWindow(QMainWindow):
         self._active_script_id = block.object_id
         self._selected = 0 if self.project.spheres() else -1
         self._selected_fire_point = -1
-        self._selected_tracer_point = -1
         self._undo.clear()
         self._redo.clear()
         self._last_directory = script_path.parent
@@ -3584,7 +3261,6 @@ class CollisionEditorWindow(QMainWindow):
             self.project.legacy = sphere
         self._selected = 0
         self._selected_fire_point = -1
-        self._selected_tracer_point = -1
         self._set_modified()
         self._sync_all()
 
@@ -3593,7 +3269,6 @@ class CollisionEditorWindow(QMainWindow):
         self.project.compound.append(self._default_sphere(category))
         self._selected = len(self.project.spheres()) - 1
         self._selected_fire_point = -1
-        self._selected_tracer_point = -1
         self._set_modified()
         self._sync_all()
 
@@ -3623,7 +3298,6 @@ class CollisionEditorWindow(QMainWindow):
             (1 if self.project.legacy is not None else 0)
             + compound_index + 1)
         self._selected_fire_point = -1
-        self._selected_tracer_point = -1
         self._set_modified()
         self._sync_all()
 
@@ -3671,7 +3345,6 @@ class CollisionEditorWindow(QMainWindow):
             detail = ""
 
         self._selected_fire_point = -1
-        self._selected_tracer_point = -1
         self._set_modified()
         self._sync_all()
         self.statusBar().showMessage(
@@ -3702,7 +3375,6 @@ class CollisionEditorWindow(QMainWindow):
             (1 if self.project.legacy is not None else 0)
             + compound_index + 1)
         self._selected_fire_point = -1
-        self._selected_tracer_point = -1
         self._set_modified()
         self._sync_all()
         self.statusBar().showMessage(
@@ -3723,7 +3395,6 @@ class CollisionEditorWindow(QMainWindow):
         self._selected = min(
             self._selected, len(self.project.spheres()) - 1)
         self._selected_fire_point = -1
-        self._selected_tracer_point = -1
         self._set_modified()
         self._sync_all()
 
@@ -3742,7 +3413,6 @@ class CollisionEditorWindow(QMainWindow):
         self.project.compound.clear()
         self._selected = -1
         self._selected_fire_point = -1
-        self._selected_tracer_point = -1
         self._set_modified()
         self._sync_all()
 
@@ -3812,7 +3482,6 @@ class CollisionEditorWindow(QMainWindow):
         self._radius_spin_active = False
         self._selected = index
         self._selected_fire_point = -1
-        self._selected_tracer_point = -1
         self._sync_all()
 
     def _select_fire_point(self, index: int):
@@ -3821,19 +3490,9 @@ class CollisionEditorWindow(QMainWindow):
         self._selected_fire_point = (
             index if (self.project.fire_points_enabled
                       and 0 <= index < point_count) else -1)
-        self._selected_tracer_point = -1
         self._selected = -1
         self._sync_all()
 
-    def _select_tracer_point(self, index: int):
-        self._radius_spin_active = False
-        point_count = len(tracer_point_positions(self.project))
-        self._selected_tracer_point = (
-            index if (self.project.tracer_points_enabled
-                      and 0 <= index < point_count) else -1)
-        self._selected_fire_point = -1
-        self._selected = -1
-        self._sync_all()
 
     def _fire_point_tree_selection_changed(self, current, _previous):
         if self._syncing or current is None:
@@ -3842,12 +3501,6 @@ class CollisionEditorWindow(QMainWindow):
         if isinstance(index, int):
             self._select_fire_point(index)
 
-    def _tracer_point_tree_selection_changed(self, current, _previous):
-        if self._syncing or current is None:
-            return
-        index = current.data(0, _TRACER_POINT_INDEX_ROLE)
-        if isinstance(index, int):
-            self._select_tracer_point(index)
 
     def _sphere_tree_selection_changed(self, current, _previous):
         if self._syncing or current is None:
@@ -4057,48 +3710,7 @@ class CollisionEditorWindow(QMainWindow):
         self._set_modified()
         self._sync_all()
 
-    def _tracer_points_enabled_changed(self, enabled: bool) -> None:
-        if self._syncing or self.project.target_category != VEHICLE:
-            return
-        enabled = bool(enabled)
-        if enabled == self.project.tracer_points_enabled:
-            return
-        self._vehicle_preview_active_edits.clear()
-        self._push_undo()
-        self.project.tracer_points_enabled = enabled
-        if not enabled:
-            self._selected_tracer_point = -1
-        self._set_modified()
-        self._sync_all()
 
-    def _tracer_point_value_changed(self, field: str, value: float) -> None:
-        if self._syncing or self.project.target_category != VEHICLE:
-            return
-        value = float(value)
-        if not math.isfinite(value):
-            return
-        current = float(getattr(self.project, field))
-        if abs(current - value) < 1e-9:
-            return
-        self._begin_vehicle_preview_edit(field)
-        setattr(self.project, field, value)
-        self.project.tracer_points_enabled = True
-        self._set_modified()
-        self._sync_all()
-
-    def _num_mguns_changed(self, value: int) -> None:
-        if self._syncing or self.project.target_category != VEHICLE:
-            return
-        value = max(1, min(255, int(value)))
-        if value == self.project.num_mguns:
-            return
-        self._begin_vehicle_preview_edit("num_mguns")
-        self.project.num_mguns = value
-        self.project.tracer_points_enabled = True
-        if self._selected_tracer_point >= value:
-            self._selected_tracer_point = value - 1
-        self._set_modified()
-        self._sync_all()
 
     def _gizmo_nudge(self, direction):
         sphere = self._selected_sphere()
@@ -4119,14 +3731,8 @@ class CollisionEditorWindow(QMainWindow):
 
         index = self._selected_fire_point
         points = fire_point_positions(self.project)
-        tracer_selected = (
-            self.project.tracer_points_enabled
-            and 0 <= self._selected_tracer_point
-            < len(tracer_point_positions(self.project)))
         if not (self.project.fire_points_enabled
                 and 0 <= index < len(points)):
-            if tracer_selected:
-                self._nudge_tracer_points(direction, step)
             return
 
         dx = float(direction[0]) * step
@@ -4176,55 +3782,6 @@ class CollisionEditorWindow(QMainWindow):
         self._set_modified()
         self._sync_all()
 
-    def _nudge_tracer_points(self, direction, step: float) -> None:
-        index = self._selected_tracer_point
-        count = max(1, int(self.project.num_mguns))
-        dx = float(direction[0]) * step
-        dy = float(direction[1]) * step
-        dz = float(direction[2]) * step
-        factor = None
-        if dx and count > 1:
-            factor = -1.0 + (2.0 * index / (count - 1))
-            if abs(factor) <= 1e-9 and not (dy or dz):
-                self.statusBar().showMessage(
-                    "The center Tracer Point is locked to X = 0. Select "
-                    "another point to change the symmetric spacing.", 6500)
-                return
-        old_values = (
-            self.project.mgun_tracer_offset_x,
-            self.project.mgun_tracer_offset_y,
-            self.project.mgun_tracer_offset_z,
-        )
-        self._push_undo()
-        changed = False
-        if dy:
-            self.project.mgun_tracer_offset_y += dy
-            changed = True
-        if dz:
-            self.project.mgun_tracer_offset_z += dz
-            changed = True
-        if dx:
-            if count == 1:
-                self.project.mgun_tracer_offset_x += dx
-                changed = True
-            elif factor is not None and abs(factor) > 1e-9:
-                current_x = factor * abs(
-                    float(self.project.mgun_tracer_offset_x))
-                new_extent = max(0.0, (current_x + dx) / factor)
-                self.project.mgun_tracer_offset_x = new_extent
-                changed = True
-        new_values = (
-            self.project.mgun_tracer_offset_x,
-            self.project.mgun_tracer_offset_y,
-            self.project.mgun_tracer_offset_z,
-        )
-        if not changed or new_values == old_values:
-            if self._undo:
-                self._undo.pop()
-            return
-        self.project.tracer_points_enabled = True
-        self._set_modified()
-        self._sync_all()
 
     def _project_fields_changed(self, *_args):
         if self._syncing:
@@ -4234,7 +3791,6 @@ class CollisionEditorWindow(QMainWindow):
         self.project.target_category = self.target_combo.currentData()
         if self.project.target_category != VEHICLE:
             self._selected_fire_point = -1
-            self._selected_tracer_point = -1
         self._set_modified()
         self._sync_all()
 
@@ -4381,29 +3937,6 @@ class CollisionEditorWindow(QMainWindow):
                 self.fire_point_tree.setCurrentItem(None)
                 self.fire_point_tree.clearSelection()
 
-    def _refresh_tracer_point_tree(self, points):
-        with QSignalBlocker(self.tracer_point_tree):
-            self.tracer_point_tree.clear()
-            selected_item = None
-            for index, point in enumerate(points):
-                item = QTreeWidgetItem([
-                    f"T{index + 1}",
-                    _number(point[0]), _number(point[1]), _number(point[2]),
-                ])
-                item.setData(0, _TRACER_POINT_INDEX_ROLE, index)
-                item.setForeground(0, QBrush(TRACER_POINT_COLOR))
-                for column in (1, 2, 3):
-                    item.setTextAlignment(
-                        column, Qt.AlignmentFlag.AlignRight
-                        | Qt.AlignmentFlag.AlignVCenter)
-                self.tracer_point_tree.addTopLevelItem(item)
-                if index == self._selected_tracer_point:
-                    selected_item = item
-            if selected_item is not None:
-                self.tracer_point_tree.setCurrentItem(selected_item)
-            else:
-                self.tracer_point_tree.setCurrentItem(None)
-                self.tracer_point_tree.clearSelection()
 
     def _refresh_project_summary_menu(self):
         menu = self.project_summary_menu
@@ -4421,11 +3954,6 @@ class CollisionEditorWindow(QMainWindow):
               and 0 <= self._selected_fire_point
               < len(fire_point_positions(self.project))):
             selected = f"Fire Point F{self._selected_fire_point + 1}"
-        elif (self.project.target_category == VEHICLE
-              and self.project.tracer_points_enabled
-              and 0 <= self._selected_tracer_point
-              < len(tracer_point_positions(self.project))):
-            selected = f"Tracer Point T{self._selected_tracer_point + 1}"
         else:
             selected = "None"
         compound_mode = bool(self.project.compound)
@@ -4465,14 +3993,6 @@ class CollisionEditorWindow(QMainWindow):
                f"{_number(self.project.fire_z)})"
                if (self.project.target_category == VEHICLE
                    and self.project.fire_points_enabled)
-               else "Not included"),
-            "Tracer points: "
-            + (f"{max(1, int(self.project.num_mguns))} at "
-               f"({_number(self.project.mgun_tracer_offset_x)}, "
-               f"{_number(self.project.mgun_tracer_offset_y)}, "
-               f"{_number(self.project.mgun_tracer_offset_z)})"
-               if (self.project.target_category == VEHICLE
-                   and self.project.tracer_points_enabled)
                else "Not included"),
             f"Collision mode: {collision_mode}",
             f"Legacy Radius: {legacy_status}",
@@ -4521,9 +4041,7 @@ class CollisionEditorWindow(QMainWindow):
                 self.model_scale_z_spin, self.overeof_check,
                 self.overeof_spin, self.fire_points_check,
                 self.fire_x_spin, self.fire_y_spin, self.fire_z_spin,
-                self.num_weapons_spin, self.tracer_points_check,
-                self.tracer_x_spin, self.tracer_y_spin, self.tracer_z_spin,
-                self.num_mguns_spin)
+                self.num_weapons_spin)
         ]
         self.name_edit.setText(self.project.name)
         self.model_scale_x_spin.setValue(self.project.model_scale_x)
@@ -4538,11 +4056,6 @@ class CollisionEditorWindow(QMainWindow):
                       else 0)
         if not (0 <= self._selected_fire_point < fire_count):
             self._selected_fire_point = -1
-        tracer_count = (len(tracer_point_positions(self.project))
-                        if (vehicle_mode and self.project.tracer_points_enabled)
-                        else 0)
-        if not (0 <= self._selected_tracer_point < tracer_count):
-            self._selected_tracer_point = -1
         self.viewport.set_ground_alignment(
             vehicle_mode, self.project.overeof_enabled,
             self.project.overeof)
@@ -4559,7 +4072,6 @@ class CollisionEditorWindow(QMainWindow):
             vehicle_mode and (self.project.overeof_enabled
                               or abs(self.project.overeof) > 1e-9))
         self.fire_points_box.setVisible(vehicle_mode)
-        self.tracer_points_box.setVisible(vehicle_mode)
         self.fire_points_check.setChecked(
             vehicle_mode and self.project.fire_points_enabled)
         self.fire_x_spin.setValue(self.project.fire_x)
@@ -4573,28 +4085,11 @@ class CollisionEditorWindow(QMainWindow):
                 self.fire_x_spin, self.fire_y_spin, self.fire_z_spin,
                 self.num_weapons_spin):
             widget.setEnabled(fire_controls_enabled)
-        self.tracer_points_check.setChecked(
-            vehicle_mode and self.project.tracer_points_enabled)
-        self.tracer_x_spin.setValue(self.project.mgun_tracer_offset_x)
-        self.tracer_y_spin.setValue(self.project.mgun_tracer_offset_y)
-        self.tracer_z_spin.setValue(self.project.mgun_tracer_offset_z)
-        self.num_mguns_spin.setValue(
-            max(1, min(255, int(self.project.num_mguns))))
-        tracer_controls_enabled = (
-            vehicle_mode and self.project.tracer_points_enabled)
-        for widget in (
-                self.tracer_x_spin, self.tracer_y_spin, self.tracer_z_spin,
-                self.num_mguns_spin):
-            widget.setEnabled(tracer_controls_enabled)
         sphere = self._selected_sphere()
         fire_selected = (
             vehicle_mode and self.project.fire_points_enabled
             and 0 <= self._selected_fire_point
             < len(fire_point_positions(self.project)))
-        tracer_selected = (
-            vehicle_mode and self.project.tracer_points_enabled
-            and 0 <= self._selected_tracer_point
-            < len(tracer_point_positions(self.project)))
         enabled = sphere is not None
         for widget in (
                 self.radius_slider, self.radius_spin, self.visible_check):
@@ -4602,22 +4097,15 @@ class CollisionEditorWindow(QMainWindow):
         self.visible_check.setVisible(enabled)
         self.gizmo.setEnabled(
             (sphere is not None and sphere.category != LEGACY)
-            or fire_selected or tracer_selected)
+            or fire_selected)
         self.transform_box.setTitle(
-            "Move Fire Point" if fire_selected
-            else "Move Tracer Point" if tracer_selected
-            else "Move Sphere")
+            "Move Fire Point" if fire_selected else "Move Sphere")
         if sphere is None:
             if fire_selected:
                 self.type_value.setText("Fire Point")
                 self.index_value.setText(str(self._selected_fire_point))
                 self.selected_element_label.setText(
                     f"Fire Point F{self._selected_fire_point + 1}")
-            elif tracer_selected:
-                self.type_value.setText("Tracer Point")
-                self.index_value.setText(str(self._selected_tracer_point))
-                self.selected_element_label.setText(
-                    f"Tracer Point T{self._selected_tracer_point + 1}")
             else:
                 self.type_value.setText("None")
                 self.index_value.setText("None")
@@ -4676,17 +4164,6 @@ class CollisionEditorWindow(QMainWindow):
             ]
         self._refresh_fire_point_tree(authored_points)
         self.viewport.set_fire_points(points, self._selected_fire_point)
-        authored_tracer_points = []
-        preview_tracer_points = []
-        if vehicle_mode and self.project.tracer_points_enabled:
-            authored_tracer_points = tracer_point_positions(self.project)
-            preview_tracer_points = [
-                (x, y + preview_offset_y, z)
-                for x, y, z in authored_tracer_points
-            ]
-        self._refresh_tracer_point_tree(authored_tracer_points)
-        self.viewport.set_tracer_points(
-            preview_tracer_points, self._selected_tracer_point)
         self._sync_gizmo_camera()
         self.undo_action.setEnabled(bool(self._undo))
         self.redo_action.setEnabled(bool(self._redo))
@@ -4790,10 +4267,6 @@ class CollisionEditorWindow(QMainWindow):
             overeof_enabled, overeof = import_overeof_block(text, block)
             fire_enabled, fire_x, fire_y, fire_z, num_weapons = (
                 import_fire_points_block(text, block))
-            tracer_probe = CollisionProject(legacy=legacy, compound=compound)
-            tracer_enabled, tracer_x, tracer_y, tracer_z, num_mguns = (
-                import_tracer_points_block(
-                    text, block, effective_runtime_radius(tracer_probe)))
         except CollisionScriptError as exc:
             QMessageBox.warning(self, "Import failed", str(exc))
             return
@@ -4813,16 +4286,10 @@ class CollisionEditorWindow(QMainWindow):
         self.project.fire_y = fire_y if vehicle_block else 0.0
         self.project.fire_z = fire_z if vehicle_block else 0.0
         self.project.num_weapons = num_weapons if vehicle_block else 1
-        self.project.tracer_points_enabled = vehicle_block and tracer_enabled
-        self.project.mgun_tracer_offset_x = tracer_x if vehicle_block else 0.0
-        self.project.mgun_tracer_offset_y = tracer_y if vehicle_block else 0.0
-        self.project.mgun_tracer_offset_z = tracer_z if vehicle_block else 0.0
-        self.project.num_mguns = num_mguns if vehicle_block else 1
         if block.name:
             self.project.name = block.name
         self._selected = 0 if self.project.spheres() else -1
         self._selected_fire_point = -1
-        self._selected_tracer_point = -1
         self._last_directory = Path(path).parent
         self._set_modified()
         self._sync_all()
@@ -4831,8 +4298,6 @@ class CollisionEditorWindow(QMainWindow):
             + (" and Legacy Radius" if legacy else "")
             + (" and Overeof" if self.project.overeof_enabled else "")
             + (" and Fire Points" if self.project.fire_points_enabled else "")
-            + (" and Tracer Points"
-               if self.project.tracer_points_enabled else "")
             + ".")
         if warnings:
             message += "\n\n" + "\n".join(warnings)
