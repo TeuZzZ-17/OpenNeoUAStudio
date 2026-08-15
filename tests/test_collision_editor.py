@@ -23,12 +23,14 @@ from collision_editor import (
     CollisionScriptError,
     CollisionSphere,
     CollisionViewport,
+    GunPoint,
     OpenScriptObjectDialog,
     LEGACY,
     VEHICLE,
     WEAPON,
     TYPE_COLORS,
     FIRE_POINT_COLOR,
+    GUN_POINT_COLOR,
     VIEW_PRESETS,
     create_backup,
     effective_runtime_radius,
@@ -37,6 +39,7 @@ from collision_editor import (
     find_script_blocks,
     import_collision_block,
     import_fire_points_block,
+    import_gun_points_block,
     import_overeof_block,
     plan_script_update,
     read_script_file,
@@ -506,9 +509,9 @@ class CollisionEditorTests(unittest.TestCase):
 
     def test_34_move_gizmo_is_compact_but_readable_and_tracks_camera(self):
         window = self._window()
-        self.assertGreaterEqual(window.gizmo.minimumWidth(), 260)
-        self.assertGreaterEqual(window.gizmo.minimumHeight(), 165)
-        self.assertLessEqual(window.gizmo.maximumHeight(), 175)
+        self.assertGreaterEqual(window.gizmo.minimumWidth(), 215)
+        self.assertGreaterEqual(window.gizmo.minimumHeight(), 122)
+        self.assertLessEqual(window.gizmo.maximumHeight(), 140)
         self.assertLessEqual(window.transform_box.maximumHeight(), 235)
         self.assertEqual(
             window.gizmo.sizePolicy().verticalPolicy(),
@@ -745,10 +748,16 @@ class CollisionEditorTests(unittest.TestCase):
             window.spheres_box.sizePolicy().verticalPolicy(),
             QSizePolicy.Policy.Expanding)
 
-    def test_selected_element_panel_is_at_top_of_properties(self):
+    def test_selected_element_panel_is_bottom_right_viewport_overlay(self):
         window = self._window()
-        properties_layout = window.selected_box.parentWidget().layout()
-        self.assertEqual(properties_layout.indexOf(window.selected_box), 0)
+        self.assertIs(window.selected_box.parentWidget(), window.viewport_panel)
+        index = window.viewport_layout.indexOf(window.selected_box)
+        self.assertGreaterEqual(index, 0)
+        alignment = window.viewport_layout.itemAt(index).alignment()
+        self.assertTrue(alignment & Qt.AlignmentFlag.AlignBottom)
+        self.assertTrue(alignment & Qt.AlignmentFlag.AlignRight)
+        self.assertFalse(alignment & Qt.AlignmentFlag.AlignTop)
+        self.assertFalse(alignment & Qt.AlignmentFlag.AlignLeft)
 
     def test_48_identical_spheres_keep_distinct_dense_indices(self):
         window = self._window()
@@ -1337,7 +1346,9 @@ class CollisionEditorTests(unittest.TestCase):
         self.assertEqual(
             window.fire_points_box.title(), "Fire Points (Vanilla)")
         self.assertEqual(
-            window.fire_points_check.text(), "Include Fire Points")
+            window.add_fire_point_button.text(), "Add Fire Point")
+        self.assertEqual(window.remove_fire_point_button.text(), "Remove")
+        self.assertIsNone(getattr(window, "fire_points_check", None))
         self.assertIn("Show Fire Points", window.viewpoint_actions)
         self.assertNotIn("Show Death Damage AoE", window.viewpoint_actions)
         self.assertFalse(window.fire_points_box.isHidden())
@@ -1557,6 +1568,53 @@ class CollisionEditorTests(unittest.TestCase):
         self.assertEqual(window.transform_box.title(), "Move Fire Point")
         self.assertEqual(window.viewport._fire_point_selected, 1)
 
+    def test_95b_add_remove_fire_points_use_vanilla_num_weapons_rack(self):
+        window = self._window()
+        self.assertFalse(window.project.fire_points_enabled)
+        self.assertFalse(window.fire_x_spin.isEnabled())
+        self.assertFalse(window.remove_fire_point_button.isEnabled())
+
+        window.add_fire_point()
+        self.assertTrue(window.project.fire_points_enabled)
+        self.assertEqual(window.project.num_weapons, 1)
+        self.assertEqual(window.fire_point_tree.topLevelItemCount(), 1)
+        self.assertEqual(window._selected_fire_point, 0)
+        self.assertTrue(window.fire_x_spin.isEnabled())
+        self.assertTrue(window.remove_fire_point_button.isEnabled())
+
+        window.project.fire_x = 30.0
+        window.add_fire_point()
+        self.assertEqual(window.project.num_weapons, 2)
+        self.assertEqual(fire_point_positions(window.project), [
+            (-30.0, 0.0, 0.0),
+            (30.0, 0.0, 0.0),
+        ])
+        self.assertEqual(window._selected_fire_point, 1)
+
+        window.remove_fire_point()
+        self.assertTrue(window.project.fire_points_enabled)
+        self.assertEqual(window.project.num_weapons, 1)
+        self.assertEqual(window.fire_point_tree.topLevelItemCount(), 1)
+
+        window.remove_fire_point()
+        self.assertFalse(window.project.fire_points_enabled)
+        self.assertEqual(window.fire_point_tree.topLevelItemCount(), 0)
+        self.assertEqual(window._selected_fire_point, -1)
+        self.assertFalse(window.fire_x_spin.isEnabled())
+        self.assertFalse(window.remove_fire_point_button.isEnabled())
+
+    def test_95c_add_fire_point_after_disable_starts_with_one_point(self):
+        window = self._window()
+        window.project.fire_points_enabled = False
+        window.project.num_weapons = 8
+        window.project.fire_x = 25.0
+        window._sync_all()
+        window.add_fire_point()
+        self.assertEqual(window.project.num_weapons, 1)
+        self.assertEqual(fire_point_positions(window.project), [
+            (25.0, 0.0, 0.0),
+        ])
+
     def test_96_gizmo_moves_vanilla_fire_rack_without_inventing_offsets(self):
         window = self._window()
         window.project.fire_points_enabled = True
@@ -1621,6 +1679,222 @@ class CollisionEditorTests(unittest.TestCase):
         viewport.resize(640, 480)
         self.assertIsNone(
             viewport._project_visible_world((1_000_000.0, 0.0, 0.0)))
+
+    def test_102_imports_legacy_and_generic_gun_points(self):
+        text = (
+            "new_vehicle 7\n"
+            " name = Carrier\n"
+            " robo_num_guns = 1\n"
+            " robo_act_gun = 0\n"
+            " robo_gun_pos_x = 10\n"
+            " robo_gun_pos_y = -2\n"
+            " robo_gun_pos_z = 30\n"
+            " robo_gun_dir_z = 1\n"
+            " robo_gun_type = 22\n"
+            " robo_gun_name = Flak\n"
+            " unit_num_guns = 2\n"
+            " unit_gun_icon = default_icon.bmp\n"
+            " unit_act_gun = 0\n"
+            " unit_gun_pos_x = -15\n"
+            " unit_gun_type = 40\n"
+            " unit_act_gun = 1\n"
+            " unit_gun_pos_x = 15\n"
+            " unit_gun_dir_y = 1\n"
+            " unit_gun_type = 41\n"
+            " unit_gun_name = SideGun\n"
+            " unit_gun_icon = side.bmp\n"
+            "end\n"
+        )
+        block = find_script_blocks(text)[0]
+        enabled, points, default_icon = import_gun_points_block(text, block)
+        self.assertTrue(enabled)
+        self.assertEqual(default_icon, "default_icon.bmp")
+        self.assertEqual([point.scheme for point in points], [
+            "robo", "unit", "unit"])
+        self.assertEqual(points[0].position, (10.0, -2.0, 30.0))
+        self.assertEqual(points[0].gun_type, 22)
+        self.assertEqual(points[0].name, "Flak")
+        self.assertEqual(points[2].direction, (0.0, 1.0, 0.0))
+        self.assertEqual(points[2].icon, "side.bmp")
+
+    def test_103_canonical_gun_save_preserves_num_mguns(self):
+        text = (
+            "new_vehicle 17\n"
+            " name = Carrier\n"
+            " vp_normal = 42\n"
+            " num_mguns = 8\n"
+            " unit_num_guns = 1\n"
+            " unit_act_gun = 0\n"
+            " unit_gun_pos_x = 999\n"
+            " unit_gun_type = 3\n"
+            "end\n"
+        )
+        project = CollisionProject(
+            name="Carrier", source_model="carrier.sklt",
+            target_category=VEHICLE, gun_points_enabled=True,
+            gun_points=[GunPoint(
+                scheme="unit", x=12, y=3, z=-5, dir_z=1,
+                gun_type=44, name="Flak")],
+        )
+        updated, _preview, _name = plan_script_update(
+            text, "new_vehicle", 17, project, replace_all_managed=True)
+        self.assertIn("num_mguns = 8", updated)
+        self.assertNotIn("unit_gun_pos_x = 999", updated)
+        self.assertIn("unit_num_guns = 1", updated)
+        self.assertIn("unit_gun_pos_x = 12", updated)
+        self.assertIn("unit_gun_dir_z = 1", updated)
+        self.assertIn("unit_gun_type = 44", updated)
+        self.assertIn("unit_gun_name = Flak", updated)
+
+    def test_104_gun_points_are_purple_listed_and_selectable(self):
+        self.assertEqual(GUN_POINT_COLOR, QColor(178, 78, 238))
+        window = self._window()
+        window.project.gun_points_enabled = True
+        window.project.gun_points = [
+            GunPoint(scheme="unit", x=4, y=5, z=6, dir_z=1, gun_type=9)]
+        window._sync_all()
+        self.assertFalse(window.gun_points_box.isHidden())
+        self.assertEqual(window.gun_point_tree.topLevelItemCount(), 1)
+        item = window.gun_point_tree.topLevelItem(0)
+        self.assertEqual(window.gun_point_tree.headerItem().text(1), "Family")
+        self.assertEqual(item.text(1), "OpenUA")
+        window.gun_point_tree.setCurrentItem(item)
+        self.assertEqual(window._selected_gun_point, 0)
+        self.assertEqual(window._selected, -1)
+        self.assertEqual(window.transform_box.title(), "Move Gun Point")
+        self.assertEqual(window.viewport._gun_point_selected, 0)
+
+    def test_105_gizmo_moves_selected_gun_point_directly(self):
+        window = self._window()
+        window.project.gun_points_enabled = True
+        window.project.gun_points = [GunPoint(scheme="unit", x=1, y=2, z=3)]
+        window._select_gun_point(0)
+        window.move_strength_spin.setValue(5)
+        window._gizmo_nudge((1, -1, 1))
+        point = window.project.gun_points[0]
+        self.assertEqual(point.position, (6.0, -3.0, 8.0))
+
+    def test_106_new_gun_point_defaults_to_generic_unit_family(self):
+        window = self._window()
+        window.add_gun_point()
+        self.assertTrue(window.project.gun_points_enabled)
+        self.assertEqual(len(window.project.gun_points), 1)
+        self.assertEqual(window.project.gun_points[0].scheme, "unit")
+        self.assertEqual(window._selected_gun_point, 0)
+
+        window.gun_point_type_combo.setCurrentIndex(
+            window.gun_point_type_combo.findData("robo"))
+        window.add_gun_point()
+        self.assertEqual(window.project.gun_points[-1].scheme, "robo")
+
+    def test_107_weapon_target_hides_gun_point_editor(self):
+        window = self._window()
+        window.project.target_category = WEAPON
+        window.project.gun_points_enabled = True
+        window.project.gun_points = [GunPoint(scheme="unit")]
+        window._sync_all()
+        self.assertFalse(window.gun_points_box.isVisible())
+        self.assertEqual(window.viewport._gun_points, [])
+
+    def test_108_gizmo_overlays_viewport_and_gun_fields_share_columns(self):
+        window = self._window()
+        self.assertIs(window.main_splitter.widget(1), window.viewport_panel)
+        self.assertIs(window.transform_box.parentWidget(), window.viewport_panel)
+        self.assertGreaterEqual(window.viewport_layout.indexOf(window.transform_box), 0)
+        self.assertIs(window.selected_box.parentWidget(), window.viewport_panel)
+        selected_index = window.viewport_layout.indexOf(window.selected_box)
+        self.assertGreaterEqual(selected_index, 0)
+        selected_alignment = window.viewport_layout.itemAt(selected_index).alignment()
+        self.assertTrue(selected_alignment & Qt.AlignmentFlag.AlignBottom)
+        self.assertTrue(selected_alignment & Qt.AlignmentFlag.AlignLeft)
+        self.assertFalse(selected_alignment & Qt.AlignmentFlag.AlignRight)
+        self.assertLessEqual(window.transform_box.maximumWidth(), 285)
+        self.assertLessEqual(window.transform_box.maximumHeight(), 172)
+
+        grid = window.gun_fields_grid
+        expected = {
+            window.gun_point_spins["x"]: (0, 1),
+            window.gun_point_spins["y"]: (0, 3),
+            window.gun_point_spins["z"]: (0, 5),
+            window.gun_dir_spins["x"]: (1, 1),
+            window.gun_dir_spins["y"]: (1, 3),
+            window.gun_dir_spins["z"]: (1, 5),
+            window.gun_type_spin: (2, 1),
+        }
+        for widget, position in expected.items():
+            index = grid.indexOf(widget)
+            self.assertGreaterEqual(index, 0)
+            row, column, _row_span, _column_span = grid.getItemPosition(index)
+            self.assertEqual((row, column), position)
+
+    def test_109_gun_direction_controls_are_canonical_and_name_is_script_name(self):
+        window = self._window()
+        self.assertEqual(window.gun_points_box.title(),
+                         "Gun Points (Vanilla/OpenUA)")
+        for spin in window.gun_dir_spins.values():
+            self.assertEqual(spin.minimum(), -1.0)
+            self.assertEqual(spin.maximum(), 1.0)
+            self.assertEqual(spin.decimals(), 0)
+            self.assertEqual(spin.singleStep(), 1.0)
+
+        text = (
+            "new_vehicle 56\n"
+            " robo_num_guns = 1\n"
+            " robo_act_gun = 0\n"
+            " robo_gun_dir_z = 1\n"
+            " robo_gun_type = 90\n"
+            " robo_gun_name = FLAK1\n"
+            "end\n"
+        )
+        block = find_script_blocks(text)[0]
+        _enabled, points, _icon = import_gun_points_block(text, block)
+        window.project.target_category = VEHICLE
+        window.project.gun_points_enabled = True
+        window.project.gun_points = points
+        window._sync_all()
+        self.assertEqual(window.gun_point_tree.topLevelItem(0).text(0),
+                         "G1 — FLAK1")
+        self.assertEqual(window.gun_point_tree.topLevelItem(0).text(1),
+                         "Vanilla")
+
+    def test_110_sphere_radius_controls_live_inside_spheres_panel(self):
+        window = self._window()
+        self.assertIs(window.radius_title.parentWidget(), window.spheres_box)
+        self.assertIs(window.radius_slider.parentWidget(), window.spheres_box)
+        self.assertIs(window.radius_spin.parentWidget(), window.spheres_box)
+        self.assertLessEqual(window.radius_spin.maximumWidth(), 86)
+
+    def test_111_spheres_follow_ground_alignment_before_fire_and_guns(self):
+        window = self._window()
+        layout = window.ground_alignment_box.parentWidget().layout()
+        self.assertLess(layout.indexOf(window.ground_alignment_box),
+                        layout.indexOf(window.spheres_box))
+        self.assertLess(layout.indexOf(window.spheres_box),
+                        layout.indexOf(window.fire_points_box))
+        self.assertLess(layout.indexOf(window.spheres_box),
+                        layout.indexOf(window.gun_points_box))
+        self.assertLessEqual(window.sphere_tree.minimumHeight(), 105)
+        self.assertLessEqual(window.sphere_tree.maximumHeight(), 165)
+
+    def test_112_properties_column_has_no_horizontal_scrollbar(self):
+        window = self._window()
+        self.assertEqual(
+            window.properties_scroll.horizontalScrollBarPolicy(),
+            Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+
+    def test_113_gun_point_type_selector_is_explicit_and_non_converting(self):
+        window = self._window()
+        combo = window.gun_point_type_combo
+        self.assertEqual(combo.itemData(0), "robo")
+        self.assertEqual(combo.itemData(1), "unit")
+        self.assertIn("Robo only", combo.itemText(0))
+        self.assertIn("All vehicle classes", combo.itemText(1))
+
+        window.project.gun_points_enabled = True
+        window.project.gun_points = [GunPoint(scheme="robo", name="FLAK1")]
+        window._select_gun_point(0)
+        self.assertEqual(window._new_gun_point_scheme, "robo")
+        self.assertEqual(window.project.gun_points[0].scheme, "robo")
 
 
 if __name__ == "__main__":

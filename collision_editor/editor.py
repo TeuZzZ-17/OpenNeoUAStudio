@@ -104,6 +104,7 @@ TYPE_COLORS = {
     WEAPON: QColor(60, 130, 235),
 }
 FIRE_POINT_COLOR = QColor(235, 60, 60)
+GUN_POINT_COLOR = QColor(178, 78, 238)
 SCRIPT_TYPES = (
     "new_vehicle", "modify_vehicle", "new_weapon", "modify_weapon",
 )
@@ -111,6 +112,7 @@ _MODEL_NAME_ROLE = int(Qt.ItemDataRole.UserRole) + 1
 _SPHERE_INDEX_ROLE = int(Qt.ItemDataRole.UserRole) + 2
 _MODEL_VP_ROLE = int(Qt.ItemDataRole.UserRole) + 3
 _FIRE_POINT_INDEX_ROLE = int(Qt.ItemDataRole.UserRole) + 4
+_GUN_POINT_INDEX_ROLE = int(Qt.ItemDataRole.UserRole) + 5
 _RADIUS_SLIDER_STEPS = 10000
 _RADIUS_LOG_MIN = -3.0
 _RADIUS_LOG_MAX = 6.0
@@ -120,7 +122,14 @@ _HEADER_RE = re.compile(
 )
 _PARAM_RE = re.compile(
     r"^(?P<indent>\s*)(?P<key>radius|overeof|fire_x|fire_y|fire_z|"
-    r"num_weapons|coll_num|coll_act|"
+    r"num_weapons|"
+    r"robo_num_guns|robo_act_gun|robo_gun_pos_x|robo_gun_pos_y|"
+    r"robo_gun_pos_z|robo_gun_dir_x|robo_gun_dir_y|robo_gun_dir_z|"
+    r"robo_gun_type|robo_gun_name|"
+    r"unit_num_guns|unit_act_gun|unit_gun_pos_x|unit_gun_pos_y|"
+    r"unit_gun_pos_z|unit_gun_dir_x|unit_gun_dir_y|unit_gun_dir_z|"
+    r"unit_gun_type|unit_gun_name|unit_gun_icon|"
+    r"coll_num|coll_act|"
     r"coll_x|coll_y|coll_z|coll_radius)\s*=\s*(?P<value>[^;#\r\n]+)",
     re.IGNORECASE,
 )
@@ -254,6 +263,37 @@ class CollisionSphere:
 
 
 @dataclass
+class GunPoint:
+    """One authored gun mount from either legacy Robo or generic OpenUA data."""
+
+    scheme: str = "unit"
+    x: float = 0.0
+    y: float = 0.0
+    z: float = 0.0
+    dir_x: float = 0.0
+    dir_y: float = 0.0
+    dir_z: float = 0.0
+    gun_type: int = 0
+    name: str = ""
+    icon: str = ""
+
+    @property
+    def position(self) -> tuple[float, float, float]:
+        return (self.x, self.y, self.z)
+
+    @property
+    def direction(self) -> tuple[float, float, float]:
+        return (self.dir_x, self.dir_y, self.dir_z)
+
+    def clone(self) -> "GunPoint":
+        return GunPoint(
+            self.scheme, self.x, self.y, self.z,
+            self.dir_x, self.dir_y, self.dir_z,
+            self.gun_type, self.name, self.icon,
+        )
+
+
+@dataclass
 class CollisionProject:
     name: str = ""
     source_model: str = ""
@@ -276,6 +316,13 @@ class CollisionProject:
     fire_y: float = 0.0
     fire_z: float = 0.0
     num_weapons: int = 1
+    # Vehicle gun mounts. ``robo`` preserves the original Host Station syntax;
+    # ``unit`` is OpenUA's generic vehicle-side implementation. Existing
+    # scripts retain their family; the editor explicitly chooses the family
+    # for each newly-authored point instead of inferring it from a bare model.
+    gun_points_enabled: bool = False
+    gun_points: list[GunPoint] = field(default_factory=list)
+    unit_gun_default_icon: str = ""
     legacy: CollisionSphere | None = None
     compound: list[CollisionSphere] = field(default_factory=list)
 
@@ -296,6 +343,12 @@ class CollisionProject:
             self.overeof_enabled, self.overeof,
             self.fire_points_enabled,
             self.fire_x, self.fire_y, self.fire_z, self.num_weapons,
+            self.gun_points_enabled, self.unit_gun_default_icon,
+            tuple((
+                point.scheme, point.x, point.y, point.z,
+                point.dir_x, point.dir_y, point.dir_z, point.gun_type,
+                point.name, point.icon,
+            ) for point in self.gun_points),
             one(self.legacy),
             tuple(one(sphere) for sphere in self.compound),
         )
@@ -309,7 +362,9 @@ class CollisionProject:
          self.overeof_enabled, self.overeof,
          self.fire_points_enabled,
          self.fire_x, self.fire_y, self.fire_z, self.num_weapons,
+         self.gun_points_enabled, self.unit_gun_default_icon, gun_points,
          legacy, compound) = state
+        self.gun_points = [GunPoint(*values) for values in gun_points]
         self.legacy = one(legacy)
         self.compound = [one(values) for values in compound]
 
@@ -598,7 +653,13 @@ def import_collision_block(
     compounds: list[CollisionSphere] = []
     warnings: list[str] = []
 
+    collision_keys = {
+        "radius", "coll_num", "coll_act",
+        "coll_x", "coll_y", "coll_z", "coll_radius",
+    }
     for _line, key, raw, _indent in rows:
+        if key not in collision_keys:
+            continue
         try:
             value = float(raw)
         except ValueError as exc:
@@ -697,6 +758,205 @@ def import_fire_points_block(
 
 
 
+
+_GUN_POINT_KEYS = {
+    "robo_num_guns", "robo_act_gun",
+    "robo_gun_pos_x", "robo_gun_pos_y", "robo_gun_pos_z",
+    "robo_gun_dir_x", "robo_gun_dir_y", "robo_gun_dir_z",
+    "robo_gun_type", "robo_gun_name",
+    "unit_num_guns", "unit_act_gun",
+    "unit_gun_pos_x", "unit_gun_pos_y", "unit_gun_pos_z",
+    "unit_gun_dir_x", "unit_gun_dir_y", "unit_gun_dir_z",
+    "unit_gun_type", "unit_gun_name", "unit_gun_icon",
+}
+
+
+def _top_level_assignment_rows(text: str, block: ScriptBlock):
+    """Yield active top-level assignments with their complete RHS text.
+
+    ``_parameter_rows`` intentionally tokenizes numeric values for the
+    collision parser. Gun names/icons are strings, so this companion retains
+    the whole value while using the same nested-scope rules.
+    """
+
+    lines = text.splitlines()
+    nested_depth = 0
+    for index in range(block.start_line + 1, block.end_line):
+        code = _active_code(lines[index])
+        token = code.split(None, 1)[0].lower() if code else ""
+        if _opens_nested_scope(token):
+            nested_depth += 1
+            continue
+        if token == "end" and nested_depth:
+            nested_depth -= 1
+            continue
+        if nested_depth or not code:
+            continue
+        match = _GENERIC_PARAM_RE.match(lines[index])
+        if match is None:
+            continue
+        yield (
+            index,
+            match.group("key").lower(),
+            match.group("value").strip(),
+            match.group("indent"),
+        )
+
+
+def gun_point_families_in_block(
+        text: str, block: ScriptBlock,
+) -> set[str]:
+    """Return the script gun families explicitly present in one block."""
+
+    families: set[str] = set()
+    if not block.complete:
+        return families
+    for _line, key, _raw, _indent in _top_level_assignment_rows(text, block):
+        if key not in _GUN_POINT_KEYS:
+            continue
+        if key.startswith("robo_"):
+            families.add("robo")
+        elif key.startswith("unit_"):
+            families.add("unit")
+    return families
+
+
+def import_gun_points_block(
+        text: str, block: ScriptBlock,
+) -> tuple[bool, list[GunPoint], str]:
+    """Read Host Station and generic OpenUA vehicle gun mounts.
+
+    The engine uses the same ``TRoboGun`` semantic payload for both families.
+    Keep the originating family on every point so editing an existing Host
+    Station does not silently rewrite ``robo_*`` data as ``unit_*`` data.
+    """
+
+    if not block.complete:
+        raise CollisionScriptError(
+            f"Parsing incompleto: manca end per {block.kind} "
+            f"{block.object_id}.")
+
+    families: dict[str, list[GunPoint]] = {"robo": [], "unit": []}
+    active = {"robo": -1, "unit": -1}
+    enabled = False
+    unit_default_icon = ""
+
+    def resize(scheme: str, count: int) -> None:
+        count = max(0, min(20, int(count)))
+        points = families[scheme]
+        if len(points) < count:
+            points.extend(GunPoint(scheme=scheme)
+                          for _ in range(count - len(points)))
+        elif len(points) > count:
+            del points[count:]
+        if active[scheme] >= count:
+            active[scheme] = count - 1
+
+    def point_for(scheme: str) -> GunPoint | None:
+        index = active[scheme]
+        if not (0 <= index < 20):
+            return None
+        points = families[scheme]
+        if index >= len(points):
+            points.extend(GunPoint(scheme=scheme)
+                          for _ in range(index + 1 - len(points)))
+        return points[index]
+
+    for _line, key, raw, _indent in _top_level_assignment_rows(text, block):
+        if key not in _GUN_POINT_KEYS:
+            continue
+        enabled = True
+        scheme = "robo" if key.startswith("robo_") else "unit"
+        prefix = f"{scheme}_"
+        leaf = key[len(prefix):]
+
+        if leaf == "num_guns":
+            try:
+                resize(scheme, int(float(raw.split()[0])))
+            except (TypeError, ValueError) as exc:
+                raise CollisionScriptError(
+                    f"Valore non numerico per {key}: {raw}") from exc
+            continue
+        if leaf == "act_gun":
+            try:
+                index = int(float(raw.split()[0]))
+            except (TypeError, ValueError) as exc:
+                raise CollisionScriptError(
+                    f"Valore non numerico per {key}: {raw}") from exc
+            active[scheme] = max(0, min(19, index))
+            point_for(scheme)
+            continue
+
+        point = point_for(scheme)
+        if leaf == "gun_icon" and point is None:
+            unit_default_icon = raw.strip().strip('"')
+            continue
+        if point is None:
+            # Ignore malformed per-slot properties before a valid act_gun.
+            # Generic unit_* data is a runtime no-op in this state; avoiding
+            # legacy robo_* index -1 also keeps the editor defensive.
+            continue
+        if leaf in {
+                "gun_pos_x", "gun_pos_y", "gun_pos_z",
+                "gun_dir_x", "gun_dir_y", "gun_dir_z"}:
+            try:
+                value = float(raw.split()[0])
+            except (TypeError, ValueError) as exc:
+                raise CollisionScriptError(
+                    f"Valore non numerico per {key}: {raw}") from exc
+            attr = leaf.removeprefix("gun_").replace("pos_", "")
+            if leaf.startswith("gun_dir_"):
+                attr = "dir_" + leaf[-1]
+            setattr(point, attr, value)
+        elif leaf == "gun_type":
+            try:
+                point.gun_type = max(0, min(255, int(float(raw.split()[0]))))
+            except (TypeError, ValueError) as exc:
+                raise CollisionScriptError(
+                    f"Valore non numerico per {key}: {raw}") from exc
+        elif leaf == "gun_name":
+            point.name = raw.strip().strip('"')
+        elif leaf == "gun_icon" and scheme == "unit":
+            point.icon = raw.strip().strip('"')
+
+    return enabled, families["robo"] + families["unit"], unit_default_icon
+
+
+def gun_point_data_lines(project: CollisionProject) -> list[str]:
+    """Render gun mounts without changing their script family."""
+
+    lines: list[str] = []
+    for scheme in ("robo", "unit"):
+        points = [point for point in project.gun_points
+                  if point.scheme == scheme]
+        default_icon = (
+            project.unit_gun_default_icon if scheme == "unit" else "")
+        if not points and not default_icon:
+            continue
+        if lines:
+            lines.append("")
+        lines.append(f"{scheme}_num_guns = {len(points)}")
+        if scheme == "unit" and default_icon:
+            lines.append(f"unit_gun_icon = {default_icon}")
+        for index, point in enumerate(points):
+            lines.extend([
+                "",
+                f"{scheme}_act_gun = {index}",
+                f"{scheme}_gun_pos_x = {_number(point.x)}",
+                f"{scheme}_gun_pos_y = {_number(point.y)}",
+                f"{scheme}_gun_pos_z = {_number(point.z)}",
+                f"{scheme}_gun_dir_x = {_number(point.dir_x)}",
+                f"{scheme}_gun_dir_y = {_number(point.dir_y)}",
+                f"{scheme}_gun_dir_z = {_number(point.dir_z)}",
+                f"{scheme}_gun_type = {max(0, min(255, int(point.gun_type)))}",
+            ])
+            if point.name:
+                lines.append(f"{scheme}_gun_name = {point.name}")
+            if scheme == "unit" and point.icon:
+                lines.append(f"unit_gun_icon = {point.icon}")
+    return lines
+
+
 def collision_data_lines(project: CollisionProject) -> list[str]:
     lines: list[str] = []
     if project.legacy is not None:
@@ -712,6 +972,12 @@ def collision_data_lines(project: CollisionProject) -> list[str]:
             f"fire_z = {_number(project.fire_z)}",
             f"num_weapons = {max(0, min(255, int(project.num_weapons)))}",
         ])
+    if project.target_category == VEHICLE and project.gun_points_enabled:
+        gun_lines = gun_point_data_lines(project)
+        if gun_lines:
+            if lines:
+                lines.append("")
+            lines.extend(gun_lines)
     if project.compound:
         if lines:
             lines.append("")
@@ -779,6 +1045,7 @@ def plan_script_update(
         row for row in rows
         if row[1] in ("fire_x", "fire_y", "fire_z", "num_weapons")
     ]
+    gun_rows = [row for row in rows if row[1] in _GUN_POINT_KEYS]
     coll_rows = [row for row in rows if row[1].startswith("coll_")]
     indent = next(
         (row[3] for row in rows if row[3]),
@@ -876,6 +1143,9 @@ def plan_script_update(
             ],
             "fire points",
         )
+    if "vehicle" in kind and project.gun_points_enabled:
+        replace_group(
+            gun_rows, gun_point_data_lines(project), "gun points")
     replace_group(coll_rows, compound_lines, "compound collisions")
 
     output: list[str] = []
@@ -962,6 +1232,27 @@ def validate_project(
             errors.append("Fire X/Y/Z devono essere numeri finiti.")
         if not (0 <= int(project.num_weapons) <= 255):
             errors.append("Num Weapons deve essere compreso tra 0 e 255.")
+    if project.target_category == VEHICLE and project.gun_points_enabled:
+        if len(project.gun_points) > 40:
+            errors.append(
+                "Gun Points oltre il limite combinato di 20 robo + 20 unit.")
+        family_counts = {"robo": 0, "unit": 0}
+        for index, point in enumerate(project.gun_points):
+            if point.scheme not in family_counts:
+                errors.append(f"Gun Point {index}: famiglia script non valida.")
+                continue
+            family_counts[point.scheme] += 1
+            if family_counts[point.scheme] > 20:
+                errors.append(
+                    f"Gun Point {index}: massimo 20 punti {point.scheme}.")
+            if not all(math.isfinite(value) for value in (
+                    point.x, point.y, point.z,
+                    point.dir_x, point.dir_y, point.dir_z)):
+                errors.append(
+                    f"Gun Point {index}: posizione/direzione non numerica.")
+            if not (0 <= int(point.gun_type) <= 255):
+                errors.append(
+                    f"Gun Point {index}: gun type deve essere 0..255.")
     for index, sphere in enumerate(project.spheres()):
         if not all(math.isfinite(value) for value in (
                 sphere.x, sphere.y, sphere.z, sphere.radius)):
@@ -989,8 +1280,8 @@ class CollisionMoveGizmo(ModelSpaceGizmo):
         # Keep the controls visually bold while allowing the properties
         # column to fit on a 1080p desktop without vertical scrolling.
         self.set_visual_scale(
-            extent_ratio=0.98, margin=8.0,
-            handle_scale=1.50, line_scale=1.35)
+            extent_ratio=0.96, margin=6.0,
+            handle_scale=1.45, line_scale=1.32)
 
     @property
     def directions(self) -> tuple[tuple[int, int, int], ...]:
@@ -1000,10 +1291,10 @@ class CollisionMoveGizmo(ModelSpaceGizmo):
         )
 
     def sizeHint(self) -> QSize:  # noqa: N802
-        return QSize(320, 175)
+        return QSize(250, 136)
 
     def minimumSizeHint(self) -> QSize:  # noqa: N802
-        return QSize(260, 165)
+        return QSize(215, 122)
 
 
 class RadiusItemDelegate(QStyledItemDelegate):
@@ -1051,6 +1342,7 @@ class CollisionViewport(AssetViewport):
 
     spherePicked = Signal(int)
     firePointPicked = Signal(int)
+    gunPointPicked = Signal(int)
     sphereContextMenuRequested = Signal(int, QPoint)
     sphereNudgeRequested = Signal(object)
     RING_SEGMENTS = 12
@@ -1078,6 +1370,10 @@ class CollisionViewport(AssetViewport):
         self._fire_points: list[tuple[float, float, float]] = []
         self._fire_point_selected = -1
         self._fire_points_visible = True
+        self._gun_points: list[tuple[float, float, float]] = []
+        self._gun_directions: list[tuple[float, float, float]] = []
+        self._gun_point_selected = -1
+        self._gun_points_visible = True
         self._model_preview_base_faces: list[
             tuple[tuple[float, float, float], ...]] = []
         self._model_preview_base_sen_boxes: list[
@@ -1106,6 +1402,9 @@ class CollisionViewport(AssetViewport):
         self._ground_alignment_source_loaded = False
         self._fire_points = []
         self._fire_point_selected = -1
+        self._gun_points = []
+        self._gun_directions = []
+        self._gun_point_selected = -1
         self._collision_selected = -1
         self._model_preview_base_faces = []
         self._model_preview_base_sen_boxes = []
@@ -1241,6 +1540,29 @@ class CollisionViewport(AssetViewport):
         self._fire_points_visible = bool(visible)
         self.update()
 
+    def set_gun_points(
+            self, points: list[tuple[float, float, float]],
+            directions: list[tuple[float, float, float]] | None = None,
+            selected: int = -1) -> None:
+        self._gun_points = [
+            tuple(float(value) for value in point) for point in points
+        ]
+        raw_directions = directions or []
+        self._gun_directions = [
+            tuple(float(value) for value in direction)
+            for direction in raw_directions
+        ]
+        if len(self._gun_directions) < len(self._gun_points):
+            self._gun_directions.extend(
+                [(0.0, 0.0, 0.0)]
+                * (len(self._gun_points) - len(self._gun_directions)))
+        self._gun_point_selected = (
+            selected if 0 <= selected < len(self._gun_points) else -1)
+        self.update()
+
+    def set_gun_points_visible(self, visible: bool) -> None:
+        self._gun_points_visible = bool(visible)
+        self.update()
 
 
     def set_collision_spheres(
@@ -1437,7 +1759,8 @@ class CollisionViewport(AssetViewport):
             event.accept()
             return
         if (self._collision_selected >= 0
-                or self._fire_point_selected >= 0) and not (
+                or self._fire_point_selected >= 0
+                or self._gun_point_selected >= 0) and not (
                 event.modifiers() & (
                     Qt.KeyboardModifier.ControlModifier
                     | Qt.KeyboardModifier.AltModifier
@@ -1585,6 +1908,64 @@ class CollisionViewport(AssetViewport):
                 screen + QPointF(9.0, -9.0), f"F{index + 1}")
 
 
+    def _gun_point_screen_positions(self):
+        return [self._project_visible_world(point) for point in self._gun_points]
+
+    def _hit_gun_point(self, point: QPointF) -> int:
+        if not (self._ground_alignment_source_loaded
+                and self._gun_points_visible):
+            return -1
+        candidates = []
+        for index, screen in enumerate(self._gun_point_screen_positions()):
+            if screen is None:
+                continue
+            distance = math.hypot(point.x() - screen.x(), point.y() - screen.y())
+            if distance <= 16.0:
+                candidates.append((distance, index))
+        return min(candidates)[1] if candidates else -1
+
+    def _draw_gun_points_overlay(self, painter: QPainter) -> None:
+        if not (self._ground_alignment_source_loaded
+                and self._gun_points_visible and self._gun_points):
+            return
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+        fill = QColor(
+            GUN_POINT_COLOR.red(), GUN_POINT_COLOR.green(),
+            GUN_POINT_COLOR.blue(), 225)
+        screens = self._gun_point_screen_positions()
+        for index, screen in enumerate(screens):
+            if screen is None:
+                continue
+            selected = index == self._gun_point_selected
+            if selected:
+                self._draw_fire_marker(
+                    painter, screen, QPen(QColor(255, 255, 255), 6.0),
+                    QColor(255, 255, 255, 235), 11.0)
+            self._draw_fire_marker(
+                painter, screen, QPen(GUN_POINT_COLOR, 2.4), fill, 10.0)
+
+            # TRoboGun::dir is a local-space initial direction. A short
+            # purple arrow makes orientation visible without pretending the
+            # marker is a second piece of model geometry.
+            if index < len(self._gun_directions):
+                dx, dy, dz = self._gun_directions[index]
+                length = math.sqrt(dx * dx + dy * dy + dz * dz)
+                if math.isfinite(length) and length > 1e-9:
+                    scale = 55.0 / length
+                    x, y, z = self._gun_points[index]
+                    endpoint = self._project_visible_world((
+                        x + dx * scale, y + dy * scale, z + dz * scale))
+                    if endpoint is not None:
+                        painter.setPen(QPen(GUN_POINT_COLOR, 2.0))
+                        painter.drawLine(screen, endpoint)
+                        painter.setBrush(fill)
+                        painter.drawEllipse(endpoint, 2.8, 2.8)
+
+            painter.setPen(QPen(
+                QColor(255, 255, 255) if selected else GUN_POINT_COLOR, 1.5))
+            painter.drawText(screen + QPointF(9.0, -9.0), f"G{index + 1}")
+
+
     def paintEvent(self, event) -> None:  # noqa: N802
         if self._collision_show_model:
             super().paintEvent(event)
@@ -1631,14 +2012,29 @@ class CollisionViewport(AssetViewport):
                 color.red(), color.green(), color.blue(), 235))
             painter.drawEllipse(center, 6.0, 6.0)
         self._draw_fire_points_overlay(painter)
+        self._draw_gun_points_overlay(painter)
         painter.end()
 
     def mousePressEvent(self, event: QMouseEvent) -> None:  # noqa: N802
         if event.button() == Qt.MouseButton.LeftButton:
+            gun_index = self._hit_gun_point(event.position())
+            if gun_index >= 0:
+                self.setFocus(Qt.FocusReason.MouseFocusReason)
+                self._gun_point_selected = gun_index
+                self._fire_point_selected = -1
+                self._collision_selected = -1
+                self._camera_interacting = False
+                self._press_pos = None
+                self._last_mouse = event.position().toPoint()
+                self.gunPointPicked.emit(gun_index)
+                self.update()
+                event.accept()
+                return
             fire_index = self._hit_fire_point(event.position())
             if fire_index >= 0:
                 self.setFocus(Qt.FocusReason.MouseFocusReason)
                 self._fire_point_selected = fire_index
+                self._gun_point_selected = -1
                 self._collision_selected = -1
                 self._camera_interacting = False
                 self._press_pos = None
@@ -1652,6 +2048,7 @@ class CollisionViewport(AssetViewport):
                 self.setFocus(Qt.FocusReason.MouseFocusReason)
                 self._collision_selected = index
                 self._fire_point_selected = -1
+                self._gun_point_selected = -1
                 self._camera_interacting = False
                 self._press_pos = None
                 self._last_mouse = event.position().toPoint()
@@ -1660,9 +2057,21 @@ class CollisionViewport(AssetViewport):
                 event.accept()
                 return
         if event.button() == Qt.MouseButton.RightButton:
+            gun_index = self._hit_gun_point(event.position())
+            if gun_index >= 0:
+                self._gun_point_selected = gun_index
+                self._fire_point_selected = -1
+                self._collision_selected = -1
+                self.gunPointPicked.emit(gun_index)
+                self.update()
+                self.sphereContextMenuRequested.emit(
+                    -1, event.globalPosition().toPoint())
+                event.accept()
+                return
             fire_index = self._hit_fire_point(event.position())
             if fire_index >= 0:
                 self._fire_point_selected = fire_index
+                self._gun_point_selected = -1
                 self._collision_selected = -1
                 self.firePointPicked.emit(fire_index)
                 self.update()
@@ -1674,6 +2083,7 @@ class CollisionViewport(AssetViewport):
             if index >= 0:
                 self._collision_selected = index
                 self._fire_point_selected = -1
+                self._gun_point_selected = -1
                 self.spherePicked.emit(index)
                 self.update()
             self.sphereContextMenuRequested.emit(
@@ -1684,18 +2094,28 @@ class CollisionViewport(AssetViewport):
 
     def mouseDoubleClickEvent(self, event: QMouseEvent) -> None:  # noqa: N802
         if event.button() == Qt.MouseButton.LeftButton:
-            fire_index = self._hit_fire_point(event.position())
-            if fire_index >= 0:
-                self._fire_point_selected = fire_index
-                self._collision_selected = -1
-                self.firePointPicked.emit(fire_index)
-            else:
-                index = self._hit_sphere(event.position(), cycle=False)
-                self._collision_selected = index
+            gun_index = self._hit_gun_point(event.position())
+            if gun_index >= 0:
+                self._gun_point_selected = gun_index
                 self._fire_point_selected = -1
-                self.spherePicked.emit(index)
-                if index < 0:
-                    self.firePointPicked.emit(-1)
+                self._collision_selected = -1
+                self.gunPointPicked.emit(gun_index)
+            else:
+                fire_index = self._hit_fire_point(event.position())
+                if fire_index >= 0:
+                    self._fire_point_selected = fire_index
+                    self._gun_point_selected = -1
+                    self._collision_selected = -1
+                    self.firePointPicked.emit(fire_index)
+                else:
+                    index = self._hit_sphere(event.position(), cycle=False)
+                    self._collision_selected = index
+                    self._fire_point_selected = -1
+                    self._gun_point_selected = -1
+                    self.spherePicked.emit(index)
+                    if index < 0:
+                        self.firePointPicked.emit(-1)
+                        self.gunPointPicked.emit(-1)
             self.update()
             event.accept()
             return
@@ -2092,6 +2512,11 @@ class CollisionEditorWindow(QMainWindow):
         self._current_owner: str | None = None
         self._selected = -1
         self._selected_fire_point = -1
+        self._selected_gun_point = -1
+        # Family used only when authoring a new Gun Point. Existing imported
+        # points keep their original robo_* / unit_* scheme unless explicitly
+        # removed and recreated, avoiding silent script-family conversions.
+        self._new_gun_point_scheme = "unit"
         self._modified = False
         self._syncing = False
         self._last_directory = Path.home()
@@ -2106,6 +2531,7 @@ class CollisionEditorWindow(QMainWindow):
         self.viewport = CollisionViewport()
         self.viewport.spherePicked.connect(self._select_sphere)
         self.viewport.firePointPicked.connect(self._select_fire_point)
+        self.viewport.gunPointPicked.connect(self._select_gun_point)
         self.viewport.sphereContextMenuRequested.connect(
             self._show_sphere_context_menu)
         self.viewport.sphereNudgeRequested.connect(self._gizmo_nudge)
@@ -2138,6 +2564,12 @@ class CollisionEditorWindow(QMainWindow):
             QAbstractItemView.SelectionMode.SingleSelection)
         self.fire_point_tree.currentItemChanged.connect(
             self._fire_point_tree_selection_changed)
+        self.gun_point_tree = QTreeWidget()
+        self.gun_point_tree.setHeaderLabels(["Gun", "Family", "X", "Y", "Z"])
+        self.gun_point_tree.setSelectionMode(
+            QAbstractItemView.SelectionMode.SingleSelection)
+        self.gun_point_tree.currentItemChanged.connect(
+            self._gun_point_tree_selection_changed)
 
         self.sphere_tree.setContextMenuPolicy(
             Qt.ContextMenuPolicy.CustomContextMenu)
@@ -2293,6 +2725,8 @@ class CollisionEditorWindow(QMainWindow):
              self.viewport.set_overeof_visible),
             ("Show Fire Points", True,
              self.viewport.set_fire_points_visible),
+            ("Show Gun Points", True,
+             self.viewport.set_gun_points_visible),
         )
         for text, checked, slot in viewpoint_options:
             action = QAction(text, self)
@@ -2456,7 +2890,19 @@ class CollisionEditorWindow(QMainWindow):
             Qt.ScrollBarPolicy.ScrollBarAsNeeded)
         self.model_tree.setTextElideMode(Qt.TextElideMode.ElideRight)
         splitter.addWidget(source_panel)
-        splitter.addWidget(self.viewport)
+
+        # Keep the movement gizmo permanently visible without extending the
+        # already tall properties column.  The viewport wrapper lets the
+        # compact Move Element panel sit over the render area in its top-right
+        # corner, directly below the main toolbar.
+        viewport_panel = QWidget()
+        self.viewport_panel = viewport_panel
+        viewport_layout = QGridLayout(viewport_panel)
+        self.viewport_layout = viewport_layout
+        viewport_layout.setContentsMargins(0, 0, 0, 0)
+        viewport_layout.setSpacing(0)
+        viewport_layout.addWidget(self.viewport, 0, 0)
+        splitter.addWidget(viewport_panel)
 
         properties = QWidget()
         right = QVBoxLayout(properties)
@@ -2537,17 +2983,92 @@ class CollisionEditorWindow(QMainWindow):
         self.ground_alignment_notice.hide()
         right.addWidget(self.ground_alignment_box)
 
+        spheres_box = QGroupBox("Spheres")
+        spheres_layout = QVBoxLayout(spheres_box)
+        self.spheres_box = spheres_box
+        self.sphere_tree.setMinimumHeight(105)
+        self.sphere_tree.setMaximumHeight(165)
+        self.sphere_tree.setSizePolicy(
+            QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
+        spheres_box.setSizePolicy(
+            QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Preferred)
+        sphere_header = self.sphere_tree.header()
+        sphere_header.setSectionResizeMode(
+            0, QHeaderView.ResizeMode.Stretch)
+        sphere_header.setSectionResizeMode(
+            1, QHeaderView.ResizeMode.ResizeToContents)
+        sphere_header.setSectionResizeMode(
+            2, QHeaderView.ResizeMode.ResizeToContents)
+        sphere_header.setSectionResizeMode(
+            3, QHeaderView.ResizeMode.ResizeToContents)
+        self.sphere_tree.headerItem().setTextAlignment(
+            1, Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+        self.sphere_tree.headerItem().setTextAlignment(
+            2, Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+        self.sphere_tree.headerItem().setTextAlignment(
+            3, Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+        self.sphere_tree.headerItem().setToolTip(
+            1, "Double-click a Radius value to edit the sphere size.")
+        spheres_layout.addWidget(self.sphere_tree, 1)
+
+        # Radius belongs to the Spheres workspace rather than being another
+        # full-height properties group.  Keep it compact under the sphere list,
+        # mirroring the Move Element panel's "control + strength" structure.
+        self.radius_title = QLabel("Sphere Radius")
+        spheres_layout.addWidget(self.radius_title)
+        radius_layout = QHBoxLayout()
+        self.radius_layout = radius_layout
+        radius_layout.setContentsMargins(0, 0, 0, 0)
+        radius_layout.setSpacing(5)
+        radius_layout.addWidget(QLabel("Radius"))
+        self.radius_slider = QSlider(Qt.Orientation.Horizontal)
+        self.radius_slider.setRange(0, _RADIUS_SLIDER_STEPS)
+        self.radius_slider.sliderPressed.connect(
+            self._begin_radius_slider)
+        self.radius_slider.valueChanged.connect(
+            self._radius_slider_changed)
+        self.radius_slider.sliderReleased.connect(
+            self._finish_radius_slider)
+        radius_layout.addWidget(self.radius_slider, 1)
+        self.radius_spin = self._coordinate_spin()
+        self.radius_spin.setMinimum(1.0)
+        self.radius_spin.setDecimals(0)
+        self.radius_spin.setSingleStep(1.0)
+        self.radius_spin.setKeyboardTracking(True)
+        self.radius_spin.valueChanged.connect(
+            self._radius_spin_changed)
+        self.radius_spin.editingFinished.connect(
+            self._finish_radius_spin_edit)
+        self.radius_spin.setMinimumWidth(72)
+        self.radius_spin.setMaximumWidth(86)
+        radius_layout.addWidget(self.radius_spin)
+        spheres_layout.addLayout(radius_layout)
+
+        right.addWidget(spheres_box)
+
         self.fire_points_box = QGroupBox("Fire Points (Vanilla)")
         fire_layout = QVBoxLayout(self.fire_points_box)
         fire_layout.setContentsMargins(6, 4, 6, 4)
         fire_layout.setSpacing(3)
-        self.fire_points_check = QCheckBox("Include Fire Points")
-        self.fire_points_check.setToolTip(
-            "Include vanilla fire_x, fire_y, fire_z and num_weapons in "
-            "output and show their exact projectile spawn positions.")
-        self.fire_points_check.toggled.connect(
-            self._fire_points_enabled_changed)
-        fire_layout.addWidget(self.fire_points_check)
+        fire_buttons = QHBoxLayout()
+        fire_buttons.setContentsMargins(0, 0, 0, 0)
+        fire_buttons.setSpacing(5)
+        self.add_fire_point_button = QPushButton("Add Fire Point")
+        self.add_fire_point_button.setToolTip(
+            "Enable the vanilla fire_x/fire_y/fire_z rack or add one more "
+            "derived muzzle by increasing num_weapons. Vanilla Fire Points "
+            "share one symmetric rack rather than independent offsets.")
+        self.add_fire_point_button.clicked.connect(self.add_fire_point)
+        self.remove_fire_point_button = QPushButton("Remove")
+        self.remove_fire_point_button.setToolTip(
+            "Remove one muzzle from the vanilla rack. With multiple muzzles "
+            "the remaining Fire Points are re-spaced symmetrically by the "
+            "vanilla num_weapons rule; removing the last point disables the "
+            "fire-point block.")
+        self.remove_fire_point_button.clicked.connect(self.remove_fire_point)
+        fire_buttons.addWidget(self.add_fire_point_button)
+        fire_buttons.addWidget(self.remove_fire_point_button)
+        fire_layout.addLayout(fire_buttons)
         fire_grid = QGridLayout()
         fire_grid.setHorizontalSpacing(5)
         fire_grid.setVerticalSpacing(3)
@@ -2605,6 +3126,144 @@ class CollisionEditorWindow(QMainWindow):
         fire_layout.addWidget(self.fire_point_tree)
         right.addWidget(self.fire_points_box)
 
+        self.gun_points_box = QGroupBox("Gun Points (Vanilla/OpenUA)")
+        gun_layout = QVBoxLayout(self.gun_points_box)
+        gun_layout.setContentsMargins(6, 4, 6, 4)
+        gun_layout.setSpacing(3)
+
+        gun_family_row = QHBoxLayout()
+        gun_family_row.setContentsMargins(0, 0, 0, 0)
+        gun_family_row.setSpacing(5)
+        gun_family_row.addWidget(QLabel("Gun Point type"))
+        self.gun_point_type_combo = QComboBox()
+        self.gun_point_type_combo.addItem(
+            "Vanilla (Robo only)", "robo")
+        self.gun_point_type_combo.addItem(
+            "OpenUA (All vehicle classes)", "unit")
+        self.gun_point_type_combo.setCurrentIndex(1)
+        self.gun_point_type_combo.setToolTip(
+            "Chooses the script family used only for newly-added Gun Points. "
+            "Vanilla writes robo_* and is intended for Host Station/Robo "
+            "classes; OpenUA writes generic unit_* and works on all vehicle "
+            "classes. Existing imported points keep their original family.")
+        self.gun_point_type_combo.currentIndexChanged.connect(
+            self._new_gun_point_scheme_changed)
+        gun_family_row.addWidget(self.gun_point_type_combo, 1)
+        gun_layout.addLayout(gun_family_row)
+
+        gun_buttons = QHBoxLayout()
+        self.add_gun_point_button = QPushButton("Add Gun Point")
+        self.add_gun_point_button.setToolTip(
+            "Add a real vehicle-side gun mount using the Gun Point type "
+            "selected above.")
+        self.add_gun_point_button.clicked.connect(self.add_gun_point)
+        self.remove_gun_point_button = QPushButton("Remove")
+        self.remove_gun_point_button.clicked.connect(self.remove_gun_point)
+        gun_buttons.addWidget(self.add_gun_point_button)
+        gun_buttons.addWidget(self.remove_gun_point_button)
+        gun_layout.addLayout(gun_buttons)
+
+        self.gun_family_value = QLabel("No point selected")
+        self.gun_family_value.setStyleSheet(
+            "color: rgb(178, 78, 238); font-size: 10px;")
+        self.gun_family_value.setToolTip(
+            "Existing robo_* Host Station points keep their legacy syntax; "
+            "generic unit_* points are valid for any OpenUA vehicle class.")
+        gun_layout.addWidget(self.gun_family_value)
+
+        # Position, direction and metadata share one grid so corresponding
+        # controls keep the same column widths.  This avoids the uneven X/Y/Z
+        # and Dir X/Dir Y/Dir Z boxes produced by three independent layouts.
+        gun_fields_grid = QGridLayout()
+        self.gun_fields_grid = gun_fields_grid
+        gun_fields_grid.setHorizontalSpacing(5)
+        gun_fields_grid.setVerticalSpacing(3)
+        self.gun_point_spins = {}
+        self.gun_dir_spins = {}
+
+        for column, axis in enumerate(("X", "Y", "Z")):
+            label_column = column * 2
+            field_column = label_column + 1
+
+            gun_fields_grid.addWidget(QLabel(axis), 0, label_column)
+            spin = CompactScaleSpinBox()
+            spin.setRange(-1_000_000.0, 1_000_000.0)
+            spin.setDecimals(3)
+            spin.setSingleStep(1.0)
+            spin.setKeyboardTracking(True)
+            spin.setMinimumWidth(72)
+            spin.setToolTip(f"Gun mount local {axis} position.")
+            field = axis.lower()
+            spin.valueChanged.connect(
+                lambda value, name=field:
+                self._gun_point_value_changed(name, value))
+            spin.editingFinished.connect(
+                lambda name=field: self._finish_vehicle_preview_edit(
+                    f"gun_{name}"))
+            self.gun_point_spins[field] = spin
+            gun_fields_grid.addWidget(spin, 0, field_column)
+
+            gun_fields_grid.addWidget(
+                QLabel(f"Dir {axis}"), 1, label_column)
+            dir_spin = CompactScaleSpinBox()
+            # Canonical UA gun mount direction components are authored as
+            # -1, 0 or +1 (including diagonal combinations such as 1,0,1).
+            # Keep editing discrete so the arrows cannot create meaningless
+            # 0.1/0.2 increments. Existing script data is still parsed as a
+            # float and is not rewritten unless the user actually edits it.
+            dir_spin.setRange(-1.0, 1.0)
+            dir_spin.setDecimals(0)
+            dir_spin.setSingleStep(1.0)
+            dir_spin.setKeyboardTracking(True)
+            dir_spin.setMinimumWidth(72)
+            dir_spin.setToolTip(
+                f"Gun mount local direction {axis}: canonical values -1, 0 or 1.")
+            dir_field = f"dir_{axis.lower()}"
+            dir_spin.valueChanged.connect(
+                lambda value, name=dir_field:
+                self._gun_point_value_changed(name, value))
+            dir_spin.editingFinished.connect(
+                lambda name=dir_field: self._finish_vehicle_preview_edit(
+                    f"gun_{name}"))
+            self.gun_dir_spins[axis.lower()] = dir_spin
+            gun_fields_grid.addWidget(dir_spin, 1, field_column)
+            gun_fields_grid.setColumnStretch(field_column, 1)
+
+        gun_fields_grid.addWidget(QLabel("Type"), 2, 0)
+        self.gun_type_spin = QSpinBox()
+        self.gun_type_spin.setRange(0, 255)
+        self.gun_type_spin.setMinimumWidth(72)
+        self.gun_type_spin.setToolTip(
+            "Vehicle prototype ID used for the mounted gun/flak.")
+        self.gun_type_spin.valueChanged.connect(self._gun_type_changed)
+        self.gun_type_spin.editingFinished.connect(
+            lambda: self._finish_vehicle_preview_edit("gun_type"))
+        gun_fields_grid.addWidget(self.gun_type_spin, 2, 1)
+
+        gun_fields_grid.addWidget(QLabel("Name"), 2, 2)
+        self.gun_name_edit = QLineEdit()
+        self.gun_name_edit.setPlaceholderText("optional")
+        self.gun_name_edit.setToolTip(
+            "Optional robo_gun_name / unit_gun_name for this mount.")
+        self.gun_name_edit.editingFinished.connect(self._gun_name_changed)
+        gun_fields_grid.addWidget(self.gun_name_edit, 2, 3, 1, 3)
+        gun_layout.addLayout(gun_fields_grid)
+
+        self.gun_point_tree.setMinimumHeight(90)
+        self.gun_point_tree.setMaximumHeight(145)
+        gun_header = self.gun_point_tree.header()
+        gun_header.setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
+        gun_header.setSectionResizeMode(
+            1, QHeaderView.ResizeMode.ResizeToContents)
+        for column in (2, 3, 4):
+            gun_header.setSectionResizeMode(
+                column, QHeaderView.ResizeMode.ResizeToContents)
+            self.gun_point_tree.headerItem().setTextAlignment(
+                column, Qt.AlignmentFlag.AlignRight
+                | Qt.AlignmentFlag.AlignVCenter)
+        gun_layout.addWidget(self.gun_point_tree)
+        right.addWidget(self.gun_points_box)
+
 
         selected_box = QGroupBox("Selected Element")
         self.selected_box = selected_box
@@ -2629,60 +3288,11 @@ class CollisionEditorWindow(QMainWindow):
         selected_layout.addStretch(1)
         selected_layout.addWidget(self.visible_check)
         selected_layout.addWidget(self.runtime_radius_value)
-
-        spheres_box = QGroupBox("Spheres")
-        spheres_layout = QVBoxLayout(spheres_box)
-        self.spheres_box = spheres_box
-        self.sphere_tree.setMinimumHeight(150)
-        self.sphere_tree.setSizePolicy(
-            QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
-        spheres_box.setSizePolicy(
-            QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Expanding)
-        sphere_header = self.sphere_tree.header()
-        sphere_header.setSectionResizeMode(
-            0, QHeaderView.ResizeMode.Stretch)
-        sphere_header.setSectionResizeMode(
-            1, QHeaderView.ResizeMode.ResizeToContents)
-        sphere_header.setSectionResizeMode(
-            2, QHeaderView.ResizeMode.ResizeToContents)
-        sphere_header.setSectionResizeMode(
-            3, QHeaderView.ResizeMode.ResizeToContents)
-        self.sphere_tree.headerItem().setTextAlignment(
-            1, Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
-        self.sphere_tree.headerItem().setTextAlignment(
-            2, Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
-        self.sphere_tree.headerItem().setTextAlignment(
-            3, Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
-        self.sphere_tree.headerItem().setToolTip(
-            1, "Double-click a Radius value to edit the sphere size.")
-        spheres_layout.addWidget(self.sphere_tree, 1)
-
-        radius_box = QGroupBox("Sphere Radius")
-        radius_layout = QHBoxLayout(radius_box)
-        radius_layout.setContentsMargins(6, 4, 6, 4)
-        radius_layout.setSpacing(5)
-        radius_layout.addWidget(QLabel("Radius"))
-        self.radius_slider = QSlider(Qt.Orientation.Horizontal)
-        self.radius_slider.setRange(0, _RADIUS_SLIDER_STEPS)
-        self.radius_slider.sliderPressed.connect(
-            self._begin_radius_slider)
-        self.radius_slider.valueChanged.connect(
-            self._radius_slider_changed)
-        self.radius_slider.sliderReleased.connect(
-            self._finish_radius_slider)
-        radius_layout.addWidget(self.radius_slider, 1)
-        self.radius_spin = self._coordinate_spin()
-        self.radius_spin.setMinimum(1.0)
-        self.radius_spin.setDecimals(0)
-        self.radius_spin.setSingleStep(1.0)
-        self.radius_spin.setKeyboardTracking(True)
-        self.radius_spin.valueChanged.connect(
-            self._radius_spin_changed)
-        self.radius_spin.editingFinished.connect(
-            self._finish_radius_spin_edit)
-        self.radius_spin.setMinimumWidth(92)
-        radius_layout.addWidget(self.radius_spin)
-        right.addWidget(radius_box)
+        selected_box.setMaximumHeight(70)
+        selected_box.setMinimumWidth(290)
+        selected_box.setMaximumWidth(430)
+        selected_box.setSizePolicy(
+            QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Fixed)
 
         transform_box = QGroupBox("Move Element")
         self.transform_box = transform_box
@@ -2695,8 +3305,8 @@ class CollisionEditorWindow(QMainWindow):
         transform_layout.setContentsMargins(5, 3, 5, 3)
         transform_layout.setSpacing(2)
         self.gizmo = CollisionMoveGizmo()
-        self.gizmo.setMinimumSize(260, 165)
-        self.gizmo.setMaximumHeight(175)
+        self.gizmo.setMinimumSize(215, 122)
+        self.gizmo.setMaximumHeight(140)
         self.gizmo.setSizePolicy(
             QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
         self.gizmo.directionTriggered.connect(self._gizmo_nudge)
@@ -2709,7 +3319,8 @@ class CollisionEditorWindow(QMainWindow):
         self.move_strength_spin = QSpinBox()
         self.move_strength_spin.setRange(1, 1_000_000)
         self.move_strength_spin.setValue(1)
-        self.move_strength_spin.setMinimumWidth(72)
+        self.move_strength_spin.setMinimumWidth(58)
+        self.move_strength_spin.setMaximumWidth(72)
         self.move_strength_value = self.move_strength_spin
         self.move_strength_slider.valueChanged.connect(
             self._move_strength_slider_changed)
@@ -2718,18 +3329,37 @@ class CollisionEditorWindow(QMainWindow):
         strength_row.addWidget(self.move_strength_slider, 1)
         strength_row.addWidget(self.move_strength_spin)
         transform_layout.addLayout(strength_row)
-        transform_box.setMaximumHeight(235)
+        transform_box.setMaximumHeight(195)
+        transform_box.setMinimumWidth(255)
+        transform_box.setMaximumWidth(310)
         transform_box.setSizePolicy(
             QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Fixed)
-        right.addWidget(transform_box)
-        right.insertWidget(0, selected_box)
-        right.addWidget(spheres_box, 1)
+        # Overlay the shared movement gizmo on the top-right of the viewport
+        # instead of consuming vertical space in the properties scroller.
+        self.viewport_layout.addWidget(
+            transform_box, 0, 0,
+            Qt.AlignmentFlag.AlignTop | Qt.AlignmentFlag.AlignRight)
+        transform_box.raise_()
+        # Selected Element stays at the same lower viewport height but moves
+        # to the left.  This frees the bottom-right corner for AssetViewport's
+        # existing XYZ orientation indicator without adding a duplicate overlay.
+        self.viewport_layout.addWidget(
+            selected_box, 0, 0,
+            Qt.AlignmentFlag.AlignBottom | Qt.AlignmentFlag.AlignLeft)
+        selected_box.raise_()
 
         properties_scroll = QScrollArea()
         properties_scroll.setWidgetResizable(True)
         properties_scroll.setFrameShape(QFrame.Shape.NoFrame)
-        properties_scroll.setMinimumWidth(275)
+        # The properties column is a vertical workspace. A tiny width mismatch
+        # between styled child widgets previously produced a useless horizontal
+        # scrollbar; keep the panel width authoritative and eradicate it.
+        properties_scroll.setHorizontalScrollBarPolicy(
+            Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        properties_scroll.setMinimumWidth(330)
+        properties.setMinimumWidth(0)
         properties_scroll.setWidget(properties)
+        self.properties_scroll = properties_scroll
         splitter.addWidget(properties_scroll)
         splitter.setStretchFactor(0, 0)
         splitter.setStretchFactor(1, 1)
@@ -2784,6 +3414,8 @@ class CollisionEditorWindow(QMainWindow):
         self.project.restore(self._undo.pop())
         self._selected = min(
             self._selected, len(self.project.spheres()) - 1)
+        self._selected_gun_point = min(
+            self._selected_gun_point, len(self.project.gun_points) - 1)
         self._set_modified()
         self._sync_all()
 
@@ -2796,6 +3428,8 @@ class CollisionEditorWindow(QMainWindow):
         self.project.restore(self._redo.pop())
         self._selected = min(
             self._selected, len(self.project.spheres()) - 1)
+        self._selected_gun_point = min(
+            self._selected_gun_point, len(self.project.gun_points) - 1)
         self._set_modified()
         self._sync_all()
 
@@ -2938,10 +3572,13 @@ class CollisionEditorWindow(QMainWindow):
                 overeof_enabled, overeof = import_overeof_block(text, block)
                 (fire_enabled, fire_x, fire_y, fire_z,
                  num_weapons) = import_fire_points_block(text, block)
+                (gun_enabled, gun_points,
+                 unit_gun_default_icon) = import_gun_points_block(text, block)
             else:
                 overeof_enabled, overeof = False, 0.0
                 fire_enabled, fire_x, fire_y, fire_z = False, 0.0, 0.0, 0.0
                 num_weapons = 1
+                gun_enabled, gun_points, unit_gun_default_icon = False, [], ""
         except CollisionScriptError as exc:
             QMessageBox.critical(
                 self, "Script parameter import failed", str(exc))
@@ -2968,14 +3605,27 @@ class CollisionEditorWindow(QMainWindow):
             fire_y=fire_y,
             fire_z=fire_z,
             num_weapons=num_weapons,
+            gun_points_enabled=gun_enabled,
+            gun_points=gun_points,
+            unit_gun_default_icon=unit_gun_default_icon,
             legacy=legacy,
             compound=compounds,
         )
+        imported_gun_schemes = gun_point_families_in_block(text, block)
+        if len(imported_gun_schemes) == 1:
+            # A script that already uses one family supplies the missing
+            # semantic context that a bare SET.BAS model cannot provide.
+            self._new_gun_point_scheme = next(iter(imported_gun_schemes))
+        elif "unit" in imported_gun_schemes:
+            # Mixed scripts remain mixed. Prefer the generic OpenUA family for
+            # a brand-new point until the user selects a specific existing one.
+            self._new_gun_point_scheme = "unit"
         self._active_script_path = script_path
         self._active_script_kind = block.kind
         self._active_script_id = block.object_id
         self._selected = 0 if self.project.spheres() else -1
         self._selected_fire_point = -1
+        self._selected_gun_point = -1
         self._undo.clear()
         self._redo.clear()
         self._last_directory = script_path.parent
@@ -3261,6 +3911,7 @@ class CollisionEditorWindow(QMainWindow):
             self.project.legacy = sphere
         self._selected = 0
         self._selected_fire_point = -1
+        self._selected_gun_point = -1
         self._set_modified()
         self._sync_all()
 
@@ -3269,6 +3920,7 @@ class CollisionEditorWindow(QMainWindow):
         self.project.compound.append(self._default_sphere(category))
         self._selected = len(self.project.spheres()) - 1
         self._selected_fire_point = -1
+        self._selected_gun_point = -1
         self._set_modified()
         self._sync_all()
 
@@ -3298,6 +3950,7 @@ class CollisionEditorWindow(QMainWindow):
             (1 if self.project.legacy is not None else 0)
             + compound_index + 1)
         self._selected_fire_point = -1
+        self._selected_gun_point = -1
         self._set_modified()
         self._sync_all()
 
@@ -3345,6 +3998,7 @@ class CollisionEditorWindow(QMainWindow):
             detail = ""
 
         self._selected_fire_point = -1
+        self._selected_gun_point = -1
         self._set_modified()
         self._sync_all()
         self.statusBar().showMessage(
@@ -3375,6 +4029,7 @@ class CollisionEditorWindow(QMainWindow):
             (1 if self.project.legacy is not None else 0)
             + compound_index + 1)
         self._selected_fire_point = -1
+        self._selected_gun_point = -1
         self._set_modified()
         self._sync_all()
         self.statusBar().showMessage(
@@ -3395,6 +4050,7 @@ class CollisionEditorWindow(QMainWindow):
         self._selected = min(
             self._selected, len(self.project.spheres()) - 1)
         self._selected_fire_point = -1
+        self._selected_gun_point = -1
         self._set_modified()
         self._sync_all()
 
@@ -3413,6 +4069,7 @@ class CollisionEditorWindow(QMainWindow):
         self.project.compound.clear()
         self._selected = -1
         self._selected_fire_point = -1
+        self._selected_gun_point = -1
         self._set_modified()
         self._sync_all()
 
@@ -3480,16 +4137,42 @@ class CollisionEditorWindow(QMainWindow):
 
     def _select_sphere(self, index: int):
         self._radius_spin_active = False
+        self._vehicle_preview_active_edits.clear()
         self._selected = index
         self._selected_fire_point = -1
+        self._selected_gun_point = -1
         self._sync_all()
 
     def _select_fire_point(self, index: int):
         self._radius_spin_active = False
+        self._vehicle_preview_active_edits.clear()
         point_count = len(fire_point_positions(self.project))
         self._selected_fire_point = (
             index if (self.project.fire_points_enabled
                       and 0 <= index < point_count) else -1)
+        self._selected_gun_point = -1
+        self._selected = -1
+        self._sync_all()
+
+    def _selected_gun(self) -> GunPoint | None:
+        index = self._selected_gun_point
+        if (self.project.gun_points_enabled
+                and 0 <= index < len(self.project.gun_points)):
+            return self.project.gun_points[index]
+        return None
+
+    def _select_gun_point(self, index: int):
+        self._radius_spin_active = False
+        self._vehicle_preview_active_edits.clear()
+        self._selected_gun_point = (
+            index if (self.project.gun_points_enabled
+                      and 0 <= index < len(self.project.gun_points)) else -1)
+        selected = self._selected_gun()
+        if selected is not None and selected.scheme in {"robo", "unit"}:
+            # Selection only changes the default family for the *next* mount.
+            # The selected point itself is never converted implicitly.
+            self._new_gun_point_scheme = selected.scheme
+        self._selected_fire_point = -1
         self._selected = -1
         self._sync_all()
 
@@ -3500,6 +4183,14 @@ class CollisionEditorWindow(QMainWindow):
         index = current.data(0, _FIRE_POINT_INDEX_ROLE)
         if isinstance(index, int):
             self._select_fire_point(index)
+
+
+    def _gun_point_tree_selection_changed(self, current, _previous):
+        if self._syncing or current is None:
+            return
+        index = current.data(0, _GUN_POINT_INDEX_ROLE)
+        if isinstance(index, int):
+            self._select_gun_point(index)
 
 
     def _sphere_tree_selection_changed(self, current, _previous):
@@ -3542,6 +4233,8 @@ class CollisionEditorWindow(QMainWindow):
             return
         self._push_undo()
         self._selected = index
+        self._selected_fire_point = -1
+        self._selected_gun_point = -1
         sphere.radius = float(value)
         self._set_modified()
         self._sync_all()
@@ -3666,17 +4359,55 @@ class CollisionEditorWindow(QMainWindow):
     def _finish_vehicle_preview_edit(self, field: str) -> None:
         self._vehicle_preview_active_edits.discard(field)
 
-    def _fire_points_enabled_changed(self, enabled: bool) -> None:
-        if self._syncing or self.project.target_category != VEHICLE:
+    def add_fire_point(self) -> None:
+        if self.project.target_category != VEHICLE:
             return
-        enabled = bool(enabled)
-        if enabled == self.project.fire_points_enabled:
+        if self.project.fire_points_enabled:
+            count = max(1, int(self.project.num_weapons))
+            if count >= 255:
+                self.statusBar().showMessage(
+                    "Vanilla num_weapons is already at its maximum (255).",
+                    4500)
+                return
+        self._vehicle_preview_active_edits.clear()
+        self._push_undo()
+        if not self.project.fire_points_enabled:
+            # fire_x/y/z + num_weapons are one vanilla rack. Add means one
+            # authored muzzle, not resurrection of a stale disabled count.
+            self.project.fire_points_enabled = True
+            self.project.num_weapons = 1
+            self._selected_fire_point = 0
+        else:
+            self.project.num_weapons = count + 1
+            self._selected_fire_point = self.project.num_weapons - 1
+        self._selected = -1
+        self._selected_gun_point = -1
+        self._set_modified()
+        self._sync_all()
+
+    def remove_fire_point(self) -> None:
+        if (self.project.target_category != VEHICLE
+                or not self.project.fire_points_enabled):
+            return
+        count = max(1, int(self.project.num_weapons))
+        index = self._selected_fire_point
+        if not (0 <= index < count):
             return
         self._vehicle_preview_active_edits.clear()
         self._push_undo()
-        self.project.fire_points_enabled = enabled
-        if not enabled:
+        if count <= 1:
+            # Keep authored fire_x/y/z values in memory so re-adding a point
+            # is non-destructive, but omit the whole Fire Point block from
+            # export/overwrite until the user adds it again.
+            self.project.fire_points_enabled = False
+            self.project.num_weapons = 1
             self._selected_fire_point = -1
+        else:
+            self.project.num_weapons = count - 1
+            self._selected_fire_point = min(index, self.project.num_weapons - 1)
+            self.statusBar().showMessage(
+                "Vanilla Fire Points share one symmetric rack; removing a "
+                "point re-spaced the remaining muzzles.", 5000)
         self._set_modified()
         self._sync_all()
 
@@ -3712,6 +4443,97 @@ class CollisionEditorWindow(QMainWindow):
 
 
 
+    def add_gun_point(self):
+        if self.project.target_category != VEHICLE:
+            return
+        scheme = (
+            self._new_gun_point_scheme
+            if self._new_gun_point_scheme in {"robo", "unit"}
+            else "unit")
+        family_count = sum(
+            point.scheme == scheme for point in self.project.gun_points)
+        if family_count >= 20:
+            family_name = (
+                "Vanilla robo_*" if scheme == "robo"
+                else "OpenUA unit_*")
+            self.statusBar().showMessage(
+                f"{family_name} supports at most 20 gun points.", 5000)
+            return
+        self._vehicle_preview_active_edits.clear()
+        self._push_undo()
+        point = GunPoint(scheme=scheme)
+        self.project.gun_points.append(point)
+        self.project.gun_points_enabled = True
+        self._selected_gun_point = len(self.project.gun_points) - 1
+        self._selected_fire_point = -1
+        self._selected = -1
+        self._set_modified()
+        self._sync_all()
+
+    def remove_gun_point(self):
+        point = self._selected_gun()
+        if point is None:
+            return
+        index = self._selected_gun_point
+        self._vehicle_preview_active_edits.clear()
+        self._push_undo()
+        del self.project.gun_points[index]
+        # Keep management enabled so Apply/Overwrite removes the old script
+        # rows when the user intentionally deletes the final mount.
+        self.project.gun_points_enabled = True
+        self._selected_gun_point = min(
+            index, len(self.project.gun_points) - 1)
+        self._set_modified()
+        self._sync_all()
+
+    def _gun_point_value_changed(self, field: str, value: float) -> None:
+        if self._syncing or self.project.target_category != VEHICLE:
+            return
+        point = self._selected_gun()
+        if point is None or not hasattr(point, field):
+            return
+        value = float(value)
+        if not math.isfinite(value):
+            return
+        if abs(float(getattr(point, field)) - value) < 1e-9:
+            return
+        self._begin_vehicle_preview_edit(f"gun_{field}")
+        setattr(point, field, value)
+        self.project.gun_points_enabled = True
+        self._set_modified()
+        self._sync_all()
+
+    def _gun_type_changed(self, value: int) -> None:
+        if self._syncing or self.project.target_category != VEHICLE:
+            return
+        point = self._selected_gun()
+        if point is None:
+            return
+        value = max(0, min(255, int(value)))
+        if point.gun_type == value:
+            return
+        self._begin_vehicle_preview_edit("gun_type")
+        point.gun_type = value
+        self.project.gun_points_enabled = True
+        self._set_modified()
+        self._sync_all()
+
+    def _gun_name_changed(self) -> None:
+        if self._syncing or self.project.target_category != VEHICLE:
+            return
+        point = self._selected_gun()
+        if point is None:
+            return
+        value = self.gun_name_edit.text().strip()
+        if point.name == value:
+            return
+        self._push_undo()
+        point.name = value
+        self.project.gun_points_enabled = True
+        self._set_modified()
+        self._sync_all()
+
+
     def _gizmo_nudge(self, direction):
         sphere = self._selected_sphere()
         step = float(self.move_strength_spin.value())
@@ -3725,6 +4547,17 @@ class CollisionEditorWindow(QMainWindow):
             sphere.x += direction[0] * step
             sphere.y += direction[1] * step
             sphere.z += direction[2] * step
+            self._set_modified()
+            self._sync_all()
+            return
+
+        gun = self._selected_gun()
+        if gun is not None:
+            self._push_undo()
+            gun.x += float(direction[0]) * step
+            gun.y += float(direction[1]) * step
+            gun.z += float(direction[2]) * step
+            self.project.gun_points_enabled = True
             self._set_modified()
             self._sync_all()
             return
@@ -3791,8 +4624,17 @@ class CollisionEditorWindow(QMainWindow):
         self.project.target_category = self.target_combo.currentData()
         if self.project.target_category != VEHICLE:
             self._selected_fire_point = -1
+            self._selected_gun_point = -1
         self._set_modified()
         self._sync_all()
+
+    def _new_gun_point_scheme_changed(self, _index: int) -> None:
+        if self._syncing:
+            return
+        scheme = self.gun_point_type_combo.currentData()
+        if scheme in {"robo", "unit"}:
+            # Choosing the authoring family alone does not modify script data.
+            self._new_gun_point_scheme = scheme
 
     def _visibility_changed(self, visible: bool):
         if self._syncing:
@@ -3938,6 +4780,44 @@ class CollisionEditorWindow(QMainWindow):
                 self.fire_point_tree.clearSelection()
 
 
+    def _refresh_gun_point_tree(self):
+        with QSignalBlocker(self.gun_point_tree):
+            self.gun_point_tree.clear()
+            selected_item = None
+            if (self.project.target_category == VEHICLE
+                    and self.project.gun_points_enabled):
+                for index, point in enumerate(self.project.gun_points):
+                    label = f"G{index + 1}"
+                    if point.name:
+                        label += f" — {point.name}"
+                    family_label = (
+                        "Vanilla" if point.scheme == "robo" else "OpenUA")
+                    item = QTreeWidgetItem([
+                        label, family_label, _number(point.x),
+                        _number(point.y), _number(point.z),
+                    ])
+                    item.setData(0, _GUN_POINT_INDEX_ROLE, index)
+                    item.setForeground(0, QBrush(GUN_POINT_COLOR))
+                    family = (
+                        "Legacy Host Station robo_* gun mount"
+                        if point.scheme == "robo"
+                        else "Generic OpenUA unit_* vehicle gun mount")
+                    item.setToolTip(0, family)
+                    item.setToolTip(1, family)
+                    for column in (2, 3, 4):
+                        item.setTextAlignment(
+                            column, Qt.AlignmentFlag.AlignRight
+                            | Qt.AlignmentFlag.AlignVCenter)
+                    self.gun_point_tree.addTopLevelItem(item)
+                    if index == self._selected_gun_point:
+                        selected_item = item
+            if selected_item is not None:
+                self.gun_point_tree.setCurrentItem(selected_item)
+            else:
+                self.gun_point_tree.setCurrentItem(None)
+                self.gun_point_tree.clearSelection()
+
+
     def _refresh_project_summary_menu(self):
         menu = self.project_summary_menu
         menu.clear()
@@ -3949,6 +4829,11 @@ class CollisionEditorWindow(QMainWindow):
         compound_index = self._selected_compound_index()
         if sphere is not None:
             selected = self._sphere_display_name(sphere, compound_index)
+        elif (self.project.target_category == VEHICLE
+              and self.project.gun_points_enabled
+              and 0 <= self._selected_gun_point
+              < len(self.project.gun_points)):
+            selected = f"Gun Point G{self._selected_gun_point + 1}"
         elif (self.project.target_category == VEHICLE
               and self.project.fire_points_enabled
               and 0 <= self._selected_fire_point
@@ -3993,6 +4878,11 @@ class CollisionEditorWindow(QMainWindow):
                f"{_number(self.project.fire_z)})"
                if (self.project.target_category == VEHICLE
                    and self.project.fire_points_enabled)
+               else "Not included"),
+            "Gun points: "
+            + (str(len(self.project.gun_points))
+               if (self.project.target_category == VEHICLE
+                   and self.project.gun_points_enabled)
                else "Not included"),
             f"Collision mode: {collision_mode}",
             f"Legacy Radius: {legacy_status}",
@@ -4039,9 +4929,14 @@ class CollisionEditorWindow(QMainWindow):
                 self.radius_spin, self.visible_check,
                 self.model_scale_x_spin, self.model_scale_y_spin,
                 self.model_scale_z_spin, self.overeof_check,
-                self.overeof_spin, self.fire_points_check,
+                self.overeof_spin,
                 self.fire_x_spin, self.fire_y_spin, self.fire_z_spin,
-                self.num_weapons_spin)
+                self.num_weapons_spin,
+                self.gun_point_spins["x"], self.gun_point_spins["y"],
+                self.gun_point_spins["z"],
+                self.gun_dir_spins["x"], self.gun_dir_spins["y"],
+                self.gun_dir_spins["z"], self.gun_type_spin,
+                self.gun_name_edit, self.gun_point_type_combo)
         ]
         self.name_edit.setText(self.project.name)
         self.model_scale_x_spin.setValue(self.project.model_scale_x)
@@ -4056,6 +4951,11 @@ class CollisionEditorWindow(QMainWindow):
                       else 0)
         if not (0 <= self._selected_fire_point < fire_count):
             self._selected_fire_point = -1
+        gun_count = (len(self.project.gun_points)
+                     if (vehicle_mode and self.project.gun_points_enabled)
+                     else 0)
+        if not (0 <= self._selected_gun_point < gun_count):
+            self._selected_gun_point = -1
         self.viewport.set_ground_alignment(
             vehicle_mode, self.project.overeof_enabled,
             self.project.overeof)
@@ -4072,8 +4972,7 @@ class CollisionEditorWindow(QMainWindow):
             vehicle_mode and (self.project.overeof_enabled
                               or abs(self.project.overeof) > 1e-9))
         self.fire_points_box.setVisible(vehicle_mode)
-        self.fire_points_check.setChecked(
-            vehicle_mode and self.project.fire_points_enabled)
+        self.add_fire_point_button.setEnabled(vehicle_mode)
         self.fire_x_spin.setValue(self.project.fire_x)
         self.fire_y_spin.setValue(self.project.fire_y)
         self.fire_z_spin.setValue(self.project.fire_z)
@@ -4081,15 +4980,56 @@ class CollisionEditorWindow(QMainWindow):
             max(0, min(255, int(self.project.num_weapons))))
         fire_controls_enabled = (
             vehicle_mode and self.project.fire_points_enabled)
+        self.remove_fire_point_button.setEnabled(
+            fire_controls_enabled and self._selected_fire_point >= 0)
         for widget in (
                 self.fire_x_spin, self.fire_y_spin, self.fire_z_spin,
                 self.num_weapons_spin):
             widget.setEnabled(fire_controls_enabled)
+
+        self.gun_points_box.setVisible(vehicle_mode)
+        scheme_index = self.gun_point_type_combo.findData(
+            self._new_gun_point_scheme)
+        self.gun_point_type_combo.setCurrentIndex(
+            scheme_index if scheme_index >= 0 else 1)
+        self.gun_point_type_combo.setEnabled(vehicle_mode)
+        gun = self._selected_gun() if vehicle_mode else None
+        self.add_gun_point_button.setEnabled(vehicle_mode)
+        self.remove_gun_point_button.setEnabled(gun is not None)
+        if gun is None:
+            self.gun_family_value.setText("No point selected")
+            for spin in self.gun_point_spins.values():
+                spin.setValue(0.0)
+            for spin in self.gun_dir_spins.values():
+                spin.setValue(0.0)
+            self.gun_type_spin.setValue(0)
+            self.gun_name_edit.clear()
+        else:
+            family_text = (
+                "Host Station legacy · robo_*" if gun.scheme == "robo"
+                else "Generic vehicle · unit_*")
+            self.gun_family_value.setText(family_text)
+            self.gun_point_spins["x"].setValue(gun.x)
+            self.gun_point_spins["y"].setValue(gun.y)
+            self.gun_point_spins["z"].setValue(gun.z)
+            self.gun_dir_spins["x"].setValue(gun.dir_x)
+            self.gun_dir_spins["y"].setValue(gun.dir_y)
+            self.gun_dir_spins["z"].setValue(gun.dir_z)
+            self.gun_type_spin.setValue(
+                max(0, min(255, int(gun.gun_type))))
+            self.gun_name_edit.setText(gun.name)
+        for widget in (
+                *self.gun_point_spins.values(),
+                *self.gun_dir_spins.values(),
+                self.gun_type_spin, self.gun_name_edit):
+            widget.setEnabled(gun is not None)
+
         sphere = self._selected_sphere()
         fire_selected = (
             vehicle_mode and self.project.fire_points_enabled
             and 0 <= self._selected_fire_point
             < len(fire_point_positions(self.project)))
+        gun_selected = gun is not None
         enabled = sphere is not None
         for widget in (
                 self.radius_slider, self.radius_spin, self.visible_check):
@@ -4097,11 +5037,20 @@ class CollisionEditorWindow(QMainWindow):
         self.visible_check.setVisible(enabled)
         self.gizmo.setEnabled(
             (sphere is not None and sphere.category != LEGACY)
-            or fire_selected)
-        self.transform_box.setTitle(
-            "Move Fire Point" if fire_selected else "Move Sphere")
+            or fire_selected or gun_selected)
+        if gun_selected:
+            self.transform_box.setTitle("Move Gun Point")
+        elif fire_selected:
+            self.transform_box.setTitle("Move Fire Point")
+        else:
+            self.transform_box.setTitle("Move Sphere")
         if sphere is None:
-            if fire_selected:
+            if gun_selected:
+                self.type_value.setText("Gun Point")
+                self.index_value.setText(str(self._selected_gun_point))
+                self.selected_element_label.setText(
+                    f"Gun Point G{self._selected_gun_point + 1}")
+            elif fire_selected:
                 self.type_value.setText("Fire Point")
                 self.index_value.setText(str(self._selected_fire_point))
                 self.selected_element_label.setText(
@@ -4147,6 +5096,7 @@ class CollisionEditorWindow(QMainWindow):
                 self.runtime_radius_value.hide()
                 self.radius_spin.setToolTip("")
         self._refresh_sphere_tree()
+        self._refresh_gun_point_tree()
         self._refresh_project_summary_menu()
         self.viewport.set_collision_spheres(
             self._preview_spheres(), self._selected)
@@ -4164,6 +5114,19 @@ class CollisionEditorWindow(QMainWindow):
             ]
         self._refresh_fire_point_tree(authored_points)
         self.viewport.set_fire_points(points, self._selected_fire_point)
+        gun_points = []
+        gun_directions = []
+        if vehicle_mode and self.project.gun_points_enabled:
+            gun_points = [
+                (point.x, point.y + preview_offset_y, point.z)
+                for point in self.project.gun_points
+            ]
+            gun_directions = [
+                (point.dir_x, point.dir_y, point.dir_z)
+                for point in self.project.gun_points
+            ]
+        self.viewport.set_gun_points(
+            gun_points, gun_directions, self._selected_gun_point)
         self._sync_gizmo_camera()
         self.undo_action.setEnabled(bool(self._undo))
         self.redo_action.setEnabled(bool(self._redo))
@@ -4267,6 +5230,8 @@ class CollisionEditorWindow(QMainWindow):
             overeof_enabled, overeof = import_overeof_block(text, block)
             fire_enabled, fire_x, fire_y, fire_z, num_weapons = (
                 import_fire_points_block(text, block))
+            gun_enabled, gun_points, unit_gun_default_icon = (
+                import_gun_points_block(text, block))
         except CollisionScriptError as exc:
             QMessageBox.warning(self, "Import failed", str(exc))
             return
@@ -4286,10 +5251,15 @@ class CollisionEditorWindow(QMainWindow):
         self.project.fire_y = fire_y if vehicle_block else 0.0
         self.project.fire_z = fire_z if vehicle_block else 0.0
         self.project.num_weapons = num_weapons if vehicle_block else 1
+        self.project.gun_points_enabled = vehicle_block and gun_enabled
+        self.project.gun_points = gun_points if vehicle_block else []
+        self.project.unit_gun_default_icon = (
+            unit_gun_default_icon if vehicle_block else "")
         if block.name:
             self.project.name = block.name
         self._selected = 0 if self.project.spheres() else -1
         self._selected_fire_point = -1
+        self._selected_gun_point = -1
         self._last_directory = Path(path).parent
         self._set_modified()
         self._sync_all()
@@ -4298,6 +5268,7 @@ class CollisionEditorWindow(QMainWindow):
             + (" and Legacy Radius" if legacy else "")
             + (" and Overeof" if self.project.overeof_enabled else "")
             + (" and Fire Points" if self.project.fire_points_enabled else "")
+            + (" and Gun Points" if self.project.gun_points_enabled else "")
             + ".")
         if warnings:
             message += "\n\n" + "\n".join(warnings)
