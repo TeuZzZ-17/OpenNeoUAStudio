@@ -5,7 +5,7 @@ from unittest.mock import patch
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 from PySide6.QtCore import QPointF, QRectF
-from PySide6.QtGui import QColor, QImage, QPainter, QTransform
+from PySide6.QtGui import QColor, QImage, QPainter
 from PySide6.QtWidgets import QApplication
 
 from asset_family import AssetFamily, FamilyObject
@@ -13,7 +13,6 @@ from assembly_viewer import (
     AssetViewport,
     ViewFace,
     ViewMaterial,
-    _projective_image_transform_is_bounded,
     resolve_visible_edit_vertices,
 )
 from base_parser import BaseObject
@@ -22,15 +21,8 @@ from depth_renderer import (
     clip_camera_polygon_near,
     order_camera_polygons,
     order_camera_polygons_fast,
-    projective_texture_coefficients,
 )
 from sklt_parser import SkltModel
-
-
-def _solid_image(color):
-    image = QImage(4, 4, QImage.Format.Format_ARGB32)
-    image.fill(color)
-    return image
 
 
 class DepthRendererTests(unittest.TestCase):
@@ -110,7 +102,7 @@ class DepthRendererTests(unittest.TestCase):
                          [-1.0, 0.0, 1.0])
         self.assertEqual(len(ordered), len(polygons))
 
-    def test_play_and_edit_use_fast_order_while_static_view_stays_exact(self):
+    def test_textured_always_uses_exact_order_and_materials_can_use_fast(self):
         viewport = self._editable_triangle_viewport()
         try:
             with patch(
@@ -124,13 +116,18 @@ class DepthRendererTests(unittest.TestCase):
 
                 viewport._anim_playing = True
                 self._render(viewport)
-                self.assertEqual(fast.call_count, 1)
+                self.assertEqual(exact.call_count, 2)
+                self.assertEqual(fast.call_count, 0)
 
                 viewport._anim_playing = False
                 self.assertTrue(viewport.enter_edit_mode("root"))
                 self._render(viewport)
-                self.assertEqual(fast.call_count, 2)
-                self.assertEqual(exact.call_count, 1)
+                self.assertEqual(exact.call_count, 3)
+                self.assertEqual(fast.call_count, 0)
+
+                viewport.set_mode("materials")
+                self._render(viewport)
+                self.assertEqual(fast.call_count, 1)
         finally:
             viewport.close()
 
@@ -202,87 +199,15 @@ class DepthRendererTests(unittest.TestCase):
                             for vertex in clipped.vertices))
         self.assertEqual(len(clipped.vertices), len(clipped.attributes))
 
-    def test_projective_transform_maps_vertices_and_is_not_affine(self):
-        source = ((0.0, 0.0), (100.0, 0.0), (0.0, 100.0))
-        screen = ((20.0, 20.0), (220.0, 35.0), (30.0, 230.0))
-        camera = ((-1.0, 1.0, -1.0),
-                  (1.0, 1.0, 1.0),
-                  (-1.0, -1.0, 2.0))
-        coefficients = projective_texture_coefficients(
-            source, screen, camera)
-        self.assertIsNotNone(coefficients)
-        transform = QTransform(*coefficients)
-        for source_point, expected in zip(source, screen):
-            mapped = transform.map(QPointF(*source_point))
-            self.assertAlmostEqual(mapped.x(), expected[0], places=6)
-            self.assertAlmostEqual(mapped.y(), expected[1], places=6)
-
-        mapped_center = transform.map(QPointF(100.0 / 3.0, 100.0 / 3.0))
-        affine_center = (
-            sum(point[0] for point in screen) / 3.0,
-            sum(point[1] for point in screen) / 3.0,
-        )
-        self.assertGreater(
-            abs(mapped_center.x() - affine_center[0])
-            + abs(mapped_center.y() - affine_center[1]),
-            5.0,
-        )
-
-    def test_unbounded_projective_image_uses_bounded_fallback_predicate(self):
-        self.assertFalse(_projective_image_transform_is_bounded(
-            (1.0, 0.0, 1.0, 0.0, 1.0, 0.0, 0.0, 0.0, -50.0),
-            100, 100))
-        self.assertTrue(_projective_image_transform_is_bounded(
-            (1.0, 0.0, 0.01, 0.0, 1.0, 0.01, 0.0, 0.0, 5.0),
-            100, 100))
-
-    def test_unbounded_projective_map_always_uses_bounded_affine_path(self):
-        viewport = AssetViewport()
-        output = QImage(120, 120, QImage.Format.Format_ARGB32)
-        output.fill(QColor(0, 0, 0, 0))
-        painter = QPainter(output)
-        screen = [
-            QPointF(10, 10), QPointF(100, 20), QPointF(20, 100)]
-        uvs = [(0, 0), (255, 0), (0, 255)]
-        camera = [(-1.0, 1.0, 0.0),
-                  (1.0, 1.0, 1.0),
-                  (-1.0, -1.0, 2.0)]
-        unbounded = (
-            1.0, 0.0, 1.0,
-            0.0, 1.0, 0.0,
-            0.0, 0.0, -2.0,
-        )
-        try:
-            with patch(
-                    "assembly_viewer.projective_texture_coefficients",
-                    return_value=unbounded), patch.object(
-                    viewport, "_draw_degenerate_uv_triangle") as fallback:
-                viewport._camera_interacting = True
-                viewport._draw_textured(
-                    painter, screen, uvs,
-                    _solid_image(QColor(80, 140, 220)), False, camera)
-                fallback.assert_not_called()
-
-                viewport._camera_interacting = False
-                viewport._draw_textured(
-                    painter, screen, uvs,
-                    _solid_image(QColor(80, 140, 220)), False, camera)
-                fallback.assert_not_called()
-        finally:
-            painter.end()
-            viewport.close()
-
-    def test_intersecting_textured_faces_are_visible_on_correct_side(self):
+    def test_intersecting_material_faces_are_visible_on_correct_side(self):
         viewport = AssetViewport()
         viewport._backface_cull = False
-        viewport._mode = "textured"
+        viewport._mode = "materials"
         viewport._show_grid = False
         viewport._show_axes = False
         viewport._materials = [
-            ViewMaterial("red", image=_solid_image(
-                QColor(230, 25, 20, 255))),
-            ViewMaterial("blue", image=_solid_image(
-                QColor(20, 45, 230, 255))),
+            ViewMaterial("red", color=QColor(230, 25, 20, 255)),
+            ViewMaterial("blue", color=QColor(20, 45, 230, 255)),
         ]
         flat = [
             (-1.0, 1.0, 0.0),
@@ -314,7 +239,7 @@ class DepthRendererTests(unittest.TestCase):
         output.fill(QColor(0, 0, 0, 0))
         painter = QPainter(output)
         viewport._render_scene(
-            painter, QRectF(0, 0, 240, 240), None, True, camera,
+            painter, QRectF(0, 0, 240, 240), None, False, camera,
             allow_transparent_background=True)
         painter.end()
 

@@ -1,6 +1,7 @@
 """Software-rendered 3D preview widget for assembled Urban Assault assets.
 
-Renders the polygons of an :class:`asset_family.AssetFamily` with QPainter.
+Renders the polygons of an :class:`asset_family.AssetFamily` with QPainter and
+the shared Retail-indexed software backend.
 Runtime-style fan triangles use per-triangle back-face culling, camera-space
 BSP splitting for depth-correct painter ordering, and perspective-correct
 texture transforms.
@@ -10,7 +11,7 @@ View modes:
   - solid            flat shading from the ATTS shade value (CONFIRMED
                      formula: brightness = 1 - shade/256, amesh.cpp)
   - materials        each texture/material block gets a distinct color
-  - textured         textured preview using OLPL UVs (u/256)
+  - textured         Retail-indexed rendering using OLPL UVs, SHADERMP/TRACYRMP
 
 Extras: SEN2 bounding/culling volume overlay (read-only), axes, grid,
 VANM texture animation playback (play/pause, loop or ping-pong).
@@ -43,7 +44,6 @@ from PySide6.QtGui import (
     QPainterPath,
     QPen,
     QPolygonF,
-    QTransform,
     QWheelEvent,
 )
 from PySide6.QtWidgets import QWidget
@@ -55,12 +55,20 @@ from depth_renderer import (
     clip_camera_polygon_near,
     order_camera_polygons,
     order_camera_polygons_fast,
-    projective_texture_coefficients,
 )
 from geometry_editor import (
     AXIS_VECTORS,
     GeometryEditSession,
     mat_apply,
+)
+from indexed_family_adapter import (
+    IndexedFamilyAdapter,
+    UnsupportedIndexedMaterialError,
+)
+from indexed_renderer import (
+    IndexedPiece,
+    IndexedRasterizer,
+    retail_source_face_front_facing,
 )
 
 MATERIAL_COLORS = [
@@ -88,7 +96,6 @@ _PICK_CAMERA_DISTANCE = 4.0
 _PICK_NEAR_DISTANCE = 0.2
 _PICK_DEPTH_EPSILON = 1e-5
 PASTE_GHOST_OPACITY = 0.18
-
 
 @dataclass
 class ViewMaterial:
@@ -131,8 +138,10 @@ class ViewFace:
 @dataclass(frozen=True)
 class _RenderPayload:
     face: ViewFace
-    image: QImage | None
     front_facing: bool
+    uv_mapping_valid: bool = True
+    source_order: int = 0
+    sort_depth: float = 0.0
 
 
 @dataclass
@@ -208,7 +217,7 @@ def _pick_shape_depth(shape: PickShape, point: QPointF) -> float | None:
     if len(screen) != len(camera) or len(screen) < 3:
         return None
     best = None
-    # Same fan used by _draw_textured(): (0, j, j - 1).
+    # Same fan used by the Retail-indexed rasterizer: (0, j, j - 1).
     for j in range(2, len(screen)):
         indices = (0, j, j - 1)
         weights = _triangle_barycentric(
@@ -458,6 +467,18 @@ class AssetViewport(QWidget):
         self._owner_bounds: dict[str, tuple] = {}
         self._texture_image_cache: dict[tuple, QImage] = {}
         self._show_diag_overlay = True
+        # Textured mode always uses the Retail-indexed renderer.  Missing or
+        # unsupported SET resources fail visibly instead of selecting a second
+        # approximation behind the user's back.
+        self._indexed_adapter: IndexedFamilyAdapter | None = None
+        self._indexed_unavailable_reason = "no AssetFamily is loaded"
+        self._indexed_runtime_error = ""
+        self._last_indexed_stats: dict = {}
+        self._last_effective_renderer = "not_rendered"
+        self._last_render_error = ""
+        self._indexed_view_cache_key: tuple | None = None
+        self._indexed_view_cache_image = QImage()
+        self._indexed_render_revision = 0
 
         # Geometry Edit Mode (Blender-style vertex editing)
         self._edit_session: GeometryEditSession | None = None
@@ -576,6 +597,7 @@ class AssetViewport(QWidget):
         self._owner_bounds = {}
         self._selected_owner = None
         self.stop_animation()
+        self._invalidate_indexed_view_cache()
         self.update()
 
     # -- Polygon Mapping Workbench controls --------------------------------------
@@ -603,8 +625,11 @@ class AssetViewport(QWidget):
     def load_family(self, family: AssetFamily,
                     visible_owners: set[str] | None = None,
                     keep_camera: bool = False,
-                    primary_owner: str | None = None) -> None:
+                    primary_owner: str | None = None,
+                    reuse_indexed_adapter: bool = False) -> None:
         same_family = family is self._family_ref
+        cached_indexed_adapter = self._indexed_adapter
+        cached_indexed_reason = self._indexed_unavailable_reason
         previous_bounds = (
             dict(self._owner_bounds) if keep_camera and same_family else {})
         if not same_family:
@@ -612,6 +637,16 @@ class AssetViewport(QWidget):
         selected = self._selected_owner
         self.clear()
         self._family_ref = family
+        if same_family and reuse_indexed_adapter:
+            self._indexed_adapter = cached_indexed_adapter
+            self._indexed_unavailable_reason = cached_indexed_reason
+        else:
+            self._indexed_adapter, self._indexed_unavailable_reason = (
+                IndexedFamilyAdapter.try_create(family))
+        self._indexed_runtime_error = ""
+        self._last_indexed_stats = {}
+        self._last_effective_renderer = "not_rendered"
+        self._last_render_error = ""
         self._visible_owners = visible_owners
         self._selected_owner = selected
         self._primary_owner = primary_owner
@@ -676,7 +711,8 @@ class AssetViewport(QWidget):
         was_editing = self._edit_session is not None
         target_owner = self._selected_owner if was_editing else None
         self.load_family(self._family_ref, owners, keep_camera=True,
-                         primary_owner=self._primary_owner)
+                         primary_owner=self._primary_owner,
+                         reuse_indexed_adapter=True)
         if was_editing and target_owner is not None:
             self.enter_edit_mode(target_owner)
         self.update()
@@ -2029,6 +2065,7 @@ class AssetViewport(QWidget):
             zs = [p[2] for p in world]
             self._owner_bounds[self._edit_owner] = (
                 min(xs), min(ys), min(zs), max(xs), max(ys), max(zs))
+        self._invalidate_indexed_view_cache()
 
     def _edit_screen_points(self, target: QRectF | None = None,
                             camera: dict | None = None) -> list[QPointF]:
@@ -2556,12 +2593,74 @@ class AssetViewport(QWidget):
         self._texture_image_cache[cache_key] = cached
         return QImage(cached)
 
+    def _invalidate_indexed_view_cache(self) -> None:
+        """Invalidate only the derived Retail-indexed viewport image."""
+
+        self._indexed_render_revision += 1
+        self._indexed_view_cache_key = None
+        self._indexed_view_cache_image = QImage()
+        self._last_indexed_stats = {}
+
+    def _indexed_view_cache_signature(
+            self, width: int, height: int, camera: dict) -> tuple:
+        pan = camera["pan"]
+        return (
+            self._indexed_render_revision,
+            id(self._indexed_adapter),
+            int(width), int(height),
+            float(camera["yaw"]), float(camera["pitch"]),
+            float(camera["zoom"]), float(pan.x()), float(pan.y()),
+            tuple(float(value) for value in camera["center"]),
+            float(camera["scale"]),
+            tuple(sorted(
+                (int(material_id), int(state[0]), int(state[1]))
+                for material_id, state in self._anim_states.items()
+            )),
+        )
+
     # -- public view controls --------------------------------------------------
 
     def set_mode(self, mode: str) -> None:
         if mode in VIEW_MODES:
+            if mode != self._mode:
+                self._invalidate_indexed_view_cache()
             self._mode = mode
+            if mode == "textured":
+                if self._indexed_adapter is not None:
+                    backend = IndexedRasterizer.acceleration_backend
+                    suffix = (
+                        " NumPy acceleration active."
+                        if backend == "numpy"
+                        else " Portable Python backend active; install NumPy "
+                             "for the supported realtime configuration."
+                    )
+                    self.statusMessage.emit(
+                        "Textured: Retail indexed SHADERMP/TRACYRMP renderer."
+                        f"{suffix}")
+                else:
+                    self.statusMessage.emit(
+                        "Textured renderer unavailable: "
+                        f"{self._indexed_unavailable_reason}")
             self.update()
+
+    @property
+    def indexed_rendering_reason(self) -> str:
+        return self._indexed_runtime_error or self._indexed_unavailable_reason
+
+    def indexed_renderer_info(self) -> dict:
+        adapter = self._indexed_adapter
+        return {
+            "available": bool(adapter is not None and not self._indexed_runtime_error),
+            "availability_reason": self.indexed_rendering_reason,
+            "requested_mode": self._mode,
+            "effective_renderer": self._last_effective_renderer,
+            "render_error": self._last_render_error,
+            "acceleration_backend": IndexedRasterizer.acceleration_backend,
+            "max_safe_pixels": IndexedRasterizer.max_safe_pixels,
+            "viewport_full_resolution": True,
+            "last_render_stats": dict(self._last_indexed_stats),
+            "sources": dict(adapter.source_info) if adapter is not None else {},
+        }
 
     def set_show_sen(self, enabled: bool) -> None:
         self._show_sen = enabled
@@ -2770,8 +2869,13 @@ class AssetViewport(QWidget):
         self._render_scene(painter, QRectF(0, 0, width, height), background,
                            clean=not include_guides,
                            camera=self._camera_state(),
-                           allow_transparent_background=True)
+                           allow_transparent_background=True,
+                           force_textured=True)
         painter.end()
+        if self._last_effective_renderer != "retail_indexed_reconstructed":
+            reason = self._last_render_error or self.indexed_rendering_reason
+            raise RuntimeError(
+                "Retail indexed export failed closed: " + (reason or "unknown reason"))
         return image
 
     def reset_view(self) -> None:
@@ -3006,7 +3110,8 @@ class AssetViewport(QWidget):
     def _render_scene(self, painter: QPainter, target: QRectF,
                       background: QColor | None, clean: bool,
                       camera: dict,
-                      allow_transparent_background: bool = False) -> None:
+                      allow_transparent_background: bool = False,
+                      force_textured: bool = False) -> None:
         """Shared QWidget/QImage renderer; ``clean`` draws model pixels only."""
 
         # While the camera is actively moving, favor response time over
@@ -3036,32 +3141,35 @@ class AssetViewport(QWidget):
         if self._show_axes and not clean:
             self._draw_axes(painter, target, camera)
 
-        mode = "textured" if clean else self._mode
+        mode = "textured" if clean or force_textured else self._mode
+        self._last_effective_renderer = (
+            "not_rendered" if mode == "textured" else f"editor_{mode}")
+        self._last_render_error = ""
+        if mode != "textured":
+            self._last_indexed_stats = {}
         pick_shapes = []
         selected_shape = None
         source_polygons: dict[int, QPolygonF] = {}
         visible_faces: set[int] = set()
         highlight_paths: dict[int, QPainterPath] = {}
         def draw_piece(face: ViewFace, piece_camera, piece_uvs,
-                       image: QImage | None,
-                       front_facing: bool) -> None:
+                       front_facing: bool, *, draw_surface: bool = True,
+                       surface_mode: str | None = None) -> None:
             screen = [
                 self._project(point, target, camera)
                 for point in piece_camera
             ]
             polygon = QPolygonF(screen)
-            if not face.mapped and not clean:
-                # ATTS coverage holes are only a diagnostic aid.  Keep them
-                # visible without letting legacy unmapped faces dominate the
-                # textured model preview.
-                painter.setPen(QPen(QColor(155, 160, 170, 115), 1.0))
-                painter.setBrush(QColor(105, 110, 120, 48))
-                painter.drawPolygon(polygon)
-            else:
-                self._draw_face(painter, face, screen, mode=mode,
-                                draw_wire=False,
-                                camera_vertices=piece_camera,
-                                texture_override=(image, piece_uvs))
+            if draw_surface:
+                if not face.mapped and not clean:
+                    # ATTS coverage holes are diagnostic only.
+                    painter.setPen(QPen(QColor(155, 160, 170, 115), 1.0))
+                    painter.setBrush(QColor(105, 110, 120, 48))
+                    painter.drawPolygon(polygon)
+                else:
+                    self._draw_face(
+                        painter, face, screen, mode=surface_mode or mode,
+                        draw_wire=False)
             if not clean and self._mapping_diagnostics and face.mapped \
                     and face.primary and face.poly_id in self._duplicate_polys:
                 painter.setPen(Qt.PenStyle.NoPen)
@@ -3159,7 +3267,7 @@ class AssetViewport(QWidget):
                         front_facing = True
                         break
                 draw_piece(
-                    face, cam, ((0.0, 0.0),) * len(cam), None,
+                    face, cam, ((0.0, 0.0),) * len(cam),
                     front_facing)
         else:
             # Match OpenUA's runtime fan triangulation, then use a camera-space
@@ -3167,7 +3275,7 @@ class AssetViewport(QWidget):
             # paint exact back-to-front pieces without a hardware depth buffer.
             triangles: list[CameraPolygon] = []
             source_order = 0
-            for face in self._faces:
+            for face_order, face in enumerate(self._faces):
                 if (not clean and not face.mapped
                         and not self._mapping_diagnostics):
                     continue
@@ -3177,13 +3285,17 @@ class AssetViewport(QWidget):
                 source_polygons[id(face)] = QPolygonF([
                     self._project(point, target, camera) for point in cam])
                 mat = self._materials[face.material]
-                image = None
                 face_uvs = []
                 if mode == "textured" and face.mapped:
-                    image, face_uvs = self._face_texture(face, mat)
-                if len(face_uvs) != len(cam):
+                    face_uvs = self._face_uvs(face, mat)
+                uv_mapping_valid = len(face_uvs) == len(cam)
+                if not uv_mapping_valid:
                     face_uvs = [(0.0, 0.0)] * len(cam)
-                    image = None
+                indexed_face_front_facing = None
+                if mode == "textured":
+                    indexed_face_front_facing = retail_source_face_front_facing(cam)
+                    if not indexed_face_front_facing:
+                        continue
                 for index in range(2, len(cam)):
                     indices = (0, index, index - 1)
                     tri_camera = tuple(cam[item] for item in indices)
@@ -3212,13 +3324,20 @@ class AssetViewport(QWidget):
                         * tri_screen[item].y()
                         for item in range(3)
                     )
-                    front_facing = self._front_facing_from_screen_area(area)
-                    if self._backface_cull and not front_facing:
+                    front_facing = (
+                        indexed_face_front_facing
+                        if indexed_face_front_facing is not None
+                        else self._front_facing_from_screen_area(area))
+                    if mode != "textured" \
+                            and self._backface_cull and not front_facing:
                         continue
                     triangles.append(CameraPolygon(
                         clipped.vertices,
                         clipped.attributes,
-                        _RenderPayload(face, image, front_facing),
+                        _RenderPayload(
+                            face, front_facing, uv_mapping_valid,
+                            face_order,
+                            max(4.0 - point[2] for point in cam)),
                         source_order,
                     ))
                     source_order += 1
@@ -3234,14 +3353,77 @@ class AssetViewport(QWidget):
             )
             ordered = (
                 order_camera_polygons_fast(triangles)
-                if interactive_render
+                if interactive_render and mode != "textured"
                 else order_camera_polygons(triangles))
+            if mode == "textured":
+                previous_error = self._indexed_runtime_error
+                try:
+                    target_width = max(1, int(round(target.width())))
+                    target_height = max(1, int(round(target.height())))
+                    if target_width * target_height \
+                            > IndexedRasterizer.max_safe_pixels:
+                        raise RuntimeError(
+                            f"requested {target_width}x{target_height} frame "
+                            "exceeds the active backend safety limit of "
+                            f"{IndexedRasterizer.max_safe_pixels:,} pixels")
+                    render_target = QRectF(
+                        0.0, 0.0, float(target_width), float(target_height))
+                    use_view_cache = not clean
+                    cache_key = (
+                        self._indexed_view_cache_signature(
+                            target_width, target_height, camera)
+                        if use_view_cache else None
+                    )
+                    if (use_view_cache
+                            and cache_key == self._indexed_view_cache_key
+                            and not self._indexed_view_cache_image.isNull()):
+                        indexed_image = QImage(self._indexed_view_cache_image)
+                    else:
+                        indexed_image = self._render_indexed_model(
+                            render_target, ordered, camera,
+                            collect_diagnostics=clean)
+                        self._last_indexed_stats.update({
+                            "viewport_target_width": target_width,
+                            "viewport_target_height": target_height,
+                            "viewport_render_width": target_width,
+                            "viewport_render_height": target_height,
+                        })
+                        if use_view_cache:
+                            self._indexed_view_cache_key = cache_key
+                            self._indexed_view_cache_image = QImage(
+                                indexed_image)
+                except Exception as exc:
+                    self._indexed_runtime_error = str(exc)
+                    self._last_indexed_stats = {}
+                    self._last_render_error = str(exc)
+                    self._last_effective_renderer = "retail_indexed_error"
+                    self._indexed_view_cache_key = None
+                    self._indexed_view_cache_image = QImage()
+                    if self._indexed_runtime_error != previous_error:
+                        self.statusMessage.emit(
+                            f"Textured renderer failed closed: {exc}")
+                else:
+                    painter.drawImage(target, indexed_image)
+                    self._indexed_runtime_error = ""
+                    self._last_render_error = ""
+                    self._last_effective_renderer = (
+                        "retail_indexed_reconstructed")
             for piece in ordered:
                 payload = piece.payload
                 draw_piece(
-                    payload.face, piece.vertices,
-                    piece.attributes, payload.image,
-                    payload.front_facing)
+                    payload.face, piece.vertices, piece.attributes,
+                    payload.front_facing,
+                    draw_surface=mode != "textured")
+
+            if mode == "textured" and self._last_render_error and not clean:
+                painter.save()
+                painter.setPen(QColor(255, 185, 120))
+                painter.drawText(
+                    target.adjusted(24, 24, -24, -24),
+                    Qt.AlignmentFlag.AlignCenter | Qt.TextFlag.TextWordWrap,
+                    "Textured renderer unavailable\n" + self._last_render_error,
+                )
+                painter.restore()
 
         if not clean and highlight_paths:
             painter.setPen(QPen(QColor(90, 230, 255), 1.2))
@@ -3322,6 +3504,66 @@ class AssetViewport(QWidget):
             self._draw_edit_overlay(painter, target, camera)
         elif not clean:
             self._draw_mode_label(painter, target, False)
+
+    def _render_indexed_model(
+            self, target: QRectF, ordered, camera: dict, *,
+            collect_diagnostics: bool = True) -> QImage:
+        """Render BSP pieces through the sole palette-index textured backend."""
+
+        adapter = self._indexed_adapter
+        if adapter is None:
+            raise RuntimeError(self._indexed_unavailable_reason)
+        unmapped = [face for face in self._faces if not face.mapped]
+        if unmapped:
+            examples = ", ".join(
+                f"{face.owner} polygon {face.poly_id}"
+                for face in unmapped[:4])
+            more = (
+                f" (+{len(unmapped) - 4} more)"
+                if len(unmapped) > 4 else "")
+            raise RuntimeError(
+                "retail indexed rendering requires complete ATTS material "
+                f"mappings; found {len(unmapped)} unmapped polygon(s): "
+                f"{examples}{more}")
+        width = max(1, int(round(target.width())))
+        height = max(1, int(round(target.height())))
+        indexed_pieces = []
+        for piece in ordered:
+            payload = piece.payload
+            face = payload.face
+            material = self._materials[face.material]
+            frame_index, _direction = self._anim_states.get(
+                face.material, (0, 1))
+            surface = adapter.resolve_surface(face, material, frame_index)
+            if surface.kind == "texture" and not payload.uv_mapping_valid:
+                raise UnsupportedIndexedMaterialError(
+                    f"polygon {face.poly_id} has incomplete source UV mapping")
+            screen = tuple(
+                (point.x() - target.left(), point.y() - target.top())
+                for point in (
+                    self._project(vertex, target, camera)
+                    for vertex in piece.vertices
+                )
+            )
+            indexed_pieces.append(IndexedPiece(
+                source_face_id=id(face),
+                polygon_id=face.poly_id,
+                screen=screen,
+                uvs=tuple(tuple(uv) for uv in piece.attributes),
+                camera_vertices=tuple(tuple(vertex) for vertex in piece.vertices),
+                surface=surface,
+                source_order=payload.source_order,
+                sort_depth=payload.sort_depth,
+            ))
+        result = IndexedRasterizer.render(
+            width, height, indexed_pieces, adapter.tables, background_index=0,
+            collect_diagnostics=collect_diagnostics,
+            track_polygon_owner=False)
+        self._last_indexed_stats = dict(result.stats)
+        rgba = result.to_rgba(adapter.tables, transparent_background=True)
+        image = QImage(
+            rgba, width, height, width * 4, QImage.Format.Format_RGBA8888)
+        return image.copy()
 
     def _draw_edit_overlay(
             self, painter: QPainter, target: QRectF,
@@ -3631,9 +3873,7 @@ class AssetViewport(QWidget):
 
     def _draw_face(self, painter: QPainter, face: ViewFace,
                    screen: list[QPointF], mode: str | None = None,
-                   draw_wire: bool | None = None,
-                   camera_vertices=None,
-                   texture_override=None) -> None:
+                   draw_wire: bool | None = None) -> None:
         polygon = QPolygonF(screen)
         mat = self._materials[face.material]
         mode = mode or self._mode
@@ -3658,182 +3898,30 @@ class AssetViewport(QWidget):
             painter.setPen(QPen(QColor(30, 32, 38), 0.5))
             painter.setBrush(color)
             painter.drawPolygon(polygon)
-        else:  # textured
-            image, uvs = (
-                texture_override
-                if texture_override is not None
-                else self._face_texture(face, mat))
-            if image is None or image.isNull() or len(uvs) < 3:
-                brightness = self._face_brightness(face)
-                color = QColor(int(mat.color.red() * brightness),
-                               int(mat.color.green() * brightness),
-                               int(mat.color.blue() * brightness))
-                painter.setPen(Qt.PenStyle.NoPen)
-                painter.setBrush(color)
-                painter.drawPolygon(polygon)
-            else:
-                self._draw_textured(painter, screen, uvs, image,
-                                    additive=mat.additive,
-                                    camera_vertices=camera_vertices)
+        else:
+            # Textured surfaces are drawn once, before overlays, by the shared
+            # Retail-indexed framebuffer pass in ``_render_scene``.
+            return
 
         if draw_wire:
             painter.setPen(QPen(QColor(0, 0, 0, 130), 0.75))
             painter.setBrush(Qt.BrushStyle.NoBrush)
             painter.drawPolygon(polygon)
 
-    def _face_texture(self, face: ViewFace, mat: ViewMaterial):
-        """Return (QImage, uv list in texture bytes) honoring VANM playback."""
+    def _face_uvs(self, face: ViewFace, mat: ViewMaterial):
+        """Return texture-byte UVs for the currently active VANM frame."""
 
         if mat.anim_frames:
             frame_index, _ = self._anim_states.get(face.material, (0, 1))
-            _, image_id, uv_id = mat.anim_frames[frame_index]
-            image = (mat.anim_images[image_id]
-                     if 0 <= image_id < len(mat.anim_images) else None)
+            _, _image_id, uv_id = mat.anim_frames[frame_index]
             group = (mat.anim_uv_groups[uv_id]
                      if 0 <= uv_id < len(mat.anim_uv_groups) else [])
             # Runtime remaps animated UVs by vertex order index (TexCoordId=j,
             # base.cpp GenerateMeshCoordsCache, CONFIRMED).
             uvs = [group[j] if j < len(group) else (0, 0)
                    for j in range(len(face.vertices))]
-            return image, uvs
-        return mat.image, face.uvs
-
-    def _draw_textured(self, painter: QPainter, screen: list[QPointF],
-                       uvs: list[tuple[int, int]], image: QImage,
-                       additive: bool = False,
-                       camera_vertices=None) -> None:
-        # Fan triangulation (0, j, j-1), same as the runtime (CONFIRMED).
-        # ARGB images honor per-texel alpha (chroma-transparent yellow).
-        # Additive = flat-tracy glow faces, approximating the engine's
-        # GL_ONE/GL_ONE blending with QPainter CompositionMode_Plus.
-        width = image.width()
-        height = image.height()
-        for j in range(2, len(screen)):
-            tri_screen = (screen[0], screen[j], screen[j - 1])
-            tri_uv = (uvs[0], uvs[j], uvs[j - 1])
-            tri_camera = (
-                (camera_vertices[0],
-                 camera_vertices[j],
-                 camera_vertices[j - 1])
-                if camera_vertices is not None
-                and len(camera_vertices) == len(screen)
-                else None
-            )
-            # UV bytes -> pixel coordinates (u/256 * width) (CONFIRMED /256)
-            src = [QPointF(u / 256.0 * width, v / 256.0 * height)
-                   for u, v in tri_uv]
-            coefficients = (
-                projective_texture_coefficients(
-                    tuple((point.x(), point.y()) for point in src),
-                    tuple((point.x(), point.y()) for point in tri_screen),
-                    tri_camera,
-                )
-                if tri_camera is not None else None
-            )
-            if coefficients is not None \
-                    and not _projective_image_transform_is_bounded(
-                        coefficients, width, height):
-                # A valid perspective map may have its projective infinity
-                # outside the source UV triangle but inside the full bitmap.
-                # QPainter then expands the complete image catastrophically.
-                # Use the bounded affine triangle path in every repaint.
-                # The former per-pixel fallback made animated/idle editor
-                # repaints hundreds of milliseconds slower.
-                coefficients = None
-            transform = (
-                QTransform(*coefficients)
-                if coefficients is not None
-                else _affine_from_triangles(src, tri_screen)
-            )
-            if transform is None:
-                self._draw_degenerate_uv_triangle(
-                    painter, tri_screen, tri_uv, image, additive,
-                    tri_camera)
-                continue
-            path = QPainterPath()
-            path.moveTo(tri_screen[0])
-            path.lineTo(tri_screen[1])
-            path.lineTo(tri_screen[2])
-            path.closeSubpath()
-            painter.save()
-            painter.setClipPath(path)
-            if additive:
-                painter.setCompositionMode(
-                    QPainter.CompositionMode.CompositionMode_Plus
-                )
-            painter.setTransform(transform, True)
-            painter.drawImage(0, 0, image)
-            painter.restore()
-
-    @staticmethod
-    def _draw_degenerate_uv_triangle(
-            painter: QPainter,
-            screen: tuple[QPointF, QPointF, QPointF],
-            uvs: tuple[tuple[int, int], tuple[int, int], tuple[int, int]],
-            image: QImage, additive: bool,
-            camera_vertices=None) -> None:
-        """Rasterize a screen triangle whose UV triangle is non-invertible.
-
-        QPainter's transformed texture path needs an invertible source UV
-        triangle.  The engine does not: it interpolates UVs from screen-space
-        barycentrics, so repeated or collinear UVs remain renderable.  This
-        bounded fallback mirrors that behavior instead of dropping a complete
-        visible triangle.
-        """
-
-        viewport = painter.viewport()
-        left = max(viewport.left(), math.floor(
-            min(point.x() for point in screen)))
-        top = max(viewport.top(), math.floor(
-            min(point.y() for point in screen)))
-        right = min(viewport.right(), math.ceil(
-            max(point.x() for point in screen)))
-        bottom = min(viewport.bottom(), math.ceil(
-            max(point.y() for point in screen)))
-        width = right - left + 1
-        height = bottom - top + 1
-        if width <= 0 or height <= 0:
-            return
-        output = QImage(width, height, QImage.Format.Format_ARGB32)
-        output.fill(Qt.GlobalColor.transparent)
-        source_width = image.width()
-        source_height = image.height()
-        for y in range(top, bottom + 1):
-            for x in range(left, right + 1):
-                weights = _triangle_barycentric(
-                    QPointF(x + 0.5, y + 0.5), screen)
-                if weights is None:
-                    continue
-                if camera_vertices is not None:
-                    corrected = [
-                        weight / max(
-                            _PICK_NEAR_DISTANCE,
-                            _PICK_CAMERA_DISTANCE - vertex[2])
-                        for weight, vertex in zip(
-                            weights, camera_vertices)
-                    ]
-                    total = sum(corrected)
-                    if total <= 1e-12:
-                        continue
-                    weights = tuple(value / total for value in corrected)
-                u = sum(weight * uv[0]
-                        for weight, uv in zip(weights, uvs))
-                v = sum(weight * uv[1]
-                        for weight, uv in zip(weights, uvs))
-                source_x = max(
-                    0, min(source_width - 1,
-                           int(u / 256.0 * source_width)))
-                source_y = max(
-                    0, min(source_height - 1,
-                           int(v / 256.0 * source_height)))
-                output.setPixel(
-                    x - left, y - top, image.pixel(source_x, source_y))
-        painter.save()
-        if additive:
-            painter.setCompositionMode(
-                QPainter.CompositionMode.CompositionMode_Plus)
-        painter.drawImage(left, top, output)
-        painter.restore()
+            return uvs
+        return face.uvs
 
     def _draw_sen(self, painter: QPainter, target: QRectF,
                   camera: dict) -> None:
@@ -4297,47 +4385,3 @@ class AssetViewport(QWidget):
     def mouseDoubleClickEvent(self, event: QMouseEvent) -> None:  # noqa: N802
         self.deselect_at(event.position().toPoint())
         event.accept()
-
-
-def _affine_from_triangles(src: list[QPointF],
-                           dst: tuple[QPointF, QPointF, QPointF]) -> QTransform | None:
-    """Affine transform mapping texture triangle ``src`` onto screen ``dst``."""
-
-    x0, y0 = src[0].x(), src[0].y()
-    x1, y1 = src[1].x(), src[1].y()
-    x2, y2 = src[2].x(), src[2].y()
-    u0, v0 = dst[0].x(), dst[0].y()
-    u1, v1 = dst[1].x(), dst[1].y()
-    u2, v2 = dst[2].x(), dst[2].y()
-
-    det = (x1 - x0) * (y2 - y0) - (x2 - x0) * (y1 - y0)
-    if abs(det) < 1e-9:
-        return None
-    a = ((u1 - u0) * (y2 - y0) - (u2 - u0) * (y1 - y0)) / det
-    c = ((u2 - u0) * (x1 - x0) - (u1 - u0) * (x2 - x0)) / det
-    e = u0 - a * x0 - c * y0
-    b = ((v1 - v0) * (y2 - y0) - (v2 - v0) * (y1 - y0)) / det
-    d = ((v2 - v0) * (x1 - x0) - (v1 - v0) * (x2 - x0)) / det
-    f = v0 - b * x0 - d * y0
-    return QTransform(a, b, c, d, e, f)
-
-
-def _projective_image_transform_is_bounded(
-        coefficients, width: int, height: int) -> bool:
-    """Reject QPainter projective images whose denominator crosses infinity."""
-
-    if len(coefficients) != 9 \
-            or not all(math.isfinite(value) for value in coefficients):
-        return False
-    w_u, w_v, w_offset = (
-        coefficients[2], coefficients[5], coefficients[8])
-    denominators = [
-        w_u * x + w_v * y + w_offset
-        for x, y in (
-            (0.0, 0.0), (float(width), 0.0),
-            (0.0, float(height)), (float(width), float(height)))
-    ]
-    epsilon = 1e-6
-    return (
-        min(denominators) > epsilon
-        or max(denominators) < -epsilon)
