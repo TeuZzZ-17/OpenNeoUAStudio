@@ -56,6 +56,7 @@ from PySide6.QtWidgets import (
     QSplitter,
     QToolBar,
     QToolButton,
+    QTabWidget,
     QTreeWidget,
     QTreeWidgetItem,
     QVBoxLayout,
@@ -91,6 +92,7 @@ _PUBLIC_DEPENDENCY_DEFAULTS = {
 LEGACY = "legacy"
 VEHICLE = "vehicle"
 WEAPON = "weapon"
+WINDOW_TITLE = "Collision Editor — OpenUAStudio"
 COMPOUND_TYPES = (VEHICLE, WEAPON)
 TYPE_LABELS = {
     LEGACY: "Legacy Radius",
@@ -122,7 +124,8 @@ _HEADER_RE = re.compile(
 )
 _PARAM_RE = re.compile(
     r"^(?P<indent>\s*)(?P<key>radius|overeof|fire_x|fire_y|fire_z|"
-    r"num_weapons|"
+    r"num_weapons|cockpit_camera_offset_x|cockpit_camera_offset_y|"
+    r"cockpit_camera_offset_z|"
     r"robo_num_guns|robo_act_gun|robo_gun_pos_x|robo_gun_pos_y|"
     r"robo_gun_pos_z|robo_gun_dir_x|robo_gun_dir_y|robo_gun_dir_z|"
     r"robo_gun_type|robo_gun_name|"
@@ -323,6 +326,13 @@ class CollisionProject:
     gun_points_enabled: bool = False
     gun_points: list[GunPoint] = field(default_factory=list)
     unit_gun_default_icon: str = ""
+    # OpenUA-only modern cockpit camera position. The engine consumes these
+    # values directly in vehicle-local model space; there is deliberately no
+    # editor-authored rotation because OpenUA keeps the vehicle orientation.
+    cockpit_camera_enabled: bool = False
+    cockpit_camera_offset_x: float = 0.0
+    cockpit_camera_offset_y: float = 0.0
+    cockpit_camera_offset_z: float = 0.0
     legacy: CollisionSphere | None = None
     compound: list[CollisionSphere] = field(default_factory=list)
 
@@ -344,6 +354,9 @@ class CollisionProject:
             self.fire_points_enabled,
             self.fire_x, self.fire_y, self.fire_z, self.num_weapons,
             self.gun_points_enabled, self.unit_gun_default_icon,
+            self.cockpit_camera_enabled,
+            self.cockpit_camera_offset_x, self.cockpit_camera_offset_y,
+            self.cockpit_camera_offset_z,
             tuple((
                 point.scheme, point.x, point.y, point.z,
                 point.dir_x, point.dir_y, point.dir_z, point.gun_type,
@@ -362,8 +375,10 @@ class CollisionProject:
          self.overeof_enabled, self.overeof,
          self.fire_points_enabled,
          self.fire_x, self.fire_y, self.fire_z, self.num_weapons,
-         self.gun_points_enabled, self.unit_gun_default_icon, gun_points,
-         legacy, compound) = state
+         self.gun_points_enabled, self.unit_gun_default_icon,
+         self.cockpit_camera_enabled,
+         self.cockpit_camera_offset_x, self.cockpit_camera_offset_y,
+         self.cockpit_camera_offset_z, gun_points, legacy, compound) = state
         self.gun_points = [GunPoint(*values) for values in gun_points]
         self.legacy = one(legacy)
         self.compound = [one(values) for values in compound]
@@ -390,6 +405,7 @@ class VehicleModelReference:
 
     block: ScriptBlock
     vp_normal: int
+    vp_wait: int | None = None
     scale_x: float = 1.0
     scale_y: float = 1.0
     scale_z: float = 1.0
@@ -397,9 +413,12 @@ class VehicleModelReference:
     @property
     def label(self) -> str:
         suffix = f" — {self.block.name}" if self.block.name else ""
+        wait = (
+            f", vp_wait {self.vp_wait}"
+            if self.vp_wait is not None else "")
         return (
             f"{self.block.kind} {self.block.object_id}{suffix}  "
-            f"[vp_normal {self.vp_normal}]"
+            f"[vp_normal {self.vp_normal}{wait}]"
         )
 
 
@@ -514,13 +533,14 @@ def _generic_parameter_rows(lines: list[str], block: ScriptBlock):
 
 
 def script_model_references(text: str) -> list[VehicleModelReference]:
-    """Read ``vp_normal`` references from new vehicles and weapons.
+    """Read visual-prototype references from new vehicles and weapons.
 
     The final active assignment wins, matching Urban Assault script override
     behavior. ``modify_vehicle`` and ``modify_weapon`` are deliberately
-    excluded because resolving inherited ``vp_normal`` would require the full
-    include chain rather than one source file. ``vp_scale_x/y/z`` are read as
-    visual-only preview values for both supported definition types.
+    excluded because resolving inherited visual prototypes would require the
+    full include chain rather than one source file. ``vp_wait`` is retained so
+    Cockpit View can preview the same stationary model used by the runtime;
+    ``vp_scale_x/y/z`` remain visual-only preview values.
     """
 
     lines = text.splitlines()
@@ -531,6 +551,7 @@ def script_model_references(text: str) -> list[VehicleModelReference]:
             continue
         values = {
             "vp_normal": None,
+            "vp_wait": None,
             "vp_scale_x": 1.0,
             "vp_scale_y": 1.0,
             "vp_scale_z": 1.0,
@@ -556,6 +577,18 @@ def script_model_references(text: str) -> list[VehicleModelReference]:
             raise CollisionScriptError(
                 f"Invalid vp_normal in {block.kind} "
                 f"{block.object_id}: {raw_vp}")
+        raw_wait = values["vp_wait"]
+        wait_vp = None
+        if raw_wait is not None:
+            if not math.isfinite(raw_wait):
+                raise CollisionScriptError(
+                    f"Non-finite vp_wait in {block.kind} "
+                    f"{block.object_id}: {raw_wait}")
+            wait_vp = int(raw_wait)
+            if abs(raw_wait - wait_vp) > 1e-9 or wait_vp < 0:
+                raise CollisionScriptError(
+                    f"Invalid vp_wait in {block.kind} "
+                    f"{block.object_id}: {raw_wait}")
         scales = (
             float(values["vp_scale_x"]),
             float(values["vp_scale_y"]),
@@ -568,6 +601,7 @@ def script_model_references(text: str) -> list[VehicleModelReference]:
         references.append(VehicleModelReference(
             block=block,
             vp_normal=vp_id,
+            vp_wait=wait_vp,
             scale_x=scales[0],
             scale_y=scales[1],
             scale_z=scales[2],
@@ -726,7 +760,14 @@ def import_overeof_block(
 def import_fire_points_block(
         text: str, block: ScriptBlock,
 ) -> tuple[bool, float, float, float, int]:
-    """Read active top-level vanilla vehicle fire-point parameters."""
+    """Read active top-level vanilla vehicle fire-point parameters.
+
+    ``num_weapons`` is a projectile-count parameter used independently by the
+    runtime, so its presence alone must not invent an authored muzzle at
+    0 / 0 / 0 in the editor.  The Fire Point workspace becomes active only
+    when at least one explicit ``fire_x``, ``fire_y`` or ``fire_z`` assignment
+    exists; ``num_weapons`` is still read so an existing rack keeps its count.
+    """
 
     if not block.complete:
         raise CollisionScriptError(
@@ -748,7 +789,8 @@ def import_fire_points_block(
         except ValueError as exc:
             raise CollisionScriptError(
                 f"Valore non numerico per {key}: {raw}") from exc
-        enabled = True
+        if key in {"fire_x", "fire_y", "fire_z"}:
+            enabled = True
     return (
         enabled,
         values["fire_x"], values["fire_y"], values["fire_z"],
@@ -756,7 +798,46 @@ def import_fire_points_block(
     )
 
 
+def import_cockpit_camera_block(
+        text: str, block: ScriptBlock,
+) -> tuple[bool, float, float, float]:
+    """Read OpenUA's vehicle-local modern cockpit camera offset.
 
+    Missing axes stay zero, matching the runtime prototype defaults. The
+    feature is vehicle-only and intentionally has no rotation parameters: the
+    game keeps the controlled vehicle's real orientation.
+    """
+
+    if not block.complete:
+        raise CollisionScriptError(
+            f"Parsing incompleto: manca end per {block.kind} "
+            f"{block.object_id}.")
+    values = {
+        "cockpit_camera_offset_x": 0.0,
+        "cockpit_camera_offset_y": 0.0,
+        "cockpit_camera_offset_z": 0.0,
+    }
+    enabled = False
+    for _line, key, raw, _indent in _parameter_rows(
+            text.splitlines(), block):
+        if key not in values:
+            continue
+        try:
+            value = float(raw)
+        except ValueError as exc:
+            raise CollisionScriptError(
+                f"Valore non numerico per {key}: {raw}") from exc
+        if not math.isfinite(value):
+            raise CollisionScriptError(
+                f"Valore non finito per {key}: {raw}")
+        values[key] = value
+        enabled = True
+    return (
+        enabled,
+        values["cockpit_camera_offset_x"],
+        values["cockpit_camera_offset_y"],
+        values["cockpit_camera_offset_z"],
+    )
 
 
 _GUN_POINT_KEYS = {
@@ -957,12 +1038,29 @@ def gun_point_data_lines(project: CollisionProject) -> list[str]:
     return lines
 
 
+def cockpit_camera_data_lines(project: CollisionProject) -> list[str]:
+    """Render only the OpenUA modern cockpit position parameters."""
+
+    if project.target_category != VEHICLE or not project.cockpit_camera_enabled:
+        return []
+    return [
+        f"cockpit_camera_offset_x = {_number(project.cockpit_camera_offset_x)}",
+        f"cockpit_camera_offset_y = {_number(project.cockpit_camera_offset_y)}",
+        f"cockpit_camera_offset_z = {_number(project.cockpit_camera_offset_z)}",
+    ]
+
+
 def collision_data_lines(project: CollisionProject) -> list[str]:
     lines: list[str] = []
     if project.legacy is not None:
         lines.append(f"radius = {_radius_number(project.legacy.radius)}")
     if project.target_category == VEHICLE and project.overeof_enabled:
         lines.append(f"overeof = {_number(project.overeof)}")
+    cockpit_lines = cockpit_camera_data_lines(project)
+    if cockpit_lines:
+        if lines:
+            lines.append("")
+        lines.extend(cockpit_lines)
     if project.target_category == VEHICLE and project.fire_points_enabled:
         if lines:
             lines.append("")
@@ -1045,6 +1143,12 @@ def plan_script_update(
         row for row in rows
         if row[1] in ("fire_x", "fire_y", "fire_z", "num_weapons")
     ]
+    cockpit_rows = [
+        row for row in rows
+        if row[1] in (
+            "cockpit_camera_offset_x", "cockpit_camera_offset_y",
+            "cockpit_camera_offset_z")
+    ]
     gun_rows = [row for row in rows if row[1] in _GUN_POINT_KEYS]
     coll_rows = [row for row in rows if row[1].startswith("coll_")]
     indent = next(
@@ -1061,7 +1165,19 @@ def plan_script_update(
         # assignments from the selected block, then insert one clean block.
         # Commented historical lines stay untouched because the game ignores
         # them and deleting user notes silently would be destructive.
-        delete.update(row[0] for row in rows)
+        #
+        # num_weapons is not exclusively a Fire Point parameter. If the source
+        # contains num_weapons but no explicit fire_x/y/z, keep that standalone
+        # gameplay value while the Fire Point workspace remains disabled.
+        source_has_fire_offsets = any(
+            row[1] in {"fire_x", "fire_y", "fire_z"} for row in fire_rows)
+        preserve_standalone_num_weapons = (
+            "vehicle" in kind and not project.fire_points_enabled
+            and not source_has_fire_offsets)
+        delete.update(
+            row[0] for row in rows
+            if not (preserve_standalone_num_weapons
+                    and row[1] == "num_weapons"))
         canonical = collision_data_lines(project)
         insert_before_end.extend(
             indent + line if line else "" for line in canonical)
@@ -1131,6 +1247,10 @@ def plan_script_update(
             [f"overeof = {_number(project.overeof)}"],
             "overeof",
         )
+    if "vehicle" in kind and project.cockpit_camera_enabled:
+        replace_group(
+            cockpit_rows, cockpit_camera_data_lines(project),
+            "cockpit camera offset")
     if "vehicle" in kind and project.fire_points_enabled:
         replace_group(
             fire_rows,
@@ -1226,6 +1346,12 @@ def validate_project(
     if (project.target_category == VEHICLE and project.overeof_enabled
             and not math.isfinite(project.overeof)):
         errors.append("Overeof deve essere un numero finito.")
+    if project.target_category == VEHICLE and project.cockpit_camera_enabled:
+        if not all(math.isfinite(value) for value in (
+                project.cockpit_camera_offset_x,
+                project.cockpit_camera_offset_y,
+                project.cockpit_camera_offset_z)):
+            errors.append("Cockpit Camera X/Y/Z devono essere numeri finiti.")
     if project.target_category == VEHICLE and project.fire_points_enabled:
         if not all(math.isfinite(value) for value in (
                 project.fire_x, project.fire_y, project.fire_z)):
@@ -1273,15 +1399,32 @@ def validate_project(
 
 
 class CollisionMoveGizmo(ModelSpaceGizmo):
-    """Camera-oriented move gizmo limited to the six signed model axes."""
+    """Move gizmo with an independently orbitable presentation.
+
+    The arrows always emit the same model-space X/Y/Z directions.  Dragging
+    empty gizmo space only rotates the *drawing* so depth-aligned handles can
+    be brought into view; it never rotates the model, viewport camera or any
+    authored script data.
+    """
 
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
-        # Keep the controls visually bold while allowing the properties
-        # column to fit on a 1080p desktop without vertical scrolling.
+        # The gizmo now lives below the property tabs, where the full width and
+        # remaining lower-right height are available.  Use that room instead
+        # of the old compact viewport-overlay geometry.
         self.set_visual_scale(
-            extent_ratio=0.96, margin=6.0,
-            handle_scale=1.45, line_scale=1.32)
+            extent_ratio=1.10, margin=12.0,
+            handle_scale=1.35, line_scale=1.30)
+        self._anchor_yaw = -35.0
+        self._anchor_pitch = 20.0
+        self._view_yaw_offset = 0.0
+        self._view_pitch_offset = 0.0
+        self._view_dragging = False
+        self._view_drag_last = QPointF()
+        self.setToolTip(
+            "Move in model space. Drag empty gizmo space to rotate only the "
+            "gizmo view; double-click empty space to realign it. Red=X, "
+            "green=Y, blue=Z.")
 
     @property
     def directions(self) -> tuple[tuple[int, int, int], ...]:
@@ -1291,10 +1434,80 @@ class CollisionMoveGizmo(ModelSpaceGizmo):
         )
 
     def sizeHint(self) -> QSize:  # noqa: N802
-        return QSize(250, 136)
+        return QSize(330, 285)
 
     def minimumSizeHint(self) -> QSize:  # noqa: N802
-        return QSize(215, 122)
+        return QSize(285, 220)
+
+    def set_camera_orientation(self, yaw: float, pitch: float) -> None:
+        """Set the reference orientation without discarding user orbit."""
+
+        self._anchor_yaw = float(yaw)
+        self._anchor_pitch = float(pitch)
+        self._apply_gizmo_view_orientation()
+
+    def _apply_gizmo_view_orientation(self) -> None:
+        pitch = max(
+            -89.0,
+            min(89.0, self._anchor_pitch + self._view_pitch_offset),
+        )
+        super().set_camera_orientation(
+            self._anchor_yaw + self._view_yaw_offset, pitch)
+
+    def reset_view_orientation(self) -> None:
+        self._view_yaw_offset = 0.0
+        self._view_pitch_offset = 0.0
+        self._apply_gizmo_view_orientation()
+
+    def mousePressEvent(self, event: QMouseEvent) -> None:  # noqa: N802
+        if (event.button() == Qt.MouseButton.LeftButton
+                and self.isEnabled()
+                and self.hit_test(event.position()) is None):
+            self._repeat_timer.stop()
+            self._view_dragging = True
+            self._view_drag_last = QPointF(event.position())
+            self.setCursor(Qt.CursorShape.ClosedHandCursor)
+            event.accept()
+            return
+        super().mousePressEvent(event)
+
+    def mouseMoveEvent(self, event: QMouseEvent) -> None:  # noqa: N802
+        if (self._view_dragging
+                and event.buttons() & Qt.MouseButton.LeftButton):
+            current = QPointF(event.position())
+            delta = current - self._view_drag_last
+            self._view_drag_last = current
+            self._view_yaw_offset += delta.x() * 0.55
+            target_pitch = max(
+                -89.0,
+                min(
+                    89.0,
+                    self._anchor_pitch + self._view_pitch_offset
+                    + delta.y() * 0.55,
+                ),
+            )
+            self._view_pitch_offset = target_pitch - self._anchor_pitch
+            self._apply_gizmo_view_orientation()
+            event.accept()
+            return
+        super().mouseMoveEvent(event)
+
+    def mouseReleaseEvent(self, event: QMouseEvent) -> None:  # noqa: N802
+        if (event.button() == Qt.MouseButton.LeftButton
+                and self._view_dragging):
+            self._view_dragging = False
+            self.unsetCursor()
+            event.accept()
+            return
+        super().mouseReleaseEvent(event)
+
+    def mouseDoubleClickEvent(self, event: QMouseEvent) -> None:  # noqa: N802
+        if (event.button() == Qt.MouseButton.LeftButton
+                and self.hit_test(event.position()) is None):
+            self.reset_view_orientation()
+            event.accept()
+            return
+        super().mouseDoubleClickEvent(event)
 
 
 class RadiusItemDelegate(QStyledItemDelegate):
@@ -1345,6 +1558,7 @@ class CollisionViewport(AssetViewport):
     gunPointPicked = Signal(int)
     sphereContextMenuRequested = Signal(int, QPoint)
     sphereNudgeRequested = Signal(object)
+    cockpitNudgeRequested = Signal(object)
     RING_SEGMENTS = 12
     SELECTED_HALO_WIDTH = 6.0
     SELECTED_COLOR_WIDTH = 3.4
@@ -1374,6 +1588,12 @@ class CollisionViewport(AssetViewport):
         self._gun_directions: list[tuple[float, float, float]] = []
         self._gun_point_selected = -1
         self._gun_points_visible = True
+        self._cockpit_preview_active = False
+        self._cockpit_offset = (0.0, 0.0, 0.0)
+        # OpenUA derives its projection/aspect correction from the gameplay
+        # render resolution, not from the editor widget (whose width changes
+        # with the side panels). 16:10 matches the supplied 1536x960 captures.
+        self._cockpit_preview_aspect: float | None = 16.0 / 10.0
         self._model_preview_base_faces: list[
             tuple[tuple[float, float, float], ...]] = []
         self._model_preview_base_sen_boxes: list[
@@ -1396,6 +1616,135 @@ class CollisionViewport(AssetViewport):
     @property
     def overeof_value(self) -> float:
         return self._overeof
+
+    @property
+    def cockpit_preview_active(self) -> bool:
+        return self._cockpit_preview_active
+
+    @property
+    def cockpit_offset(self) -> tuple[float, float, float]:
+        return self._cockpit_offset
+
+    def set_cockpit_preview_active(self, active: bool) -> None:
+        """Switch only the Collision Editor preview into OpenUA cockpit view.
+
+        The regular orbit camera state is never overwritten, so leaving this
+        mode restores the exact previous editor view.
+        """
+
+        active = bool(active)
+        if self._cockpit_preview_active == active:
+            return
+        self._cockpit_preview_active = active
+        self.update()
+
+    def set_cockpit_camera_offset(
+            self, x: float, y: float, z: float) -> None:
+        values = tuple(float(value) for value in (x, y, z))
+        if not all(math.isfinite(value) for value in values):
+            return
+        self._cockpit_offset = values
+        self.update()
+
+    def set_cockpit_preview_aspect(self, aspect: float | None) -> None:
+        """Set the editor-only gameplay aspect used by Cockpit View."""
+
+        if aspect is None:
+            value = None
+        else:
+            value = float(aspect)
+            if not math.isfinite(value) or value <= 0.0:
+                return
+        if value == self._cockpit_preview_aspect:
+            return
+        self._cockpit_preview_aspect = value
+        self.update()
+
+    def _cockpit_render_rect(self) -> QRectF:
+        """Largest centered viewport matching the selected game aspect."""
+
+        outer = QRectF(self.rect())
+        aspect = self._cockpit_preview_aspect
+        if aspect is None or outer.width() <= 1.0 or outer.height() <= 1.0:
+            return outer
+        available = outer.width() / outer.height()
+        if available > aspect:
+            height = outer.height()
+            width = height * aspect
+        else:
+            width = outer.width()
+            height = width / aspect
+        return QRectF(
+            outer.center().x() - width * 0.5,
+            outer.center().y() - height * 0.5,
+            width,
+            height,
+        )
+
+    def _camera_state(self) -> dict:
+        state = super()._camera_state()
+        if getattr(self, "_cockpit_preview_active", False):
+            # Cockpit View has no authorable FOV, orbit or pan in OpenUA.
+            # Keep a stable editor-only preview instead of leaking the prior
+            # inspection camera into the generated result.
+            state["yaw"] = 180.0
+            state["pitch"] = 0.0
+            state["zoom"] = 1.0
+            state["pan"] = QPointF(0.0, 0.0)
+            # assembly_viewer clips against ``near_distance``. OpenUA starts
+            # gameplay with _setFrustumClip(1.0, WORLD_FAR_CLIP).
+            state["near_distance"] = 1.0
+        return state
+
+    def _camera_vertex(self, point, camera: dict | None = None):
+        if not getattr(self, "_cockpit_preview_active", False):
+            return super()._camera_vertex(point, camera)
+
+        # OpenUA uses actor + rotation.Transpose() * cockpit_camera_offset,
+        # while the camera orientation stays the vehicle orientation. With an
+        # identity actor rotation the forward axis is +Z and UA -Y is up.
+        # AssetViewport's perspective expects the camera near plane at z=4,
+        # so +Z world distance becomes a decreasing camera-space Z value.
+        ox, oy, oz = self._cockpit_offset
+        oy += self.overeof_preview_offset
+        # Cockpit offsets and rendered VP vertices are already in the same
+        # vehicle-local units. Do not apply AssetViewport's editor-only
+        # auto-fit scale here: the runtime near plane is expressed in real UA
+        # units and applying that scale made clipping model-dependent.
+        dx = float(point[0]) - ox
+        dy = float(point[1]) - oy
+        dz = float(point[2]) - oz
+        return (dx, -dy, 4.0 - dz)
+
+    def _project(self, camera_point, target: QRectF | None = None,
+                 camera: dict | None = None) -> QPointF:
+        if not getattr(self, "_cockpit_preview_active", False):
+            return super()._project(camera_point, target, camera)
+
+        # Exact OpenUA projection used by GFXEngine:
+        # UAFrustum gives clip x=x, y=-y, w=z and the engine applies legacy
+        # matrixAspectCorrection() to camera X/Y. ``camera_point`` retains the
+        # shared AssetViewport z=4 depth convention so BSP/near clipping can
+        # be reused without introducing a parallel renderer.
+        target = target or QRectF(self.rect())
+        x, y, z = camera_point
+        depth = 4.0 - z
+        if depth <= 1e-9:
+            depth = 1e-9
+        width = max(1.0, float(target.width()))
+        height = max(1.0, float(target.height()))
+        corr_w = 1.0
+        corr_h = 1.0
+        if width / height >= 1.4:
+            half = (width + height) * 0.5
+            corr_w = half * 1.1429 / width
+            corr_h = half * 0.85715 / height
+        focal_x = width * 0.5 * corr_w
+        focal_y = height * 0.5 * corr_h
+        return QPointF(
+            target.center().x() + x * focal_x / depth,
+            target.center().y() - y * focal_y / depth,
+        )
 
     def clear(self) -> None:
         super().clear()
@@ -1758,6 +2107,24 @@ class CollisionViewport(AssetViewport):
         if event.key() == Qt.Key.Key_Tab:
             event.accept()
             return
+        if self._cockpit_preview_active and not (
+                event.modifiers() & (
+                    Qt.KeyboardModifier.ControlModifier
+                    | Qt.KeyboardModifier.AltModifier
+                    | Qt.KeyboardModifier.MetaModifier)):
+            directions = {
+                Qt.Key.Key_Left: (-1, 0, 0),
+                Qt.Key.Key_Right: (1, 0, 0),
+                Qt.Key.Key_Up: (0, 0, 1),
+                Qt.Key.Key_Down: (0, 0, -1),
+                Qt.Key.Key_PageUp: (0, -1, 0),
+                Qt.Key.Key_PageDown: (0, 1, 0),
+            }
+            direction = directions.get(event.key())
+            if direction is not None:
+                self.cockpitNudgeRequested.emit(direction)
+                event.accept()
+                return
         if (self._collision_selected >= 0
                 or self._fire_point_selected >= 0
                 or self._gun_point_selected >= 0) and not (
@@ -1967,6 +2334,25 @@ class CollisionViewport(AssetViewport):
 
 
     def paintEvent(self, event) -> None:  # noqa: N802
+        if self._cockpit_preview_active:
+            painter = QPainter(self)
+            painter.fillRect(self.rect(), QColor(24, 26, 32))
+            target = self._cockpit_render_rect()
+            painter.save()
+            painter.setClipRect(target)
+            if self._collision_show_model:
+                self._render_scene(
+                    painter, target, QColor(24, 26, 32), clean=True,
+                    camera=self._camera_state())
+            else:
+                painter.fillRect(target, QColor(24, 26, 32))
+                painter.setPen(QColor(130, 135, 145))
+                painter.drawText(
+                    target, Qt.AlignmentFlag.AlignCenter, "Model hidden")
+            painter.restore()
+            painter.end()
+            return
+
         if self._collision_show_model:
             super().paintEvent(event)
         else:
@@ -2015,7 +2401,23 @@ class CollisionViewport(AssetViewport):
         self._draw_gun_points_overlay(painter)
         painter.end()
 
+    def mouseMoveEvent(self, event: QMouseEvent) -> None:  # noqa: N802
+        if self._cockpit_preview_active:
+            event.accept()
+            return
+        super().mouseMoveEvent(event)
+
+    def wheelEvent(self, event) -> None:  # noqa: N802
+        if self._cockpit_preview_active:
+            event.accept()
+            return
+        super().wheelEvent(event)
+
     def mousePressEvent(self, event: QMouseEvent) -> None:  # noqa: N802
+        if self._cockpit_preview_active:
+            self.setFocus(Qt.FocusReason.MouseFocusReason)
+            event.accept()
+            return
         if event.button() == Qt.MouseButton.LeftButton:
             gun_index = self._hit_gun_point(event.position())
             if gun_index >= 0:
@@ -2499,7 +2901,7 @@ class CollisionEditorWindow(QMainWindow):
 
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
-        self.setWindowTitle("Collision Editor — OpenUAStudio")
+        self.setWindowTitle(WINDOW_TITLE)
         self.resize(1100, 720)
         self.project = CollisionProject()
         self.family: AssetFamily | None = None
@@ -2509,7 +2911,11 @@ class CollisionEditorWindow(QMainWindow):
         self._active_script_path: Path | None = None
         self._active_script_kind: str = ""
         self._active_script_id: int | None = None
+        self._active_model_reference: VehicleModelReference | None = None
+        self._active_base_path: Path | None = None
         self._current_owner: str | None = None
+        self._current_owner_base_bounds: tuple[float, float, float, float, float, float] | None = None
+        self._viewport_owner: str | None = None
         self._selected = -1
         self._selected_fire_point = -1
         self._selected_gun_point = -1
@@ -2517,6 +2923,12 @@ class CollisionEditorWindow(QMainWindow):
         # points keep their original robo_* / unit_* scheme unless explicitly
         # removed and recreated, avoiding silent script-family conversions.
         self._new_gun_point_scheme = "unit"
+        # Reset All Gun Points returns to the exact source state captured by
+        # the last explicit script load/import, not to guessed hard-coded data.
+        self._loaded_gun_points_enabled = False
+        self._loaded_gun_points: list[GunPoint] = []
+        self._loaded_unit_gun_default_icon = ""
+        self._loaded_gun_point_scheme = "unit"
         self._modified = False
         self._syncing = False
         self._last_directory = Path.home()
@@ -2535,6 +2947,7 @@ class CollisionEditorWindow(QMainWindow):
         self.viewport.sphereContextMenuRequested.connect(
             self._show_sphere_context_menu)
         self.viewport.sphereNudgeRequested.connect(self._gizmo_nudge)
+        self.viewport.cockpitNudgeRequested.connect(self._cockpit_nudge)
         self.viewport.statusMessage.connect(
             lambda text: self.statusBar().showMessage(text, 4500))
         self.model_tree = QTreeWidget()
@@ -2578,6 +2991,7 @@ class CollisionEditorWindow(QMainWindow):
 
         self._build_actions()
         self._build_ui()
+        self._fit_initial_window_to_screen()
         self._sync_all()
         self.statusBar().showMessage(
             "BASE/SKLT assets are read-only; only explicit text exports or "
@@ -2855,8 +3269,8 @@ class CollisionEditorWindow(QMainWindow):
         self.setCentralWidget(splitter)
 
         source_panel = QWidget()
-        source_panel.setMinimumWidth(260)
-        source_panel.setMaximumWidth(440)
+        source_panel.setMinimumWidth(230)
+        source_panel.setMaximumWidth(400)
         source_panel.setSizePolicy(
             QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Expanding)
         source_layout = QVBoxLayout(source_panel)
@@ -2888,13 +3302,12 @@ class CollisionEditorWindow(QMainWindow):
         self.model_tree.setColumnWidth(1, 48)
         self.model_tree.setHorizontalScrollBarPolicy(
             Qt.ScrollBarPolicy.ScrollBarAsNeeded)
-        self.model_tree.setTextElideMode(Qt.TextElideMode.ElideRight)
+        self.model_tree.setTextElideMode(Qt.TextElideMode.ElideNone)
         splitter.addWidget(source_panel)
 
-        # Keep the movement gizmo permanently visible without extending the
-        # already tall properties column.  The viewport wrapper lets the
-        # compact Move Element panel sit over the render area in its top-right
-        # corner, directly below the main toolbar.
+        # The viewport stays dedicated to the asset preview.  The shared move
+        # gizmo lives in the right properties column below the domain tabs so
+        # it can use substantially more room without covering the model.
         viewport_panel = QWidget()
         self.viewport_panel = viewport_panel
         viewport_layout = QGridLayout(viewport_panel)
@@ -2913,8 +3326,11 @@ class CollisionEditorWindow(QMainWindow):
         project_form.setContentsMargins(6, 5, 6, 5)
         project_form.setHorizontalSpacing(6)
         project_form.setVerticalSpacing(3)
+        # The right pane is intentionally wide enough to keep both project
+        # rows on one line. Stable row heights prevent the tab strip from
+        # shifting when the window is resized or another workspace is opened.
         project_form.setRowWrapPolicy(
-            QFormLayout.RowWrapPolicy.WrapLongRows)
+            QFormLayout.RowWrapPolicy.DontWrapRows)
         self.name_edit = QLineEdit()
         self.name_edit.setPlaceholderText("Example")
         self.name_edit.editingFinished.connect(self._project_fields_changed)
@@ -2934,8 +3350,75 @@ class CollisionEditorWindow(QMainWindow):
         self.vanilla_collision_notice.setToolTip(
             "Red Legacy Radius is vanilla-compatible. Green and blue "
             "compound spheres are OpenUA-only script data.")
-        project_form.addRow(self.vanilla_collision_notice)
         right.addWidget(project_box)
+
+        # Keep the right-side workspaces explicit. Collision, Fire Points, Gun
+        # Points and the OpenUA-only Cockpit View share one compact properties
+        # column instead of stacking unrelated controls vertically.
+        self.properties_tabs = QTabWidget()
+        self.properties_tabs.setDocumentMode(True)
+        # Keep the four workspaces inside the actual properties-pane width.
+        # On high-DPI / narrower displays the old tab size hints could make
+        # the whole editor wider than the available desktop.
+        tab_bar = self.properties_tabs.tabBar()
+        tab_bar.setExpanding(True)
+        tab_bar.setElideMode(Qt.TextElideMode.ElideNone)
+        tab_bar.setUsesScrollButtons(False)
+        tab_bar.setMovable(False)
+        # Match OpenUAStudio's established red primary-workspace tabs.
+        tab_bar.setStyleSheet("""
+            QTabBar::tab {
+                background: #602d37;
+                color: #f8edef;
+                border: 1px solid #7c4049;
+                border-bottom: none;
+                padding: 7px 9px;
+                font-weight: normal;
+            }
+            QTabBar::tab:selected {
+                background: #a84552;
+                border-color: #d66b77;
+                color: #ffffff;
+            }
+            QTabBar::tab:hover:!selected {
+                background: #7b3742;
+            }
+        """)
+        self.collision_tab = QWidget()
+        self.fire_points_tab = QWidget()
+        self.gun_points_tab = QWidget()
+        self.cockpit_tab = QWidget()
+        self.collision_tab_layout = QVBoxLayout(self.collision_tab)
+        self.fire_points_tab_layout = QVBoxLayout(self.fire_points_tab)
+        self.gun_points_tab_layout = QVBoxLayout(self.gun_points_tab)
+        self.cockpit_tab_layout = QVBoxLayout(self.cockpit_tab)
+        for tab, layout in (
+                (self.collision_tab, self.collision_tab_layout),
+                (self.fire_points_tab, self.fire_points_tab_layout),
+                (self.gun_points_tab, self.gun_points_tab_layout),
+                (self.cockpit_tab, self.cockpit_tab_layout)):
+            layout.setContentsMargins(2, 3, 2, 3)
+            layout.setSpacing(3)
+            tab.setMinimumSize(0, 0)
+            tab.setSizePolicy(
+                QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
+        self.collision_tab_index = self.properties_tabs.addTab(
+            self.collision_tab, "Collision")
+        self.fire_points_tab_index = self.properties_tabs.addTab(
+            self.fire_points_tab, "Fire Points")
+        self.gun_points_tab_index = self.properties_tabs.addTab(
+            self.gun_points_tab, "Gun Points")
+        self.cockpit_tab_index = self.properties_tabs.addTab(
+            self.cockpit_tab, "Cockpit View")
+        self.properties_tabs.currentChanged.connect(
+            self._properties_tab_changed)
+        self.properties_tabs.setMinimumHeight(0)
+        self.properties_tabs.setSizePolicy(
+            QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Ignored)
+        # The tab workspace owns the flexible vertical area; the shared gizmo
+        # below has a stable height on every tab. This also lets the lists
+        # extend down to the gizmo instead of leaving dead space.
+        right.addWidget(self.properties_tabs, 1)
 
         self.ground_alignment_box = QGroupBox("Ground Alignment")
         ground_layout = QVBoxLayout(self.ground_alignment_box)
@@ -2981,17 +3464,19 @@ class CollisionEditorWindow(QMainWindow):
         ground_layout.addLayout(ground_controls)
         self.ground_alignment_notice = QLabel("")
         self.ground_alignment_notice.hide()
-        right.addWidget(self.ground_alignment_box)
+        self.collision_tab_layout.addWidget(self.vanilla_collision_notice)
+        self.collision_tab_layout.addWidget(self.ground_alignment_box)
 
-        spheres_box = QGroupBox("Spheres")
+        spheres_box = QGroupBox("Spheres (Vanilla/OpenUA)")
         spheres_layout = QVBoxLayout(spheres_box)
+        spheres_layout.setContentsMargins(6, 4, 6, 4)
+        spheres_layout.setSpacing(3)
         self.spheres_box = spheres_box
-        self.sphere_tree.setMinimumHeight(105)
-        self.sphere_tree.setMaximumHeight(165)
+        self.sphere_tree.setMinimumHeight(82)
         self.sphere_tree.setSizePolicy(
-            QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
+            QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
         spheres_box.setSizePolicy(
-            QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Preferred)
+            QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
         sphere_header = self.sphere_tree.header()
         sphere_header.setSectionResizeMode(
             0, QHeaderView.ResizeMode.Stretch)
@@ -3009,13 +3494,16 @@ class CollisionEditorWindow(QMainWindow):
             3, Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
         self.sphere_tree.headerItem().setToolTip(
             1, "Double-click a Radius value to edit the sphere size.")
-        spheres_layout.addWidget(self.sphere_tree, 1)
+        spheres_layout.addWidget(self.sphere_tree)
 
         # Radius belongs to the Spheres workspace rather than being another
         # full-height properties group.  Keep it compact under the sphere list,
         # mirroring the Move Element panel's "control + strength" structure.
-        self.radius_title = QLabel("Sphere Radius")
-        spheres_layout.addWidget(self.radius_title)
+        self.radius_title = QLabel("Sphere Radius", spheres_box)
+        # Compatibility attribute only.  The Spheres group already provides
+        # the section title, so another heading here created a large dead zone
+        # between the table and the actual Radius control.
+        self.radius_title.hide()
         radius_layout = QHBoxLayout()
         self.radius_layout = radius_layout
         radius_layout.setContentsMargins(0, 0, 0, 0)
@@ -3044,7 +3532,7 @@ class CollisionEditorWindow(QMainWindow):
         radius_layout.addWidget(self.radius_spin)
         spheres_layout.addLayout(radius_layout)
 
-        right.addWidget(spheres_box)
+        self.collision_tab_layout.addWidget(spheres_box, 1)
 
         self.fire_points_box = QGroupBox("Fire Points (Vanilla)")
         fire_layout = QVBoxLayout(self.fire_points_box)
@@ -3066,8 +3554,15 @@ class CollisionEditorWindow(QMainWindow):
             "vanilla num_weapons rule; removing the last point disables the "
             "fire-point block.")
         self.remove_fire_point_button.clicked.connect(self.remove_fire_point)
-        fire_buttons.addWidget(self.add_fire_point_button)
-        fire_buttons.addWidget(self.remove_fire_point_button)
+        self.reset_fire_point_button = QPushButton("Reset Position")
+        self.reset_fire_point_button.setToolTip(
+            "Reset vanilla fire_x/fire_y/fire_z to 0 / 0 / 0. If no Fire "
+            "Point is active, this also creates one muzzle at the origin.")
+        self.reset_fire_point_button.clicked.connect(
+            self._reset_fire_point_position)
+        fire_buttons.addWidget(self.add_fire_point_button, 1)
+        fire_buttons.addWidget(self.remove_fire_point_button, 1)
+        fire_buttons.addWidget(self.reset_fire_point_button, 1)
         fire_layout.addLayout(fire_buttons)
         fire_grid = QGridLayout()
         fire_grid.setHorizontalSpacing(5)
@@ -3113,8 +3608,9 @@ class CollisionEditorWindow(QMainWindow):
         fire_layout.addLayout(fire_grid)
         self.fire_point_notice = QLabel("")
         self.fire_point_notice.hide()
-        self.fire_point_tree.setMinimumHeight(90)
-        self.fire_point_tree.setMaximumHeight(135)
+        self.fire_point_tree.setMinimumHeight(82)
+        self.fire_point_tree.setSizePolicy(
+            QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
         fire_header = self.fire_point_tree.header()
         fire_header.setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
         for column in (1, 2, 3):
@@ -3123,8 +3619,10 @@ class CollisionEditorWindow(QMainWindow):
             self.fire_point_tree.headerItem().setTextAlignment(
                 column, Qt.AlignmentFlag.AlignRight
                 | Qt.AlignmentFlag.AlignVCenter)
-        fire_layout.addWidget(self.fire_point_tree)
-        right.addWidget(self.fire_points_box)
+        fire_layout.addWidget(self.fire_point_tree, 1)
+        self.fire_points_box.setSizePolicy(
+            QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
+        self.fire_points_tab_layout.addWidget(self.fire_points_box, 1)
 
         self.gun_points_box = QGroupBox("Gun Points (Vanilla/OpenUA)")
         gun_layout = QVBoxLayout(self.gun_points_box)
@@ -3141,6 +3639,11 @@ class CollisionEditorWindow(QMainWindow):
         self.gun_point_type_combo.addItem(
             "OpenUA (All vehicle classes)", "unit")
         self.gun_point_type_combo.setCurrentIndex(1)
+        self.gun_point_type_combo.setSizeAdjustPolicy(
+            QComboBox.SizeAdjustPolicy.AdjustToMinimumContentsLengthWithIcon)
+        self.gun_point_type_combo.setMinimumContentsLength(12)
+        self.gun_point_type_combo.setSizePolicy(
+            QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
         self.gun_point_type_combo.setToolTip(
             "Chooses the script family used only for newly-added Gun Points. "
             "Vanilla writes robo_* and is intended for Host Station/Robo "
@@ -3151,7 +3654,9 @@ class CollisionEditorWindow(QMainWindow):
         gun_family_row.addWidget(self.gun_point_type_combo, 1)
         gun_layout.addLayout(gun_family_row)
 
-        gun_buttons = QHBoxLayout()
+        gun_buttons = QGridLayout()
+        gun_buttons.setHorizontalSpacing(5)
+        gun_buttons.setVerticalSpacing(3)
         self.add_gun_point_button = QPushButton("Add Gun Point")
         self.add_gun_point_button.setToolTip(
             "Add a real vehicle-side gun mount using the Gun Point type "
@@ -3159,8 +3664,25 @@ class CollisionEditorWindow(QMainWindow):
         self.add_gun_point_button.clicked.connect(self.add_gun_point)
         self.remove_gun_point_button = QPushButton("Remove")
         self.remove_gun_point_button.clicked.connect(self.remove_gun_point)
-        gun_buttons.addWidget(self.add_gun_point_button)
-        gun_buttons.addWidget(self.remove_gun_point_button)
+        self.reset_gun_point_button = QPushButton("Reset Position")
+        self.reset_gun_point_button.setToolTip(
+            "Reset the selected Gun Point position to 0 / 0 / 0 without "
+            "changing its direction, type, name or script family.")
+        self.reset_gun_point_button.clicked.connect(
+            self._reset_gun_point_position)
+        self.reset_all_gun_points_button = QPushButton("Reset All Gun Points")
+        self.reset_all_gun_points_button.setToolTip(
+            "Restore every Gun Point to the values loaded from the current "
+            "script. If the loaded source contained no Gun Points, remove all "
+            "points authored after load.")
+        self.reset_all_gun_points_button.clicked.connect(
+            self._reset_all_gun_points)
+        gun_buttons.addWidget(self.add_gun_point_button, 0, 0)
+        gun_buttons.addWidget(self.remove_gun_point_button, 0, 1)
+        gun_buttons.addWidget(self.reset_gun_point_button, 1, 0)
+        gun_buttons.addWidget(self.reset_all_gun_points_button, 1, 1)
+        gun_buttons.setColumnStretch(0, 1)
+        gun_buttons.setColumnStretch(1, 1)
         gun_layout.addLayout(gun_buttons)
 
         self.gun_family_value = QLabel("No point selected")
@@ -3171,9 +3693,11 @@ class CollisionEditorWindow(QMainWindow):
             "generic unit_* points are valid for any OpenUA vehicle class.")
         gun_layout.addWidget(self.gun_family_value)
 
-        # Position, direction and metadata share one grid so corresponding
-        # controls keep the same column widths.  This avoids the uneven X/Y/Z
-        # and Dir X/Dir Y/Dir Z boxes produced by three independent layouts.
+        # The right pane is now deliberately wider, so Gun Point authoring can
+        # stay compact without truncating signed coordinates: X/Y/Z share one
+        # row, direction shares a second row, and Vehicle/Name share a third.
+        # Dir Y remains intentionally non-authorable; imported values are
+        # preserved internally and on rewrite.
         gun_fields_grid = QGridLayout()
         self.gun_fields_grid = gun_fields_grid
         gun_fields_grid.setHorizontalSpacing(5)
@@ -3181,17 +3705,19 @@ class CollisionEditorWindow(QMainWindow):
         self.gun_point_spins = {}
         self.gun_dir_spins = {}
 
-        for column, axis in enumerate(("X", "Y", "Z")):
-            label_column = column * 2
+        for pair, axis in enumerate(("X", "Y", "Z")):
+            label_column = pair * 2
             field_column = label_column + 1
-
             gun_fields_grid.addWidget(QLabel(axis), 0, label_column)
             spin = CompactScaleSpinBox()
             spin.setRange(-1_000_000.0, 1_000_000.0)
             spin.setDecimals(3)
             spin.setSingleStep(1.0)
             spin.setKeyboardTracking(True)
-            spin.setMinimumWidth(72)
+            spin.setMinimumWidth(82)
+            spin.setMaximumWidth(132)
+            spin.setSizePolicy(
+                QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
             spin.setToolTip(f"Gun mount local {axis} position.")
             field = axis.lower()
             spin.valueChanged.connect(
@@ -3202,22 +3728,24 @@ class CollisionEditorWindow(QMainWindow):
                     f"gun_{name}"))
             self.gun_point_spins[field] = spin
             gun_fields_grid.addWidget(spin, 0, field_column)
+            gun_fields_grid.setColumnStretch(field_column, 1)
 
-            gun_fields_grid.addWidget(
-                QLabel(f"Dir {axis}"), 1, label_column)
+        for pair, axis in enumerate(("X", "Z")):
+            label_column = pair * 2
+            field_column = label_column + 1
+            gun_fields_grid.addWidget(QLabel(f"Dir {axis}"), 1, label_column)
             dir_spin = CompactScaleSpinBox()
-            # Canonical UA gun mount direction components are authored as
-            # -1, 0 or +1 (including diagonal combinations such as 1,0,1).
-            # Keep editing discrete so the arrows cannot create meaningless
-            # 0.1/0.2 increments. Existing script data is still parsed as a
-            # float and is not rewritten unless the user actually edits it.
             dir_spin.setRange(-1.0, 1.0)
             dir_spin.setDecimals(0)
             dir_spin.setSingleStep(1.0)
             dir_spin.setKeyboardTracking(True)
-            dir_spin.setMinimumWidth(72)
+            dir_spin.setMinimumWidth(82)
+            dir_spin.setMaximumWidth(132)
+            dir_spin.setSizePolicy(
+                QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
             dir_spin.setToolTip(
-                f"Gun mount local direction {axis}: canonical values -1, 0 or 1.")
+                f"Gun mount local direction {axis}: canonical values -1, 0 or 1. "
+                "Dir Y is intentionally not authorable in this editor.")
             dir_field = f"dir_{axis.lower()}"
             dir_spin.valueChanged.connect(
                 lambda value, name=dir_field:
@@ -3227,12 +3755,14 @@ class CollisionEditorWindow(QMainWindow):
                     f"gun_{name}"))
             self.gun_dir_spins[axis.lower()] = dir_spin
             gun_fields_grid.addWidget(dir_spin, 1, field_column)
-            gun_fields_grid.setColumnStretch(field_column, 1)
 
-        gun_fields_grid.addWidget(QLabel("Type"), 2, 0)
+        gun_fields_grid.addWidget(QLabel("Vehicle"), 2, 0)
         self.gun_type_spin = QSpinBox()
         self.gun_type_spin.setRange(0, 255)
-        self.gun_type_spin.setMinimumWidth(72)
+        self.gun_type_spin.setMinimumWidth(82)
+        self.gun_type_spin.setMaximumWidth(132)
+        self.gun_type_spin.setSizePolicy(
+            QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
         self.gun_type_spin.setToolTip(
             "Vehicle prototype ID used for the mounted gun/flak.")
         self.gun_type_spin.valueChanged.connect(self._gun_type_changed)
@@ -3245,12 +3775,15 @@ class CollisionEditorWindow(QMainWindow):
         self.gun_name_edit.setPlaceholderText("optional")
         self.gun_name_edit.setToolTip(
             "Optional robo_gun_name / unit_gun_name for this mount.")
+        self.gun_name_edit.setSizePolicy(
+            QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
         self.gun_name_edit.editingFinished.connect(self._gun_name_changed)
         gun_fields_grid.addWidget(self.gun_name_edit, 2, 3, 1, 3)
         gun_layout.addLayout(gun_fields_grid)
 
-        self.gun_point_tree.setMinimumHeight(90)
-        self.gun_point_tree.setMaximumHeight(145)
+        self.gun_point_tree.setMinimumHeight(82)
+        self.gun_point_tree.setSizePolicy(
+            QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
         gun_header = self.gun_point_tree.header()
         gun_header.setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
         gun_header.setSectionResizeMode(
@@ -3261,9 +3794,139 @@ class CollisionEditorWindow(QMainWindow):
             self.gun_point_tree.headerItem().setTextAlignment(
                 column, Qt.AlignmentFlag.AlignRight
                 | Qt.AlignmentFlag.AlignVCenter)
-        gun_layout.addWidget(self.gun_point_tree)
-        right.addWidget(self.gun_points_box)
+        gun_layout.addWidget(self.gun_point_tree, 1)
+        self.gun_points_box.setSizePolicy(
+            QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
+        self.gun_points_tab_layout.addWidget(self.gun_points_box, 1)
 
+        self.cockpit_box = QGroupBox("Cockpit View (OpenUA)")
+        cockpit_layout = QVBoxLayout(self.cockpit_box)
+        cockpit_layout.setContentsMargins(6, 4, 6, 4)
+        cockpit_layout.setSpacing(3)
+        self.cockpit_notice = QLabel(
+            "OpenUA only — not supported by vanilla Urban Assault. "
+            "The preview keeps the vehicle's real orientation; only the "
+            "local camera position X/Y/Z is authored.")
+        self.cockpit_notice.setWordWrap(True)
+        self.cockpit_notice.setStyleSheet(
+            "color: #e1aa62; font-size: 10px;")
+        cockpit_layout.addWidget(self.cockpit_notice)
+
+        self.cockpit_camera_button = QPushButton("Enable Cockpit Camera Offset")
+        self.cockpit_camera_button.setToolTip(
+            "Enable the OpenUA cockpit-camera authoring workspace. Until this "
+            "button is pressed, no cockpit parameters are written and the "
+            "cockpit preview remains inactive. Imported scripts that already "
+            "contain cockpit offsets enable it automatically.")
+        self.cockpit_camera_button.clicked.connect(
+            self._toggle_cockpit_camera)
+        cockpit_layout.addWidget(self.cockpit_camera_button)
+
+        cockpit_preview_grid = QGridLayout()
+        cockpit_preview_grid.setHorizontalSpacing(6)
+        cockpit_preview_grid.setVerticalSpacing(2)
+        cockpit_preview_grid.addWidget(QLabel("Runtime model"), 0, 0)
+        self.cockpit_model_state_combo = QComboBox()
+        self.cockpit_model_state_combo.addItem(
+            "Player / normal (vp_normal)", "normal")
+        self.cockpit_model_state_combo.addItem(
+            "Idle / stationary (vp_wait)", "idle")
+        self.cockpit_model_state_combo.setToolTip(
+            "Preview-only VP state. OpenUA can render vp_wait while the "
+            "vehicle is idle and vp_normal while moving; this selector never "
+            "changes script data.")
+        self.cockpit_model_state_combo.currentIndexChanged.connect(
+            self._cockpit_preview_setting_changed)
+        cockpit_preview_grid.addWidget(self.cockpit_model_state_combo, 0, 1)
+
+        cockpit_preview_grid.addWidget(QLabel("Game aspect"), 1, 0)
+        self.cockpit_aspect_combo = QComboBox()
+        self.cockpit_aspect_combo.addItem("16:10", 16.0 / 10.0)
+        self.cockpit_aspect_combo.addItem("16:9", 16.0 / 9.0)
+        self.cockpit_aspect_combo.addItem("4:3", 4.0 / 3.0)
+        self.cockpit_aspect_combo.addItem("Editor viewport", None)
+        self.cockpit_aspect_combo.setToolTip(
+            "Preview-only gameplay aspect. 16:10 matches 1536x960. "
+            "This never writes a vehicle parameter.")
+        self.cockpit_aspect_combo.currentIndexChanged.connect(
+            self._cockpit_preview_setting_changed)
+        cockpit_preview_grid.addWidget(self.cockpit_aspect_combo, 1, 1)
+        cockpit_preview_grid.setColumnStretch(1, 1)
+        cockpit_layout.addLayout(cockpit_preview_grid)
+
+        self.cockpit_preview_info = QLabel("")
+        self.cockpit_preview_info.setWordWrap(True)
+        self.cockpit_preview_info.setStyleSheet(
+            "font-size: 10px; color: #aeb6c2;")
+        cockpit_layout.addWidget(self.cockpit_preview_info)
+
+        self.cockpit_controls = QWidget()
+        cockpit_controls_layout = QVBoxLayout(self.cockpit_controls)
+        cockpit_controls_layout.setContentsMargins(0, 0, 0, 0)
+        cockpit_controls_layout.setSpacing(3)
+
+        cockpit_grid = QGridLayout()
+        cockpit_grid.setHorizontalSpacing(6)
+        cockpit_grid.setVerticalSpacing(3)
+        self.cockpit_camera_spins = {}
+        for column, axis in enumerate(("X", "Y", "Z")):
+            cockpit_grid.addWidget(QLabel(axis), 0, column)
+            spin = CompactScaleSpinBox()
+            spin.setRange(-1_000_000.0, 1_000_000.0)
+            spin.setDecimals(3)
+            spin.setSingleStep(1.0)
+            spin.setKeyboardTracking(True)
+            spin.setMinimumWidth(88)
+            spin.setSizePolicy(
+                QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+            spin.setToolTip(
+                f"OpenUA cockpit_camera_offset_{axis.lower()} in vehicle-local "
+                "coordinates.")
+            field = axis.lower()
+            spin.valueChanged.connect(
+                lambda value, name=field:
+                self._cockpit_value_changed(name, value))
+            spin.editingFinished.connect(
+                lambda name=field:
+                self._finish_vehicle_preview_edit(f"cockpit_{name}"))
+            self.cockpit_camera_spins[field] = spin
+            cockpit_grid.addWidget(spin, 1, column)
+            cockpit_grid.setColumnStretch(column, 1)
+        self.cockpit_x_spin = self.cockpit_camera_spins["x"]
+        self.cockpit_y_spin = self.cockpit_camera_spins["y"]
+        self.cockpit_z_spin = self.cockpit_camera_spins["z"]
+        cockpit_controls_layout.addLayout(cockpit_grid)
+
+        cockpit_buttons = QHBoxLayout()
+        self.reset_cockpit_button = QPushButton("Reset Position to 0 / 0 / 0")
+        self.reset_cockpit_button.setToolTip(
+            "Reset the active cockpit camera position to the vehicle origin. "
+            "Use Disable Cockpit Camera Offset to remove the parameters.")
+        self.reset_cockpit_button.clicked.connect(self._reset_cockpit_camera)
+        cockpit_buttons.addWidget(self.reset_cockpit_button)
+        cockpit_controls_layout.addLayout(cockpit_buttons)
+
+        self.cockpit_hint = QLabel(
+            "Cockpit preview uses OpenUA's real 90° UAFrustum projection, "
+            "runtime widescreen aspect correction and near plane. Use the "
+            "gizmo or Left/Right = X, Up/Down = Z, Page Up/Page Down = Y. "
+            "Only the gizmo itself can be orbited.")
+        self.cockpit_hint.setWordWrap(True)
+        self.cockpit_hint.setStyleSheet("font-size: 10px; color: #aeb6c2;")
+        cockpit_controls_layout.addWidget(self.cockpit_hint)
+
+        self.cockpit_output = QPlainTextEdit()
+        self.cockpit_output.setReadOnly(True)
+        self.cockpit_output.setMinimumHeight(56)
+        self.cockpit_output.setMaximumHeight(72)
+        self.cockpit_output.setPlaceholderText(
+            "cockpit_camera_offset_x/y/z output")
+        cockpit_controls_layout.addWidget(self.cockpit_output)
+        cockpit_layout.addWidget(self.cockpit_controls)
+        cockpit_layout.addStretch(1)
+        self.cockpit_box.setSizePolicy(
+            QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
+        self.cockpit_tab_layout.addWidget(self.cockpit_box, 1)
 
         selected_box = QGroupBox("Selected Element")
         self.selected_box = selected_box
@@ -3302,15 +3965,21 @@ class CollisionEditorWindow(QMainWindow):
             "on Z, and Page Up/Page Down move on Y. Every key press uses "
             "the current Move strength value.")
         transform_layout = QVBoxLayout(transform_box)
-        transform_layout.setContentsMargins(5, 3, 5, 3)
-        transform_layout.setSpacing(2)
+        transform_layout.setContentsMargins(6, 5, 6, 5)
+        transform_layout.setSpacing(4)
         self.gizmo = CollisionMoveGizmo()
-        self.gizmo.setMinimumSize(215, 122)
-        self.gizmo.setMaximumHeight(140)
+        self.gizmo.setMinimumSize(300, 150)
         self.gizmo.setSizePolicy(
-            QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+            QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
         self.gizmo.directionTriggered.connect(self._gizmo_nudge)
         transform_layout.addWidget(self.gizmo, 1)
+        self.gizmo_view_hint = QLabel(
+            "Drag empty gizmo space to rotate its controls only. "
+            "Double-click empty space to realign.")
+        self.gizmo_view_hint.setWordWrap(True)
+        self.gizmo_view_hint.setStyleSheet(
+            "font-size: 10px; color: #aeb6c2;")
+        transform_layout.addWidget(self.gizmo_view_hint)
         strength_row = QHBoxLayout()
         strength_row.addWidget(QLabel("Move strength"))
         self.move_strength_slider = QSlider(Qt.Orientation.Horizontal)
@@ -3329,17 +3998,15 @@ class CollisionEditorWindow(QMainWindow):
         strength_row.addWidget(self.move_strength_slider, 1)
         strength_row.addWidget(self.move_strength_spin)
         transform_layout.addLayout(strength_row)
-        transform_box.setMaximumHeight(195)
-        transform_box.setMinimumWidth(255)
-        transform_box.setMaximumWidth(310)
+        # Fixed workspace height keeps the gizmo identical when switching
+        # tabs; only the properties area above grows/shrinks with the window.
+        transform_box.setFixedHeight(248)
         transform_box.setSizePolicy(
-            QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Fixed)
-        # Overlay the shared movement gizmo on the top-right of the viewport
-        # instead of consuming vertical space in the properties scroller.
-        self.viewport_layout.addWidget(
-            transform_box, 0, 0,
-            Qt.AlignmentFlag.AlignTop | Qt.AlignmentFlag.AlignRight)
-        transform_box.raise_()
+            QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        # One shared gizmo is reused by every domain tab.  Keeping it directly
+        # below the tabs avoids four duplicate widgets and uses the newly freed
+        # lower-right area for a much larger, easier-to-read control.
+        right.addWidget(transform_box, 0)
         # Selected Element stays at the same lower viewport height but moves
         # to the left.  This frees the bottom-right corner for AssetViewport's
         # existing XYZ orientation indicator without adding a duplicate overlay.
@@ -3351,20 +4018,51 @@ class CollisionEditorWindow(QMainWindow):
         properties_scroll = QScrollArea()
         properties_scroll.setWidgetResizable(True)
         properties_scroll.setFrameShape(QFrame.Shape.NoFrame)
-        # The properties column is a vertical workspace. A tiny width mismatch
-        # between styled child widgets previously produced a useless horizontal
-        # scrollbar; keep the panel width authoritative and eradicate it.
+        # The authoring column is intentionally dimensioned to fit all four
+        # workspaces without an outer scrollbar. Lists may still scroll inside
+        # themselves when they contain many entries; the workspace itself does
+        # not move or change width when switching tabs.
         properties_scroll.setHorizontalScrollBarPolicy(
             Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
-        properties_scroll.setMinimumWidth(330)
+        properties_scroll.setVerticalScrollBarPolicy(
+            Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        # Keep the authoring column at the user-validated compact width while
+        # still leaving room for all four full tab labels and controls.
+        # The user can continue widening it manually when desired.
+        properties_scroll.setMinimumWidth(420)
+        properties_scroll.setMaximumWidth(760)
         properties.setMinimumWidth(0)
+        properties.setMinimumHeight(0)
+        properties.setSizePolicy(
+            QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Expanding)
         properties_scroll.setWidget(properties)
         self.properties_scroll = properties_scroll
         splitter.addWidget(properties_scroll)
         splitter.setStretchFactor(0, 0)
         splitter.setStretchFactor(1, 1)
         splitter.setStretchFactor(2, 0)
-        splitter.setSizes([300, 830, 360])
+        # Start at the user-validated splitter proportions: the archive list is
+        # wide enough for full resource names, while the properties column is
+        # compact and the viewport remains the flexible central workspace.
+        splitter.setSizes([230, 850, 430])
+
+    def _fit_initial_window_to_screen(self) -> None:
+        """Keep the initial editor window inside the usable desktop area."""
+
+        screen = self.screen() or QApplication.primaryScreen()
+        if screen is None:
+            self.resize(1100, 720)
+            return
+
+        available = screen.availableGeometry()
+        # Qt reports availableGeometry in device-independent pixels, so this
+        # also fixes high-DPI setups where a fixed 1100px logical window can
+        # otherwise extend beyond the physical desktop.
+        target_width = min(1500, max(1100, int(available.width() * 0.96)))
+        target_height = min(900, max(720, int(available.height() * 0.94)))
+        target_width = min(target_width, available.width())
+        target_height = min(target_height, available.height())
+        self.resize(target_width, target_height)
 
     @staticmethod
     def _coordinate_spin() -> QDoubleSpinBox:
@@ -3400,10 +4098,53 @@ class CollisionEditorWindow(QMainWindow):
             self._undo = self._undo[-100:]
         self._redo.clear()
 
+    def _active_internal_base_name(self) -> str:
+        """Return the BASE backing the primary vehicle/model when known."""
+
+        vp_id = None
+        if self._active_model_reference is not None:
+            vp_id = self._active_model_reference.vp_normal
+        elif hasattr(self, "model_tree"):
+            item = self.model_tree.currentItem()
+            if item is not None:
+                vp_ids = item.data(0, _MODEL_VP_ROLE) or ()
+                if vp_ids:
+                    vp_id = int(vp_ids[0])
+        if self._vp_table is not None and vp_id is not None \
+                and 0 <= vp_id < len(self._vp_table.entries):
+            return self._vp_table.entry(vp_id).base_name
+        if self._active_base_path is not None \
+                and self._active_base_path.name.casefold() != "set.bas":
+            return self._active_base_path.name
+        return ""
+
+    def _update_window_title(self) -> None:
+        parts = [WINDOW_TITLE]
+        if self._active_script_path is not None and self.project.name.strip():
+            parts.append(self.project.name.strip())
+
+        internal_base = self._active_internal_base_name()
+        if internal_base:
+            parts.append(internal_base)
+
+        if self._active_base_path is not None:
+            full_path = self._active_base_path.expanduser().resolve(
+                strict=False)
+            if (not internal_base
+                    or internal_base.casefold() != full_path.name.casefold()):
+                parts.append(full_path.name)
+            parts.append(str(full_path))
+        elif self._active_script_path is not None:
+            full_script = self._active_script_path.expanduser().resolve(
+                strict=False)
+            parts.append(str(full_script))
+
+        self.setWindowTitle(
+            ("* " if self._modified else "") + " - ".join(parts))
+
     def _set_modified(self, modified=True):
         self._modified = bool(modified)
-        title = "Collision Editor — OpenUAStudio"
-        self.setWindowTitle(("* " if self._modified else "") + title)
+        self._update_window_title()
 
     def undo(self):
         if not self._undo:
@@ -3434,8 +4175,16 @@ class CollisionEditorWindow(QMainWindow):
         self._sync_all()
 
     def _sync_gizmo_camera(self):
-        self.gizmo.set_camera_orientation(
-            self.viewport._yaw, self.viewport._pitch)
+        if self._is_cockpit_tab_active():
+            # Keep the cockpit *camera* fixed to OpenUA semantics, but do not
+            # force the gizmo into that front-on projection: +Z/-Z would sit
+            # on top of each other and become awkward to click.  The gizmo is
+            # only a control surface, so start from the familiar oblique view
+            # and let the user orbit it independently by dragging empty space.
+            self.gizmo.set_camera_orientation(-35.0, 20.0)
+        else:
+            self.gizmo.set_camera_orientation(
+                self.viewport._yaw, self.viewport._pitch)
 
     def _on_manual_camera_changed(self):
         with QSignalBlocker(self.toolbar_view_preset_combo):
@@ -3470,6 +4219,11 @@ class CollisionEditorWindow(QMainWindow):
         self._active_script_path = None
         self._active_script_kind = ""
         self._active_script_id = None
+        self._active_model_reference = None
+        self._loaded_gun_points_enabled = False
+        self._loaded_gun_points = []
+        self._loaded_unit_gun_default_icon = ""
+        self._loaded_gun_point_scheme = "unit"
 
     def open_vehicle_script_dialog(self):
         path, _ = QFileDialog.getOpenFileName(
@@ -3572,12 +4326,16 @@ class CollisionEditorWindow(QMainWindow):
                 overeof_enabled, overeof = import_overeof_block(text, block)
                 (fire_enabled, fire_x, fire_y, fire_z,
                  num_weapons) = import_fire_points_block(text, block)
+                (cockpit_enabled, cockpit_x, cockpit_y,
+                 cockpit_z) = import_cockpit_camera_block(text, block)
                 (gun_enabled, gun_points,
                  unit_gun_default_icon) = import_gun_points_block(text, block)
             else:
                 overeof_enabled, overeof = False, 0.0
                 fire_enabled, fire_x, fire_y, fire_z = False, 0.0, 0.0, 0.0
                 num_weapons = 1
+                cockpit_enabled, cockpit_x, cockpit_y, cockpit_z = (
+                    False, 0.0, 0.0, 0.0)
                 gun_enabled, gun_points, unit_gun_default_icon = False, [], ""
         except CollisionScriptError as exc:
             QMessageBox.critical(
@@ -3608,6 +4366,10 @@ class CollisionEditorWindow(QMainWindow):
             gun_points_enabled=gun_enabled,
             gun_points=gun_points,
             unit_gun_default_icon=unit_gun_default_icon,
+            cockpit_camera_enabled=cockpit_enabled,
+            cockpit_camera_offset_x=cockpit_x,
+            cockpit_camera_offset_y=cockpit_y,
+            cockpit_camera_offset_z=cockpit_z,
             legacy=legacy,
             compound=compounds,
         )
@@ -3620,9 +4382,15 @@ class CollisionEditorWindow(QMainWindow):
             # Mixed scripts remain mixed. Prefer the generic OpenUA family for
             # a brand-new point until the user selects a specific existing one.
             self._new_gun_point_scheme = "unit"
+        self._capture_loaded_gun_points()
         self._active_script_path = script_path
         self._active_script_kind = block.kind
         self._active_script_id = block.object_id
+        self._active_model_reference = reference
+        self._active_base_path = chosen_set
+        if hasattr(self, "cockpit_model_state_combo"):
+            with QSignalBlocker(self.cockpit_model_state_combo):
+                self.cockpit_model_state_combo.setCurrentIndex(0)
         self._selected = 0 if self.project.spheres() else -1
         self._selected_fire_point = -1
         self._selected_gun_point = -1
@@ -3648,6 +4416,13 @@ class CollisionEditorWindow(QMainWindow):
         return True
 
     def _select_model_by_vp(self, vp_id: int) -> bool:
+        item = self._model_item_by_vp(vp_id)
+        if item is None:
+            return False
+        self.model_tree.setCurrentItem(item)
+        return True
+
+    def _model_item_by_vp(self, vp_id: int):
         matches = []
         for index in range(self.model_tree.topLevelItemCount()):
             item = self.model_tree.topLevelItem(index)
@@ -3655,12 +4430,79 @@ class CollisionEditorWindow(QMainWindow):
             if int(vp_id) in vp_ids:
                 matches.append(item)
         if not matches:
-            return False
-        # VP slots are unique.  If a malformed archive exposes more than one
-        # candidate, prefer the root object whose source offset matched the
-        # embedded VP entry and keep the operation deterministic.
-        self.model_tree.setCurrentItem(matches[0])
-        return True
+            return None
+        return matches[0]
+
+    def _cockpit_requested_vp(self) -> tuple[int | None, str]:
+        reference = self._active_model_reference
+        if reference is None or self.project.target_category != VEHICLE:
+            return None, ""
+        state = (
+            self.cockpit_model_state_combo.currentData()
+            if hasattr(self, "cockpit_model_state_combo") else "normal")
+        if state == "idle" and reference.vp_wait is not None:
+            return reference.vp_wait, "vp_wait"
+        return reference.vp_normal, "vp_normal"
+
+    def _sync_cockpit_preview_model(self) -> None:
+        """Load the runtime VP state without changing authored project data."""
+
+        if self.family is None:
+            if hasattr(self, "cockpit_preview_info"):
+                self.cockpit_preview_info.setText("")
+            return
+
+        cockpit_active = self._is_cockpit_tab_active()
+        desired_owner = self._current_owner
+        info = ""
+        if cockpit_active and self._active_model_reference is not None:
+            vp_id, state_name = self._cockpit_requested_vp()
+            item = self._model_item_by_vp(vp_id) if vp_id is not None else None
+            if item is None and state_name == "vp_wait":
+                vp_id = self._active_model_reference.vp_normal
+                state_name = "vp_normal fallback"
+                item = self._model_item_by_vp(vp_id)
+            if item is not None:
+                desired_owner = item.data(0, Qt.ItemDataRole.UserRole)
+                base_name = ""
+                if (self._vp_table is not None and vp_id is not None
+                        and 0 <= vp_id < len(self._vp_table.entries)):
+                    base_name = self._vp_table.entry(vp_id).base_name
+                info = f"Preview: {state_name} {vp_id}"
+                if base_name:
+                    info += f" — {base_name}"
+            else:
+                info = (
+                    "Preview: script VP unavailable in the loaded archive; "
+                    "using the selected model.")
+        elif cockpit_active:
+            info = (
+                "Preview: selected model. Import a vehicle script to switch "
+                "between its vp_wait and vp_normal states automatically.")
+
+        if desired_owner is not None and desired_owner != self._viewport_owner:
+            self.viewport.load_family(
+                self.family, {desired_owner}, keep_camera=True,
+                primary_owner=desired_owner)
+            self.viewport.set_model_preview_scale(
+                self.project.model_scale_x,
+                self.project.model_scale_y,
+                self.project.model_scale_z)
+            self.viewport.set_ground_alignment(
+                self.project.target_category == VEHICLE,
+                self.project.overeof_enabled,
+                self.project.overeof)
+            self._viewport_owner = desired_owner
+
+        if hasattr(self, "cockpit_preview_info"):
+            self.cockpit_preview_info.setText(info)
+
+    def _cockpit_preview_setting_changed(self, *_args) -> None:
+        if not hasattr(self, "cockpit_aspect_combo"):
+            return
+        self.viewport.set_cockpit_preview_aspect(
+            self.cockpit_aspect_combo.currentData())
+        self._sync_cockpit_preview_model()
 
     def overwrite_loaded_script(self):
         if (self._active_script_path is None
@@ -3738,6 +4580,7 @@ class CollisionEditorWindow(QMainWindow):
         self._vp_embedded = embedded
         self._vp_table = vp_table
         self._vp_table_source = vp_source
+        self._active_base_path = path
         self._last_directory = path.parent
         self.project.source_base = path.name
         self._fill_models(family)
@@ -3776,6 +4619,7 @@ class CollisionEditorWindow(QMainWindow):
         self._vp_embedded = None
         self._vp_table = None
         self._vp_table_source = ""
+        self._active_base_path = Path(path)
         self._last_directory = Path(path).parent
         self.project.source_base = ""
         self._fill_models(family)
@@ -3878,6 +4722,9 @@ class CollisionEditorWindow(QMainWindow):
         self._current_owner = owner
         self.viewport.load_family(
             self.family, {owner}, primary_owner=owner)
+        self._current_owner_base_bounds = (
+            self.viewport._model_preview_base_owner_bounds.get(owner))
+        self._viewport_owner = owner
         self.viewport.frame_owner(owner)
         self.project.source_model = current.data(0, _MODEL_NAME_ROLE)
         with QSignalBlocker(self.toolbar_view_preset_combo):
@@ -3887,7 +4734,23 @@ class CollisionEditorWindow(QMainWindow):
         self._sync_all()
 
     def _model_bounds(self):
-        return self.viewport.local_scaled_owner_bounds(self._current_owner)
+        # Cockpit View may temporarily render vp_wait while collision data
+        # remains authored against the selected vp_normal owner.
+        bounds = self._current_owner_base_bounds
+        if bounds is None:
+            return self.viewport.local_scaled_owner_bounds(self._current_owner)
+        x0, y0, z0, x1, y1, z1 = bounds
+        scale = (
+            self.project.model_scale_x,
+            self.project.model_scale_y,
+            self.project.model_scale_z,
+        )
+        a = (x0 * scale[0], y0 * scale[1], z0 * scale[2])
+        b = (x1 * scale[0], y1 * scale[1], z1 * scale[2])
+        return (
+            min(a[0], b[0]), min(a[1], b[1]), min(a[2], b[2]),
+            max(a[0], b[0]), max(a[1], b[1]), max(a[2], b[2]),
+        )
 
     def _default_sphere(self, category: str) -> CollisionSphere:
         bounds = self._model_bounds()
@@ -4152,6 +5015,15 @@ class CollisionEditorWindow(QMainWindow):
                       and 0 <= index < point_count) else -1)
         self._selected_gun_point = -1
         self._selected = -1
+        if (self._selected_fire_point >= 0
+                and self.properties_tabs.currentIndex()
+                != self.fire_points_tab_index):
+            # Viewport picks are domain navigation too: jump directly to the
+            # controls for the selected muzzle without triggering a redundant
+            # currentChanged sync before the normal _sync_all below.
+            with QSignalBlocker(self.properties_tabs):
+                self.properties_tabs.setCurrentIndex(
+                    self.fire_points_tab_index)
         self._sync_all()
 
     def _selected_gun(self) -> GunPoint | None:
@@ -4351,6 +5223,99 @@ class CollisionEditorWindow(QMainWindow):
         self._set_modified()
         self._sync_all()
 
+    def _is_cockpit_tab_selected(self) -> bool:
+        return (hasattr(self, "properties_tabs")
+                and self.properties_tabs.currentIndex()
+                == self.cockpit_tab_index
+                and self.project.target_category == VEHICLE)
+
+    def _is_cockpit_tab_active(self) -> bool:
+        # The Cockpit tab itself is harmless. Runtime-style preview and gizmo
+        # editing start only after the explicit Enable button is pressed (or
+        # when an imported script already contains cockpit offsets).
+        return (self._is_cockpit_tab_selected()
+                and self.project.cockpit_camera_enabled)
+
+    def _properties_tab_changed(self, _index: int) -> None:
+        # Changing workspace must never modify authored data. It only switches
+        # the viewport presentation and which object the shared gizmo moves.
+        cockpit_selected = self._is_cockpit_tab_selected()
+        cockpit_active = self._is_cockpit_tab_active()
+        self.viewport.set_cockpit_preview_active(cockpit_active)
+        if hasattr(self, "toolbar_view_preset_combo"):
+            self.toolbar_view_preset_combo.setEnabled(not cockpit_active)
+        if hasattr(self, "reset_view_action"):
+            self.reset_view_action.setEnabled(not cockpit_active)
+        if hasattr(self, "selected_box"):
+            self.selected_box.setVisible(not cockpit_active)
+        if hasattr(self, "transform_box"):
+            self.transform_box.setTitle(
+                "Move Cockpit Camera" if cockpit_selected else "Move Element")
+        if hasattr(self, "cockpit_aspect_combo"):
+            self.viewport.set_cockpit_preview_aspect(
+                self.cockpit_aspect_combo.currentData())
+        self._sync_cockpit_preview_model()
+        self._sync_gizmo_camera()
+        if cockpit_active:
+            self.viewport.setFocus(Qt.FocusReason.OtherFocusReason)
+        if not self._syncing:
+            self._sync_all()
+
+    def _toggle_cockpit_camera(self) -> None:
+        if self._syncing or self.project.target_category != VEHICLE:
+            return
+        self._vehicle_preview_active_edits.clear()
+        self._push_undo()
+        self.project.cockpit_camera_enabled = (
+            not self.project.cockpit_camera_enabled)
+        self._set_modified()
+        self._sync_all()
+
+    def _cockpit_value_changed(self, axis: str, value: float) -> None:
+        if self._syncing or self.project.target_category != VEHICLE:
+            return
+        value = float(value)
+        if not math.isfinite(value) or axis not in {"x", "y", "z"}:
+            return
+        field = f"cockpit_camera_offset_{axis}"
+        if abs(float(getattr(self.project, field)) - value) < 1e-9:
+            return
+        self._begin_vehicle_preview_edit(f"cockpit_{axis}")
+        setattr(self.project, field, value)
+        self._set_modified()
+        self._sync_all()
+
+    def _reset_cockpit_camera(self) -> None:
+        if self.project.target_category != VEHICLE:
+            return
+        values = (
+            self.project.cockpit_camera_enabled,
+            self.project.cockpit_camera_offset_x,
+            self.project.cockpit_camera_offset_y,
+            self.project.cockpit_camera_offset_z,
+        )
+        if values == (False, 0.0, 0.0, 0.0):
+            return
+        self._vehicle_preview_active_edits.clear()
+        self._push_undo()
+        self.project.cockpit_camera_offset_x = 0.0
+        self.project.cockpit_camera_offset_y = 0.0
+        self.project.cockpit_camera_offset_z = 0.0
+        self._set_modified()
+        self._sync_all()
+
+    def _cockpit_nudge(self, direction) -> None:
+        if not self._is_cockpit_tab_active():
+            return
+        step = float(self.move_strength_spin.value())
+        self._vehicle_preview_active_edits.clear()
+        self._push_undo()
+        self.project.cockpit_camera_offset_x += float(direction[0]) * step
+        self.project.cockpit_camera_offset_y += float(direction[1]) * step
+        self.project.cockpit_camera_offset_z += float(direction[2]) * step
+        self._set_modified()
+        self._sync_all()
+
     def _begin_vehicle_preview_edit(self, field: str) -> None:
         if field not in self._vehicle_preview_active_edits:
             self._push_undo()
@@ -4408,6 +5373,34 @@ class CollisionEditorWindow(QMainWindow):
             self.statusBar().showMessage(
                 "Vanilla Fire Points share one symmetric rack; removing a "
                 "point re-spaced the remaining muzzles.", 5000)
+        self._set_modified()
+        self._sync_all()
+
+    def _reset_fire_point_position(self) -> None:
+        """Reset the authored vanilla Fire Point rack to the model origin."""
+
+        if self.project.target_category != VEHICLE:
+            return
+        target_count = (
+            max(1, int(self.project.num_weapons))
+            if self.project.fire_points_enabled else 1)
+        if (self.project.fire_points_enabled
+                and self.project.fire_x == 0.0
+                and self.project.fire_y == 0.0
+                and self.project.fire_z == 0.0
+                and self.project.num_weapons == target_count):
+            return
+        self._vehicle_preview_active_edits.clear()
+        self._push_undo()
+        self.project.fire_points_enabled = True
+        self.project.fire_x = 0.0
+        self.project.fire_y = 0.0
+        self.project.fire_z = 0.0
+        self.project.num_weapons = target_count
+        if self._selected_fire_point < 0:
+            self._selected_fire_point = 0
+        self._selected = -1
+        self._selected_gun_point = -1
         self._set_modified()
         self._sync_all()
 
@@ -4486,6 +5479,57 @@ class CollisionEditorWindow(QMainWindow):
         self._set_modified()
         self._sync_all()
 
+    def _capture_loaded_gun_points(self) -> None:
+        """Snapshot source-authored Gun Points for Reset All Gun Points."""
+
+        self._loaded_gun_points_enabled = bool(
+            self.project.gun_points_enabled)
+        self._loaded_gun_points = [
+            point.clone() for point in self.project.gun_points]
+        self._loaded_unit_gun_default_icon = (
+            self.project.unit_gun_default_icon)
+        self._loaded_gun_point_scheme = self._new_gun_point_scheme
+
+    def _reset_all_gun_points(self) -> None:
+        """Restore all mounts to the state captured from the loaded script."""
+
+        if self.project.target_category != VEHICLE:
+            return
+        baseline = [point.clone() for point in self._loaded_gun_points]
+        current = [point.clone() for point in self.project.gun_points]
+        same_points = (current == baseline)
+        if (same_points
+                and self.project.gun_points_enabled
+                    == self._loaded_gun_points_enabled
+                and self.project.unit_gun_default_icon
+                    == self._loaded_unit_gun_default_icon):
+            return
+        self._vehicle_preview_active_edits.clear()
+        self._push_undo()
+        self.project.gun_points_enabled = self._loaded_gun_points_enabled
+        self.project.gun_points = baseline
+        self.project.unit_gun_default_icon = (
+            self._loaded_unit_gun_default_icon)
+        self._new_gun_point_scheme = self._loaded_gun_point_scheme
+        self._selected_gun_point = 0 if baseline else -1
+        self._set_modified()
+        self._sync_all()
+
+    def _reset_gun_point_position(self) -> None:
+        """Reset only the selected Gun Point translation to the origin."""
+
+        point = self._selected_gun()
+        if point is None or point.position == (0.0, 0.0, 0.0):
+            return
+        self._vehicle_preview_active_edits.clear()
+        self._push_undo()
+        point.x = 0.0
+        point.y = 0.0
+        point.z = 0.0
+        self.project.gun_points_enabled = True
+        self._set_modified()
+        self._sync_all()
+
     def _gun_point_value_changed(self, field: str, value: float) -> None:
         if self._syncing or self.project.target_category != VEHICLE:
             return
@@ -4535,9 +5579,16 @@ class CollisionEditorWindow(QMainWindow):
 
 
     def _gizmo_nudge(self, direction):
-        sphere = self._selected_sphere()
+        if self._is_cockpit_tab_active():
+            self._cockpit_nudge(direction)
+            return
         step = float(self.move_strength_spin.value())
-        if sphere is not None:
+        active_tab = self.properties_tabs.currentIndex()
+
+        if active_tab == self.collision_tab_index:
+            sphere = self._selected_sphere()
+            if sphere is None:
+                return
             if sphere.category == LEGACY:
                 self.statusBar().showMessage(
                     "Legacy Radius has no script offset and remains at origin.",
@@ -4551,8 +5602,10 @@ class CollisionEditorWindow(QMainWindow):
             self._sync_all()
             return
 
-        gun = self._selected_gun()
-        if gun is not None:
+        if active_tab == self.gun_points_tab_index:
+            gun = self._selected_gun()
+            if gun is None:
+                return
             self._push_undo()
             gun.x += float(direction[0]) * step
             gun.y += float(direction[1]) * step
@@ -4560,6 +5613,9 @@ class CollisionEditorWindow(QMainWindow):
             self.project.gun_points_enabled = True
             self._set_modified()
             self._sync_all()
+            return
+
+        if active_tab != self.fire_points_tab_index:
             return
 
         index = self._selected_fire_point
@@ -4884,6 +5940,13 @@ class CollisionEditorWindow(QMainWindow):
                if (self.project.target_category == VEHICLE
                    and self.project.gun_points_enabled)
                else "Not included"),
+            "Cockpit camera: "
+            + (f"X {_number(self.project.cockpit_camera_offset_x)}  "
+               f"Y {_number(self.project.cockpit_camera_offset_y)}  "
+               f"Z {_number(self.project.cockpit_camera_offset_z)}"
+               if (self.project.target_category == VEHICLE
+                   and self.project.cockpit_camera_enabled)
+               else "Not included"),
             f"Collision mode: {collision_mode}",
             f"Legacy Radius: {legacy_status}",
             f"Internal broad-phase extent: "
@@ -4932,10 +5995,13 @@ class CollisionEditorWindow(QMainWindow):
                 self.overeof_spin,
                 self.fire_x_spin, self.fire_y_spin, self.fire_z_spin,
                 self.num_weapons_spin,
+                self.cockpit_camera_spins["x"],
+                self.cockpit_camera_spins["y"],
+                self.cockpit_camera_spins["z"],
                 self.gun_point_spins["x"], self.gun_point_spins["y"],
                 self.gun_point_spins["z"],
-                self.gun_dir_spins["x"], self.gun_dir_spins["y"],
-                self.gun_dir_spins["z"], self.gun_type_spin,
+                self.gun_dir_spins["x"], self.gun_dir_spins["z"],
+                self.gun_type_spin,
                 self.gun_name_edit, self.gun_point_type_combo)
         ]
         self.name_edit.setText(self.project.name)
@@ -4960,6 +6026,59 @@ class CollisionEditorWindow(QMainWindow):
             vehicle_mode, self.project.overeof_enabled,
             self.project.overeof)
         self.target_combo.setCurrentIndex(0 if vehicle_mode else 1)
+        for index in (
+                self.fire_points_tab_index, self.gun_points_tab_index,
+                self.cockpit_tab_index):
+            self.properties_tabs.setTabEnabled(index, vehicle_mode)
+        if (not vehicle_mode
+                and self.properties_tabs.currentIndex()
+                != self.collision_tab_index):
+            self.properties_tabs.setCurrentIndex(self.collision_tab_index)
+
+        cockpit_enabled = vehicle_mode and self.project.cockpit_camera_enabled
+        self.cockpit_camera_button.setEnabled(vehicle_mode)
+        self.cockpit_camera_button.setText(
+            "Disable Cockpit Camera Offset" if cockpit_enabled
+            else "Enable Cockpit Camera Offset")
+        self.cockpit_controls.setVisible(cockpit_enabled)
+        self.cockpit_x_spin.setValue(self.project.cockpit_camera_offset_x)
+        self.cockpit_y_spin.setValue(self.project.cockpit_camera_offset_y)
+        self.cockpit_z_spin.setValue(self.project.cockpit_camera_offset_z)
+        for spin in self.cockpit_camera_spins.values():
+            spin.setEnabled(cockpit_enabled)
+        self.reset_cockpit_button.setEnabled(
+            cockpit_enabled and any(abs(value) > 1e-9 for value in (
+                self.project.cockpit_camera_offset_x,
+                self.project.cockpit_camera_offset_y,
+                self.project.cockpit_camera_offset_z)))
+        cockpit_lines = [
+            f"cockpit_camera_offset_x = "
+            f"{_number(self.project.cockpit_camera_offset_x)}",
+            f"cockpit_camera_offset_y = "
+            f"{_number(self.project.cockpit_camera_offset_y)}",
+            f"cockpit_camera_offset_z = "
+            f"{_number(self.project.cockpit_camera_offset_z)}",
+        ]
+        if not vehicle_mode:
+            cockpit_lines = [
+                "; Cockpit View is available only for vehicle definitions"]
+        elif not cockpit_enabled:
+            cockpit_lines = []
+        self.cockpit_output.setPlainText("\n".join(cockpit_lines))
+        self.viewport.set_cockpit_camera_offset(
+            self.project.cockpit_camera_offset_x,
+            self.project.cockpit_camera_offset_y,
+            self.project.cockpit_camera_offset_z)
+        cockpit_active = self._is_cockpit_tab_active()
+        self.viewport.set_cockpit_preview_active(cockpit_active)
+        if hasattr(self, "cockpit_aspect_combo"):
+            self.viewport.set_cockpit_preview_aspect(
+                self.cockpit_aspect_combo.currentData())
+        self._sync_cockpit_preview_model()
+        self.toolbar_view_preset_combo.setEnabled(not cockpit_active)
+        self.reset_view_action.setEnabled(not cockpit_active)
+        self.selected_box.setVisible(not cockpit_active)
+
         self.ground_alignment_box.setVisible(vehicle_mode)
         self.overeof_check.setChecked(
             vehicle_mode and self.project.overeof_enabled)
@@ -4982,6 +6101,7 @@ class CollisionEditorWindow(QMainWindow):
             vehicle_mode and self.project.fire_points_enabled)
         self.remove_fire_point_button.setEnabled(
             fire_controls_enabled and self._selected_fire_point >= 0)
+        self.reset_fire_point_button.setEnabled(vehicle_mode)
         for widget in (
                 self.fire_x_spin, self.fire_y_spin, self.fire_z_spin,
                 self.num_weapons_spin):
@@ -4996,6 +6116,8 @@ class CollisionEditorWindow(QMainWindow):
         gun = self._selected_gun() if vehicle_mode else None
         self.add_gun_point_button.setEnabled(vehicle_mode)
         self.remove_gun_point_button.setEnabled(gun is not None)
+        self.reset_gun_point_button.setEnabled(gun is not None)
+        self.reset_all_gun_points_button.setEnabled(vehicle_mode)
         if gun is None:
             self.gun_family_value.setText("No point selected")
             for spin in self.gun_point_spins.values():
@@ -5013,7 +6135,6 @@ class CollisionEditorWindow(QMainWindow):
             self.gun_point_spins["y"].setValue(gun.y)
             self.gun_point_spins["z"].setValue(gun.z)
             self.gun_dir_spins["x"].setValue(gun.dir_x)
-            self.gun_dir_spins["y"].setValue(gun.dir_y)
             self.gun_dir_spins["z"].setValue(gun.dir_z)
             self.gun_type_spin.setValue(
                 max(0, min(255, int(gun.gun_type))))
@@ -5035,15 +6156,38 @@ class CollisionEditorWindow(QMainWindow):
                 self.radius_slider, self.radius_spin, self.visible_check):
             widget.setEnabled(enabled)
         self.visible_check.setVisible(enabled)
-        self.gizmo.setEnabled(
-            (sphere is not None and sphere.category != LEGACY)
-            or fire_selected or gun_selected)
-        if gun_selected:
-            self.transform_box.setTitle("Move Gun Point")
-        elif fire_selected:
-            self.transform_box.setTitle("Move Fire Point")
+        active_tab = self.properties_tabs.currentIndex()
+        cockpit_selected = self._is_cockpit_tab_selected()
+        gizmo_enabled = False
+        if cockpit_active:
+            gizmo_enabled = True
+        elif active_tab == self.collision_tab_index:
+            gizmo_enabled = sphere is not None and sphere.category != LEGACY
+        elif active_tab == self.fire_points_tab_index:
+            gizmo_enabled = fire_selected
+        elif active_tab == self.gun_points_tab_index:
+            gizmo_enabled = gun_selected
+        self.gizmo.setEnabled(gizmo_enabled)
+        if cockpit_selected:
+            self.transform_box.setTitle("Move Cockpit Camera")
+            self.transform_box.setToolTip(
+                "Move the OpenUA cockpit camera in vehicle-local X/Y/Z after "
+                "Cockpit Camera Offset is enabled. Left/Right = X, Up/Down = "
+                "Z, Page Up/Page Down = Y. The camera keeps the vehicle's real "
+                "orientation. Drag empty gizmo space to rotate only the "
+                "control view.")
         else:
-            self.transform_box.setTitle("Move Sphere")
+            self.transform_box.setToolTip(
+                "Move the selected element from the active property tab. "
+                "With the viewport focused: Left/Right move on X, Up/Down "
+                "move on Z, and Page Up/Page Down move on Y. Drag empty "
+                "gizmo space to rotate only the control view.")
+            if active_tab == self.gun_points_tab_index:
+                self.transform_box.setTitle("Move Gun Point")
+            elif active_tab == self.fire_points_tab_index:
+                self.transform_box.setTitle("Move Fire Point")
+            else:
+                self.transform_box.setTitle("Move Collision Sphere")
         if sphere is None:
             if gun_selected:
                 self.type_value.setText("Gun Point")
@@ -5230,6 +6374,8 @@ class CollisionEditorWindow(QMainWindow):
             overeof_enabled, overeof = import_overeof_block(text, block)
             fire_enabled, fire_x, fire_y, fire_z, num_weapons = (
                 import_fire_points_block(text, block))
+            cockpit_enabled, cockpit_x, cockpit_y, cockpit_z = (
+                import_cockpit_camera_block(text, block))
             gun_enabled, gun_points, unit_gun_default_icon = (
                 import_gun_points_block(text, block))
         except CollisionScriptError as exc:
@@ -5251,10 +6397,19 @@ class CollisionEditorWindow(QMainWindow):
         self.project.fire_y = fire_y if vehicle_block else 0.0
         self.project.fire_z = fire_z if vehicle_block else 0.0
         self.project.num_weapons = num_weapons if vehicle_block else 1
+        self.project.cockpit_camera_enabled = (
+            vehicle_block and cockpit_enabled)
+        self.project.cockpit_camera_offset_x = (
+            cockpit_x if vehicle_block else 0.0)
+        self.project.cockpit_camera_offset_y = (
+            cockpit_y if vehicle_block else 0.0)
+        self.project.cockpit_camera_offset_z = (
+            cockpit_z if vehicle_block else 0.0)
         self.project.gun_points_enabled = vehicle_block and gun_enabled
         self.project.gun_points = gun_points if vehicle_block else []
         self.project.unit_gun_default_icon = (
             unit_gun_default_icon if vehicle_block else "")
+        self._capture_loaded_gun_points()
         if block.name:
             self.project.name = block.name
         self._selected = 0 if self.project.spheres() else -1
@@ -5269,6 +6424,8 @@ class CollisionEditorWindow(QMainWindow):
             + (" and Overeof" if self.project.overeof_enabled else "")
             + (" and Fire Points" if self.project.fire_points_enabled else "")
             + (" and Gun Points" if self.project.gun_points_enabled else "")
+            + (" and Cockpit View"
+               if self.project.cockpit_camera_enabled else "")
             + ".")
         if warnings:
             message += "\n\n" + "\n".join(warnings)
