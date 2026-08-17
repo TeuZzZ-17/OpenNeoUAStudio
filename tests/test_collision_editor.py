@@ -38,6 +38,7 @@ from collision_editor import (
     fire_point_positions,
     find_script_blocks,
     import_collision_block,
+    import_cockpit_camera_block,
     import_fire_points_block,
     import_gun_points_block,
     import_overeof_block,
@@ -509,13 +510,13 @@ class CollisionEditorTests(unittest.TestCase):
 
     def test_34_move_gizmo_is_compact_but_readable_and_tracks_camera(self):
         window = self._window()
-        self.assertGreaterEqual(window.gizmo.minimumWidth(), 215)
-        self.assertGreaterEqual(window.gizmo.minimumHeight(), 122)
-        self.assertLessEqual(window.gizmo.maximumHeight(), 140)
-        self.assertLessEqual(window.transform_box.maximumHeight(), 235)
+        self.assertGreaterEqual(window.gizmo.minimumWidth(), 300)
+        self.assertGreaterEqual(window.gizmo.minimumHeight(), 150)
+        self.assertEqual(window.transform_box.minimumHeight(), 248)
+        self.assertEqual(window.transform_box.maximumHeight(), 248)
         self.assertEqual(
             window.gizmo.sizePolicy().verticalPolicy(),
-            QSizePolicy.Policy.Fixed)
+            QSizePolicy.Policy.Expanding)
         self.assertGreater(window.gizmo._handle_scale, 1.0)
         self.assertEqual(window.gizmo.directions, (
             (0, 0, 1), (0, 1, 0), (1, 0, 0),
@@ -781,14 +782,16 @@ class CollisionEditorTests(unittest.TestCase):
         window.show()
         QApplication.processEvents()
         source_panel = window.main_splitter.widget(0)
-        self.assertGreaterEqual(source_panel.minimumWidth(), 260)
-        self.assertGreaterEqual(window.main_splitter.sizes()[0], 260)
+        self.assertGreaterEqual(source_panel.minimumWidth(), 230)
+        self.assertGreaterEqual(window.main_splitter.sizes()[0], 230)
         self.assertEqual(
             window.model_tree.header().sectionResizeMode(0),
             QHeaderView.ResizeMode.Stretch)
         self.assertEqual(
             window.model_tree.header().sectionResizeMode(1),
             QHeaderView.ResizeMode.ResizeToContents)
+        self.assertEqual(
+            window.model_tree.textElideMode(), Qt.TextElideMode.ElideNone)
 
     def test_50_project_name_uses_neutral_example_placeholder(self):
         window = self._window()
@@ -885,7 +888,7 @@ class CollisionEditorTests(unittest.TestCase):
         item = window.model_tree.topLevelItem(0)
         alignment = item.textAlignment(1)
         self.assertTrue(alignment & int(Qt.AlignmentFlag.AlignRight))
-        self.assertGreaterEqual(window.main_splitter.widget(0).minimumWidth(), 260)
+        self.assertGreaterEqual(window.main_splitter.widget(0).minimumWidth(), 230)
         self.assertLessEqual(window.main_splitter.widget(0).maximumWidth(), 440)
         self.assertFalse(window.model_tree.header().stretchLastSection())
         self.assertEqual(item.toolTip(0), "models/root.sklt")
@@ -1362,6 +1365,7 @@ class CollisionEditorTests(unittest.TestCase):
             "new_vehicle 17\n"
             " name = Wasp\n"
             " vp_normal = 42\n"
+            " vp_wait = 43\n"
             " vp_scale_x = 2\n"
             " vp_scale_y = 1.5\n"
             " vp_scale_z = 0.75\n"
@@ -1373,6 +1377,7 @@ class CollisionEditorTests(unittest.TestCase):
         reference = references[0]
         self.assertEqual(reference.block.object_id, 17)
         self.assertEqual(reference.vp_normal, 42)
+        self.assertEqual(reference.vp_wait, 43)
         self.assertEqual(
             (reference.scale_x, reference.scale_y, reference.scale_z),
             (2.0, 1.5, 0.75),
@@ -1796,11 +1801,15 @@ class CollisionEditorTests(unittest.TestCase):
         self.assertFalse(window.gun_points_box.isVisible())
         self.assertEqual(window.viewport._gun_points, [])
 
-    def test_108_gizmo_overlays_viewport_and_gun_fields_share_columns(self):
+    def test_108_gizmo_lives_below_tabs_and_gun_fields_share_columns(self):
         window = self._window()
         self.assertIs(window.main_splitter.widget(1), window.viewport_panel)
-        self.assertIs(window.transform_box.parentWidget(), window.viewport_panel)
-        self.assertGreaterEqual(window.viewport_layout.indexOf(window.transform_box), 0)
+        self.assertIs(
+            window.transform_box.parentWidget(), window.properties_scroll.widget())
+        self.assertLess(window.properties_scroll.widget().layout().indexOf(
+            window.properties_tabs),
+            window.properties_scroll.widget().layout().indexOf(
+                window.transform_box))
         self.assertIs(window.selected_box.parentWidget(), window.viewport_panel)
         selected_index = window.viewport_layout.indexOf(window.selected_box)
         self.assertGreaterEqual(selected_index, 0)
@@ -1808,8 +1817,12 @@ class CollisionEditorTests(unittest.TestCase):
         self.assertTrue(selected_alignment & Qt.AlignmentFlag.AlignBottom)
         self.assertTrue(selected_alignment & Qt.AlignmentFlag.AlignLeft)
         self.assertFalse(selected_alignment & Qt.AlignmentFlag.AlignRight)
-        self.assertLessEqual(window.transform_box.maximumWidth(), 285)
-        self.assertLessEqual(window.transform_box.maximumHeight(), 172)
+        self.assertEqual(window.transform_box.minimumHeight(), 248)
+        self.assertEqual(window.transform_box.maximumHeight(), 248)
+        self.assertGreaterEqual(window.gizmo.minimumHeight(), 150)
+        self.assertEqual(
+            window.transform_box.sizePolicy().horizontalPolicy(),
+            QSizePolicy.Policy.Expanding)
 
         grid = window.gun_fields_grid
         expected = {
@@ -1817,8 +1830,7 @@ class CollisionEditorTests(unittest.TestCase):
             window.gun_point_spins["y"]: (0, 3),
             window.gun_point_spins["z"]: (0, 5),
             window.gun_dir_spins["x"]: (1, 1),
-            window.gun_dir_spins["y"]: (1, 3),
-            window.gun_dir_spins["z"]: (1, 5),
+            window.gun_dir_spins["z"]: (1, 3),
             window.gun_type_spin: (2, 1),
         }
         for widget, position in expected.items():
@@ -1860,27 +1872,53 @@ class CollisionEditorTests(unittest.TestCase):
     def test_110_sphere_radius_controls_live_inside_spheres_panel(self):
         window = self._window()
         self.assertIs(window.radius_title.parentWidget(), window.spheres_box)
+        self.assertTrue(window.radius_title.isHidden())
         self.assertIs(window.radius_slider.parentWidget(), window.spheres_box)
         self.assertIs(window.radius_spin.parentWidget(), window.spheres_box)
         self.assertLessEqual(window.radius_spin.maximumWidth(), 86)
+        self.assertGreaterEqual(window.sphere_tree.minimumHeight(), 80)
+        self.assertEqual(
+            window.spheres_box.sizePolicy().verticalPolicy(),
+            QSizePolicy.Policy.Expanding)
 
-    def test_111_spheres_follow_ground_alignment_before_fire_and_guns(self):
+    def test_111_right_properties_are_split_into_domain_tabs(self):
         window = self._window()
-        layout = window.ground_alignment_box.parentWidget().layout()
-        self.assertLess(layout.indexOf(window.ground_alignment_box),
-                        layout.indexOf(window.spheres_box))
-        self.assertLess(layout.indexOf(window.spheres_box),
-                        layout.indexOf(window.fire_points_box))
-        self.assertLess(layout.indexOf(window.spheres_box),
-                        layout.indexOf(window.gun_points_box))
-        self.assertLessEqual(window.sphere_tree.minimumHeight(), 105)
-        self.assertLessEqual(window.sphere_tree.maximumHeight(), 165)
+        self.assertEqual(
+            [window.properties_tabs.tabText(index)
+             for index in range(window.properties_tabs.count())],
+            ["Collision", "Fire Points", "Gun Points", "Cockpit View"])
+        self.assertIs(
+            window.ground_alignment_box.parentWidget(), window.collision_tab)
+        self.assertIs(window.spheres_box.parentWidget(), window.collision_tab)
+        self.assertIs(
+            window.fire_points_box.parentWidget(), window.fire_points_tab)
+        self.assertIs(
+            window.gun_points_box.parentWidget(), window.gun_points_tab)
+        self.assertIs(window.cockpit_box.parentWidget(), window.cockpit_tab)
+        self.assertEqual(window.cockpit_model_state_combo.currentData(), "normal")
+        self.assertLessEqual(window.sphere_tree.minimumHeight(), 90)
+        self.assertLessEqual(window.fire_point_tree.minimumHeight(), 90)
+        self.assertLessEqual(window.gun_point_tree.minimumHeight(), 90)
 
-    def test_112_properties_column_has_no_horizontal_scrollbar(self):
+    def test_112_properties_column_is_stable_wide_and_outer_scroll_free(self):
         window = self._window()
         self.assertEqual(
             window.properties_scroll.horizontalScrollBarPolicy(),
             Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self.assertEqual(
+            window.properties_scroll.verticalScrollBarPolicy(),
+            Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self.assertGreaterEqual(window.properties_scroll.minimumWidth(), 420)
+        self.assertLessEqual(window.properties_scroll.minimumWidth(), 430)
+        bar = window.properties_tabs.tabBar()
+        self.assertTrue(bar.expanding())
+        self.assertEqual(bar.elideMode(), Qt.TextElideMode.ElideNone)
+        self.assertFalse(bar.usesScrollButtons())
+        self.assertFalse(bar.isMovable())
+        self.assertEqual(
+            [window.properties_tabs.tabText(index)
+             for index in range(window.properties_tabs.count())],
+            ["Collision", "Fire Points", "Gun Points", "Cockpit View"])
 
     def test_113_gun_point_type_selector_is_explicit_and_non_converting(self):
         window = self._window()
@@ -1895,6 +1933,276 @@ class CollisionEditorTests(unittest.TestCase):
         window._select_gun_point(0)
         self.assertEqual(window._new_gun_point_scheme, "robo")
         self.assertEqual(window.project.gun_points[0].scheme, "robo")
+
+
+    def test_114_cockpit_parser_reads_partial_axes_with_zero_fallback(self):
+        text = (
+            "new_vehicle 7\n"
+            " cockpit_camera_offset_x = 12.5\n"
+            " cockpit_camera_offset_z = -40\n"
+            "end\n"
+        )
+        block = find_script_blocks(text)[0]
+        enabled, x, y, z = import_cockpit_camera_block(text, block)
+        self.assertTrue(enabled)
+        self.assertEqual((x, y, z), (12.5, 0.0, -40.0))
+
+    def test_115_cockpit_output_is_openua_vehicle_only_and_opt_in(self):
+        project = CollisionProject(
+            name="Wasp", source_model="wasp.sklt",
+            target_category=VEHICLE, cockpit_camera_enabled=True,
+            cockpit_camera_offset_x=10, cockpit_camera_offset_y=-5,
+            cockpit_camera_offset_z=30)
+        output = export_collision_text(project)
+        self.assertIn("cockpit_camera_offset_x = 10", output)
+        self.assertIn("cockpit_camera_offset_y = -5", output)
+        self.assertIn("cockpit_camera_offset_z = 30", output)
+
+        project.cockpit_camera_enabled = False
+        self.assertNotIn("cockpit_camera_offset", export_collision_text(project))
+        project.cockpit_camera_enabled = True
+        project.target_category = WEAPON
+        self.assertNotIn("cockpit_camera_offset", export_collision_text(project))
+
+    def test_116_overwrite_replaces_only_managed_cockpit_parameters(self):
+        text = (
+            "new_vehicle 17\n"
+            " name = Wasp\n"
+            " cockpit_camera_offset_x = 999\n"
+            " cockpit_camera_offset_y = 888\n"
+            " cockpit_camera_offset_z = 777\n"
+            " num_mguns = 2\n"
+            "end\n"
+        )
+        project = CollisionProject(
+            name="Wasp", source_model="wasp.sklt",
+            target_category=VEHICLE, cockpit_camera_enabled=True,
+            cockpit_camera_offset_x=1, cockpit_camera_offset_y=-2,
+            cockpit_camera_offset_z=3)
+        updated, _preview, _name = plan_script_update(
+            text, "new_vehicle", 17, project, replace_all_managed=True)
+        self.assertIn("cockpit_camera_offset_x = 1", updated)
+        self.assertIn("cockpit_camera_offset_y = -2", updated)
+        self.assertIn("cockpit_camera_offset_z = 3", updated)
+        self.assertNotIn("cockpit_camera_offset_x = 999", updated)
+        self.assertIn("num_mguns = 2", updated)
+
+        project.cockpit_camera_enabled = False
+        removed, _preview, _name = plan_script_update(
+            text, "new_vehicle", 17, project, replace_all_managed=True)
+        self.assertNotIn("cockpit_camera_offset", removed)
+        self.assertIn("num_mguns = 2", removed)
+
+    def test_117_cockpit_tab_enters_fixed_preview_and_restores_orbit_state(self):
+        window = self._window()
+        window.viewport._yaw = 23.0
+        window.viewport._pitch = -17.0
+        window.viewport._zoom = 2.5
+        before = (
+            window.viewport._yaw, window.viewport._pitch,
+            window.viewport._zoom, QPointF(window.viewport._pan))
+
+        window.properties_tabs.setCurrentIndex(window.cockpit_tab_index)
+        self.assertTrue(window.viewport.cockpit_preview_active)
+        self.assertEqual(window.transform_box.title(), "Move Cockpit Camera")
+        self.assertFalse(window.toolbar_view_preset_combo.isEnabled())
+        self.assertTrue(window.selected_box.isHidden())
+
+        window.properties_tabs.setCurrentIndex(window.collision_tab_index)
+        self.assertFalse(window.viewport.cockpit_preview_active)
+        after = (
+            window.viewport._yaw, window.viewport._pitch,
+            window.viewport._zoom, QPointF(window.viewport._pan))
+        self.assertEqual(after, before)
+        self.assertTrue(window.toolbar_view_preset_combo.isEnabled())
+
+    def test_118_cockpit_gizmo_moves_xyz_and_auto_enables_output(self):
+        window = self._window()
+        window.properties_tabs.setCurrentIndex(window.cockpit_tab_index)
+        window.move_strength_spin.setValue(5)
+        window._gizmo_nudge((1, -1, 1))
+        self.assertTrue(window.project.cockpit_camera_enabled)
+        self.assertEqual(
+            (window.project.cockpit_camera_offset_x,
+             window.project.cockpit_camera_offset_y,
+             window.project.cockpit_camera_offset_z),
+            (5.0, -5.0, 5.0))
+        output = window.cockpit_output.toPlainText()
+        self.assertIn("cockpit_camera_offset_x = 5", output)
+        self.assertIn("cockpit_camera_offset_y = -5", output)
+        self.assertIn("cockpit_camera_offset_z = 5", output)
+
+    def test_119_cockpit_projection_uses_local_plus_z_forward(self):
+        viewport = CollisionViewport()
+        self.addCleanup(viewport.close)
+        # Cockpit math uses authored UA units, not the normal editor auto-fit
+        # scale. This is what keeps the real one-unit near plane meaningful.
+        viewport._scale = 0.01
+        viewport.set_cockpit_camera_offset(10.0, -4.0, 20.0)
+        viewport.set_cockpit_preview_active(True)
+        # Ten units in front on vehicle-local +Z lands ten perspective units
+        # ahead of the camera; X/Y are measured relative to the authored eye.
+        self.assertEqual(
+            viewport._camera_vertex((10.0, -4.0, 30.0)),
+            (0.0, 0.0, -6.0))
+        self.assertEqual(
+            viewport._camera_vertex((12.0, -6.0, 30.0)),
+            (2.0, 2.0, -6.0))
+        self.assertEqual(viewport._camera_state()["near_distance"], 1.0)
+
+    def test_119b_cockpit_preview_uses_runtime_aspect_correction(self):
+        viewport = CollisionViewport()
+        self.addCleanup(viewport.close)
+        viewport.resize(1000, 1000)
+        viewport.set_cockpit_preview_active(True)
+        viewport.set_cockpit_preview_aspect(16.0 / 10.0)
+        target = viewport._cockpit_render_rect()
+        self.assertAlmostEqual(target.width(), 1000.0)
+        self.assertAlmostEqual(target.height(), 625.0)
+
+        center = target.center()
+        projected = viewport._project((10.0, 0.0, -6.0), target)
+        half = (target.width() + target.height()) * 0.5
+        corr_w = half * 1.1429 / target.width()
+        expected_x = center.x() + 10.0 * (target.width() * 0.5 * corr_w) / 10.0
+        self.assertAlmostEqual(projected.x(), expected_x, places=5)
+        self.assertAlmostEqual(projected.y(), center.y(), places=5)
+
+    def test_119c_window_title_reports_script_vehicle_base_and_archive(self):
+        window = self._window()
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            window.project.name = "Eisenhans"
+            window._active_script_path = root / "Vehicles.txt"
+            window._active_base_path = root / "SET.BAS"
+            window._active_model_reference = MagicMock(vp_normal=18)
+            window._vp_table = MagicMock()
+            window._vp_table.entries = [None] * 19
+            window._vp_table.entry.return_value.base_name = "VP_PANZ1.base"
+            window._set_modified(False)
+            title = window.windowTitle()
+            self.assertIn("Eisenhans", title)
+            self.assertIn("VP_PANZ1.base", title)
+            self.assertIn("SET.BAS", title)
+            self.assertIn(str((root / "SET.BAS").resolve()), title)
+
+    def test_119d_model_bounds_stay_on_authored_owner_during_vp_preview(self):
+        window = self._window()
+        window._current_owner_base_bounds = (-2.0, -3.0, -4.0, 5.0, 6.0, 7.0)
+        window.project.model_scale_x = 2.0
+        window.project.model_scale_y = 3.0
+        window.project.model_scale_z = 4.0
+        self.assertEqual(
+            window._model_bounds(),
+            (-4.0, -9.0, -16.0, 10.0, 18.0, 28.0))
+
+    def test_120_weapon_mode_disables_vehicle_only_tabs(self):
+        window = self._window()
+        window.project.target_category = WEAPON
+        window.properties_tabs.setCurrentIndex(window.cockpit_tab_index)
+        window._sync_all()
+        self.assertEqual(
+            window.properties_tabs.currentIndex(), window.collision_tab_index)
+        self.assertFalse(
+            window.properties_tabs.isTabEnabled(window.fire_points_tab_index))
+        self.assertFalse(
+            window.properties_tabs.isTabEnabled(window.gun_points_tab_index))
+        self.assertFalse(
+            window.properties_tabs.isTabEnabled(window.cockpit_tab_index))
+        self.assertFalse(window.viewport.cockpit_preview_active)
+
+    def test_121_fire_point_reset_creates_origin_and_resets_existing_rack(self):
+        window = self._window()
+        window.project.fire_points_enabled = False
+        window.project.fire_x = 12.0
+        window.project.fire_y = -3.0
+        window.project.fire_z = 7.0
+        window.project.num_weapons = 0
+        window._reset_fire_point_position()
+        self.assertTrue(window.project.fire_points_enabled)
+        self.assertEqual(window.project.num_weapons, 1)
+        self.assertEqual(
+            (window.project.fire_x, window.project.fire_y,
+             window.project.fire_z),
+            (0.0, 0.0, 0.0))
+        self.assertEqual(window._selected_fire_point, 0)
+
+        window.project.fire_x = 50.0
+        window.project.fire_y = 10.0
+        window.project.fire_z = -20.0
+        window.project.num_weapons = 3
+        window._reset_fire_point_position()
+        self.assertEqual(window.project.num_weapons, 3)
+        self.assertEqual(
+            (window.project.fire_x, window.project.fire_y,
+             window.project.fire_z),
+            (0.0, 0.0, 0.0))
+
+    def test_122_gun_point_reset_changes_position_only(self):
+        window = self._window()
+        point = GunPoint(
+            scheme="unit", x=12, y=-4, z=9,
+            dir_x=1, dir_y=0, dir_z=-1,
+            gun_type=90, name="FLAK1")
+        window.project.gun_points_enabled = True
+        window.project.gun_points = [point]
+        window._select_gun_point(0)
+        window._reset_gun_point_position()
+        self.assertEqual(point.position, (0.0, 0.0, 0.0))
+        self.assertEqual((point.dir_x, point.dir_y, point.dir_z), (1, 0, -1))
+        self.assertEqual(point.gun_type, 90)
+        self.assertEqual(point.name, "FLAK1")
+        self.assertEqual(point.scheme, "unit")
+
+    def test_123_shared_gizmo_moves_only_active_tab_domain(self):
+        window = self._window()
+        window.project.compound = [
+            CollisionSphere(VEHICLE, x=1, y=2, z=3, radius=10)]
+        window.project.fire_points_enabled = True
+        window.project.fire_x = 4
+        window.project.fire_y = 5
+        window.project.fire_z = 6
+        window.project.num_weapons = 1
+        window.project.gun_points_enabled = True
+        window.project.gun_points = [GunPoint(scheme="unit", x=7, y=8, z=9)]
+        window._selected = 0
+        window._selected_fire_point = 0
+        window._selected_gun_point = 0
+        window.move_strength_spin.setValue(2)
+
+        window.properties_tabs.setCurrentIndex(window.fire_points_tab_index)
+        window._gizmo_nudge((1, 0, 0))
+        self.assertEqual(window.project.fire_x, 6.0)
+        self.assertEqual(window.project.compound[0].x, 1)
+        self.assertEqual(window.project.gun_points[0].x, 7)
+
+        window.properties_tabs.setCurrentIndex(window.gun_points_tab_index)
+        window._gizmo_nudge((1, 0, 0))
+        self.assertEqual(window.project.gun_points[0].x, 9.0)
+        self.assertEqual(window.project.compound[0].x, 1)
+
+        window.properties_tabs.setCurrentIndex(window.collision_tab_index)
+        window._gizmo_nudge((1, 0, 0))
+        self.assertEqual(window.project.compound[0].x, 3)
+
+    def test_124_cockpit_gizmo_is_oblique_and_user_orbit_is_independent(self):
+        window = self._window()
+        window.properties_tabs.setCurrentIndex(window.cockpit_tab_index)
+        window._sync_gizmo_camera()
+        self.assertEqual(window.gizmo._anchor_yaw, -35.0)
+        self.assertEqual(window.gizmo._anchor_pitch, 20.0)
+
+        original_viewport = (window.viewport._yaw, window.viewport._pitch)
+        window.gizmo._view_yaw_offset = 25.0
+        window.gizmo._view_pitch_offset = -10.0
+        window.gizmo._apply_gizmo_view_orientation()
+        self.assertEqual(
+            (window.viewport._yaw, window.viewport._pitch), original_viewport)
+        self.assertEqual(window.gizmo._yaw, -10.0)
+        self.assertEqual(window.gizmo._pitch, 10.0)
+        window.gizmo.reset_view_orientation()
+        self.assertEqual(window.gizmo._yaw, -35.0)
+        self.assertEqual(window.gizmo._pitch, 20.0)
 
 
 if __name__ == "__main__":

@@ -3178,12 +3178,16 @@ class AssetViewport(QWidget):
                 for index in range(2, len(cam)):
                     indices = (0, index, index - 1)
                     tri_camera = tuple(cam[item] for item in indices)
-                    clipped = clip_camera_polygon_near(CameraPolygon(
-                        tri_camera,
-                        tuple(tuple(face_uvs[item]) for item in indices),
-                        None,
-                        source_order,
-                    ))
+                    clipped = clip_camera_polygon_near(
+                        CameraPolygon(
+                            tri_camera,
+                            tuple(tuple(face_uvs[item]) for item in indices),
+                            None,
+                            source_order,
+                        ),
+                        minimum_distance=float(
+                            camera.get("near_distance", 0.2)),
+                    )
                     if clipped is None:
                         continue
                     tri_screen = [
