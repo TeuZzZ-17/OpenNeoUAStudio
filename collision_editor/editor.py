@@ -1590,10 +1590,10 @@ class CollisionViewport(AssetViewport):
         self._gun_points_visible = True
         self._cockpit_preview_active = False
         self._cockpit_offset = (0.0, 0.0, 0.0)
-        # OpenUA derives its projection/aspect correction from the gameplay
-        # render resolution, not from the editor widget (whose width changes
-        # with the side panels). 16:10 matches the supplied 1536x960 captures.
-        self._cockpit_preview_aspect: float | None = 16.0 / 10.0
+        # Cockpit preview always fills the editor viewport. The only aspect
+        # control left is OpenUA's logical runtime aspect, which drives the
+        # legacy matrixAspectCorrection() emulation. 4:3 is vanilla-safe.
+        self._cockpit_runtime_aspect: float = 4.0 / 3.0
         self._model_preview_base_faces: list[
             tuple[tuple[float, float, float], ...]] = []
         self._model_preview_base_sen_boxes: list[
@@ -1646,40 +1646,21 @@ class CollisionViewport(AssetViewport):
         self._cockpit_offset = values
         self.update()
 
-    def set_cockpit_preview_aspect(self, aspect: float | None) -> None:
-        """Set the editor-only gameplay aspect used by Cockpit View."""
+    def set_cockpit_runtime_aspect(self, aspect: float) -> None:
+        """Set OpenUA's logical aspect used for matrix aspect correction."""
 
-        if aspect is None:
-            value = None
-        else:
-            value = float(aspect)
-            if not math.isfinite(value) or value <= 0.0:
-                return
-        if value == self._cockpit_preview_aspect:
+        value = float(aspect)
+        if not math.isfinite(value) or value <= 0.0:
             return
-        self._cockpit_preview_aspect = value
+        if value == self._cockpit_runtime_aspect:
+            return
+        self._cockpit_runtime_aspect = value
         self.update()
 
     def _cockpit_render_rect(self) -> QRectF:
-        """Largest centered viewport matching the selected game aspect."""
+        """Use the complete editor viewport for Cockpit View."""
 
-        outer = QRectF(self.rect())
-        aspect = self._cockpit_preview_aspect
-        if aspect is None or outer.width() <= 1.0 or outer.height() <= 1.0:
-            return outer
-        available = outer.width() / outer.height()
-        if available > aspect:
-            height = outer.height()
-            width = height * aspect
-        else:
-            width = outer.width()
-            height = width / aspect
-        return QRectF(
-            outer.center().x() - width * 0.5,
-            outer.center().y() - height * 0.5,
-            width,
-            height,
-        )
+        return QRectF(self.rect())
 
     def _camera_state(self) -> dict:
         state = super()._camera_state()
@@ -1747,12 +1728,19 @@ class CollisionViewport(AssetViewport):
             depth = 1e-9
         width = max(1.0, float(target.width()))
         height = max(1.0, float(target.height()))
+        # OpenUA computes corrW/corrH from its logical graphics mode, while
+        # glViewport() uses the physical drawable. Do not derive the runtime
+        # correction from this editor rectangle: that was the source of the
+        # remaining Y/Z mismatch on 4:3 logical modes shown on widescreen.
+        runtime_aspect = max(1e-9, float(self._cockpit_runtime_aspect))
         corr_w = 1.0
         corr_h = 1.0
-        if width / height >= 1.4:
-            half = (width + height) * 0.5
-            corr_w = half * 1.1429 / width
-            corr_h = half * 0.85715 / height
+        if runtime_aspect >= 1.4:
+            logical_width = runtime_aspect
+            logical_height = 1.0
+            half = (logical_width + logical_height) * 0.5
+            corr_w = half * 1.1429 / logical_width
+            corr_h = half * 0.85715 / logical_height
         focal_x = width * 0.5 * corr_w
         focal_y = height * 0.5 * corr_h
         return QPointF(
@@ -2943,6 +2931,11 @@ class CollisionEditorWindow(QMainWindow):
         self._loaded_gun_points: list[GunPoint] = []
         self._loaded_unit_gun_default_icon = ""
         self._loaded_gun_point_scheme = "unit"
+        # Script-authored cockpit baseline. This is source state, not part of
+        # undo/redo: Restore Script Position always returns to the coordinates
+        # read during the last explicit script load/import.
+        self._loaded_cockpit_camera_enabled = False
+        self._loaded_cockpit_camera_offset = (0.0, 0.0, 0.0)
         self._modified = False
         self._syncing = False
         self._last_directory = Path.home()
@@ -3853,18 +3846,21 @@ class CollisionEditorWindow(QMainWindow):
             self._cockpit_preview_setting_changed)
         cockpit_preview_grid.addWidget(self.cockpit_model_state_combo, 0, 1)
 
-        cockpit_preview_grid.addWidget(QLabel("Game aspect"), 1, 0)
-        self.cockpit_aspect_combo = QComboBox()
-        self.cockpit_aspect_combo.addItem("16:10", 16.0 / 10.0)
-        self.cockpit_aspect_combo.addItem("16:9", 16.0 / 9.0)
-        self.cockpit_aspect_combo.addItem("4:3", 4.0 / 3.0)
-        self.cockpit_aspect_combo.addItem("Editor viewport", None)
-        self.cockpit_aspect_combo.setToolTip(
-            "Preview-only gameplay aspect. 16:10 matches 1536x960. "
-            "This never writes a vehicle parameter.")
-        self.cockpit_aspect_combo.currentIndexChanged.connect(
+        cockpit_preview_grid.addWidget(QLabel("Runtime aspect"), 1, 0)
+        self.cockpit_runtime_aspect_combo = QComboBox()
+        self.cockpit_runtime_aspect_combo.addItem(
+            "4:3 (default / vanilla)", 4.0 / 3.0)
+        self.cockpit_runtime_aspect_combo.addItem("16:10", 16.0 / 10.0)
+        self.cockpit_runtime_aspect_combo.addItem("16:9", 16.0 / 9.0)
+        self.cockpit_runtime_aspect_combo.setToolTip(
+            "Logical OpenUA graphics aspect used by matrixAspectCorrection(). "
+            "4:3 is the vanilla-safe default and matches a 640x480 vid.def. "
+            "Changing it updates only the live preview; cockpit X/Y/Z output "
+            "is never modified.")
+        self.cockpit_runtime_aspect_combo.currentIndexChanged.connect(
             self._cockpit_preview_setting_changed)
-        cockpit_preview_grid.addWidget(self.cockpit_aspect_combo, 1, 1)
+        cockpit_preview_grid.addWidget(
+            self.cockpit_runtime_aspect_combo, 1, 1)
         cockpit_preview_grid.setColumnStretch(1, 1)
         cockpit_layout.addLayout(cockpit_preview_grid)
 
@@ -3918,23 +3914,45 @@ class CollisionEditorWindow(QMainWindow):
             "Use Disable Cockpit Camera Offset to remove the parameters.")
         self.reset_cockpit_button.clicked.connect(self._reset_cockpit_camera)
         cockpit_buttons.addWidget(self.reset_cockpit_button)
+        self.restore_script_cockpit_button = QPushButton(
+            "Restore Script Position")
+        self.restore_script_cockpit_button.setToolTip(
+            "Restore the cockpit X/Y/Z coordinates read from the last loaded "
+            "or imported vehicle script. Disabled when that script did not "
+            "contain cockpit_camera_offset_x/y/z.")
+        self.restore_script_cockpit_button.clicked.connect(
+            self._restore_loaded_cockpit_camera)
+        cockpit_buttons.addWidget(self.restore_script_cockpit_button)
         cockpit_controls_layout.addLayout(cockpit_buttons)
 
         self.cockpit_hint = QLabel(
-            "Cockpit preview uses OpenUA's real 90° UAFrustum projection, "
-            "runtime widescreen aspect correction and near plane. Use the "
-            "gizmo or Left/Right = X, Up/Down = Z, Page Up/Page Down = Y. "
-            "Only the gizmo itself can be orbited.")
+            "Cockpit preview uses OpenUA's real 90° UAFrustum projection and "
+            "near plane. The physical preview always follows the editor "
+            "viewport; Runtime aspect controls only OpenUA's logical "
+            "widescreen correction. Use the gizmo or Left/Right = X, "
+            "Up/Down = Z, Page Up/Page Down = Y. Only the gizmo itself can "
+            "be orbited.")
         self.cockpit_hint.setWordWrap(True)
         self.cockpit_hint.setStyleSheet("font-size: 10px; color: #aeb6c2;")
         cockpit_controls_layout.addWidget(self.cockpit_hint)
 
-        self.cockpit_output = QPlainTextEdit()
-        self.cockpit_output.setReadOnly(True)
+        # This output is display-only and always contains at most the three
+        # cockpit offset lines. A QLabel is a better fit than a scrollable
+        # text editor here: it gives deterministic centered text and cannot
+        # expose an unnecessary horizontal scrollbar/focus underline.
+        self.cockpit_output = QLabel()
+        self.cockpit_output.setTextFormat(Qt.TextFormat.PlainText)
+        self.cockpit_output.setAlignment(
+            Qt.AlignmentFlag.AlignHCenter | Qt.AlignmentFlag.AlignVCenter)
+        self.cockpit_output.setTextInteractionFlags(
+            Qt.TextInteractionFlag.TextSelectableByMouse)
+        self.cockpit_output.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        self.cockpit_output.setFrameShape(QFrame.Shape.StyledPanel)
+        self.cockpit_output.setFrameShadow(QFrame.Shadow.Sunken)
         self.cockpit_output.setMinimumHeight(56)
         self.cockpit_output.setMaximumHeight(72)
-        self.cockpit_output.setPlaceholderText(
-            "cockpit_camera_offset_x/y/z output")
+        self.cockpit_output.setSizePolicy(
+            QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
         cockpit_controls_layout.addWidget(self.cockpit_output)
         cockpit_layout.addWidget(self.cockpit_controls)
         cockpit_layout.addStretch(1)
@@ -4238,6 +4256,8 @@ class CollisionEditorWindow(QMainWindow):
         self._loaded_gun_points = []
         self._loaded_unit_gun_default_icon = ""
         self._loaded_gun_point_scheme = "unit"
+        self._loaded_cockpit_camera_enabled = False
+        self._loaded_cockpit_camera_offset = (0.0, 0.0, 0.0)
 
     def open_vehicle_script_dialog(self):
         path, _ = QFileDialog.getOpenFileName(
@@ -4397,6 +4417,7 @@ class CollisionEditorWindow(QMainWindow):
             # a brand-new point until the user selects a specific existing one.
             self._new_gun_point_scheme = "unit"
         self._capture_loaded_gun_points()
+        self._capture_loaded_cockpit_camera()
         self._active_script_path = script_path
         self._active_script_kind = block.kind
         self._active_script_id = block.object_id
@@ -4512,10 +4533,9 @@ class CollisionEditorWindow(QMainWindow):
             self.cockpit_preview_info.setText(info)
 
     def _cockpit_preview_setting_changed(self, *_args) -> None:
-        if not hasattr(self, "cockpit_aspect_combo"):
-            return
-        self.viewport.set_cockpit_preview_aspect(
-            self.cockpit_aspect_combo.currentData())
+        if hasattr(self, "cockpit_runtime_aspect_combo"):
+            self.viewport.set_cockpit_runtime_aspect(
+                self.cockpit_runtime_aspect_combo.currentData())
         self._sync_cockpit_preview_model()
 
     def overwrite_loaded_script(self):
@@ -5265,9 +5285,9 @@ class CollisionEditorWindow(QMainWindow):
         if hasattr(self, "transform_box"):
             self.transform_box.setTitle(
                 "Move Cockpit Camera" if cockpit_selected else "Move Element")
-        if hasattr(self, "cockpit_aspect_combo"):
-            self.viewport.set_cockpit_preview_aspect(
-                self.cockpit_aspect_combo.currentData())
+        if hasattr(self, "cockpit_runtime_aspect_combo"):
+            self.viewport.set_cockpit_runtime_aspect(
+                self.cockpit_runtime_aspect_combo.currentData())
         self._sync_cockpit_preview_model()
         self._sync_gizmo_camera()
         if cockpit_active:
@@ -5490,6 +5510,42 @@ class CollisionEditorWindow(QMainWindow):
         self.project.gun_points_enabled = True
         self._selected_gun_point = min(
             index, len(self.project.gun_points) - 1)
+        self._set_modified()
+        self._sync_all()
+
+    def _capture_loaded_cockpit_camera(self) -> None:
+        """Snapshot source-authored cockpit coordinates for later restore."""
+
+        self._loaded_cockpit_camera_enabled = bool(
+            self.project.cockpit_camera_enabled)
+        self._loaded_cockpit_camera_offset = (
+            float(self.project.cockpit_camera_offset_x),
+            float(self.project.cockpit_camera_offset_y),
+            float(self.project.cockpit_camera_offset_z),
+        )
+
+    def _restore_loaded_cockpit_camera(self) -> None:
+        """Restore cockpit X/Y/Z exactly as read from the source script."""
+
+        if (self.project.target_category != VEHICLE
+                or not self._loaded_cockpit_camera_enabled):
+            return
+        baseline = self._loaded_cockpit_camera_offset
+        current = (
+            float(self.project.cockpit_camera_offset_x),
+            float(self.project.cockpit_camera_offset_y),
+            float(self.project.cockpit_camera_offset_z),
+        )
+        if (self.project.cockpit_camera_enabled
+                and all(abs(a - b) < 1e-9
+                        for a, b in zip(current, baseline))):
+            return
+        self._vehicle_preview_active_edits.clear()
+        self._push_undo()
+        self.project.cockpit_camera_enabled = True
+        (self.project.cockpit_camera_offset_x,
+         self.project.cockpit_camera_offset_y,
+         self.project.cockpit_camera_offset_z) = baseline
         self._set_modified()
         self._sync_all()
 
@@ -6065,6 +6121,29 @@ class CollisionEditorWindow(QMainWindow):
                 self.project.cockpit_camera_offset_x,
                 self.project.cockpit_camera_offset_y,
                 self.project.cockpit_camera_offset_z)))
+        cockpit_current = (
+            float(self.project.cockpit_camera_offset_x),
+            float(self.project.cockpit_camera_offset_y),
+            float(self.project.cockpit_camera_offset_z),
+        )
+        cockpit_source_available = (
+            vehicle_mode and self._loaded_cockpit_camera_enabled)
+        cockpit_matches_source = all(
+            abs(a - b) < 1e-9 for a, b in zip(
+                cockpit_current, self._loaded_cockpit_camera_offset))
+        self.restore_script_cockpit_button.setEnabled(
+            cockpit_enabled and cockpit_source_available
+            and not cockpit_matches_source)
+        if cockpit_source_available:
+            source_x, source_y, source_z = self._loaded_cockpit_camera_offset
+            self.restore_script_cockpit_button.setToolTip(
+                "Restore the cockpit position read from the source script: "
+                f"X {_number(source_x)}, Y {_number(source_y)}, "
+                f"Z {_number(source_z)}.")
+        else:
+            self.restore_script_cockpit_button.setToolTip(
+                "No cockpit_camera_offset_x/y/z coordinates were found in "
+                "the last loaded or imported vehicle script.")
         cockpit_lines = [
             f"cockpit_camera_offset_x = "
             f"{_number(self.project.cockpit_camera_offset_x)}",
@@ -6078,16 +6157,16 @@ class CollisionEditorWindow(QMainWindow):
                 "; Cockpit View is available only for vehicle definitions"]
         elif not cockpit_enabled:
             cockpit_lines = []
-        self.cockpit_output.setPlainText("\n".join(cockpit_lines))
+        self.cockpit_output.setText("\n".join(cockpit_lines))
         self.viewport.set_cockpit_camera_offset(
             self.project.cockpit_camera_offset_x,
             self.project.cockpit_camera_offset_y,
             self.project.cockpit_camera_offset_z)
         cockpit_active = self._is_cockpit_tab_active()
         self.viewport.set_cockpit_preview_active(cockpit_active)
-        if hasattr(self, "cockpit_aspect_combo"):
-            self.viewport.set_cockpit_preview_aspect(
-                self.cockpit_aspect_combo.currentData())
+        if hasattr(self, "cockpit_runtime_aspect_combo"):
+            self.viewport.set_cockpit_runtime_aspect(
+                self.cockpit_runtime_aspect_combo.currentData())
         self._sync_cockpit_preview_model()
         self.toolbar_view_preset_combo.setEnabled(not cockpit_active)
         self.reset_view_action.setEnabled(not cockpit_active)
@@ -6424,6 +6503,7 @@ class CollisionEditorWindow(QMainWindow):
         self.project.unit_gun_default_icon = (
             unit_gun_default_icon if vehicle_block else "")
         self._capture_loaded_gun_points()
+        self._capture_loaded_cockpit_camera()
         if block.name:
             self.project.name = block.name
         self._selected = 0 if self.project.spheres() else -1
