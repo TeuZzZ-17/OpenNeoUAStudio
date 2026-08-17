@@ -9,8 +9,8 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 from PySide6.QtCore import QEvent, QPointF, Qt
 from PySide6.QtGui import QColor, QKeyEvent, QMouseEvent
 from PySide6.QtWidgets import (
-    QAbstractItemView, QApplication, QDialog, QHeaderView, QMessageBox, QSizePolicy,
-    QPushButton, QToolBar, QToolButton,
+    QAbstractItemView, QApplication, QDialog, QHeaderView, QLabel, QMessageBox,
+    QSizePolicy, QPushButton, QToolBar, QToolButton,
 )
 
 from asset_family import AssetFamily, FamilyObject
@@ -2027,10 +2027,62 @@ class CollisionEditorTests(unittest.TestCase):
              window.project.cockpit_camera_offset_y,
              window.project.cockpit_camera_offset_z),
             (5.0, -5.0, 5.0))
-        output = window.cockpit_output.toPlainText()
+        output = window.cockpit_output.text()
         self.assertIn("cockpit_camera_offset_x = 5", output)
         self.assertIn("cockpit_camera_offset_y = -5", output)
         self.assertIn("cockpit_camera_offset_z = 5", output)
+
+    def test_118b_cockpit_runtime_aspect_selector_defaults_to_4_3(self):
+        window = CollisionEditorWindow()
+        self.addCleanup(window.close)
+        self.assertFalse(hasattr(window, "cockpit_aspect_combo"))
+        self.assertFalse(hasattr(window.viewport, "_cockpit_preview_aspect"))
+        self.assertEqual(window.cockpit_runtime_aspect_combo.currentText(),
+                         "4:3 (default / vanilla)")
+        self.assertAlmostEqual(
+            window.cockpit_runtime_aspect_combo.currentData(), 4.0 / 3.0)
+        self.assertAlmostEqual(window.viewport._cockpit_runtime_aspect,
+                               4.0 / 3.0)
+
+    def test_118d_cockpit_output_is_centered_and_non_scrollable(self):
+        window = self._window()
+        window.project.cockpit_camera_enabled = True
+        window._sync_all()
+        self.assertIsInstance(window.cockpit_output, QLabel)
+        self.assertEqual(
+            window.cockpit_output.alignment(),
+            Qt.AlignmentFlag.AlignHCenter | Qt.AlignmentFlag.AlignVCenter)
+        self.assertEqual(
+            window.cockpit_output.focusPolicy(), Qt.FocusPolicy.NoFocus)
+        self.assertIn("cockpit_camera_offset_y", window.cockpit_output.text())
+
+    def test_118c_restore_script_cockpit_position_uses_imported_baseline(self):
+        window = self._window()
+        window.project.cockpit_camera_enabled = True
+        window.project.cockpit_camera_offset_x = 0.0
+        window.project.cockpit_camera_offset_y = -40.0
+        window.project.cockpit_camera_offset_z = 0.0
+        window._capture_loaded_cockpit_camera()
+
+        window.project.cockpit_camera_offset_x = 3.0
+        window.project.cockpit_camera_offset_y = -44.0
+        window.project.cockpit_camera_offset_z = 2.0
+        window._sync_all()
+        self.assertTrue(window.restore_script_cockpit_button.isEnabled())
+
+        window._restore_loaded_cockpit_camera()
+        self.assertTrue(window.project.cockpit_camera_enabled)
+        self.assertEqual(
+            (window.project.cockpit_camera_offset_x,
+             window.project.cockpit_camera_offset_y,
+             window.project.cockpit_camera_offset_z),
+            (0.0, -40.0, 0.0))
+        self.assertFalse(window.restore_script_cockpit_button.isEnabled())
+
+        window._loaded_cockpit_camera_enabled = False
+        window.project.cockpit_camera_offset_y = -45.0
+        window._sync_all()
+        self.assertFalse(window.restore_script_cockpit_button.isEnabled())
 
     def test_119_cockpit_projection_uses_local_plus_z_forward(self):
         viewport = CollisionViewport()
@@ -2050,23 +2102,47 @@ class CollisionEditorTests(unittest.TestCase):
             (2.0, 2.0, -6.0))
         self.assertEqual(viewport._camera_state()["near_distance"], 1.0)
 
-    def test_119b_cockpit_preview_uses_runtime_aspect_correction(self):
+    def test_119b_cockpit_uses_editor_viewport_and_runtime_aspect_only(self):
         viewport = CollisionViewport()
         self.addCleanup(viewport.close)
         viewport.resize(1000, 1000)
         viewport.set_cockpit_preview_active(True)
-        viewport.set_cockpit_preview_aspect(16.0 / 10.0)
+
+        # Physical preview always fills the editor viewport. Runtime logical
+        # aspect defaults to 4:3, matching the vanilla-safe 640x480 vid.def.
         target = viewport._cockpit_render_rect()
+        self.assertFalse(hasattr(viewport, "_cockpit_preview_aspect"))
         self.assertAlmostEqual(target.width(), 1000.0)
-        self.assertAlmostEqual(target.height(), 625.0)
+        self.assertAlmostEqual(target.height(), 1000.0)
+        self.assertAlmostEqual(viewport._cockpit_runtime_aspect, 4.0 / 3.0)
 
         center = target.center()
-        projected = viewport._project((10.0, 0.0, -6.0), target)
-        half = (target.width() + target.height()) * 0.5
-        corr_w = half * 1.1429 / target.width()
-        expected_x = center.x() + 10.0 * (target.width() * 0.5 * corr_w) / 10.0
-        self.assertAlmostEqual(projected.x(), expected_x, places=5)
-        self.assertAlmostEqual(projected.y(), center.y(), places=5)
+        projected_43 = viewport._project((10.0, 10.0, -6.0), target)
+        self.assertAlmostEqual(
+            projected_43.x(), center.x() + target.width() * 0.5, places=5)
+        self.assertAlmostEqual(
+            projected_43.y(), center.y() - target.height() * 0.5, places=5)
+
+        # Selecting a widescreen logical mode changes only OpenUA's matrix
+        # correction; the physical preview remains the same editor viewport.
+        viewport.set_cockpit_runtime_aspect(16.0 / 10.0)
+        runtime_target = viewport._cockpit_render_rect()
+        self.assertAlmostEqual(runtime_target.width(), target.width())
+        self.assertAlmostEqual(runtime_target.height(), target.height())
+        projected_1610 = viewport._project((10.0, 10.0, -6.0), target)
+        runtime_aspect = 16.0 / 10.0
+        half = (runtime_aspect + 1.0) * 0.5
+        corr_w = half * 1.1429 / runtime_aspect
+        corr_h = half * 0.85715
+        self.assertAlmostEqual(
+            projected_1610.x(),
+            center.x() + 10.0 * (target.width() * 0.5 * corr_w) / 10.0,
+            places=5)
+        self.assertAlmostEqual(
+            projected_1610.y(),
+            center.y() - 10.0 * (target.height() * 0.5 * corr_h) / 10.0,
+            places=5)
+        self.assertNotAlmostEqual(projected_43.y(), projected_1610.y())
 
     def test_119b2_cockpit_culling_matches_opengl_window_winding(self):
         viewport = CollisionViewport()
