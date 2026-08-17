@@ -80,7 +80,11 @@ from asset_family import (
 )
 from anm_parser import AnmParseError, export_anm_bytes, parse_anm_bytes
 from asset_tree_filter import filter_tree as filter_asset_tree
-from assembly_viewer import AssetViewport, VIEW_MODES, VIEW_PRESETS
+from assembly_viewer import (
+    AssetViewport,
+    VIEW_MODES,
+    VIEW_PRESETS,
+)
 from base_mapping_editor import (
     MappingEditError,
     MappingIndex,
@@ -1227,9 +1231,11 @@ class AssemblyWindow(QMainWindow):
         self.mode_combo = QComboBox()
         for mode in (candidate for candidate in VIEW_MODES
                      if candidate != "solid"):
-            label = {"wireframe": "Wireframe",
-                     "materials": "Material groups",
-                     "textured": "Textured"}[mode]
+            label = {
+                "wireframe": "Wireframe",
+                "materials": "Material groups",
+                "textured": "Textured",
+            }[mode]
             self.mode_combo.addItem(label, mode)
         self.mode_combo.setCurrentIndex(
             self.mode_combo.findData("textured"))
@@ -1762,7 +1768,9 @@ class AssemblyWindow(QMainWindow):
         self.snapshot_color_button.setFixedSize(64, 26)
         self.snapshot_color_button.setToolTip(
             "No color selected: preview uses the normal dark background and export is transparent.\n"
-            "Click to choose a custom background color.")
+            "Click to choose a custom background color. In Retail indexed mode "
+            "the RGB background is presentation-only; indexed rendering and "
+            "TRACY composition are resolved first against palette index 0.")
         self.snapshot_color_button.clicked.connect(
             self._choose_snapshot_color)
         background_layout.addWidget(self.snapshot_color_button, 0, 1)
@@ -4275,9 +4283,11 @@ class AssemblyWindow(QMainWindow):
                 widget.blockSignals(False)
             self.snapshot_guides_button.setChecked(False)
             self.viewport.set_snapshot_guides_visible(False)
+            snapshot_mode = "textured"
+            self.viewport.set_mode(snapshot_mode)
             self.mode_combo.blockSignals(True)
             self.mode_combo.setCurrentIndex(
-                self.mode_combo.findData("textured"))
+                self.mode_combo.findData(snapshot_mode))
             self.mode_combo.blockSignals(False)
             self.mode_combo.setEnabled(False)
             self.edit_toggle_action.setEnabled(False)

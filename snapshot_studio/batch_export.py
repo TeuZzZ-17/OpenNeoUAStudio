@@ -34,7 +34,10 @@ from PySide6.QtWidgets import (
     QVBoxLayout,
 )
 
-from assembly_viewer import AssetViewport, VIEW_PRESET_ANGLES
+from assembly_viewer import (
+    AssetViewport,
+    VIEW_PRESET_ANGLES,
+)
 from asset_family import AssetFamily, FamilyObject, load_asset_family
 from base_parser import BaseObject
 from setbas_reader import decode_skeleton
@@ -77,6 +80,13 @@ class BatchManifestRow:
     relative_file: str
     status: str
     message: str
+    requested_renderer: str = ""
+    effective_renderer: str = ""
+    render_error: str = ""
+    palette_sha256: str = ""
+    shadermp_sha256: str = ""
+    tracyrmp_sha256: str = ""
+    index_buffer_sha256: str = ""
 
 
 def safe_component(value: str, fallback: str = "unnamed",
@@ -128,6 +138,7 @@ class VPSnapshotBatchPanel(QGroupBox):
         self._failed = 0
         self._started_at = 0.0
         self._last_setbas_path = ""
+        self._renderer_mode = "textured"
         self._batch_viewport: AssetViewport | None = None
         self._active_source_key: tuple[str, int] | None = None
 
@@ -324,6 +335,7 @@ class VPSnapshotBatchPanel(QGroupBox):
         self._root.mkdir(parents=True, exist_ok=True)
         self._target_size = self.window._snapshot_output_size()
         self._zoom = int(self.window.snapshot_zoom_spin.value())
+        self._renderer_mode = "textured"
 
         self._set_running(True)
         self.status_label.setText("Scanning SET.BAS...")
@@ -398,6 +410,7 @@ class VPSnapshotBatchPanel(QGroupBox):
 
         self._batch_viewport = AssetViewport(self)
         self._batch_viewport.begin_snapshot_mode(None)
+        self._batch_viewport.set_mode(self._renderer_mode)
         self._batch_viewport.play_animation(False)
         self._batch_viewport.set_snapshot_guides_visible(False)
         self._active_source_key = None
@@ -627,6 +640,7 @@ class VPSnapshotBatchPanel(QGroupBox):
             viewport.set_selected_owner("root")
 
         viewport.begin_snapshot_mode(None)
+        viewport.set_mode(self._renderer_mode)
         viewport.play_animation(False)
         viewport.reset_animation()
         viewport.set_snapshot_guides_visible(False)
@@ -652,8 +666,7 @@ class VPSnapshotBatchPanel(QGroupBox):
 
         folder = self._root / source.folder_name
         folder.mkdir(parents=True, exist_ok=True)
-        output_path = folder / (
-            f"{view_index:02d}_{view_slug(view)}.png")
+        output_path = folder / f"{view_index:02d}_{view_slug(view)}.png"
         relative = str(
             output_path.relative_to(self._root)).replace("\\", "/")
 
@@ -689,31 +702,57 @@ class VPSnapshotBatchPanel(QGroupBox):
             if image.isNull():
                 raise RuntimeError(
                     "Snapshot renderer returned a null image")
-            writer = QImageWriter(str(output_path), b"png")
-            if not writer.write(image):
-                raise OSError(
-                    writer.errorString()
-                    or f"Could not write {output_path}")
+            partial_path = output_path.with_suffix(output_path.suffix + ".part")
+            if partial_path.exists():
+                partial_path.unlink()
+            writer = QImageWriter(str(partial_path), b"png")
+            try:
+                if not writer.write(image):
+                    raise OSError(
+                        writer.errorString()
+                        or f"Could not write {output_path}")
+                os.replace(partial_path, output_path)
+            except Exception:
+                if partial_path.exists():
+                    partial_path.unlink()
+                raise
         except Exception as exc:
             message = str(exc)
-            self._record(source, view, "", "ERROR", message)
+            self._record(
+                source, view, "", "ERROR", message, include_renderer=True)
             self._warnings.append(
                 f"{source.folder_name} [{view}]: {message}")
             self._failed += 1
         else:
-            mode = (
-                "geometry-only" if source.geometry_only
-                else "textured")
+            mode = "geometry-only" if source.geometry_only else "retail-indexed"
             self._record(
                 source, view, relative, "WRITTEN",
-                f"{image.width()}x{image.height()} transparent PNG ({mode})")
+                f"{image.width()}x{image.height()} transparent PNG ({mode})",
+                include_renderer=True)
             self._written += 1
 
         QTimer.singleShot(0, self._step)
 
     def _record(
             self, source: SnapshotSource, view: str,
-            relative_file: str, status: str, message: str) -> None:
+            relative_file: str, status: str, message: str,
+            *, include_renderer: bool = False) -> None:
+        renderer = {}
+        viewport = self._batch_viewport
+        if include_renderer and viewport is not None and view:
+            try:
+                renderer = viewport.indexed_renderer_info()
+            except Exception:
+                renderer = {}
+        sources = renderer.get("sources", {}) if isinstance(renderer, dict) else {}
+        stats = renderer.get("last_render_stats", {}) if isinstance(renderer, dict) else {}
+
+        def source_hash(name: str) -> str:
+            value = sources.get(name, {}) if isinstance(sources, dict) else {}
+            return str(value.get("sha256", "")) if isinstance(value, dict) else ""
+
+        requested = "retail_indexed_reconstructed"
+        effective = str(renderer.get("effective_renderer", ""))
         self._rows.append(BatchManifestRow(
             source.source_kind,
             source.source_id,
@@ -727,6 +766,14 @@ class VPSnapshotBatchPanel(QGroupBox):
             relative_file,
             status,
             message,
+            requested,
+            effective,
+            str(renderer.get("render_error", "")),
+            source_hash("palette"),
+            source_hash("shader"),
+            source_hash("tracy"),
+            str(stats.get("index_buffer_sha256", ""))
+            if isinstance(stats, dict) else "",
         ))
 
     def _write_manifests(self, cancelled: bool) -> None:
@@ -777,6 +824,10 @@ class VPSnapshotBatchPanel(QGroupBox):
             "transparent_background": True,
             "guides": False,
             "animation_frame": "initial/reset",
+            "renderer_mode": self._renderer_mode,
+            "renderer_requested": "retail_indexed_reconstructed",
+            "retail_indexed_policy": (
+                "fail_closed_on_unsupported_or_ambiguous_sources"),
             "written": self._written,
             "existing": self._existing,
             "skipped_models": self._skipped_models,
@@ -807,15 +858,26 @@ class VPSnapshotBatchPanel(QGroupBox):
         if partial.exists():
             partial.unlink()
         try:
+            authorized = {
+                (self._root / row.relative_file).resolve()
+                for row in self._rows
+                if row.relative_file and row.status in ("WRITTEN", "EXISTS")
+            }
+            authorized.update(
+                (self._root / name).resolve()
+                for name in (
+                    "manifest.json", "manifest.csv", "warnings.log",
+                    "run_info.json")
+            )
             with zipfile.ZipFile(
                     partial, "w",
                     compression=zipfile.ZIP_DEFLATED,
                     compresslevel=1,
                     allowZip64=True) as archive:
-                for path in sorted(self._root.rglob("*")):
+                for path in sorted(authorized):
                     if self._cancel_requested:
                         raise InterruptedError
-                    if path.is_file():
+                    if path.is_file() and self._root in path.parents:
                         archive.write(
                             path,
                             arcname=(
