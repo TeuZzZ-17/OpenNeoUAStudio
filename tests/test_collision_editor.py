@@ -1085,7 +1085,7 @@ class CollisionEditorTests(unittest.TestCase):
         self.assertEqual(window.project.overeof, 0.0)
         self.assertEqual(window.viewport.overeof_preview_offset, 0.0)
         self.assertEqual(
-            window.ground_alignment_box.title(), "Ground Alignment")
+            window.ground_alignment_box.title(), "Ground Alignment (Vanilla)")
         self.assertEqual(window.ground_alignment_notice.text(), "")
         self.assertTrue(window.ground_alignment_notice.isHidden())
         self.assertIn("Show Ground Simulation", window.viewpoint_actions)
@@ -2311,6 +2311,43 @@ class CollisionEditorTests(unittest.TestCase):
         window.gizmo.reset_view_orientation()
         self.assertEqual(window.gizmo._yaw, -35.0)
         self.assertEqual(window.gizmo._pitch, 20.0)
+
+    def test_125_domain_context_menus_reuse_existing_workspace_actions(self):
+        window = self._window()
+        self.assertEqual(
+            window.ground_alignment_box.title(), "Ground Alignment (Vanilla)")
+        self.assertFalse(hasattr(window, "cockpit_hint"))
+
+        fire_menu = window._create_fire_point_context_menu()
+        fire_texts = [action.text() for action in fire_menu.actions()]
+        self.assertIn("Add Fire Point", fire_texts)
+        self.assertIn("Remove Selected Fire Point", fire_texts)
+        self.assertIn("Reset Position to 0 / 0 / 0", fire_texts)
+        self.assertIn("Show Fire Points", fire_texts)
+
+        gun_menu = window._create_gun_point_context_menu()
+        gun_texts = [action.text() for action in gun_menu.actions()]
+        self.assertIn("Add Gun Point", gun_texts)
+        self.assertIn("Remove Selected Gun Point", gun_texts)
+        self.assertIn("Reset All Gun Points", gun_texts)
+        gun_submenus = {
+            action.text(): action.menu() for action in gun_menu.actions()
+            if action.menu() is not None
+        }
+        self.assertIn("New Gun Point Type", gun_submenus)
+
+        cockpit_menu = window._create_cockpit_context_menu()
+        cockpit_texts = [action.text() for action in cockpit_menu.actions()]
+        self.assertIn("Enable Cockpit Camera Offset", cockpit_texts)
+        self.assertIn("Reset Position to 0 / 0 / 0", cockpit_texts)
+        self.assertIn("Restore Script Position", cockpit_texts)
+        cockpit_submenus = {
+            action.text(): action.menu() for action in cockpit_menu.actions()
+            if action.menu() is not None
+        }
+        self.assertIn("Runtime Model", cockpit_submenus)
+        self.assertIn("Runtime Aspect", cockpit_submenus)
+
 
 
 if __name__ == "__main__":
