@@ -2995,6 +2995,14 @@ class CollisionEditorWindow(QMainWindow):
             Qt.ContextMenuPolicy.CustomContextMenu)
         self.sphere_tree.customContextMenuRequested.connect(
             self._show_sphere_tree_context_menu)
+        self.fire_point_tree.setContextMenuPolicy(
+            Qt.ContextMenuPolicy.CustomContextMenu)
+        self.fire_point_tree.customContextMenuRequested.connect(
+            self._show_fire_point_tree_context_menu)
+        self.gun_point_tree.setContextMenuPolicy(
+            Qt.ContextMenuPolicy.CustomContextMenu)
+        self.gun_point_tree.customContextMenuRequested.connect(
+            self._show_gun_point_tree_context_menu)
 
         self._build_actions()
         self._build_ui()
@@ -3427,7 +3435,7 @@ class CollisionEditorWindow(QMainWindow):
         # extend down to the gizmo instead of leaving dead space.
         right.addWidget(self.properties_tabs, 1)
 
-        self.ground_alignment_box = QGroupBox("Ground Alignment")
+        self.ground_alignment_box = QGroupBox("Ground Alignment (Vanilla)")
         ground_layout = QVBoxLayout(self.ground_alignment_box)
         ground_layout.setContentsMargins(6, 4, 6, 4)
         ground_layout.setSpacing(3)
@@ -3542,6 +3550,10 @@ class CollisionEditorWindow(QMainWindow):
         self.collision_tab_layout.addWidget(spheres_box, 1)
 
         self.fire_points_box = QGroupBox("Fire Points (Vanilla)")
+        self.fire_points_box.setContextMenuPolicy(
+            Qt.ContextMenuPolicy.CustomContextMenu)
+        self.fire_points_box.customContextMenuRequested.connect(
+            self._show_fire_points_context_menu)
         fire_layout = QVBoxLayout(self.fire_points_box)
         fire_layout.setContentsMargins(6, 4, 6, 4)
         fire_layout.setSpacing(3)
@@ -3632,6 +3644,10 @@ class CollisionEditorWindow(QMainWindow):
         self.fire_points_tab_layout.addWidget(self.fire_points_box, 1)
 
         self.gun_points_box = QGroupBox("Gun Points (Vanilla/OpenUA)")
+        self.gun_points_box.setContextMenuPolicy(
+            Qt.ContextMenuPolicy.CustomContextMenu)
+        self.gun_points_box.customContextMenuRequested.connect(
+            self._show_gun_points_context_menu)
         gun_layout = QVBoxLayout(self.gun_points_box)
         gun_layout.setContentsMargins(6, 4, 6, 4)
         gun_layout.setSpacing(3)
@@ -3807,6 +3823,10 @@ class CollisionEditorWindow(QMainWindow):
         self.gun_points_tab_layout.addWidget(self.gun_points_box, 1)
 
         self.cockpit_box = QGroupBox("Cockpit View (OpenUA)")
+        self.cockpit_box.setContextMenuPolicy(
+            Qt.ContextMenuPolicy.CustomContextMenu)
+        self.cockpit_box.customContextMenuRequested.connect(
+            self._show_cockpit_context_menu)
         cockpit_layout = QVBoxLayout(self.cockpit_box)
         cockpit_layout.setContentsMargins(6, 4, 6, 4)
         cockpit_layout.setSpacing(3)
@@ -3924,17 +3944,6 @@ class CollisionEditorWindow(QMainWindow):
             self._restore_loaded_cockpit_camera)
         cockpit_buttons.addWidget(self.restore_script_cockpit_button)
         cockpit_controls_layout.addLayout(cockpit_buttons)
-
-        self.cockpit_hint = QLabel(
-            "Cockpit preview uses OpenUA's real 90° UAFrustum projection and "
-            "near plane. The physical preview always follows the editor "
-            "viewport; Runtime aspect controls only OpenUA's logical "
-            "widescreen correction. Use the gizmo or Left/Right = X, "
-            "Up/Down = Z, Page Up/Page Down = Y. Only the gizmo itself can "
-            "be orbited.")
-        self.cockpit_hint.setWordWrap(True)
-        self.cockpit_hint.setStyleSheet("font-size: 10px; color: #aeb6c2;")
-        cockpit_controls_layout.addWidget(self.cockpit_hint)
 
         # This output is display-only and always contains at most the three
         # cockpit offset lines. A QLabel is a better fit than a scrollable
@@ -4994,15 +5003,169 @@ class CollisionEditorWindow(QMainWindow):
         menu.addAction(self.open_base_action)
         menu.addAction(self.open_sklt_action)
         preset_menu = menu.addMenu("View Preset")
+        self._populate_view_preset_context_menu(preset_menu)
+        return menu
+
+    def _populate_view_preset_context_menu(self, menu: QMenu) -> None:
+        """Populate the same read-only camera presets in every workspace menu."""
+
         for preset in VIEW_PRESETS:
-            action = preset_menu.addAction(preset)
+            action = menu.addAction(preset)
             action.setCheckable(True)
             action.setChecked(
                 preset == self.toolbar_view_preset_combo.currentText())
             action.triggered.connect(
                 lambda _checked=False, value=preset:
                 self.toolbar_view_preset_combo.setCurrentText(value))
+
+    @staticmethod
+    def _context_action(menu: QMenu, text: str, callback, enabled: bool = True):
+        action = menu.addAction(text)
+        action.setEnabled(enabled)
+        action.triggered.connect(callback)
+        return action
+
+    def _add_workspace_context_tail(self, menu: QMenu, visibility_action=None) -> None:
+        if visibility_action is not None:
+            menu.addSeparator()
+            menu.addAction(visibility_action)
+        menu.addAction(self.reset_view_action)
+        menu.addSeparator()
+        menu.addAction(self.open_base_action)
+        menu.addAction(self.open_sklt_action)
+        preset_menu = menu.addMenu("View Preset")
+        self._populate_view_preset_context_menu(preset_menu)
+
+    def _create_fire_point_context_menu(self) -> QMenu:
+        menu = QMenu(self)
+        menu.addAction(self.undo_action)
+        menu.addAction(self.redo_action)
+        menu.addSeparator()
+        self._context_action(menu, "Add Fire Point", self.add_fire_point,
+                             self.add_fire_point_button.isEnabled())
+        self._context_action(
+            menu, "Remove Selected Fire Point", self.remove_fire_point,
+            self.remove_fire_point_button.isEnabled())
+        self._context_action(
+            menu, "Reset Position to 0 / 0 / 0",
+            self._reset_fire_point_position,
+            self.reset_fire_point_button.isEnabled())
+        self._add_workspace_context_tail(
+            menu, self.viewpoint_actions.get("Show Fire Points"))
         return menu
+
+    def _create_gun_point_context_menu(self) -> QMenu:
+        menu = QMenu(self)
+        menu.addAction(self.undo_action)
+        menu.addAction(self.redo_action)
+        menu.addSeparator()
+        self._context_action(menu, "Add Gun Point", self.add_gun_point,
+                             self.add_gun_point_button.isEnabled())
+        self._context_action(
+            menu, "Remove Selected Gun Point", self.remove_gun_point,
+            self.remove_gun_point_button.isEnabled())
+        self._context_action(
+            menu, "Reset Selected Position to 0 / 0 / 0",
+            self._reset_gun_point_position,
+            self.reset_gun_point_button.isEnabled())
+        self._context_action(
+            menu, "Reset All Gun Points", self._reset_all_gun_points,
+            self.reset_all_gun_points_button.isEnabled())
+
+        type_menu = menu.addMenu("New Gun Point Type")
+        for index in range(self.gun_point_type_combo.count()):
+            text = self.gun_point_type_combo.itemText(index)
+            data = self.gun_point_type_combo.itemData(index)
+            action = type_menu.addAction(text)
+            action.setCheckable(True)
+            action.setChecked(data == self._new_gun_point_scheme)
+            action.triggered.connect(
+                lambda _checked=False, value=data:
+                self.gun_point_type_combo.setCurrentIndex(
+                    self.gun_point_type_combo.findData(value)))
+
+        self._add_workspace_context_tail(
+            menu, self.viewpoint_actions.get("Show Gun Points"))
+        return menu
+
+    def _create_cockpit_context_menu(self) -> QMenu:
+        menu = QMenu(self)
+        menu.addAction(self.undo_action)
+        menu.addAction(self.redo_action)
+        menu.addSeparator()
+
+        cockpit_enabled = (self.project.target_category == VEHICLE
+                           and self.project.cockpit_camera_enabled)
+        toggle_text = (
+            "Disable Cockpit Camera Offset" if cockpit_enabled
+            else "Enable Cockpit Camera Offset")
+        self._context_action(
+            menu, toggle_text, self._toggle_cockpit_camera,
+            self.project.target_category == VEHICLE)
+        self._context_action(
+            menu, "Reset Position to 0 / 0 / 0", self._reset_cockpit_camera,
+            cockpit_enabled)
+        self._context_action(
+            menu, "Restore Script Position",
+            self._restore_loaded_cockpit_camera,
+            self.restore_script_cockpit_button.isEnabled())
+
+        model_menu = menu.addMenu("Runtime Model")
+        for index in range(self.cockpit_model_state_combo.count()):
+            text = self.cockpit_model_state_combo.itemText(index)
+            data = self.cockpit_model_state_combo.itemData(index)
+            action = model_menu.addAction(text)
+            action.setCheckable(True)
+            action.setChecked(
+                data == self.cockpit_model_state_combo.currentData())
+            action.triggered.connect(
+                lambda _checked=False, value=data:
+                self.cockpit_model_state_combo.setCurrentIndex(
+                    self.cockpit_model_state_combo.findData(value)))
+
+        aspect_menu = menu.addMenu("Runtime Aspect")
+        for index in range(self.cockpit_runtime_aspect_combo.count()):
+            text = self.cockpit_runtime_aspect_combo.itemText(index)
+            data = self.cockpit_runtime_aspect_combo.itemData(index)
+            action = aspect_menu.addAction(text)
+            action.setCheckable(True)
+            action.setChecked(
+                data == self.cockpit_runtime_aspect_combo.currentData())
+            action.triggered.connect(
+                lambda _checked=False, value=data:
+                self.cockpit_runtime_aspect_combo.setCurrentIndex(
+                    self.cockpit_runtime_aspect_combo.findData(value)))
+
+        menu.addSeparator()
+        menu.addAction(self.open_base_action)
+        menu.addAction(self.open_sklt_action)
+        return menu
+
+    def _show_fire_points_context_menu(self, local_pos: QPoint) -> None:
+        self._create_fire_point_context_menu().exec(
+            self.fire_points_box.mapToGlobal(local_pos))
+
+    def _show_gun_points_context_menu(self, local_pos: QPoint) -> None:
+        self._create_gun_point_context_menu().exec(
+            self.gun_points_box.mapToGlobal(local_pos))
+
+    def _show_cockpit_context_menu(self, local_pos: QPoint) -> None:
+        self._create_cockpit_context_menu().exec(
+            self.cockpit_box.mapToGlobal(local_pos))
+
+    def _show_fire_point_tree_context_menu(self, local_pos: QPoint) -> None:
+        item = self.fire_point_tree.itemAt(local_pos)
+        if item is not None:
+            self.fire_point_tree.setCurrentItem(item)
+        self._create_fire_point_context_menu().exec(
+            self.fire_point_tree.viewport().mapToGlobal(local_pos))
+
+    def _show_gun_point_tree_context_menu(self, local_pos: QPoint) -> None:
+        item = self.gun_point_tree.itemAt(local_pos)
+        if item is not None:
+            self.gun_point_tree.setCurrentItem(item)
+        self._create_gun_point_context_menu().exec(
+            self.gun_point_tree.viewport().mapToGlobal(local_pos))
 
     def _show_sphere_context_menu(self, index: int, global_pos: QPoint):
         self._create_sphere_context_menu(index).exec(global_pos)
