@@ -27,23 +27,6 @@ Suite, Map Editor, Collision Editor, or Wireframe Editor.
 
 A precompiled Windows executable may also be included in the repository for convenience.
 
-## Textured renderer
-
-The model viewer and Snapshot Studio use one **Textured** renderer. It keeps
-Urban Assault palette indices through the reconstructed `SHADERMP` /
-`TRACYRMP` pipeline until the final RGBA display conversion. The same renderer
-is used for the live viewport, camera motion, VANM playback, geometry editing,
-single Snapshot exports and batch exports.
-
-Viewport frames are rendered at the real target resolution; there is no
-low-resolution interaction mode and no RGB textured fallback. Completed frames
-are cached only while camera, animation, geometry and viewport size remain
-unchanged. NumPy is a supported runtime dependency and is included in the
-official Windows build. Unsupported or ambiguous source data fails closed
-instead of silently switching renderers.
-
-See `RETAIL_INDEXED_RENDERER.md` for behavior, limits, provenance and testing.
-
 ## License
 
 Copyright (C) 2025-2026 TeuZzZ-17
