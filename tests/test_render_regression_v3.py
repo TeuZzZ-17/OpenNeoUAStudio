@@ -5,7 +5,7 @@ from unittest.mock import MagicMock
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-from PySide6.QtCore import QPointF, QRectF
+from PySide6.QtCore import QRectF
 from PySide6.QtGui import QColor, QImage, QPainter
 from PySide6.QtWidgets import QApplication
 
@@ -14,13 +14,39 @@ from assembly_viewer import (
     PrecisionGuide,
 )
 from geometry_editor import GeometryEditSession
+from indexed_renderer import (
+    IndexedPiece,
+    IndexedRasterizer,
+    IndexedSurface,
+    IndexedTables,
+)
 from sklt_parser import SkltModel
 
 
-def _opaque_source():
-    image = QImage(4, 4, QImage.Format.Format_ARGB32)
-    image.fill(QColor(220, 45, 30, 255))
-    return image
+def _indexed_tables(color=(220, 45, 30)):
+    palette = [(0, 0, 0)] * 256
+    palette[37] = color
+    shader = bytes(range(256)) * 256
+    tracy = b"".join(bytes((background,)) * 256 for background in range(256))
+    return IndexedTables(tuple(palette), shader, tracy)
+
+
+def _indexed_image(width, height, screen, uvs, *, source_index=37,
+                   tracy_mode="none", camera_vertices=None):
+    surface = IndexedSurface(
+        "regression", "texture", bytes((source_index,)) * 16, 4, 4,
+        None, "none", 0,
+        tracy_mode, "depth")
+    camera_vertices = camera_vertices or ((0.0, 0.0, 0.0),) * len(screen)
+    piece = IndexedPiece(
+        "face", 1, tuple(screen), tuple(uvs), tuple(camera_vertices),
+        surface)
+    tables = _indexed_tables()
+    result = IndexedRasterizer.render(width, height, (piece,), tables)
+    rgba = result.to_rgba(tables)
+    return QImage(
+        rgba, width, height, width * 4,
+        QImage.Format.Format_RGBA8888).copy()
 
 
 def _alpha_count(image, rect=None):
@@ -38,66 +64,33 @@ class RenderRegressionV3Tests(unittest.TestCase):
         cls.app = QApplication.instance() or QApplication([])
 
     def test_degenerate_source_uv_triangle_is_rasterized_not_skipped(self):
-        viewport = AssetViewport()
-        output = QImage(120, 120, QImage.Format.Format_ARGB32)
-        output.fill(QColor(0, 0, 0, 0))
-        painter = QPainter(output)
-        viewport._draw_textured(
-            painter,
-            [
-                QPointF(10, 10),
-                QPointF(10, 110),
-                QPointF(110, 110),
-                QPointF(110, 10),
-            ],
-            [(32, 32), (32, 32), (32, 32), (32, 32)],
-            _opaque_source(),
-        )
-        painter.end()
+        output = _indexed_image(
+            120, 120,
+            [(10, 10), (10, 110), (110, 110), (110, 10)],
+            [(32, 32), (32, 32), (32, 32), (32, 32)])
         self.assertGreater(_alpha_count(output), 9000)
         self.assertEqual(output.pixelColor(25, 75).alpha(), 255)
         self.assertEqual(output.pixelColor(75, 25).alpha(), 255)
 
     def test_inclined_quad_keeps_both_fan_triangles_visible(self):
-        viewport = AssetViewport()
-        output = QImage(140, 130, QImage.Format.Format_ARGB32)
-        output.fill(QColor(0, 0, 0, 0))
-        painter = QPainter(output)
-        viewport._draw_textured(
-            painter,
-            [
-                QPointF(16, 20),
-                QPointF(9, 112),
-                QPointF(118, 104),
-                QPointF(130, 14),
-            ],
+        output = _indexed_image(
+            140, 130,
+            [(16, 20), (9, 112), (118, 104), (130, 14)],
             [(0, 0), (0, 255), (255, 255), (255, 0)],
-            _opaque_source(),
-        )
-        painter.end()
+            camera_vertices=(
+                (-1.0, 1.0, 0.0), (-1.0, -1.0, 0.5),
+                (1.0, -1.0, 1.0), (1.0, 1.0, 0.5)))
         self.assertGreater(_alpha_count(output), 9000)
         self.assertEqual(output.pixelColor(35, 75).alpha(), 255)
         self.assertEqual(output.pixelColor(95, 42).alpha(), 255)
 
-    def test_degenerate_fallback_preserves_source_alpha(self):
-        viewport = AssetViewport()
-        source = QImage(2, 2, QImage.Format.Format_ARGB32)
-        source.fill(QColor(120, 60, 30, 128))
-        output = QImage(50, 50, QImage.Format.Format_ARGB32)
-        output.fill(QColor(0, 0, 0, 0))
-        painter = QPainter(output)
-        viewport._draw_textured(
-            painter,
-            [QPointF(5, 5), QPointF(5, 45), QPointF(45, 45)],
+    def test_clear_tracy_source_zero_preserves_transparent_destination(self):
+        output = _indexed_image(
+            50, 50,
+            [(5, 5), (5, 45), (45, 45)],
             [(10, 10), (10, 10), (10, 10)],
-            source,
-        )
-        painter.end()
-        sample = output.pixelColor(15, 30)
-        self.assertEqual(sample.alpha(), 128)
-        self.assertLessEqual(abs(sample.red() - 120), 1)
-        self.assertLessEqual(abs(sample.green() - 60), 1)
-        self.assertLessEqual(abs(sample.blue() - 30), 1)
+            source_index=0, tracy_mode="clear")
+        self.assertEqual(output.pixelColor(15, 30).alpha(), 0)
 
     def test_orientation_triad_stays_at_margin_and_tracks_camera(self):
         viewport = AssetViewport()
