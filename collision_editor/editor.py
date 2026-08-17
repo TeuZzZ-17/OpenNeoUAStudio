@@ -1716,6 +1716,20 @@ class CollisionViewport(AssetViewport):
         dz = float(point[2]) - oz
         return (dx, -dy, 4.0 - dz)
 
+    def _front_facing_from_screen_area(self, area: float) -> bool:
+        """Match OpenUA GL_CCW culling in the cockpit-only Qt view.
+
+        OpenUA renders the vehicle body with OpenGL's default CCW
+        front-face convention. Cockpit projection is converted to Qt's
+        top-left screen coordinates, which invert window Y; therefore a
+        runtime front-facing triangle has a negative signed area here.
+        The regular editor keeps its historical winding unchanged.
+        """
+
+        if self._cockpit_preview_active:
+            return float(area) <= 0.0
+        return super()._front_facing_from_screen_area(area)
+
     def _project(self, camera_point, target: QRectF | None = None,
                  camera: dict | None = None) -> QPointF:
         if not getattr(self, "_cockpit_preview_active", False):

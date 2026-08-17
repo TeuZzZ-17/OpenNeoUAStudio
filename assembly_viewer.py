@@ -2980,6 +2980,15 @@ class AssetViewport(QWidget):
 
     # -- painting ------------------------------------------------------------------
 
+    def _front_facing_from_screen_area(self, area: float) -> bool:
+        """Return the regular editor front-face convention for screen area.
+
+        Runtime-specific workspaces may override this without changing the
+        shared Model Editor / Snapshot rendering contract.
+        """
+
+        return float(area) >= 0.0
+
     def paintGL_stub(self):  # pragma: no cover - kept for API parity
         pass
 
@@ -3146,7 +3155,7 @@ class AssetViewport(QWidget):
                         - triangle[(item + 1) % 3].x()
                         * triangle[item].y()
                         for item in range(3))
-                    if area >= 0.0:
+                    if self._front_facing_from_screen_area(area):
                         front_facing = True
                         break
                 draw_piece(
@@ -3203,7 +3212,7 @@ class AssetViewport(QWidget):
                         * tri_screen[item].y()
                         for item in range(3)
                     )
-                    front_facing = area >= 0.0
+                    front_facing = self._front_facing_from_screen_area(area)
                     if self._backface_cull and not front_facing:
                         continue
                     triangles.append(CameraPolygon(

@@ -2068,6 +2068,38 @@ class CollisionEditorTests(unittest.TestCase):
         self.assertAlmostEqual(projected.x(), expected_x, places=5)
         self.assertAlmostEqual(projected.y(), center.y(), places=5)
 
+    def test_119b2_cockpit_culling_matches_opengl_window_winding(self):
+        viewport = CollisionViewport()
+        self.addCleanup(viewport.close)
+        viewport.resize(1000, 625)
+        viewport.set_cockpit_camera_offset(0.0, -40.0, 0.0)
+        viewport.set_cockpit_preview_active(True)
+        target = QRectF(0.0, 0.0, 1000.0, 625.0)
+
+        # Eisenhans VP_PANZ1 polygon 0, runtime fan triangle (0, 2, 1).
+        # OpenUA/OpenGL sees it as GL_CCW/front-facing. Converted to Qt
+        # top-left coordinates its signed area is negative. The old
+        # Cockpit View culled it and removed the lower nose panel.
+        points = (
+            (27.0, -30.0, 10.0),
+            (-27.0, -3.0, 46.0),
+            (-27.0, -30.0, 10.0),
+        )
+        screen = [
+            viewport._project(viewport._camera_vertex(point), target)
+            for point in points
+        ]
+        area = sum(
+            screen[index].x() * screen[(index + 1) % 3].y()
+            - screen[(index + 1) % 3].x() * screen[index].y()
+            for index in range(3)
+        )
+        self.assertLess(area, 0.0)
+        self.assertTrue(viewport._front_facing_from_screen_area(area))
+
+        viewport.set_cockpit_preview_active(False)
+        self.assertFalse(viewport._front_facing_from_screen_area(area))
+
     def test_119c_window_title_reports_script_vehicle_base_and_archive(self):
         window = self._window()
         with tempfile.TemporaryDirectory() as tmp:
