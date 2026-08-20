@@ -1,8 +1,8 @@
-"""Startup tool selector for OpenUAStudio.
+"""Startup tool selector for OpenNeoUA Studio.
 
 The selector deliberately imports only the lightweight Qt widgets it needs.
 The selected editor is loaded by :mod:`main` after this dialog is closed, so
-opening OpenUAStudio does not initialize every editor up front.
+opening OpenNeoUA Studio does not initialize every editor up front.
 """
 
 from __future__ import annotations
@@ -208,11 +208,11 @@ class _StaticToolPanel(QFrame):
 
 
 class StartupToolSelector(QDialog):
-    """Ask which OpenUAStudio workspace should be opened."""
+    """Ask which OpenNeoUA Studio workspace should be opened."""
 
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
-        self.setWindowTitle("OpenUAStudio - Select Tool")
+        self.setWindowTitle("OpenNeoUA Studio - Select Tool")
         self.setModal(True)
         self.setMinimumSize(720, 720)
         self.resize(760, 760)
@@ -243,7 +243,7 @@ class StartupToolSelector(QDialog):
         layout.addWidget(self.tool_list)
 
         note = QLabel(
-            "Each workspace shares the same OpenUAStudio asset pipeline."
+            "Each workspace shares the same OpenNeoUA Studio asset pipeline."
         )
         note.setObjectName("selectorNote")
         note.setWordWrap(True)

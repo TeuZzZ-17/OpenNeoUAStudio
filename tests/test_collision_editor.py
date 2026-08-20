@@ -170,7 +170,7 @@ class CollisionEditorTests(unittest.TestCase):
             [13, 13, 13],
         )
 
-    def test_06_f10_colors_match_openua(self):
+    def test_06_f10_colors_match_openneoua(self):
         self.assertEqual(TYPE_COLORS[LEGACY], QColor(220, 60, 60))
         self.assertEqual(TYPE_COLORS[VEHICLE], QColor(60, 220, 60))
         self.assertEqual(TYPE_COLORS[WEAPON], QColor(60, 130, 235))
@@ -899,7 +899,7 @@ class CollisionEditorTests(unittest.TestCase):
         self.assertTrue(notice.isVisibleTo(window) or not window.isVisible())
         self.assertIn("Vanilla Urban Assault", notice.text())
         self.assertIn("Legacy Radius only", notice.text())
-        self.assertIn("OpenUA", notice.text())
+        self.assertIn("OpenNeoUA", notice.text())
 
     def test_59_model_preview_scale_defaults_to_identity(self):
         window = self._window()
@@ -1762,7 +1762,7 @@ class CollisionEditorTests(unittest.TestCase):
         self.assertEqual(window.gun_point_tree.topLevelItemCount(), 1)
         item = window.gun_point_tree.topLevelItem(0)
         self.assertEqual(window.gun_point_tree.headerItem().text(1), "Family")
-        self.assertEqual(item.text(1), "OpenUA")
+        self.assertEqual(item.text(1), "OpenNeoUA")
         window.gun_point_tree.setCurrentItem(item)
         self.assertEqual(window._selected_gun_point, 0)
         self.assertEqual(window._selected, -1)
@@ -1842,7 +1842,7 @@ class CollisionEditorTests(unittest.TestCase):
     def test_109_gun_direction_controls_are_canonical_and_name_is_script_name(self):
         window = self._window()
         self.assertEqual(window.gun_points_box.title(),
-                         "Gun Points (Vanilla/OpenUA)")
+                         "Gun Points (Vanilla/OpenNeoUA)")
         for spin in window.gun_dir_spins.values():
             self.assertEqual(spin.minimum(), -1.0)
             self.assertEqual(spin.maximum(), 1.0)
@@ -1947,7 +1947,7 @@ class CollisionEditorTests(unittest.TestCase):
         self.assertTrue(enabled)
         self.assertEqual((x, y, z), (12.5, 0.0, -40.0))
 
-    def test_115_cockpit_output_is_openua_vehicle_only_and_opt_in(self):
+    def test_115_cockpit_output_is_openneoua_vehicle_only_and_opt_in(self):
         project = CollisionProject(
             name="Wasp", source_model="wasp.sklt",
             target_category=VEHICLE, cockpit_camera_enabled=True,
@@ -2123,7 +2123,7 @@ class CollisionEditorTests(unittest.TestCase):
         self.assertAlmostEqual(
             projected_43.y(), center.y() - target.height() * 0.5, places=5)
 
-        # Selecting a widescreen logical mode changes only OpenUA's matrix
+        # Selecting a widescreen logical mode changes only OpenNeoUA's matrix
         # correction; the physical preview remains the same editor viewport.
         viewport.set_cockpit_runtime_aspect(16.0 / 10.0)
         runtime_target = viewport._cockpit_render_rect()
@@ -2153,7 +2153,7 @@ class CollisionEditorTests(unittest.TestCase):
         target = QRectF(0.0, 0.0, 1000.0, 625.0)
 
         # Eisenhans VP_PANZ1 polygon 0, runtime fan triangle (0, 2, 1).
-        # OpenUA/OpenGL sees it as GL_CCW/front-facing. Converted to Qt
+        # OpenNeoUA/OpenGL sees it as GL_CCW/front-facing. Converted to Qt
         # top-left coordinates its signed area is negative. The old
         # Cockpit View culled it and removed the lower nose panel.
         points = (

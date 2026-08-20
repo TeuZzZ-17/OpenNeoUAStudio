@@ -1,4 +1,4 @@
-"""Integrated Map Editor for OpenUAStudio."""
+"""Integrated Map Editor for OpenNeoUAStudio."""
 
 from .editor import MapEditor, main, run_map_editor
 

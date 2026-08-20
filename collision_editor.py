@@ -1,8 +1,8 @@
-"""Manual collision-sphere editor integrated with OpenUAStudio.
+"""Manual collision-sphere editor integrated with OpenNeoUAStudio.
 
 The tool deliberately stores only script data.  BASE/SKLT assets stay
 read-only and all model loading, texture resolution, camera and rendering are
-delegated to the existing OpenUAStudio asset-family and viewport code.
+delegated to the existing OpenNeoUAStudio asset-family and viewport code.
 """
 
 from __future__ import annotations
@@ -75,7 +75,7 @@ TYPE_LABELS = {
     VEHICLE: "Vehicle Collision",
     WEAPON: "Weapon Collision",
 }
-# Exact F10 debug colors from OpenUA src/yw_game.cpp.
+# Exact F10 debug colors from OpenNeoUA src/yw_game.cpp.
 TYPE_COLORS = {
     LEGACY: QColor(220, 60, 60),
     VEHICLE: QColor(60, 220, 60),
@@ -461,7 +461,7 @@ def create_backup(path: str | Path) -> Path:
 
 
 def read_script_file(path: str | Path) -> tuple[str, str, bool]:
-    """Read common OpenUA text encodings without silently changing them."""
+    """Read common OpenNeoUA text encodings without silently changing them."""
 
     data = Path(path).read_bytes()
     if data.startswith(b"\xef\xbb\xbf"):
@@ -663,7 +663,7 @@ class CollisionViewport(AssetViewport):
             painter.end()
 
         painter = QPainter(self)
-        # OpenUA F10 uses unfilled, aliased one-pixel lines and 12 segments.
+        # OpenNeoUA F10 uses unfilled, aliased one-pixel lines and 12 segments.
         painter.setRenderHint(QPainter.RenderHint.Antialiasing, False)
         for index, sphere in enumerate(self._collision_spheres):
             if not self._is_sphere_drawn(sphere):
@@ -846,7 +846,7 @@ class ApplyScriptDialog(QDialog):
 
     def _browse(self):
         path, _ = QFileDialog.getOpenFileName(
-            self, "Select OpenUA script", "",
+            self, "Select OpenNeoUA script", "",
             "Text scripts (*.txt *.ini);;All files (*)")
         if path:
             self.path_edit.setText(path)
@@ -894,11 +894,11 @@ class ApplyScriptDialog(QDialog):
 
 
 class CollisionEditorWindow(QMainWindow):
-    """Manual collision editor built on OpenUAStudio's existing systems."""
+    """Manual collision editor built on OpenNeoUAStudio's existing systems."""
 
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
-        self.setWindowTitle("Collision Editor — OpenUAStudio")
+        self.setWindowTitle("Collision Editor — OpenNeoUA Studio")
         self.resize(1100, 720)
         self.project = CollisionProject()
         self.family: AssetFamily | None = None
@@ -1217,7 +1217,7 @@ class CollisionEditorWindow(QMainWindow):
 
     def _set_modified(self, modified=True):
         self._modified = bool(modified)
-        title = "Collision Editor — OpenUAStudio"
+        title = "Collision Editor — OpenNeoUA Studio"
         self.setWindowTitle(("* " if self._modified else "") + title)
 
     def undo(self):

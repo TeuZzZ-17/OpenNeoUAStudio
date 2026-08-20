@@ -7,7 +7,7 @@ ST_ENDL5 #82.
 
 A repair appends ONE 6-byte ATTS entry and ONE matching OLPL group
 (s16 uvCount + uvCount * (u8 u, u8 v), uvCount == polygon vertex count) to a
-user-chosen amesh block.  Both formats are CONFIRMED against the OpenUA
+user-chosen amesh block.  Both formats are CONFIRMED against the OpenNeoUA
 runtime (amesh.cpp); the appended deltas are always even (6 bytes, and
 2 + 2*n bytes), so IFF chunk padding never changes — the writer only splices
 the new bytes at the end of the two chunk payloads and bumps the big-endian

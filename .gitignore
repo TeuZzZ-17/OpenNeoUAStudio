@@ -1,6 +1,4 @@
 
-# OpenUAStudio build outputs
-OpenUAStudio.exe
 dist/
 build/
 __pycache__/

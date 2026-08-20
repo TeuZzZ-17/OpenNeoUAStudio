@@ -1,4 +1,4 @@
-"""OpenUAStudio Wireframe Editor window.
+"""OpenNeoUA Studio Wireframe Editor window.
 
 This is the complete former 2D editor, integrated into the same QApplication
 as the 3D/SET.BAS workbench.
@@ -38,7 +38,7 @@ from sklt_parser import (
     save_sklt_with_poo2_pol2_structure,
     save_sklt_with_poo2_points,
 )
-APP_TITLE = "OpenUAStudio - Wireframe Editor"
+APP_TITLE = "OpenNeoUA Studio - Wireframe Editor"
 
 
 class WireframeEditorWindow(QMainWindow):
@@ -721,7 +721,7 @@ class WireframeEditorWindow(QMainWindow):
 
 def main() -> int:
     app = QApplication(sys.argv)
-    app.setApplicationName("OpenUAStudio")
+    app.setApplicationName("OpenNeoUAStudio")
     app.setApplicationDisplayName("")
     window = WireframeEditorWindow()
     window.show()

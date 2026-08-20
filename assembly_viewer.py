@@ -390,7 +390,7 @@ def _image_from_ilbm(img, palette_override=None,
 
 
 def _image_from_effect_png(path) -> QImage | None:
-    """Load an OpenUA HI/ALPHA effect PNG with engine chroma handling."""
+    """Load an OpenNeoUA HI/ALPHA effect PNG with engine chroma handling."""
 
     if path is None:
         return None
@@ -3270,7 +3270,7 @@ class AssetViewport(QWidget):
                     face, cam, ((0.0, 0.0),) * len(cam),
                     front_facing)
         else:
-            # Match OpenUA's runtime fan triangulation, then use a camera-space
+            # Match OpenNeoUA's runtime fan triangulation, then use a camera-space
             # BSP to split intersecting triangles.  QPainter can consequently
             # paint exact back-to-front pieces without a hardware depth buffer.
             triangles: list[CameraPolygon] = []

@@ -2,7 +2,7 @@
 
 A .base file references resources by logical name, e.g.
 ``Skeleton/BP_FLAK1.sklt`` or ``MTL.ILBM``.  On disk those names may live in
-several layouts (developer CD tree, OpenUA Data/SetN/Loose, BASet extraction
+several layouts (developer CD tree, OpenNeoUA Data/SetN/Loose, BASet extraction
 output) and may use legacy extension aliases:
 
     .base <-> .bas          .sklt <-> .skl

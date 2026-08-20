@@ -1,4 +1,4 @@
-"""Compact model-space Move, Rotate and Scale gizmo for OpenUAStudio."""
+"""Compact model-space Move, Rotate and Scale gizmo for OpenNeoUAStudio."""
 
 from __future__ import annotations
 
@@ -68,7 +68,7 @@ class ModelSpaceGizmo(QWidget):
         self._repeat_timer.timeout.connect(self._repeat)
         self._handles: tuple[GizmoHandle, ...] = ()
         # Optional visual tuning.  Defaults preserve the established gizmo
-        # geometry used by the other OpenUAStudio editors.
+        # geometry used by the other OpenNeoUAStudio editors.
         self._visual_extent_ratio = 0.72
         self._visual_margin = 22.0
         self._handle_scale = 1.0

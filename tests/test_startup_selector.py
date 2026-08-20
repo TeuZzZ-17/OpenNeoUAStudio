@@ -38,7 +38,7 @@ class StartupToolSelectorTests(unittest.TestCase):
 
         self.assertEqual(dialog.tool_list.count(), 5)
         self.assertEqual(dialog.selected_tool(), "model_editor")
-        self.assertEqual(dialog.windowTitle(), "OpenUAStudio - Select Tool")
+        self.assertEqual(dialog.windowTitle(), "OpenNeoUA Studio - Select Tool")
 
     def test_selection_returns_the_requested_tool_key(self):
         dialog = StartupToolSelector()
