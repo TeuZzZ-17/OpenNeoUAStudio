@@ -14,7 +14,7 @@ Known payload classes (SET1 census: 1119 EMRS = 28 VBMP for ilbm.class,
     bmpanim.class -> FORM VANM
 
 Everything stays in memory: payloads are decoded straight from the loaded
-byte buffer with the existing OpenUAStudio parsers.  This module never writes,
+byte buffer with the existing OpenNeoUAStudio parsers.  This module never writes,
 moves or repacks anything.
 """
 

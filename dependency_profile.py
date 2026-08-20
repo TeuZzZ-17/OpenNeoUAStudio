@@ -1,7 +1,7 @@
 """Optional persistence of dependency choices (tool-side, never asset-side).
 
 Stores the user's picks for ambiguous references in
-``~/.openuastudio/dependency_choices.json`` so the same theme/texture
+``~/.openneouastudio/dependency_choices.json`` so the same theme/texture
 does not have to be chosen every session.  The profile NEVER lives next to
 game assets and nothing in the original asset tree is ever modified.
 
@@ -21,10 +21,12 @@ from datetime import datetime
 import json
 from pathlib import Path
 
-PROFILE_DIR = Path.home() / ".openuastudio"
+PROFILE_DIR = Path.home() / ".openneouastudio"
 PROFILE_PATH = PROFILE_DIR / "dependency_choices.json"
-LEGACY_PROFILE_PATH = (Path.home() / ".skltron"
-                       / "skltron_dependency_choices.json")
+LEGACY_OPENUA_PROFILE_PATH = (Path.home() / ".openuastudio"
+                              / "dependency_choices.json")
+LEGACY_SKLTRON_PROFILE_PATH = (Path.home() / ".skltron"
+                                / "skltron_dependency_choices.json")
 PROFILE_VERSION = 1
 
 
@@ -60,13 +62,17 @@ class DependencyProfile:
         self.auto_apply = False
         self._choices: dict[tuple, SavedChoice] = {}
         self.load_error: str | None = None
-        # One-way compatibility bridge for existing users.  The old file is
-        # read when the new OpenUAStudio profile does not exist; the next
-        # successful save writes only the new path.
-        self._load_path = (LEGACY_PROFILE_PATH
-                           if path is None and not self.path.is_file()
-                           and LEGACY_PROFILE_PATH.is_file()
-                           else self.path)
+        # One-way compatibility bridge for existing users.  Read the new
+        # profile first, then the former OpenUAStudio location, then the
+        # older SKLtron profile.  The next successful save always writes only
+        # the new path; legacy files are never moved, deleted, or overwritten.
+        self._load_path = self.path
+        if path is None and not self.path.is_file():
+            for legacy_path in (LEGACY_OPENUA_PROFILE_PATH,
+                                LEGACY_SKLTRON_PROFILE_PATH):
+                if legacy_path.is_file():
+                    self._load_path = legacy_path
+                    break
         self._load()
 
     # -- persistence -------------------------------------------------------------

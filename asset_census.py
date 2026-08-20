@@ -274,7 +274,7 @@ def run_census(manifest: dict, rgb: bool = True, limit: int = 0,
         global_totals["decode_failures"] += len(s.get("decode_failures", []))
         global_totals["errors"] += len(s.get("errors", []))
     return {
-        "generator": "OpenUAStudio asset_census V0.6",
+        "generator": "OpenNeoUA Studio asset_census V0.6",
         "generated_at": datetime.now().isoformat(timespec="seconds"),
         "global": global_totals,
         "sets": sets,

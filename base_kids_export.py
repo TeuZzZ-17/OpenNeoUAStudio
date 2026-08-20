@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
-"""Export BASE/KIDS scene metadata from a local Urban Assault/OpenUA SET.BAS.
+"""Export BASE/KIDS scene metadata from a local Urban Assault/OpenNeoUA SET.BAS.
 
 This tool is read-only for SET.BAS. It exports structural metadata and
 references, not decoded asset payloads.
 
 Ported verbatim from the BASet project (same author, GPL v3) as part of the
-BASet/OpenUAStudio capability merge; used by setbas_export.py for the optional
+BASet/OpenNeoUA Studio capability merge; used by setbas_export.py for the optional
 "raw BASE/KIDS chunks" developer dump and the JSON scene metadata export.
 """
 
@@ -581,7 +581,7 @@ def print_summary(summary: Dict[str, object]) -> None:
 
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="Export BASE/KIDS metadata from a local OpenUA/Urban Assault SET.BAS.")
+    parser = argparse.ArgumentParser(description="Export BASE/KIDS metadata from a local OpenNeoUA/Urban Assault SET.BAS.")
     parser.add_argument("setbas", metavar="path_to_SET.BAS", help="local SET.BAS file to parse read-only")
     parser.add_argument("--out", required=True, help="metadata output directory")
     return parser

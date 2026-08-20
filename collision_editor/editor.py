@@ -1,8 +1,8 @@
-"""Manual collision-sphere editor integrated with OpenUAStudio.
+"""Manual collision-sphere editor integrated with OpenNeoUAStudio.
 
 The tool deliberately stores only script data.  BASE/SKLT assets stay
 read-only and all model loading, texture resolution, camera and rendering are
-delegated to the existing OpenUAStudio asset-family and viewport code.
+delegated to the existing OpenNeoUAStudio asset-family and viewport code.
 """
 
 from __future__ import annotations
@@ -92,14 +92,14 @@ _PUBLIC_DEPENDENCY_DEFAULTS = {
 LEGACY = "legacy"
 VEHICLE = "vehicle"
 WEAPON = "weapon"
-WINDOW_TITLE = "Collision Editor — OpenUAStudio"
+WINDOW_TITLE = "Collision Editor — OpenNeoUA Studio"
 COMPOUND_TYPES = (VEHICLE, WEAPON)
 TYPE_LABELS = {
     LEGACY: "Legacy Radius",
     VEHICLE: "Vehicle Collision",
     WEAPON: "Weapon Collision",
 }
-# Exact F10 debug colors from OpenUA src/yw_game.cpp.
+# Exact F10 debug colors from OpenNeoUA src/yw_game.cpp.
 TYPE_COLORS = {
     LEGACY: QColor(220, 60, 60),
     VEHICLE: QColor(60, 220, 60),
@@ -182,7 +182,7 @@ def fire_point_positions(project: "CollisionProject") -> list[tuple[float, float
 
 
 def effective_runtime_radius(project: "CollisionProject") -> float:
-    """Return the collision broad-phase extent used internally by OpenUA.
+    """Return the collision broad-phase extent used internally by OpenNeoUA.
 
     Manual ``coll_*`` spheres replace the vanilla Legacy Radius.  When at
     least one compound sphere exists, the engine derives its internal broad
@@ -267,7 +267,7 @@ class CollisionSphere:
 
 @dataclass
 class GunPoint:
-    """One authored gun mount from either legacy Robo or generic OpenUA data."""
+    """One authored gun mount from either legacy Robo or generic OpenNeoUA data."""
 
     scheme: str = "unit"
     x: float = 0.0
@@ -302,7 +302,7 @@ class CollisionProject:
     source_model: str = ""
     source_base: str = ""
     target_category: str = VEHICLE
-    # Visual-only preview of OpenUA's vp_scale_x/y/z.  These values never
+    # Visual-only preview of OpenNeoUA's vp_scale_x/y/z.  These values never
     # modify the source model and are never emitted as collision parameters.
     model_scale_x: float = 1.0
     model_scale_y: float = 1.0
@@ -320,15 +320,15 @@ class CollisionProject:
     fire_z: float = 0.0
     num_weapons: int = 1
     # Vehicle gun mounts. ``robo`` preserves the original Host Station syntax;
-    # ``unit`` is OpenUA's generic vehicle-side implementation. Existing
+    # ``unit`` is OpenNeoUA's generic vehicle-side implementation. Existing
     # scripts retain their family; the editor explicitly chooses the family
     # for each newly-authored point instead of inferring it from a bare model.
     gun_points_enabled: bool = False
     gun_points: list[GunPoint] = field(default_factory=list)
     unit_gun_default_icon: str = ""
-    # OpenUA-only modern cockpit camera position. The engine consumes these
+    # OpenNeoUA-only modern cockpit camera position. The engine consumes these
     # values directly in vehicle-local model space; there is deliberately no
-    # editor-authored rotation because OpenUA keeps the vehicle orientation.
+    # editor-authored rotation because OpenNeoUA keeps the vehicle orientation.
     cockpit_camera_enabled: bool = False
     cockpit_camera_offset_x: float = 0.0
     cockpit_camera_offset_y: float = 0.0
@@ -631,7 +631,7 @@ def runtime_vp_table(
         set_bas_path: str | Path,
         embedded: EmbeddedVPSet,
 ) -> tuple[VPTable, str, list[str]]:
-    """Resolve the same VP source precedence used by OpenUAStudio.
+    """Resolve the same VP source precedence used by OpenNeoUAStudio.
 
     Loose ``VISPROTO.LST`` wins over the embedded table; the legacy Scripts
     copy is only a fallback when neither of the stronger sources is usable.
@@ -801,7 +801,7 @@ def import_fire_points_block(
 def import_cockpit_camera_block(
         text: str, block: ScriptBlock,
 ) -> tuple[bool, float, float, float]:
-    """Read OpenUA's vehicle-local modern cockpit camera offset.
+    """Read OpenNeoUA's vehicle-local modern cockpit camera offset.
 
     Missing axes stay zero, matching the runtime prototype defaults. The
     feature is vehicle-only and intentionally has no rotation parameters: the
@@ -905,7 +905,7 @@ def gun_point_families_in_block(
 def import_gun_points_block(
         text: str, block: ScriptBlock,
 ) -> tuple[bool, list[GunPoint], str]:
-    """Read Host Station and generic OpenUA vehicle gun mounts.
+    """Read Host Station and generic OpenNeoUA vehicle gun mounts.
 
     The engine uses the same ``TRoboGun`` semantic payload for both families.
     Keep the originating family on every point so editing an existing Host
@@ -1039,7 +1039,7 @@ def gun_point_data_lines(project: CollisionProject) -> list[str]:
 
 
 def cockpit_camera_data_lines(project: CollisionProject) -> list[str]:
-    """Render only the OpenUA modern cockpit position parameters."""
+    """Render only the OpenNeoUA modern cockpit position parameters."""
 
     if project.target_category != VEHICLE or not project.cockpit_camera_enabled:
         return []
@@ -1305,7 +1305,7 @@ def create_backup(path: str | Path) -> Path:
 
 
 def read_script_file(path: str | Path) -> tuple[str, str, bool]:
-    """Read common OpenUA text encodings without silently changing them."""
+    """Read common OpenNeoUA text encodings without silently changing them."""
 
     data = Path(path).read_bytes()
     if data.startswith(b"\xef\xbb\xbf"):
@@ -1591,7 +1591,7 @@ class CollisionViewport(AssetViewport):
         self._cockpit_preview_active = False
         self._cockpit_offset = (0.0, 0.0, 0.0)
         # Cockpit preview always fills the editor viewport. The only aspect
-        # control left is OpenUA's logical runtime aspect, which drives the
+        # control left is OpenNeoUA's logical runtime aspect, which drives the
         # legacy matrixAspectCorrection() emulation. 4:3 is vanilla-safe.
         self._cockpit_runtime_aspect: float = 4.0 / 3.0
         self._model_preview_base_faces: list[
@@ -1626,7 +1626,7 @@ class CollisionViewport(AssetViewport):
         return self._cockpit_offset
 
     def set_cockpit_preview_active(self, active: bool) -> None:
-        """Switch only the Collision Editor preview into OpenUA cockpit view.
+        """Switch only the Collision Editor preview into OpenNeoUA cockpit view.
 
         The regular orbit camera state is never overwritten, so leaving this
         mode restores the exact previous editor view.
@@ -1647,7 +1647,7 @@ class CollisionViewport(AssetViewport):
         self.update()
 
     def set_cockpit_runtime_aspect(self, aspect: float) -> None:
-        """Set OpenUA's logical aspect used for matrix aspect correction."""
+        """Set OpenNeoUA's logical aspect used for matrix aspect correction."""
 
         value = float(aspect)
         if not math.isfinite(value) or value <= 0.0:
@@ -1665,14 +1665,14 @@ class CollisionViewport(AssetViewport):
     def _camera_state(self) -> dict:
         state = super()._camera_state()
         if getattr(self, "_cockpit_preview_active", False):
-            # Cockpit View has no authorable FOV, orbit or pan in OpenUA.
+            # Cockpit View has no authorable FOV, orbit or pan in OpenNeoUA.
             # Keep a stable editor-only preview instead of leaking the prior
             # inspection camera into the generated result.
             state["yaw"] = 180.0
             state["pitch"] = 0.0
             state["zoom"] = 1.0
             state["pan"] = QPointF(0.0, 0.0)
-            # assembly_viewer clips against ``near_distance``. OpenUA starts
+            # assembly_viewer clips against ``near_distance``. OpenNeoUA starts
             # gameplay with _setFrustumClip(1.0, WORLD_FAR_CLIP).
             state["near_distance"] = 1.0
         return state
@@ -1681,7 +1681,7 @@ class CollisionViewport(AssetViewport):
         if not getattr(self, "_cockpit_preview_active", False):
             return super()._camera_vertex(point, camera)
 
-        # OpenUA uses actor + rotation.Transpose() * cockpit_camera_offset,
+        # OpenNeoUA uses actor + rotation.Transpose() * cockpit_camera_offset,
         # while the camera orientation stays the vehicle orientation. With an
         # identity actor rotation the forward axis is +Z and UA -Y is up.
         # AssetViewport's perspective expects the camera near plane at z=4,
@@ -1698,9 +1698,9 @@ class CollisionViewport(AssetViewport):
         return (dx, -dy, 4.0 - dz)
 
     def _front_facing_from_screen_area(self, area: float) -> bool:
-        """Match OpenUA GL_CCW culling in the cockpit-only Qt view.
+        """Match OpenNeoUA GL_CCW culling in the cockpit-only Qt view.
 
-        OpenUA renders the vehicle body with OpenGL's default CCW
+        OpenNeoUA renders the vehicle body with OpenGL's default CCW
         front-face convention. Cockpit projection is converted to Qt's
         top-left screen coordinates, which invert window Y; therefore a
         runtime front-facing triangle has a negative signed area here.
@@ -1716,7 +1716,7 @@ class CollisionViewport(AssetViewport):
         if not getattr(self, "_cockpit_preview_active", False):
             return super()._project(camera_point, target, camera)
 
-        # Exact OpenUA projection used by GFXEngine:
+        # Exact OpenNeoUA projection used by GFXEngine:
         # UAFrustum gives clip x=x, y=-y, w=z and the engine applies legacy
         # matrixAspectCorrection() to camera X/Y. ``camera_point`` retains the
         # shared AssetViewport z=4 depth convention so BSP/near clipping can
@@ -1728,7 +1728,7 @@ class CollisionViewport(AssetViewport):
             depth = 1e-9
         width = max(1.0, float(target.width()))
         height = max(1.0, float(target.height()))
-        # OpenUA computes corrW/corrH from its logical graphics mode, while
+        # OpenNeoUA computes corrW/corrH from its logical graphics mode, while
         # glViewport() uses the physical drawable. Do not derive the runtime
         # correction from this editor rectangle: that was the source of the
         # remaining Y/Z mismatch on 4:3 logical modes shown on widescreen.
@@ -2013,7 +2013,7 @@ class CollisionViewport(AssetViewport):
     @staticmethod
     def _camera_point_is_projectable(camera_point) -> bool:
         # AssetViewport uses a camera distance of 4 and clamps its denominator
-        # at 0.2. OpenUA F10 instead drops points behind the near plane.
+        # at 0.2. OpenNeoUA F10 instead drops points behind the near plane.
         # Applying the equivalent rejection here prevents large AoE spheres
         # from producing diagonal lines across the entire viewport.
         return 4.0 - float(camera_point[2]) > 0.2
@@ -2023,7 +2023,7 @@ class CollisionViewport(AssetViewport):
         if not self._camera_point_is_projectable(camera_point):
             return None
         screen = self._project(camera_point)
-        # OpenUA F10 also rejects projected points beyond a small screen
+        # OpenNeoUA F10 also rejects projected points beyond a small screen
         # margin, then restarts the ring at the next valid point. Without
         # this guard, very large AoE radii can still draw long cross-screen
         # chords even though the world-space radius itself is correct.
@@ -2166,7 +2166,7 @@ class CollisionViewport(AssetViewport):
                 for world in self._ring_world_points(sphere, axis)
             ]
             for start, end in zip(projected, projected[1:]):
-                # Match OpenUA's F10 conversion: a segment is emitted only
+                # Match OpenNeoUA's F10 conversion: a segment is emitted only
                 # when both endpoints survive near-plane projection.
                 if start is not None and end is not None:
                     painter.drawLine(start, end)
@@ -2372,7 +2372,7 @@ class CollisionViewport(AssetViewport):
 
         painter = QPainter(self)
         self._draw_ground_alignment_overlay(painter)
-        # OpenUA F10 uses unfilled, aliased one-pixel lines and 12 segments.
+        # OpenNeoUA F10 uses unfilled, aliased one-pixel lines and 12 segments.
         painter.setRenderHint(QPainter.RenderHint.Antialiasing, False)
         selected_pair = None
         for index, sphere in enumerate(self._collision_spheres):
@@ -2786,7 +2786,7 @@ class ApplyScriptDialog(QDialog):
 
     def _browse(self):
         path, _ = QFileDialog.getOpenFileName(
-            self, "Select OpenUA script", "",
+            self, "Select OpenNeoUA script", "",
             "Text scripts (*.txt *.ini);;All files (*)")
         if path:
             self.path_edit.setText(path)
@@ -2899,7 +2899,7 @@ class ApplyScriptDialog(QDialog):
 
 
 class CollisionEditorWindow(QMainWindow):
-    """Manual collision editor built on OpenUAStudio's existing systems."""
+    """Manual collision editor built on OpenNeoUAStudio's existing systems."""
 
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
@@ -3358,17 +3358,17 @@ class CollisionEditorWindow(QMainWindow):
         project_form.addRow("Target category", self.target_combo)
         self.vanilla_collision_notice = QLabel(
             "Vanilla Urban Assault supports Legacy Radius only. "
-            "Compound collision spheres require OpenUA.")
+            "Compound collision spheres require OpenNeoUA.")
         self.vanilla_collision_notice.setWordWrap(True)
         self.vanilla_collision_notice.setStyleSheet(
             "color: #e1aa62; font-size: 10px;")
         self.vanilla_collision_notice.setToolTip(
             "Red Legacy Radius is vanilla-compatible. Green and blue "
-            "compound spheres are OpenUA-only script data.")
+            "compound spheres are OpenNeoUA-only script data.")
         right.addWidget(project_box)
 
         # Keep the right-side workspaces explicit. Collision, Fire Points, Gun
-        # Points and the OpenUA-only Cockpit View share one compact properties
+        # Points and the OpenNeoUA-only Cockpit View share one compact properties
         # column instead of stacking unrelated controls vertically.
         self.properties_tabs = QTabWidget()
         self.properties_tabs.setDocumentMode(True)
@@ -3380,7 +3380,7 @@ class CollisionEditorWindow(QMainWindow):
         tab_bar.setElideMode(Qt.TextElideMode.ElideNone)
         tab_bar.setUsesScrollButtons(False)
         tab_bar.setMovable(False)
-        # Match OpenUAStudio's established red primary-workspace tabs.
+        # Match OpenNeoUAStudio's established red primary-workspace tabs.
         tab_bar.setStyleSheet("""
             QTabBar::tab {
                 background: #602d37;
@@ -3445,7 +3445,7 @@ class CollisionEditorWindow(QMainWindow):
         self.overeof_check = QCheckBox("Include Overeof")
         self.overeof_check.setToolTip(
             "When enabled, the model and collision preview follow the "
-            "OpenUA placement rule actor_y = ground_y - overeof, and the "
+            "OpenNeoUA placement rule actor_y = ground_y - overeof, and the "
             "value is included in vehicle text output.")
         self.overeof_check.toggled.connect(
             self._overeof_enabled_changed)
@@ -3482,7 +3482,7 @@ class CollisionEditorWindow(QMainWindow):
         self.collision_tab_layout.addWidget(self.vanilla_collision_notice)
         self.collision_tab_layout.addWidget(self.ground_alignment_box)
 
-        spheres_box = QGroupBox("Spheres (Vanilla/OpenUA)")
+        spheres_box = QGroupBox("Spheres (Vanilla/OpenNeoUA)")
         spheres_layout = QVBoxLayout(spheres_box)
         spheres_layout.setContentsMargins(6, 4, 6, 4)
         spheres_layout.setSpacing(3)
@@ -3643,7 +3643,7 @@ class CollisionEditorWindow(QMainWindow):
             QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
         self.fire_points_tab_layout.addWidget(self.fire_points_box, 1)
 
-        self.gun_points_box = QGroupBox("Gun Points (Vanilla/OpenUA)")
+        self.gun_points_box = QGroupBox("Gun Points (Vanilla/OpenNeoUA)")
         self.gun_points_box.setContextMenuPolicy(
             Qt.ContextMenuPolicy.CustomContextMenu)
         self.gun_points_box.customContextMenuRequested.connect(
@@ -3660,7 +3660,7 @@ class CollisionEditorWindow(QMainWindow):
         self.gun_point_type_combo.addItem(
             "Vanilla (Robo only)", "robo")
         self.gun_point_type_combo.addItem(
-            "OpenUA (All vehicle classes)", "unit")
+            "OpenNeoUA (All vehicle classes)", "unit")
         self.gun_point_type_combo.setCurrentIndex(1)
         self.gun_point_type_combo.setSizeAdjustPolicy(
             QComboBox.SizeAdjustPolicy.AdjustToMinimumContentsLengthWithIcon)
@@ -3670,7 +3670,7 @@ class CollisionEditorWindow(QMainWindow):
         self.gun_point_type_combo.setToolTip(
             "Chooses the script family used only for newly-added Gun Points. "
             "Vanilla writes robo_* and is intended for Host Station/Robo "
-            "classes; OpenUA writes generic unit_* and works on all vehicle "
+            "classes; OpenNeoUA writes generic unit_* and works on all vehicle "
             "classes. Existing imported points keep their original family.")
         self.gun_point_type_combo.currentIndexChanged.connect(
             self._new_gun_point_scheme_changed)
@@ -3713,7 +3713,7 @@ class CollisionEditorWindow(QMainWindow):
             "color: rgb(178, 78, 238); font-size: 10px;")
         self.gun_family_value.setToolTip(
             "Existing robo_* Host Station points keep their legacy syntax; "
-            "generic unit_* points are valid for any OpenUA vehicle class.")
+            "generic unit_* points are valid for any OpenNeoUA vehicle class.")
         gun_layout.addWidget(self.gun_family_value)
 
         # The right pane is now deliberately wider, so Gun Point authoring can
@@ -3822,7 +3822,7 @@ class CollisionEditorWindow(QMainWindow):
             QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
         self.gun_points_tab_layout.addWidget(self.gun_points_box, 1)
 
-        self.cockpit_box = QGroupBox("Cockpit View (OpenUA)")
+        self.cockpit_box = QGroupBox("Cockpit View (OpenNeoUA)")
         self.cockpit_box.setContextMenuPolicy(
             Qt.ContextMenuPolicy.CustomContextMenu)
         self.cockpit_box.customContextMenuRequested.connect(
@@ -3831,7 +3831,7 @@ class CollisionEditorWindow(QMainWindow):
         cockpit_layout.setContentsMargins(6, 4, 6, 4)
         cockpit_layout.setSpacing(3)
         self.cockpit_notice = QLabel(
-            "OpenUA only — not supported by vanilla Urban Assault. "
+            "OpenNeoUA only — not supported by vanilla Urban Assault. "
             "The preview keeps the vehicle's real orientation; only the "
             "local camera position X/Y/Z is authored.")
         self.cockpit_notice.setWordWrap(True)
@@ -3841,7 +3841,7 @@ class CollisionEditorWindow(QMainWindow):
 
         self.cockpit_camera_button = QPushButton("Enable Cockpit Camera Offset")
         self.cockpit_camera_button.setToolTip(
-            "Enable the OpenUA cockpit-camera authoring workspace. Until this "
+            "Enable the OpenNeoUA cockpit-camera authoring workspace. Until this "
             "button is pressed, no cockpit parameters are written and the "
             "cockpit preview remains inactive. Imported scripts that already "
             "contain cockpit offsets enable it automatically.")
@@ -3859,7 +3859,7 @@ class CollisionEditorWindow(QMainWindow):
         self.cockpit_model_state_combo.addItem(
             "Idle / stationary (vp_wait)", "idle")
         self.cockpit_model_state_combo.setToolTip(
-            "Preview-only VP state. OpenUA can render vp_wait while the "
+            "Preview-only VP state. OpenNeoUA can render vp_wait while the "
             "vehicle is idle and vp_normal while moving; this selector never "
             "changes script data.")
         self.cockpit_model_state_combo.currentIndexChanged.connect(
@@ -3873,7 +3873,7 @@ class CollisionEditorWindow(QMainWindow):
         self.cockpit_runtime_aspect_combo.addItem("16:10", 16.0 / 10.0)
         self.cockpit_runtime_aspect_combo.addItem("16:9", 16.0 / 9.0)
         self.cockpit_runtime_aspect_combo.setToolTip(
-            "Logical OpenUA graphics aspect used by matrixAspectCorrection(). "
+            "Logical OpenNeoUA graphics aspect used by matrixAspectCorrection(). "
             "4:3 is the vanilla-safe default and matches a 640x480 vid.def. "
             "Changing it updates only the live preview; cockpit X/Y/Z output "
             "is never modified.")
@@ -3910,7 +3910,7 @@ class CollisionEditorWindow(QMainWindow):
             spin.setSizePolicy(
                 QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
             spin.setToolTip(
-                f"OpenUA cockpit_camera_offset_{axis.lower()} in vehicle-local "
+                f"OpenNeoUA cockpit_camera_offset_{axis.lower()} in vehicle-local "
                 "coordinates.")
             field = axis.lower()
             spin.valueChanged.connect(
@@ -4217,7 +4217,7 @@ class CollisionEditorWindow(QMainWindow):
 
     def _sync_gizmo_camera(self):
         if self._is_cockpit_tab_active():
-            # Keep the cockpit *camera* fixed to OpenUA semantics, but do not
+            # Keep the cockpit *camera* fixed to OpenNeoUA semantics, but do not
             # force the gizmo into that front-on projection: +Z/-Z would sit
             # on top of each other and become awkward to click.  The gizmo is
             # only a control surface, so start from the familiar oblique view
@@ -4272,7 +4272,7 @@ class CollisionEditorWindow(QMainWindow):
         path, _ = QFileDialog.getOpenFileName(
             self, "Import vehicle / weapon definition",
             str(self._last_directory),
-            "OpenUA scripts (*.txt *.scr *.ini *.ldf);;All files (*)")
+            "OpenNeoUA scripts (*.txt *.scr *.ini *.ldf);;All files (*)")
         if path:
             self.open_vehicle_script(path)
 
@@ -4422,7 +4422,7 @@ class CollisionEditorWindow(QMainWindow):
             # semantic context that a bare SET.BAS model cannot provide.
             self._new_gun_point_scheme = next(iter(imported_gun_schemes))
         elif "unit" in imported_gun_schemes:
-            # Mixed scripts remain mixed. Prefer the generic OpenUA family for
+            # Mixed scripts remain mixed. Prefer the generic OpenNeoUA family for
             # a brand-new point until the user selects a specific existing one.
             self._new_gun_point_scheme = "unit"
         self._capture_loaded_gun_points()
@@ -5393,7 +5393,7 @@ class CollisionEditorWindow(QMainWindow):
             QMessageBox.warning(
                 self, "No model", "Load and select a model first.")
             return
-        # OpenUA places the actor origin at ground_y - overeof.  In the
+        # OpenNeoUA places the actor origin at ground_y - overeof.  In the
         # model convention used by UA the lowest point is the maximum local Y.
         suggested = float(bounds[4])
         if (self.project.overeof_enabled
@@ -5645,7 +5645,7 @@ class CollisionEditorWindow(QMainWindow):
         if family_count >= 20:
             family_name = (
                 "Vanilla robo_*" if scheme == "robo"
-                else "OpenUA unit_*")
+                else "OpenNeoUA unit_*")
             self.statusBar().showMessage(
                 f"{family_name} supports at most 20 gun points.", 5000)
             return
@@ -6030,7 +6030,7 @@ class CollisionEditorWindow(QMainWindow):
                 if sphere.category == LEGACY and compound_mode:
                     message = (
                         "Legacy Radius is disabled at runtime because manual "
-                        "compound coll_* spheres are present. OpenUA F10 shows "
+                        "compound coll_* spheres are present. OpenNeoUA F10 shows "
                         "only the compound collision spheres for this object."
                     )
                     for column in range(4):
@@ -6080,7 +6080,7 @@ class CollisionEditorWindow(QMainWindow):
                     if point.name:
                         label += f" — {point.name}"
                     family_label = (
-                        "Vanilla" if point.scheme == "robo" else "OpenUA")
+                        "Vanilla" if point.scheme == "robo" else "OpenNeoUA")
                     item = QTreeWidgetItem([
                         label, family_label, _number(point.x),
                         _number(point.y), _number(point.z),
@@ -6090,7 +6090,7 @@ class CollisionEditorWindow(QMainWindow):
                     family = (
                         "Legacy Host Station robo_* gun mount"
                         if point.scheme == "robo"
-                        else "Generic OpenUA unit_* vehicle gun mount")
+                        else "Generic OpenNeoUA unit_* vehicle gun mount")
                     item.setToolTip(0, family)
                     item.setToolTip(1, family)
                     for column in (2, 3, 4):
@@ -6138,7 +6138,7 @@ class CollisionEditorWindow(QMainWindow):
         else:
             legacy_status = "Active"
         collision_mode = (
-            "OpenUA compound (Legacy Radius disabled)"
+            "OpenNeoUA compound (Legacy Radius disabled)"
             if compound_mode else "Vanilla Legacy Radius"
         )
         lines = [
@@ -6194,7 +6194,7 @@ class CollisionEditorWindow(QMainWindow):
             action.setEnabled(False)
 
     def _preview_spheres(self) -> list[CollisionSphere]:
-        """Return collision preview matching the current OpenUA engine rule.
+        """Return collision preview matching the current OpenNeoUA engine rule.
 
         Any authored compound ``coll_*`` sphere disables the visible/physical
         Legacy Radius.  Keep an invisible clone in the list so editor selection
@@ -6427,7 +6427,7 @@ class CollisionEditorWindow(QMainWindow):
         if cockpit_selected:
             self.transform_box.setTitle("Move Cockpit Camera")
             self.transform_box.setToolTip(
-                "Move the OpenUA cockpit camera in vehicle-local X/Y/Z after "
+                "Move the OpenNeoUA cockpit camera in vehicle-local X/Y/Z after "
                 "Cockpit Camera Offset is enabled. Left/Right = X, Up/Down = "
                 "Z, Page Up/Page Down = Y. The camera keeps the vehicle's real "
                 "orientation. Drag empty gizmo space to rotate only the "
@@ -6486,7 +6486,7 @@ class CollisionEditorWindow(QMainWindow):
                     "Legacy disabled by compound coll_*")
                 self.runtime_radius_value.setToolTip(
                     "Manual compound collision spheres replace Legacy Radius. "
-                    "OpenUA F10 shows only the compound spheres.")
+                    "OpenNeoUA F10 shows only the compound spheres.")
                 self.runtime_radius_value.show()
                 self.radius_spin.setToolTip(
                     "Stored authored radius. It is inactive while compound "
@@ -6695,7 +6695,7 @@ class CollisionEditorWindow(QMainWindow):
             return
         path, _ = QFileDialog.getOpenFileName(
             self, "Apply to Existing Script", str(self._last_directory),
-            "OpenUA scripts (*.txt *.scr *.ini *.ldf);;All files (*)")
+            "OpenNeoUA scripts (*.txt *.scr *.ini *.ldf);;All files (*)")
         if not path:
             return
         self._last_directory = Path(path).parent

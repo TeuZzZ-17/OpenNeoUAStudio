@@ -1,4 +1,4 @@
-"""OpenUAStudio: integrated Urban Assault asset workbench.
+"""OpenNeoUA Studio: integrated Urban Assault asset workbench.
 
 The main window assembles BASE + skeleton + texture + animation families,
 provides the former BASet extraction/conversion workflows, and launches the
@@ -172,7 +172,7 @@ from vp_manager import (
     reconstruct_embedded_vps,
 )
 
-WINDOW_TITLE = "OpenUAStudio"
+WINDOW_TITLE = "OpenNeoUA Studio"
 _BAS_KIND_ROLE = int(Qt.ItemDataRole.UserRole) + 1
 _BAS_NAME_ROLE = int(Qt.ItemDataRole.UserRole) + 2
 
@@ -685,7 +685,7 @@ class AssemblyWindow(QMainWindow):
             widget.customContextMenuRequested.connect(
                 lambda pos, source=widget:
                 self._show_generic_item_context_menu(source, pos))
-        # tool-side dependency choice profile (~/.openuastudio), never asset-side
+        # tool-side dependency choice profile (~/.openneouastudio), never asset-side
         self._profile = DependencyProfile()
         if self._profile.load_error:
             self.log_list.addItem(f"profile: {self._profile.load_error}")
@@ -2894,7 +2894,7 @@ class AssemblyWindow(QMainWindow):
             answer = QMessageBox.warning(
                 self, "VP validation issues",
                 "\n".join(issues)
-                + "\n\nExport anyway? OpenUA will reject a loose table "
+                + "\n\nExport anyway? OpenNeoUA will reject a loose table "
                 "if a listed BASE cannot load.",
                 QMessageBox.StandardButton.Yes
                 | QMessageBox.StandardButton.No,
@@ -2913,7 +2913,7 @@ class AssemblyWindow(QMainWindow):
         dialog.setOption(QFileDialog.Option.DontUseNativeDialog, True)
         dialog.selectFile(Path(default_path).name)
         note = QLabel(
-            "OpenUA reads this file as a per-SET VP table. The file does not "
+            "OpenNeoUA reads this file as a per-SET VP table. The file does not "
             "modify SET.BAS. VP IDs are determined by entry order starting "
             "from 0.")
         note.setWordWrap(True)
@@ -2935,7 +2935,7 @@ class AssemblyWindow(QMainWindow):
                 manager.table, include_comments=True,
                 encoding="cp1252", newline="\r\n")
             with tempfile.TemporaryDirectory(
-                    prefix="openuastudio_vp_") as tmp_dir:
+                    prefix="openneouastudio_vp_") as tmp_dir:
                 staged = Path(tmp_dir) / "VISPROTO.LST"
                 staged.write_bytes(payload)
                 verified = load_visproto(
@@ -8944,7 +8944,7 @@ class AssemblyWindow(QMainWindow):
             return
         try:
             with tempfile.TemporaryDirectory(
-                    prefix="OpenUAStudio_sklt_") as temp_dir:
+                    prefix="OpenNeoUAStudio_sklt_") as temp_dir:
                 temporary = Path(temp_dir) / target.name
                 self._write_verified_sklt(model, temporary)
                 target.parent.mkdir(parents=True, exist_ok=True)
@@ -9081,7 +9081,7 @@ class AssemblyWindow(QMainWindow):
                     source.parent.mkdir(parents=True, exist_ok=True)
                     shutil.copy2(source, backup)
                     with tempfile.TemporaryDirectory(
-                            prefix="OpenUAStudio_overwrite_sklt_") as temp_dir:
+                            prefix="OpenNeoUAStudio_overwrite_sklt_") as temp_dir:
                         temporary = Path(temp_dir) / source.name
                         self._write_verified_sklt(model, temporary)
                         warnings = _commit_verified_files(
@@ -9295,7 +9295,7 @@ class AssemblyWindow(QMainWindow):
             structural_blocks = self._bundle_topology_states(
                 standalone, fam_obj)
             with tempfile.TemporaryDirectory(
-                    prefix="OpenUAStudio_bundle_") as temp_dir:
+                    prefix="OpenNeoUAStudio_bundle_") as temp_dir:
                 temp_root = Path(temp_dir)
                 temp_base = temp_root / "BASE" / base_target.name
                 temp_base.parent.mkdir(parents=True, exist_ok=True)

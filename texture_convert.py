@@ -1,7 +1,7 @@
 """Texture conversions: ILBM/VBMP -> PNG, PNG -> ILBM, VBMP -> ILBM.
 
 Capabilities merged from the BASet project (same author, GPL v3), rebuilt on
-top of OpenUAStudio's own parsers so the format knowledge lives in one place:
+top of OpenNeoUA Studio's own parsers so the format knowledge lives in one place:
 
   - decode side: ``ilbm_parser`` (engine-confirmed ILBM/VBMP reader)
   - IFF structure: ``iff_reader``
@@ -550,7 +550,7 @@ def _iter_inputs(paths: list[str], suffixes: tuple[str, ...]) -> list[Path]:
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
-        description="OpenUAStudio texture conversions (merged from BASet).")
+        description="OpenNeoUA Studio texture conversions (merged from BASet).")
     sub = parser.add_subparsers(dest="command", required=True)
 
     to_png = sub.add_parser("to-png", help="ILBM/VBMP -> indexed PNG")

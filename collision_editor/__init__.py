@@ -1,4 +1,4 @@
-"""Public package for OpenUAStudio's Collision Editor.
+"""Public package for OpenNeoUAStudio's Collision Editor.
 
 The implementation lives in :mod:`collision_editor.editor`; public names are
 re-exported here so existing imports such as ``from collision_editor import

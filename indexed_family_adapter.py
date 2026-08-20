@@ -1,4 +1,4 @@
-"""Adapter from OpenUAStudio AssetFamily data to the optional indexed renderer.
+"""Adapter from OpenNeoUAStudio AssetFamily data to the optional indexed renderer.
 
 The adapter is deliberately fail-closed.  It accepts only material combinations
 whose retail dispatch semantics are established and only uses palette/remap

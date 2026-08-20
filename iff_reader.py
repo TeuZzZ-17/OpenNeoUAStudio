@@ -10,7 +10,7 @@ This module is strictly read-only.  It never raises on malformed data past the
 first header: problems are recorded as warnings and the tree is truncated at
 the damaged point, so unknown or broken chunks can still be inspected.
 
-Confidence: the chunk framing itself is CONFIRMED (it matches both the OpenUA
+Confidence: the chunk framing itself is CONFIRMED (it matches both the OpenNeoUA
 runtime ``IFFile`` parser and the original 1996-1998 asset files byte for
 byte).
 """

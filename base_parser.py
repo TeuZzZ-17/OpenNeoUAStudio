@@ -1,6 +1,6 @@
 """Read-only parser for Urban Assault .base/.bas prefab files.
 
-The chunk layout implemented here is CONFIRMED: it mirrors the OpenUA runtime
+The chunk layout implemented here is CONFIRMED: it mirrors the OpenNeoUA runtime
 loaders line by line (UA_source: base.cpp, ade.cpp, area.cpp, amesh.cpp,
 ilbm.cpp, bmpAnm.cpp, embed.cpp, nucleas.cpp) and was verified byte for byte
 against original 1996 developer assets (BP_FLAK1.base and others).

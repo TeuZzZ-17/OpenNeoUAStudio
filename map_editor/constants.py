@@ -9,7 +9,7 @@ DEFAULT_HOST_VIEWANGLE = 0
 DEFAULT_SCRIPT_CONTENT = ";include data:scripts/startup2.scr"
 MAX_SPECIAL_SLOTS = 10
 
-# GEM action templates supported by OpenUA. The same list drives both the
+# GEM action templates supported by OpenNeoUA. The same list drives both the
 # editor dropdown and LDF import, so saved upgrades are never dropped on load.
 GEM_ACTION_PARAMS_BY_TARGET = {
     "modify_vehicle": (

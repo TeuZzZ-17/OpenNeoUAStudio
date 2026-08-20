@@ -7,7 +7,7 @@ from pathlib import Path
 from assembly_window import AssemblyWindow
 
 
-WINDOW_TITLE = "OpenUAStudio - Model Editor"
+WINDOW_TITLE = "OpenNeoUA Studio - Model Editor"
 
 
 def _tab_index(tabs, title: str) -> int:

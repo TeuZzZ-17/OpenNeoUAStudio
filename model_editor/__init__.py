@@ -1,4 +1,4 @@
-"""Model Editor workspace for OpenUAStudio."""
+"""Model Editor workspace for OpenNeoUAStudio."""
 
 from .window import ModelEditorWindow
 

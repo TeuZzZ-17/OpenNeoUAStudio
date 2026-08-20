@@ -143,7 +143,7 @@ class IndexedViewerPolicySourceTests(unittest.TestCase):
         self.assertIn('"viewport_render_width": target_width', render_scene)
         for obsolete in (
                 "textured_indexed", "fit_render_size",
-                "openua_preview", "transient_proxy",
+                "openneoua_preview", "transient_proxy",
                 "viewport_dynamic_quality", "viewport_scaled_preview"):
             with self.subTest(obsolete=obsolete):
                 self.assertNotIn(obsolete, render_scene)

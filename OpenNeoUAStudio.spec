@@ -22,7 +22,7 @@ exe = EXE(
     a.binaries,
     a.datas,
     [],
-    name='OpenUAStudio',
+    name='OpenNeoUAStudio',
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,
@@ -35,5 +35,5 @@ exe = EXE(
     target_arch=None,
     codesign_identity=None,
     entitlements_file=None,
-    icon=['icons\\OpenUAStudio.ico'],
+    icon=['icons\\OpenNeoUAStudio.ico'],
 )

@@ -1,12 +1,12 @@
 @echo off
 setlocal
-title OPENUA - GIT GC SICURO
+title OPENNEOUA STUDIO - GIT GC SICURO
 
 rem Lavora nella cartella in cui si trova questo file BAT
 pushd "%~dp0" >nul 2>&1
 
 echo ============================================================
-echo          OPENUA - MANUTENZIONE GIT SICURA
+echo       OPENNEOUA STUDIO - MANUTENZIONE GIT SICURA
 echo ============================================================
 echo.
 echo Cartella:

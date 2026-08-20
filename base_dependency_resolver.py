@@ -15,7 +15,7 @@ clear statuses:
     ambiguous          multiple plausible candidates; NOT auto-loaded
     skipped            user chose to ignore it for this session
     missing            no candidate found anywhere
-    unsupported_loader found/parsed but OpenUAStudio has no loader for it
+    unsupported_loader found/parsed but OpenNeoUAStudio has no loader for it
     failed_load        a loader exists but raised; error recorded
 
 Everything is read-only; the collector never touches disk.

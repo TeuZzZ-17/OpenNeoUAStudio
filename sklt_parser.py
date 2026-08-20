@@ -174,7 +174,7 @@ def parse_sklt_bytes(data: bytes, source_name: str = "<memory>") -> SkltModel:
     olpl_payload = _first_payload(payloads, b"OLPL", model)
     # Legacy v1 chunks (old dev-CD skeletons): POOL/SENS are 3 x int16 BE per
     # point, POLY is an int16 index stream where -1 ends each polygon.  The
-    # engine still loads them (sklt.cpp); OpenUAStudio reads them for display but
+    # engine still loads them (sklt.cpp); OpenNeoUAStudio reads them for display but
     # keeps editing/saving restricted to the v2 chunks.
     pool_payload = _first_payload(payloads, b"POOL", model)
     poly_payload = _first_payload(payloads, b"POLY", model)
@@ -244,7 +244,7 @@ def _fit_axis_aligned_affine(
 ) -> tuple[float, float] | None:
     """Fit ``target = source * scale + offset`` for one POO2 axis.
 
-    OpenUAStudio's whole-model Scale operation is axis-aligned in model space
+    OpenNeoUAStudio's whole-model Scale operation is axis-aligned in model space
     and keeps point order unchanged.  A selective or otherwise non-affine edit
     must not alter SEN2, so the fit is accepted only when every POO2 point
     agrees within a small float-rounding tolerance and the scale is positive.

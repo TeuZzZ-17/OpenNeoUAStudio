@@ -1,6 +1,6 @@
 """Parser and fixed-layout UV writer for Urban Assault .ANM / VANM animations.
 
-Layout (CONFIRMED, mirrors OpenUA UA_source/src/bmpAnm.cpp and verified byte
+Layout (CONFIRMED, mirrors OpenNeoUA UA_source/src/bmpAnm.cpp and verified byte
 for byte against original FLAK1.ANM):
 
     FORM VANM

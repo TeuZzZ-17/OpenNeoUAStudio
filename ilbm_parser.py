@@ -1,6 +1,6 @@
 """Read-only decoder for Urban Assault ILBM / VBMP indexed textures.
 
-Layout (CONFIRMED, mirrors OpenUA UA_source/src/ilbm.cpp READ_ILBM and
+Layout (CONFIRMED, mirrors OpenNeoUA UA_source/src/ilbm.cpp READ_ILBM and
 ILBM_BODY_READ):
 
     FORM ILBM
