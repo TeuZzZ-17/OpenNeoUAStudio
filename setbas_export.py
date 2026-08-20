@@ -1,6 +1,6 @@
 """Extract and convert SET.BAS resources (BASet capability merge).
 
-Built on OpenUAStudio's own ``setbas_reader`` index instead of a parallel
+Built on OpenNeoUA Studio's own ``setbas_reader`` index instead of a parallel
 parser.
 Strictly read-only for the archive: extraction writes new files into a
 separate output folder, mirroring the BASet layout:
@@ -334,7 +334,7 @@ def extract_archive(archive: SetBasArchive, out_dir: str | Path, *,
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         description="Extract raw EMRS payloads from SET.BAS "
-                    "(BASet capability, OpenUAStudio parsers).")
+                    "(BASet capability, OpenNeoUA Studio parsers).")
     parser.add_argument("setbas", help="SET.BAS file (read-only)")
     parser.add_argument("--out", required=True, help="output directory")
     parser.add_argument("--class", dest="class_name", default=DEFAULT_CLASS,

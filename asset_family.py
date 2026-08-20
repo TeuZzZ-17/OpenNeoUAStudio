@@ -90,7 +90,7 @@ class AssetFamily:
     animation_refs: dict[str, ResolvedFile] = field(default_factory=dict)
     # logical texture name -> set of tracy modes of the blocks using it
     texture_tracy_usage: dict[str, set] = field(default_factory=dict)
-    # Modern OpenUA remaps FX1/FX2/FX3 to the set's HI/ALPHA PNGs when
+    # Modern OpenNeoUA remaps FX1/FX2/FX3 to the set's HI/ALPHA PNGs when
     # destination blending is available.  Paths are keyed by lowercase
     # logical bitmap name and consumed only by flat-tracy preview materials.
     effect_override_paths: dict[str, Path] = field(default_factory=dict)
@@ -546,7 +546,7 @@ def _propagate_anm_tracy_usage(family: AssetFamily) -> None:
 
 
 def _find_engine_effect_overrides(family: AssetFamily) -> None:
-    """Locate the same HI/ALPHA FX PNG overrides used by modern OpenUA."""
+    """Locate the same HI/ALPHA FX PNG overrides used by modern OpenNeoUA."""
 
     effect_names = {
         name for name in family.textures

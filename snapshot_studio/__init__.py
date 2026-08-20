@@ -1,4 +1,4 @@
-"""Snapshot Studio workspace for OpenUAStudio."""
+"""Snapshot Studio workspace for OpenNeoUAStudio."""
 
 from .window import SnapshotStudioWindow
 

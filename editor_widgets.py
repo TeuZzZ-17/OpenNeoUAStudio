@@ -1,4 +1,4 @@
-"""Reusable Qt widgets and image helpers for the OpenUAStudio workbench."""
+"""Reusable Qt widgets and image helpers for the OpenNeoUAStudio workbench."""
 
 from __future__ import annotations
 

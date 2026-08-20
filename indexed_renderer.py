@@ -1,4 +1,4 @@
-"""Source-faithful indexed-colour raster backend for OpenUAStudio.
+"""Source-faithful indexed-colour raster backend for OpenNeoUAStudio.
 
 This renderer keeps Urban Assault palette indices intact until the
 last display conversion.  That is required for SHADERMP/TRACYRMP semantics,

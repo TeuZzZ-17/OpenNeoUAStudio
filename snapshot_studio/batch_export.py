@@ -801,7 +801,7 @@ class VPSnapshotBatchPanel(QGroupBox):
             encoding="utf-8",
         )
         run_info = {
-            "feature": "OpenUAStudio Snapshot Studio complete model batch",
+            "feature": "OpenNeoUA Studio Snapshot Studio complete model batch",
             "setbas": str(getattr(
                 getattr(self.window, "_setbas", None),
                 "path", "",

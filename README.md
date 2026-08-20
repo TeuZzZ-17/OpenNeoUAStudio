@@ -1,6 +1,9 @@
-# OpenUAStudio
+# OpenNeoUA Studio
 
-OpenUAStudio is an independent, community-developed editing workbench for OpenUA and Microsoft Urban Assault (1998).
+OpenNeoUA Studio (technical project name: `OpenNeoUAStudio`) is an independent,
+community-developed editing workbench for OpenNeoUA and Microsoft Urban Assault
+(1998). It is derived from the `UA_source`/OpenUA tool lineage without hiding
+that provenance.
 
 The project brings together tools and workflows for inspecting, editing, converting, and creating compatible game data.
 
@@ -8,7 +11,7 @@ Its structure, interface, supported formats, features, and integrated editors ma
 
 ## Project status
 
-OpenUAStudio is under active development.
+OpenNeoUA Studio is under active development.
 
 Features, file layouts, commands, dependencies, workflows, and user-interface elements may be added, removed, renamed, or reorganized without notice.
 
@@ -22,7 +25,7 @@ Run from source:
 python main.py
 ```
 
-On normal startup, OpenUAStudio first shows a tool selector for the Main
+On normal startup, OpenNeoUA Studio first shows a tool selector for the Main
 Suite, Map Editor, Collision Editor, or Wireframe Editor.
 
 A precompiled Windows executable may also be included in the repository for convenience.
@@ -31,17 +34,17 @@ A precompiled Windows executable may also be included in the repository for conv
 
 Copyright (C) 2025-2026 TeuZzZ-17
 
-The original OpenUAStudio source code and original project components are licensed under the GNU General Public License version 3 only (`GPL-3.0-only`).
+The original OpenNeoUA Studio source code and original project components are licensed under the GNU General Public License version 3 only (`GPL-3.0-only`).
 
 See the `LICENSE` file for the complete license terms.
 
-The GNU GPL applies only to material for which the OpenUAStudio copyright holders have the legal authority to grant that license.
+The GNU GPL applies only to material for which the OpenNeoUA Studio copyright holders have the legal authority to grant that license.
 
 It does not relicense third-party software, game data, trademarks, artwork, textures, models, sounds, documentation, or other materials owned by their respective rights holders.
 
 ## Third-party game data and asset notice
 
-OpenUAStudio is an unofficial, fan-made project.
+OpenNeoUA Studio is an unofficial, fan-made project.
 
 It is not affiliated with, endorsed by, sponsored by, or approved by Microsoft, Xbox Game Studios, TerraTools, or any other original publisher, developer, or rights holder connected with Urban Assault.
 
@@ -55,7 +58,7 @@ These previews are not retail game data files distributed in their original form
 
 They were rendered from the sector graphics using a visualization utility and were subsequently cropped, processed, upscaled, organized, and adapted for use as functional map-editing references.
 
-The visualization utility used to generate the original previews is not included or distributed with OpenUAStudio.
+The visualization utility used to generate the original previews is not included or distributed with OpenNeoUA Studio.
 
 The previews are included solely to identify terrain sectors and display the editable map grid.
 
@@ -63,7 +66,7 @@ They are not intended to replace the original game, reproduce its underlying dat
 
 The underlying Urban Assault designs and visual content remain the property of their respective rights holders.
 
-Only the original processing, organization, tool integration, source code, and other independently created OpenUAStudio components are claimed by the project author.
+Only the original processing, organization, tool integration, source code, and other independently created OpenNeoUA Studio components are claimed by the project author.
 
 The presence of these preview images in this repository:
 
@@ -87,11 +90,11 @@ Treat original game files as read-only whenever possible.
 
 Save edited assets and levels to explicit output paths and keep backups of source data.
 
-OpenUAStudio is intended to support safe editing workflows, but users remain responsible for protecting their own files and installations.
+OpenNeoUA Studio is intended to support safe editing workflows, but users remain responsible for protecting their own files and installations.
 
 ## Warranty
 
-OpenUAStudio is provided without warranty.
+OpenNeoUA Studio is provided without warranty.
 
 Use it at your own risk.
 

@@ -1,4 +1,4 @@
-"""OpenUAStudio entry point.
+"""OpenNeoUA Studio entry point.
 
 The normal startup path shows a lightweight tool selector first. The chosen
 editor is imported only after the user selects it, while the explicit
@@ -15,7 +15,7 @@ import subprocess
 import sys
 from pathlib import Path
 
-APP_TITLE = "OpenUAStudio"
+APP_TITLE = "OpenNeoUA Studio"
 MAP_EDITOR_FLAG = "--map-editor"
 MAIN_SUITE_TOOL = "main_suite"  # backward-compatible internal key
 MODEL_EDITOR_TOOL = "model_editor"
@@ -146,7 +146,7 @@ def main() -> int:
     app = QApplication(sys.argv)
     app.setApplicationName(APP_TITLE)
     # Each window composes its own full title. Keep the platform from
-    # appending a second "OpenUAStudio" label to document titles.
+    # appending a second "OpenNeoUA Studio" label to document titles.
     app.setApplicationDisplayName("")
 
     selector = StartupToolSelector()

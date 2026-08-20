@@ -24,7 +24,7 @@ from editor_widgets import (
 from snapshot_studio.batch_export import VPSnapshotBatchPanel
 
 
-WINDOW_TITLE = "OpenUAStudio - Snapshot Studio"
+WINDOW_TITLE = "OpenNeoUA Studio - Snapshot Studio"
 
 
 class SnapshotStudioWindow(AssemblyWindow):

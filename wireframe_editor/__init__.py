@@ -1,4 +1,4 @@
-"""Integrated OpenUAStudio Wireframe Editor."""
+"""Integrated OpenNeoUAStudio Wireframe Editor."""
 
 from .window import WireframeEditorWindow
 
