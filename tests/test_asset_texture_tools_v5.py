@@ -1,4 +1,5 @@
 import os
+import struct
 import tempfile
 import unittest
 from pathlib import Path
@@ -8,7 +9,12 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 from PySide6.QtWidgets import QApplication, QTreeWidget, QTreeWidgetItem
 
-from asset_resolver import DirectoryIndex
+from asset_family import (
+    AssetFamily,
+    _find_external_palette,
+    _resolve_with_setbas,
+)
+from asset_resolver import AssetResolver, DirectoryIndex
 from asset_tree_filter import filter_tree
 from texture_assignment import classify_texture_assignment
 from texture_catalog import build_texture_catalog
@@ -154,6 +160,184 @@ class DirectoryIndexTests(unittest.TestCase):
                 export / "textures_ilbm", refresh=True)
             self.assertEqual(
                 len(explicit.find_name("SHADOW.ILBM")), 1)
+
+
+class AssetResolverIntegrityTests(unittest.TestCase):
+    def setUp(self):
+        DirectoryIndex.clear_cache()
+
+    def test_same_name_in_two_set_roots_is_visible_ambiguity(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            set1 = root / "Set1"
+            set2 = root / "Set2"
+            set1.mkdir()
+            set2.mkdir()
+            (set1 / "SAME.ILBM").write_bytes(b"one")
+            (set2 / "same.ilbm").write_bytes(b"two")
+
+            resolved = AssetResolver([set1, set2]).resolve(
+                "SAME.ILBM", "texture")
+
+            self.assertEqual(resolved.status, "ambiguous")
+            self.assertIsNone(resolved.path)
+            self.assertEqual(len(resolved.candidates), 2)
+            self.assertIn("multiple", resolved.resolution_rule)
+
+    def test_package_logical_path_precedes_later_set_root(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            package = root / "package"
+            set_root = root / "Set1"
+            (package / "Skeleton").mkdir(parents=True)
+            (set_root / "Skeleton").mkdir(parents=True)
+            local = package / "Skeleton" / "HERO.SKL"
+            other = set_root / "Skeleton" / "HERO.SKLT"
+            local.write_bytes(b"package")
+            other.write_bytes(b"set")
+
+            resolved = AssetResolver([package, set_root]).resolve(
+                "Skeleton:HERO.SKLT", "skeleton")
+
+            self.assertEqual(resolved.status, "found")
+            self.assertEqual(resolved.path, local)
+            self.assertEqual(resolved.source_root, package)
+            self.assertEqual(
+                resolved.provenance["logical_reference"],
+                "Skeleton:HERO.SKLT")
+            self.assertIn("highest-priority", resolved.resolution_rule)
+
+    def test_case_and_legacy_extension_use_the_shared_alias_table(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            texture = root / "MiXeD.IlB"
+            texture.write_bytes(b"asset")
+
+            resolved = AssetResolver([root]).resolve(
+                "mixed.ILBM", "texture")
+
+            self.assertEqual(resolved.status, "found")
+            self.assertEqual(resolved.path, texture)
+            self.assertIn("alias", resolved.resolution_rule)
+
+    def test_case_mismatched_logical_folder_still_disambiguates_exact_path(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            (root / "Skeleton").mkdir()
+            (root / "Other").mkdir()
+            wanted = root / "Skeleton" / "Hero.SKL"
+            wanted.write_bytes(b"wanted")
+            (root / "Other" / "HERO.SKLT").write_bytes(b"other")
+
+            resolved = AssetResolver([root]).resolve(
+                "sKeLeToN:hero.SKLT", "skeleton")
+
+            self.assertEqual(resolved.status, "found")
+            self.assertEqual(resolved.path, wanted)
+            self.assertEqual(resolved.source_root, root)
+            self.assertIn("exact logical path", resolved.resolution_rule)
+
+    def test_ambiguous_palette_is_not_auto_selected(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            first = root / "a"
+            second = root / "b"
+            first.mkdir()
+            second.mkdir()
+            (first / "STANDARD.PAL").write_bytes(b"one")
+            (second / "STANDARD.PAL").write_bytes(b"two")
+
+            resolved = AssetResolver([root]).resolve(
+                "STANDARD.PAL", "palette")
+
+            self.assertEqual(resolved.status, "ambiguous")
+            self.assertIsNone(resolved.path)
+
+    def test_local_standard_palette_precedes_later_set_normal_palette(self):
+        def palette_bytes(marker: int) -> bytes:
+            cmap = bytes(
+                channel for index in range(256)
+                for channel in (index, index, (index + marker) & 0xFF))
+            chunk = b"CMAP" + struct.pack(">I", len(cmap)) + cmap
+            payload = b"ILBM" + chunk
+            return b"FORM" + struct.pack(">I", len(payload)) + payload
+
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            local = root / "Set1"
+            later = root / "Set2"
+            (local / "PALETTE").mkdir(parents=True)
+            (later / "PALETTE").mkdir(parents=True)
+            local_palette = local / "PALETTE" / "STANDARD.PAL"
+            local_palette.write_bytes(palette_bytes(0))
+            (later / "PALETTE" / "NORMAL.PAL").write_bytes(
+                palette_bytes(1))
+            family = AssetFamily()
+
+            _find_external_palette(
+                family, AssetResolver([local, later]))
+
+            self.assertEqual(family.external_palette_path, local_palette)
+            self.assertEqual(
+                family.external_palette_ref.source_root, local)
+
+    def test_loose_precedence_and_explicit_embedded_override_are_provenanced(self):
+        class Archive:
+            path = Path("SET.BAS")
+
+            @staticmethod
+            def find(name, class_id):
+                if name.casefold() == "stone.ilbm" \
+                        and class_id == "ilbm.class":
+                    return [SimpleNamespace(
+                        resource_name="STONE.ILBM", index=7)]
+                return []
+
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            loose = root / "STONE.ILBM"
+            loose.write_bytes(b"loose")
+            family = AssetFamily(setbas_archive=Archive())
+            resolver = AssetResolver([root])
+
+            resolved = _resolve_with_setbas(
+                family, resolver, "STONE.ILBM", "texture", "ilbm.class")
+
+            self.assertEqual(resolved.path, loose)
+            self.assertEqual(resolved.source, "loose")
+            self.assertTrue(resolved.embedded_available)
+            self.assertEqual(
+                resolved.provenance["logical_reference"], "STONE.ILBM")
+            family.setbas_overrides["stone.ilbm"] = True
+            forced = _resolve_with_setbas(
+                family, resolver, "STONE.ILBM", "texture", "ilbm.class")
+            self.assertEqual(forced.status, "manual (SET.BAS)")
+            self.assertEqual(forced.source, "SET.BAS")
+            self.assertIn("explicit unique", forced.resolution_rule)
+
+    def test_ambiguous_loose_candidate_does_not_fall_back_to_embedded(self):
+        class Archive:
+            path = Path("SET.BAS")
+
+            @staticmethod
+            def find(_name, _class_id):
+                return [SimpleNamespace(resource_name="SAME.ILBM", index=1)]
+
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            (root / "a").mkdir()
+            (root / "b").mkdir()
+            (root / "a" / "SAME.ILBM").write_bytes(b"a")
+            (root / "b" / "same.ilbm").write_bytes(b"b")
+            family = AssetFamily(setbas_archive=Archive())
+
+            resolved = _resolve_with_setbas(
+                family, AssetResolver([root]), "SAME.ILBM", "texture",
+                "ilbm.class")
+
+            self.assertEqual(resolved.status, "ambiguous")
+            self.assertIsNone(resolved.path)
+            self.assertTrue(resolved.embedded_available)
 
 
 class TextureAssignmentTests(unittest.TestCase):

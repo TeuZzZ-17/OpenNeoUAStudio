@@ -65,6 +65,7 @@ class DirectoryIndex:
     def __init__(self, root: Path):
         self.root = root
         self.by_name: dict[str, list[Path]] = {}
+        self.by_relative: dict[str, list[Path]] = {}
         self.file_count = 0
         for dirpath, dirnames, filenames in os.walk(root):
             current = Path(dirpath)
@@ -86,6 +87,11 @@ class DirectoryIndex:
                     continue
                 path = Path(dirpath) / filename
                 self.by_name.setdefault(filename.lower(), []).append(path)
+                try:
+                    relative = path.relative_to(root).as_posix().casefold()
+                    self.by_relative.setdefault(relative, []).append(path)
+                except ValueError:
+                    pass
                 self.file_count += 1
 
     @classmethod
@@ -102,6 +108,10 @@ class DirectoryIndex:
     def find_name(self, filename: str) -> list[Path]:
         return list(self.by_name.get(filename.lower(), []))
 
+    def find_relative(self, logical_path: str) -> list[Path]:
+        normalized = normalize_logical_name(logical_path).casefold()
+        return list(self.by_relative.get(normalized, []))
+
 
 @dataclass
 class ResolvedFile:
@@ -113,6 +123,9 @@ class ResolvedFile:
     searched: list[str] = field(default_factory=list)
     # where the resource actually came from: "loose" | "manual" | "SET.BAS" | ""
     source: str = ""
+    # Stable, user-visible explanation of the rule that produced this result.
+    resolution_rule: str = "unresolved"
+    source_root: Path | None = None
     # the same logical name also exists as an embedded SET.BAS resource
     embedded_available: bool = False
     # display names of embedded candidates ("SET.BAS:<resource_name>")
@@ -131,6 +144,19 @@ class ResolvedFile:
             return self.embedded_candidates[0] if self.embedded_candidates \
                 else "SET.BAS (embedded)"
         return "-"
+
+    @property
+    def provenance(self) -> dict:
+        return {
+            "logical_reference": self.logical_name,
+            "status": self.status,
+            "resolved_path": str(self.path) if self.path else None,
+            "source": self.source,
+            "source_root": str(self.source_root) if self.source_root else None,
+            "resolution_rule": self.resolution_rule,
+            "candidates": [str(path) for path in self.candidates],
+            "embedded_candidates": list(self.embedded_candidates),
+        }
 
 
 def normalize_logical_name(name: str) -> str:
@@ -220,6 +246,7 @@ class AssetResolver:
         result = ResolvedFile(logical_name=logical_name)
         normalized = normalize_logical_name(logical_name)
         if not normalized:
+            result.resolution_rule = "empty logical reference"
             return result
 
         override = self.overrides.get(normalized.lower())
@@ -232,9 +259,14 @@ class AssetResolver:
                 result.status = "manual"
                 result.path = override
                 result.candidates = [override]
+                result.source = "manual"
+                result.source_root = override.parent
+                result.resolution_rule = "explicit session override"
                 return result
             result.status = "missing"
             result.candidates = []
+            result.source = "manual"
+            result.resolution_rule = "explicit session override is missing"
             return result
 
         parts = normalized.split("/")
@@ -247,16 +279,46 @@ class AssetResolver:
         # to references that actually carry a directory component; a bare
         # filename is not a path and goes to filename matching instead.
         if has_subpath:
+            exact_matches: list[tuple[Path, Path]] = []
             for root in self.roots:
+                index = DirectoryIndex.get(root)
                 for name in names:
                     candidate = root.joinpath(*parts[:-1], name)
                     result.searched.append(str(candidate.parent))
                     if candidate.is_file():
-                        result.status = "found"
-                        result.path = candidate
-                        result.candidates = [candidate]
-                        result.source = "relative path"
-                        return result
+                        exact_matches.append((candidate, root))
+                    relative_name = "/".join((*parts[:-1], name))
+                    exact_matches.extend(
+                        (match, root)
+                        for match in index.find_relative(relative_name))
+                if exact_matches:
+                    # Package/base-local paths have explicit precedence over
+                    # later SET roots.  Do not merge a lower-priority root
+                    # into an otherwise exact package-local result.
+                    break
+            if exact_matches:
+                unique = []
+                for candidate, root in exact_matches:
+                    if candidate not in [item[0] for item in unique]:
+                        unique.append((candidate, root))
+                exact_name = [
+                    item for item in unique
+                    if item[0].name.casefold() == file_name.casefold()]
+                result.candidates = [item[0] for item in unique]
+                selected = (exact_name[0] if len(exact_name) == 1
+                            else unique[0] if len(unique) == 1 else None)
+                if selected is not None:
+                    result.status = "found"
+                    result.path, result.source_root = selected
+                    result.source = "filesystem"
+                    result.resolution_rule = (
+                        "exact logical path in highest-priority root")
+                else:
+                    result.status = "ambiguous"
+                    result.resolution_rule = (
+                        "multiple extension aliases match the exact logical "
+                        "path in the same priority root")
+                return result
 
         # Priority 2/3: recursive filename match (Windows filesystems are
         # case-insensitive, so exact and case-insensitive coincide here) over
@@ -276,21 +338,30 @@ class AssetResolver:
         exact = [m for m in matches if m.name.lower() == file_name.lower()]
         if not matches:
             result.status = "missing"
+            result.resolution_rule = "no logical-path or filename match"
         elif len(matches) == 1 or len(exact) == 1:
             # A single match, or a single exact-name match among alias
             # extensions, is a strong candidate: auto-load it.
             result.status = "found"
             result.path = (exact or matches)[0]
-        elif kind == "palette":
-            # Palettes are a preview-only aid: pick the hint-ranked first
-            # (flagged ambiguous) instead of blocking the preview.
-            result.status = "ambiguous"
-            result.path = matches[0]
+            result.source = "filesystem"
+            result.resolution_rule = (
+                "unique exact filename" if len(exact) == 1
+                else "unique filename or shared extension alias")
+            for root in self.roots:
+                try:
+                    result.path.relative_to(root)
+                    result.source_root = root
+                    break
+                except ValueError:
+                    continue
         else:
             # Multiple plausible candidates: NEVER silently pick one.  The
             # ranked list is exposed so callers/UI can trial-load a choice.
             result.status = "ambiguous"
             result.path = None
+            result.resolution_rule = (
+                "multiple filename or extension-alias candidates")
         return result
 
 

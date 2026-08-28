@@ -49,9 +49,56 @@ class VisprotoParsingTests(unittest.TestCase):
         )
         self.assertTrue(table.entries[1].is_dummy)
         self.assertEqual(table.entries[1].vp_id, 1)
+        self.assertEqual(
+            [(comment.anchor, comment.text, comment.after_terminator)
+             for comment in table.source_comments],
+            [(0, "# full comment", False),
+             (1, "; another full comment", False)],
+        )
         with self.assertRaises(VPParseError):
             parse_visproto_text(
                 "VP_ONE.base\n", require_terminator=True)
+
+    def test_full_line_comments_survive_export_and_trailing_edits(self):
+        table = parse_visproto_text(
+            "  # header\n"
+            "VP_ONE.base ; inline\n"
+            "; between\n"
+            "VP_TWO.base\n"
+            "# before terminator\n"
+            ">\n"
+            "; after terminator\n",
+            require_terminator=True,
+        )
+        self.assertEqual(
+            export_visproto(table),
+            "  # header\n"
+            "VP_ONE.base ; inline\n"
+            "; between\n"
+            "VP_TWO.base\n"
+            "# before terminator\n"
+            ">\n"
+            "; after terminator\n",
+        )
+
+        appended = table.append("VP_THREE.base")
+        self.assertEqual(
+            export_visproto(appended),
+            "  # header\n"
+            "VP_ONE.base ; inline\n"
+            "; between\n"
+            "VP_TWO.base\n"
+            "VP_THREE.base\n"
+            "# before terminator\n"
+            ">\n"
+            "; after terminator\n",
+        )
+        self.assertEqual(export_visproto(appended.remove_trailing()),
+                         export_visproto(table))
+        self.assertEqual(
+            export_visproto(table, include_comments=False),
+            "VP_ONE.base\nVP_TWO.base\n>\n",
+        )
 
     def test_terminator_is_retained_and_rejects_later_content(self):
         table = parse_visproto_text(
@@ -74,6 +121,14 @@ class VisprotoParsingTests(unittest.TestCase):
         decoded = parse_visproto_bytes(utf16, require_terminator=True)
         self.assertEqual(decoded.source_encoding, "utf-16")
         self.assertEqual(decoded.entries[0].base_name, "VP_TWO.base")
+
+        crlf = parse_visproto_bytes(
+            "VP_THREE.base ; note\r\n>\r\n".encode("utf-8"),
+            require_terminator=True)
+        self.assertEqual(crlf.source_newline, "\r\n")
+        self.assertEqual(
+            export_visproto_bytes(crlf),
+            "VP_THREE.base ; note\r\n>\r\n".encode("utf-8"))
 
     def test_canonical_export_always_terminates_and_comments_are_optional(self):
         table = parse_visproto_text(
@@ -159,6 +214,59 @@ class VPEditingTests(unittest.TestCase):
         self.assertEqual(table.vps_for_base("vp_dup"), (0, 2))
         self.assertEqual(table.vp_for_base("VP_DUP.base"), AMBIGUOUS_VP)
         self.assertEqual(table.vp_for_base("missing.base"), None)
+
+    def test_clear_append_duplicate_copy_paste_and_undo_redo_keep_ids(self):
+        manager = VPManager(self.table)
+        original_ids = [entry.index for entry in manager.table]
+
+        self.assertTrue(manager.clear(0))
+        self.assertEqual(manager.table.entry(0).base_name, "dummy.base")
+        self.assertEqual(manager.table.entry(0).comment, "slot zero")
+        self.assertEqual(
+            [entry.index for entry in manager.table], original_ids)
+
+        self.assertTrue(manager.append("VP_APPENDED.base"))
+        self.assertEqual(manager.table.entry(3).base_name, "VP_APPENDED.base")
+        self.assertEqual(
+            [entry.index for entry in manager.table], [0, 1, 2, 3])
+
+        self.assertTrue(manager.duplicate_assignment(2))
+        self.assertEqual(manager.table.entry(4).base_name, "VP_TWO.base")
+        self.assertEqual(manager.table.vps_for_base("VP_TWO.base"), (2, 4))
+
+        self.assertEqual(manager.copy_assignment(3), "VP_APPENDED.base")
+        with self.assertRaises(VPConflictError):
+            manager.paste_assignment(1)
+        self.assertTrue(manager.paste_assignment(1, allow_replace=True))
+        self.assertEqual(manager.table.entry(1).base_name, "VP_APPENDED.base")
+        self.assertTrue(manager.undo())
+        self.assertEqual(manager.table.entry(1).base_name, "dummy.base")
+        self.assertTrue(manager.redo())
+        self.assertEqual(manager.table.entry(1).base_name, "VP_APPENDED.base")
+
+    def test_physical_remove_is_trailing_only_and_undoable(self):
+        manager = VPManager(self.table)
+        with self.assertRaises(VPConflictError):
+            manager.remove_trailing(1)
+        self.assertEqual(len(manager.table), 3)
+        self.assertTrue(manager.remove_trailing(2))
+        self.assertEqual(len(manager.table), 2)
+        self.assertEqual([entry.index for entry in manager.table], [0, 1])
+        self.assertTrue(manager.undo())
+        self.assertEqual(manager.table, self.table)
+
+    def test_invalid_indices_fail_without_history_or_id_changes(self):
+        manager = VPManager(self.table)
+        for operation in (
+                lambda: manager.clear(-1),
+                lambda: manager.duplicate_assignment(99),
+                lambda: manager.copy_assignment(99),
+                lambda: manager.paste_assignment(99, allow_replace=True),
+                lambda: manager.remove_trailing(99)):
+            with self.assertRaises((IndexError, VPConflictError)):
+                operation()
+        self.assertEqual(manager.table, self.table)
+        self.assertFalse(manager.can_undo)
 
 
 class EmbeddedVPTests(unittest.TestCase):

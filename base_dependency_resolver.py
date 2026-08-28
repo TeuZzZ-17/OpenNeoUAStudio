@@ -39,6 +39,8 @@ class AssetDependency:
     status: str = "unresolved"
     candidates: list[Path] = field(default_factory=list)
     error: str | None = None
+    resolution_source: str = ""
+    resolution_rule: str = ""
 
     def display_path(self) -> str:
         if self.resolved_path is not None:
@@ -73,6 +75,8 @@ def _dep_from_ref(family, name: str, kind: str, source: str,
                           error=error or None)
     if ref is not None:
         dep.candidates = list(ref.candidates)
+        dep.resolution_source = ref.source
+        dep.resolution_rule = getattr(ref, "resolution_rule", "")
         if ref.found and ref.path is not None:
             dep.resolved_path = ref.path
         elif ref.found:
@@ -148,6 +152,15 @@ def collect_dependencies(family) -> list[AssetDependency]:
                 owner_node=label,
                 status=("resolved" if supported and has_payload else
                         "missing" if supported else "unsupported_loader"),
+                resolution_source=(
+                    "inline BASE" if res.payload_size > 0 else
+                    "SET.BAS" if has_payload else ""),
+                resolution_rule=(
+                    "embedded EMRS payload in the owning BASE"
+                    if res.payload_size > 0 else
+                    "unique attached archive payload"
+                    if has_payload else
+                    "embedded reference has no available payload"),
             ))
 
         for unknown in base_obj.unknown_chunks:
@@ -155,6 +168,9 @@ def collect_dependencies(family) -> list[AssetDependency]:
                 kind="unknown_chunk", raw_ref=unknown,
                 source="FORM BASE child", owner_node=label,
                 status="unsupported_loader",
+                resolution_source="inline BASE",
+                resolution_rule=(
+                    "unknown chunk retained by the conservative BASE parser"),
             ))
 
         for kid_index, kid in enumerate(fam_obj.kids):
@@ -166,6 +182,8 @@ def collect_dependencies(family) -> list[AssetDependency]:
                 source="FORM KIDS (inline child base object)",
                 owner_node=label,
                 status="resolved",
+                resolution_source="inline BASE",
+                resolution_rule="ordered FORM KIDS child object",
             ))
             walk(kid, kid_label)
 
@@ -183,6 +201,26 @@ def collect_dependencies(family) -> list[AssetDependency]:
                 family, bitmap_name, "anm_bitmap",
                 f"VANM {anm_name} bitmap list", "family",
                 ref, bitmap_name in family.textures,
+            ))
+
+    palette_ref = getattr(family, "external_palette_ref", None)
+    if palette_ref is not None:
+        deps.append(_dep_from_ref(
+            family, palette_ref.logical_name, "palette",
+            "Retail indexed SET profile", "family", palette_ref,
+            getattr(family, "external_palette", None) is not None,
+        ))
+    for profile_name, logical_name in (
+            ("shader", "REMAP/SHADERMP.ILB"),
+            ("tracy", "REMAP/TRACYRMP.ILB")):
+        ref = getattr(family, "indexed_profile_refs", {}).get(profile_name)
+        if ref is not None:
+            deps.append(_dep_from_ref(
+                family, logical_name,
+                "shader_remap" if profile_name == "shader"
+                else "tracy_remap",
+                "Retail indexed SET profile", "family", ref,
+                ref.path is not None,
             ))
 
     return deps
@@ -224,6 +262,8 @@ def deps_to_dicts(deps: list[AssetDependency]) -> list[dict]:
             "resolved_path": str(d.resolved_path) if d.resolved_path else None,
             "candidates": [str(c) for c in d.candidates],
             "error": d.error,
+            "resolution_source": d.resolution_source,
+            "resolution_rule": d.resolution_rule,
         }
         for d in deps
     ]

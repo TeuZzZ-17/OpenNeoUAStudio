@@ -32,6 +32,7 @@ from uv_topology_editor import (
     apply_uv_vertex_deletion,
     plan_uv_vertex_deletion,
 )
+from tests.synthetic_indexed_profile import attach_synthetic_indexed_profile
 
 
 def _chunk(tag, payload):
@@ -323,6 +324,7 @@ class UVPhase3Tests(unittest.TestCase):
                 base_asset=base_asset,
                 root_object=obj,
             )
+            attach_synthetic_indexed_profile(family, root)
             window = _open_memory_window(family, obj)
             try:
                 window._on_polygon_picked(0)

@@ -102,32 +102,31 @@ class DepthRendererTests(unittest.TestCase):
                          [-1.0, 0.0, 1.0])
         self.assertEqual(len(ordered), len(polygons))
 
-    def test_textured_always_uses_exact_order_and_materials_can_use_fast(self):
+    def test_all_public_modes_use_exact_retail_bsp_order(self):
         viewport = self._editable_triangle_viewport()
         try:
             with patch(
                     "assembly_viewer.order_camera_polygons",
-                    wraps=order_camera_polygons) as exact, patch(
-                    "assembly_viewer.order_camera_polygons_fast",
-                    wraps=order_camera_polygons_fast) as fast:
+                    wraps=order_camera_polygons) as exact:
                 self._render(viewport)
                 self.assertEqual(exact.call_count, 1)
-                self.assertEqual(fast.call_count, 0)
 
                 viewport._anim_playing = True
                 self._render(viewport)
                 self.assertEqual(exact.call_count, 2)
-                self.assertEqual(fast.call_count, 0)
 
                 viewport._anim_playing = False
                 self.assertTrue(viewport.enter_edit_mode("root"))
                 self._render(viewport)
                 self.assertEqual(exact.call_count, 3)
-                self.assertEqual(fast.call_count, 0)
 
                 viewport.set_mode("materials")
                 self._render(viewport)
-                self.assertEqual(fast.call_count, 1)
+                self.assertEqual(exact.call_count, 4)
+
+                viewport.set_mode("wireframe")
+                self._render(viewport)
+                self.assertEqual(exact.call_count, 5)
         finally:
             viewport.close()
 
@@ -250,15 +249,15 @@ class DepthRendererTests(unittest.TestCase):
         self.assertGreater(right.blue(), 180)
         self.assertLess(right.red(), 80)
 
-    def test_backface_culling_is_applied_to_each_runtime_fan_triangle(self):
+    def test_base_uses_retail_whole_source_face_backface_culling(self):
         viewport = AssetViewport()
         viewport._backface_cull = True
         viewport._mode = "solid"
         viewport._show_grid = False
         viewport._show_axes = False
         viewport._materials = [ViewMaterial("solid")]
-        # The first runtime fan triangle (0,2,1) faces the camera; the second
-        # (0,3,2) faces away.  Whole-polygon culling cannot represent this.
+        # Retail visibility is decided once from the source face before fan
+        # triangulation, matching the Textured path imported from the fork.
         viewport._faces = [ViewFace(
             [
                 (-2.0 / 3.0, 2.0 / 3.0, 0.0),
@@ -286,8 +285,9 @@ class DepthRendererTests(unittest.TestCase):
             painter, QRectF(0, 0, 200, 200), None, False, camera,
             allow_transparent_background=True)
         painter.end()
-        self.assertEqual(len(viewport._pick_shapes), 1)
-        self.assertEqual(viewport._pick_shapes[0].face.poly_id, 7)
+        self.assertEqual(len(viewport._pick_shapes), 2)
+        self.assertTrue(all(
+            shape.face.poly_id == 7 for shape in viewport._pick_shapes))
 
     def test_wire_overlay_is_occluded_by_nearer_bsp_surface(self):
         viewport = AssetViewport()

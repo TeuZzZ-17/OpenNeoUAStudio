@@ -267,6 +267,13 @@ class IndexedPiece:
     surface: IndexedSurface
     source_order: int = 0
     sort_depth: float = 0.0
+    # AREA_FLAG_DPTHFADE is evaluated from radial camera distance at each
+    # source vertex, matching skeleton.cpp.  Distances stay in asset units;
+    # the rasterizer only interpolates the resulting shade contribution.
+    distance_fade: bool = False
+    fade_start: float = 0.0
+    fade_length: float = 600.0
+    vertex_distances: tuple[float, ...] = ()
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "screen", _points(self.screen, 2, "screen"))
@@ -283,6 +290,27 @@ class IndexedPiece:
         if not math.isfinite(depth):
             raise ValueError("sort_depth must be finite")
         object.__setattr__(self, "sort_depth", depth)
+        object.__setattr__(self, "distance_fade", bool(self.distance_fade))
+        fade_start = float(self.fade_start)
+        fade_length = float(self.fade_length)
+        if not math.isfinite(fade_start):
+            raise ValueError("fade_start must be finite")
+        if not math.isfinite(fade_length) or fade_length <= 0.0:
+            raise ValueError("fade_length must be finite and positive")
+        distances = tuple(float(value) for value in self.vertex_distances)
+        if distances and (
+                len(distances) != len(self.screen)
+                or any(not math.isfinite(value) or value < 0.0
+                       for value in distances)):
+            raise ValueError(
+                "vertex_distances must provide one finite non-negative "
+                "distance per vertex")
+        if self.distance_fade and not distances:
+            raise ValueError(
+                "distance-faded pieces need vertex_distances")
+        object.__setattr__(self, "fade_start", fade_start)
+        object.__setattr__(self, "fade_length", fade_length)
+        object.__setattr__(self, "vertex_distances", distances)
 
 
 @dataclass(frozen=True)
@@ -441,6 +469,9 @@ class IndexedRasterizer:
                 tri_screen = tuple(piece.screen[i] for i in ids)
                 tri_uvs = tuple(piece.uvs[i] for i in ids) if piece.uvs else ()
                 tri_camera = tuple(piece.camera_vertices[i] for i in ids)
+                tri_distances = (
+                    tuple(piece.vertex_distances[i] for i in ids)
+                    if piece.distance_fade else ())
                 counters["fan_triangles"] += 1
                 if _np is not None:
                     IndexedRasterizer._triangle_numpy(
@@ -449,6 +480,7 @@ class IndexedRasterizer:
                         (None if flat_sparse is None else
                          flat_sparse.get(piece.source_face_id)),
                         piece, input_order, tri_screen, tri_uvs, tri_camera,
+                        tri_distances,
                         shader, tracy, counters, forced, width, height,
                     )
                 else:
@@ -458,7 +490,8 @@ class IndexedRasterizer:
                     IndexedRasterizer._triangle_python(
                         framebuffer, coverage, owner, opaque_order,
                         face_seen, piece, input_order,
-                        tri_screen, tri_uvs, tri_camera, tables, counters, forced,
+                        tri_screen, tri_uvs, tri_camera, tri_distances,
+                        tables, counters, forced,
                         width, height,
                     )
 
@@ -503,7 +536,8 @@ class IndexedRasterizer:
     def _triangle_numpy(framebuffer, coverage, owner, opaque_order,
                         flat_seen_bits, flat_face_bit, sparse_seen,
                         piece: IndexedPiece, input_order: int,
-                        screen, uvs, camera, shader, tracy, counters, forced,
+                        screen, uvs, camera, distances, shader, tracy,
+                        counters, forced,
                         width: int, height: int) -> None:
         left = max(0, math.floor(min(point[0] for point in screen)))
         right = min(width - 1, math.ceil(max(point[0] for point in screen)))
@@ -592,6 +626,33 @@ class IndexedRasterizer:
                 if not bool(mask.any()):
                     return
 
+        if piece.distance_fade:
+            fade_vertices = _np.clip(
+                (_np.asarray(distances, dtype=_np.float64)
+                 - piece.fade_start) / piece.fade_length,
+                0.0, 1.0)
+            fade_value = (
+                w0 * fade_vertices[0]
+                + w1 * fade_vertices[1]
+                + w2 * fade_vertices[2])
+            fade_row = _np.floor(
+                _np.clip(fade_value, 0.0, 1.0) * 255.0 + 0.5
+            ).astype(_np.int16)
+            base_row = (
+                int(surface.shade_value)
+                if surface.shade_mode != "none" else 0)
+            shade_rows = _np.clip(base_row + fade_row, 0, 255)
+            composed_source = shader[shade_rows, raw_source]
+            fade_samples = int(_np.count_nonzero(mask))
+            counters["distance_fade_triangles"] += 1
+            counters["distance_fade_samples"] += fade_samples
+            counters["distance_fade_saturated_samples"] += int(
+                _np.count_nonzero(mask & (shade_rows == 255)))
+        elif surface.shade_mode != "none":
+            composed_source = shader[int(surface.shade_value), raw_source]
+        else:
+            composed_source = raw_source
+
         framebuffer_sub = framebuffer[top:bottom + 1, left:right + 1]
         coverage_sub = coverage[top:bottom + 1, left:right + 1]
         owner_sub = (
@@ -615,7 +676,7 @@ class IndexedRasterizer:
             lookup_background = (
                 current if forced is None
                 else _np.full(current.shape, forced, dtype=_np.uint8))
-            output = tracy[lookup_background, raw_source]
+            output = tracy[lookup_background, composed_source]
             samples = int(_np.count_nonzero(mask))
             counters["flat_tracy_samples"] += samples
             counters["flat_tracy_source_zero_samples"] += int(
@@ -632,10 +693,7 @@ class IndexedRasterizer:
                 sparse_seen.update(int(value) for value in ids.tolist())
             return
 
-        if surface.shade_mode != "none":
-            output = shader[int(surface.shade_value), raw_source]
-        else:
-            output = raw_source
+        output = composed_source
         samples = int(_np.count_nonzero(mask))
         counters["opaque_or_clear_samples"] += samples
         framebuffer_sub[mask] = output[mask]
@@ -648,7 +706,8 @@ class IndexedRasterizer:
     @staticmethod
     def _triangle_python(framebuffer, coverage, owner, opaque_order, face_seen,
                          piece: IndexedPiece, input_order: int,
-                         screen, uvs, camera, tables, counters, forced,
+                         screen, uvs, camera, distances, tables, counters,
+                         forced,
                          width: int, height: int) -> None:
         left = max(0, math.floor(min(point[0] for point in screen)))
         right = min(width - 1, math.ceil(max(point[0] for point in screen)))
@@ -661,6 +720,15 @@ class IndexedRasterizer:
             counters["depth_mapped_triangles"] += 1
         else:
             counters["linear_mapped_triangles"] += 1
+        if piece.distance_fade:
+            counters["distance_fade_triangles"] += 1
+            fade_values = tuple(
+                min(1.0, max(
+                    0.0,
+                    (distance - piece.fade_start) / piece.fade_length))
+                for distance in distances)
+        else:
+            fade_values = ()
 
         for y in range(top, bottom + 1):
             for x in range(left, right + 1):
@@ -698,6 +766,28 @@ class IndexedRasterizer:
                         counters["clear_source_zero_skipped"] += 1
                         continue
 
+                if piece.distance_fade:
+                    interpolated = sum(
+                        weight * value
+                        for weight, value in zip(weights, fade_values))
+                    fade_row = int(math.floor(
+                        min(1.0, max(0.0, interpolated)) * 255.0
+                        + 0.5))
+                    base_row = (
+                        surface.shade_value
+                        if surface.shade_mode != "none" else 0)
+                    shade_row = min(255, base_row + fade_row)
+                    composed_source = tables.shade_index(
+                        shade_row, raw_source)
+                    counters["distance_fade_samples"] += 1
+                    if shade_row == 255:
+                        counters["distance_fade_saturated_samples"] += 1
+                elif surface.shade_mode != "none":
+                    composed_source = tables.shade_index(
+                        surface.shade_value, raw_source)
+                else:
+                    composed_source = raw_source
+
                 if surface.tracy_mode != "none" and int(
                         IndexedRasterizer._get(opaque_order, y, x)) > input_order:
                     counters["transparent_samples_occluded"] += 1
@@ -706,7 +796,8 @@ class IndexedRasterizer:
                 if surface.tracy_mode == "flat":
                     background = int(IndexedRasterizer._get(framebuffer, y, x))
                     lookup_background = background if forced is None else forced
-                    output = tables.tracy_index(lookup_background, raw_source)
+                    output = tables.tracy_index(
+                        lookup_background, composed_source)
                     counters["flat_tracy_samples"] += 1
                     if raw_source == 0:
                         counters["flat_tracy_source_zero_samples"] += 1
@@ -718,8 +809,7 @@ class IndexedRasterizer:
                         face_seen.add(pixel_key)
                     continue
 
-                output = (tables.shade_index(surface.shade_value, raw_source)
-                          if surface.shade_mode != "none" else raw_source)
+                output = composed_source
                 counters["opaque_or_clear_samples"] += 1
                 IndexedRasterizer._set(framebuffer, y, x, output)
                 IndexedRasterizer._set(coverage, y, x, True)
