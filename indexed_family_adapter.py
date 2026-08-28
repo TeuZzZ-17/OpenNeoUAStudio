@@ -8,7 +8,6 @@ resources from one bounded Urban Assault SET profile.
 from __future__ import annotations
 
 import hashlib
-import math
 import operator
 from pathlib import Path
 from typing import Any
@@ -27,8 +26,10 @@ _RETAIL_MATERIAL_CODES = frozenset(
     (_RETAIL_NNN_CODE,) + tuple(_RETAIL_LINEAR_CODES) + tuple(_RETAIL_DEPTH_CODES)
 )
 _AMBIGUOUS_TEXTURE = object()
+VANILLA_GAMEPLAY_VIS_LIMIT = 1400.0
 VANILLA_FADE_LENGTH = 600.0
-VANILLA_VIS_LIMIT = 4096.0
+VANILLA_GAMEPLAY_FADE_START = (
+    VANILLA_GAMEPLAY_VIS_LIMIT - VANILLA_FADE_LENGTH)
 
 
 class IndexedFamilyAdapterError(RuntimeError):
@@ -256,11 +257,6 @@ class IndexedFamilyAdapter:
         depth_fade = []
         for obj in family.all_objects():
             owner = str(getattr(obj, "owner_path", "root"))
-            transform = getattr(getattr(obj, "base_object", None),
-                                "transform", None)
-            vis_limit = float(
-                getattr(transform, "vis_limit", VANILLA_VIS_LIMIT)
-                if transform is not None else VANILLA_VIS_LIMIT)
             for block_index, group in enumerate(getattr(obj, "materials", ())):
                 block = getattr(group, "block", None)
                 if block is None:
@@ -277,8 +273,8 @@ class IndexedFamilyAdapter:
                 if bool(getattr(block, "depth_fade", False)):
                     depth_fade.append(f"{owner} block {block_index}")
                     self.fade_profiles[(owner, block_index)] = {
-                        "vis_limit": vis_limit,
-                        "fade_start": vis_limit - VANILLA_FADE_LENGTH,
+                        "vis_limit": VANILLA_GAMEPLAY_VIS_LIMIT,
+                        "fade_start": VANILLA_GAMEPLAY_FADE_START,
                         "fade_length": VANILLA_FADE_LENGTH,
                     }
         self.source_info["unsupported_material_codes"] = unsupported
@@ -321,40 +317,23 @@ class IndexedFamilyAdapter:
         return self.block_map.get((str(owner), int(block_index)))
 
     def distance_fade_profile(
-            self, face, preview_override: dict | None = None
+            self, face, enabled: bool = False
             ) -> dict[str, float] | None:
-        """Return AREA fade values without mutating the asset.
+        """Return the recovered retail gameplay AREA fade profile.
 
-        Asset values are the default: ``BaseTransform.vis_limit`` and the
-        vanilla 600-unit fade length.  A preview override is accepted only
-        for an already DPTHFADE-marked block.
+        The BASE/AREA data only marks eligible geometry with
+        ``AREA_FLAG_DPTHFADE``.  The normal Urban Assault world runtime
+        supplies visLimit=1400 and fadeLength=600, therefore fadeStart=800.
+        The viewer exposes only an opt-in toggle; no editable preview profile
+        is accepted here.
         """
 
+        if not enabled:
+            return None
         key = (str(getattr(face, "owner", "root")),
                int(getattr(face, "block_index", -1)))
-        asset = self.fade_profiles.get(key)
-        if asset is None:
-            return None
-        if not preview_override or preview_override.get("use_asset", True):
-            return dict(asset)
-        try:
-            vis_limit = float(preview_override["vis_limit"])
-            fade_start = float(preview_override["fade_start"])
-            fade_length = float(preview_override["fade_length"])
-        except (KeyError, TypeError, ValueError) as exc:
-            raise IndexedSourceError(
-                "AREA fade preview override is incomplete") from exc
-        if not all(math.isfinite(value) for value in (
-                vis_limit, fade_start, fade_length)) \
-                or fade_length <= 0.0:
-            raise IndexedSourceError(
-                "AREA fade preview values must be finite and fadeLength "
-                "must be positive")
-        return {
-            "vis_limit": vis_limit,
-            "fade_start": fade_start,
-            "fade_length": fade_length,
-        }
+        profile = self.fade_profiles.get(key)
+        return dict(profile) if profile is not None else None
 
     def active_texture_name(self, material, frame_index: int) -> str:
         frames = list(getattr(material, "anim_frames", ()) or ())

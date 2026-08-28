@@ -1084,14 +1084,14 @@ class AssemblyWindow(QMainWindow):
                        self.axes_check, self.grid_check,
                        self.overlay_check, self.mapping_diag_check):
             view_menu.addAction(action)
-        self.area_fade_preview_action = QAction(
-            "AREA distance fade preview...", self)
-        self.area_fade_preview_action.setStatusTip(
-            "Inspect DPTHFADE faces with asset/vanilla values or a "
-            "non-persistent preview override.")
-        self.area_fade_preview_action.triggered.connect(
-            self._configure_area_fade_preview)
-        view_menu.addAction(self.area_fade_preview_action)
+        self.retail_distance_fade_check = self._checkable(
+            "Vanilla distance fade (1400/600)",
+            self.viewport.set_retail_distance_fade, True)
+        self.retail_distance_fade_check.setStatusTip(
+            "Retail AREA distance fade recovered from the fork, enabled by default: "
+            "AREA_FLAG_DPTHFADE faces use the vanilla gameplay profile "
+            "visLimit 1400, fadeStart 800, fadeLength 600.")
+        view_menu.addAction(self.retail_distance_fade_check)
         view_menu.addSeparator()
         self.reset_camera_action = QAction("Reset camera", self)
         self.reset_camera_action.setEnabled(False)
@@ -3932,85 +3932,6 @@ class AssemblyWindow(QMainWindow):
         self._notify(
             f"Viewport mode changed to {self.mode_combo.currentText()}.",
             3500)
-
-    def _configure_area_fade_preview(self) -> None:
-        """Configure a session-only renderer override for DPTHFADE faces."""
-
-        selected = self._owner_to_obj.get(self._selected_owner) \
-            if self._selected_owner else None
-        transform = getattr(
-            getattr(selected, "base_object", None), "transform", None)
-        asset_vis_limit = float(
-            getattr(transform, "vis_limit", 4096)
-            if transform is not None else 4096)
-        settings = self.viewport.area_fade_preview_settings()
-
-        dialog = QDialog(self)
-        dialog.setWindowTitle("AREA Distance Fade Preview")
-        layout = QVBoxLayout(dialog)
-        note = QLabel(
-            "Only AREA/AMESH blocks carrying AREA_FLAG_DPTHFADE are "
-            "affected. Asset/Vanilla Values uses BaseTransform.vis_limit, "
-            "fadeLength 600 and fadeStart = visLimit - 600. Overrides affect "
-            "preview rendering only; no BASE data is changed.")
-        note.setWordWrap(True)
-        layout.addWidget(note)
-        use_asset = QCheckBox("Use Asset/Vanilla Values")
-        use_asset.setChecked(bool(settings.get("use_asset", True)))
-        layout.addWidget(use_asset)
-
-        grid = QGridLayout()
-        vis_limit = QDoubleSpinBox()
-        fade_start = QDoubleSpinBox()
-        fade_length = QDoubleSpinBox()
-        for spin in (vis_limit, fade_start, fade_length):
-            spin.setDecimals(2)
-            spin.setRange(-1_000_000.0, 10_000_000.0)
-        fade_length.setMinimum(0.01)
-        vis_limit.setValue(float(
-            settings.get("vis_limit")
-            if settings.get("vis_limit") is not None
-            else asset_vis_limit))
-        fade_start.setValue(float(
-            settings.get("fade_start")
-            if settings.get("fade_start") is not None
-            else asset_vis_limit - 600.0))
-        fade_length.setValue(float(settings.get("fade_length") or 600.0))
-        grid.addWidget(QLabel("visLimit:"), 0, 0)
-        grid.addWidget(vis_limit, 0, 1)
-        grid.addWidget(QLabel("fadeStart:"), 1, 0)
-        grid.addWidget(fade_start, 1, 1)
-        grid.addWidget(QLabel("fadeLength:"), 2, 0)
-        grid.addWidget(fade_length, 2, 1)
-        layout.addLayout(grid)
-
-        def sync_enabled(checked: bool) -> None:
-            for spin in (vis_limit, fade_start, fade_length):
-                spin.setEnabled(not checked)
-
-        use_asset.toggled.connect(sync_enabled)
-        sync_enabled(use_asset.isChecked())
-        buttons = QDialogButtonBox(
-            QDialogButtonBox.StandardButton.Ok
-            | QDialogButtonBox.StandardButton.Cancel)
-        buttons.accepted.connect(dialog.accept)
-        buttons.rejected.connect(dialog.reject)
-        layout.addWidget(buttons)
-        if dialog.exec() != QDialog.DialogCode.Accepted:
-            return
-        try:
-            self.viewport.set_area_fade_preview(
-                use_asset.isChecked(), vis_limit.value(),
-                fade_start.value(), fade_length.value())
-        except ValueError as exc:
-            QMessageBox.warning(
-                self, "Invalid AREA fade preview values", str(exc))
-            return
-        self._notify(
-            "AREA fade preview uses asset/vanilla values."
-            if use_asset.isChecked() else
-            "AREA fade preview override enabled (asset unchanged).",
-            6000)
 
     def _sync_animation_controls(self) -> None:
         """Match controls and playback to the rendered selected subtree.

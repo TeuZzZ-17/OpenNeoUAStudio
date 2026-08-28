@@ -125,7 +125,8 @@ class WindowContractV5Tests(unittest.TestCase):
                 if not action.isSeparator()]
             self.assertNotIn("Frame full family", view_labels)
             self.assertNotIn("Navigation help", view_labels)
-            self.assertIn("AREA distance fade preview...", view_labels)
+            self.assertIn("Vanilla distance fade (1400/600)", view_labels)
+            self.assertTrue(window.retail_distance_fade_check.isChecked())
             tool_labels = []
             for menu_action in window.menuBar().actions():
                 menu = menu_action.menu()
