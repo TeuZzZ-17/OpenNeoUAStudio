@@ -13,7 +13,7 @@ from pathlib import Path
 from types import MappingProxyType
 from typing import Iterable, Mapping
 
-from base_parser import parse_base_file
+from base_parser import BaseParseError, parse_base_file
 
 
 DUMMY_BASE_NAME = "dummy.base"
@@ -666,6 +666,31 @@ def _base_filename(object_name: str, index: int) -> str:
             f"embedded VP {index} has an invalid BASE name: {exc}") from exc
 
 
+
+def load_visproto_base(path: str | PathLike[str]) -> VPTable:
+    """Load a standalone embedded-style VISPROTO.BASE positionally."""
+
+    source = Path(path)
+    try:
+        asset = parse_base_file(source)
+    except (OSError, BaseParseError) as exc:
+        raise VPEmbeddedError(
+            f"{source} is not a usable standalone VISPROTO.BASE: {exc}") from exc
+    root = asset.root
+    if root is None:
+        raise VPEmbeddedError(f"{source} has no parsed BASE root object.")
+    if not root.kids:
+        raise VPEmbeddedError(f"{source} contains no visual prototypes.")
+    return VPTable(
+        tuple(
+            VPEntry(index, _base_filename(obj.name, index))
+            for index, obj in enumerate(root.kids)
+        ),
+        source_encoding="embedded-base",
+        had_terminator=False,
+    )
+
+
 def reconstruct_embedded_vps(
         set_bas_path: str | PathLike[str]) -> EmbeddedVPSet:
     """Rebuild the engine VP order from parsed SET.BAS.
@@ -725,6 +750,7 @@ __all__ = [
     "export_visproto",
     "export_visproto_bytes",
     "load_visproto",
+    "load_visproto_base",
     "normalize_base_name",
     "normalize_skeleton_name",
     "parse_visproto",

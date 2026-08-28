@@ -1,9 +1,8 @@
 """Canonical portable package workflow for a complete :mod:`asset_family`.
 
 The module does not parse asset formats itself.  It records files produced by
-the existing BASE/SKLT/ANM/ILBM writers, validates them by reopening the BASE
-through :func:`asset_family.load_asset_family`, and installs only a previously
-validated package through the shared coordinated commit helper.
+the existing BASE/SKLT/ANM/ILBM writers and validates them by reopening the
+BASE through :func:`asset_family.load_asset_family`.
 """
 
 from __future__ import annotations
@@ -13,16 +12,13 @@ import hashlib
 import json
 from pathlib import Path
 import re
-import shutil
 import struct
-import tempfile
 from typing import Iterable
 
 from asset_family import AssetFamily, FamilyObject, load_asset_family
 from asset_resolver import DirectoryIndex, normalize_logical_name
 from indexed_family_adapter import IndexedFamilyAdapter
 from sklt_parser import sen2_points_for_poo2
-from verified_io import VerifiedCommitError, commit_verified_files
 
 
 MANIFEST_NAME = "asset_family_manifest.json"
@@ -63,19 +59,6 @@ class PackageValidation:
     family: AssetFamily | None = None
     errors: list[str] = field(default_factory=list)
     warnings: list[str] = field(default_factory=list)
-
-
-@dataclass
-class PackageImportResult:
-    source_root: Path
-    destination_root: Path
-    entry_base: Path
-    base_name: str = ""
-    vp_assignment: str = ""
-    copied: list[Path] = field(default_factory=list)
-    identical: list[Path] = field(default_factory=list)
-    warnings: list[str] = field(default_factory=list)
-    validation: PackageValidation | None = None
 
 
 def sha256_file(path: str | Path) -> str:
@@ -558,207 +541,15 @@ def validate_family_package(
     return result
 
 
-def import_family_package(
-        source_root: str | Path,
-        destination_root: str | Path, *,
-        runtime_loose: bool = False) -> PackageImportResult:
-    """Install one validated package without silent differing overwrites.
-
-    ``runtime_loose`` relocates runtime-consumed assets into the canonical
-    OpenNeoUA folders: ``BASE/``, ``SKLT/``, ``ILBM/`` and ``ANM/``.  The
-    entry BASE uses its internal BASE NAME; unsupported package-only files
-    keep their portable package paths.  A destination manifest reflecting the
-    relocation is staged and validated with the files.
-    """
-
-    source = Path(source_root).resolve()
-    validation = validate_family_package(source)
-    if not validation.valid or validation.manifest is None:
-        raise AssetFamilyPackageError(
-            "package validation failed:\n" + "\n".join(validation.errors))
-
-    destination = Path(destination_root).resolve()
-    manifest = validation.manifest
-    source_entry = Path(manifest["entry_base"])
-    base_name = ""
-    vp_assignment = ""
-    destination_entry = source_entry
-    destination_manifest = json.loads(json.dumps(manifest))
-    runtime_targets: dict[str, Path] = {}
-    if runtime_loose:
-        root_object = (
-            validation.family.root_object
-            if validation.family is not None else None)
-        base_name = str(
-            getattr(getattr(root_object, "base_object", None), "name", "")
-            or "")
-        if not base_name:
-            raise AssetFamilyPackageError(
-                "runtime VP import requires a non-empty internal BASE NAME")
-        safe_name = package_relative_path(
-            base_name, default_name="MODEL.BASE",
-            extensions=(".BASE", ".BAS"))
-        if len(safe_name.parts) != 1:
-            raise AssetFamilyPackageError(
-                "runtime VP BASE NAME cannot contain path separators")
-        destination_entry = Path("BASE") / safe_name.with_suffix(".BASE")
-        vp_assignment = safe_name.with_suffix(".base").name
-        destination_manifest["entry_base"] = destination_entry.as_posix()
-        source_entry_key = source_entry.as_posix().casefold()
-        class_folders = {
-            "base.class": "BASE",
-            "sklt.class": "SKLT",
-            "ilbm.class": "ILBM",
-            "bmpanim.class": "ANM",
-        }
-        matching_entries = 0
-        for item in destination_manifest["entries"]:
-            if item.get("status") != "exported":
-                continue
-            source_relative = Path(str(item.get("exported_path", "")))
-            source_key = source_relative.as_posix().casefold()
-            if source_key == source_entry_key:
-                target_relative = destination_entry
-                matching_entries += 1
-            else:
-                folder = class_folders.get(str(item.get("asset_class", "")))
-                target_relative = (Path(folder) / source_relative.name
-                                   if folder else source_relative)
-            runtime_targets[source_key] = target_relative
-            item["exported_path"] = target_relative.as_posix()
-        if matching_entries != 1:
-            raise AssetFamilyPackageError(
-                "manifest does not identify exactly one exported entry BASE")
-
-    manifest_bytes = (
-        json.dumps(destination_manifest, indent=2, ensure_ascii=False)
-        + "\n").encode("utf-8")
-    exported: list[tuple[Path, Path]] = []
-    target_keys: set[str] = set()
-    for item in manifest["entries"]:
-        if item.get("status") != "exported":
-            continue
-        source_relative = Path(item["exported_path"])
-        target_relative = runtime_targets.get(
-            source_relative.as_posix().casefold(), source_relative)
-        key = target_relative.as_posix().casefold()
-        if key in target_keys:
-            raise AssetFamilyPackageError(
-                f"import entries collide at {target_relative}")
-        target_keys.add(key)
-        exported.append((source_relative, target_relative))
-    result = PackageImportResult(
-        source_root=source, destination_root=destination,
-        entry_base=destination / destination_entry,
-        base_name=base_name, vp_assignment=vp_assignment)
-    copies: list[tuple[Path, Path]] = []
-    new_targets: list[Path] = []
-    for source_relative, target_relative in exported:
-        source_file = (source / source_relative).resolve()
-        target = (destination / target_relative).resolve()
-        try:
-            source_file.relative_to(source)
-            target.relative_to(destination)
-        except ValueError as exc:
-            raise AssetFamilyPackageError(
-                f"package path escapes its root: {target_relative}") from exc
-        if target.is_file():
-            if sha256_file(target) == sha256_file(source_file):
-                result.identical.append(target)
-                continue
-            raise AssetFamilyPackageError(
-                "import collision with different content: " + str(target))
-        if target.exists():
-            raise AssetFamilyPackageError(
-                "import target exists but is not a file: " + str(target))
-        copies.append((source_file, target))
-        new_targets.append(target)
-
-    destination_manifest_relative = Path(MANIFEST_NAME)
-    if runtime_loose:
-        destination_manifest_relative = destination_entry.with_suffix(
-            ".asset_family_manifest.json")
-    manifest_target = destination / destination_manifest_relative
-    if manifest_target.is_file():
-        if manifest_target.read_bytes() == manifest_bytes:
-            result.identical.append(manifest_target)
-        else:
-            raise AssetFamilyPackageError(
-                "import collision with different content: "
-                + str(manifest_target))
-    elif manifest_target.exists():
-        raise AssetFamilyPackageError(
-            "import target exists but is not a file: "
-            + str(manifest_target))
-    else:
-        new_targets.append(manifest_target)
-
-    # Validation above is read-only.  Only now may the destination tree be
-    # created and populated.
-    destination.mkdir(parents=True, exist_ok=True)
-    try:
-        with tempfile.TemporaryDirectory(
-                prefix="OpenNeoUAStudio_import_",
-                dir=destination.parent) as temp_dir:
-            stage_root = Path(temp_dir)
-            staged_pairs = []
-            for source_file, target in copies:
-                relative = target.relative_to(destination)
-                staged = stage_root / relative
-                staged.parent.mkdir(parents=True, exist_ok=True)
-                shutil.copy2(source_file, staged)
-                if sha256_file(staged) != sha256_file(source_file):
-                    raise AssetFamilyPackageError(
-                        f"staging hash mismatch: {relative}")
-                staged_pairs.append((staged, target))
-            if manifest_target in new_targets:
-                staged_manifest = stage_root / destination_manifest_relative
-                staged_manifest.parent.mkdir(parents=True, exist_ok=True)
-                staged_manifest.write_bytes(manifest_bytes)
-                staged_pairs.append((staged_manifest, manifest_target))
-            validation_holder: dict[str, PackageValidation] = {}
-
-            def verify_import() -> None:
-                DirectoryIndex.clear_cache()
-                imported_validation = validate_family_package(
-                    destination,
-                    manifest_relative=destination_manifest_relative)
-                validation_holder["result"] = imported_validation
-                if not imported_validation.valid:
-                    raise AssetFamilyPackageError(
-                        "installed package failed isolated reload:\n"
-                        + "\n".join(imported_validation.errors))
-
-            result.warnings.extend(commit_verified_files(
-                staged_pairs, verify=verify_import))
-        result.copied.extend(new_targets)
-        result.validation = validation_holder["result"]
-    except (OSError, VerifiedCommitError, AssetFamilyPackageError) as exc:
-        rollback_errors = []
-        for target in reversed(new_targets):
-            try:
-                if target.is_file():
-                    target.unlink()
-            except OSError as rollback_exc:
-                rollback_errors.append(f"{target}: {rollback_exc}")
-        message = str(exc)
-        if rollback_errors:
-            message += ("\nRollback cleanup failed:\n"
-                        + "\n".join(rollback_errors))
-        raise AssetFamilyPackageError(message) from exc
-    return result
-
 
 __all__ = [
     "MANIFEST_NAME",
     "AssetFamilyPackageError",
     "PackageEntry",
     "PackageValidation",
-    "PackageImportResult",
     "package_relative_path",
     "family_semantic_snapshot",
     "semantic_sha256",
     "write_package_manifest",
     "validate_family_package",
-    "import_family_package",
 ]

@@ -96,11 +96,12 @@ def _setbas_bytes(*, duplicate_sklt: bool = False,
     if invalid_duplicate_sklt:
         embedded += _emrs(
             "sklt.class", "SKELETON/HERO.sklt", _form(b"BAD "))
-    kids = _base_object("VP_HERO")
+    visproto_kids = _base_object("VP_HERO")
     if duplicate_base:
-        kids += _base_object("vp_hero")
+        visproto_kids += _base_object("vp_hero")
+    visproto = _base_object("", kids=visproto_kids)
     return _form(
-        b"MC2 ", _base_object("", kids=kids, embedded=embedded))
+        b"MC2 ", _base_object("", kids=visproto, embedded=embedded))
 
 
 class RuntimeLooseExportTests(unittest.TestCase):
@@ -121,7 +122,7 @@ class RuntimeLooseExportTests(unittest.TestCase):
             loose = set_root / "Loose"
 
             self.assertTrue(summary["validation"]["valid"])
-            self.assertEqual(summary["exported"], 4)
+            self.assertEqual(summary["exported"], 5)
             self.assertEqual(summary["skipped"], 2)
             self.assertEqual(setbas.read_bytes(), source_before)
             self.assertEqual(
@@ -129,6 +130,13 @@ class RuntimeLooseExportTests(unittest.TestCase):
             self.assertEqual(
                 (loose / "ILBM" / "MTL.ILBM").read_bytes(), _vbmp())
             self.assertEqual((loose / "ANM" / "FLASH.ANM").read_bytes(), _vanm())
+            from vp_manager import load_visproto
+            visproto = load_visproto(
+                loose / "VISPROTO.LST", require_terminator=True)
+            self.assertEqual(
+                [entry.base_name for entry in visproto.entries],
+                ["VP_HERO.base"])
+            self.assertFalse((loose / "VISPROTO.BASE").exists())
             self.assertFalse((loose / "raw").exists())
             self.assertFalse((loose / "textures_ilbm").exists())
             self.assertEqual(
@@ -141,6 +149,8 @@ class RuntimeLooseExportTests(unittest.TestCase):
             self.assertEqual(manifest["source"]["name"], "SET.BAS")
             self.assertEqual(manifest["layout"]["logical_root"],
                              "Data/Set1/Loose")
+            self.assertEqual(manifest["layout"]["root_files"],
+                             ["VISPROTO.LST"])
             for row in manifest["resources"]:
                 self.assertTrue({
                     "source_name", "class", "logical_name", "output_path",
@@ -272,6 +282,7 @@ class RuntimeLooseExportTests(unittest.TestCase):
             self.assertFalse((loose / "ILBM" / "MTL.ILBM").exists())
             self.assertFalse((loose / "ANM" / "FLASH.ANM").exists())
             self.assertFalse((loose / "BASE" / "VP_HERO.BASE").exists())
+            self.assertFalse((loose / "VISPROTO.LST").exists())
             self.assertEqual(setbas.read_bytes(), source_before)
 
     def test_cross_set_target_is_rejected_before_writes(self):

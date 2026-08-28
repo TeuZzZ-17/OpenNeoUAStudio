@@ -1,4 +1,5 @@
 import os
+import struct
 from pathlib import Path
 import tempfile
 import unittest
@@ -1518,8 +1519,26 @@ class CollisionEditorTests(unittest.TestCase):
             window.file_script_menu.actions())
         self.assertFalse(window.save_loaded_script_action.isEnabled())
 
-    def test_93_runtime_vp_table_prefers_loose_visproto(self):
+    def test_93_runtime_vp_table_prefers_loose_visproto_base(self):
         from vp_manager import EmbeddedVPEntry, EmbeddedVPSet
+
+        def chunk(tag: bytes, payload: bytes) -> bytes:
+            result = tag + struct.pack(">I", len(payload)) + payload
+            return result + (b"\0" if len(payload) & 1 else b"")
+
+        def form(form_type: bytes, children: bytes = b"") -> bytes:
+            return chunk(b"FORM", form_type + children)
+
+        def base_object(name: str, kids: bytes = b"") -> bytes:
+            root = (form(b"ROOT", chunk(b"NAME", name.encode("latin-1") + b"\0"))
+                    if name else b"")
+            root += chunk(b"STRC", bytes(62))
+            if kids:
+                root += form(b"KIDS", kids)
+            return form(
+                b"OBJT",
+                chunk(b"CLID", b"base.class\0") + form(b"BASE", root),
+            )
 
         with tempfile.TemporaryDirectory() as tmp:
             set_root = Path(tmp) / "Set1"
@@ -1530,7 +1549,7 @@ class CollisionEditorTests(unittest.TestCase):
             set_bas = objects / "SET.BAS"
             set_bas.write_bytes(b"placeholder")
             (loose / "VISPROTO.LST").write_text(
-                "Custom.base\n>\n", encoding="utf-8")
+                "Custom.base\n>\n", encoding="cp1252")
             embedded = EmbeddedVPSet(
                 source_path=set_bas,
                 container_source_offset=0,

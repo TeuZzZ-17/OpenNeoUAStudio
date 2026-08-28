@@ -18,6 +18,7 @@ from vp_manager import (
     export_visproto,
     export_visproto_bytes,
     load_visproto,
+    load_visproto_base,
     normalize_base_name,
     normalize_skeleton_name,
     parse_visproto_bytes,
@@ -306,6 +307,18 @@ class EmbeddedVPTests(unittest.TestCase):
             [entry.index for entry in embedded.entries], [0, 1])
         self.assertEqual(
             [entry.base_name for entry in embedded.as_table()],
+            ["VP_ONE.base", "dummy.base"],
+        )
+
+    def test_standalone_visproto_base_uses_root_children_positionally(self):
+        parsed = SimpleNamespace(root=SimpleNamespace(kids=[
+            self._object("VP_ONE", "Skeleton/ONE.sklt", 110),
+            self._object("dummy", "Skeleton/DUMMY.sklt", 120),
+        ]))
+        with patch("vp_manager.parse_base_file", return_value=parsed):
+            table = load_visproto_base("Loose/VISPROTO.BASE")
+        self.assertEqual(
+            [entry.base_name for entry in table],
             ["VP_ONE.base", "dummy.base"],
         )
 
