@@ -818,6 +818,26 @@ def _plan_runtime_loose(archive: SetBasArchive
             offset_label = f"0x{offset:X}" if offset >= 0 else "unknown"
             return f"{row['class']}:{row['source_name']}@{offset_label}"
 
+        # SET.BAS legitimately repeats some BASE objects byte-for-byte (for
+        # example VP_SULG2 in retail Set1).  Such aliases are not ambiguous:
+        # one standalone file represents every identical source object, while
+        # VISPROTO.LST may still reference that filename from multiple slots.
+        # Only collapse a group when every candidate was valid/planned and the
+        # serialized payload hash is exactly the same.
+        hashes = {row["hash"] for row in group}
+        if (all(row["status"] == "planned" for row in group)
+                and len(hashes) == 1 and "" not in hashes):
+            canonical = group[0]
+            canonical["reason"] = (
+                f"{len(group)} byte-identical archive entries share "
+                f"{output_path}; one canonical copy selected")
+            for row in group[1:]:
+                row["status"] = "skipped_identical"
+                row["reason"] = (
+                    f"byte-identical duplicate of {source_label(canonical)}; "
+                    f"canonical {output_path} retained")
+            continue
+
         sources = ", ".join(
             source_label(row) for row in group[:6])
         if len(group) > 6:

@@ -83,7 +83,8 @@ def _vanm() -> bytes:
 
 def _setbas_bytes(*, duplicate_sklt: bool = False,
                   invalid_duplicate_sklt: bool = False,
-                  duplicate_base: bool = False) -> bytes:
+                  duplicate_base: bool = False,
+                  identical_duplicate_base: bool = False) -> bytes:
     embedded = (
         _emrs("sklt.class", "Skeleton/HERO.sklt", _sklt())
         + _emrs("ilbm.class", "MTL.ILBM", _vbmp())
@@ -99,6 +100,8 @@ def _setbas_bytes(*, duplicate_sklt: bool = False,
     visproto_kids = _base_object("VP_HERO")
     if duplicate_base:
         visproto_kids += _base_object("vp_hero")
+    if identical_duplicate_base:
+        visproto_kids += _base_object("VP_HERO")
     visproto = _base_object("", kids=visproto_kids)
     return _form(
         b"MC2 ", _base_object("", kids=visproto, embedded=embedded))
@@ -189,6 +192,32 @@ class RuntimeLooseExportTests(unittest.TestCase):
             self.assertTrue(all(
                 "no candidate selected" in row["reason"]
                 for row in skeleton_rows + base_rows))
+
+    def test_byte_identical_duplicate_base_exports_one_canonical_file(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            set_root, _setbas, archive = self._fixture(
+                Path(tmp), identical_duplicate_base=True)
+
+            summary = export_runtime_loose(archive, set_root)
+
+            self.assertTrue(summary["validation"]["valid"])
+            base_path = set_root / "Loose" / "BASE" / "VP_HERO.BASE"
+            self.assertTrue(base_path.is_file())
+            base_rows = [
+                row for row in summary["manifest"]["resources"]
+                if row["class"] == "base.class"
+                and row["logical_name"] == "VP_HERO"]
+            self.assertEqual(len(base_rows), 2)
+            self.assertEqual(
+                sorted(row["status"] for row in base_rows),
+                ["exported", "skipped_identical"])
+            from vp_manager import load_visproto
+            table = load_visproto(
+                set_root / "Loose" / "VISPROTO.LST",
+                require_terminator=True)
+            self.assertEqual(
+                [entry.base_name for entry in table.entries],
+                ["VP_HERO.base", "VP_HERO.base"])
 
     def test_existing_file_requires_explicit_overwrite(self):
         with tempfile.TemporaryDirectory() as tmp:
