@@ -103,6 +103,10 @@ class AssetFamily:
     setbas_overrides: dict[str, bool] = field(default_factory=dict)
     external_palette: Palette | None = None
     external_palette_path: Path | None = None
+    external_palette_ref: ResolvedFile | None = None
+    # Canonical same-root SET profile resolution used by renderer, package
+    # export and dependency provenance.
+    indexed_profile_refs: dict[str, ResolvedFile] = field(default_factory=dict)
     search_roots: list[str] = field(default_factory=list)
     search_root: str = ""            # primary root (the .base parent dir)
     warnings: list[str] = field(default_factory=list)
@@ -126,19 +130,28 @@ class AssetFamily:
             self.textured_diagnostics.append(text)
 
 
-def _setbas_find(family: AssetFamily, name: str, class_id: str):
-    """First matching embedded resource for a logical name, or None."""
+def _setbas_matches(family: AssetFamily, name: str,
+                    class_id: str) -> list:
+    """All matching embedded resources; callers must handle ambiguity."""
 
     if family.setbas_archive is None:
-        return None
-    matches = family.setbas_archive.find(name, class_id)
+        return []
+    return family.setbas_archive.find(name, class_id)
+
+
+def _setbas_find(family: AssetFamily, name: str, class_id: str):
+    """The unique matching embedded resource, never an arbitrary first."""
+
+    matches = _setbas_matches(family, name, class_id)
     if len(matches) > 1:
-        family.warnings.append(
+        warning = (
             f"{name}: {len(matches)} embedded resources match in "
-            f"{family.setbas_archive.path.name}; using the first "
-            f"(EMRS #{matches[0].index})."
+            f"{family.setbas_archive.path.name}; none was selected."
         )
-    return matches[0] if matches else None
+        if warning not in family.warnings:
+            family.warnings.append(warning)
+        return None
+    return matches[0] if len(matches) == 1 else None
 
 
 def _wants_setbas(family: AssetFamily, name: str) -> bool:
@@ -158,21 +171,38 @@ def _resolve_with_setbas(family: AssetFamily, resolver: AssetResolver,
     "setbas:" override on top.
     """
 
-    embedded = _setbas_find(family, name, class_id)
+    embedded_matches = _setbas_matches(family, name, class_id)
+    embedded = embedded_matches[0] if len(embedded_matches) == 1 else None
+    embedded_labels = [
+        f"SET.BAS:{resource.resource_name} (EMRS #{resource.index})"
+        for resource in embedded_matches]
 
-    if embedded is not None and _wants_setbas(family, name):
-        ref = ResolvedFile(logical_name=name, status="manual (SET.BAS)",
-                           source="manual")
-        ref.embedded_available = True
-        ref.embedded_candidates = [f"SET.BAS:{embedded.resource_name}"]
+    if _wants_setbas(family, name):
         loose = resolver.resolve(name, kind)
+        if embedded is not None:
+            ref = ResolvedFile(
+                logical_name=name, status="manual (SET.BAS)",
+                source="SET.BAS",
+                resolution_rule="explicit unique SET.BAS override")
+        elif embedded_matches:
+            ref = ResolvedFile(
+                logical_name=name, status="ambiguous", source="SET.BAS",
+                resolution_rule=(
+                    "explicit SET.BAS override has multiple embedded matches"))
+        else:
+            ref = ResolvedFile(
+                logical_name=name, status="missing", source="SET.BAS",
+                resolution_rule=(
+                    "explicit SET.BAS override has no embedded match"))
+        ref.embedded_available = bool(embedded_matches)
+        ref.embedded_candidates = embedded_labels
         ref.candidates = loose.candidates
         return ref
 
     ref = resolver.resolve(name, kind)
-    if embedded is not None:
+    if embedded_matches:
         ref.embedded_available = True
-        ref.embedded_candidates = [f"SET.BAS:{embedded.resource_name}"]
+        ref.embedded_candidates = embedded_labels
 
     if ref.path is not None:
         ref.source = "manual" if ref.status == "manual" else "loose"
@@ -182,9 +212,20 @@ def _resolve_with_setbas(family: AssetFamily, resolver: AssetResolver,
                 f"{family.setbas_archive.path.name}; loose wins (engine "
                 "precedence). Use the Resolve panel to compare sources."
             )
+    elif ref.status == "ambiguous":
+        # A plausible loose override must not be bypassed by silently using
+        # SET.BAS; the user first has to disambiguate the higher-priority
+        # loose source.
+        pass
     elif embedded is not None:
         ref.status = "setbas"
         ref.source = "SET.BAS"
+        ref.resolution_rule = "unique embedded fallback after loose miss"
+    elif embedded_matches:
+        ref.status = "ambiguous"
+        ref.source = "SET.BAS"
+        ref.resolution_rule = "multiple embedded fallback candidates"
+        _setbas_find(family, name, class_id)  # emit the visible warning once
     return ref
 
 
@@ -400,24 +441,76 @@ def _find_external_palette(family: AssetFamily, resolver: AssetResolver) -> None
         img.pixels is not None and img.palette is None
         for img in family.textures.values()
     )
-    if not needs_palette:
-        return
-    for pal_name in ("NORMAL.PAL", "STANDARD.PAL"):
-        ref = resolver.resolve(pal_name, "palette")
-        if ref.path is not None:
-            palette = parse_pal_file(ref.path)
-            if palette:
-                family.external_palette = palette
-                family.external_palette_path = ref.path
-                family.warnings.append(
-                    f"Using external palette {ref.path.name} for textures "
-                    "without CMAP."
-                )
-                return
-    family.warnings.append(
-        "Some textures have no CMAP and no external .PAL was found; "
-        "grayscale preview will be used."
-    )
+    # The Retail indexed renderer needs the SET palette even when every ILBM
+    # carries its own CMAP.  Resolve the package/SET-local PALETTE path first
+    # so a broader compatibility root cannot silently supply another SET's
+    # profile.
+    palette_names = ("PALETTE/NORMAL.PAL", "PALETTE/STANDARD.PAL")
+    selected_ref = None
+
+    # Explicit session overrides remain authoritative.  Otherwise evaluate
+    # NORMAL/STANDARD as aliases within each root before considering the next
+    # root, so a later Set's NORMAL.PAL cannot beat this Set's STANDARD.PAL.
+    override_refs = [
+        resolver.resolve(name, "palette") for name in palette_names]
+    explicit_refs = [
+        ref for ref in override_refs
+        if ref.resolution_rule.startswith("explicit session override")]
+    if explicit_refs:
+        selected_ref = explicit_refs[0]
+    else:
+        for root in resolver.roots:
+            scoped = AssetResolver([root])
+            refs = [scoped.resolve(name, "palette")
+                    for name in palette_names]
+            selected_ref = None
+            for ref in refs:
+                if ref.path is not None:
+                    selected_ref = ref
+                    break
+                if ref.status == "ambiguous":
+                    family.warnings.append(
+                        f"Palette {ref.logical_name} is ambiguous inside "
+                        f"{root}; none was selected.")
+                    family.external_palette_ref = ref
+                    return
+            if selected_ref is not None:
+                break
+
+    if selected_ref is not None:
+        if selected_ref.path is None:
+            family.external_palette_ref = selected_ref
+            family.warnings.append(
+                f"Palette override {selected_ref.logical_name} is missing; "
+                "none was selected.")
+            return
+        palette = parse_pal_file(selected_ref.path)
+        if palette:
+            family.external_palette = palette
+            family.external_palette_path = selected_ref.path
+            family.external_palette_ref = selected_ref
+            profile_root = (
+                selected_ref.source_root
+                or selected_ref.path.parent.parent)
+            if profile_root.name.casefold() == "palette":
+                profile_root = profile_root.parent
+            profile_resolver = AssetResolver([profile_root])
+            family.indexed_profile_refs = {
+                "shader": profile_resolver.resolve(
+                    "REMAP/SHADERMP.ILB", "texture"),
+                "tracy": profile_resolver.resolve(
+                    "REMAP/TRACYRMP.ILB", "texture"),
+            }
+            family.warnings.append(
+                f"Using external palette {selected_ref.path.name} for "
+                "textures and Retail indexed rendering."
+            )
+            return
+    if needs_palette:
+        family.warnings.append(
+            "Some textures have no CMAP and no external .PAL was found; "
+            "grayscale preview will be used."
+        )
 
 
 def _run_checks(family: AssetFamily) -> None:
@@ -678,7 +771,8 @@ def _split_overrides(family: AssetFamily,
 def load_asset_family(base_path: str | Path,
                       extra_roots: list[str | Path] | None = None,
                       overrides: dict[str, Path | str] | None = None,
-                      setbas: SetBasArchive | str | Path | None = None
+                      setbas: SetBasArchive | str | Path | None = None,
+                      *, isolated_root: str | Path | None = None
                       ) -> AssetFamily:
     """Mode A: open a .base file and assemble the referenced family.
 
@@ -694,9 +788,33 @@ def load_asset_family(base_path: str | Path,
     path = Path(base_path)
     family.base_path = path
 
-    roots: list[Path | str] = [path.parent, path.parent.parent]
-    for extra in extra_roots or []:
-        roots.append(extra)
+    if isolated_root is not None:
+        isolated = Path(isolated_root).resolve()
+        resolved_path = path.resolve()
+        try:
+            resolved_path.relative_to(isolated)
+        except ValueError as exc:
+            raise ValueError(
+                f"BASE {resolved_path} is outside isolated root {isolated}"
+            ) from exc
+        roots: list[Path | str] = [isolated]
+        if extra_roots:
+            raise ValueError(
+                "isolated AssetFamily loading does not accept extra roots")
+        if setbas is not None:
+            provider_path = (
+                setbas.path if isinstance(setbas, SetBasArchive)
+                else Path(setbas))
+            try:
+                provider_path.resolve().relative_to(isolated)
+            except ValueError as exc:
+                raise ValueError(
+                    "isolated AssetFamily loading cannot use an external "
+                    "SET.BAS provider") from exc
+    else:
+        roots = [path.parent, path.parent.parent]
+        for extra in extra_roots or []:
+            roots.append(extra)
     _attach_setbas(family, setbas, roots)
     file_overrides = _split_overrides(family, overrides)
     resolver = AssetResolver(roots, file_overrides)

@@ -78,6 +78,15 @@ from asset_family import (
     load_manual_family,
     rebuild_materials,
 )
+from asset_family_package import (
+    MANIFEST_NAME as ASSET_FAMILY_MANIFEST,
+    AssetFamilyPackageError,
+    PackageEntry,
+    import_family_package,
+    package_relative_path,
+    validate_family_package,
+    write_package_manifest,
+)
 from anm_parser import AnmParseError, export_anm_bytes, parse_anm_bytes
 from asset_tree_filter import filter_tree as filter_asset_tree
 from assembly_viewer import (
@@ -86,14 +95,18 @@ from assembly_viewer import (
     VIEW_PRESETS,
 )
 from base_mapping_editor import (
+    MaterialBlockClipboard,
     MappingEditError,
     MappingIndex,
     RepairPlan,
     StructuralBlockState,
     TextureNameEdit,
     UVEdit,
+    build_material_block_clipboard,
+    delete_material_block,
     eligible_blocks,
     export_base_object_bytes,
+    paste_material_block,
     plan_copy_style,
     plan_planar,
     rewrite_block_texture_template,
@@ -161,15 +174,16 @@ from uv_topology_editor import (
     plan_uv_vertex_insertion,
 )
 from vp_manager import (
-    VPConflictError,
     VPEmbeddedError,
-    VPManager,
-    VPParseError,
-    export_visproto_bytes,
-    load_visproto,
+    VPTable,
     normalize_base_name,
     normalize_skeleton_name,
     reconstruct_embedded_vps,
+)
+from indexed_family_adapter import IndexedFamilyAdapter
+from verified_io import (
+    VerifiedCommitError as _BundleCommitError,
+    commit_verified_files as _commit_verified_files,
 )
 
 WINDOW_TITLE = "OpenNeoUA Studio"
@@ -224,101 +238,6 @@ def _next_backup_path(source: Path) -> Path:
         if not candidate.exists():
             return candidate
         index += 1
-
-
-class _BundleCommitError(OSError):
-    def __init__(self, message: str, *, rollback_complete: bool) -> None:
-        super().__init__(message)
-        self.rollback_complete = rollback_complete
-
-
-def _commit_verified_files(
-        files: list[tuple[Path, Path]]) -> list[str]:
-    """Commit a verified multi-file output with coordinated rollback.
-
-    Sources are first copied to staging files beside every destination. Only
-    after all staging succeeds are existing destinations moved to temporary
-    backups and replaced. A failure restores the complete old pair whenever
-    the filesystem permits it.
-    """
-
-    records: list[dict] = []
-    try:
-        for source, target in files:
-            target.parent.mkdir(parents=True, exist_ok=True)
-            fd, stage_name = tempfile.mkstemp(
-                prefix=f".{target.name}.", suffix=".stage",
-                dir=target.parent)
-            os.close(fd)
-            record = {
-                "target": target,
-                "stage": Path(stage_name),
-                "backup": None,
-                "committed": False,
-            }
-            records.append(record)
-            shutil.copy2(source, record["stage"])
-
-        for record in records:
-            target = record["target"]
-            if target.exists():
-                fd, backup_name = tempfile.mkstemp(
-                    prefix=f".{target.name}.", suffix=".rollback",
-                    dir=target.parent)
-                os.close(fd)
-                backup = Path(backup_name)
-                backup.unlink()
-                os.replace(target, backup)
-                record["backup"] = backup
-            os.replace(record["stage"], target)
-            record["committed"] = True
-    except OSError as exc:
-        rollback_errors = []
-        for record in reversed(records):
-            target = record["target"]
-            backup = record["backup"]
-            try:
-                if backup is not None and backup.exists():
-                    if target.exists():
-                        target.unlink()
-                    os.replace(backup, target)
-                    record["backup"] = None
-                elif record["committed"] and target.exists():
-                    target.unlink()
-            except OSError as rollback_exc:
-                rollback_errors.append(f"{target}: {rollback_exc}")
-        for record in records:
-            stage = record["stage"]
-            try:
-                if stage.exists():
-                    stage.unlink()
-            except OSError as cleanup_exc:
-                rollback_errors.append(f"{stage}: {cleanup_exc}")
-        message = str(exc)
-        if rollback_errors:
-            message += ("\n\nRollback was incomplete; inspect these paths:\n"
-                        + "\n".join(rollback_errors))
-        raise _BundleCommitError(
-            message, rollback_complete=not rollback_errors) from exc
-
-    warnings = []
-    for record in records:
-        backup = record["backup"]
-        if backup is not None and backup.exists():
-            try:
-                backup.unlink()
-            except OSError as exc:
-                warnings.append(
-                    f"saved, but temporary backup cleanup failed: "
-                    f"{backup} ({exc})")
-        stage = record["stage"]
-        if stage.exists():
-            try:
-                stage.unlink()
-            except OSError as exc:
-                warnings.append(
-                    f"saved, but staging cleanup failed: {stage} ({exc})")
-    return warnings
 
 
 class AddFxElementDialog(QDialog):
@@ -449,7 +368,7 @@ class AssemblyWindow(QMainWindow):
         self._owner_to_item: dict[str, QTreeWidgetItem] = {}
         # optional read-only SET.BAS resource provider
         self._setbas: SetBasArchive | None = None
-        self._vp_manager: VPManager | None = None
+        self._vp_table: VPTable | None = None
         self._vp_embedded = None
         self._vp_source = "unavailable"
         self._vp_source_path: Path | None = None
@@ -480,6 +399,9 @@ class AssemblyWindow(QMainWindow):
         self._mapping_dialog: QDialog | None = None
         self._picked_structure: tuple[str, int, int] | None = None
         self._geometry_clipboard = None
+        # Unlike the geometry clipboard, this is an immutable dependency-aware
+        # snapshot and intentionally survives loading another family.
+        self._material_clipboard: MaterialBlockClipboard | None = None
         self._geometry_writer_capability_cache: dict[tuple, str] = {}
         self._topology_original: dict[str, dict] = {}
         self._edit_undo_stack: list[dict] = []
@@ -658,6 +580,15 @@ class AssemblyWindow(QMainWindow):
         self.fx_combo.currentIndexChanged.connect(self._on_fx_selected)
         self.blocks_list = QListWidget()
         self.blocks_list.currentRowChanged.connect(self._on_block_selected)
+        self.material_copy_button = QPushButton("Copy Material")
+        self.material_copy_button.clicked.connect(self._copy_material_block)
+        self.material_paste_button = QPushButton("Paste Material")
+        self.material_paste_button.clicked.connect(self._paste_material_block)
+        self.material_add_button = QPushButton("Add Compatible Slot")
+        self.material_add_button.clicked.connect(self._add_material_slot)
+        self.material_delete_button = QPushButton("Delete Material")
+        self.material_delete_button.clicked.connect(
+            self._delete_material_block)
         self.repair_target_combo = QComboBox()
         self.repair_source_spin = QSpinBox()
         self.repair_source_spin.setRange(0, 65535)
@@ -807,6 +738,10 @@ class AssemblyWindow(QMainWindow):
         menu.addAction("Extract archive",
                        self._extract_setbas_archive).setEnabled(
                            self._setbas is not None)
+        menu.addAction(
+            "Export Runtime Loose SET",
+            self._export_runtime_loose_set).setEnabled(
+                self._setbas is not None)
         if resources:
             menu.addSeparator()
             copy_names = menu.addAction("Copy resource name(s)")
@@ -995,14 +930,18 @@ class AssemblyWindow(QMainWindow):
         self.open_ilbm_action.triggered.connect(self.open_ilbm_dialog)
         self.open_family_action = QAction("Import Asset Family", self)
         self.open_family_action.triggered.connect(self.open_family_dialog)
+        self.import_vp_package_action = QAction("Import VP Package", self)
+        self.import_vp_package_action.triggered.connect(
+            self.import_vp_package_dialog)
 
         self.file_import_menu = file_menu.addMenu("Import")
         for action in (
                 self.open_base_action, self.open_sklt_action,
-                self.open_ilbm_action, self.open_family_action):
+                self.open_ilbm_action, self.open_family_action,
+                self.import_vp_package_action):
             self.file_import_menu.addAction(action)
 
-        self.save_asset_family_action = QAction("Export Asset Family", self)
+        self.save_asset_family_action = QAction("Export SET Family", self)
         self.save_asset_family_action.setEnabled(False)
         self.save_asset_family_action.triggered.connect(self._save_model_as)
         self.save_base_action = QAction("Export BASE", self)
@@ -1145,6 +1084,14 @@ class AssemblyWindow(QMainWindow):
                        self.axes_check, self.grid_check,
                        self.overlay_check, self.mapping_diag_check):
             view_menu.addAction(action)
+        self.area_fade_preview_action = QAction(
+            "AREA distance fade preview...", self)
+        self.area_fade_preview_action.setStatusTip(
+            "Inspect DPTHFADE faces with asset/vanilla values or a "
+            "non-persistent preview override.")
+        self.area_fade_preview_action.triggered.connect(
+            self._configure_area_fade_preview)
+        view_menu.addAction(self.area_fade_preview_action)
         view_menu.addSeparator()
         self.reset_camera_action = QAction("Reset camera", self)
         self.reset_camera_action.setEnabled(False)
@@ -1158,6 +1105,12 @@ class AssemblyWindow(QMainWindow):
         extract_setbas_action = QAction("Extract archive", self)
         extract_setbas_action.triggered.connect(self._extract_setbas_archive)
         setbas_tools_menu.addAction(extract_setbas_action)
+        self.export_runtime_loose_action = QAction(
+            "Export Runtime Loose SET", self)
+        self.export_runtime_loose_action.setEnabled(False)
+        self.export_runtime_loose_action.triggered.connect(
+            self._export_runtime_loose_set)
+        setbas_tools_menu.addAction(self.export_runtime_loose_action)
         metadata_action = QAction("Export scene metadata...", self)
         metadata_action.triggered.connect(self._export_setbas_metadata)
         setbas_tools_menu.addAction(metadata_action)
@@ -1333,17 +1286,11 @@ class AssemblyWindow(QMainWindow):
         self.setbas_search.textChanged.connect(self._filter_setbas_tree)
         setbas_layout.addWidget(self.setbas_search)
         setbas_layout.addWidget(self.setbas_tree, 1)
-        vp_source_row = QHBoxLayout()
         self.vp_source_label = QLabel("VP source: unavailable")
         self.vp_source_label.setWordWrap(True)
-        vp_source_row.addWidget(self.vp_source_label, 1)
-        self.vp_import_button = QPushButton("Import VISPROTO.LST...")
-        self.vp_import_button.clicked.connect(self._import_visproto)
-        self.vp_import_button.setEnabled(False)
-        vp_source_row.addWidget(self.vp_import_button)
-        setbas_layout.addLayout(vp_source_row)
+        setbas_layout.addWidget(self.vp_source_label)
 
-        vp_edit_box = QGroupBox("VP assignment")
+        vp_edit_box = QGroupBox("VP information")
         vp_edit_layout = QGridLayout(vp_edit_box)
         vp_edit_layout.setContentsMargins(5, 4, 5, 5)
         vp_edit_layout.addWidget(QLabel("Selected BASE:"), 0, 0)
@@ -1351,30 +1298,11 @@ class AssemblyWindow(QMainWindow):
         self.vp_selected_base_label.setTextInteractionFlags(
             Qt.TextInteractionFlag.TextSelectableByMouse)
         vp_edit_layout.addWidget(self.vp_selected_base_label, 0, 1, 1, 3)
-        vp_edit_layout.addWidget(QLabel("Current VP:"), 1, 0)
+        vp_edit_layout.addWidget(QLabel("VP in SET.BAS:"), 1, 0)
         self.vp_current_label = QLabel("-")
-        vp_edit_layout.addWidget(self.vp_current_label, 1, 1)
-        vp_edit_layout.addWidget(QLabel("New VP:"), 1, 2)
-        self.vp_new_spin = QSpinBox()
-        self.vp_new_spin.setRange(0, 0)
-        self.vp_new_spin.setEnabled(False)
-        vp_edit_layout.addWidget(self.vp_new_spin, 1, 3)
-        self.vp_assign_button = QPushButton("Assign / Swap VP...")
-        self.vp_assign_button.clicked.connect(self._assign_or_swap_vp)
-        self.vp_assign_button.setEnabled(False)
-        vp_edit_layout.addWidget(self.vp_assign_button, 2, 0, 1, 2)
-        self.vp_undo_button = QPushButton("Undo VP")
-        self.vp_undo_button.clicked.connect(self._undo_vp)
-        self.vp_undo_button.setEnabled(False)
-        vp_edit_layout.addWidget(self.vp_undo_button, 2, 2)
-        self.vp_redo_button = QPushButton("Redo VP")
-        self.vp_redo_button.clicked.connect(self._redo_vp)
-        self.vp_redo_button.setEnabled(False)
-        vp_edit_layout.addWidget(self.vp_redo_button, 2, 3)
-        self.vp_export_button = QPushButton("Export VISPROTO.LST...")
-        self.vp_export_button.clicked.connect(self._export_visproto)
-        self.vp_export_button.setEnabled(False)
-        vp_edit_layout.addWidget(self.vp_export_button, 3, 0, 1, 4)
+        self.vp_current_label.setTextInteractionFlags(
+            Qt.TextInteractionFlag.TextSelectableByMouse)
+        vp_edit_layout.addWidget(self.vp_current_label, 1, 1, 1, 3)
         setbas_layout.addWidget(vp_edit_box)
 
         setbas_buttons = QGridLayout()
@@ -1399,6 +1327,12 @@ class AssemblyWindow(QMainWindow):
             self._open_last_output_folder)
         self.setbas_open_output_button.setEnabled(False)
         setbas_buttons.addWidget(self.setbas_open_output_button, 1, 1)
+        self.setbas_runtime_loose_button = QPushButton(
+            "Export Runtime Loose SET")
+        self.setbas_runtime_loose_button.clicked.connect(
+            self._export_runtime_loose_set)
+        self.setbas_runtime_loose_button.setEnabled(False)
+        setbas_buttons.addWidget(self.setbas_runtime_loose_button, 2, 0, 1, 2)
         setbas_layout.addLayout(setbas_buttons)
 
         # Asset family browser moved to the right so the 3D viewport gets the
@@ -1660,10 +1594,12 @@ class AssemblyWindow(QMainWindow):
         self.model_save_button.setEnabled(False)
         self.model_save_button.clicked.connect(self._overwrite_model)
         save_buttons.addWidget(self.model_save_button, 0, 0)
-        self.model_save_as_button = QPushButton("Export Asset Family")
+        self.model_save_as_button = QPushButton(
+            "Export SET Family")
         self.model_save_as_button.setEnabled(False)
         self.model_save_as_button.setToolTip(
-            "Export the selected BASE, SKLT, textures and animations together.")
+            "Export a portable BASE package with SKLT, ILBM, VANM, SET "
+            "palette/remaps, manifest and isolated round-trip validation.")
         self.model_save_as_button.clicked.connect(self._save_model_as)
         save_buttons.addWidget(self.model_save_as_button, 0, 1)
         save_buttons.setColumnStretch(0, 1)
@@ -1693,6 +1629,13 @@ class AssemblyWindow(QMainWindow):
         overview_layout.addWidget(self.poly_uv_label, 1)
         self.blocks_list.setMaximumHeight(145)
         overview_layout.addWidget(self.blocks_list)
+        material_tools = _ResponsiveButtonGrid([
+            self.material_copy_button,
+            self.material_paste_button,
+            self.material_add_button,
+            self.material_delete_button,
+        ])
+        overview_layout.addWidget(material_tools)
         mapping_layout.addWidget(mapping_overview, 1)
 
         repair_box = QGroupBox("Repair Selected Unmapped Polygon")
@@ -2475,6 +2418,69 @@ class AssemblyWindow(QMainWindow):
         )
         self._open_manual_asset_family(sklt, base, textures, anms)
 
+    def import_vp_package_dialog(self) -> None:
+        """Validate and install one SET Family package."""
+
+        source_text = QFileDialog.getExistingDirectory(
+            self, "Import VP Package - choose package folder",
+            str(self._last_directory))
+        if not source_text:
+            return
+        source = Path(source_text)
+        validation = validate_family_package(source)
+        if not validation.valid:
+            QMessageBox.critical(
+                self, "Import VP Package validation failed",
+                "Nothing was written.\n\n"
+                + "\n".join(validation.errors[:20]))
+            return
+        destination_text = QFileDialog.getExistingDirectory(
+            self,
+            "Import VP Package - choose loose destination root",
+            str(self._last_directory))
+        if not destination_text:
+            return
+        from setbas_export import SetBasExportError, resolve_runtime_loose_root
+        try:
+            destination, _set_id = resolve_runtime_loose_root(
+                Path(destination_text))
+        except SetBasExportError as exc:
+            QMessageBox.warning(
+                self, "Invalid Runtime Loose destination",
+                f"Choose Data/SetN/Loose for Set1 through Set7.\n\n{exc}")
+            return
+        answer = QMessageBox.question(
+            self, "Install validated VP package?",
+            f"Install the validated package into:\n{destination}\n\n"
+            "Different-content collisions will be rejected. SET.BAS will "
+            "not be modified.",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No)
+        if answer != QMessageBox.StandardButton.Yes:
+            return
+        try:
+            imported = import_family_package(
+                source, destination, runtime_loose=True)
+        except AssetFamilyPackageError as exc:
+            QMessageBox.critical(
+                self, "Import VP Package failed - destination rolled back",
+                f"SET.BAS was not modified.\n\n{exc}")
+            return
+
+        self._last_directory = destination
+        if imported.validation is not None \
+                and imported.validation.family is not None \
+                and self._confirm_discard_geometry():
+            self._set_family(imported.validation.family)
+            self._set_document_title(imported.entry_base)
+        QMessageBox.information(
+            self, "Import VP Package complete",
+            f"Installed {len(imported.copied)} file(s); "
+            f"{len(imported.identical)} identical file(s) reused.\n\n"
+            f"Entry BASE: {imported.entry_base}\n"
+            "The installed family passed an isolated resolver reload. "
+            "SET.BAS was not modified.")
+
     def open_setbas_dialog(self) -> None:
         path, _ = QFileDialog.getOpenFileName(
             self, "Import SET.BAS as read-only resource provider",
@@ -2523,79 +2529,38 @@ class AssemblyWindow(QMainWindow):
             self._set_document_title(archive.path)
         self._preview_first_setbas_skeleton(confirm_discard=False)
 
-    @staticmethod
-    def _set_root_for_archive(path: str | Path) -> Path:
-        archive_path = Path(path)
-        parent = archive_path.parent
-        if parent.name.casefold() in ("objects", "object"):
-            return parent.parent
-        return parent
-
-    def _vp_paths(self) -> tuple[Path | None, Path | None]:
-        if self._setbas is None:
-            return None, None
-        set_root = self._set_root_for_archive(self._setbas.path)
-        return (
-            set_root / "Loose" / "VISPROTO.LST",
-            set_root / "Scripts" / "VISPROTO.LST",
-        )
-
-    def _set_vp_manager(
-            self, manager: VPManager | None, source: str,
-            source_path: Path | None = None) -> None:
-        self._vp_manager = manager
+    def _set_vp_table(
+            self, table: VPTable | None, source: str) -> None:
+        self._vp_table = table
         self._vp_source = source
-        self._vp_source_path = source_path
         label = getattr(self, "vp_source_label", None)
         if label is not None:
-            count = len(manager.table) if manager is not None else 0
+            count = len(table) if table is not None else 0
             label.setText(
                 f"VP source: {source}"
-                + (f" ({count} slots)" if manager is not None else ""))
+                + (f" ({count} slots)" if table is not None else ""))
             issues = self._vp_validation_issues()
             label.setToolTip("\n".join(issues) if issues else
-                             "VP IDs are zero-based list positions.")
+                             "Read-only VP IDs reconstructed from the "
+                             "embedded visproto.base; IDs are zero-based.")
         self._sync_vp_controls()
 
     def _load_vp_table(self, archive: SetBasArchive) -> None:
-        """Choose one read-only VP source without altering SET.BAS."""
+        """Reconstruct the read-only VP table embedded in SET.BAS."""
 
         self._vp_embedded = None
+        self._vp_source_path = Path(archive.path)
         try:
             self._vp_embedded = reconstruct_embedded_vps(archive.path)
         except (VPEmbeddedError, BaseParseError, OSError, ValueError) as exc:
             self._log(f"VP table: embedded reconstruction unavailable: {exc}")
 
-        set_root = self._set_root_for_archive(archive.path)
-        loose_path = set_root / "Loose" / "VISPROTO.LST"
-        scripts_path = set_root / "Scripts" / "VISPROTO.LST"
-        manager = None
+        table = None
         source = "unavailable"
-        source_path = None
-        if loose_path.is_file():
-            try:
-                manager = VPManager(load_visproto(
-                    loose_path, require_terminator=True))
-                source = "Loose VISPROTO.LST"
-                source_path = loose_path
-            except (OSError, VPParseError) as exc:
-                self._log(
-                    f"VP table: invalid loose VISPROTO.LST ignored: {exc}")
-        if manager is None and self._vp_embedded is not None:
-            manager = VPManager(self._vp_embedded.as_table())
+        if self._vp_embedded is not None:
+            table = self._vp_embedded.as_table()
             source = "embedded visproto.base"
-            source_path = Path(archive.path)
-        if manager is None and scripts_path.is_file():
-            try:
-                manager = VPManager(load_visproto(
-                    scripts_path, require_terminator=False))
-                source = "fallback scripts/visproto.lst"
-                source_path = scripts_path
-            except (OSError, VPParseError) as exc:
-                self._log(
-                    f"VP table: legacy scripts/visproto.lst unavailable: "
-                    f"{exc}")
-        self._set_vp_manager(manager, source, source_path)
+        self._set_vp_table(table, source)
         self._log(f"VP table: {source}")
 
     def _vp_base_skeletons(self) -> dict[str, set[str]]:
@@ -2611,21 +2576,21 @@ class AssemblyWindow(QMainWindow):
         return values
 
     def _vp_text_for_base(self, base_name: str) -> str:
-        manager = self._vp_manager
-        if manager is None:
+        table = self._vp_table
+        if table is None:
             return "?"
-        indices = manager.table.vps_for_base(base_name)
+        indices = table.vps_for_base(base_name)
         return ", ".join(str(index) for index in indices)
 
     def _vp_text_for_skeleton(self, skeleton_name: str) -> str:
-        manager = self._vp_manager
-        if manager is None or self._vp_embedded is None:
+        table = self._vp_table
+        if table is None or self._vp_embedded is None:
             return "?"
         target = normalize_skeleton_name(skeleton_name)
         by_base = self._vp_base_skeletons()
         indices = []
         ambiguous = False
-        for entry in manager.table:
+        for entry in table:
             candidates = by_base.get(normalize_base_name(entry.base_name), set())
             if target not in candidates:
                 continue
@@ -2638,10 +2603,9 @@ class AssemblyWindow(QMainWindow):
         return ", ".join(str(index) for index in indices)
 
     def _vp_validation_issues(self) -> list[str]:
-        manager = self._vp_manager
-        if manager is None:
+        table = self._vp_table
+        if table is None:
             return ["VP table unavailable."]
-        table = manager.table
         issues = []
         seen: dict[str, list[int]] = {}
         for entry in table:
@@ -2675,26 +2639,10 @@ class AssemblyWindow(QMainWindow):
                 issues.append(f"Missing BASE entries: {sample}.")
         return issues
 
-    def _refresh_vp_column(self) -> None:
-        for group_index in range(self.setbas_tree.topLevelItemCount()):
-            group = self.setbas_tree.topLevelItem(group_index)
-            for row_index in range(group.childCount()):
-                row = group.child(row_index)
-                kind = row.data(0, _BAS_KIND_ROLE)
-                name = row.data(0, _BAS_NAME_ROLE) or row.text(0)
-                if kind == "base":
-                    row.setText(2, self._vp_text_for_base(name))
-                elif kind == "sklt.class":
-                    row.setText(2, self._vp_text_for_skeleton(name))
-                else:
-                    row.setText(2, "")
-        self._set_vp_manager(
-            self._vp_manager, self._vp_source, self._vp_source_path)
-
     def _current_vp_base_candidates(self) -> list[str]:
         item = self.setbas_tree.currentItem()
-        manager = self._vp_manager
-        if item is None or manager is None:
+        table = self._vp_table
+        if item is None or table is None:
             return []
         kind = item.data(0, _BAS_KIND_ROLE)
         name = item.data(0, _BAS_NAME_ROLE) or item.text(0)
@@ -2705,7 +2653,7 @@ class AssemblyWindow(QMainWindow):
         target = normalize_skeleton_name(str(name))
         by_base = self._vp_base_skeletons()
         candidates = []
-        for entry in manager.table:
+        for entry in table:
             base_name = entry.base_name
             skeletons = by_base.get(normalize_base_name(base_name), set())
             if target in skeletons and base_name not in candidates:
@@ -2713,40 +2661,25 @@ class AssemblyWindow(QMainWindow):
         return candidates
 
     def _sync_vp_controls(self) -> None:
-        manager = self._vp_manager
-        table_available = manager is not None and bool(len(manager.table))
+        table = self._vp_table
+        table_available = table is not None and bool(len(table))
         candidates = self._current_vp_base_candidates() \
             if table_available and hasattr(self, "setbas_tree") else []
-        if hasattr(self, "vp_import_button"):
-            self.vp_import_button.setEnabled(self._setbas is not None)
-            self.vp_export_button.setEnabled(table_available)
-            self.vp_new_spin.setEnabled(table_available and bool(candidates))
-            if table_available:
-                maximum = len(manager.table) - 1
-                self.vp_new_spin.setRange(0, maximum)
-            else:
-                self.vp_new_spin.setRange(0, 0)
-            self.vp_assign_button.setEnabled(bool(candidates))
-            self.vp_undo_button.setEnabled(
-                bool(manager and manager.can_undo))
-            self.vp_redo_button.setEnabled(
-                bool(manager and manager.can_redo))
+        if hasattr(self, "vp_selected_base_label"):
             if not candidates:
                 self.vp_selected_base_label.setText("-")
                 self.vp_current_label.setText("-")
             elif len(candidates) == 1:
                 base_name = candidates[0]
-                indices = manager.table.vps_for_base(base_name)
+                indices = table.vps_for_base(base_name)
                 self.vp_selected_base_label.setText(base_name)
                 self.vp_current_label.setText(
                     ", ".join(map(str, indices)) or "not assigned")
-                if indices:
-                    self.vp_new_spin.setValue(indices[0])
             else:
                 self.vp_selected_base_label.setText(
                     f"{len(candidates)} BASE parents")
                 self.vp_current_label.setText(
-                    "choose BASE when assigning")
+                    "multiple embedded VP parents")
         if hasattr(self, "setbas_preview_button"):
             item = self.setbas_tree.currentItem()
             resource_index = (
@@ -2759,206 +2692,6 @@ class AssemblyWindow(QMainWindow):
                 previewable = class_id in ("sklt.class", "ilbm.class")
             self.setbas_preview_button.setEnabled(previewable)
             self.setbas_extract_button.setEnabled(resource_index is not None)
-
-    def _choose_vp_base(self) -> str | None:
-        candidates = self._current_vp_base_candidates()
-        if not candidates:
-            return None
-        if len(candidates) == 1:
-            return candidates[0]
-        selected, accepted = QInputDialog.getItem(
-            self, "Choose BASE parent",
-            "This SKLT is referenced by more than one BASE. Edit:",
-            candidates, 0, False)
-        return str(selected) if accepted else None
-
-    def _choose_vp_slot(self, base_name: str, slots: tuple[int, ...]) -> int | None:
-        if len(slots) == 1:
-            return slots[0]
-        labels = [str(slot) for slot in slots]
-        selected, accepted = QInputDialog.getItem(
-            self, "Choose current VP",
-            f"{base_name} occupies multiple slots. Move:",
-            labels, 0, False)
-        return int(selected) if accepted else None
-
-    def _assign_or_swap_vp(self) -> None:
-        manager = self._vp_manager
-        base_name = self._choose_vp_base()
-        if manager is None or base_name is None:
-            return
-        destination = self.vp_new_spin.value()
-        slots = manager.table.vps_for_base(base_name)
-        changed = False
-        if slots:
-            source = self._choose_vp_slot(base_name, slots)
-            if source is None or source == destination:
-                return
-            occupied = manager.table.entry(destination).base_name
-            answer = QMessageBox.question(
-                self, "Swap VP assignments?",
-                f"VP {destination} is occupied by {occupied}.\n\n"
-                f"Swap VP {source} ({base_name}) with VP {destination}?",
-                QMessageBox.StandardButton.Yes
-                | QMessageBox.StandardButton.No,
-                QMessageBox.StandardButton.No)
-            if answer != QMessageBox.StandardButton.Yes:
-                return
-            changed = manager.swap(source, destination)
-        else:
-            occupied = manager.table.entry(destination).base_name
-            answer = QMessageBox.warning(
-                self, "Replace VP assignment?",
-                f"{base_name} is not currently assigned.\n"
-                f"VP {destination} contains {occupied}.\n\n"
-                "Replace it explicitly? No other slot is renumbered.",
-                QMessageBox.StandardButton.Yes
-                | QMessageBox.StandardButton.No,
-                QMessageBox.StandardButton.No)
-            if answer != QMessageBox.StandardButton.Yes:
-                return
-            try:
-                changed = manager.assign(
-                    destination, base_name, allow_replace=True)
-            except VPConflictError as exc:
-                self._notify(f"VP assignment refused: {exc}", 8000)
-                return
-        if changed:
-            self._refresh_vp_column()
-            self._notify(
-                "VP assignment updated in memory. Export VISPROTO.LST to "
-                "persist it; SET.BAS is unchanged.", 9000)
-
-    def _undo_vp(self) -> None:
-        if self._vp_manager is not None and self._vp_manager.undo():
-            self._refresh_vp_column()
-            self._notify("VP assignment undone in memory.", 5000)
-
-    def _redo_vp(self) -> None:
-        if self._vp_manager is not None and self._vp_manager.redo():
-            self._refresh_vp_column()
-            self._notify("VP assignment redone in memory.", 5000)
-
-    def _import_visproto(self) -> None:
-        if self._setbas is None:
-            return
-        loose_path, scripts_path = self._vp_paths()
-        start = loose_path.parent if loose_path is not None \
-            else self._last_directory
-        path, _ = QFileDialog.getOpenFileName(
-            self, "Import VISPROTO.LST (SET.BAS remains unchanged)",
-            str(start), "VISPROTO tables (VISPROTO.LST *.lst *.LST);;"
-            "All files (*)")
-        if not path:
-            return
-        try:
-            manager = VPManager(load_visproto(
-                Path(path), require_terminator=False))
-        except (OSError, VPParseError) as exc:
-            QMessageBox.warning(
-                self, "VISPROTO import failed",
-                f"No file or archive was modified.\n\n{exc}")
-            return
-        if not self._confirm_discard_vp_changes(
-                "Importing another table will discard the current "
-                "unexported VP assignments. Continue?"):
-            return
-        imported_path = Path(path)
-        if loose_path is not None \
-                and imported_path.resolve() == loose_path.resolve():
-            source = "Loose VISPROTO.LST"
-        elif scripts_path is not None \
-                and imported_path.resolve() == scripts_path.resolve():
-            source = "fallback scripts/visproto.lst"
-        else:
-            source = "Loose VISPROTO.LST (imported)"
-        self._set_vp_manager(manager, source, imported_path)
-        self._fill_setbas(self._setbas)
-        issues = self._vp_validation_issues()
-        if issues:
-            QMessageBox.warning(
-                self, "VISPROTO imported with validation issues",
-                "\n".join(issues)
-                + "\n\nSET.BAS was not modified.")
-        self._last_directory = imported_path.parent
-        self._notify(
-            f"Imported {len(manager.table)} zero-based VP slots; "
-            "SET.BAS is unchanged.", 8000)
-
-    def _export_visproto(self) -> None:
-        manager = self._vp_manager
-        if manager is None:
-            return
-        issues = self._vp_validation_issues()
-        if issues:
-            answer = QMessageBox.warning(
-                self, "VP validation issues",
-                "\n".join(issues)
-                + "\n\nExport anyway? OpenNeoUA will reject a loose table "
-                "if a listed BASE cannot load.",
-                QMessageBox.StandardButton.Yes
-                | QMessageBox.StandardButton.No,
-                QMessageBox.StandardButton.No)
-            if answer != QMessageBox.StandardButton.Yes:
-                return
-        loose_path, _scripts_path = self._vp_paths()
-        default_path = loose_path or (
-            self._last_directory / "VISPROTO.LST")
-        dialog = QFileDialog(
-            self, "Export per-SET VISPROTO.LST",
-            str(default_path),
-            "VISPROTO tables (VISPROTO.LST *.lst *.LST);;All files (*)")
-        dialog.setAcceptMode(QFileDialog.AcceptMode.AcceptSave)
-        dialog.setFileMode(QFileDialog.FileMode.AnyFile)
-        dialog.setOption(QFileDialog.Option.DontUseNativeDialog, True)
-        dialog.selectFile(Path(default_path).name)
-        note = QLabel(
-            "OpenNeoUA reads this file as a per-SET VP table. The file does not "
-            "modify SET.BAS. VP IDs are determined by entry order starting "
-            "from 0.")
-        note.setWordWrap(True)
-        layout = dialog.layout()
-        if isinstance(layout, QGridLayout):
-            layout.addWidget(
-                note, layout.rowCount(), 0, 1,
-                max(1, layout.columnCount()))
-        if dialog.exec() != QDialog.DialogCode.Accepted:
-            return
-        selected = dialog.selectedFiles()
-        if not selected:
-            return
-        target = Path(selected[0])
-        if not target.suffix:
-            target = target.with_suffix(".LST")
-        try:
-            payload = export_visproto_bytes(
-                manager.table, include_comments=True,
-                encoding="cp1252", newline="\r\n")
-            with tempfile.TemporaryDirectory(
-                    prefix="openneouastudio_vp_") as tmp_dir:
-                staged = Path(tmp_dir) / "VISPROTO.LST"
-                staged.write_bytes(payload)
-                verified = load_visproto(
-                    staged, require_terminator=True)
-                if [entry.base_name for entry in verified] != [
-                        entry.base_name for entry in manager.table]:
-                    raise VPParseError(
-                        "round-trip verification changed VP assignments")
-                warnings = _commit_verified_files([(staged, target)])
-        except (OSError, UnicodeError, VPParseError,
-                _BundleCommitError) as exc:
-            QMessageBox.critical(
-                self, "VISPROTO export failed",
-                f"SET.BAS was not modified.\n\n{exc}")
-            return
-        self._last_directory = target.parent
-        self._set_vp_manager(
-            VPManager(manager.table), "Loose VISPROTO.LST", target)
-        for warning in warnings:
-            self._log(f"VISPROTO export: {warning}")
-        self._notify(
-            f"Exported {len(manager.table)} VP slots to {target}. "
-            "SET.BAS was not modified.", 10000)
 
     def _raise_setbas_tab(self) -> None:
         """Bring the primary BAS panel to the front after loading it."""
@@ -3014,9 +2747,9 @@ class AssemblyWindow(QMainWindow):
             self.setbas_tree.addTopLevelItem(item)
 
         base_names = []
-        if self._vp_manager is not None:
+        if self._vp_table is not None:
             base_names.extend(
-                entry.base_name for entry in self._vp_manager.table)
+                entry.base_name for entry in self._vp_table)
         if self._vp_embedded is not None:
             base_names.extend(
                 entry.base_name for entry in self._vp_embedded.entries)
@@ -3090,6 +2823,8 @@ class AssemblyWindow(QMainWindow):
                 self.setbas_tree.takeTopLevelItem(index)
         self.setbas_tree.collapseAll()
         self.setbas_extract_all_button.setEnabled(True)
+        self.setbas_runtime_loose_button.setEnabled(True)
+        self.export_runtime_loose_action.setEnabled(True)
         self._sync_vp_controls()
 
     @staticmethod
@@ -3771,6 +3506,113 @@ class AssemblyWindow(QMainWindow):
         QMessageBox.information(self, "Extraction complete",
                                 f"{message}\n\nOutput: {out_dir}")
 
+    def _export_runtime_loose_set(self) -> None:
+        if self._setbas is None:
+            QMessageBox.information(
+                self, "No SET.BAS loaded",
+                "Open a SET.BAS provider before exporting Runtime Loose data.")
+            return
+        from setbas_export import (
+            SetBasExportError,
+            export_runtime_loose,
+            infer_runtime_loose_root,
+            resolve_runtime_loose_root,
+        )
+
+        suggested = infer_runtime_loose_root(self._setbas.path)
+        initial_target = (suggested.parent if suggested is not None
+                          else self._last_directory)
+        dialog = QDialog(self)
+        dialog.setWindowTitle("Export Runtime Loose SET")
+        layout = QVBoxLayout(dialog)
+        info = QLabel(
+            f"Source (always read-only): {self._setbas.path}\n\n"
+            "Exports only BASE, SKLT, ILBM and ANM representations already "
+            "supported by OpenNeoUA into Loose/BASE, Loose/SKLT, Loose/ILBM "
+            "and Loose/ANM. Unsupported or ambiguous resources stay "
+            "in SET.BAS as the fallback. Select the target SetN folder; the "
+            "Loose subfolder is managed automatically.")
+        info.setWordWrap(True)
+        layout.addWidget(info)
+
+        target_row = QHBoxLayout()
+        target_edit = QLineEdit(str(initial_target))
+        target_edit.setPlaceholderText(".../Data/SetN or .../Data/Sets/SetN")
+        browse_button = QPushButton("Browse...")
+
+        def browse_target() -> None:
+            selected = QFileDialog.getExistingDirectory(
+                self, "Select the target Data/SetN folder",
+                target_edit.text() or str(self._last_directory))
+            if selected:
+                target_edit.setText(selected)
+
+        browse_button.clicked.connect(browse_target)
+        target_row.addWidget(target_edit, 1)
+        target_row.addWidget(browse_button)
+        layout.addLayout(target_row)
+
+        dry_run_check = QCheckBox(
+            "Dry run / validate only (write no files)")
+        overwrite_check = QCheckBox(
+            "Replace different files at the exact managed output paths")
+        overwrite_check.setToolTip(
+            "Never modifies SET.BAS and never resolves duplicate archive names. "
+            "Higher-priority existing PNG overrides remain protected.")
+        layout.addWidget(dry_run_check)
+        layout.addWidget(overwrite_check)
+        buttons = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Ok
+            | QDialogButtonBox.StandardButton.Cancel)
+        buttons.accepted.connect(dialog.accept)
+        buttons.rejected.connect(dialog.reject)
+        layout.addWidget(buttons)
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            return
+
+        try:
+            loose_root, _set_id = resolve_runtime_loose_root(
+                target_edit.text().strip())
+            self.statusBar().showMessage(
+                "Validating Runtime Loose export..." if dry_run_check.isChecked()
+                else "Exporting Runtime Loose SET...")
+            summary = export_runtime_loose(
+                self._setbas, loose_root,
+                dry_run=dry_run_check.isChecked(),
+                overwrite=overwrite_check.isChecked(),
+                log=self._log)
+        except (SetBasExportError, OSError, ValueError) as exc:
+            QMessageBox.critical(
+                self, "Runtime Loose export failed",
+                f"SET.BAS was not modified.\n\n{exc}")
+            return
+
+        validation = summary["validation"]
+        mode = "Dry-run" if dry_run_check.isChecked() else "Export"
+        message = (
+            f"{mode}: {summary['exported']} exported, "
+            f"{summary['already_current']} already current, "
+            f"{summary['planned']} planned, {summary['skipped']} left to "
+            f"fallback, {summary['errors']} error(s). Layout validation: "
+            f"{'PASS' if validation['valid'] else 'FAIL'} "
+            f"({validation['checked']} checked).")
+        if not dry_run_check.isChecked():
+            self._last_directory = loose_root
+            self._remember_output_folder(loose_root)
+        issue_text = ""
+        if validation["issues"]:
+            issue_text = "\n\n" + "\n".join(validation["issues"][:12])
+        self._log(f"Runtime Loose SET: {message}")
+        self.statusBar().showMessage(message, 15000)
+        if summary["errors"] or not validation["valid"]:
+            QMessageBox.warning(
+                self, "Runtime Loose export needs attention",
+                f"{message}\n\nTarget: {loose_root}{issue_text}")
+        else:
+            QMessageBox.information(
+                self, "Runtime Loose export complete",
+                f"{message}\n\nTarget: {loose_root}")
+
     def _export_setbas_metadata(self) -> None:
         if self._setbas is None:
             QMessageBox.information(
@@ -4091,6 +3933,85 @@ class AssemblyWindow(QMainWindow):
             f"Viewport mode changed to {self.mode_combo.currentText()}.",
             3500)
 
+    def _configure_area_fade_preview(self) -> None:
+        """Configure a session-only renderer override for DPTHFADE faces."""
+
+        selected = self._owner_to_obj.get(self._selected_owner) \
+            if self._selected_owner else None
+        transform = getattr(
+            getattr(selected, "base_object", None), "transform", None)
+        asset_vis_limit = float(
+            getattr(transform, "vis_limit", 4096)
+            if transform is not None else 4096)
+        settings = self.viewport.area_fade_preview_settings()
+
+        dialog = QDialog(self)
+        dialog.setWindowTitle("AREA Distance Fade Preview")
+        layout = QVBoxLayout(dialog)
+        note = QLabel(
+            "Only AREA/AMESH blocks carrying AREA_FLAG_DPTHFADE are "
+            "affected. Asset/Vanilla Values uses BaseTransform.vis_limit, "
+            "fadeLength 600 and fadeStart = visLimit - 600. Overrides affect "
+            "preview rendering only; no BASE data is changed.")
+        note.setWordWrap(True)
+        layout.addWidget(note)
+        use_asset = QCheckBox("Use Asset/Vanilla Values")
+        use_asset.setChecked(bool(settings.get("use_asset", True)))
+        layout.addWidget(use_asset)
+
+        grid = QGridLayout()
+        vis_limit = QDoubleSpinBox()
+        fade_start = QDoubleSpinBox()
+        fade_length = QDoubleSpinBox()
+        for spin in (vis_limit, fade_start, fade_length):
+            spin.setDecimals(2)
+            spin.setRange(-1_000_000.0, 10_000_000.0)
+        fade_length.setMinimum(0.01)
+        vis_limit.setValue(float(
+            settings.get("vis_limit")
+            if settings.get("vis_limit") is not None
+            else asset_vis_limit))
+        fade_start.setValue(float(
+            settings.get("fade_start")
+            if settings.get("fade_start") is not None
+            else asset_vis_limit - 600.0))
+        fade_length.setValue(float(settings.get("fade_length") or 600.0))
+        grid.addWidget(QLabel("visLimit:"), 0, 0)
+        grid.addWidget(vis_limit, 0, 1)
+        grid.addWidget(QLabel("fadeStart:"), 1, 0)
+        grid.addWidget(fade_start, 1, 1)
+        grid.addWidget(QLabel("fadeLength:"), 2, 0)
+        grid.addWidget(fade_length, 2, 1)
+        layout.addLayout(grid)
+
+        def sync_enabled(checked: bool) -> None:
+            for spin in (vis_limit, fade_start, fade_length):
+                spin.setEnabled(not checked)
+
+        use_asset.toggled.connect(sync_enabled)
+        sync_enabled(use_asset.isChecked())
+        buttons = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Ok
+            | QDialogButtonBox.StandardButton.Cancel)
+        buttons.accepted.connect(dialog.accept)
+        buttons.rejected.connect(dialog.reject)
+        layout.addWidget(buttons)
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            return
+        try:
+            self.viewport.set_area_fade_preview(
+                use_asset.isChecked(), vis_limit.value(),
+                fade_start.value(), fade_length.value())
+        except ValueError as exc:
+            QMessageBox.warning(
+                self, "Invalid AREA fade preview values", str(exc))
+            return
+        self._notify(
+            "AREA fade preview uses asset/vanilla values."
+            if use_asset.isChecked() else
+            "AREA fade preview override enabled (asset unchanged).",
+            6000)
+
     def _sync_animation_controls(self) -> None:
         """Match controls and playback to the rendered selected subtree.
 
@@ -4127,7 +4048,20 @@ class AssemblyWindow(QMainWindow):
             return False
         owner = self._selected_owner
         obj = self._owner_to_obj.get(owner) if owner else None
-        return bool(obj is not None and obj.skeleton is not None)
+        return bool(
+            obj is not None and obj.skeleton is not None
+            and not self._is_embedded_geometry_source(obj))
+
+    def _selected_model_is_archive_read_only(self) -> bool:
+        """Return True only when the selected model comes from SET.BAS."""
+
+        if self._family is None:
+            return False
+        owner = self._selected_owner
+        obj = self._owner_to_obj.get(owner) if owner else None
+        return bool(
+            obj is not None and obj.skeleton is not None
+            and self._is_embedded_geometry_source(obj))
 
     def _editing_allowed(self) -> bool:
         """Single source of truth for every model-mutating operation."""
@@ -4136,7 +4070,8 @@ class AssemblyWindow(QMainWindow):
         return bool(
             button is not None and button.isChecked()
             and self.viewport.is_edit_mode
-            and not self._snapshot_mode_active)
+            and not self._snapshot_mode_active
+            and self._has_editable_model())
 
     def _require_editing(self, action: str) -> bool:
         if self._editing_allowed():
@@ -4173,6 +4108,16 @@ class AssemblyWindow(QMainWindow):
         if edit_button is None or not edit_button.isChecked():
             if self.viewport.is_edit_mode:
                 self.viewport.exit_edit_mode()
+            return
+        if self._selected_model_is_archive_read_only():
+            edit_button.blockSignals(True)
+            edit_button.setChecked(False)
+            edit_button.blockSignals(False)
+            if self.viewport.is_edit_mode:
+                self.viewport.exit_edit_mode()
+            self._notify(
+                "SET.BAS resources are read-only. Export the SET Family or "
+                "load loose files before editing.", 7000)
             return
 
         panel = self._active_editor_panel()
@@ -5096,7 +5041,22 @@ class AssemblyWindow(QMainWindow):
             ])
             top.setIcon(0, _status_icon(status_key.get(status, status)))
             top.setData(0, Qt.ItemDataRole.UserRole, (dep.raw_ref, None))
+            provenance = (
+                f"source={dep.resolution_source or '-'}\n"
+                f"rule={dep.resolution_rule or '-'}")
+            for column in range(3):
+                top.setToolTip(column, provenance)
             self.resolve_tree.addTopLevelItem(top)
+
+            if dep.resolution_source or dep.resolution_rule:
+                rule_row = QTreeWidgetItem([
+                    "resolution provenance",
+                    dep.resolution_source or "-",
+                    dep.resolution_rule or "-",
+                ])
+                rule_row.setData(
+                    0, Qt.ItemDataRole.UserRole, (dep.raw_ref, None))
+                top.addChild(rule_row)
 
             ref = (family.texture_refs.get(dep.raw_ref)
                    or family.animation_refs.get(dep.raw_ref))
@@ -5912,6 +5872,7 @@ class AssemblyWindow(QMainWindow):
     def _on_block_selected(self, row: int) -> None:
         if row < 0 or self._workbench_obj is None:
             self.viewport.set_highlight_polys(set())
+            self._update_repair_buttons()
             return
         item = self.blocks_list.item(row)
         index = item.data(Qt.ItemDataRole.UserRole)
@@ -5923,6 +5884,242 @@ class AssemblyWindow(QMainWindow):
             f"Block #{index} {tex}: {len(ids)} polygon(s) highlighted"
         )
         self._draw_block_uv_islands(index)
+        self._update_repair_buttons()
+
+    def _current_material_block_index(self) -> int | None:
+        item = self.blocks_list.currentItem()
+        if item is None:
+            return None
+        value = item.data(Qt.ItemDataRole.UserRole)
+        return int(value) if value is not None else None
+
+    @staticmethod
+    def _capture_family_resource_state(family: AssetFamily) -> dict:
+        return {
+            "textures": dict(family.textures),
+            "texture_refs": dict(family.texture_refs),
+            "animations": dict(family.animations),
+            "animation_refs": dict(family.animation_refs),
+        }
+
+    @staticmethod
+    def _restore_family_resource_state(
+            family: AssetFamily, state: dict) -> None:
+        for name in (
+                "textures", "texture_refs", "animations", "animation_refs"):
+            mapping = getattr(family, name)
+            mapping.clear()
+            mapping.update(state[name])
+
+    def _material_structure_reason(self) -> str:
+        if not self._editing_allowed():
+            return "Edit Mode is required"
+        if self.viewport.paste_preview_active:
+            return "finish or cancel the geometry Paste Preview first"
+        owner = self._selected_owner
+        if self._workbench_obj is None or self._family is None \
+                or owner != self._workbench_obj.owner_path:
+            return "select an editable model owner first"
+        if self._pending_repairs:
+            return "export or revert pending Mapping Repairs first"
+        if any(key[0] == owner for key in self._uv_original):
+            return "save or reset pending UV edits before changing ADES order"
+        if self._owner_vanm_uv_keys(owner):
+            return "save or reset pending VANM UV edits before changing ADES order"
+        if any(key[0] == owner for key in self._texture_original):
+            return "save or reset pending material previews first"
+        return ""
+
+    def _apply_material_structure(self, label: str, operation):
+        reason = self._material_structure_reason()
+        if reason:
+            raise MappingEditError(reason)
+        owner = self._selected_owner
+        family = self._family
+        fam_obj = self._workbench_obj
+        before = self._capture_topology_state(owner)
+        if before is None:
+            raise MappingEditError("the topology snapshot could not be created")
+        resources_before = self._capture_family_resource_state(family)
+        had_topology_original = owner in self._topology_original
+        previous_geom_original = self._geom_original.get(owner)
+        previous_dirty = self._geom_dirty.get(owner)
+        previous_undo = list(self._edit_undo_stack)
+        previous_redo = list(self._edit_redo_stack)
+        try:
+            self._topology_original.setdefault(owner, copy.deepcopy(before))
+            self._remember_geometry_original(owner)
+            result = operation()
+            self._refresh_object_material_faces(fam_obj)
+            self._selected_owner = owner
+            self.viewport.refresh_family_materials()
+            self._rebuild_workbench(family, owner)
+            self._refresh_fx_elements()
+            self.viewport.set_selected_owner(owner)
+            self.viewport.set_selected_polygon(self._selected_poly)
+            self.viewport.set_highlight_polys(self._selected_polys)
+            self._on_geometry_edited(owner)
+            after = self._capture_topology_state(owner)
+            if after is None:
+                raise MappingEditError(
+                    "the committed ADES topology could not be verified")
+            resources_after = self._capture_family_resource_state(family)
+            self._record_edit_command({
+                "kind": "material_topology",
+                "owner": owner,
+                "before": before,
+                "after": after,
+                "resource_before": resources_before,
+                "resource_after": resources_after,
+                "label": label,
+            })
+            block_index = getattr(result, "block_index", None)
+            if block_index is not None:
+                for row in range(self.blocks_list.count()):
+                    item = self.blocks_list.item(row)
+                    if item.data(Qt.ItemDataRole.UserRole) == block_index:
+                        self.blocks_list.setCurrentRow(row)
+                        break
+            self._fill_polygon_inspector(self._selected_poly)
+            self._sync_geometry_save_controls()
+            self._sync_editor_context()
+            return result
+        except Exception as exc:
+            self._restore_family_resource_state(family, resources_before)
+            self._restore_topology_state(owner, before)
+            if not had_topology_original:
+                self._topology_original.pop(owner, None)
+            if previous_geom_original is None:
+                self._geom_original.pop(owner, None)
+            else:
+                self._geom_original[owner] = previous_geom_original
+            if previous_dirty is None:
+                self._geom_dirty.pop(owner, None)
+            else:
+                self._geom_dirty[owner] = previous_dirty
+            self._edit_undo_stack[:] = previous_undo
+            self._edit_redo_stack[:] = previous_redo
+            if isinstance(exc, MappingEditError):
+                raise
+            raise MappingEditError(
+                f"{label} failed and was rolled back: {exc}") from exc
+
+    def _copy_material_block(self) -> None:
+        block_index = self._current_material_block_index()
+        if self._family is None or self._workbench_obj is None \
+                or block_index is None:
+            self._notify("Copy Material: select a material block first.", 5000)
+            return
+        try:
+            self._material_clipboard = build_material_block_clipboard(
+                self._family, self._workbench_obj, block_index)
+        except MappingEditError as exc:
+            QMessageBox.warning(self, "Cannot copy material", str(exc))
+            return
+        block = self._workbench_obj.base_object.ades[block_index]
+        texture = block.texture.name if block.texture else block.class_id
+        self._notify(
+            f"Copied material #{block_index} {texture} with "
+            f"{len(self._material_clipboard.resources)} dependency snapshot(s).",
+            7000)
+        self._update_repair_buttons()
+
+    def _paste_material_block(self) -> None:
+        if not self._require_editing("Paste Material"):
+            return
+        clipboard = self._material_clipboard
+        if clipboard is None or self._family is None \
+                or self._workbench_obj is None:
+            self._notify("Paste Material: the material clipboard is empty.", 5000)
+            return
+        target_poly_id = None
+        if clipboard.class_id == "area.class":
+            selected = set(self._selected_polys)
+            if not selected and self._selected_poly is not None:
+                selected = {self._selected_poly}
+            if len(selected) != 1:
+                self._notify(
+                    "AREA paste refused: select exactly one unmapped target "
+                    "polygon.", 7000)
+                return
+            target_poly_id = next(iter(selected))
+        try:
+            result = self._apply_material_structure(
+                "paste material block",
+                lambda: paste_material_block(
+                    self._family, self._workbench_obj, clipboard,
+                    target_poly_id=target_poly_id))
+        except MappingEditError as exc:
+            QMessageBox.warning(self, "Cannot paste material", str(exc))
+            return
+        assigned = (
+            f" and mapped it to polygon #{result.assigned_poly_id}"
+            if result.assigned_poly_id is not None else
+            "; AMESH polygon mappings remain intentionally empty")
+        imported = (
+            f" Imported {len(result.imported_resources)} missing "
+            "dependency snapshot(s)."
+            if result.imported_resources else "")
+        self._notify(
+            f"Pasted material block #{result.block_index}{assigned}."
+            f"{imported} Undo is available.", 9000)
+
+    def _add_material_slot(self) -> None:
+        if not self._require_editing("Add Compatible Material Slot"):
+            return
+        block_index = self._current_material_block_index()
+        if self._family is None or self._workbench_obj is None \
+                or block_index is None:
+            self._notify("Add Slot: select an AMESH template first.", 5000)
+            return
+        try:
+            clipboard = build_material_block_clipboard(
+                self._family, self._workbench_obj, block_index)
+            if clipboard.class_id != "amesh.class":
+                raise MappingEditError(
+                    "AREA is a one-polygon typed block; use Copy/Paste AREA "
+                    "with an explicit unmapped target polygon")
+            result = self._apply_material_structure(
+                "add compatible material slot",
+                lambda: paste_material_block(
+                    self._family, self._workbench_obj, clipboard))
+        except MappingEditError as exc:
+            QMessageBox.warning(self, "Cannot add material slot", str(exc))
+            return
+        self._notify(
+            f"Added empty compatible AMESH slot #{result.block_index}. "
+            "Use Mapping Repair to assign polygons; Undo is available.", 9000)
+
+    def _delete_material_block(self) -> None:
+        if not self._require_editing("Delete Material"):
+            return
+        block_index = self._current_material_block_index()
+        if self._workbench_obj is None or block_index is None:
+            self._notify("Delete Material: select a block first.", 5000)
+            return
+        block = self._workbench_obj.base_object.ades[block_index]
+        mapped = len(block.atts)
+        answer = QMessageBox.warning(
+            self, "Delete material block?",
+            f"Delete ADES block #{block_index} ({block.class_id or 'unknown'})?\n\n"
+            f"{mapped} polygon mapping(s) will be removed; POL2 geometry is "
+            "kept and those polygons become unmapped. SET.BAS and source "
+            "files are not modified until an explicit export.",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No)
+        if answer != QMessageBox.StandardButton.Yes:
+            return
+        try:
+            self._apply_material_structure(
+                "delete material block",
+                lambda: delete_material_block(
+                    self._workbench_obj, block_index))
+        except MappingEditError as exc:
+            QMessageBox.warning(self, "Cannot delete material", str(exc))
+            return
+        self._notify(
+            f"Deleted material block #{block_index}; {mapped} polygon(s) "
+            "are now unmapped. Undo is available.", 9000)
 
     def _on_polygon_structure_picked(
             self, owner: str, poly_id: int, block_index: int) -> None:
@@ -7946,6 +8143,11 @@ class AssemblyWindow(QMainWindow):
             self._geom_original[owner] = list(model.points)
 
     def _show_model_editor(self) -> None:
+        if self._selected_model_is_archive_read_only():
+            self._notify(
+                "SET.BAS resources are read-only. Export the SET Family or "
+                "load loose files before editing.", 7000)
+            return
         if hasattr(self, "_right_tabs") and hasattr(self, "_editor_tabs"):
             self._right_tabs.setCurrentWidget(self._editor_tabs)
             self._editor_tabs.setCurrentWidget(self._model_editor_panel)
@@ -7953,6 +8155,11 @@ class AssemblyWindow(QMainWindow):
     def _show_mapping_repair(self) -> None:
         """Open the existing repair panel as one shared-state tool window."""
 
+        if self._selected_model_is_archive_read_only():
+            self._notify(
+                "SET.BAS resources are read-only. Export the SET Family or "
+                "load loose files before repairing mappings.", 7000)
+            return
         self._show_model_editor()
         if self._mapping_dialog is None:
             dialog = QDialog(self)
@@ -7970,6 +8177,17 @@ class AssemblyWindow(QMainWindow):
 
     def _set_global_edit_mode(self, enabled: bool) -> None:
         if enabled:
+            if not self._has_editable_model():
+                self.edit_toggle_action.blockSignals(True)
+                self.edit_toggle_action.setChecked(False)
+                self.edit_toggle_action.blockSignals(False)
+                if self.viewport.is_edit_mode:
+                    self.viewport.exit_edit_mode()
+                if self._selected_model_is_archive_read_only():
+                    self._notify(
+                        "SET.BAS resources are read-only. Export the SET "
+                        "Family or load loose files before editing.", 7000)
+                return
             self._remember_geometry_original(self._selected_owner)
             self._sync_editor_context()
             if not self.viewport.is_edit_mode:
@@ -8030,6 +8248,7 @@ class AssemblyWindow(QMainWindow):
         active = session is not None
         editing = self._editing_allowed()
         paste_preview = self.viewport.paste_preview_active
+        archive_read_only = self._selected_model_is_archive_read_only()
         copy_reason = self._copy_geometry_reason()
         delete_reason = self._delete_geometry_reason()
         can_copy = not copy_reason
@@ -8037,7 +8256,22 @@ class AssemblyWindow(QMainWindow):
         if hasattr(self, "edit_toggle_action"):
             self.edit_toggle_action.setText(
                 "View Mode" if active else "Edit Mode")
-            self.edit_toggle_action.setEnabled(not paste_preview)
+            self.edit_toggle_action.setEnabled(
+                not paste_preview and not archive_read_only)
+        if hasattr(self, "edit_menu"):
+            self.edit_menu.setEnabled(
+                not paste_preview and not archive_read_only)
+        if hasattr(self, "mapping_repair_action"):
+            self.mapping_repair_action.setEnabled(not archive_read_only)
+        if hasattr(self, "_right_tabs") and hasattr(self, "_editor_tabs"):
+            editor_index = self._right_tabs.indexOf(self._editor_tabs)
+            if editor_index >= 0:
+                self._right_tabs.setTabEnabled(
+                    editor_index, not archive_read_only)
+                if archive_read_only \
+                        and self._right_tabs.currentWidget() \
+                        is self._editor_tabs:
+                    self._right_tabs.setCurrentWidget(self._resources_tabs)
         for name in ("edit_select_all_action", "edit_select_none_action"):
             action = getattr(self, name, None)
             if action is not None:
@@ -8444,6 +8678,26 @@ class AssemblyWindow(QMainWindow):
             self._geom_dirty[owner] = fam_obj
         return True
 
+    def _apply_material_topology_history(
+            self, command: dict, target: dict, *, redo: bool) -> bool:
+        family = self._family
+        if family is None:
+            return False
+        previous = self._capture_family_resource_state(family)
+        resources = command[
+            "resource_after" if redo else "resource_before"]
+        try:
+            # Resources must be present before rebuilding material groups for
+            # the restored ADES state.
+            self._restore_family_resource_state(family, resources)
+            if not self._apply_topology_history(command["owner"], target):
+                self._restore_family_resource_state(family, previous)
+                return False
+        except Exception:
+            self._restore_family_resource_state(family, previous)
+            return False
+        return True
+
     def _apply_edit_command(self, command: dict, redo: bool) -> bool:
         target = command["after" if redo else "before"]
         kind = command.get("kind")
@@ -8454,6 +8708,9 @@ class AssemblyWindow(QMainWindow):
             elif kind == "topology":
                 applied = self._apply_topology_history(
                     command["owner"], target)
+            elif kind == "material_topology":
+                applied = self._apply_material_topology_history(
+                    command, target, redo=redo)
             elif kind == "texture":
                 applied = self._apply_texture_history(target)
             elif kind == "uv":
@@ -8523,54 +8780,29 @@ class AssemblyWindow(QMainWindow):
                          6000)
         self._sync_edit_action_states()
 
-    def _has_unsaved_vp_changes(self) -> bool:
-        return bool(self._vp_manager and self._vp_manager.can_undo)
-
-    def _confirm_discard_vp_changes(self, message: str) -> bool:
-        if not self._has_unsaved_vp_changes():
-            return True
-        answer = QMessageBox.question(
-            self, "Unexported VP assignments",
-            message + "\n\nSET.BAS has not been modified.",
-            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
-            QMessageBox.StandardButton.No)
-        return answer == QMessageBox.StandardButton.Yes
-
     def _confirm_discard_geometry(self) -> bool:
-        """Confirm switching away from unsaved model or VP state."""
+        """Confirm switching away from unsaved loose-model edits."""
 
         model_dirty = bool(
             self._geom_dirty or self._texture_original
             or self._uv_original or self._vanm_uv_original
             or self._pending_repairs)
-        vp_dirty = self._has_unsaved_vp_changes()
-        if not model_dirty and not vp_dirty:
+        if not model_dirty:
             return True
-        if self._skip_model_switch_warning and not vp_dirty:
+        if self._skip_model_switch_warning:
             return True
-        if model_dirty and vp_dirty:
-            message = (
-                "This workbench has unsaved model changes and unexported "
-                "VP assignments.\nSwitching will discard them. Continue?")
-        elif vp_dirty:
-            message = (
-                "This VP table has unexported assignments.\n"
-                "Switching will discard them. Continue?")
-        else:
-            message = (
-                "This model has unsaved changes.\n"
-                "Switching models will discard them. Continue?")
+        message = (
+            "This model has unsaved changes.\n"
+            "Switching models will discard them. Continue?")
         box = QMessageBox(QMessageBox.Icon.Question, "Unsaved changes",
                           message,
                           QMessageBox.StandardButton.Yes
                           | QMessageBox.StandardButton.No, self)
         box.setDefaultButton(QMessageBox.StandardButton.No)
-        skip = None
-        if not vp_dirty:
-            skip = QCheckBox("Don't show this again during this session")
-            box.setCheckBox(skip)
+        skip = QCheckBox("Don't show this again during this session")
+        box.setCheckBox(skip)
         accepted = box.exec() == QMessageBox.StandardButton.Yes
-        if accepted and skip is not None and skip.isChecked():
+        if accepted and skip.isChecked():
             self._skip_model_switch_warning = True
         return accepted
 
@@ -8578,49 +8810,23 @@ class AssemblyWindow(QMainWindow):
         logical = (fam_obj.base_object.skeleton_name
                    or getattr(fam_obj.skeleton, "source_name", "")
                    or "MODEL.SKLT")
-        logical = logical.replace("SET.BAS:", "").replace("\\", "/")
-        parts = []
-        for raw in logical.split("/"):
-            if not raw or raw in (".", ".."):
-                continue
-            clean = re.sub(r'[^A-Za-z0-9_. -]', "_", raw).strip()
-            if clean:
-                parts.append(clean)
-        relative = Path(*parts) if parts else Path("MODEL.SKLT")
-        if relative.suffix.lower() not in (".skl", ".sklt"):
-            relative = relative.with_suffix(".SKLT")
-        return relative
+        if logical.upper().startswith("SET.BAS:"):
+            logical = logical[len("SET.BAS:"):]
+        return package_relative_path(
+            logical, default_name="MODEL.SKLT",
+            extensions=(".SKLT", ".SKL"))
 
     @staticmethod
     def _bundle_animation_relative_path(name: str) -> Path:
-        logical = str(name).replace("\\", "/")
-        parts = []
-        for raw in logical.split("/"):
-            if not raw or raw in (".", ".."):
-                continue
-            clean = re.sub(r'[^A-Za-z0-9_. -]', "_", raw).strip()
-            if clean:
-                parts.append(clean)
-        relative = Path(*parts) if parts else Path("ANIMATION.ANM")
-        if relative.suffix.lower() not in (".anm", ".vanm"):
-            relative = relative.with_suffix(".ANM")
-        return relative
+        return package_relative_path(
+            name, default_name="ANIMATION.ANM",
+            extensions=(".ANM", ".VANM"))
 
     @staticmethod
     def _bundle_texture_relative_path(name: str) -> Path:
-        logical = str(name).replace("\\", "/")
-        parts = []
-        for raw in logical.split("/"):
-            if not raw or raw in (".", ".."):
-                continue
-            clean = re.sub(r'[^A-Za-z0-9_. -]', "_", raw).strip()
-            if clean:
-                parts.append(clean)
-        relative = Path(*parts) if parts else Path("TEXTURE.ILBM")
-        if relative.suffix.lower() not in (
-                ".ilbm", ".ilb", ".lbm", ".iff", ".vbmp"):
-            relative = relative.with_suffix(".ILBM")
-        return relative
+        return package_relative_path(
+            name, default_name="TEXTURE.ILBM",
+            extensions=(".ILBM", ".ILB", ".LBM", ".IFF", ".VBMP"))
 
     @staticmethod
     def _matching_ref(mapping: dict, logical_name: str):
@@ -8638,10 +8844,14 @@ class AssemblyWindow(QMainWindow):
             return source.read_bytes(), source
         archive = family.setbas_archive or self._setbas
         if archive is not None:
-            resource = next((entry for entry in archive.find(
-                name, "ilbm.class") if entry.decodable), None)
-            if resource is not None:
-                return archive.payload_bytes(resource), None
+            resources = [entry for entry in archive.find(
+                name, "ilbm.class") if entry.decodable]
+            if len(resources) > 1:
+                raise MappingEditError(
+                    f"Texture dependency {name} has {len(resources)} "
+                    "embedded matches; none can be exported safely.")
+            if len(resources) == 1:
+                return archive.payload_bytes(resources[0]), None
         return None, source
 
     def _bundle_base_edits(self, owner: str, fam_obj):
@@ -8947,13 +9157,15 @@ class AssemblyWindow(QMainWindow):
                     prefix="OpenNeoUAStudio_sklt_") as temp_dir:
                 temporary = Path(temp_dir) / target.name
                 self._write_verified_sklt(model, temporary)
-                target.parent.mkdir(parents=True, exist_ok=True)
-                target.write_bytes(temporary.read_bytes())
-        except (MappingEditError, OSError, SkltParseError) as exc:
+                warnings = _commit_verified_files([(temporary, target)])
+        except (MappingEditError, OSError, SkltParseError,
+                _BundleCommitError) as exc:
             QMessageBox.critical(
                 self, "Export SKLT failed - nothing written", str(exc))
             return
         self._last_directory = target.parent
+        for warning in warnings:
+            self._log(f"SKLT export: {warning}")
         self._notify(f"SKLT exported to {target}.", 8000)
 
     def _current_model_texture_name(self) -> str | None:
@@ -9039,7 +9251,7 @@ class AssemblyWindow(QMainWindow):
             base_stem = Path(base_stem).stem or "MODEL"
         suggested = self._last_directory / f"{base_stem}.BASE"
         output, _selected_filter = QFileDialog.getSaveFileName(
-            self, "Export Asset Family", str(suggested),
+            self, "Export SET Family", str(suggested),
             "BASE model (*.BASE *.base);;All files (*.*)",
             options=QFileDialog.Option.DontConfirmOverwrite)
         if not output:
@@ -9112,7 +9324,8 @@ class AssemblyWindow(QMainWindow):
         owner, family, fam_obj, _model, _tree = context
         targets = self._bundle_targets.get(owner)
         if targets is None:
-            self._notify("Export Asset Family before Overwrite.", 5000)
+            self._notify(
+                "Export SET Family before Overwrite.", 5000)
             return
         skeleton_target, base_target = targets
         if self._write_model_files(
@@ -9125,12 +9338,14 @@ class AssemblyWindow(QMainWindow):
     def _write_model_files(self, owner: str, family: AssetFamily, fam_obj,
                            skeleton_target: Path, base_target: Path,
                            *, ask_replace: bool) -> bool:
-        """Export one complete selected asset family with safe verification."""
+        """Export one portable SET Family package."""
 
         model = fam_obj.skeleton
         tree = family.base_asset.tree
         source_archive_digest = hashlib.sha256(tree.data).digest()
         base_source = Path(family.base_path) if family.base_path else None
+        package_root = base_target.parent.resolve()
+        manifest_target = package_root / ASSET_FAMILY_MANIFEST
 
         # Scope dependencies to the selected BASE object and its KIDS.  A
         # SET.BAS session can contain hundreds of unrelated resources; an
@@ -9146,7 +9361,13 @@ class AssemblyWindow(QMainWindow):
                     f"Skeleton dependency for {current_obj.display_name} is "
                     "unresolved; the asset family would be incomplete.")
                 return False
-            relative = self._bundle_skeleton_relative_path(current_obj)
+            try:
+                relative = self._bundle_skeleton_relative_path(current_obj)
+            except AssetFamilyPackageError as exc:
+                QMessageBox.critical(
+                    self, "Export failed - current files unchanged",
+                    str(exc))
+                return False
             target = (skeleton_target if object_index == 0
                       else base_target.parent / relative)
             key = str(target.resolve()).casefold()
@@ -9198,10 +9419,14 @@ class AssemblyWindow(QMainWindow):
                     f"Animation dependency {canonical} is unresolved; the "
                     "asset family would be incomplete.")
                 return False
-            animation_exports.append((
-                canonical, animation,
-                self._bundle_animation_relative_path(canonical),
-            ))
+            try:
+                relative = self._bundle_animation_relative_path(canonical)
+            except AssetFamilyPackageError as exc:
+                QMessageBox.critical(
+                    self, "Export failed - current files unchanged",
+                    str(exc))
+                return False
+            animation_exports.append((canonical, animation, relative))
             texture_names.update(animation.bitmap_names)
 
         texture_exports = []
@@ -9224,11 +9449,35 @@ class AssemblyWindow(QMainWindow):
                     f"Texture dependency {canonical} is unresolved; the asset "
                     "family would be incomplete.")
                 return False
+            try:
+                relative = self._bundle_texture_relative_path(canonical)
+            except AssetFamilyPackageError as exc:
+                QMessageBox.critical(
+                    self, "Export failed - current files unchanged",
+                    str(exc))
+                return False
             texture_exports.append((
-                canonical, raw_data, image,
-                self._bundle_texture_relative_path(canonical),
-                loose_source,
-            ))
+                canonical, raw_data, image, relative, loose_source))
+
+        indexed_adapter, indexed_reason = IndexedFamilyAdapter.try_create(
+            family)
+        if indexed_adapter is None:
+            QMessageBox.critical(
+                self, "Export failed - current files unchanged",
+                "A SET Family must contain one coherent SET "
+                "palette/SHADERMP/TRACYRMP profile.\n\n" + indexed_reason)
+            return False
+        profile_exports = [
+            ("SET palette", "palette.class", indexed_adapter.palette_path,
+             Path("PALETTE") / indexed_adapter.palette_path.name,
+             "Retail indexed palette"),
+            ("SHADERMP", "shadermap.class", indexed_adapter.shader_path,
+             Path("REMAP") / indexed_adapter.shader_path.name,
+             "Retail indexed shade lookup"),
+            ("TRACYRMP", "tracymap.class", indexed_adapter.tracy_path,
+             Path("REMAP") / indexed_adapter.tracy_path.name,
+             "Retail indexed transparency lookup"),
+        ]
 
         forbidden = [
             path.resolve() for path in (base_source,)
@@ -9246,6 +9495,9 @@ class AssemblyWindow(QMainWindow):
         for _canonical, _raw, _image, _relative, source in texture_exports:
             if source is not None and source.exists():
                 forbidden.append(source.resolve())
+        forbidden.extend(
+            source.resolve() for _logical, _class, source, _relative,
+            _relation in profile_exports if source.exists())
 
         skeleton_targets = [entry[3] for entry in skeleton_exports]
         animation_targets = [
@@ -9254,9 +9506,14 @@ class AssemblyWindow(QMainWindow):
         texture_targets = [
             base_target.parent / relative
             for _name, _raw, _image, relative, _source in texture_exports]
+        profile_targets = [
+            package_root / relative
+            for _logical, _class, _source, relative, _relation
+            in profile_exports]
         all_targets = [
             *skeleton_targets, base_target,
-            *animation_targets, *texture_targets]
+            *animation_targets, *texture_targets,
+            *profile_targets, manifest_target]
         target_keys = [str(path.resolve()).casefold() for path in all_targets]
         if len(target_keys) != len(set(target_keys)):
             QMessageBox.critical(
@@ -9297,57 +9554,61 @@ class AssemblyWindow(QMainWindow):
             with tempfile.TemporaryDirectory(
                     prefix="OpenNeoUAStudio_bundle_") as temp_dir:
                 temp_root = Path(temp_dir)
-                temp_base = temp_root / "BASE" / base_target.name
+
+                def staged_path(target: Path) -> Path:
+                    try:
+                        relative_target = target.resolve().relative_to(
+                            package_root)
+                    except ValueError as exc:
+                        raise AssetFamilyPackageError(
+                            f"Package output escapes its root: {target}"
+                        ) from exc
+                    return temp_root / relative_target
+
+                temp_base = staged_path(base_target)
                 temp_base.parent.mkdir(parents=True, exist_ok=True)
                 temp_skeletons = []
-                primary_verify = None
+                package_entries: list[PackageEntry] = []
                 for object_index, (
                         _current_obj, current_model, relative, target,
-                        _source) in enumerate(skeleton_exports):
-                    temp_skeleton = temp_root / "SKLT" / relative
+                        source) in enumerate(skeleton_exports):
+                    temp_skeleton = staged_path(target)
                     temp_skeleton.parent.mkdir(parents=True, exist_ok=True)
-                    verified = self._write_verified_sklt(
-                        current_model, temp_skeleton)
-                    if object_index == 0:
-                        primary_verify = verified
+                    self._write_verified_sklt(current_model, temp_skeleton)
                     temp_skeletons.append((temp_skeleton, target))
-                if primary_verify is None:
-                    raise SkltParseError(
-                        "the selected asset has no verified skeleton")
+                    package_entries.append(PackageEntry(
+                        logical_reference=(
+                            _current_obj.base_object.skeleton_name
+                            or relative.as_posix()),
+                        asset_class="sklt.class",
+                        resolved_source=(
+                            str(source) if source is not None else
+                            "SET.BAS:" + (
+                                _current_obj.base_object.skeleton_name
+                                or relative.as_posix())),
+                        exported_path=target.resolve().relative_to(
+                            package_root).as_posix(),
+                        dependency_relation="OBJT sklt.class NAME",
+                        owner_node=_current_obj.owner_path,
+                    ))
 
                 notes = save_model_base_copy(
                     standalone, uv_edits, texture_edits, temp_base,
                     structural_blocks=structural_blocks)
                 verified_base_bytes = temp_base.read_bytes()
-                reloaded = load_asset_family(temp_base)
-                reloaded_obj = reloaded.root_object
-                reloaded_model = (
-                    reloaded_obj.skeleton if reloaded_obj is not None else None)
-                if reloaded_model is None:
-                    reloaded_base = parse_base_bytes(
-                        verified_base_bytes, "<exported-family-base>")
-                    if reloaded_base.root is None:
-                        raise MappingEditError(
-                            "exported BASE failed family reconstruction")
-                    reloaded_obj = FamilyObject(
-                        base_object=reloaded_base.root,
-                        skeleton=primary_verify,
-                        owner_path="root")
-                    reloaded_model = primary_verify
-                if reloaded_model.polygons != model.polygons:
-                    raise MappingEditError(
-                        "exported BASE/SKLT family failed topology reload")
-                roundtrip_issues = [
-                    issue for issue in diagnose_polygon_references(reloaded_obj)
-                    if "missing typed handler" not in issue]
-                if roundtrip_issues:
-                    raise MappingEditError(
-                        "exported reference graph failed verification: "
-                        + "; ".join(roundtrip_issues[:4]))
-                if hashlib.sha256(tree.data).digest() \
-                        != source_archive_digest:
-                    raise MappingEditError(
-                        "the read-only source BASE/SET.BAS bytes changed")
+                package_entries.insert(0, PackageEntry(
+                    logical_reference=base_target.name,
+                    asset_class="base.class",
+                    resolved_source=(
+                        str(base_source) if base_source is not None else
+                        str(family.setbas_path or "in-memory BASE")),
+                    exported_path=base_target.resolve().relative_to(
+                        package_root).as_posix(),
+                    dependency_relation=(
+                        "package entry point; inline KIDS and embedded "
+                        "resources preserved"),
+                    owner_node="root",
+                ))
 
                 temp_animations = []
                 for canonical, animation, relative in animation_exports:
@@ -9356,17 +9617,31 @@ class AssemblyWindow(QMainWindow):
                     if verified.texcoord_groups != animation.texcoord_groups:
                         raise AnmParseError(
                             f"{canonical} failed UV round-trip verification")
-                    temp_animation = temp_root / "ANM" / relative
+                    target = base_target.parent / relative
+                    temp_animation = staged_path(target)
                     temp_animation.parent.mkdir(parents=True, exist_ok=True)
                     temp_animation.write_bytes(data)
-                    target = base_target.parent / relative
                     temp_animations.append((temp_animation, target))
+                    ref_entry = self._matching_ref(
+                        family.animation_refs, canonical)
+                    source = (str(ref_entry.path)
+                              if ref_entry is not None and ref_entry.path
+                              else f"SET.BAS:{canonical}")
+                    package_entries.append(PackageEntry(
+                        logical_reference=canonical,
+                        asset_class="bmpanim.class",
+                        resolved_source=source,
+                        exported_path=target.resolve().relative_to(
+                            package_root).as_posix(),
+                        dependency_relation="ADES BANI animation",
+                    ))
 
                 from ilbm_parser import parse_ilbm_bytes
                 temp_textures = []
                 for canonical, raw_data, image, relative, _source in \
                         texture_exports:
-                    temp_texture = temp_root / "ILBM" / relative
+                    target = base_target.parent / relative
+                    temp_texture = staged_path(target)
                     temp_texture.parent.mkdir(parents=True, exist_ok=True)
                     parsed_raw = (parse_ilbm_bytes(raw_data, canonical)
                                   if raw_data is not None else None)
@@ -9404,15 +9679,95 @@ class AssemblyWindow(QMainWindow):
                     if not verified_texture.has_body:
                         raise TextureConvertError(
                             f"{canonical}: exported texture failed verification")
-                    target = base_target.parent / relative
                     temp_textures.append((temp_texture, target))
+                    ref_entry = self._matching_ref(
+                        family.texture_refs, canonical)
+                    source = (str(ref_entry.path)
+                              if ref_entry is not None and ref_entry.path
+                              else f"SET.BAS:{canonical}")
+                    package_entries.append(PackageEntry(
+                        logical_reference=canonical,
+                        asset_class="ilbm.class",
+                        resolved_source=source,
+                        exported_path=target.resolve().relative_to(
+                            package_root).as_posix(),
+                        dependency_relation=(
+                            "ADES texture/TRACY or VANM frame bitmap"),
+                    ))
 
-                notes.extend(_commit_verified_files([
+                temp_profiles = []
+                for logical, asset_class, source, relative, relation in \
+                        profile_exports:
+                    target = package_root / relative
+                    staged = staged_path(target)
+                    staged.parent.mkdir(parents=True, exist_ok=True)
+                    shutil.copy2(source, staged)
+                    if hashlib.sha256(staged.read_bytes()).digest() \
+                            != hashlib.sha256(source.read_bytes()).digest():
+                        raise AssetFamilyPackageError(
+                            f"Profile staging hash mismatch: {source}")
+                    temp_profiles.append((staged, target))
+                    package_entries.append(PackageEntry(
+                        logical_reference=logical,
+                        asset_class=asset_class,
+                        resolved_source=str(source),
+                        exported_path=relative.as_posix(),
+                        dependency_relation=relation,
+                    ))
+
+                temp_manifest, _manifest = write_package_manifest(
+                    temp_root,
+                    temp_base.relative_to(temp_root),
+                    family,
+                    package_entries,
+                    root_object=fam_obj,
+                    source_name=str(family.base_path or family.setbas_path
+                                    or base_target.name),
+                )
+                package_validation = validate_family_package(temp_root)
+                if not package_validation.valid:
+                    raise AssetFamilyPackageError(
+                        "SET Family validation failed:\n"
+                        + "\n".join(package_validation.errors))
+                reloaded_obj = package_validation.family.root_object
+                reloaded_model = (
+                    reloaded_obj.skeleton if reloaded_obj is not None
+                    else None)
+                if reloaded_model is None \
+                        or reloaded_model.polygons != model.polygons:
+                    raise MappingEditError(
+                        "exported BASE/SKLT family failed isolated topology "
+                        "reload")
+                roundtrip_issues = [
+                    issue for issue in diagnose_polygon_references(reloaded_obj)
+                    if "missing typed handler" not in issue]
+                if roundtrip_issues:
+                    raise MappingEditError(
+                        "exported reference graph failed verification: "
+                        + "; ".join(roundtrip_issues[:4]))
+                if hashlib.sha256(tree.data).digest() \
+                        != source_archive_digest:
+                    raise MappingEditError(
+                        "the read-only source BASE/SET.BAS bytes changed")
+
+                commit_pairs = [
                     *temp_skeletons,
                     (temp_base, base_target),
                     *temp_animations,
                     *temp_textures,
-                ]))
+                    *temp_profiles,
+                    (temp_manifest, manifest_target),
+                ]
+
+                def verify_destination_package() -> None:
+                    committed = validate_family_package(package_root)
+                    if not committed.valid:
+                        raise AssetFamilyPackageError(
+                            "committed SET Family failed isolated "
+                            "reload:\n" + "\n".join(committed.errors))
+
+                notes.extend(_commit_verified_files(
+                    commit_pairs, verify=verify_destination_package))
         except _BundleCommitError as exc:
             title = (
                 "Export failed - current files unchanged"
@@ -9420,8 +9775,8 @@ class AssemblyWindow(QMainWindow):
                 "Export failed - inspect output files")
             QMessageBox.critical(self, title, str(exc))
             return False
-        except (AnmParseError, MappingEditError, SkltParseError,
-                TextureConvertError, OSError) as exc:
+        except (AnmParseError, AssetFamilyPackageError, MappingEditError,
+                SkltParseError, TextureConvertError, OSError) as exc:
             QMessageBox.critical(
                 self, "Export failed - current files unchanged", str(exc))
             return False
@@ -9445,7 +9800,7 @@ class AssemblyWindow(QMainWindow):
             del self._uv_original[key]
         for key in [key for key in self._texture_original if key[0] == owner]:
             del self._texture_original[key]
-        for key in [key for key in self._vanm_uv_original if key[0] == owner]:
+        for key in self._owner_vanm_uv_keys(owner):
             del self._vanm_uv_original[key]
         self._pending_repairs = []
         self._repair_plan = None
@@ -10715,6 +11070,23 @@ class AssemblyWindow(QMainWindow):
         self.repair_revert_button.setEnabled(
             editing and bool(self._pending_repairs))
         self.repair_save_button.setEnabled(bool(self._pending_repairs))
+        block_index = self._current_material_block_index()
+        block = None
+        if self._workbench_obj is not None and block_index is not None \
+                and 0 <= block_index < len(
+                    self._workbench_obj.base_object.ades):
+            block = self._workbench_obj.base_object.ades[block_index]
+        supported = bool(
+            block is not None
+            and (block.class_id or "").lower()
+            in ("amesh.class", "area.class"))
+        self.material_copy_button.setEnabled(supported)
+        self.material_paste_button.setEnabled(
+            editing and self._material_clipboard is not None)
+        self.material_add_button.setEnabled(
+            editing and supported
+            and (block.class_id or "").lower() == "amesh.class")
+        self.material_delete_button.setEnabled(editing and supported)
 
     def _show_plan(self, plan: RepairPlan) -> None:
         self._repair_plan = plan

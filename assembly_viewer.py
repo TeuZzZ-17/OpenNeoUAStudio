@@ -1,16 +1,16 @@
 """Software-rendered 3D preview widget for assembled Urban Assault assets.
 
 Renders the polygons of an :class:`asset_family.AssetFamily` with QPainter and
-the shared Retail-indexed software backend.
-Runtime-style fan triangles use per-triangle back-face culling, camera-space
-BSP splitting for depth-correct painter ordering, and perspective-correct
-texture transforms.
+the shared Retail geometry pipeline.  All view modes use the same source-face
+visibility test, runtime fan triangulation, near-plane clipping and exact
+camera-space BSP ordering.  Textured mode then adds the Retail-indexed
+SHADERMP/TRACYRMP framebuffer pass.
 
 View modes:
-  - wireframe        outline of every polygon
+  - wireframe        SKLT-style outline using Retail-visible polygons
   - solid            flat shading from the ATTS shade value (CONFIRMED
                      formula: brightness = 1 - shade/256, amesh.cpp)
-  - materials        each texture/material block gets a distinct color
+  - materials        BASE/material blocks with distinct colors
   - textured         Retail-indexed rendering using OLPL UVs, SHADERMP/TRACYRMP
 
 Extras: SEN2 bounding/culling volume overlay (read-only), axes, grid,
@@ -54,7 +54,6 @@ from depth_renderer import (
     CameraPolygon,
     clip_camera_polygon_near,
     order_camera_polygons,
-    order_camera_polygons_fast,
 )
 from geometry_editor import (
     AXIS_VECTORS,
@@ -467,9 +466,10 @@ class AssetViewport(QWidget):
         self._owner_bounds: dict[str, tuple] = {}
         self._texture_image_cache: dict[tuple, QImage] = {}
         self._show_diag_overlay = True
-        # Textured mode always uses the Retail-indexed renderer.  Missing or
-        # unsupported SET resources fail visibly instead of selecting a second
-        # approximation behind the user's back.
+        # Every viewport mode shares the Retail geometry path.  Textured mode
+        # additionally uses the Retail-indexed palette/remap framebuffer.
+        # Missing or unsupported SET resources fail visibly instead of
+        # selecting a second approximation behind the user's back.
         self._indexed_adapter: IndexedFamilyAdapter | None = None
         self._indexed_unavailable_reason = "no AssetFamily is loaded"
         self._indexed_runtime_error = ""
@@ -479,6 +479,9 @@ class AssetViewport(QWidget):
         self._indexed_view_cache_key: tuple | None = None
         self._indexed_view_cache_image = QImage()
         self._indexed_render_revision = 0
+        # None means exact asset/vanilla values.  Overrides are preview-only
+        # and are never written back to BaseTransform.
+        self._area_fade_preview_override: dict[str, float | bool] | None = None
 
         # Geometry Edit Mode (Blender-style vertex editing)
         self._edit_session: GeometryEditSession | None = None
@@ -2616,6 +2619,7 @@ class AssetViewport(QWidget):
                 (int(material_id), int(state[0]), int(state[1]))
                 for material_id, state in self._anim_states.items()
             )),
+            tuple(sorted((self._area_fade_preview_override or {}).items())),
         )
 
     # -- public view controls --------------------------------------------------
@@ -2641,6 +2645,15 @@ class AssetViewport(QWidget):
                     self.statusMessage.emit(
                         "Textured renderer unavailable: "
                         f"{self._indexed_unavailable_reason}")
+            elif mode in ("materials", "wireframe", "solid"):
+                label = {
+                    "materials": "BASE/material groups",
+                    "wireframe": "SKLT/wireframe",
+                    "solid": "Solid",
+                }[mode]
+                self.statusMessage.emit(
+                    f"{label}: shared Retail geometry renderer "
+                    "(source-face culling, near clip, exact BSP).")
             self.update()
 
     @property
@@ -2660,7 +2673,47 @@ class AssetViewport(QWidget):
             "viewport_full_resolution": True,
             "last_render_stats": dict(self._last_indexed_stats),
             "sources": dict(adapter.source_info) if adapter is not None else {},
+            "area_fade_preview": self.area_fade_preview_settings(),
         }
+
+    def area_fade_preview_settings(self) -> dict:
+        override = self._area_fade_preview_override
+        if override is None:
+            return {
+                "use_asset": True,
+                "vis_limit": None,
+                "fade_start": None,
+                "fade_length": 600.0,
+            }
+        return dict(override)
+
+    def set_area_fade_preview(
+            self, use_asset: bool, vis_limit: float = 4096.0,
+            fade_start: float = 3496.0,
+            fade_length: float = 600.0) -> None:
+        """Set a non-persistent AREA distance-fade inspection override."""
+
+        if use_asset:
+            updated = None
+        else:
+            values = tuple(float(value) for value in (
+                vis_limit, fade_start, fade_length))
+            if not all(math.isfinite(value) for value in values) \
+                    or values[2] <= 0.0:
+                raise ValueError(
+                    "AREA fade preview values must be finite and fadeLength "
+                    "must be positive")
+            updated = {
+                "use_asset": False,
+                "vis_limit": values[0],
+                "fade_start": values[1],
+                "fade_length": values[2],
+            }
+        if updated == self._area_fade_preview_override:
+            return
+        self._area_fade_preview_override = updated
+        self._invalidate_indexed_view_cache()
+        self.update()
 
     def set_show_sen(self, enabled: bool) -> None:
         self._show_sen = enabled
@@ -3143,7 +3196,8 @@ class AssetViewport(QWidget):
 
         mode = "textured" if clean or force_textured else self._mode
         self._last_effective_renderer = (
-            "not_rendered" if mode == "textured" else f"editor_{mode}")
+            "not_rendered" if mode == "textured"
+            else f"retail_geometry_{mode}")
         self._last_render_error = ""
         if mode != "textured":
             self._last_indexed_stats = {}
@@ -3233,197 +3287,163 @@ class AssetViewport(QWidget):
                 ))
             visible_faces.add(id(face))
 
-        if mode == "wireframe":
-            # Wireframe intentionally shows every complete source polygon.
-            # There are no filled surfaces requiring BSP depth resolution.
-            queued = []
-            for face in self._faces:
-                if (not clean and not face.mapped
-                        and not self._mapping_diagnostics):
-                    continue
-                cam = tuple(
-                    self._camera_vertex(vertex, camera)
-                    for vertex in face.vertices)
-                queued.append((
-                    sum(point[2] for point in cam) / len(cam),
-                    face, cam,
-                ))
-            for _depth, face, cam in sorted(
-                    queued, key=lambda item: item[0]):
-                source_polygons[id(face)] = QPolygonF([
-                    self._project(point, target, camera) for point in cam])
-                screen = list(source_polygons[id(face)])
-                front_facing = False
-                for index in range(2, len(screen)):
-                    triangle = [
-                        screen[item] for item in (0, index, index - 1)]
-                    area = sum(
-                        triangle[item].x()
-                        * triangle[(item + 1) % 3].y()
-                        - triangle[(item + 1) % 3].x()
-                        * triangle[item].y()
-                        for item in range(3))
-                    if self._front_facing_from_screen_area(area):
-                        front_facing = True
-                        break
-                draw_piece(
-                    face, cam, ((0.0, 0.0),) * len(cam),
-                    front_facing)
-        else:
-            # Match OpenNeoUA's runtime fan triangulation, then use a camera-space
-            # BSP to split intersecting triangles.  QPainter can consequently
-            # paint exact back-to-front pieces without a hardware depth buffer.
-            triangles: list[CameraPolygon] = []
-            source_order = 0
-            for face_order, face in enumerate(self._faces):
-                if (not clean and not face.mapped
-                        and not self._mapping_diagnostics):
-                    continue
-                cam = tuple(
-                    self._camera_vertex(vertex, camera)
-                    for vertex in face.vertices)
-                source_polygons[id(face)] = QPolygonF([
-                    self._project(point, target, camera) for point in cam])
-                mat = self._materials[face.material]
-                face_uvs = []
-                if mode == "textured" and face.mapped:
-                    face_uvs = self._face_uvs(face, mat)
-                uv_mapping_valid = len(face_uvs) == len(cam)
-                if not uv_mapping_valid:
-                    face_uvs = [(0.0, 0.0)] * len(cam)
-                indexed_face_front_facing = None
-                if mode == "textured":
-                    indexed_face_front_facing = retail_source_face_front_facing(cam)
-                    if not indexed_face_front_facing:
-                        continue
-                for index in range(2, len(cam)):
-                    indices = (0, index, index - 1)
-                    tri_camera = tuple(cam[item] for item in indices)
-                    clipped = clip_camera_polygon_near(
-                        CameraPolygon(
-                            tri_camera,
-                            tuple(tuple(face_uvs[item]) for item in indices),
-                            None,
-                            source_order,
-                        ),
-                        minimum_distance=float(
-                            camera.get("near_distance", 0.2)),
-                    )
-                    if clipped is None:
-                        continue
-                    tri_screen = [
-                        self._project(point, target, camera)
-                        for point in clipped.vertices
-                    ]
-                    # Runtime indices use (0, j, j-1).  With screen Y pointing
-                    # down, its visible clockwise triangles have positive area.
-                    area = sum(
-                        tri_screen[item].x()
-                        * tri_screen[(item + 1) % 3].y()
-                        - tri_screen[(item + 1) % 3].x()
-                        * tri_screen[item].y()
-                        for item in range(3)
-                    )
-                    front_facing = (
-                        indexed_face_front_facing
-                        if indexed_face_front_facing is not None
-                        else self._front_facing_from_screen_area(area))
-                    if mode != "textured" \
-                            and self._backface_cull and not front_facing:
-                        continue
-                    triangles.append(CameraPolygon(
-                        clipped.vertices,
-                        clipped.attributes,
-                        _RenderPayload(
-                            face, front_facing, uv_mapping_valid,
-                            face_order,
-                            max(4.0 - point[2] for point in cam)),
-                        source_order,
-                    ))
-                    source_order += 1
-
-            interactive_render = (
-                not clean
-                and (
-                    self._camera_interacting
-                    or self._anim_playing
-                    or self._edit_session is not None
-                    or self._paste_preview is not None
-                )
-            )
-            ordered = (
-                order_camera_polygons_fast(triangles)
-                if interactive_render and mode != "textured"
-                else order_camera_polygons(triangles))
+        # BASE/material and SKLT/wireframe previews intentionally share the
+        # same Retail geometry path as Textured: whole-source-face visibility,
+        # runtime fan triangulation, near-plane clipping and exact BSP order.
+        # Their presentation remains editor-specific (flat material colors or
+        # source-polygon outlines) and does not require indexed SET resources.
+        triangles: list[CameraPolygon] = []
+        source_order = 0
+        wireframe_polygons: dict[int, QPolygonF] = {}
+        for face_order, face in enumerate(self._faces):
+            if (not clean and not face.mapped
+                    and not self._mapping_diagnostics):
+                continue
+            cam = tuple(
+                self._camera_vertex(vertex, camera)
+                for vertex in face.vertices)
+            source_front_facing = retail_source_face_front_facing(cam)
             if mode == "textured":
-                previous_error = self._indexed_runtime_error
-                try:
-                    target_width = max(1, int(round(target.width())))
-                    target_height = max(1, int(round(target.height())))
-                    if target_width * target_height \
-                            > IndexedRasterizer.max_safe_pixels:
-                        raise RuntimeError(
-                            f"requested {target_width}x{target_height} frame "
-                            "exceeds the active backend safety limit of "
-                            f"{IndexedRasterizer.max_safe_pixels:,} pixels")
-                    render_target = QRectF(
-                        0.0, 0.0, float(target_width), float(target_height))
-                    use_view_cache = not clean
-                    cache_key = (
-                        self._indexed_view_cache_signature(
-                            target_width, target_height, camera)
-                        if use_view_cache else None
-                    )
-                    if (use_view_cache
-                            and cache_key == self._indexed_view_cache_key
-                            and not self._indexed_view_cache_image.isNull()):
-                        indexed_image = QImage(self._indexed_view_cache_image)
-                    else:
-                        indexed_image = self._render_indexed_model(
-                            render_target, ordered, camera,
-                            collect_diagnostics=clean)
-                        self._last_indexed_stats.update({
-                            "viewport_target_width": target_width,
-                            "viewport_target_height": target_height,
-                            "viewport_render_width": target_width,
-                            "viewport_render_height": target_height,
-                        })
-                        if use_view_cache:
-                            self._indexed_view_cache_key = cache_key
-                            self._indexed_view_cache_image = QImage(
-                                indexed_image)
-                except Exception as exc:
-                    self._indexed_runtime_error = str(exc)
-                    self._last_indexed_stats = {}
-                    self._last_render_error = str(exc)
-                    self._last_effective_renderer = "retail_indexed_error"
-                    self._indexed_view_cache_key = None
-                    self._indexed_view_cache_image = QImage()
-                    if self._indexed_runtime_error != previous_error:
-                        self.statusMessage.emit(
-                            f"Textured renderer failed closed: {exc}")
-                else:
-                    painter.drawImage(target, indexed_image)
-                    self._indexed_runtime_error = ""
-                    self._last_render_error = ""
-                    self._last_effective_renderer = (
-                        "retail_indexed_reconstructed")
-            for piece in ordered:
-                payload = piece.payload
-                draw_piece(
-                    payload.face, piece.vertices, piece.attributes,
-                    payload.front_facing,
-                    draw_surface=mode != "textured")
+                if not source_front_facing:
+                    continue
+            elif self._backface_cull and not source_front_facing:
+                # Preserve the explicit editor override for BASE/SKLT while
+                # using the exact same Retail visibility decision by default.
+                continue
 
-            if mode == "textured" and self._last_render_error and not clean:
-                painter.save()
-                painter.setPen(QColor(255, 185, 120))
-                painter.drawText(
-                    target.adjusted(24, 24, -24, -24),
-                    Qt.AlignmentFlag.AlignCenter | Qt.TextFlag.TextWordWrap,
-                    "Textured renderer unavailable\n" + self._last_render_error,
+            mat = self._materials[face.material]
+            face_uvs = []
+            if mode == "textured" and face.mapped:
+                face_uvs = self._face_uvs(face, mat)
+            uv_mapping_valid = len(face_uvs) == len(cam)
+            if not uv_mapping_valid:
+                face_uvs = [(0.0, 0.0)] * len(cam)
+
+            source_polygon = CameraPolygon(
+                cam, tuple(tuple(uv) for uv in face_uvs), None, source_order)
+            clipped_source = clip_camera_polygon_near(
+                source_polygon,
+                minimum_distance=float(camera.get("near_distance", 0.2)),
+            )
+            if clipped_source is not None:
+                projected_source = QPolygonF([
+                    self._project(point, target, camera)
+                    for point in clipped_source.vertices])
+                source_polygons[id(face)] = projected_source
+                if mode == "wireframe":
+                    wireframe_polygons[id(face)] = projected_source
+
+            for index in range(2, len(cam)):
+                indices = (0, index, index - 1)
+                tri_camera = tuple(cam[item] for item in indices)
+                clipped = clip_camera_polygon_near(
+                    CameraPolygon(
+                        tri_camera,
+                        tuple(tuple(face_uvs[item]) for item in indices),
+                        None,
+                        source_order,
+                    ),
+                    minimum_distance=float(camera.get("near_distance", 0.2)),
                 )
-                painter.restore()
+                if clipped is None:
+                    continue
+                triangles.append(CameraPolygon(
+                    clipped.vertices,
+                    clipped.attributes,
+                    _RenderPayload(
+                        face, source_front_facing, uv_mapping_valid,
+                        face_order,
+                        max(4.0 - point[2] for point in cam)),
+                    source_order,
+                ))
+                source_order += 1
+
+        # Do not switch BASE/SKLT to the old camera-drag approximation.  The
+        # fork-derived Retail BSP path is now the single geometry truth for all
+        # three public preview modes.
+        ordered = order_camera_polygons(triangles)
+        if mode == "textured":
+            previous_error = self._indexed_runtime_error
+            try:
+                target_width = max(1, int(round(target.width())))
+                target_height = max(1, int(round(target.height())))
+                if target_width * target_height \
+                        > IndexedRasterizer.max_safe_pixels:
+                    raise RuntimeError(
+                        f"requested {target_width}x{target_height} frame "
+                        "exceeds the active backend safety limit of "
+                        f"{IndexedRasterizer.max_safe_pixels:,} pixels")
+                render_target = QRectF(
+                    0.0, 0.0, float(target_width), float(target_height))
+                use_view_cache = not clean
+                cache_key = (
+                    self._indexed_view_cache_signature(
+                        target_width, target_height, camera)
+                    if use_view_cache else None
+                )
+                if (use_view_cache
+                        and cache_key == self._indexed_view_cache_key
+                        and not self._indexed_view_cache_image.isNull()):
+                    indexed_image = QImage(self._indexed_view_cache_image)
+                else:
+                    indexed_image = self._render_indexed_model(
+                        render_target, ordered, camera,
+                        collect_diagnostics=clean)
+                    self._last_indexed_stats.update({
+                        "viewport_target_width": target_width,
+                        "viewport_target_height": target_height,
+                        "viewport_render_width": target_width,
+                        "viewport_render_height": target_height,
+                    })
+                    if use_view_cache:
+                        self._indexed_view_cache_key = cache_key
+                        self._indexed_view_cache_image = QImage(
+                            indexed_image)
+            except Exception as exc:
+                self._indexed_runtime_error = str(exc)
+                self._last_indexed_stats = {}
+                self._last_render_error = str(exc)
+                self._last_effective_renderer = "retail_indexed_error"
+                self._indexed_view_cache_key = None
+                self._indexed_view_cache_image = QImage()
+                if self._indexed_runtime_error != previous_error:
+                    self.statusMessage.emit(
+                        f"Textured renderer failed closed: {exc}")
+            else:
+                painter.drawImage(target, indexed_image)
+                self._indexed_runtime_error = ""
+                self._last_render_error = ""
+                self._last_effective_renderer = (
+                    "retail_indexed_reconstructed")
+
+        for piece in ordered:
+            payload = piece.payload
+            draw_piece(
+                payload.face, piece.vertices, piece.attributes,
+                payload.front_facing,
+                draw_surface=mode not in ("textured", "wireframe"))
+
+        if mode == "wireframe":
+            # Keep SKLT presentation as source-polygon outlines rather than
+            # exposing runtime fan/BSP split edges.  Visibility and clipping
+            # still come from the shared Retail geometry pass above.
+            for face in self._faces:
+                polygon = wireframe_polygons.get(id(face))
+                if polygon is None or id(face) not in visible_faces:
+                    continue
+                self._draw_face(
+                    painter, face, list(polygon),
+                    mode="wireframe", draw_wire=False)
+
+        if mode == "textured" and self._last_render_error and not clean:
+            painter.save()
+            painter.setPen(QColor(255, 185, 120))
+            painter.drawText(
+                target.adjusted(24, 24, -24, -24),
+                Qt.AlignmentFlag.AlignCenter | Qt.TextFlag.TextWordWrap,
+                "Textured renderer unavailable\n" + self._last_render_error,
+            )
+            painter.restore()
 
         if not clean and highlight_paths:
             painter.setPen(QPen(QColor(90, 230, 255), 1.2))
@@ -3528,6 +3548,8 @@ class AssetViewport(QWidget):
         width = max(1, int(round(target.width())))
         height = max(1, int(round(target.height())))
         indexed_pieces = []
+        distance_scale = 1.0 / max(
+            abs(float(camera.get("scale", 1.0))), 1e-12)
         for piece in ordered:
             payload = piece.payload
             face = payload.face
@@ -3545,6 +3567,18 @@ class AssetViewport(QWidget):
                     for vertex in piece.vertices
                 )
             )
+            fade_profile = adapter.distance_fade_profile(
+                face, self._area_fade_preview_override)
+            vertex_distances = ()
+            if fade_profile is not None:
+                vertex_distances = tuple(
+                    math.sqrt(
+                        vertex[0] * vertex[0]
+                        + vertex[1] * vertex[1]
+                        + (_PICK_CAMERA_DISTANCE - vertex[2])
+                        * (_PICK_CAMERA_DISTANCE - vertex[2]))
+                    * distance_scale
+                    for vertex in piece.vertices)
             indexed_pieces.append(IndexedPiece(
                 source_face_id=id(face),
                 polygon_id=face.poly_id,
@@ -3554,6 +3588,12 @@ class AssetViewport(QWidget):
                 surface=surface,
                 source_order=payload.source_order,
                 sort_depth=payload.sort_depth,
+                distance_fade=fade_profile is not None,
+                fade_start=(fade_profile["fade_start"]
+                            if fade_profile is not None else 0.0),
+                fade_length=(fade_profile["fade_length"]
+                             if fade_profile is not None else 600.0),
+                vertex_distances=vertex_distances,
             ))
         result = IndexedRasterizer.render(
             width, height, indexed_pieces, adapter.tables, background_index=0,
@@ -3685,8 +3725,7 @@ class AssetViewport(QWidget):
                 shade=copied.shade_val,
             )
             self._draw_face(
-                painter, ghost, screen, mode="textured", draw_wire=False,
-                camera_vertices=camera_points)
+                painter, ghost, screen, mode="materials", draw_wire=False)
             painter.setPen(QPen(QColor(255, 235, 95, 225), 1.2,
                                 Qt.PenStyle.DashLine))
             painter.setBrush(Qt.BrushStyle.NoBrush)

@@ -223,7 +223,8 @@ def read_setbas(path: str | Path) -> SetBasArchive:
         archive.warnings.append(
             f"{len(duplicates)} resource name(s) appear more than once in the "
             f"archive (first few: "
-            f"{', '.join(list(duplicates)[:4])}); the first match is used."
+            f"{', '.join(list(duplicates)[:4])}); callers must disambiguate "
+            "them before decoding."
         )
     return archive
 

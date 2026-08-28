@@ -8,6 +8,7 @@ resources from one bounded Urban Assault SET profile.
 from __future__ import annotations
 
 import hashlib
+import math
 import operator
 from pathlib import Path
 from typing import Any
@@ -26,6 +27,8 @@ _RETAIL_MATERIAL_CODES = frozenset(
     (_RETAIL_NNN_CODE,) + tuple(_RETAIL_LINEAR_CODES) + tuple(_RETAIL_DEPTH_CODES)
 )
 _AMBIGUOUS_TEXTURE = object()
+VANILLA_FADE_LENGTH = 600.0
+VANILLA_VIS_LIMIT = 4096.0
 
 
 class IndexedFamilyAdapterError(RuntimeError):
@@ -130,6 +133,26 @@ def _find_profile(family) -> tuple[Path, Path, Path]:
     if palette_memory is None:
         raise IndexedSourceError("no resolved 256-entry SET palette is available")
 
+    canonical_refs = getattr(family, "indexed_profile_refs", {}) or {}
+    if canonical_refs:
+        shader_ref = canonical_refs.get("shader")
+        tracy_ref = canonical_refs.get("tracy")
+        failures = []
+        for label, ref in (("SHADERMP", shader_ref),
+                           ("TRACYRMP", tracy_ref)):
+            if ref is None or ref.path is None or ref.status == "ambiguous":
+                status = getattr(ref, "status", "missing")
+                rule = getattr(ref, "resolution_rule", "unresolved")
+                failures.append(f"{label}: {status} ({rule})")
+        if failures:
+            raise IndexedSourceError(
+                "the palette-selected SET has no unique complete REMAP "
+                "profile: " + "; ".join(failures))
+        if palette_path is None or not palette_path.is_file():
+            raise IndexedSourceError(
+                "the canonical palette provenance has no source file")
+        return palette_path, shader_ref.path.resolve(), tracy_ref.path.resolve()
+
     roots = _candidate_set_roots(family)
     if palette_path is not None and palette_path.parent.name.casefold() == "palette":
         preferred = palette_path.parent.parent
@@ -200,9 +223,27 @@ class IndexedFamilyAdapter:
             "tracy": _sha256(tracy_path),
         }
         self.source_info = {
-            "palette": {"path": str(palette_path), "sha256": self.source_hashes["palette"]},
-            "shader": {"path": str(shader_path), "sha256": self.source_hashes["shader"]},
-            "tracy": {"path": str(tracy_path), "sha256": self.source_hashes["tracy"]},
+            "palette": {
+                "path": str(palette_path),
+                "sha256": self.source_hashes["palette"],
+                "provenance": getattr(
+                    getattr(family, "external_palette_ref", None),
+                    "provenance", {}),
+            },
+            "shader": {
+                "path": str(shader_path),
+                "sha256": self.source_hashes["shader"],
+                "provenance": getattr(
+                    getattr(family, "indexed_profile_refs", {}).get(
+                        "shader"), "provenance", {}),
+            },
+            "tracy": {
+                "path": str(tracy_path),
+                "sha256": self.source_hashes["tracy"],
+                "provenance": getattr(
+                    getattr(family, "indexed_profile_refs", {}).get(
+                        "tracy"), "provenance", {}),
+            },
             "tracy_lookup_axis_order": "TRACYRMP[background][raw_source]",
             "shade_model": (
                 "raw 0..2 bypass SHADERMP; 3..253 uses "
@@ -210,10 +251,16 @@ class IndexedFamilyAdapter:
         }
 
         self.block_map: dict[tuple[str, int], Any] = {}
+        self.fade_profiles: dict[tuple[str, int], dict[str, float]] = {}
         unsupported = []
         depth_fade = []
         for obj in family.all_objects():
             owner = str(getattr(obj, "owner_path", "root"))
+            transform = getattr(getattr(obj, "base_object", None),
+                                "transform", None)
+            vis_limit = float(
+                getattr(transform, "vis_limit", VANILLA_VIS_LIMIT)
+                if transform is not None else VANILLA_VIS_LIMIT)
             for block_index, group in enumerate(getattr(obj, "materials", ())):
                 block = getattr(group, "block", None)
                 if block is None:
@@ -229,8 +276,17 @@ class IndexedFamilyAdapter:
                     })
                 if bool(getattr(block, "depth_fade", False)):
                     depth_fade.append(f"{owner} block {block_index}")
+                    self.fade_profiles[(owner, block_index)] = {
+                        "vis_limit": vis_limit,
+                        "fade_start": vis_limit - VANILLA_FADE_LENGTH,
+                        "fade_length": VANILLA_FADE_LENGTH,
+                    }
         self.source_info["unsupported_material_codes"] = unsupported
         self.source_info["depth_fade_blocks"] = depth_fade
+        self.source_info["area_distance_fade_profiles"] = {
+            f"{owner} block {block}": dict(profile)
+            for (owner, block), profile in self.fade_profiles.items()
+        }
         self._texture_lookup_revision: tuple[int, int] | None = None
         self._texture_exact: dict[str, Any] = {}
         self._texture_basename: dict[str, Any] = {}
@@ -263,6 +319,42 @@ class IndexedFamilyAdapter:
 
     def block_for(self, owner: str, block_index: int):
         return self.block_map.get((str(owner), int(block_index)))
+
+    def distance_fade_profile(
+            self, face, preview_override: dict | None = None
+            ) -> dict[str, float] | None:
+        """Return AREA fade values without mutating the asset.
+
+        Asset values are the default: ``BaseTransform.vis_limit`` and the
+        vanilla 600-unit fade length.  A preview override is accepted only
+        for an already DPTHFADE-marked block.
+        """
+
+        key = (str(getattr(face, "owner", "root")),
+               int(getattr(face, "block_index", -1)))
+        asset = self.fade_profiles.get(key)
+        if asset is None:
+            return None
+        if not preview_override or preview_override.get("use_asset", True):
+            return dict(asset)
+        try:
+            vis_limit = float(preview_override["vis_limit"])
+            fade_start = float(preview_override["fade_start"])
+            fade_length = float(preview_override["fade_length"])
+        except (KeyError, TypeError, ValueError) as exc:
+            raise IndexedSourceError(
+                "AREA fade preview override is incomplete") from exc
+        if not all(math.isfinite(value) for value in (
+                vis_limit, fade_start, fade_length)) \
+                or fade_length <= 0.0:
+            raise IndexedSourceError(
+                "AREA fade preview values must be finite and fadeLength "
+                "must be positive")
+        return {
+            "vis_limit": vis_limit,
+            "fade_start": fade_start,
+            "fade_length": fade_length,
+        }
 
     def active_texture_name(self, material, frame_index: int) -> str:
         frames = list(getattr(material, "anim_frames", ()) or ())

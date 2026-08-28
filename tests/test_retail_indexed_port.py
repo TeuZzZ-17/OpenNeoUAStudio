@@ -10,7 +10,7 @@ from unittest.mock import patch
 
 import indexed_renderer
 from asset_family import AssetFamily, FamilyObject, MaterialGroup
-from base_parser import AmeshBlock, BaseObject, TextureRef
+from base_parser import AmeshBlock, BaseObject, BaseTransform, TextureRef
 from ilbm_parser import IlbmImage
 from indexed_family_adapter import (
     IndexedFamilyAdapter,
@@ -169,6 +169,78 @@ class IndexedViewerPolicySourceTests(unittest.TestCase):
 
 
 class IndexedRendererPortTests(unittest.TestCase):
+
+    @staticmethod
+    def _fade_tables():
+        palette = _palette()
+        shader = bytes(
+            shade for shade in range(256) for _source in range(256))
+        tracy = bytes(
+            source for _background in range(256)
+            for source in range(256))
+        return IndexedTables(palette, shader, tracy)
+
+    @staticmethod
+    def _fade_piece(surface, distance=50.0):
+        return IndexedPiece(
+            source_face_id="fade", polygon_id=1,
+            screen=((0.0, 0.0), (1.0, 0.0), (0.0, 1.0)),
+            uvs=((0.0, 0.0),) * 3 if surface.kind == "texture" else (),
+            camera_vertices=((0.0, 0.0, 0.0),) * 3,
+            surface=surface, distance_fade=True,
+            fade_start=0.0, fade_length=100.0,
+            vertex_distances=(distance,) * 3)
+
+    def test_area_distance_fade_affects_only_flagged_piece(self):
+        tables = self._fade_tables()
+        surface = IndexedSurface(
+            "opaque", "texture", b"\x0a", 1, 1, None,
+            "none", 0, "none", "linear")
+        faded = IndexedRasterizer.render(
+            1, 1, (self._fade_piece(surface),), tables)
+        plain = IndexedRasterizer.render(
+            1, 1, (IndexedPiece(
+                source_face_id="plain", polygon_id=1,
+                screen=((0.0, 0.0), (1.0, 0.0), (0.0, 1.0)),
+                uvs=((0.0, 0.0),) * 3,
+                camera_vertices=((0.0, 0.0, 0.0),) * 3,
+                surface=surface),), tables)
+        self.assertEqual(int(faded.indices[0][0]), 128)
+        self.assertEqual(int(plain.indices[0][0]), 10)
+        self.assertEqual(faded.stats["distance_fade_samples"], 1)
+
+    def test_area_fade_keeps_clear_zero_and_fades_nonzero_before_tracy(self):
+        tables = self._fade_tables()
+        background = _piece(_surface(20), "background", order=0)
+        clear_zero = IndexedSurface(
+            "clear-zero", "texture", b"\x00", 1, 1, None,
+            "none", 0, "clear", "linear")
+        zero = IndexedRasterizer.render(
+            1, 1, (background, self._fade_piece(clear_zero)), tables)
+        self.assertEqual(int(zero.indices[0][0]), 20)
+        self.assertEqual(zero.stats["clear_source_zero_skipped"], 1)
+
+        flat = IndexedSurface(
+            "flat", "texture", b"\x0a", 1, 1, None,
+            "none", 0, "flat", "linear")
+        composed = IndexedRasterizer.render(
+            1, 1, (background, self._fade_piece(flat)), tables)
+        # The test TRACY table returns its source.  A 50% fog contribution
+        # therefore proves SHADERMP was applied before flat-TRACY composition.
+        self.assertEqual(int(composed.indices[0][0]), 128)
+
+    def test_area_fade_and_depth_mapping_are_deterministic_on_both_backends(self):
+        tables = self._fade_tables()
+        surface = IndexedSurface(
+            "depth", "texture", b"\x0a", 1, 1, None,
+            "none", 0, "none", "depth")
+        piece = self._fade_piece(surface, 75.0)
+        accelerated = IndexedRasterizer.render(1, 1, (piece,), tables)
+        with patch.object(indexed_renderer, "_np", None):
+            portable = IndexedRasterizer.render(1, 1, (piece,), tables)
+        self.assertEqual(int(accelerated.indices[0][0]), 191)
+        self.assertEqual(accelerated.indices.tolist(), portable.indices)
+        self.assertEqual(accelerated.stats["depth_mapped_samples"], 1)
 
     def test_whole_face_cull_uses_preclip_3d_winding(self):
         camera_vertices = [
@@ -398,6 +470,49 @@ class IndexedAdapterPortTests(unittest.TestCase):
                 anim_uv_groups=[])
             with self.assertRaises(UnsupportedIndexedMaterialError):
                 adapter.resolve_surface(face, material, 0)
+
+    def test_vanm_frame_selection_keeps_asset_vislimit_fade_profile(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "Set1"
+            block = AmeshBlock(
+                area_flags=1, polflags=0x02 | 0x08,
+                texture=TextureRef(kind="bmpanim", name="FLASH.ANM"))
+            first = IlbmImage(
+                source_name="FRAME0.ILBM", kind="VBMP",
+                width=1, height=1, pixels=b"\x08")
+            family = self._family(root, block, first)
+            family.root_object.base_object.transform = BaseTransform(
+                vis_limit=1400)
+            family.textures["FRAME1.ILBM"] = IlbmImage(
+                source_name="FRAME1.ILBM", kind="VBMP",
+                width=1, height=1, pixels=b"\x0a")
+            adapter, reason = IndexedFamilyAdapter.try_create(family)
+            self.assertEqual(reason, "")
+            face = SimpleNamespace(
+                owner="root", block_index=0, poly_id=0,
+                mapped=True, shade=0)
+            material = SimpleNamespace(
+                label="FLASH.ANM",
+                anim_frames=[(1, 0, 0), (1, 1, 0)],
+                anim_bitmap_names=["FRAME0.ILBM", "FRAME1.ILBM"],
+                anim_uv_groups=[[(0, 0), (255, 0), (0, 255)]])
+            first_surface = adapter.resolve_surface(face, material, 0)
+            second_surface = adapter.resolve_surface(face, material, 1)
+            self.assertEqual(first_surface.indices, b"\x08")
+            self.assertEqual(second_surface.indices, b"\x0a")
+            self.assertEqual(adapter.distance_fade_profile(face), {
+                "vis_limit": 1400.0,
+                "fade_start": 800.0,
+                "fade_length": 600.0,
+            })
+            self.assertEqual(
+                adapter.distance_fade_profile(face, {
+                    "use_asset": False,
+                    "vis_limit": 2000.0,
+                    "fade_start": 1000.0,
+                    "fade_length": 1000.0,
+                })["fade_start"],
+                1000.0)
 
 
 if __name__ == "__main__":

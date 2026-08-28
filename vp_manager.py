@@ -112,12 +112,35 @@ class VPEntry:
 
 
 @dataclass(frozen=True)
+class VPSourceComment:
+    """One full-line VISPROTO comment anchored between positional slots."""
+
+    anchor: int
+    text: str
+    after_terminator: bool = False
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.anchor, int) or isinstance(self.anchor, bool) \
+                or self.anchor < 0:
+            raise VPIndexError(f"invalid VISPROTO comment anchor: {self.anchor!r}")
+        text = str(self.text)
+        if "\r" in text or "\n" in text:
+            raise VPParseError("VISPROTO comments must stay on one line.")
+        if not text.lstrip().startswith((";", "#")):
+            raise VPParseError(
+                "full-line VISPROTO comments must start with ';' or '#'.")
+        object.__setattr__(self, "text", text)
+
+
+@dataclass(frozen=True)
 class VPTable:
-    """Immutable VISPROTO table with pure assign and swap operations."""
+    """Immutable VISPROTO table with index-preserving edit operations."""
 
     entries: tuple[VPEntry, ...]
     source_encoding: str = "unicode"
+    source_newline: str = "\n"
     had_terminator: bool = False
+    source_comments: tuple[VPSourceComment, ...] = ()
 
     def __post_init__(self) -> None:
         entries = tuple(self.entries)
@@ -129,6 +152,18 @@ class VPTable:
         object.__setattr__(self, "entries", entries)
         if not self.source_encoding:
             raise VPParseError("source encoding label cannot be empty.")
+        if self.source_newline not in ("\n", "\r\n"):
+            raise VPParseError("source newline must be LF or CRLF.")
+        source_comments = tuple(self.source_comments)
+        for comment in source_comments:
+            if not isinstance(comment, VPSourceComment):
+                raise VPParseError(
+                    "source_comments must contain VPSourceComment values.")
+            if comment.anchor > len(entries):
+                raise VPIndexError(
+                    "VISPROTO comment anchor exceeds the table length: "
+                    f"{comment.anchor} > {len(entries)}.")
+        object.__setattr__(self, "source_comments", source_comments)
 
     def __len__(self) -> int:
         return len(self.entries)
@@ -187,6 +222,64 @@ class VPTable:
             second_entry, base_name=first_entry.base_name)
         return replace(self, entries=tuple(changed))
 
+    def clear(self, index: int) -> "VPTable":
+        """Replace one assignment with ``dummy.base`` without renumbering."""
+
+        return self.assign(index, DUMMY_BASE_NAME, allow_replace=True)
+
+    def append(self, base_name: str = DUMMY_BASE_NAME, *,
+               comment: str = "") -> "VPTable":
+        """Append exactly one new trailing slot; existing IDs stay stable."""
+
+        changed = list(self.entries)
+        old_length = len(changed)
+        changed.append(VPEntry(len(changed), base_name, comment))
+        # Full-line comments at the old end stay trailing, immediately before
+        # the terminator, instead of unexpectedly moving above the new slot.
+        source_comments = tuple(
+            replace(item, anchor=old_length + 1)
+            if not item.after_terminator and item.anchor == old_length
+            else item
+            for item in self.source_comments
+        )
+        return replace(
+            self, entries=tuple(changed), source_comments=source_comments)
+
+    def duplicate_assignment(
+            self, source: int, destination: int | None = None, *,
+            allow_replace: bool = False) -> "VPTable":
+        """Copy a BASE reference to an existing or newly appended slot."""
+
+        assignment = self.entry(source).base_name
+        if destination is None:
+            return self.append(assignment)
+        return self.assign(
+            destination, assignment, allow_replace=allow_replace)
+
+    def remove_trailing(self, index: int | None = None) -> "VPTable":
+        """Physically remove only the final slot, never shifting earlier IDs."""
+
+        if len(self.entries) <= 1:
+            raise VPConflictError(0, self.entries[0].base_name, "<remove>")
+        trailing = len(self.entries) - 1
+        requested = trailing if index is None else index
+        self.entry(requested)
+        if requested != trailing:
+            current = self.entry(requested).base_name
+            raise VPConflictError(
+                requested, current,
+                f"<remove only trailing VP {trailing}>")
+        new_length = trailing
+        source_comments = tuple(
+            replace(item, anchor=new_length)
+            if not item.after_terminator and item.anchor > new_length
+            else item
+            for item in self.source_comments
+        )
+        return replace(
+            self, entries=self.entries[:-1],
+            source_comments=source_comments)
+
     def vps_for_base(self, base_name: str) -> tuple[int, ...]:
         key = normalize_base_name(base_name)
         return tuple(
@@ -224,8 +317,9 @@ def _split_entry_line(line: str) -> tuple[str, str]:
 
 def parse_visproto_text(
         text: str, *, require_terminator: bool = False,
-        source_encoding: str = "unicode") -> VPTable:
-    """Parse VISPROTO text while ignoring blank and full-comment lines.
+        source_encoding: str = "unicode",
+        source_newline: str | None = None) -> VPTable:
+    """Parse VISPROTO text while retaining full-line and inline comments.
 
     ``>`` is optional for UI imports unless ``require_terminator`` is true.
     Content after a terminator is rejected, apart from comments, blanks, or a
@@ -235,10 +329,16 @@ def parse_visproto_text(
     if not isinstance(text, str):
         raise TypeError("parse_visproto_text expects str input.")
     entries: list[VPEntry] = []
+    source_comments: list[VPSourceComment] = []
     terminated = False
     for line_number, raw_line in enumerate(text.splitlines(), 1):
         line = raw_line.strip()
-        if not line or line.startswith((";", "#")):
+        if not line:
+            continue
+        if line.startswith((";", "#")):
+            source_comments.append(VPSourceComment(
+                len(entries), raw_line,
+                after_terminator=terminated))
             continue
         if line.startswith(">"):
             terminated = True
@@ -256,9 +356,13 @@ def parse_visproto_text(
         raise VPParseError("VISPROTO terminator '>' is required.")
     if not entries:
         raise VPParseError("VISPROTO contains no BASE entries.")
+    if source_newline is None:
+        source_newline = "\r\n" if "\r\n" in text else "\n"
     return VPTable(
         tuple(entries), source_encoding=source_encoding,
-        had_terminator=terminated)
+        source_newline=source_newline,
+        had_terminator=terminated,
+        source_comments=tuple(source_comments))
 
 
 def decode_visproto_bytes(data: bytes) -> tuple[str, str]:
@@ -287,7 +391,8 @@ def parse_visproto_bytes(
     text, encoding = decode_visproto_bytes(data)
     return parse_visproto_text(
         text, require_terminator=require_terminator,
-        source_encoding=encoding)
+        source_encoding=encoding,
+        source_newline="\r\n" if "\r\n" in text else "\n")
 
 
 def parse_visproto(
@@ -320,26 +425,44 @@ def load_visproto(
 
 def export_visproto(
         table: VPTable, *, include_comments: bool = True,
-        newline: str = "\n") -> str:
+        newline: str | None = None) -> str:
     """Return canonical VISPROTO text, always terminated by ``>``."""
 
+    if newline is None:
+        newline = table.source_newline
     if newline not in ("\n", "\r\n"):
         raise ValueError("newline must be '\\n' or '\\r\\n'.")
-    lines = []
-    for entry in table.entries:
+    lines: list[str] = []
+    comments_by_anchor: dict[int, list[str]] = {}
+    after_terminator: list[str] = []
+    if include_comments:
+        for comment in table.source_comments:
+            if comment.after_terminator:
+                after_terminator.append(comment.text)
+            else:
+                comments_by_anchor.setdefault(
+                    comment.anchor, []).append(comment.text)
+    for index, entry in enumerate(table.entries):
+        lines.extend(comments_by_anchor.get(index, ()))
         line = entry.base_name
         if include_comments and entry.comment:
             line += f" ; {entry.comment}"
         lines.append(line)
+    lines.extend(comments_by_anchor.get(len(table.entries), ()))
     lines.append(">")
+    lines.extend(after_terminator)
     return newline.join(lines) + newline
 
 
 def export_visproto_bytes(
         table: VPTable, *, include_comments: bool = True,
-        encoding: str = "cp1252", newline: str = "\n") -> bytes:
+        encoding: str | None = None, newline: str | None = None) -> bytes:
     """Encode canonical output strictly; unsupported characters are errors."""
 
+    if encoding is None:
+        encoding = table.source_encoding
+        if encoding in ("unicode", "embedded"):
+            encoding = "cp1252"
     return export_visproto(
         table, include_comments=include_comments,
         newline=newline).encode(encoding, errors="strict")
@@ -352,6 +475,7 @@ class VPManager:
         self._table = table
         self._undo: list[VPTable] = []
         self._redo: list[VPTable] = []
+        self._clipboard_assignment: str | None = None
 
     @property
     def table(self) -> VPTable:
@@ -364,6 +488,14 @@ class VPManager:
     @property
     def can_redo(self) -> bool:
         return bool(self._redo)
+
+    @property
+    def has_clipboard_assignment(self) -> bool:
+        return self._clipboard_assignment is not None
+
+    @property
+    def clipboard_assignment(self) -> str | None:
+        return self._clipboard_assignment
 
     def _apply(self, table: VPTable) -> bool:
         if table == self._table:
@@ -383,6 +515,36 @@ class VPManager:
 
     def swap(self, first: int, second: int) -> bool:
         return self._apply(self._table.swap(first, second))
+
+    def clear(self, index: int) -> bool:
+        return self._apply(self._table.clear(index))
+
+    def append(self, base_name: str = DUMMY_BASE_NAME, *,
+               comment: str = "") -> bool:
+        return self._apply(self._table.append(base_name, comment=comment))
+
+    def duplicate_assignment(
+            self, source: int, destination: int | None = None, *,
+            allow_replace: bool = False) -> bool:
+        return self._apply(self._table.duplicate_assignment(
+            source, destination, allow_replace=allow_replace))
+
+    def copy_assignment(self, index: int) -> str:
+        self._clipboard_assignment = self._table.entry(index).base_name
+        return self._clipboard_assignment
+
+    def paste_assignment(self, index: int, *,
+                         allow_replace: bool = False) -> bool:
+        if self._clipboard_assignment is None:
+            raise VPConflictError(
+                index, self._table.entry(index).base_name,
+                "<empty VP clipboard>")
+        return self._apply(self._table.assign(
+            index, self._clipboard_assignment,
+            allow_replace=allow_replace))
+
+    def remove_trailing(self, index: int | None = None) -> bool:
+        return self._apply(self._table.remove_trailing(index))
 
     def undo(self) -> bool:
         if not self._undo:

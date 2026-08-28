@@ -12,6 +12,7 @@ from PySide6.QtWidgets import QApplication
 
 from assembly_window import AssemblyWindow
 from asset_family import AssetFamily, FamilyObject, rebuild_materials
+from anm_parser import parse_anm_bytes
 from base_mapping_editor import MappingIndex
 from base_parser import AmeshBlock, AttsEntry, parse_base_bytes
 from fx_element_editor import (
@@ -37,6 +38,8 @@ from sklt_parser import (
     parse_sklt_file,
     save_sklt_with_poo2_pol2_structure,
 )
+from ilbm_parser import parse_ilbm_bytes
+from tests.synthetic_indexed_profile import attach_synthetic_indexed_profile
 
 
 UVS = ((0, 0), (255, 0), (255, 255), (0, 255))
@@ -49,6 +52,27 @@ def _chunk(tag, payload):
 
 def _form(form_type, children):
     return _chunk(b"FORM", form_type + children)
+
+
+def _vbmp_bytes(pixel):
+    return _form(
+        b"VBMP",
+        _chunk(b"HEAD", struct.pack(">HHH", 1, 1, 0))
+        + _chunk(b"BODY", bytes((pixel,))),
+    )
+
+
+def _vanm_bytes():
+    bitmap_class = b"ilbm.class\0"
+    bitmap_names = b"STONE.ILBM\0"
+    stream = (
+        struct.pack(">h", len(bitmap_class)) + bitmap_class
+        + struct.pack(">h", len(bitmap_names)) + bitmap_names
+        + struct.pack(">hh", len(UVS) + 1, len(UVS))
+        + bytes(value for uv in UVS for value in uv)
+        + struct.pack(">hihh", 1, 128, 0, 0)
+    )
+    return _form(b"VANM", _chunk(b"DATA", stream))
 
 
 def _area_objt(poly_id, texture_name):
@@ -175,6 +199,15 @@ def _family(root):
         base_asset=base_asset,
         root_object=obj,
     )
+    family.animations["MODEL.ANM"] = parse_anm_bytes(
+        _vanm_bytes(), "MODEL.ANM")
+    family.textures.update({
+        "FX2.ILBM": parse_ilbm_bytes(
+            _vbmp_bytes(8), "FX2.ILBM"),
+        "STONE.ILBM": parse_ilbm_bytes(
+            _vbmp_bytes(9), "STONE.ILBM"),
+    })
+    attach_synthetic_indexed_profile(family, root)
     rebuild_materials(obj, family)
     return family, obj, original_base
 
