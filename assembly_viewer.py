@@ -63,6 +63,9 @@ from geometry_editor import (
 from indexed_family_adapter import (
     IndexedFamilyAdapter,
     UnsupportedIndexedMaterialError,
+    VANILLA_FADE_LENGTH,
+    VANILLA_GAMEPLAY_FADE_START,
+    VANILLA_GAMEPLAY_VIS_LIMIT,
 )
 from indexed_renderer import (
     IndexedPiece,
@@ -479,9 +482,10 @@ class AssetViewport(QWidget):
         self._indexed_view_cache_key: tuple | None = None
         self._indexed_view_cache_image = QImage()
         self._indexed_render_revision = 0
-        # None means exact asset/vanilla values.  Overrides are preview-only
-        # and are never written back to BaseTransform.
-        self._area_fade_preview_override: dict[str, float | bool] | None = None
+        # Recovered fork behavior: retail AREA distance fade using the normal
+        # Urban Assault gameplay profile (1400/600, start 800).  OpenNeoUA
+        # Studio enables it by default; the fixed profile can only be toggled.
+        self._retail_distance_fade_enabled = True
 
         # Geometry Edit Mode (Blender-style vertex editing)
         self._edit_session: GeometryEditSession | None = None
@@ -2619,7 +2623,7 @@ class AssetViewport(QWidget):
                 (int(material_id), int(state[0]), int(state[1]))
                 for material_id, state in self._anim_states.items()
             )),
-            tuple(sorted((self._area_fade_preview_override or {}).items())),
+            bool(self._retail_distance_fade_enabled),
         )
 
     # -- public view controls --------------------------------------------------
@@ -2673,45 +2677,21 @@ class AssetViewport(QWidget):
             "viewport_full_resolution": True,
             "last_render_stats": dict(self._last_indexed_stats),
             "sources": dict(adapter.source_info) if adapter is not None else {},
-            "area_fade_preview": self.area_fade_preview_settings(),
+            "retail_distance_fade": {
+                "enabled": bool(self._retail_distance_fade_enabled),
+                "vis_limit": VANILLA_GAMEPLAY_VIS_LIMIT,
+                "fade_start": VANILLA_GAMEPLAY_FADE_START,
+                "fade_length": VANILLA_FADE_LENGTH,
+            },
         }
 
-    def area_fade_preview_settings(self) -> dict:
-        override = self._area_fade_preview_override
-        if override is None:
-            return {
-                "use_asset": True,
-                "vis_limit": None,
-                "fade_start": None,
-                "fade_length": 600.0,
-            }
-        return dict(override)
+    def set_retail_distance_fade(self, enabled: bool) -> None:
+        """Enable the recovered vanilla gameplay AREA distance fade."""
 
-    def set_area_fade_preview(
-            self, use_asset: bool, vis_limit: float = 4096.0,
-            fade_start: float = 3496.0,
-            fade_length: float = 600.0) -> None:
-        """Set a non-persistent AREA distance-fade inspection override."""
-
-        if use_asset:
-            updated = None
-        else:
-            values = tuple(float(value) for value in (
-                vis_limit, fade_start, fade_length))
-            if not all(math.isfinite(value) for value in values) \
-                    or values[2] <= 0.0:
-                raise ValueError(
-                    "AREA fade preview values must be finite and fadeLength "
-                    "must be positive")
-            updated = {
-                "use_asset": False,
-                "vis_limit": values[0],
-                "fade_start": values[1],
-                "fade_length": values[2],
-            }
-        if updated == self._area_fade_preview_override:
+        updated = bool(enabled)
+        if updated == self._retail_distance_fade_enabled:
             return
-        self._area_fade_preview_override = updated
+        self._retail_distance_fade_enabled = updated
         self._invalidate_indexed_view_cache()
         self.update()
 
@@ -3568,7 +3548,7 @@ class AssetViewport(QWidget):
                 )
             )
             fade_profile = adapter.distance_fade_profile(
-                face, self._area_fade_preview_override)
+                face, self._retail_distance_fade_enabled)
             vertex_distances = ()
             if fade_profile is not None:
                 vertex_distances = tuple(
@@ -3592,7 +3572,8 @@ class AssetViewport(QWidget):
                 fade_start=(fade_profile["fade_start"]
                             if fade_profile is not None else 0.0),
                 fade_length=(fade_profile["fade_length"]
-                             if fade_profile is not None else 600.0),
+                             if fade_profile is not None
+                             else VANILLA_FADE_LENGTH),
                 vertex_distances=vertex_distances,
             ))
         result = IndexedRasterizer.render(
