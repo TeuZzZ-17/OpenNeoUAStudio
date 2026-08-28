@@ -483,9 +483,9 @@ class AssetViewport(QWidget):
         self._indexed_view_cache_image = QImage()
         self._indexed_render_revision = 0
         # Recovered fork behavior: retail AREA distance fade using the normal
-        # Urban Assault gameplay profile (1400/600, start 800).  OpenNeoUA
-        # Studio enables it by default; the fixed profile can only be toggled.
-        self._retail_distance_fade_enabled = True
+        # Urban Assault gameplay profile (1400/600, start 800).  Keep it
+        # optional and disabled by default; the fixed profile can only be toggled.
+        self._retail_distance_fade_enabled = False
 
         # Geometry Edit Mode (Blender-style vertex editing)
         self._edit_session: GeometryEditSession | None = None

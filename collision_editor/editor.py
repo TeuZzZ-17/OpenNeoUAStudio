@@ -631,13 +631,14 @@ def runtime_vp_table(
         set_bas_path: str | Path,
         embedded: EmbeddedVPSet,
 ) -> tuple[VPTable, str, list[str]]:
-    """Resolve the same VP source precedence used by OpenNeoUAStudio.
+    """Resolve the same VISPROTO.LST precedence used by OpenNeoUA.
 
-    Loose ``VISPROTO.LST`` wins over the embedded table; the legacy Scripts
-    copy is only a fallback when neither of the stronger sources is usable.
-    Invalid optional files never replace a valid embedded database.
+    ``Loose/VISPROTO.LST`` is the editable runtime override. If it is absent
+    or invalid, the normal ``Scripts/VISPROTO.LST`` is used. The embedded
+    binary visproto.base is intentionally not selected as a runtime VP table.
     """
 
+    del embedded  # Kept in the signature for callers that already reconstructed it.
     path = Path(set_bas_path)
     set_root = path.parent.parent if path.parent.name.casefold() in (
         "objects", "object") else path.parent
@@ -654,20 +655,18 @@ def runtime_vp_table(
         except (OSError, VPParseError) as exc:
             warnings.append(
                 f"Invalid Loose VISPROTO.LST ignored: {exc}")
-    if embedded.entries:
-        return embedded.as_table(), "embedded visproto.base", warnings
     if scripts.is_file():
         try:
             return (
                 load_visproto(scripts, require_terminator=False),
-                "fallback Scripts/VISPROTO.LST",
+                "Scripts/VISPROTO.LST",
                 warnings,
             )
         except (OSError, VPParseError) as exc:
             warnings.append(
                 f"Invalid Scripts/VISPROTO.LST ignored: {exc}")
     raise CollisionScriptError(
-        "No usable VP database was found beside the selected SET.BAS.")
+        "No usable VISPROTO.LST was found beside the selected SET.BAS.")
 
 
 def import_collision_block(

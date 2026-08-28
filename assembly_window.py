@@ -82,7 +82,6 @@ from asset_family_package import (
     MANIFEST_NAME as ASSET_FAMILY_MANIFEST,
     AssetFamilyPackageError,
     PackageEntry,
-    import_family_package,
     package_relative_path,
     validate_family_package,
     write_package_manifest,
@@ -930,20 +929,21 @@ class AssemblyWindow(QMainWindow):
         self.open_ilbm_action.triggered.connect(self.open_ilbm_dialog)
         self.open_family_action = QAction("Import Asset Family", self)
         self.open_family_action.triggered.connect(self.open_family_dialog)
-        self.import_vp_package_action = QAction("Import VP Package", self)
-        self.import_vp_package_action.triggered.connect(
-            self.import_vp_package_dialog)
 
         self.file_import_menu = file_menu.addMenu("Import")
         for action in (
                 self.open_base_action, self.open_sklt_action,
-                self.open_ilbm_action, self.open_family_action,
-                self.import_vp_package_action):
+                self.open_ilbm_action, self.open_family_action):
             self.file_import_menu.addAction(action)
 
-        self.save_asset_family_action = QAction("Export SET Family", self)
-        self.save_asset_family_action.setEnabled(False)
-        self.save_asset_family_action.triggered.connect(self._save_model_as)
+        # One shared Runtime Loose action is exposed from both File > Export
+        # and Tools > BAS Archive.  Keeping one QAction means both entry
+        # points always share the same enabled state and implementation.
+        self.export_runtime_loose_action = QAction(
+            "Export Runtime Loose SET", self)
+        self.export_runtime_loose_action.setEnabled(False)
+        self.export_runtime_loose_action.triggered.connect(
+            self._export_runtime_loose_set)
         self.save_base_action = QAction("Export BASE", self)
         self.save_base_action.setEnabled(False)
         self.save_base_action.triggered.connect(self._save_base_as)
@@ -959,7 +959,7 @@ class AssemblyWindow(QMainWindow):
 
         self.file_export_menu = file_menu.addMenu("Export")
         for action in (
-                self.save_asset_family_action, self.save_base_action,
+                self.export_runtime_loose_action, self.save_base_action,
                 self.save_sklt_action, self.save_ilbm_action,
                 self.overwrite_action):
             self.file_export_menu.addAction(action)
@@ -1086,9 +1086,9 @@ class AssemblyWindow(QMainWindow):
             view_menu.addAction(action)
         self.retail_distance_fade_check = self._checkable(
             "Vanilla distance fade (1400/600)",
-            self.viewport.set_retail_distance_fade, True)
+            self.viewport.set_retail_distance_fade, False)
         self.retail_distance_fade_check.setStatusTip(
-            "Retail AREA distance fade recovered from the fork, enabled by default: "
+            "Retail AREA distance fade recovered from the fork, disabled by default: "
             "AREA_FLAG_DPTHFADE faces use the vanilla gameplay profile "
             "visLimit 1400, fadeStart 800, fadeLength 600.")
         view_menu.addAction(self.retail_distance_fade_check)
@@ -1105,11 +1105,6 @@ class AssemblyWindow(QMainWindow):
         extract_setbas_action = QAction("Extract archive", self)
         extract_setbas_action.triggered.connect(self._extract_setbas_archive)
         setbas_tools_menu.addAction(extract_setbas_action)
-        self.export_runtime_loose_action = QAction(
-            "Export Runtime Loose SET", self)
-        self.export_runtime_loose_action.setEnabled(False)
-        self.export_runtime_loose_action.triggered.connect(
-            self._export_runtime_loose_set)
         setbas_tools_menu.addAction(self.export_runtime_loose_action)
         metadata_action = QAction("Export scene metadata...", self)
         metadata_action.triggered.connect(self._export_setbas_metadata)
@@ -2395,91 +2390,43 @@ class AssemblyWindow(QMainWindow):
         )
 
     def open_family_dialog(self) -> None:
+        # Keep the chooser anchored to the most recently selected file during
+        # this one Asset Family import.  Optional steps may be skipped, but a
+        # successful selection becomes the starting directory for the next
+        # requested asset type instead of resetting to the session directory.
+        dialog_directory = Path(self._last_directory)
+
         sklt, _ = QFileDialog.getOpenFileName(
             self, "Import skeleton (.sklt/.skl) - optional, Cancel to skip",
-            str(self._last_directory),
+            str(dialog_directory),
             "Skeletons (*.sklt *.skl *.SKLT *.SKL);;All files (*)",
         )
+        if sklt:
+            dialog_directory = Path(sklt).parent
+
         base, _ = QFileDialog.getOpenFileName(
             self, "Import BASE file - optional, Cancel to skip",
-            str(self._last_directory),
+            str(dialog_directory),
             "Urban Assault BASE (*.base *.bas *.BASE *.BAS);;All files (*)",
         )
+        if base:
+            dialog_directory = Path(base).parent
+
         textures, _ = QFileDialog.getOpenFileNames(
             self, "Import texture files (.ilbm/.ilb/.vbmp) - optional",
-            str(self._last_directory),
+            str(dialog_directory),
             "ILBM/VBMP textures (*.ilbm *.ilb *.lbm *.iff *.vbmp "
             "*.ILBM *.ILB *.LBM *.IFF *.VBMP);;All files (*)",
         )
+        if textures:
+            dialog_directory = Path(textures[0]).parent
+
         anms, _ = QFileDialog.getOpenFileNames(
             self, "Import animation files (.anm/.vanm) - optional",
-            str(self._last_directory),
+            str(dialog_directory),
             "Animations (*.anm *.vanm *.ANM *.VANM);;All files (*)",
         )
         self._open_manual_asset_family(sklt, base, textures, anms)
-
-    def import_vp_package_dialog(self) -> None:
-        """Validate and install one SET Family package."""
-
-        source_text = QFileDialog.getExistingDirectory(
-            self, "Import VP Package - choose package folder",
-            str(self._last_directory))
-        if not source_text:
-            return
-        source = Path(source_text)
-        validation = validate_family_package(source)
-        if not validation.valid:
-            QMessageBox.critical(
-                self, "Import VP Package validation failed",
-                "Nothing was written.\n\n"
-                + "\n".join(validation.errors[:20]))
-            return
-        destination_text = QFileDialog.getExistingDirectory(
-            self,
-            "Import VP Package - choose loose destination root",
-            str(self._last_directory))
-        if not destination_text:
-            return
-        from setbas_export import SetBasExportError, resolve_runtime_loose_root
-        try:
-            destination, _set_id = resolve_runtime_loose_root(
-                Path(destination_text))
-        except SetBasExportError as exc:
-            QMessageBox.warning(
-                self, "Invalid Runtime Loose destination",
-                f"Choose Data/SetN/Loose for Set1 through Set7.\n\n{exc}")
-            return
-        answer = QMessageBox.question(
-            self, "Install validated VP package?",
-            f"Install the validated package into:\n{destination}\n\n"
-            "Different-content collisions will be rejected. SET.BAS will "
-            "not be modified.",
-            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
-            QMessageBox.StandardButton.No)
-        if answer != QMessageBox.StandardButton.Yes:
-            return
-        try:
-            imported = import_family_package(
-                source, destination, runtime_loose=True)
-        except AssetFamilyPackageError as exc:
-            QMessageBox.critical(
-                self, "Import VP Package failed - destination rolled back",
-                f"SET.BAS was not modified.\n\n{exc}")
-            return
-
-        self._last_directory = destination
-        if imported.validation is not None \
-                and imported.validation.family is not None \
-                and self._confirm_discard_geometry():
-            self._set_family(imported.validation.family)
-            self._set_document_title(imported.entry_base)
-        QMessageBox.information(
-            self, "Import VP Package complete",
-            f"Installed {len(imported.copied)} file(s); "
-            f"{len(imported.identical)} identical file(s) reused.\n\n"
-            f"Entry BASE: {imported.entry_base}\n"
-            "The installed family passed an isolated resolver reload. "
-            "SET.BAS was not modified.")
 
     def open_setbas_dialog(self) -> None:
         path, _ = QFileDialog.getOpenFileName(
@@ -3527,10 +3474,12 @@ class AssemblyWindow(QMainWindow):
         layout = QVBoxLayout(dialog)
         info = QLabel(
             f"Source (always read-only): {self._setbas.path}\n\n"
-            "Exports only BASE, SKLT, ILBM and ANM representations already "
-            "supported by OpenNeoUA into Loose/BASE, Loose/SKLT, Loose/ILBM "
-            "and Loose/ANM. Unsupported or ambiguous resources stay "
-            "in SET.BAS as the fallback. Select the target SetN folder; the "
+            "Converts the embedded VISPROTO table to editable VISPROTO.LST "
+            "and exports BASE, SKLT, ILBM and ANM representations already "
+            "supported by OpenNeoUA into Loose/VISPROTO.LST, Loose/BASE, "
+            "Loose/SKLT, Loose/ILBM and Loose/ANM. VISPROTO falls back to "
+            "Scripts/VISPROTO.LST; other unsupported or ambiguous resources "
+            "stay in SET.BAS. Select the target SetN folder; the "
             "Loose subfolder is managed automatically.")
         info.setWordWrap(True)
         layout.addWidget(info)
@@ -8344,7 +8293,6 @@ class AssemblyWindow(QMainWindow):
         overwrite_enabled = self.can_overwrite_geometry()
         self.model_save_button.setEnabled(overwrite_enabled)
         self.model_save_as_button.setEnabled(family_export_enabled)
-        self.save_asset_family_action.setEnabled(family_export_enabled)
         self.save_base_action.setEnabled(family_export_enabled)
         self.save_sklt_action.setEnabled(sklt_export_enabled)
         self.save_ilbm_action.setEnabled(ilbm_export_enabled)
