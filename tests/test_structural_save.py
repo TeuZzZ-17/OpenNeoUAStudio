@@ -35,6 +35,7 @@ from sklt_parser import (
     parse_sklt_file,
     save_sklt_with_poo2_pol2_structure,
 )
+from tests.synthetic_indexed_profile import attach_synthetic_indexed_profile
 
 
 def _chunk(tag, payload):
@@ -200,6 +201,7 @@ class StructuralSaveTests(unittest.TestCase):
                 base_asset=base_asset,
                 root_object=obj,
             )
+            attach_synthetic_indexed_profile(family, root)
             window = AssemblyWindow()
             window._family = family
             window._owner_to_obj = {"root": obj}
@@ -277,6 +279,7 @@ class StructuralSaveTests(unittest.TestCase):
                 base_asset=base_asset,
                 root_object=obj,
             )
+            attach_synthetic_indexed_profile(family, root)
             clipboard = build_geometry_clipboard(
                 obj, "root", {0}, MappingIndex(obj))
             append_geometry_clipboard(
@@ -361,6 +364,7 @@ class StructuralSaveTests(unittest.TestCase):
                 base_asset=base_asset,
                 root_object=obj,
             )
+            attach_synthetic_indexed_profile(family, root)
             window = AssemblyWindow()
             window._family = family
             window._owner_to_obj = {"root": obj}

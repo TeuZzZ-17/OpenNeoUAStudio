@@ -25,7 +25,9 @@ Safety model:
 
 from __future__ import annotations
 
+import copy
 from dataclasses import dataclass, field
+import hashlib
 from pathlib import Path
 import struct
 
@@ -135,6 +137,374 @@ class StructuralBlockState:
     ade_poly_id: int | None = None
     template_objt: bytes | None = field(
         default=None, repr=False, compare=False)
+
+
+@dataclass(frozen=True)
+class MaterialResourceSnapshot:
+    """One decoded dependency carried by the structural material clipboard."""
+
+    logical_name: str
+    resource_kind: str             # "texture" | "animation"
+    semantic_signature: tuple
+    value: object = field(repr=False, compare=False)
+    reference: object | None = field(default=None, repr=False, compare=False)
+
+
+@dataclass(frozen=True)
+class MaterialBlockClipboard:
+    """Dependency-aware snapshot of one writable ADES material block.
+
+    AMESH mappings are deliberately not pasted: copying those polyIDs into a
+    different model would create duplicate or unrelated references.  AREA has
+    one typed polygon reference and can therefore be remapped, but only to an
+    explicit compatible, currently-unmapped target polygon.
+    """
+
+    source_family_identity: int
+    source_owner: str
+    source_block_index: int
+    class_id: str
+    block_template: object = field(repr=False, compare=False)
+    area_vertex_count: int | None = None
+    resources: tuple[MaterialResourceSnapshot, ...] = ()
+    indexed_profile_signature: tuple[tuple[str, str], ...] | None = None
+
+
+@dataclass(frozen=True)
+class MaterialPasteResult:
+    block_index: int
+    assigned_poly_id: int | None
+    imported_resources: tuple[tuple[str, str], ...] = ()
+
+
+def _unique_casefold_item(mapping: dict, logical_name: str, kind: str):
+    matches = [
+        (key, value) for key, value in mapping.items()
+        if str(key).casefold() == str(logical_name).casefold()
+    ]
+    if len(matches) > 1:
+        raise MappingEditError(
+            f"{kind} dependency {logical_name!r} is ambiguous in the "
+            "loaded AssetFamily")
+    return matches[0] if matches else None
+
+
+def _texture_semantic_signature(image) -> tuple:
+    return (
+        str(getattr(image, "kind", "")),
+        int(getattr(image, "width", 0)),
+        int(getattr(image, "height", 0)),
+        int(getattr(image, "n_planes", 0)),
+        int(getattr(image, "masking", 0)),
+        int(getattr(image, "compression", 0)),
+        int(getattr(image, "transparent_color", 0)),
+        tuple(tuple(rgb) for rgb in (getattr(image, "palette", None) or ())),
+        bytes(getattr(image, "pixels", None) or b""),
+    )
+
+
+def _animation_semantic_signature(animation) -> tuple:
+    return (
+        bool(getattr(animation, "has_form", False)),
+        str(getattr(animation, "bitmap_class", "")),
+        tuple(str(name) for name in getattr(animation, "bitmap_names", ())),
+        tuple(
+            tuple(tuple(uv) for uv in group)
+            for group in getattr(animation, "texcoord_groups", ())),
+        tuple(
+            (
+                int(getattr(frame, "frame_time", 0)),
+                int(getattr(frame, "frame_id", 0)),
+                int(getattr(frame, "texcoords_id", 0)),
+            )
+            for frame in getattr(animation, "frames", ())),
+    )
+
+
+def _indexed_profile_signature(family) \
+        -> tuple[tuple[str, str], ...] | None:
+    refs = (
+        ("palette", getattr(family, "external_palette_ref", None)),
+        ("shader", getattr(family, "indexed_profile_refs", {}).get("shader")),
+        ("tracy", getattr(family, "indexed_profile_refs", {}).get("tracy")),
+    )
+    result = []
+    for label, ref in refs:
+        path = getattr(ref, "path", None)
+        if path is None or not Path(path).is_file():
+            return None
+        try:
+            digest = hashlib.sha256(Path(path).read_bytes()).hexdigest()
+        except OSError:
+            return None
+        result.append((label, digest))
+    return tuple(result)
+
+
+def _material_resources(family, block) \
+        -> tuple[MaterialResourceSnapshot, ...]:
+    snapshots: dict[tuple[str, str], MaterialResourceSnapshot] = {}
+
+    def add_texture(logical_name: str) -> None:
+        key = ("texture", logical_name.casefold())
+        if key in snapshots:
+            return
+        match = _unique_casefold_item(
+            getattr(family, "textures", {}), logical_name, "texture")
+        if match is None:
+            raise MappingEditError(
+                f"texture dependency {logical_name!r} is not decoded")
+        canonical, image = match
+        ref_match = _unique_casefold_item(
+            getattr(family, "texture_refs", {}), logical_name,
+            "texture provenance")
+        snapshots[key] = MaterialResourceSnapshot(
+            logical_name=str(canonical),
+            resource_kind="texture",
+            semantic_signature=_texture_semantic_signature(image),
+            value=copy.deepcopy(image),
+            reference=(copy.deepcopy(ref_match[1])
+                       if ref_match is not None else None),
+        )
+
+    def add_animation(logical_name: str) -> None:
+        key = ("animation", logical_name.casefold())
+        if key in snapshots:
+            return
+        match = _unique_casefold_item(
+            getattr(family, "animations", {}), logical_name, "animation")
+        if match is None:
+            raise MappingEditError(
+                f"animation dependency {logical_name!r} is not decoded")
+        canonical, animation = match
+        ref_match = _unique_casefold_item(
+            getattr(family, "animation_refs", {}), logical_name,
+            "animation provenance")
+        snapshots[key] = MaterialResourceSnapshot(
+            logical_name=str(canonical),
+            resource_kind="animation",
+            semantic_signature=_animation_semantic_signature(animation),
+            value=copy.deepcopy(animation),
+            reference=(copy.deepcopy(ref_match[1])
+                       if ref_match is not None else None),
+        )
+        for bitmap_name in getattr(animation, "bitmap_names", ()):
+            add_texture(str(bitmap_name))
+
+    for descriptor in (
+            getattr(block, "texture", None),
+            getattr(block, "tracy_texture", None)):
+        name = str(getattr(descriptor, "name", "") or "")
+        if not name:
+            continue
+        if str(getattr(descriptor, "kind", "")).casefold() == "bmpanim":
+            add_animation(name)
+        else:
+            add_texture(name)
+    return tuple(
+        snapshots[key] for key in sorted(snapshots))
+
+
+def build_material_block_clipboard(
+        family, fam_obj, block_index: int) -> MaterialBlockClipboard:
+    """Validate and snapshot one AMESH/AREA block plus its dependencies."""
+
+    blocks = getattr(getattr(fam_obj, "base_object", None), "ades", ())
+    model = getattr(fam_obj, "skeleton", None)
+    if not (0 <= int(block_index) < len(blocks)):
+        raise MappingEditError("select a valid material block first")
+    block = blocks[int(block_index)]
+    class_id = (getattr(block, "class_id", "") or "").lower()
+    if class_id not in ("amesh.class", "area.class"):
+        raise MappingEditError(
+            f"class {block.class_id or '<missing class>'!r} has no safe "
+            "structural material clipboard handler")
+    if not getattr(block, "source_objt_bytes", b""):
+        raise MappingEditError(
+            f"material block #{block_index} has no exact source OBJT")
+    if model is None:
+        raise MappingEditError("the selected material owner has no skeleton")
+
+    area_vertex_count = None
+    if class_id == "amesh.class":
+        atts_only = bool(
+            getattr(block, "texture", None) is not None
+            and block.texture.kind == "bmpanim" and not block.olpl)
+        if not atts_only and len(block.atts) != len(block.olpl):
+            raise MappingEditError(
+                f"material block #{block_index} has ambiguous ATTS/OLPL "
+                "counts")
+        if len({entry.poly_id for entry in block.atts}) != len(block.atts):
+            raise MappingEditError(
+                f"material block #{block_index} contains duplicate polyIDs")
+        for entry_index, entry in enumerate(block.atts):
+            if not (0 <= entry.poly_id < len(model.polygons)):
+                raise MappingEditError(
+                    f"material block #{block_index} has invalid polyID "
+                    f"{entry.poly_id}")
+            if not atts_only and len(block.olpl[entry_index]) \
+                    != len(model.polygons[entry.poly_id]):
+                raise MappingEditError(
+                    f"material block #{block_index} UV count does not match "
+                    f"polygon #{entry.poly_id}")
+    else:
+        poly_id = int(block.ade_poly_id)
+        if getattr(block, "ade_strc_chunk_offset", -1) < 0:
+            raise MappingEditError(
+                f"AREA block #{block_index} has no writable ADE/STRC")
+        if not (0 <= poly_id < len(model.polygons)) \
+                or len(block.atts) != 1 \
+                or block.atts[0].poly_id != poly_id:
+            raise MappingEditError(
+                f"AREA block #{block_index} has an inconsistent POL2 mapping")
+        area_vertex_count = len(model.polygons[poly_id])
+        if block.olpl and (
+                len(block.olpl) != 1
+                or len(block.olpl[0]) != area_vertex_count):
+            raise MappingEditError(
+                f"AREA block #{block_index} has incompatible OLPL data")
+
+    resources = _material_resources(family, block)
+    return MaterialBlockClipboard(
+        source_family_identity=id(family),
+        source_owner=str(getattr(fam_obj, "owner_path", "root")),
+        source_block_index=int(block_index),
+        class_id=class_id,
+        block_template=copy.deepcopy(block),
+        area_vertex_count=area_vertex_count,
+        resources=resources,
+        indexed_profile_signature=(
+            _indexed_profile_signature(family) if resources else None),
+    )
+
+
+def _plan_material_resource_transfer(
+        family, clipboard: MaterialBlockClipboard
+        ) -> list[tuple[MaterialResourceSnapshot, str]]:
+    if clipboard.resources and id(family) != clipboard.source_family_identity:
+        source_profile = clipboard.indexed_profile_signature
+        target_profile = _indexed_profile_signature(family)
+        if source_profile is None or target_profile is None:
+            raise MappingEditError(
+                "cross-family material paste requires complete palette, "
+                "SHADERMP and TRACYRMP provenance on both families")
+        if source_profile != target_profile:
+            raise MappingEditError(
+                "cross-family material paste refused: the SET palette/remap "
+                "profiles differ")
+
+    additions = []
+    for snapshot in clipboard.resources:
+        mapping_name = (
+            "textures" if snapshot.resource_kind == "texture"
+            else "animations")
+        mapping = getattr(family, mapping_name)
+        match = _unique_casefold_item(
+            mapping, snapshot.logical_name, snapshot.resource_kind)
+        if match is not None:
+            current_signature = (
+                _texture_semantic_signature(match[1])
+                if snapshot.resource_kind == "texture"
+                else _animation_semantic_signature(match[1]))
+            if current_signature != snapshot.semantic_signature:
+                raise MappingEditError(
+                    f"{snapshot.resource_kind} collision for "
+                    f"{snapshot.logical_name!r}: target content differs")
+            continue
+        additions.append((snapshot, mapping_name))
+    return additions
+
+
+def paste_material_block(
+        family, fam_obj, clipboard: MaterialBlockClipboard,
+        *, target_poly_id: int | None = None) -> MaterialPasteResult:
+    """Append a safe material slot or remapped AREA block atomically."""
+
+    if not isinstance(clipboard, MaterialBlockClipboard):
+        raise MappingEditError("the material clipboard is invalid")
+    model = getattr(fam_obj, "skeleton", None)
+    blocks = getattr(getattr(fam_obj, "base_object", None), "ades", None)
+    if model is None or blocks is None:
+        raise MappingEditError("the target owner has no editable model")
+    block = copy.deepcopy(clipboard.block_template)
+    class_id = (getattr(block, "class_id", "") or "").lower()
+    if class_id != clipboard.class_id \
+            or class_id not in ("amesh.class", "area.class") \
+            or not getattr(block, "source_objt_bytes", b""):
+        raise MappingEditError("the material clipboard template is invalid")
+
+    assigned_poly_id = None
+    if class_id == "amesh.class":
+        if target_poly_id is not None:
+            raise MappingEditError(
+                "AMESH paste creates an empty material slot; map polygons "
+                "explicitly with the Mapping Repair tools")
+        block.atts = []
+        block.olpl = []
+    else:
+        if target_poly_id is None:
+            raise MappingEditError(
+                "AREA paste requires one explicit unmapped target polygon")
+        target_poly_id = int(target_poly_id)
+        if not (0 <= target_poly_id < len(model.polygons)):
+            raise MappingEditError("the AREA target polygon is invalid")
+        mapping = MappingIndex(fam_obj)
+        if mapping.status(target_poly_id) != "unmapped":
+            raise MappingEditError(
+                f"AREA target polygon #{target_poly_id} is already mapped")
+        if len(model.polygons[target_poly_id]) \
+                != clipboard.area_vertex_count:
+            raise MappingEditError(
+                "AREA target polygon vertex count differs from the copied "
+                "material")
+        if len(block.atts) != 1:
+            raise MappingEditError("the copied AREA mapping is inconsistent")
+        source_entry = block.atts[0]
+        block.ade_poly_id = target_poly_id
+        block.atts = [type(source_entry)(
+            target_poly_id, source_entry.color_val, source_entry.shade_val,
+            source_entry.tracy_val, source_entry.pad)]
+        if block.olpl:
+            block.olpl = [copy.deepcopy(block.olpl[0])]
+        assigned_poly_id = target_poly_id
+
+    additions = _plan_material_resource_transfer(family, clipboard)
+    imported = []
+    for snapshot, mapping_name in additions:
+        getattr(family, mapping_name)[snapshot.logical_name] = copy.deepcopy(
+            snapshot.value)
+        refs_name = (
+            "texture_refs" if snapshot.resource_kind == "texture"
+            else "animation_refs")
+        if snapshot.reference is not None:
+            getattr(family, refs_name)[snapshot.logical_name] = copy.deepcopy(
+                snapshot.reference)
+        imported.append((snapshot.resource_kind, snapshot.logical_name))
+    block_index = len(blocks)
+    blocks.append(block)
+    return MaterialPasteResult(
+        block_index=block_index,
+        assigned_poly_id=assigned_poly_id,
+        imported_resources=tuple(imported),
+    )
+
+
+def delete_material_block(fam_obj, block_index: int):
+    """Delete one typed AMESH/AREA block without touching POL2 geometry."""
+
+    blocks = getattr(getattr(fam_obj, "base_object", None), "ades", None)
+    if blocks is None or not (0 <= int(block_index) < len(blocks)):
+        raise MappingEditError("select a valid material block first")
+    block = blocks[int(block_index)]
+    class_id = (getattr(block, "class_id", "") or "").lower()
+    if class_id not in ("amesh.class", "area.class"):
+        raise MappingEditError(
+            f"class {block.class_id or '<missing class>'!r} has no safe "
+            "structural delete handler")
+    if not getattr(block, "source_objt_bytes", b""):
+        raise MappingEditError(
+            f"material block #{block_index} has no exact source OBJT")
+    return blocks.pop(int(block_index))
 
 
 def _polygon_vertices(fam_obj, poly_id: int) -> list[tuple[float, float, float]]:

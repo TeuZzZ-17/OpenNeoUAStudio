@@ -15,7 +15,7 @@ from PySide6.QtWidgets import (
 import assembly_window as assembly_window_module
 from assembly_viewer import VIEW_MODES
 from assembly_window import AssemblyWindow
-from vp_manager import VPManager, parse_visproto_text
+from vp_manager import parse_visproto_text
 
 
 class _FakeSignal:
@@ -125,6 +125,7 @@ class WindowContractV5Tests(unittest.TestCase):
                 if not action.isSeparator()]
             self.assertNotIn("Frame full family", view_labels)
             self.assertNotIn("Navigation help", view_labels)
+            self.assertIn("AREA distance fade preview...", view_labels)
             tool_labels = []
             for menu_action in window.menuBar().actions():
                 menu = menu_action.menu()
@@ -151,6 +152,34 @@ class WindowContractV5Tests(unittest.TestCase):
                 window.loaded_resource_label.font().pointSize(), 13)
             self.assertEqual(
                 window.loaded_resource_label.text(), "No Resource Loaded")
+            self.assertEqual(
+                window.setbas_runtime_loose_button.text(),
+                "Export Runtime Loose SET")
+            self.assertEqual(
+                window.export_runtime_loose_action.text(),
+                "Export Runtime Loose SET")
+            self.assertFalse(window.setbas_runtime_loose_button.isEnabled())
+            self.assertFalse(window.export_runtime_loose_action.isEnabled())
+            for removed_vp_control in (
+                    "vp_import_button", "vp_new_spin", "vp_assign_button",
+                    "vp_undo_button", "vp_redo_button", "vp_clear_button",
+                    "vp_append_button", "vp_duplicate_button",
+                    "vp_copy_button", "vp_paste_button",
+                    "vp_remove_trailing_button", "vp_export_button"):
+                self.assertFalse(hasattr(window, removed_vp_control))
+            self.assertEqual(window.vp_selected_base_label.text(), "-")
+            self.assertEqual(window.vp_current_label.text(), "-")
+            self.assertEqual(
+                window.model_save_as_button.text(),
+                "Export SET Family")
+            self.assertEqual(window.material_copy_button.text(),
+                             "Copy Material")
+            self.assertEqual(window.material_paste_button.text(),
+                             "Paste Material")
+            self.assertEqual(window.material_add_button.text(),
+                             "Add Compatible Slot")
+            self.assertEqual(window.material_delete_button.text(),
+                             "Delete Material")
             editor_tab_center = window._right_tabs.tabBar().mapToGlobal(
                 window._right_tabs.tabBar().tabRect(1).center()).x()
             status_center = window.editor_status_panel.mapToGlobal(
@@ -175,14 +204,14 @@ class WindowContractV5Tests(unittest.TestCase):
                 [action.text() for action in window.file_import_menu.actions()],
                 [
                     "Import BAS Archive", "Import SKLT", "Import ILBM",
-                    "Import Asset Family",
+                    "Import Asset Family", "Import VP Package",
                 ],
             )
             self.assertEqual(
                 [action.text() for action in window.file_export_menu.actions()],
                 [
-                    "Export Asset Family", "Export BASE", "Export SKLT",
-                    "Export ILBM", "Overwrite",
+                    "Export SET Family", "Export BASE",
+                    "Export SKLT", "Export ILBM", "Overwrite",
                 ],
             )
             self.assertEqual(window.open_base_action.shortcut().toString(), "")
@@ -840,30 +869,45 @@ class WindowContractV5Tests(unittest.TestCase):
         finally:
             window.close()
 
-    def test_unexported_vp_assignments_require_confirmation(self):
+    def test_setbas_vp_table_uses_embedded_source_only(self):
         window = AssemblyWindow()
         try:
-            window._vp_manager = VPManager(parse_visproto_text(
-                "ONE.base\nTWO.base\n>"))
-            window._vp_manager.swap(0, 1)
-            self.assertTrue(window._has_unsaved_vp_changes())
-            window._skip_model_switch_warning = True
-            with patch.object(
-                    QMessageBox, "exec",
-                    return_value=QMessageBox.StandardButton.No):
-                self.assertFalse(window._confirm_discard_geometry())
-            with patch.object(
-                    QMessageBox, "question",
-                    return_value=QMessageBox.StandardButton.No):
-                self.assertFalse(window._confirm_discard_vp_changes(
-                    "Discard?"))
-            with patch.object(
-                    QMessageBox, "question",
-                    return_value=QMessageBox.StandardButton.Yes):
-                self.assertTrue(window._confirm_discard_vp_changes(
-                    "Discard?"))
-            window._vp_manager.undo()
-            self.assertFalse(window._has_unsaved_vp_changes())
+            embedded_table = parse_visproto_text("EMBEDDED.base\n>")
+            embedded = SimpleNamespace(
+                entries=[], as_table=lambda: embedded_table)
+            archive = SimpleNamespace(path=Path("/tmp/Set1/SET.BAS"))
+            with patch(
+                    "assembly_window.reconstruct_embedded_vps",
+                    return_value=embedded):
+                window._load_vp_table(archive)
+            self.assertEqual(window._vp_source, "embedded visproto.base")
+            self.assertEqual(
+                window._vp_table.entry(0).base_name,
+                "EMBEDDED.base")
+            self.assertEqual(window._vp_source_path, archive.path)
+        finally:
+            window.close()
+
+    def test_embedded_setbas_model_is_not_editable(self):
+        window = AssemblyWindow()
+        try:
+            owner = "root"
+            window._family = SimpleNamespace()
+            window._selected_owner = owner
+            window._owner_to_obj = {
+                owner: SimpleNamespace(
+                    skeleton=object(),
+                    skeleton_ref=SimpleNamespace(
+                        path=None, status="setbas", source="SET.BAS"),
+                )
+            }
+            self.assertTrue(window._selected_model_is_archive_read_only())
+            self.assertFalse(window._has_editable_model())
+            window._sync_edit_action_states()
+            editor_index = window._right_tabs.indexOf(window._editor_tabs)
+            self.assertFalse(window._right_tabs.isTabEnabled(editor_index))
+            self.assertFalse(window.edit_menu.isEnabled())
+            self.assertFalse(window.mapping_repair_action.isEnabled())
         finally:
             window.close()
 

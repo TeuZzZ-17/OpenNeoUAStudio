@@ -55,6 +55,7 @@ from sklt_parser import (
     parse_sklt_file,
     save_sklt_with_poo2_pol2_structure,
 )
+from tests.synthetic_indexed_profile import attach_synthetic_indexed_profile
 
 
 UVS = [(0, 0), (255, 0), (255, 255), (0, 255)]
@@ -335,6 +336,7 @@ def _writable_family(root: Path, fx_name="FX1", *, vanm=False,
         animations=animations,
         textures={f"{fx_name}.ILBM": _image(f"{fx_name}.ILBM")},
     )
+    attach_synthetic_indexed_profile(family, root)
     return family, obj
 
 
@@ -1132,6 +1134,14 @@ class FxClipboardV3Tests(unittest.TestCase):
                     export_anm_bytes(family.animations["GLOW.ANM"]),
                     target.read_bytes())
                 self.assertFalse(window._vanm_uv_original)
+                first_export = target.read_bytes()
+                self.assertTrue(window._write_model_files(
+                    "root", family, obj,
+                    output / "FXTEST.SKLT",
+                    output / "FXTEST.BASE",
+                    ask_replace=False))
+                self.assertEqual(target.read_bytes(), first_export)
+                self.assertFalse(window._vanm_uv_original)
             finally:
                 window.close()
 
@@ -1185,7 +1195,10 @@ class FxClipboardV3Tests(unittest.TestCase):
                 self.assertEqual(
                     obj.skeleton.polygons[0], [0, 4, 1, 2, 3])
 
-                target_sklt = root / "export" / "BODY.SKLT"
+                # Complete-family export preserves the BASE logical NAME;
+                # the skeleton cannot be silently renamed to an unrelated
+                # filename inside the package.
+                target_sklt = root / "export" / "FXTEST.SKLT"
                 target_base = root / "export" / "BODY.BASE"
                 self.assertTrue(window._write_model_files(
                     "root", family, obj, target_sklt, target_base,

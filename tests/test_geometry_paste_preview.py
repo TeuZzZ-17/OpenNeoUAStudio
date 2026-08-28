@@ -110,6 +110,9 @@ class GeometryPastePreviewTests(unittest.TestCase):
 
     def test_ghost_and_guides_do_not_enter_pick_shapes(self):
         viewport, _model, clipboard = _fixture()
+        # This test covers overlay/picking isolation, not the fail-closed
+        # Retail indexed backend (the synthetic fixture has no SET profile).
+        viewport.set_mode("materials")
         start = viewport._project(
             viewport._camera_vertex(clipboard.pivot)).toPoint()
         viewport.set_show_owner_bbox(False)
