@@ -22,6 +22,7 @@ logical names and writes only formats already consumed by OpenNeoUA's
 ``Data/SetN/Loose`` lookup:
 
     Loose/
+      VISPROTO.LST           editable text list converted from embedded VISPROTO
       BASE/<NAME>.BASE       standalone copies of named BASE OBJTs
       SKLT/<NAME>.sklt       original FORM SKLT payloads
       ILBM/<NAME>.ILBM       original FORM VBMP/ILBM payloads
@@ -351,8 +352,9 @@ def _existing_runtime_override_paths(loose_root: Path, row: dict) -> list[Path]:
     output_path = row.get("output_path", "").replace("\\", "/")
     if not output_path:
         return []
-    relatives = [output_path, _legacy_three_letter_path(output_path)]
     class_name = row.get("class", "")
+    relatives = ([output_path] if class_name == "visproto.lst"
+                 else [output_path, _legacy_three_letter_path(output_path)])
     logical_name = row.get("logical_name", "").replace("\\", "/")
     if class_name == "ilbm.class":
         relatives.extend(
@@ -681,7 +683,70 @@ def _plan_runtime_loose(archive: SetBasArchive
                 status="skipped_invalid",
                 reason="SET.BAS has no parseable root BASE object"))
         else:
+            visproto_container = (base_asset.root.kids[0]
+                                  if base_asset.root.kids else None)
+            if visproto_container is None or not visproto_container.kids:
+                rows.append(_runtime_manifest_row(
+                    source_name="embedded visproto.base",
+                    class_name="visproto.lst",
+                    logical_name="VISPROTO", output_path="VISPROTO.LST",
+                    status="skipped_invalid",
+                    reason=("SET.BAS first root child does not contain the "
+                            "visual-prototype table; Scripts/VISPROTO.LST "
+                            "fallback kept")))
+            else:
+                try:
+                    from vp_manager import (
+                        export_visproto_bytes,
+                        parse_visproto_bytes,
+                        reconstruct_embedded_vps,
+                    )
+
+                    embedded_vps = reconstruct_embedded_vps(archive.path)
+                    visproto_list = export_visproto_bytes(
+                        embedded_vps.as_table(),
+                        include_comments=False,
+                        encoding="cp1252",
+                        newline="\r\n",
+                    )
+                    verified_visproto = parse_visproto_bytes(
+                        visproto_list, require_terminator=True)
+                    if len(verified_visproto.entries) != len(visproto_container.kids):
+                        raise SetBasExportError(
+                            "VISPROTO.LST VP count verification failed")
+                    expected_names = tuple(
+                        entry.base_name.casefold()
+                        for entry in embedded_vps.entries)
+                    actual_names = tuple(
+                        entry.base_name.casefold()
+                        for entry in verified_visproto.entries)
+                    if actual_names != expected_names:
+                        raise SetBasExportError(
+                            "VISPROTO.LST VP order/name verification failed")
+                except Exception as exc:
+                    rows.append(_runtime_manifest_row(
+                        source_name="embedded visproto.base",
+                        class_name="visproto.lst",
+                        logical_name="VISPROTO", output_path="VISPROTO.LST",
+                        status="skipped_invalid",
+                        reason=f"{exc}; Scripts/VISPROTO.LST fallback kept",
+                        source_offset=visproto_container.source_objt_offset))
+                else:
+                    row = _runtime_manifest_row(
+                        source_name="embedded visproto.base",
+                        class_name="visproto.lst", logical_name="VISPROTO",
+                        output_path="VISPROTO.LST", data=visproto_list,
+                        status="planned",
+                        reason=("converted from the first SET root child to an "
+                                "editable VISPROTO.LST, preserving VP order"),
+                        source_offset=visproto_container.source_objt_offset)
+                    rows.append(row)
+                    candidates.append(
+                        _RuntimeLooseCandidate(row=row, data=visproto_list))
+
             for base_object in base_asset.all_objects():
+                if base_object is visproto_container:
+                    continue
                 source_name = (base_object.name or
                                f"<unnamed BASE @ 0x{base_object.source_objt_offset:X}>")
                 if not base_object.name:
@@ -741,7 +806,7 @@ def _plan_runtime_loose(archive: SetBasArchive
     by_output: dict[str, list[dict]] = defaultdict(list)
     for row in rows:
         if row["output_path"] and row["class"] in (
-                *RUNTIME_LOOSE_CLASSES, "base.class"):
+                *RUNTIME_LOOSE_CLASSES, "base.class", "visproto.lst"):
             by_output[row["output_path"].casefold()].append(row)
     for group in by_output.values():
         if len(group) < 2:
@@ -768,9 +833,20 @@ def _plan_runtime_loose(archive: SetBasArchive
 
 
 def _validate_runtime_row_bytes(row: dict, data: bytes) -> str:
-    if row["class"] != "base.class":
+    class_name = row["class"]
+    if class_name == "visproto.lst":
+        from vp_manager import parse_visproto_bytes
+        try:
+            table = parse_visproto_bytes(data, require_terminator=True)
+        except Exception as exc:
+            return f"VISPROTO.LST parse failed: {exc}"
+        if not table.entries:
+            return "VISPROTO.LST contains no VP entries"
+        return ""
+
+    if class_name != "base.class":
         return _validate_emrs_payload(
-            row["class"], data, row["source_name"])
+            class_name, data, row["source_name"])
 
     from base_parser import parse_base_bytes
     parsed = parse_base_bytes(data, row["output_path"])
@@ -786,6 +862,13 @@ def _resolver_check(loose_root: Path, row: dict,
                     cache: dict[tuple[Path, str], AssetResolver]) -> str:
     output_parts = row["output_path"].replace("\\", "/").split("/")
     class_name = row["class"]
+    if class_name == "visproto.lst":
+        if row["output_path"].casefold() != "visproto.lst":
+            return "VISPROTO override must be Loose/VISPROTO.LST"
+        expected = loose_root / "VISPROTO.LST"
+        if not expected.is_file() or expected.is_symlink():
+            return "canonical Loose/VISPROTO.LST is missing or unsafe"
+        return ""
     canonical_folder = {
         "ilbm.class": "ILBM",
         "sklt.class": "SKLT",
@@ -1113,6 +1196,7 @@ def export_runtime_loose(archive: SetBasArchive, target: str | Path, *,
             "loose_root": str(loose_root),
             "logical_root": f"Data/Set{set_id}/Loose",
             "folders": ["ILBM", "ANM", "SKLT", "BASE"],
+            "root_files": ["VISPROTO.LST"],
         },
         "hash_algorithm": "sha256",
         "dry_run": dry_run,

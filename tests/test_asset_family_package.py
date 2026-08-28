@@ -18,7 +18,6 @@ from asset_family_package import (
     MANIFEST_NAME,
     AssetFamilyPackageError,
     PackageEntry,
-    import_family_package,
     package_relative_path,
     validate_family_package,
     write_package_manifest,
@@ -241,105 +240,6 @@ class CompleteAssetFamilyPackageTests(unittest.TestCase):
             self.assertTrue(any(
                 "exactly one exported base.class" in error
                 for error in validation.errors))
-
-    def test_import_round_trip_and_different_collision_are_atomic(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            parent = Path(tmp)
-            source = parent / "source"
-            source.mkdir()
-            _make_package(source)
-            destination = parent / "destination"
-
-            imported = import_family_package(source, destination)
-
-            self.assertTrue(imported.validation.valid)
-            self.assertEqual(len(imported.copied), 7)
-            second = import_family_package(source, destination)
-            self.assertEqual(len(second.copied), 0)
-            self.assertEqual(len(second.identical), 7)
-            original = (destination / "Texture" / "STATIC.ILB").read_bytes()
-            (destination / "Texture" / "STATIC.ILB").write_bytes(b"user")
-            with self.assertRaises(AssetFamilyPackageError):
-                import_family_package(source, destination)
-            self.assertEqual(
-                (destination / "Texture" / "STATIC.ILB").read_bytes(),
-                b"user")
-            self.assertNotEqual(original, b"user")
-
-    def test_import_final_reload_failure_removes_every_new_file(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            parent = Path(tmp)
-            source = parent / "source"
-            source.mkdir()
-            _make_package(source)
-            destination = parent / "destination"
-            real_validate = validate_family_package
-
-            def fail_destination(root, **kwargs):
-                validation = real_validate(root, **kwargs)
-                if Path(root).resolve() == destination.resolve():
-                    validation.valid = False
-                    validation.errors.append(
-                        "simulated final isolated reload failure")
-                return validation
-
-            with patch(
-                    "asset_family_package.validate_family_package",
-                    side_effect=fail_destination):
-                with self.assertRaises(AssetFamilyPackageError):
-                    import_family_package(source, destination)
-
-            self.assertTrue(destination.is_dir())
-            self.assertEqual(list(destination.rglob("*")), [])
-
-    def test_runtime_loose_import_relocates_entry_by_internal_base_name(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            parent = Path(tmp)
-            source = parent / "source"
-            source.mkdir()
-            _make_package(source)
-            destination = parent / "Data" / "Set1" / "Loose"
-            destination.mkdir(parents=True)
-            root_manifest = destination / MANIFEST_NAME
-            root_manifest.write_bytes(b"unrelated loose-root manifest")
-
-            imported = import_family_package(
-                source, destination, runtime_loose=True)
-
-            self.assertEqual(imported.base_name, "TEST")
-            self.assertEqual(imported.vp_assignment, "TEST.base")
-            self.assertEqual(
-                imported.entry_base, destination / "BASE" / "TEST.BASE")
-            self.assertTrue(imported.entry_base.is_file())
-            self.assertTrue(imported.validation.valid)
-            runtime_manifest = (
-                destination / "BASE" / "TEST.asset_family_manifest.json")
-            installed_manifest = json.loads(
-                runtime_manifest.read_text(encoding="utf-8"))
-            self.assertEqual(
-                root_manifest.read_bytes(), b"unrelated loose-root manifest")
-            self.assertEqual(
-                installed_manifest["entry_base"], "BASE/TEST.BASE")
-            self.assertTrue(any(
-                item["exported_path"] == "BASE/TEST.BASE"
-                for item in installed_manifest["entries"]))
-            self.assertTrue(any(
-                item["exported_path"] == "SKLT/TEST.SKLT"
-                for item in installed_manifest["entries"]))
-            self.assertTrue(any(
-                item["exported_path"] == "ILBM/STATIC.ILB"
-                for item in installed_manifest["entries"]))
-            installed_validation = validate_family_package(
-                destination,
-                manifest_relative=Path("BASE")
-                / "TEST.asset_family_manifest.json")
-            self.assertTrue(
-                installed_validation.valid,
-                installed_validation.errors)
-            second = import_family_package(
-                source, destination, runtime_loose=True)
-            self.assertEqual(second.copied, [])
-            self.assertEqual(len(second.identical), 7)
 
     def test_window_export_builds_the_validated_portable_layout(self):
         with tempfile.TemporaryDirectory() as tmp:

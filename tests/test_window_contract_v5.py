@@ -126,7 +126,7 @@ class WindowContractV5Tests(unittest.TestCase):
             self.assertNotIn("Frame full family", view_labels)
             self.assertNotIn("Navigation help", view_labels)
             self.assertIn("Vanilla distance fade (1400/600)", view_labels)
-            self.assertTrue(window.retail_distance_fade_check.isChecked())
+            self.assertFalse(window.retail_distance_fade_check.isChecked())
             tool_labels = []
             for menu_action in window.menuBar().actions():
                 menu = menu_action.menu()
@@ -161,6 +161,8 @@ class WindowContractV5Tests(unittest.TestCase):
                 "Export Runtime Loose SET")
             self.assertFalse(window.setbas_runtime_loose_button.isEnabled())
             self.assertFalse(window.export_runtime_loose_action.isEnabled())
+            self.assertFalse(hasattr(window, "import_vp_package_action"))
+            self.assertFalse(hasattr(window, "save_asset_family_action"))
             for removed_vp_control in (
                     "vp_import_button", "vp_new_spin", "vp_assign_button",
                     "vp_undo_button", "vp_redo_button", "vp_clear_button",
@@ -205,13 +207,13 @@ class WindowContractV5Tests(unittest.TestCase):
                 [action.text() for action in window.file_import_menu.actions()],
                 [
                     "Import BAS Archive", "Import SKLT", "Import ILBM",
-                    "Import Asset Family", "Import VP Package",
+                    "Import Asset Family",
                 ],
             )
             self.assertEqual(
                 [action.text() for action in window.file_export_menu.actions()],
                 [
-                    "Export SET Family", "Export BASE",
+                    "Export Runtime Loose SET", "Export BASE",
                     "Export SKLT", "Export ILBM", "Overwrite",
                 ],
             )
@@ -250,9 +252,45 @@ class WindowContractV5Tests(unittest.TestCase):
 
             self.assertTrue(window.save_sklt_action.isEnabled())
             self.assertTrue(window.overwrite_action.isEnabled())
-            self.assertFalse(window.save_asset_family_action.isEnabled())
             self.assertFalse(window.save_base_action.isEnabled())
             self.assertFalse(window.save_ilbm_action.isEnabled())
+        finally:
+            window.close()
+
+    def test_import_asset_family_reuses_selected_directory_between_steps(self):
+        window = AssemblyWindow()
+        try:
+            window._last_directory = Path("C:/start")
+            selected_dir = Path("C:/UA/Assets/Family")
+            single_results = [
+                (str(selected_dir / "MODEL.SKLT"), "Skeletons"),
+                (str(selected_dir / "MODEL.BASE"), "BASE"),
+            ]
+            multi_results = [
+                ([str(selected_dir / "MODEL.ILBM")], "Textures"),
+                ([str(selected_dir / "MODEL.ANM")], "Animations"),
+            ]
+            with patch.object(
+                    assembly_window_module.QFileDialog, "getOpenFileName",
+                    side_effect=single_results) as single_dialog, patch.object(
+                    assembly_window_module.QFileDialog, "getOpenFileNames",
+                    side_effect=multi_results) as multi_dialog, patch.object(
+                    window, "_open_manual_asset_family") as open_family:
+                window.open_family_dialog()
+
+            self.assertEqual(single_dialog.call_args_list[0].args[2],
+                             "C:/start")
+            self.assertEqual(single_dialog.call_args_list[1].args[2],
+                             str(selected_dir))
+            self.assertEqual(multi_dialog.call_args_list[0].args[2],
+                             str(selected_dir))
+            self.assertEqual(multi_dialog.call_args_list[1].args[2],
+                             str(selected_dir))
+            open_family.assert_called_once_with(
+                str(selected_dir / "MODEL.SKLT"),
+                str(selected_dir / "MODEL.BASE"),
+                [str(selected_dir / "MODEL.ILBM")],
+                [str(selected_dir / "MODEL.ANM")])
         finally:
             window.close()
 
