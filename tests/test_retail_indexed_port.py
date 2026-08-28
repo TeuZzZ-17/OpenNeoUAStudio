@@ -159,6 +159,10 @@ class IndexedViewerPolicySourceTests(unittest.TestCase):
         self.assertNotIn("_indexed_dynamic_quality_active", viewer)
         self.assertNotIn("textured_indexed", viewer + window + batch)
         self.assertNotIn("snapshot_renderer_combo", window + batch)
+        self.assertNotIn("_configure_area_fade_preview", window)
+        self.assertNotIn("set_area_fade_preview", viewer)
+        self.assertNotIn("fadeStart:", window)
+        self.assertIn("Vanilla distance fade (1400/600)", window)
 
     def test_snapshot_forces_retail_and_fails_closed_independently_of_ui_mode(self):
         snapshot = self._method_source("render_snapshot")
@@ -471,7 +475,7 @@ class IndexedAdapterPortTests(unittest.TestCase):
             with self.assertRaises(UnsupportedIndexedMaterialError):
                 adapter.resolve_surface(face, material, 0)
 
-    def test_vanm_frame_selection_keeps_asset_vislimit_fade_profile(self):
+    def test_vanm_frame_selection_keeps_vanilla_gameplay_fade_profile(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp) / "Set1"
             block = AmeshBlock(
@@ -500,19 +504,12 @@ class IndexedAdapterPortTests(unittest.TestCase):
             second_surface = adapter.resolve_surface(face, material, 1)
             self.assertEqual(first_surface.indices, b"\x08")
             self.assertEqual(second_surface.indices, b"\x0a")
-            self.assertEqual(adapter.distance_fade_profile(face), {
+            self.assertIsNone(adapter.distance_fade_profile(face))
+            self.assertEqual(adapter.distance_fade_profile(face, True), {
                 "vis_limit": 1400.0,
                 "fade_start": 800.0,
                 "fade_length": 600.0,
             })
-            self.assertEqual(
-                adapter.distance_fade_profile(face, {
-                    "use_asset": False,
-                    "vis_limit": 2000.0,
-                    "fade_start": 1000.0,
-                    "fade_length": 1000.0,
-                })["fade_start"],
-                1000.0)
 
 
 if __name__ == "__main__":
