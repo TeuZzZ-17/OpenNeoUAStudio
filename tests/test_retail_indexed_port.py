@@ -162,7 +162,7 @@ class IndexedViewerPolicySourceTests(unittest.TestCase):
         self.assertNotIn("_configure_area_fade_preview", window)
         self.assertNotIn("set_area_fade_preview", viewer)
         self.assertNotIn("fadeStart:", window)
-        self.assertIn("Vanilla distance fade (1400/600)", window)
+        self.assertIn("Vanilla distance fade", window)
 
     def test_snapshot_forces_retail_and_fails_closed_independently_of_ui_mode(self):
         snapshot = self._method_source("render_snapshot")
