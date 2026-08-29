@@ -115,7 +115,6 @@ class GeometryPastePreviewTests(unittest.TestCase):
         viewport.set_mode("materials")
         start = viewport._project(
             viewport._camera_vertex(clipboard.pivot)).toPoint()
-        viewport.set_show_owner_bbox(False)
         viewport.begin_paste_preview(clipboard, start)
         image = QImage(320, 240, QImage.Format.Format_ARGB32)
         image.fill(QColor(20, 20, 20))

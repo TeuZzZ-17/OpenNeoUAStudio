@@ -125,7 +125,7 @@ class WindowContractV5Tests(unittest.TestCase):
                 if not action.isSeparator()]
             self.assertNotIn("Frame full family", view_labels)
             self.assertNotIn("Navigation help", view_labels)
-            self.assertIn("Vanilla distance fade (1400/600)", view_labels)
+            self.assertIn("Vanilla distance fade", view_labels)
             self.assertFalse(window.retail_distance_fade_check.isChecked())
             tool_labels = []
             for menu_action in window.menuBar().actions():
@@ -161,6 +161,20 @@ class WindowContractV5Tests(unittest.TestCase):
                 "Export Runtime Loose SET")
             self.assertFalse(window.setbas_runtime_loose_button.isEnabled())
             self.assertFalse(window.export_runtime_loose_action.isEnabled())
+            source = (Path(__file__).resolve().parents[1] /
+                      "assembly_window.py").read_text(encoding="utf-8")
+            self.assertNotIn("Source (always read-only):", source)
+            self.assertNotIn("Dry run / validate only (write no files)", source)
+            self.assertNotIn(
+                "Replace different files at the exact managed output paths",
+                source)
+            self.assertIn(
+                "Select the destination SetN folder. Loose/ is created ",
+                source)
+            self.assertIn("target_edit.setMinimumWidth(500)", source)
+            self.assertNotIn("Please wait until completion.", source)
+            self.assertNotIn("runtimeLooseWaitDialog", source)
+            self.assertNotIn("QProgressDialog", source)
             self.assertFalse(hasattr(window, "import_vp_package_action"))
             self.assertFalse(hasattr(window, "save_asset_family_action"))
             for removed_vp_control in (
