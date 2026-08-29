@@ -1063,9 +1063,6 @@ class AssemblyWindow(QMainWindow):
         self.view_menu = view_menu
         self.sen_check = self._checkable("SEN2 volume",
                                          self.viewport.set_show_sen, False)
-        self.owner_bounds_check = self._checkable(
-            "Selected Model Bounds",
-            self.viewport.set_show_owner_bbox, False)
         self.wire_check = self._checkable("Wire overlay",
                                           self.viewport.set_wire_overlay, True)
         self.cull_check = self._checkable("Backface cull",
@@ -1079,13 +1076,12 @@ class AssemblyWindow(QMainWindow):
             "Preview issues overlay", self.viewport.set_overlay_visible, True)
         self.mapping_diag_check = self._checkable(
             "Mapping diagnostics", self._set_mapping_diagnostics, True)
-        for action in (self.sen_check, self.owner_bounds_check,
-                       self.wire_check, self.cull_check,
+        for action in (self.sen_check, self.wire_check, self.cull_check,
                        self.axes_check, self.grid_check,
                        self.overlay_check, self.mapping_diag_check):
             view_menu.addAction(action)
         self.retail_distance_fade_check = self._checkable(
-            "Vanilla distance fade (1400/600)",
+            "Vanilla distance fade",
             self.viewport.set_retail_distance_fade, False)
         self.retail_distance_fade_check.setStatusTip(
             "Retail AREA distance fade recovered from the fork, disabled by default: "
@@ -3471,23 +3467,21 @@ class AssemblyWindow(QMainWindow):
                           else self._last_directory)
         dialog = QDialog(self)
         dialog.setWindowTitle("Export Runtime Loose SET")
+        dialog.setMinimumWidth(680)
         layout = QVBoxLayout(dialog)
-        info = QLabel(
-            f"Source (always read-only): {self._setbas.path}\n\n"
-            "Converts the embedded VISPROTO table to editable VISPROTO.LST "
-            "and exports BASE, SKLT, ILBM and ANM representations already "
-            "supported by OpenNeoUA into Loose/VISPROTO.LST, Loose/BASE, "
-            "Loose/SKLT, Loose/ILBM and Loose/ANM. VISPROTO falls back to "
-            "Scripts/VISPROTO.LST; other unsupported or ambiguous resources "
-            "stay in SET.BAS. Select the target SetN folder; the "
-            "Loose subfolder is managed automatically.")
-        info.setWordWrap(True)
-        layout.addWidget(info)
+
+        target_hint = QLabel(
+            "Select the destination SetN folder. Loose/ is created "
+            "automatically.")
+        target_hint.setWordWrap(True)
+        layout.addWidget(target_hint)
 
         target_row = QHBoxLayout()
         target_edit = QLineEdit(str(initial_target))
         target_edit.setPlaceholderText(".../Data/SetN or .../Data/Sets/SetN")
+        target_edit.setMinimumWidth(500)
         browse_button = QPushButton("Browse...")
+        browse_button.setMinimumWidth(100)
 
         def browse_target() -> None:
             selected = QFileDialog.getExistingDirectory(
@@ -3501,15 +3495,6 @@ class AssemblyWindow(QMainWindow):
         target_row.addWidget(browse_button)
         layout.addLayout(target_row)
 
-        dry_run_check = QCheckBox(
-            "Dry run / validate only (write no files)")
-        overwrite_check = QCheckBox(
-            "Replace different files at the exact managed output paths")
-        overwrite_check.setToolTip(
-            "Never modifies SET.BAS and never resolves duplicate archive names. "
-            "Higher-priority existing PNG overrides remain protected.")
-        layout.addWidget(dry_run_check)
-        layout.addWidget(overwrite_check)
         buttons = QDialogButtonBox(
             QDialogButtonBox.StandardButton.Ok
             | QDialogButtonBox.StandardButton.Cancel)
@@ -3522,13 +3507,12 @@ class AssemblyWindow(QMainWindow):
         try:
             loose_root, _set_id = resolve_runtime_loose_root(
                 target_edit.text().strip())
-            self.statusBar().showMessage(
-                "Validating Runtime Loose export..." if dry_run_check.isChecked()
-                else "Exporting Runtime Loose SET...")
+            self.statusBar().showMessage("Exporting Runtime Loose SET...")
+            QApplication.processEvents()
             summary = export_runtime_loose(
                 self._setbas, loose_root,
-                dry_run=dry_run_check.isChecked(),
-                overwrite=overwrite_check.isChecked(),
+                dry_run=False,
+                overwrite=False,
                 log=self._log)
         except (SetBasExportError, OSError, ValueError) as exc:
             QMessageBox.critical(
@@ -3537,17 +3521,15 @@ class AssemblyWindow(QMainWindow):
             return
 
         validation = summary["validation"]
-        mode = "Dry-run" if dry_run_check.isChecked() else "Export"
         message = (
-            f"{mode}: {summary['exported']} exported, "
+            f"Export: {summary['exported']} exported, "
             f"{summary['already_current']} already current, "
             f"{summary['planned']} planned, {summary['skipped']} left to "
             f"fallback, {summary['errors']} error(s). Layout validation: "
             f"{'PASS' if validation['valid'] else 'FAIL'} "
             f"({validation['checked']} checked).")
-        if not dry_run_check.isChecked():
-            self._last_directory = loose_root
-            self._remember_output_folder(loose_root)
+        self._last_directory = loose_root
+        self._remember_output_folder(loose_root)
         issue_text = ""
         if validation["issues"]:
             issue_text = "\n\n" + "\n".join(validation["issues"][:12])
@@ -4107,8 +4089,7 @@ class AssemblyWindow(QMainWindow):
             self.mode_combo.setEnabled(False)
             self.edit_toggle_action.setEnabled(False)
             self.toolbar_view_preset_combo.setEnabled(False)
-            for action in (self.sen_check, self.wire_check,
-                           self.owner_bounds_check, self.axes_check,
+            for action in (self.sen_check, self.wire_check, self.axes_check,
                            self.grid_check, self.overlay_check,
                            self.mapping_diag_check):
                 action.setEnabled(False)
@@ -4125,8 +4106,7 @@ class AssemblyWindow(QMainWindow):
             self.mode_combo.setEnabled(True)
             self.edit_toggle_action.setEnabled(True)
             self.toolbar_view_preset_combo.setEnabled(True)
-            for action in (self.sen_check, self.wire_check,
-                           self.owner_bounds_check, self.axes_check,
+            for action in (self.sen_check, self.wire_check, self.axes_check,
                            self.grid_check, self.overlay_check,
                            self.mapping_diag_check):
                 action.setEnabled(True)

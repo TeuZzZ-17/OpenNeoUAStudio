@@ -115,7 +115,6 @@ class SnapshotStudioWindow(AssemblyWindow):
 
         for action in (
                 self.sen_check,
-                self.owner_bounds_check,
                 self.wire_check,
                 self.axes_check,
                 self.grid_check,

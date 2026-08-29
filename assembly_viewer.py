@@ -539,7 +539,6 @@ class AssetViewport(QWidget):
         self._show_axes = True
         self._show_grid = True
         self._show_wire_overlay = False
-        self._show_owner_bbox = False
         self._backface_cull = True
 
         self._yaw = self.RESET_YAW
@@ -2711,10 +2710,6 @@ class AssetViewport(QWidget):
         self._show_wire_overlay = enabled
         self.update()
 
-    def set_show_owner_bbox(self, enabled: bool) -> None:
-        self._show_owner_bbox = enabled
-        self.update()
-
     def set_backface_cull(self, enabled: bool) -> None:
         self._backface_cull = enabled
         self.update()
@@ -2753,7 +2748,6 @@ class AssetViewport(QWidget):
                 "show_axes": self._show_axes,
                 "show_grid": self._show_grid,
                 "show_wire_overlay": self._show_wire_overlay,
-                "show_owner_bbox": self._show_owner_bbox,
                 "mapping_diagnostics": self._mapping_diagnostics,
                 "show_diag_overlay": self._show_diag_overlay,
             }
@@ -2768,7 +2762,6 @@ class AssetViewport(QWidget):
         self._show_axes = False
         self._show_grid = False
         self._show_wire_overlay = False
-        self._show_owner_bbox = False
         self._mapping_diagnostics = False
         self._show_diag_overlay = False
         self.update()
@@ -2784,7 +2777,6 @@ class AssetViewport(QWidget):
             self._show_axes = state["show_axes"]
             self._show_grid = state["show_grid"]
             self._show_wire_overlay = state["show_wire_overlay"]
-            self._show_owner_bbox = state["show_owner_bbox"]
             self._mapping_diagnostics = state["mapping_diagnostics"]
             self._show_diag_overlay = state["show_diag_overlay"]
         self._snapshot_active = False
@@ -2812,8 +2804,6 @@ class AssetViewport(QWidget):
             self._show_grid = state["show_grid"] if visible else False
             self._show_wire_overlay = (
                 state["show_wire_overlay"] if visible else False)
-            self._show_owner_bbox = (
-                state["show_owner_bbox"] if visible else False)
             self._mapping_diagnostics = (
                 state["mapping_diagnostics"] if visible else False)
             self._show_diag_overlay = (
@@ -3488,11 +3478,6 @@ class AssetViewport(QWidget):
                 or self._model_nudge_before is not None):
             self._draw_precision_guides(painter, target, camera)
 
-        if not clean and self._selected_owner is not None \
-                and self._show_owner_bbox:
-            self._draw_owner_bbox(painter, self._selected_owner,
-                                  target, camera)
-
         if not clean and self._show_sen:
             self._draw_sen(painter, target, camera)
 
@@ -3847,24 +3832,6 @@ class AssetViewport(QWidget):
         if (int(target.left()), int(target.top()), int(target.width()),
                 int(target.height())) == (0, 0, self.width(), self.height()):
             self._mode_label_rect = QRect(x, y, width, height)
-
-    def _draw_owner_bbox(self, painter: QPainter, owner: str,
-                         target: QRectF, camera: dict) -> None:
-        bounds = self._owner_bounds.get(owner)
-        if bounds is None:
-            return
-        x0, y0, z0, x1, y1, z1 = bounds
-        corners = [(x, y, z) for x in (x0, x1) for y in (y0, y1)
-                   for z in (z0, z1)]
-        pts = [self._project(self._camera_vertex(c, camera), target, camera)
-               for c in corners]
-        edges = [(0, 1), (0, 2), (0, 4), (1, 3), (1, 5), (2, 3), (2, 6),
-                 (3, 7), (4, 5), (4, 6), (5, 7), (6, 7)]
-        painter.setPen(QPen(QColor(90, 230, 255, 220), 1.4,
-                            Qt.PenStyle.DashLine))
-        painter.setBrush(Qt.BrushStyle.NoBrush)
-        for a, b in edges:
-            painter.drawLine(pts[a], pts[b])
 
     def _draw_diagnostics_overlay(self, painter: QPainter) -> None:
         # Compact badge: first two issues only; the full list lives in the

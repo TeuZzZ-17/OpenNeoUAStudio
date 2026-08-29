@@ -81,7 +81,6 @@ class SnapshotStudioTests(unittest.TestCase):
         try:
             for action in (
                     window.sen_check,
-                    window.owner_bounds_check,
                     window.wire_check,
                     window.axes_check,
                     window.grid_check,
