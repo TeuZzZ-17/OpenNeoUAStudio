@@ -431,6 +431,11 @@ class AssemblyWindow(QMainWindow):
         self._live_scale_dialog: LiveScaleDialog | None = None
         self._live_rotate_dialog: LiveRotateDialog | None = None
         self._asset_filter_expansion: dict[int, bool] | None = None
+        # Asset Dependencies is a viewer/resolver, not a normal selection list.
+        # The rows composing the active model keep a persistent visual focus
+        # until the selected model owner changes.
+        self._asset_focus_owner: str | None = None
+        self._asset_focus_restoring = False
         self._texture_preview_cache: dict[tuple[int, str], str | None] = {}
         self._texture_qimage_cache: dict[tuple, QImage] = {}
 
@@ -479,6 +484,14 @@ class AssemblyWindow(QMainWindow):
         self.asset_tree.setStyleSheet(
             "QTreeWidget::item { padding-top: 0px; padding-bottom: 0px; "
             "padding-left: 1px; padding-right: 1px; }"
+            # Persistent model dependencies: muted wine-red, intentionally
+            # distinct from the ordinary grey hover feedback.
+            "QTreeWidget::item:selected { "
+            "background-color: rgba(126, 46, 58, 185); }"
+            "QTreeWidget::item:selected:hover { "
+            "background-color: rgba(126, 46, 58, 185); }"
+            "QTreeWidget::item:hover:!selected { "
+            "background-color: rgba(255, 255, 255, 24); }"
         )
         asset_header = self.asset_tree.header()
         asset_header.setSectionsMovable(False)
@@ -495,6 +508,8 @@ class AssemblyWindow(QMainWindow):
         self.asset_tree.setHorizontalScrollBarPolicy(
             Qt.ScrollBarPolicy.ScrollBarAsNeeded)
         self.asset_tree.currentItemChanged.connect(self._on_tree_node_selected)
+        self.asset_tree.itemSelectionChanged.connect(
+            self._restore_asset_dependency_focus)
         self.asset_tree.itemClicked.connect(
             lambda item, _column: self._remember_component_selection(item))
         self.asset_tree.itemDoubleClicked.connect(self._on_tree_double_clicked)
@@ -823,8 +838,11 @@ class AssemblyWindow(QMainWindow):
             return
         name = data[1]
         owner = self._tree_owner_for_item(item)
-        if owner:
-            self._select_owner(owner, preserve_asset_selection=True)
+        if owner and owner != self._selected_owner:
+            self.statusBar().showMessage(
+                "Asset Dependencies is a viewer: select that model first "
+                "before playing its animation.", 6000)
+            return
         self._sync_animation_controls()
         if name not in self._family.animations or not self.viewport.has_animation:
             self.statusBar().showMessage(
@@ -11748,7 +11766,13 @@ class AssemblyWindow(QMainWindow):
 
     def _fill_asset_tree(self, family: AssetFamily) -> None:
         self._asset_filter_expansion = None
-        self.asset_tree.clear()
+        # Rebuild atomically with respect to the persistent-focus guard: Qt
+        # emits selection changes while clear() destroys the old items.
+        self.asset_tree.blockSignals(True)
+        try:
+            self.asset_tree.clear()
+        finally:
+            self.asset_tree.blockSignals(False)
         self._owner_to_item = {}
         if family.root_object is None:
             root_item = self._tree_item(
@@ -11908,46 +11932,75 @@ class AssemblyWindow(QMainWindow):
         if self.tree_search.text().strip():
             self._filter_asset_tree(self.tree_search.text())
 
+    def _asset_dependency_focus_items(
+            self, owner: str | None) -> list[QTreeWidgetItem]:
+        """Return the BASE/dependency rows belonging to one model owner."""
+
+        if owner is None or owner not in self._owner_to_item:
+            return []
+        owner_item = self._owner_to_item[owner]
+        focused = [owner_item]
+
+        def collect_components(item) -> None:
+            for index in range(item.childCount()):
+                child = item.child(index)
+                data = child.data(0, Qt.ItemDataRole.UserRole)
+                kind = data[0] if data else ""
+                # A child BASE is another model entry point.  Its dependencies
+                # become highlighted only when that child becomes the active
+                # selected model.
+                if kind == "child":
+                    continue
+                if kind in ("skeleton", "texture", "animation"):
+                    focused.append(child)
+                elif kind == "group" and not child.text(0).startswith(
+                        "Children / KIDS"):
+                    child.setExpanded(True)
+                    collect_components(child)
+
+        collect_components(owner_item)
+        return focused
+
+    def _restore_asset_dependency_focus(self) -> None:
+        """Keep the active model dependency highlight locked and persistent."""
+
+        if self._asset_focus_restoring:
+            return
+        focused = self._asset_dependency_focus_items(self._asset_focus_owner)
+        if not focused:
+            return
+        self._asset_focus_restoring = True
+        try:
+            self.asset_tree.blockSignals(True)
+            self.asset_tree.clearSelection()
+            for item in focused:
+                item.setSelected(True)
+        finally:
+            self.asset_tree.blockSignals(False)
+            self._asset_focus_restoring = False
+
     def _focus_assets_for_owner(self, owner: str | None,
                                 switch_tabs: bool = True) -> None:
-        """Show and highlight the files composing the newly opened model."""
+        """Show and persistently highlight the active model dependencies."""
 
         if owner is None or owner not in self._owner_to_item:
             return
         if switch_tabs:
             self._right_tabs.setCurrentWidget(self._resources_tabs)
             self._resources_tabs.setCurrentWidget(self._assets_panel)
+        self._asset_focus_owner = owner
         owner_item = self._owner_to_item[owner]
-        focus_item = owner_item
-        self.asset_tree.blockSignals(True)
-        self.asset_tree.clearSelection()
-        owner_item.setSelected(True)
         owner_item.setExpanded(True)
-
-        def select_components(item) -> None:
-            nonlocal focus_item
-            for index in range(item.childCount()):
-                child = item.child(index)
-                data = child.data(0, Qt.ItemDataRole.UserRole)
-                kind = data[0] if data else ""
-                if kind == "child":
-                    continue
-                if kind in ("skeleton", "texture", "animation"):
-                    child.setSelected(True)
-                elif kind == "group" and not child.text(0).startswith(
-                        "Children / KIDS"):
-                    child.setExpanded(True)
-                    select_components(child)
-
-        select_components(owner_item)
-        self.asset_tree.setCurrentItem(focus_item)
-        # setCurrentItem clears an extended selection; restore the complete
-        # component highlight after establishing the keyboard/current row.
-        owner_item.setSelected(True)
-        select_components(owner_item)
+        self.asset_tree.blockSignals(True)
+        try:
+            # Current row is only keyboard/context position.  The red rows are
+            # the persistent model-dependency focus and are restored separately.
+            self.asset_tree.setCurrentItem(owner_item)
+        finally:
+            self.asset_tree.blockSignals(False)
+        self._restore_asset_dependency_focus()
         self.asset_tree.scrollToItem(
-            focus_item, QAbstractItemView.ScrollHint.PositionAtCenter)
-        self.asset_tree.blockSignals(False)
+            owner_item, QAbstractItemView.ScrollHint.PositionAtCenter)
 
     def _tree_owner_for_item(self, item) -> str | None:
         current = item
@@ -11965,6 +12018,8 @@ class AssemblyWindow(QMainWindow):
         return None
 
     def _on_tree_double_clicked(self, item, _column=0) -> None:
+        """Open dependency previews without turning the tree into a model list."""
+
         data = item.data(0, Qt.ItemDataRole.UserRole)
         if data:
             kind, payload = data
@@ -11974,10 +12029,6 @@ class AssemblyWindow(QMainWindow):
                 return
             if kind == "animation":
                 self._play_asset_animation(item)
-                return
-        owner = self._tree_owner_for_item(item)
-        if owner:
-            self._select_owner(owner)
 
     def _filter_asset_tree(self, text: str) -> None:
         self._asset_filter_expansion = filter_asset_tree(
@@ -12100,11 +12151,10 @@ class AssemblyWindow(QMainWindow):
             self._set_object_info(["No asset information available."])
             return
         kind, payload = data
-        owner = self._tree_owner_for_item(current)
-        if owner:
-            self._select_owner(owner, preserve_asset_selection=True)
-        if kind == "animation":
-            self._play_asset_animation(current)
+        # Asset Dependencies is intentionally a viewer/resolver.  Moving the
+        # current/hovered row must never switch the active model or replace its
+        # persistent dependency highlight.  Explicit model changes come from
+        # the viewport/Bas Manager (or the dedicated context action).
         family = self._family
         lines = []
 
