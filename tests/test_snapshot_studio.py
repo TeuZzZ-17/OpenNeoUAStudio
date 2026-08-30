@@ -13,6 +13,17 @@ class SnapshotStudioTests(unittest.TestCase):
     def setUpClass(cls):
         cls.app = QApplication.instance() or QApplication([])
 
+    def test_close_bas_archive_uses_shared_action(self):
+        window = SnapshotStudioWindow()
+        try:
+            labels = [
+                action.text() for action in window.file_menu.actions()
+                if not action.isSeparator()]
+            self.assertIn("Close BAS Archive", labels)
+            self.assertFalse(window.close_bas_archive_action.isEnabled())
+        finally:
+            window.close()
+
     def test_workspace_has_only_snapshot_and_bas_manager_tabs(self):
         window = SnapshotStudioWindow()
         try:

@@ -169,6 +169,7 @@ class WindowContractV5Tests(unittest.TestCase):
                 window.loaded_resource_label.font().pointSize(), 13)
             self.assertEqual(
                 window.loaded_resource_label.text(), "No Resource Loaded")
+            self.assertFalse(hasattr(window, "setbas_preview_button"))
             self.assertEqual(
                 window.setbas_runtime_loose_button.text(),
                 "Export Runtime Loose SET")
@@ -233,7 +234,9 @@ class WindowContractV5Tests(unittest.TestCase):
             labels = [
                 action.text() for action in window.file_menu.actions()
                 if not action.isSeparator()]
-            self.assertEqual(labels, ["Import", "Export", "Exit"])
+            self.assertEqual(
+                labels, ["Import", "Export", "Close BAS Archive", "Exit"])
+            self.assertFalse(window.close_bas_archive_action.isEnabled())
             self.assertEqual(
                 [action.text() for action in window.file_import_menu.actions()],
                 [

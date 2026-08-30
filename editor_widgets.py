@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from PySide6.QtCore import QPointF, QSize, QTimer, Qt
 from PySide6.QtGui import (
+    QAction,
     QColor,
     QIcon,
     QImage,
@@ -15,6 +16,7 @@ from PySide6.QtWidgets import (
     QAbstractItemView,
     QDialog,
     QDialogButtonBox,
+    QFileDialog,
     QGridLayout,
     QLineEdit,
     QListView,
@@ -26,6 +28,53 @@ from PySide6.QtWidgets import (
     QVBoxLayout,
     QWidget,
 )
+
+
+BAS_ARCHIVE_FILTER = (
+    "SET.BAS archives (SET.BAS *.bas *.BAS);;All files (*)"
+)
+
+
+def create_import_bas_archive_action(parent, callback, *, shortcut=False) -> QAction:
+    """Create the canonical BAS-archive import action used by Studio tools."""
+
+    action = QAction("Import BAS Archive", parent)
+    if shortcut:
+        from PySide6.QtGui import QKeySequence
+        action.setShortcut(QKeySequence.StandardKey.Open)
+    action.triggered.connect(callback)
+    return action
+
+
+def choose_bas_archive(parent, directory) -> str:
+    """Open the shared SET.BAS chooser and return the selected path or ''."""
+
+    path, _ = QFileDialog.getOpenFileName(
+        parent, "Import BAS Archive", str(directory), BAS_ARCHIVE_FILTER)
+    return path
+
+
+def install_standard_file_menu_tail(
+        file_menu, parent, *, close_archive_callback=None, exit_text="Exit"):
+    """Install the canonical Close BAS Archive / Exit tail.
+
+    Editors that do not own a BAS provider omit ``close_archive_callback`` and
+    receive only the shared separator + Exit action.  The actual close
+    lifecycle remains editor-owned; only the action semantics and placement
+    are centralized here.
+    """
+
+    close_action = None
+    if close_archive_callback is not None:
+        close_action = QAction("Close BAS Archive", parent)
+        close_action.setEnabled(False)
+        close_action.triggered.connect(close_archive_callback)
+        file_menu.addAction(close_action)
+    file_menu.addSeparator()
+    exit_action = QAction(exit_text, parent)
+    exit_action.triggered.connect(parent.close)
+    file_menu.addAction(exit_action)
+    return close_action, exit_action
 
 
 STATUS_COLORS = {
