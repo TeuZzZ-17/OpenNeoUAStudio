@@ -113,14 +113,9 @@ class SnapshotStudioWindow(AssemblyWindow):
                 self.map_editor_action):
             action.setVisible(False)
 
-        for action in (
-                self.sen_check,
-                self.wire_check,
-                self.axes_check,
-                self.grid_check,
-                self.overlay_check,
-                self.mapping_diag_check):
-            action.setVisible(False)
+        # View options stay on the shared AssemblyWindow QAction path.
+        # Snapshot Studio changes only their default checked state; it does
+        # not own a second menu or a second set of overlay controls.
 
         for name in self._EDIT_ACTION_NAMES:
             action = getattr(self, name, None)

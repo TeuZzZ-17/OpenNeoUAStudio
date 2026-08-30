@@ -22,6 +22,7 @@ from pathlib import Path
 from PySide6.QtCore import QPointF, QSize, QTimer, QUrl, Qt
 from PySide6.QtGui import (
     QAction,
+    QBrush,
     QColor,
     QCursor,
     QDesktopServices,
@@ -91,6 +92,7 @@ from asset_tree_filter import filter_tree as filter_asset_tree
 from assembly_viewer import (
     AssetViewport,
     VIEW_MODES,
+    VIEW_PRESET_ANGLES,
     VIEW_PRESETS,
 )
 from base_mapping_editor import (
@@ -420,6 +422,8 @@ class AssemblyWindow(QMainWindow):
         self._snapshot_mode_active = False
         self._snapshot_custom_color: QColor | None = None
         self._snapshot_zoom_percent = 100
+        self._snapshot_zoom_reference: float | None = None
+        self._snapshot_view_action_state: dict[QAction, bool] | None = None
         self._skip_model_switch_warning = False
         self._bundle_targets: dict[str, tuple[Path, Path]] = {}
         # Last successfully written standalone BASE per owner.  Subsequent
@@ -484,12 +488,12 @@ class AssemblyWindow(QMainWindow):
         self.asset_tree.setStyleSheet(
             "QTreeWidget::item { padding-top: 0px; padding-bottom: 0px; "
             "padding-left: 1px; padding-right: 1px; }"
-            # Persistent model dependencies: muted wine-red, intentionally
-            # distinct from the ordinary grey hover feedback.
+            # Persistent model dependencies: muted sage green, intentionally
+            # distinct from ordinary grey hover feedback and from error red.
             "QTreeWidget::item:selected { "
-            "background-color: rgba(126, 46, 58, 185); }"
+            "background-color: rgba(74, 112, 84, 180); }"
             "QTreeWidget::item:selected:hover { "
-            "background-color: rgba(126, 46, 58, 185); }"
+            "background-color: rgba(74, 112, 84, 180); }"
             "QTreeWidget::item:hover:!selected { "
             "background-color: rgba(255, 255, 255, 24); }"
         )
@@ -525,6 +529,11 @@ class AssemblyWindow(QMainWindow):
         self.texture_list.setIconSize(QPixmap(96, 96).size())
         self.texture_list.setSelectionMode(
             QAbstractItemView.SelectionMode.ExtendedSelection)
+        # Asset Textures is a compact resource browser. Long source paths wrap
+        # inside the available width instead of forcing a horizontal scrollbar.
+        self.texture_list.setWordWrap(True)
+        self.texture_list.setHorizontalScrollBarPolicy(
+            Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         self.texture_list.setContextMenuPolicy(
             Qt.ContextMenuPolicy.CustomContextMenu)
         self.texture_list.customContextMenuRequested.connect(
@@ -827,9 +836,6 @@ class AssemblyWindow(QMainWindow):
             return
         subprocess.Popen(["explorer", "/select,", str(path)])
 
-    def _select_owner_from_asset_menu(self, owner: str) -> None:
-        self._select_owner(owner)
-
     def _play_asset_animation(self, item) -> None:
         if self._family is None or item is None:
             return
@@ -861,10 +867,6 @@ class AssemblyWindow(QMainWindow):
             return
         data = item.data(0, Qt.ItemDataRole.UserRole)
         menu = QMenu(self.asset_tree)
-        owner = self._tree_owner_for_item(item)
-        if owner:
-            menu.addAction("Select model",
-                           lambda: self._select_owner_from_asset_menu(owner))
         if data:
             kind, payload = data
             if kind == "texture":
@@ -902,8 +904,6 @@ class AssemblyWindow(QMainWindow):
             use = menu.addAction(
                 "Use Selected Source", self._use_selected_candidate)
             use.setEnabled(bool(candidate))
-            assign = menu.addAction("Assign File...", self._assign_manual_file)
-            assign.setEnabled(bool(logical_name))
             keep = menu.addAction("Keep for Session", self._keep_for_session)
             keep.setEnabled(bool(logical_name))
             revert = menu.addAction("Revert Source", self._clear_override)
@@ -1198,23 +1198,15 @@ class AssemblyWindow(QMainWindow):
         tools_menu.addAction(self.mapping_repair_action)
 
         diagnostics_menu = self.menuBar().addMenu("&Diagnostics")
-        show_warnings = QAction("Warnings", self)
-        show_warnings.triggered.connect(lambda: self._show_diagnostics(0))
-        diagnostics_menu.addAction(show_warnings)
-        show_validation = QAction("Validation", self)
-        show_validation.triggered.connect(lambda: self._show_diagnostics(1))
-        diagnostics_menu.addAction(show_validation)
-        show_log = QAction("Log", self)
-        show_log.triggered.connect(lambda: self._show_diagnostics(2))
-        diagnostics_menu.addAction(show_log)
+        self.diagnostics_toggle_action = QAction(
+            "Show Diagnostic Panel", self)
+        self.diagnostics_toggle_action.triggered.connect(
+            self._toggle_diagnostics_panel)
+        diagnostics_menu.addAction(self.diagnostics_toggle_action)
         diagnostics_menu.addSeparator()
-        hide_diagnostics = QAction("Hide diagnostics panel", self)
-        hide_diagnostics.triggered.connect(self._hide_diagnostics)
-        diagnostics_menu.addAction(hide_diagnostics)
-        diagnostics_menu.addSeparator()
-        clear_log = QAction("Clear log", self)
-        clear_log.triggered.connect(self._clear_diagnostics)
-        diagnostics_menu.addAction(clear_log)
+        self.clear_log_action = QAction("Clear Log", self)
+        self.clear_log_action.triggered.connect(self._clear_diagnostics)
+        diagnostics_menu.addAction(self.clear_log_action)
 
         self.object_info_menu = self.menuBar().addMenu("Object Info")
         self.object_info_menu.setStyleSheet("""
@@ -1751,12 +1743,6 @@ class AssemblyWindow(QMainWindow):
         self.snapshot_zoom_slider.valueChanged.connect(
             self._on_snapshot_zoom_changed)
         view_layout.addWidget(self.snapshot_zoom_slider, 2, 0, 1, 2)
-        self.snapshot_guides_button = QPushButton("Show Guides and Overlays")
-        self.snapshot_guides_button.setCheckable(True)
-        self.snapshot_guides_button.setChecked(False)
-        self.snapshot_guides_button.toggled.connect(
-            self._on_snapshot_guides_toggled)
-        view_layout.addWidget(self.snapshot_guides_button, 3, 0, 1, 2)
         studio_layout.addWidget(view_box)
 
         background_box = QGroupBox("Background")
@@ -1777,6 +1763,22 @@ class AssemblyWindow(QMainWindow):
             self._clear_snapshot_color)
         self.snapshot_clear_color_button.setEnabled(False)
         background_layout.addWidget(self.snapshot_clear_color_button, 0, 2)
+        background_layout.addWidget(QLabel("Opacity:"), 1, 0)
+        self.snapshot_opacity_spin = QSpinBox()
+        self.snapshot_opacity_spin.setRange(0, 100)
+        self.snapshot_opacity_spin.setSuffix("%")
+        self.snapshot_opacity_spin.setValue(100)
+        self.snapshot_opacity_spin.setEnabled(False)
+        self.snapshot_opacity_spin.valueChanged.connect(
+            self._on_snapshot_opacity_changed)
+        background_layout.addWidget(self.snapshot_opacity_spin, 1, 1)
+        self.snapshot_opacity_slider = QSlider(Qt.Orientation.Horizontal)
+        self.snapshot_opacity_slider.setRange(0, 100)
+        self.snapshot_opacity_slider.setValue(100)
+        self.snapshot_opacity_slider.setEnabled(False)
+        self.snapshot_opacity_slider.valueChanged.connect(
+            self._on_snapshot_opacity_changed)
+        background_layout.addWidget(self.snapshot_opacity_slider, 1, 2)
         studio_layout.addWidget(background_box)
 
         output_box = QGroupBox("Output size")
@@ -1805,7 +1807,6 @@ class AssemblyWindow(QMainWindow):
         output_layout.addWidget(self.snapshot_height_label, 2, 0)
         output_layout.addWidget(self.snapshot_height_spin, 2, 1)
         self._set_snapshot_custom_size_visible(False)
-        studio_layout.addWidget(output_box)
 
         animation_box = QGroupBox("Animation frame")
         animation_layout = QVBoxLayout(animation_box)
@@ -1814,7 +1815,7 @@ class AssemblyWindow(QMainWindow):
         self.snapshot_frame_label.setWordWrap(True)
         animation_layout.addWidget(self.snapshot_frame_label)
         animation_buttons = QHBoxLayout()
-        self.snapshot_next_frame_button = QPushButton("Next Frame")
+        self.snapshot_next_frame_button = QPushButton("Next Frame >>")
         self.snapshot_next_frame_button.clicked.connect(
             self.viewport.step_animation)
         animation_buttons.addWidget(self.snapshot_next_frame_button)
@@ -1822,12 +1823,17 @@ class AssemblyWindow(QMainWindow):
         self.snapshot_reset_frame_button.clicked.connect(
             self.viewport.reset_animation)
         animation_buttons.addWidget(self.snapshot_reset_frame_button)
+        self.snapshot_previous_frame_button = QPushButton("<< Previous Frame")
+        self.snapshot_previous_frame_button.clicked.connect(
+            self.viewport.step_animation_backward)
+        animation_buttons.addWidget(self.snapshot_previous_frame_button)
         animation_layout.addLayout(animation_buttons)
         studio_layout.addWidget(animation_box)
 
         export_box = QGroupBox("Export")
         export_layout = QGridLayout(export_box)
-        export_layout.addWidget(QLabel("Format:"), 0, 0)
+        export_layout.addWidget(output_box, 0, 0, 1, 2)
+        export_layout.addWidget(QLabel("Format:"), 1, 0)
         self.snapshot_format_combo = QComboBox()
         supported = {
             bytes(fmt).decode("ascii", errors="ignore").lower()
@@ -1843,16 +1849,24 @@ class AssemblyWindow(QMainWindow):
             self.snapshot_format_combo.addItem("WebP", "webp")
         self.snapshot_format_combo.currentIndexChanged.connect(
             self._on_snapshot_format_changed)
-        export_layout.addWidget(self.snapshot_format_combo, 0, 1)
-        export_layout.addWidget(QLabel("Quality:"), 1, 0)
+        export_layout.addWidget(self.snapshot_format_combo, 1, 1)
+        export_layout.addWidget(QLabel("Quality:"), 2, 0)
         self.snapshot_quality_spin = QSpinBox()
         self.snapshot_quality_spin.setRange(1, 100)
         self.snapshot_quality_spin.setValue(95)
         self.snapshot_quality_spin.setEnabled(False)
-        export_layout.addWidget(self.snapshot_quality_spin, 1, 1)
+        export_layout.addWidget(self.snapshot_quality_spin, 2, 1)
         self.snapshot_export_button = QPushButton("Export Image As...")
         self.snapshot_export_button.clicked.connect(self._export_snapshot)
-        export_layout.addWidget(self.snapshot_export_button, 2, 0, 1, 2)
+        export_layout.addWidget(self.snapshot_export_button, 3, 0, 1, 2)
+        self.snapshot_figurine_button = QPushButton("Export Figurine Set...")
+        self.snapshot_figurine_button.setToolTip(
+            "Export the current model as PNG from every canonical angle. "
+            "Uses the selected background color/opacity, or transparent "
+            "alpha when no background is selected.")
+        self.snapshot_figurine_button.clicked.connect(
+            self._export_figurine_set)
+        export_layout.addWidget(self.snapshot_figurine_button, 4, 0, 1, 2)
         studio_layout.addWidget(export_box)
         studio_layout.addStretch(1)
         snapshot_layout.addWidget(studio_box)
@@ -2043,10 +2057,10 @@ class AssemblyWindow(QMainWindow):
 
     # -- actions ---------------------------------------------------------------
 
-    def _show_diagnostics(self, index: int) -> None:
-        """Show diagnostics strictly inside the existing main-window area."""
+    def _show_diagnostics(self, index: int | None = None) -> None:
+        """Show the shared diagnostics panel without duplicating menu routes."""
 
-        if self._diagnostics_tabs is not None:
+        if self._diagnostics_tabs is not None and index is not None:
             index = max(0, min(index,
                                self._diagnostics_tabs.count() - 1))
             self._diagnostics_tabs.setCurrentIndex(index)
@@ -2054,6 +2068,7 @@ class AssemblyWindow(QMainWindow):
             return
         was_visible = self._diagnostics_dock.isVisible()
         self._diagnostics_dock.show()
+        self._sync_diagnostics_menu_label()
         splitter = getattr(self, "_diagnostics_splitter", None)
         if splitter is None:
             return
@@ -2076,15 +2091,29 @@ class AssemblyWindow(QMainWindow):
     def _hide_diagnostics(self) -> None:
         if self._diagnostics_dock is not None:
             self._diagnostics_dock.hide()
+        self._sync_diagnostics_menu_label()
+
+    def _sync_diagnostics_menu_label(self) -> None:
+        action = getattr(self, "diagnostics_toggle_action", None)
+        panel = getattr(self, "_diagnostics_dock", None)
+        if action is not None:
+            action.setText(
+                "Hide Diagnostic Panel"
+                if panel is not None and panel.isVisible()
+                else "Show Diagnostic Panel")
+
+    def _toggle_diagnostics_panel(self) -> None:
+        panel = getattr(self, "_diagnostics_dock", None)
+        if panel is not None and panel.isVisible():
+            self._hide_diagnostics()
+        else:
+            self._show_diagnostics()
 
     def _clear_diagnostics(self) -> None:
-        """Clear every visible diagnostics stream and its viewport overlay."""
+        """Clear the shared diagnostic log without erasing current findings."""
 
-        self.warning_list.clear()
-        self.checks_list.clear()
         self.log_list.clear()
-        self.viewport.set_diagnostics([])
-        self.statusBar().showMessage("Diagnostics cleared.", 2000)
+        self.statusBar().showMessage("Log cleared.", 2000)
 
     def _set_object_info(self, lines: list[str]) -> None:
         """Store selected-asset details and rebuild the compact info menu."""
@@ -3962,13 +3991,20 @@ class AssemblyWindow(QMainWindow):
         return self._editor_tabs.currentWidget()
 
     def _has_editable_model(self) -> bool:
+        """Return whether the selected model can enter in-memory Edit Mode.
+
+        SET.BAS ownership controls where data may be written, not whether the
+        decoded model may be edited in memory.  Archive-backed models therefore
+        use the same GeometryEditSession as loose models; verified export paths
+        remain the only way to persist those edits.
+        """
+
         if self._family is None:
             return False
         owner = self._selected_owner
         obj = self._owner_to_obj.get(owner) if owner else None
         return bool(
-            obj is not None and getattr(obj, "skeleton", None) is not None
-            and not self._is_embedded_geometry_source(obj))
+            obj is not None and getattr(obj, "skeleton", None) is not None)
 
     def _family_entry_is_setbas_archive(self) -> bool:
         """True only for a model whose BASE entry still lives in SET.BAS."""
@@ -3984,11 +4020,12 @@ class AssemblyWindow(QMainWindow):
             return False
 
     @staticmethod
-    def _archive_read_only_message(action: str = "editing") -> str:
+    def _archive_read_only_message(action: str = "edited") -> str:
         return (
-            "SET.BAS is a read-only archive provider. Use Show Dependencies "
-            "then Edit BASE Dependencies to create a standalone BASE copy, "
-            f"or use File > Import > Import BASE before {action}.")
+            "SET.BAS is a read-only archive provider. The selected model may "
+            f"be {action} in memory, but SET.BAS is never overwritten. Use "
+            "Export Asset Family (or an explicit BASE/SKLT export) to keep "
+            "the changes.")
 
     def _selected_model_is_archive_read_only(self) -> bool:
         """Return True only when the selected model comes from SET.BAS."""
@@ -4047,16 +4084,6 @@ class AssemblyWindow(QMainWindow):
             if self.viewport.is_edit_mode:
                 self.viewport.exit_edit_mode()
             return
-        if self._selected_model_is_archive_read_only():
-            edit_button.blockSignals(True)
-            edit_button.setChecked(False)
-            edit_button.blockSignals(False)
-            if self.viewport.is_edit_mode:
-                self.viewport.exit_edit_mode()
-            self._notify(
-                self._archive_read_only_message(), 9000)
-            return
-
         panel = self._active_editor_panel()
         if panel is self._model_editor_panel:
             self.viewport.set_highlight_polys(set())
@@ -4163,8 +4190,8 @@ class AssemblyWindow(QMainWindow):
                 widget.blockSignals(True)
                 widget.setValue(100)
                 widget.blockSignals(False)
-            self.snapshot_guides_button.setChecked(False)
-            self.viewport.set_snapshot_guides_visible(False)
+            self._snapshot_zoom_reference = self.viewport.camera_zoom
+            self._enter_snapshot_view_profile()
             snapshot_mode = "textured"
             self.viewport.set_mode(snapshot_mode)
             self.mode_combo.blockSignals(True)
@@ -4174,10 +4201,6 @@ class AssemblyWindow(QMainWindow):
             self.mode_combo.setEnabled(False)
             self.edit_toggle_action.setEnabled(False)
             self.toolbar_view_preset_combo.setEnabled(False)
-            for action in (self.sen_check, self.wire_check, self.axes_check,
-                           self.grid_check, self.overlay_check,
-                           self.mapping_diag_check):
-                action.setEnabled(False)
             self._on_snapshot_preset_changed(
                 self.snapshot_view_combo.currentText())
         elif not entering and self._snapshot_mode_active:
@@ -4191,10 +4214,8 @@ class AssemblyWindow(QMainWindow):
             self.mode_combo.setEnabled(True)
             self.edit_toggle_action.setEnabled(True)
             self.toolbar_view_preset_combo.setEnabled(True)
-            for action in (self.sen_check, self.wire_check, self.axes_check,
-                           self.grid_check, self.overlay_check,
-                           self.mapping_diag_check):
-                action.setEnabled(True)
+            self._leave_snapshot_view_profile()
+            self._snapshot_zoom_reference = None
         self._sync_tab_edit_mode()
         if self._right_tabs.currentWidget() is self._editor_tabs \
                 and self._selected_model_is_archive_read_only():
@@ -4242,11 +4263,65 @@ class AssemblyWindow(QMainWindow):
         if self._snapshot_mode_active and previous > 0:
             self.viewport.adjust_snapshot_zoom(value / previous)
 
-    def _on_snapshot_guides_toggled(self, visible: bool) -> None:
-        self.snapshot_guides_button.setText(
-            "Hide Guides and Overlays" if visible
-            else "Show Guides and Overlays")
-        self.viewport.set_snapshot_guides_visible(visible)
+    def _sync_snapshot_zoom_from_viewport(self) -> None:
+        """Reflect wheel/gesture zoom in the shared Snapshot controls."""
+
+        reference = self._snapshot_zoom_reference
+        if not self._snapshot_mode_active or not reference or reference <= 0:
+            return
+        value = round(self.viewport.camera_zoom / reference * 100.0)
+        value = max(25, min(300, value))
+        self._snapshot_zoom_percent = value
+        for widget in (self.snapshot_zoom_spin, self.snapshot_zoom_slider):
+            if widget.value() != value:
+                widget.blockSignals(True)
+                widget.setValue(value)
+                widget.blockSignals(False)
+
+    def _view_option_actions(self) -> tuple[QAction, ...]:
+        """Return the one shared View-option set used by every workspace."""
+
+        return (
+            self.sen_check, self.wire_check, self.cull_check, self.axes_check,
+            self.grid_check, self.overlay_check, self.mapping_diag_check,
+            self.retail_distance_fade_check,
+        )
+
+    def _enter_snapshot_view_profile(self) -> None:
+        """Use shared View actions with Snapshot-specific clean defaults."""
+
+        actions = self._view_option_actions()
+        if self._snapshot_view_action_state is None:
+            self._snapshot_view_action_state = {
+                action: action.isChecked() for action in actions}
+        defaults = {
+            self.sen_check: False,
+            self.wire_check: False,
+            self.cull_check: True,
+            self.axes_check: False,
+            self.grid_check: False,
+            self.overlay_check: False,
+            self.mapping_diag_check: False,
+            self.retail_distance_fade_check: False,
+        }
+        for action in actions:
+            action.setVisible(True)
+            action.setEnabled(True)
+            action.setChecked(defaults[action])
+
+    def _leave_snapshot_view_profile(self) -> None:
+        state = self._snapshot_view_action_state
+        if not state:
+            return
+        self._snapshot_view_action_state = None
+        for action, checked in state.items():
+            action.setEnabled(True)
+            action.setChecked(checked)
+
+    def _snapshot_include_guides(self) -> bool:
+        return any(action.isChecked() for action in (
+            self.sen_check, self.wire_check, self.axes_check, self.grid_check,
+            self.overlay_check, self.mapping_diag_check))
 
     def _on_snapshot_preset_changed(self, preset: str) -> None:
         if not self._snapshot_mode_active:
@@ -4261,6 +4336,10 @@ class AssemblyWindow(QMainWindow):
         self.viewport.apply_snapshot_preset(
             preset, self._snapshot_output_size(),
             self._snapshot_zoom_percent)
+        if self._snapshot_zoom_percent > 0:
+            self._snapshot_zoom_reference = (
+                self.viewport.camera_zoom
+                / (self._snapshot_zoom_percent / 100.0))
 
     def _on_toolbar_view_preset_changed(self, preset: str) -> None:
         if self._snapshot_mode_active:
@@ -4278,6 +4357,8 @@ class AssemblyWindow(QMainWindow):
 
         self._sync_gizmo_camera()
         self._update_reset_camera_action()
+        if self._snapshot_mode_active:
+            self._sync_snapshot_zoom_from_viewport()
         combo = (self.snapshot_view_combo if self._snapshot_mode_active
                  else self.toolbar_view_preset_combo)
         if combo.currentText() == "Current View":
@@ -4303,12 +4384,19 @@ class AssemblyWindow(QMainWindow):
             self._update_reset_camera_action()
             return
         self.viewport.reset_view()
+        if self._snapshot_mode_active:
+            self._sync_snapshot_zoom_from_viewport()
         self._sync_gizmo_camera()
         self._update_reset_camera_action()
 
     def _snapshot_background(self) -> QColor | None:
-        return (QColor(self._snapshot_custom_color)
-                if self._snapshot_custom_color is not None else None)
+        if self._snapshot_custom_color is None:
+            return None
+        color = QColor(self._snapshot_custom_color)
+        opacity = getattr(self, "snapshot_opacity_spin", None)
+        percent = opacity.value() if opacity is not None else 100
+        color.setAlpha(round(255 * max(0, min(100, percent)) / 100.0))
+        return color
 
     def _update_snapshot_color_button(self) -> None:
         if not hasattr(self, "snapshot_color_button"):
@@ -4318,11 +4406,27 @@ class AssemblyWindow(QMainWindow):
             self.snapshot_color_button.setText("None")
             self.snapshot_color_button.setStyleSheet("")
             self.snapshot_clear_color_button.setEnabled(False)
+            if hasattr(self, "snapshot_opacity_spin"):
+                self.snapshot_opacity_spin.setEnabled(False)
+                self.snapshot_opacity_slider.setEnabled(False)
             return
         self.snapshot_color_button.setText("")
         self.snapshot_color_button.setStyleSheet(
             f"background-color: {color.name()}; border: 1px solid #b0b0b0;")
         self.snapshot_clear_color_button.setEnabled(True)
+        if hasattr(self, "snapshot_opacity_spin"):
+            self.snapshot_opacity_spin.setEnabled(True)
+            self.snapshot_opacity_slider.setEnabled(True)
+
+    def _on_snapshot_opacity_changed(self, value: int) -> None:
+        value = max(0, min(100, int(value)))
+        for widget in (self.snapshot_opacity_spin,
+                       self.snapshot_opacity_slider):
+            if widget.value() != value:
+                widget.blockSignals(True)
+                widget.setValue(value)
+                widget.blockSignals(False)
+        self.viewport.set_snapshot_background(self._snapshot_background())
 
     def _choose_snapshot_color(self) -> None:
         initial = (self._snapshot_custom_color
@@ -4335,7 +4439,7 @@ class AssemblyWindow(QMainWindow):
             return
         self._snapshot_custom_color = color
         self._update_snapshot_color_button()
-        self.viewport.set_snapshot_background(color)
+        self.viewport.set_snapshot_background(self._snapshot_background())
 
     def _clear_snapshot_color(self) -> None:
         self._snapshot_custom_color = None
@@ -4350,6 +4454,7 @@ class AssemblyWindow(QMainWindow):
         self.snapshot_frame_label.setText(text)
         self.snapshot_next_frame_button.setEnabled(has_animation)
         self.snapshot_reset_frame_button.setEnabled(has_animation)
+        self.snapshot_previous_frame_button.setEnabled(has_animation)
 
     def _on_animation_frame_changed(self, text: str = "") -> None:
         self._update_snapshot_frame_text(text)
@@ -4436,7 +4541,7 @@ class AssemblyWindow(QMainWindow):
             background = QColor(96, 96, 96)
         image = self.viewport.render_snapshot(
             self._snapshot_output_size(), background,
-            include_guides=self.snapshot_guides_button.isChecked())
+            include_guides=self._snapshot_include_guides())
         if image.isNull():
             QMessageBox.warning(self, "Export failed",
                                 "The snapshot image could not be rendered.")
@@ -4453,6 +4558,93 @@ class AssemblyWindow(QMainWindow):
         self._last_directory = path.parent
         self.statusBar().showMessage(
             f"Snapshot written to {path} ({image.width()} x {image.height()})")
+
+    def _export_figurine_set(self) -> None:
+        """Export the current model from every canonical Snapshot angle."""
+
+        if not self.viewport.has_model:
+            QMessageBox.information(
+                self, "No model loaded",
+                "Load a model before exporting a Figurine Set.")
+            return
+        output = QFileDialog.getExistingDirectory(
+            self, "Choose Figurine Set destination folder",
+            str(self._last_directory))
+        if not output:
+            return
+        root = Path(output)
+        root.mkdir(parents=True, exist_ok=True)
+        model_name = self._snapshot_name()
+        targets = []
+        for index, view in enumerate(VIEW_PRESET_ANGLES, 1):
+            slug = re.sub(r"[^A-Za-z0-9_.-]+", "_", view).strip("._")
+            targets.append((
+                view, root / f"{model_name}_{index:02d}_{slug}.png"))
+        existing = [path for _view, path in targets if path.exists()]
+        if existing:
+            answer = QMessageBox.question(
+                self, "Replace existing Figurine Set images?",
+                f"{len(existing)} destination image(s) already exist. "
+                "Replace them?",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                QMessageBox.StandardButton.No)
+            if answer != QMessageBox.StandardButton.Yes:
+                return
+
+        camera = self.viewport._camera_state()
+        preset = self.snapshot_view_combo.currentText()
+        zoom_percent = self._snapshot_zoom_percent
+        zoom_reference = self._snapshot_zoom_reference
+        size = self._snapshot_output_size()
+        background = self._snapshot_background()
+        include_guides = self._snapshot_include_guides()
+        written = []
+        try:
+            for view, path in targets:
+                self.viewport.apply_snapshot_preset(
+                    view, size, zoom_percent)
+                image = self.viewport.render_snapshot(
+                    size, background, include_guides=include_guides)
+                if image.isNull():
+                    raise OSError(f"Could not render {view}")
+                partial = path.with_suffix(path.suffix + ".part")
+                if partial.exists():
+                    partial.unlink()
+                writer = QImageWriter(str(partial), b"png")
+                if not writer.write(image):
+                    if partial.exists():
+                        partial.unlink()
+                    raise OSError(
+                        writer.errorString() or f"Could not write {path}")
+                os.replace(partial, path)
+                written.append(path)
+        except (OSError, RuntimeError) as exc:
+            QMessageBox.warning(
+                self, "Figurine Set export failed",
+                f"{exc}\n\n{len(written)} image(s) were written before "
+                "the failure.")
+            return
+        finally:
+            self.viewport._set_camera_state(camera)
+            self.viewport.update()
+            self.snapshot_view_combo.blockSignals(True)
+            self.snapshot_view_combo.setCurrentText(preset)
+            self.snapshot_view_combo.blockSignals(False)
+            self._snapshot_zoom_percent = zoom_percent
+            self._snapshot_zoom_reference = zoom_reference
+            for widget in (self.snapshot_zoom_spin, self.snapshot_zoom_slider):
+                widget.blockSignals(True)
+                widget.setValue(zoom_percent)
+                widget.blockSignals(False)
+
+        self._last_directory = root
+        background_label = (
+            "transparent" if background is None
+            else f"background {background.name()} at "
+                 f"{self.snapshot_opacity_spin.value()}% opacity")
+        self.statusBar().showMessage(
+            f"Figurine Set exported: {len(written)} PNG, "
+            f"{background_label}.", 10000)
 
     # -- texture resolution (session-only overrides) -----------------------------
 
@@ -4630,6 +4822,7 @@ class AssemblyWindow(QMainWindow):
                 6000)
         edit_button = getattr(self, "edit_toggle_action", None)
         keep_global_edit = bool(edit_button and edit_button.isChecked())
+        previous_owner = self._selected_owner
         self._selected_owner = owner
         self.viewport.set_selected_owner(owner)
         # The polygon workbench (picking / inspector / UV editor) follows the
@@ -4642,6 +4835,12 @@ class AssemblyWindow(QMainWindow):
                 self._rebuild_workbench(self._family, owner)
                 self.viewport._primary_owner = owner
             self._apply_selected_children_scope()
+        # Asset Dependencies is model-scoped.  Rebuild only when the real
+        # active owner changes, never for hover/current-row activity inside the
+        # dependency viewer itself.
+        if owner is not None and owner != previous_owner \
+                and self._family is not None:
+            self._fill_asset_tree(self._family)
         if owner and not from_viewport:
             pass  # tree already reflects the click
         if owner and from_viewport:
@@ -4660,6 +4859,7 @@ class AssemblyWindow(QMainWindow):
         self._refresh_fx_elements()
         if not preserve_asset_selection:
             self._focus_assets_for_owner(owner, switch_tabs=False)
+        self._refresh_texture_usage_highlight()
         self._sync_geometry_save_controls()
         if hasattr(self, "_editor_tabs"):
             if keep_global_edit and not self.edit_toggle_action.isChecked():
@@ -8384,10 +8584,6 @@ class AssemblyWindow(QMainWindow):
     def _show_mapping_repair(self) -> None:
         """Open the existing repair panel as one shared-state tool window."""
 
-        if self._selected_model_is_archive_read_only():
-            self._notify(
-                self._archive_read_only_message("repairing mappings"), 9000)
-            return
         self._show_model_editor()
         if self._mapping_dialog is None:
             dialog = QDialog(self)
@@ -8411,9 +8607,9 @@ class AssemblyWindow(QMainWindow):
                 self.edit_toggle_action.blockSignals(False)
                 if self.viewport.is_edit_mode:
                     self.viewport.exit_edit_mode()
-                if self._selected_model_is_archive_read_only():
-                    self._notify(
-                        self._archive_read_only_message(), 9000)
+                self._notify(
+                    "Edit Mode requires a decoded skeleton-bearing model.",
+                    7000)
                 return
             self._remember_geometry_original(self._selected_owner)
             self._sync_editor_context()
@@ -8483,23 +8679,22 @@ class AssemblyWindow(QMainWindow):
         if hasattr(self, "edit_toggle_action"):
             self.edit_toggle_action.setText(
                 "View Mode" if active else "Edit Mode")
-            self.edit_toggle_action.setEnabled(
-                not paste_preview and not archive_read_only)
+            self.edit_toggle_action.setEnabled(not paste_preview)
         if hasattr(self, "edit_menu"):
-            self.edit_menu.setEnabled(
-                not paste_preview and not archive_read_only)
+            self.edit_menu.setEnabled(not paste_preview)
         if hasattr(self, "mapping_repair_action"):
-            self.mapping_repair_action.setEnabled(not archive_read_only)
+            self.mapping_repair_action.setEnabled(not paste_preview)
         if hasattr(self, "_right_tabs") and hasattr(self, "_editor_tabs"):
             editor_index = self._right_tabs.indexOf(self._editor_tabs)
             if editor_index >= 0:
-                # The Editor remains inspectable in View Mode. Only mutating
-                # Edit Mode is disabled for a BASE still inside SET.BAS.
+                # Archive-backed and loose models share the same in-memory
+                # Edit Mode. Persistence remains constrained by the verified
+                # export/overwrite paths, so SET.BAS itself stays read-only.
                 self._right_tabs.setTabEnabled(editor_index, True)
                 self._right_tabs.setTabToolTip(
                     editor_index,
                     self._archive_read_only_message()
-                    if archive_read_only else "Edit the selected loose model.")
+                    if archive_read_only else "Edit the selected model.")
         for name in ("edit_select_all_action", "edit_select_none_action"):
             action = getattr(self, name, None)
             if action is not None:
@@ -9009,7 +9204,7 @@ class AssemblyWindow(QMainWindow):
         self._sync_edit_action_states()
 
     def _confirm_discard_geometry(self) -> bool:
-        """Confirm switching away from unsaved loose-model edits."""
+        """Confirm switching away from unsaved in-memory model edits."""
 
         model_dirty = bool(
             self._geom_dirty or self._texture_original
@@ -9019,9 +9214,16 @@ class AssemblyWindow(QMainWindow):
             return True
         if self._skip_model_switch_warning:
             return True
-        message = (
-            "This model has unsaved changes.\n"
-            "Switching models will discard them. Continue?")
+        if self._selected_model_is_archive_read_only():
+            message = (
+                "This SET.BAS model has unsaved in-memory changes.\n"
+                "SET.BAS has not been modified. Export Asset Family first if "
+                "you want to keep the changes.\n\n"
+                "Switching models will discard them. Continue?")
+        else:
+            message = (
+                "This model has unsaved changes.\n"
+                "Switching models will discard them. Continue?")
         box = QMessageBox(QMessageBox.Icon.Question, "Unsaved changes",
                           message,
                           QMessageBox.StandardButton.Yes
@@ -9649,6 +9851,31 @@ class AssemblyWindow(QMainWindow):
                 f"Overwritten complete asset family rooted at "
                 f"{base_target.name}.", 9000)
 
+    @staticmethod
+    def _visual_reference_names(family_objects) -> tuple[set[str], set[str]]:
+        """Collect direct animation and texture refs for model objects."""
+
+        animation_names: set[str] = set()
+        texture_names: set[str] = set()
+        for current_obj in family_objects:
+            for block in current_obj.base_object.ades:
+                visual_blocks = (block.iter_visual_blocks()
+                                 if hasattr(block, "iter_visual_blocks")
+                                 else (block,))
+                for visual in visual_blocks:
+                    for texture in (
+                            getattr(visual, "texture", None),
+                            getattr(visual, "tracy_texture", None)):
+                        name = str(getattr(texture, "name", "") or "")
+                        if not name:
+                            continue
+                        if str(getattr(texture, "kind", "")).casefold() \
+                                == "bmpanim":
+                            animation_names.add(name)
+                        else:
+                            texture_names.add(name)
+        return animation_names, texture_names
+
     def _write_model_files(self, owner: str, family: AssetFamily, fam_obj,
                            skeleton_target: Path, base_target: Path,
                            *, ask_replace: bool) -> bool:
@@ -9702,25 +9929,8 @@ class AssemblyWindow(QMainWindow):
             skeleton_exports.append(
                 (current_obj, current_model, relative, target, source))
 
-        animation_names: set[str] = set()
-        texture_names: set[str] = set()
-        for current_obj in family_objects:
-            for block in current_obj.base_object.ades:
-                visual_blocks = (block.iter_visual_blocks()
-                                 if hasattr(block, "iter_visual_blocks")
-                                 else (block,))
-                for visual in visual_blocks:
-                    for texture in (
-                            getattr(visual, "texture", None),
-                            getattr(visual, "tracy_texture", None)):
-                        name = str(getattr(texture, "name", "") or "")
-                        if not name:
-                            continue
-                        if str(getattr(texture, "kind", "")).casefold() \
-                                == "bmpanim":
-                            animation_names.add(name)
-                        else:
-                            texture_names.add(name)
+        animation_names, texture_names = self._visual_reference_names(
+            family_objects)
 
         animation_exports = []
         for canonical in sorted(animation_names, key=str.casefold):
@@ -11764,6 +11974,35 @@ class AssemblyWindow(QMainWindow):
         return (f"BASE object at 0x{offset:X}" if offset >= 0 else
                 f"BASE object [{owner}]")
 
+    def _fit_asset_dependency_columns(self) -> None:
+        """Fit the three dependency columns inside the current viewport.
+
+        The sections remain Interactive: a user can deliberately drag them
+        wider and Qt will then expose the horizontal scrollbar.  This helper
+        only establishes a compact default after a tree rebuild.
+        """
+
+        width = self.asset_tree.viewport().width()
+        if width <= 0:
+            return
+        usable = max(240, width - 6)
+        # 46/17/37 keeps the status compact while giving Source / Path enough
+        # room to be useful.  At the minimum supported width the three minima
+        # still sum exactly to the available space, so no scrollbar is created
+        # by our default sizing.
+        asset_width = max(110, int(usable * 0.46))
+        status_width = max(70, int(usable * 0.17))
+        source_width = usable - asset_width - status_width
+        if source_width < 60:
+            deficit = 60 - source_width
+            reducible = max(0, asset_width - 110)
+            reduction = min(deficit, reducible)
+            asset_width -= reduction
+            source_width += reduction
+        self.asset_tree.setColumnWidth(0, asset_width)
+        self.asset_tree.setColumnWidth(1, status_width)
+        self.asset_tree.setColumnWidth(2, source_width)
+
     def _fill_asset_tree(self, family: AssetFamily) -> None:
         self._asset_filter_expansion = None
         # Rebuild atomically with respect to the persistent-focus guard: Qt
@@ -11780,19 +12019,20 @@ class AssemblyWindow(QMainWindow):
                 str(family.base_path or "manual selection"))
             self.asset_tree.addTopLevelItem(root_item)
             return
+        # Asset Dependencies has one stable meaning: show the active model
+        # entry point and its own dependency subtree.  Bas Manager remains the
+        # archive-wide browser.  Do not switch between whole-archive and
+        # model-scoped trees depending on whether a VP name happened to be
+        # resolved in this session.
         display_root = family.root_object
         display_owner = display_root.owner_path
-        if self._family_entry_is_setbas_archive() and self._base_entry_names:
-            scoped_owner = (
-                self._selected_owner
-                if self._selected_owner in self._base_entry_names else
-                next(iter(self._base_entry_names)))
+        if self._selected_owner:
             scoped = next((
                 obj for obj in family.all_objects()
-                if obj.owner_path == scoped_owner), None)
+                if obj.owner_path == self._selected_owner), None)
             if scoped is not None:
                 display_root = scoped
-                display_owner = scoped_owner
+                display_owner = scoped.owner_path
         root_name = self._base_entry_name(
             family, display_root, display_owner)
         root_source = str(family.base_path or "manual family")
@@ -11929,6 +12169,9 @@ class AssemblyWindow(QMainWindow):
                 group.addChild(node)
 
         self.asset_tree.expandAll()
+        # Defer one event-loop turn so the tab/layout has its real viewport
+        # width; users can still resize the Interactive sections afterwards.
+        QTimer.singleShot(0, self._fit_asset_dependency_columns)
         if self.tree_search.text().strip():
             self._filter_asset_tree(self.tree_search.text())
 
@@ -11946,15 +12189,14 @@ class AssemblyWindow(QMainWindow):
                 child = item.child(index)
                 data = child.data(0, Qt.ItemDataRole.UserRole)
                 kind = data[0] if data else ""
-                # A child BASE is another model entry point.  Its dependencies
-                # become highlighted only when that child becomes the active
-                # selected model.
-                if kind == "child":
-                    continue
-                if kind in ("skeleton", "texture", "animation"):
+                # Every native component in the active BASE subtree is part
+                # of that model dependency family.  Keep KIDS and animation
+                # frame bitmaps highlighted too; provenance/candidate rows are
+                # diagnostic choices, not model dependencies themselves.
+                if kind in ("child", "skeleton", "texture", "animation"):
                     focused.append(child)
-                elif kind == "group" and not child.text(0).startswith(
-                        "Children / KIDS"):
+                    collect_components(child)
+                elif kind == "group":
                     child.setExpanded(True)
                     collect_components(child)
 
@@ -11993,7 +12235,7 @@ class AssemblyWindow(QMainWindow):
         owner_item.setExpanded(True)
         self.asset_tree.blockSignals(True)
         try:
-            # Current row is only keyboard/context position.  The red rows are
+            # Current row is only keyboard/context position.  The green rows are
             # the persistent model-dependency focus and are restored separately.
             self.asset_tree.setCurrentItem(owner_item)
         finally:
@@ -12308,13 +12550,101 @@ class AssemblyWindow(QMainWindow):
             lines.append("group node")
         self._set_object_info(lines)
 
+    def _active_model_texture_names(self) -> set[str]:
+        """Return every ILBM/frame bitmap used by the active model subtree."""
+
+        family = self._family
+        owner = self._selected_owner
+        fam_obj = self._owner_to_obj.get(owner) if owner else None
+        if family is None or fam_obj is None:
+            return set()
+        objects = list(fam_obj.iter_tree())
+        animation_names, texture_names = self._visual_reference_names(objects)
+        for animation_name in animation_names:
+            animation = next((
+                value for key, value in family.animations.items()
+                if str(key).casefold() == animation_name.casefold()), None)
+            if animation is not None:
+                texture_names.update(
+                    str(name) for name in animation.bitmap_names if name)
+        return {name.casefold() for name in texture_names}
+
+    def _refresh_texture_usage_highlight(self) -> None:
+        """Prioritize and softly tint textures used by the active model.
+
+        The highlight is informational, not QListWidget selection state. Used
+        textures are stable-partitioned to the top whenever the active owner
+        changes, so the tab always reflects the current model immediately.
+        """
+
+        used = self._active_model_texture_names()
+        active_brush = QBrush(QColor(72, 118, 84, 54))
+        clear_brush = QBrush()
+        text_brush = QBrush(QColor(238, 238, 238))
+
+        current = self.texture_list.currentItem()
+        current_name = (
+            str(current.data(Qt.ItemDataRole.UserRole)).casefold()
+            if current is not None
+            and current.data(Qt.ItemDataRole.UserRole) else None)
+        selected_names = {
+            str(item.data(Qt.ItemDataRole.UserRole)).casefold()
+            for item in self.texture_list.selectedItems()
+            if item.data(Qt.ItemDataRole.UserRole)
+        }
+
+        # Reorder the existing items too. _fill_textures() already prioritizes
+        # its initial build, but changing the selected model must reprioritize
+        # the list without rebuilding the whole texture catalog.
+        previous_block = self.texture_list.blockSignals(True)
+        try:
+            items = [
+                self.texture_list.takeItem(0)
+                for _ in range(self.texture_list.count())
+            ]
+            used_items = []
+            other_items = []
+            for item in items:
+                name = item.data(Qt.ItemDataRole.UserRole)
+                folded = str(name).casefold() if name else ""
+                item.setForeground(text_brush)
+                item.setBackground(
+                    active_brush if folded in used else clear_brush)
+                (used_items if folded in used else other_items).append(item)
+
+            for item in used_items + other_items:
+                self.texture_list.addItem(item)
+
+            restored_current = None
+            for row in range(self.texture_list.count()):
+                item = self.texture_list.item(row)
+                name = item.data(Qt.ItemDataRole.UserRole)
+                folded = str(name).casefold() if name else ""
+                item.setSelected(folded in selected_names)
+                if current_name is not None and folded == current_name:
+                    restored_current = item
+            if restored_current is not None:
+                self.texture_list.setCurrentItem(restored_current)
+        finally:
+            self.texture_list.blockSignals(previous_block)
+
     def _fill_textures(self, family: AssetFamily | None) -> None:
         self.texture_list.clear()
         archive = getattr(family, "setbas_archive", None) or self._setbas
         family_textures = getattr(family, "textures", {})
         tracy_usage = getattr(family, "texture_tracy_usage", {})
         external_palette = getattr(family, "external_palette", None)
-        for entry in build_texture_catalog(family, archive):
+        # Used textures are always the first group.  Python's sort is stable,
+        # so both the used group and the remaining catalog keep their existing
+        # relative order.  Rebuilding after a model switch updates the priority
+        # dynamically without maintaining a second texture list.
+        used = (self._active_model_texture_names()
+                if family is not None and family is self._family else set())
+        catalog = list(build_texture_catalog(family, archive))
+        catalog.sort(
+            key=lambda entry: 0
+            if str(entry.name).casefold() in used else 1)
+        for entry in catalog:
             name = entry.name
             ref = entry.reference
             img_name = next(
@@ -12364,18 +12694,26 @@ class AssemblyWindow(QMainWindow):
                 lines.append(
                     f"{img.kind} {img.width}x{img.height}, "
                     f"{img.n_planes} planes, {compression}, {palette}, {body}")
+                # Missing CMAP is normal for many UA textures resolved with
+                # the external family palette. Keep that implementation detail
+                # out of the compact Asset Textures list. Other real warnings
+                # remain visible.
                 for warning in img.warnings:
+                    if "no cmap palette in file" in str(warning).casefold():
+                        continue
                     lines.append(f"warning: {warning}")
             item = QListWidgetItem("\n".join(lines))
             item.setData(Qt.ItemDataRole.UserRole, name)
-            item.setForeground(
-                _STATUS_COLORS.get(status, QColor(220, 220, 220)))
+            # Status remains visible in the label/icon; valid/error rows do not
+            # compete with the model-usage background through colored text.
+            item.setForeground(QBrush(QColor(238, 238, 238)))
             qimage = self._texture_qimage(img_name) if img_name else None
             if qimage is not None and not qimage.isNull():
                 item.setIcon(_checker_thumbnail(qimage))
             else:
                 item.setIcon(_status_icon(status))
             self.texture_list.addItem(item)
+        self._refresh_texture_usage_highlight()
 
     def _fill_chunks(self, family: AssetFamily) -> None:
         self.chunk_tree.clear()

@@ -866,6 +866,12 @@ class AssetViewport(QWidget):
         return self._yaw, self._pitch
 
     @property
+    def camera_zoom(self) -> float:
+        """Return the current camera zoom for shared UI synchronisation."""
+
+        return float(self._zoom)
+
+    @property
     def has_loaded_resource(self) -> bool:
         """Return whether the viewport currently owns a loaded asset family."""
 
@@ -2938,6 +2944,21 @@ class AssetViewport(QWidget):
             frame, direction = self._anim_states.get(mat_id, (0, 1))
             frame, direction = self._next_frame(mat, frame, direction)
             self._anim_states[mat_id] = (frame, direction)
+            self._anim_left_ms[mat_id] = 0.0
+        self.update()
+        self.animationFrameChanged.emit(self.current_frame_text())
+
+    def step_animation_backward(self) -> None:
+        """Move every active animation to the previous visible frame."""
+
+        for mat_id, mat in enumerate(self._materials):
+            if not mat.anim_frames:
+                continue
+            frame, direction = self._anim_states.get(mat_id, (0, 1))
+            frame = (frame - 1) % len(mat.anim_frames)
+            # Manual stepping selects an explicit frame.  Resume forward from
+            # there instead of inheriting a stale ping-pong direction.
+            self._anim_states[mat_id] = (frame, 1 if direction >= 0 else -1)
             self._anim_left_ms[mat_id] = 0.0
         self.update()
         self.animationFrameChanged.emit(self.current_frame_text())
