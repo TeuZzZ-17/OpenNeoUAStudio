@@ -81,7 +81,7 @@ class WindowContractV5Tests(unittest.TestCase):
             self.assertEqual(
                 [window._diagnostics_tabs.tabText(index)
                  for index in range(window._diagnostics_tabs.count())],
-                ["Warnings", "Validation", "Log"])
+                ["Log", "Warnings", "Validation"])
             diagnostic_menu = next(
                 action.menu() for action in window.menuBar().actions()
                 if action.text().replace("&", "") == "Diagnostics")
@@ -613,7 +613,7 @@ class WindowContractV5Tests(unittest.TestCase):
             copied.assert_called_once_with(
                 "Objects/MODEL.BASE", "BASE name copied successfully.")
             self.assertIn("Show Dependencies", labels)
-            self.assertIn("Edit BASE Dependencies...", labels)
+            self.assertIn("Edit BASE Dependencies", labels)
         finally:
             window.close()
 
