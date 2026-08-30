@@ -101,6 +101,8 @@ class WindowContractV5Tests(unittest.TestCase):
             self.assertEqual(window.step_button.text(), ">>")
             self.assertTrue(window.auto_align_check.isChecked())
             self.assertEqual(window._resources_tabs.tabText(0), "Bas Manager")
+            self.assertEqual(
+                window._resources_tabs.tabText(1), "Asset Dependencies")
             self.assertFalse(hasattr(window, "global_edit_button"))
             toolbar_widgets = [
                 action.defaultWidget()
@@ -176,7 +178,8 @@ class WindowContractV5Tests(unittest.TestCase):
             self.assertNotIn("runtimeLooseWaitDialog", source)
             self.assertNotIn("QProgressDialog", source)
             self.assertFalse(hasattr(window, "import_vp_package_action"))
-            self.assertFalse(hasattr(window, "save_asset_family_action"))
+            self.assertEqual(
+                window.save_asset_family_action.text(), "Export Asset Family")
             for removed_vp_control in (
                     "vp_import_button", "vp_new_spin", "vp_assign_button",
                     "vp_undo_button", "vp_redo_button", "vp_clear_button",
@@ -188,7 +191,7 @@ class WindowContractV5Tests(unittest.TestCase):
             self.assertEqual(window.vp_current_label.text(), "-")
             self.assertEqual(
                 window.model_save_as_button.text(),
-                "Export SET Family")
+                "Export Asset Family")
             self.assertEqual(window.material_copy_button.text(),
                              "Copy Material")
             self.assertEqual(window.material_paste_button.text(),
@@ -220,7 +223,8 @@ class WindowContractV5Tests(unittest.TestCase):
             self.assertEqual(
                 [action.text() for action in window.file_import_menu.actions()],
                 [
-                    "Import BAS Archive", "Import SKLT", "Import ILBM",
+                    "Import BAS Archive", "Import BASE", "Import SKLT",
+                    "Import ILBM",
                     "Import Asset Family",
                 ],
             )
@@ -228,7 +232,8 @@ class WindowContractV5Tests(unittest.TestCase):
                 [action.text() for action in window.file_export_menu.actions()],
                 [
                     "Export Runtime Loose SET", "Export BASE",
-                    "Export SKLT", "Export ILBM", "Overwrite",
+                    "Export SKLT", "Export ILBM", "Export Asset Family",
+                    "Overwrite",
                 ],
             )
             self.assertEqual(window.open_base_action.shortcut().toString(), "")
@@ -258,10 +263,9 @@ class WindowContractV5Tests(unittest.TestCase):
             window._family = family
             window._selected_owner = "root"
             window._owner_to_obj = {"root": obj}
-            window.viewport.edit_owner = None
-            window.viewport.paste_preview_active = False
-
-            with patch.object(window, "can_export_sklt", return_value=True):
+            with patch.object(
+                    window, "can_export_sklt", return_value=True), patch.object(
+                    window, "_standalone_sklt_source", return_value=ref.path):
                 window._sync_geometry_save_controls()
 
             self.assertTrue(window.save_sklt_action.isEnabled())
@@ -277,8 +281,8 @@ class WindowContractV5Tests(unittest.TestCase):
             window._last_directory = Path("C:/start")
             selected_dir = Path("C:/UA/Assets/Family")
             single_results = [
-                (str(selected_dir / "MODEL.SKLT"), "Skeletons"),
                 (str(selected_dir / "MODEL.BASE"), "BASE"),
+                (str(selected_dir / "MODEL.SKLT"), "Skeletons"),
             ]
             multi_results = [
                 ([str(selected_dir / "MODEL.ILBM")], "Textures"),
@@ -293,7 +297,7 @@ class WindowContractV5Tests(unittest.TestCase):
                 window.open_family_dialog()
 
             self.assertEqual(single_dialog.call_args_list[0].args[2],
-                             "C:/start")
+                             str(Path("C:/start")))
             self.assertEqual(single_dialog.call_args_list[1].args[2],
                              str(selected_dir))
             self.assertEqual(multi_dialog.call_args_list[0].args[2],
@@ -323,7 +327,7 @@ class WindowContractV5Tests(unittest.TestCase):
         finally:
             window.close()
 
-    def test_import_bas_archive_routes_standalone_base_normally(self):
+    def test_import_base_routes_standalone_base_normally(self):
         window = AssemblyWindow()
         try:
             path = Path("C:/UA/Data/Objects/ASKY2.BAS")
@@ -332,7 +336,7 @@ class WindowContractV5Tests(unittest.TestCase):
                     return_value=(str(path), "BAS archive")), patch.object(
                     window, "open_setbas") as open_setbas, patch.object(
                     window, "open_base") as open_base:
-                window.open_bas_archive_dialog()
+                window.open_base_dialog()
             open_base.assert_called_once_with(path)
             open_setbas.assert_not_called()
         finally:
@@ -378,8 +382,7 @@ class WindowContractV5Tests(unittest.TestCase):
         try:
             for tree, count in (
                     (window.setbas_tree, 3),
-                    (window.asset_tree, 2),
-                    (window.resolve_tree, 3)):
+                    (window.asset_tree, 3)):
                 header = tree.header()
                 for column in range(count):
                     self.assertEqual(
@@ -399,13 +402,12 @@ class WindowContractV5Tests(unittest.TestCase):
             self.assertEqual(window.setbas_tree.columnWidth(2), 55)
             self.assertEqual(window.asset_tree.columnWidth(0), 300)
             self.assertEqual(window.asset_tree.columnWidth(1), 105)
-            self.assertEqual(window.resolve_tree.columnWidth(0), 260)
-            self.assertEqual(window.resolve_tree.columnWidth(1), 70)
-            self.assertEqual(window.resolve_tree.columnWidth(2), 165)
+            self.assertEqual(window.asset_tree.columnWidth(2), 190)
+            self.assertFalse(hasattr(window, "resolve_tree"))
         finally:
             window.close()
 
-    def test_save_model_as_asks_for_base_filename_and_keeps_bundle_layout(
+    def test_save_model_as_asks_for_folder_and_keeps_bundle_layout(
             self):
         window = AssemblyWindow()
         try:
@@ -413,11 +415,13 @@ class WindowContractV5Tests(unittest.TestCase):
             fam_obj = SimpleNamespace(
                 base_object=SimpleNamespace(name="OriginalModel"))
             context = ("root", family, fam_obj, object(), object())
-            selected = Path("C:/chosen/CustomModel")
-            expected_base = selected.with_suffix(".BASE")
+            selected = Path("C:/chosen")
+            expected_base = selected / "OriginalModel.BASE"
             expected_skeleton = (
-                selected.parent / "Skeleton" / "ORIGINAL.sklt")
+                selected / "Skeleton" / "ORIGINAL.sklt")
             with patch.object(
+                    window, "_export_owner_for_selection",
+                    return_value="root"), patch.object(
                     window, "_model_save_context",
                     return_value=context), patch.object(
                     window, "_bundle_skeleton_relative_path",
@@ -425,8 +429,8 @@ class WindowContractV5Tests(unittest.TestCase):
                     window, "_owner_vanm_uv_keys",
                     return_value=set()), patch.object(
                     assembly_window_module.QFileDialog,
-                    "getSaveFileName",
-                    return_value=(str(selected), "BASE model")), patch.object(
+                    "getExistingDirectory",
+                    return_value=str(selected)), patch.object(
                     window, "_write_model_files",
                     return_value=True) as write, patch.object(
                     window, "_sync_geometry_save_controls"), patch.object(
@@ -439,7 +443,7 @@ class WindowContractV5Tests(unittest.TestCase):
             self.assertEqual(
                 window._bundle_targets["root"],
                 (expected_skeleton, expected_base))
-            self.assertEqual(window._last_directory, selected.parent)
+            self.assertEqual(window._last_directory, selected)
         finally:
             window.close()
 
@@ -589,8 +593,13 @@ class WindowContractV5Tests(unittest.TestCase):
                     candidate for candidate in fake_menu.actions()
                     if candidate.text() == "Copy BASE name")
                 action.triggered.callback()
+                labels = [
+                    candidate.text() for candidate in fake_menu.actions()
+                    if not candidate.isSeparator()]
             copied.assert_called_once_with(
                 "Objects/MODEL.BASE", "BASE name copied successfully.")
+            self.assertIn("Show Dependencies", labels)
+            self.assertIn("Edit BASE Dependencies...", labels)
         finally:
             window.close()
 
@@ -811,6 +820,7 @@ class WindowContractV5Tests(unittest.TestCase):
                 action.text() for action in fake_menu.actions()
                 if not action.isSeparator()]
             self.assertIn("Preview texture", captured)
+            self.assertIn("Select Resource...", captured)
             self.assertIn("Copy info", captured)
             self.assertNotIn("Copy item", captured)
             self.assertNotIn("Expand all", captured)
@@ -945,7 +955,9 @@ class WindowContractV5Tests(unittest.TestCase):
         window = AssemblyWindow()
         try:
             owner = "root"
-            window._family = SimpleNamespace()
+            archive = SimpleNamespace(path=Path("C:/UA/Set1/SET.BAS"))
+            window._setbas = archive
+            window._family = SimpleNamespace(base_path=archive.path)
             window._selected_owner = owner
             window._owner_to_obj = {
                 owner: SimpleNamespace(
@@ -958,7 +970,9 @@ class WindowContractV5Tests(unittest.TestCase):
             self.assertFalse(window._has_editable_model())
             window._sync_edit_action_states()
             editor_index = window._right_tabs.indexOf(window._editor_tabs)
-            self.assertFalse(window._right_tabs.isTabEnabled(editor_index))
+            self.assertTrue(window._right_tabs.isTabEnabled(editor_index))
+            self.assertIn(
+                "read-only archive", window._right_tabs.tabToolTip(editor_index))
             self.assertFalse(window.edit_menu.isEnabled())
             self.assertFalse(window.mapping_repair_action.isEnabled())
         finally:
