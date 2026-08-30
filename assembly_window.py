@@ -19,7 +19,7 @@ import os
 import tempfile
 from pathlib import Path
 
-from PySide6.QtCore import QPointF, QSize, QTimer, QUrl, Qt
+from PySide6.QtCore import QIODevice, QPointF, QSaveFile, QSize, QTimer, QUrl, Qt
 from PySide6.QtGui import (
     QAction,
     QBrush,
@@ -89,6 +89,7 @@ from asset_family_package import (
 )
 from anm_parser import AnmParseError, export_anm_bytes, parse_anm_bytes
 from asset_tree_filter import filter_tree as filter_asset_tree
+from asset_resolver import DirectoryIndex
 from assembly_viewer import (
     AssetViewport,
     VIEW_MODES,
@@ -765,7 +766,7 @@ class AssemblyWindow(QMainWindow):
                 "Show Dependencies",
                 lambda: self._show_setbas_base_dependencies(base_name))
             menu.addAction(
-                "Edit BASE Dependencies...",
+                "Edit BASE Dependencies",
                 lambda: self._edit_setbas_base_dependencies(base_name))
         if resources:
             menu.addSeparator()
@@ -892,7 +893,7 @@ class AssemblyWindow(QMainWindow):
                         lambda: self._play_asset_animation(item))
             if kind in ("base", "child"):
                 menu.addAction(
-                    "Edit BASE Dependencies...",
+                    "Edit BASE Dependencies",
                     lambda: self._edit_base_dependencies_for_item(item))
         dependency_target = self._dependency_target_for_item(item)
         if dependency_target is not None:
@@ -1147,6 +1148,14 @@ class AssemblyWindow(QMainWindow):
             "AREA_FLAG_DPTHFADE faces use the vanilla gameplay profile "
             "visLimit 1400, fadeStart 800, fadeLength 600.")
         view_menu.addAction(self.retail_distance_fade_check)
+        # Snapshot Studio reuses these exact QAction objects.  Their normal
+        # viewport setters already own the feature state; this extra signal
+        # only switches the Snapshot renderer out of clean-model-only mode
+        # when one of the shared overlays is actually requested.
+        for action in (self.sen_check, self.wire_check, self.axes_check,
+                       self.grid_check, self.overlay_check,
+                       self.mapping_diag_check):
+            action.toggled.connect(self._sync_snapshot_view_render_mode)
         view_menu.addSeparator()
         self.reset_camera_action = QAction("Reset camera", self)
         self.reset_camera_action.setEnabled(False)
@@ -1335,7 +1344,7 @@ class AssemblyWindow(QMainWindow):
         vp_edit_box = QGroupBox("VP information")
         vp_edit_layout = QGridLayout(vp_edit_box)
         vp_edit_layout.setContentsMargins(5, 4, 5, 5)
-        vp_edit_layout.addWidget(QLabel("Selected BASE:"), 0, 0)
+        vp_edit_layout.addWidget(QLabel("Selected:"), 0, 0)
         self.vp_selected_base_label = QLabel("-")
         self.vp_selected_base_label.setTextInteractionFlags(
             Qt.TextInteractionFlag.TextSelectableByMouse)
@@ -1349,11 +1358,12 @@ class AssemblyWindow(QMainWindow):
 
         setbas_buttons = QGridLayout()
         setbas_buttons.setHorizontalSpacing(4)
-        self.setbas_preview_button = QPushButton("Preview")
-        self.setbas_preview_button.clicked.connect(
-            self._preview_setbas_resource)
-        self.setbas_preview_button.setEnabled(False)
-        setbas_buttons.addWidget(self.setbas_preview_button, 0, 0)
+        self.setbas_runtime_loose_button = QPushButton(
+            "Export Runtime Loose SET")
+        self.setbas_runtime_loose_button.clicked.connect(
+            self._export_runtime_loose_set)
+        self.setbas_runtime_loose_button.setEnabled(False)
+        setbas_buttons.addWidget(self.setbas_runtime_loose_button, 0, 0)
         self.setbas_extract_button = QPushButton("Extract selected...")
         self.setbas_extract_button.clicked.connect(
             self._extract_setbas_selected)
@@ -1369,12 +1379,6 @@ class AssemblyWindow(QMainWindow):
             self._open_last_output_folder)
         self.setbas_open_output_button.setEnabled(False)
         setbas_buttons.addWidget(self.setbas_open_output_button, 1, 1)
-        self.setbas_runtime_loose_button = QPushButton(
-            "Export Runtime Loose SET")
-        self.setbas_runtime_loose_button.clicked.connect(
-            self._export_runtime_loose_set)
-        self.setbas_runtime_loose_button.setEnabled(False)
-        setbas_buttons.addWidget(self.setbas_runtime_loose_button, 2, 0, 1, 2)
         setbas_layout.addLayout(setbas_buttons)
 
         # Asset family browser moved to the right so the 3D viewport gets the
@@ -1810,23 +1814,22 @@ class AssemblyWindow(QMainWindow):
 
         animation_box = QGroupBox("Animation frame")
         animation_layout = QVBoxLayout(animation_box)
-        animation_layout.addWidget(QLabel("Current animation frame"))
-        self.snapshot_frame_label = QLabel("No animation")
+        self.snapshot_frame_label = QLabel("Current Animation Frame: No animation")
         self.snapshot_frame_label.setWordWrap(True)
         animation_layout.addWidget(self.snapshot_frame_label)
         animation_buttons = QHBoxLayout()
-        self.snapshot_next_frame_button = QPushButton("Next Frame >>")
-        self.snapshot_next_frame_button.clicked.connect(
-            self.viewport.step_animation)
-        animation_buttons.addWidget(self.snapshot_next_frame_button)
-        self.snapshot_reset_frame_button = QPushButton("Reset Frame")
-        self.snapshot_reset_frame_button.clicked.connect(
-            self.viewport.reset_animation)
-        animation_buttons.addWidget(self.snapshot_reset_frame_button)
         self.snapshot_previous_frame_button = QPushButton("<< Previous Frame")
         self.snapshot_previous_frame_button.clicked.connect(
             self.viewport.step_animation_backward)
         animation_buttons.addWidget(self.snapshot_previous_frame_button)
+        self.snapshot_reset_frame_button = QPushButton("Reset Frame")
+        self.snapshot_reset_frame_button.clicked.connect(
+            self.viewport.reset_animation)
+        animation_buttons.addWidget(self.snapshot_reset_frame_button)
+        self.snapshot_next_frame_button = QPushButton("Next Frame >>")
+        self.snapshot_next_frame_button.clicked.connect(
+            self.viewport.step_animation)
+        animation_buttons.addWidget(self.snapshot_next_frame_button)
         animation_layout.addLayout(animation_buttons)
         studio_layout.addWidget(animation_box)
 
@@ -2021,11 +2024,12 @@ class AssemblyWindow(QMainWindow):
         diagnostics_tabs.setMinimumHeight(0)
         diagnostics_tabs.setSizePolicy(QSizePolicy.Policy.Expanding,
                                        QSizePolicy.Policy.Ignored)
+        diagnostics_tabs.addTab(self.log_list, "Log")
         diagnostics_tabs.addTab(self.warning_list, "Warnings")
         diagnostics_tabs.addTab(self.checks_list, "Validation")
-        diagnostics_tabs.addTab(self.log_list, "Log")
-        for diagnostic_list in (self.warning_list, self.checks_list,
-                                self.log_list):
+        diagnostics_tabs.setCurrentIndex(0)
+        for diagnostic_list in (self.log_list, self.warning_list,
+                                self.checks_list):
             diagnostic_list.setMinimumHeight(0)
 
         diagnostics_panel = QWidget()
@@ -2051,8 +2055,8 @@ class AssemblyWindow(QMainWindow):
         self._diagnostics_tabs = diagnostics_tabs
         self._diagnostics_dock = diagnostics_panel
         self._diagnostics_splitter = vertical_split
-        # Diagnostics are opt-in at startup.  The first explicit Warnings,
-        # Validation or Log command reopens the same compact 80 px panel.
+        # Diagnostics are opt-in at startup.  Show Diagnostic Panel reopens
+        # the same compact 80 px panel with Log as the default tab.
         diagnostics_panel.hide()
 
     # -- actions ---------------------------------------------------------------
@@ -2669,35 +2673,31 @@ class AssemblyWindow(QMainWindow):
     def _sync_vp_controls(self) -> None:
         table = self._vp_table
         table_available = table is not None and bool(len(table))
+        item = self.setbas_tree.currentItem() \
+            if hasattr(self, "setbas_tree") else None
+        kind = item.data(0, _BAS_KIND_ROLE) if item is not None else None
+        selected_name = "-"
+        if item is not None and kind != "group":
+            selected_name = str(
+                item.data(0, _BAS_NAME_ROLE) or item.text(0) or "-")
         candidates = self._current_vp_base_candidates() \
-            if table_available and hasattr(self, "setbas_tree") else []
+            if table_available and item is not None else []
         if hasattr(self, "vp_selected_base_label"):
+            self.vp_selected_base_label.setText(selected_name)
             if not candidates:
-                self.vp_selected_base_label.setText("-")
                 self.vp_current_label.setText("-")
             elif len(candidates) == 1:
                 base_name = candidates[0]
                 indices = table.vps_for_base(base_name)
-                self.vp_selected_base_label.setText(base_name)
                 self.vp_current_label.setText(
                     ", ".join(map(str, indices)) or "not assigned")
             else:
-                self.vp_selected_base_label.setText(
-                    f"{len(candidates)} BASE parents")
                 self.vp_current_label.setText(
                     "multiple embedded VP parents")
-        if hasattr(self, "setbas_preview_button"):
-            item = self.setbas_tree.currentItem()
-            resource_index = (
-                item.data(0, Qt.ItemDataRole.UserRole)
-                if item is not None else None)
-            kind = item.data(0, _BAS_KIND_ROLE) if item is not None else None
-            previewable = kind == "base"
-            if resource_index is not None and self._setbas is not None:
-                class_id = self._setbas.resources[resource_index].class_id.lower()
-                previewable = class_id in ("sklt.class", "ilbm.class")
-            self.setbas_preview_button.setEnabled(previewable)
-            self.setbas_extract_button.setEnabled(resource_index is not None)
+        resource_index = (
+            item.data(0, Qt.ItemDataRole.UserRole)
+            if item is not None else None)
+        self.setbas_extract_button.setEnabled(resource_index is not None)
 
     def _raise_setbas_tab(self) -> None:
         """Bring the primary BAS panel to the front after loading it."""
@@ -3027,7 +3027,7 @@ class AssemblyWindow(QMainWindow):
         resource = self._setbas.resources[index]
         class_id = resource.class_id.lower()
         if class_id == "sklt.class":
-            self._preview_setbas_skeleton()
+            self._preview_setbas_skeleton(resource=resource)
             return
         if class_id == "ilbm.class":
             self._preview_setbas_texture(resource)
@@ -3218,18 +3218,19 @@ class AssemblyWindow(QMainWindow):
             image, f"Palette: {palette_source}")
 
     def _preview_setbas_skeleton(
-            self, *, confirm_discard: bool = True) -> None:
+            self, resource=None, *, confirm_discard: bool = True) -> None:
         if self._setbas is None:
             return
-        item = self.setbas_tree.currentItem()
-        index = item.data(0, Qt.ItemDataRole.UserRole) if item else None
-        if index is None:
-            QMessageBox.information(
-                self, "No resource selected",
-                "Select a sklt.class resource in the SET.BAS tree first.",
-            )
-            return
-        resource = self._setbas.resources[index]
+        if resource is None:
+            item = self.setbas_tree.currentItem()
+            index = item.data(0, Qt.ItemDataRole.UserRole) if item else None
+            if index is None:
+                QMessageBox.information(
+                    self, "No resource selected",
+                    "Select a sklt.class resource in the SET.BAS tree first.",
+                )
+                return
+            resource = self._setbas.resources[index]
         if resource.class_id.lower() != "sklt.class":
             QMessageBox.information(
                 self, "Not a skeleton",
@@ -4308,6 +4309,7 @@ class AssemblyWindow(QMainWindow):
             action.setVisible(True)
             action.setEnabled(True)
             action.setChecked(defaults[action])
+        self._sync_snapshot_view_render_mode()
 
     def _leave_snapshot_view_profile(self) -> None:
         state = self._snapshot_view_action_state
@@ -4322,6 +4324,14 @@ class AssemblyWindow(QMainWindow):
         return any(action.isChecked() for action in (
             self.sen_check, self.wire_check, self.axes_check, self.grid_check,
             self.overlay_check, self.mapping_diag_check))
+
+    def _sync_snapshot_view_render_mode(self, _checked: bool = False) -> None:
+        """Make the Snapshot preview honor the shared View QAction state."""
+
+        if not self._snapshot_mode_active:
+            return
+        self.viewport.set_snapshot_shared_overlays_enabled(
+            self._snapshot_include_guides())
 
     def _on_snapshot_preset_changed(self, preset: str) -> None:
         if not self._snapshot_mode_active:
@@ -4450,8 +4460,17 @@ class AssemblyWindow(QMainWindow):
         if not hasattr(self, "snapshot_frame_label"):
             return
         has_animation = self.viewport.has_animation
-        text = self.viewport.current_frame_text() if has_animation else "No animation"
-        self.snapshot_frame_label.setText(text)
+        if has_animation:
+            # The viewport may animate several materials at once. Snapshot
+            # Studio only needs one compact visual reference; keep the full
+            # multi-animation state in the viewport and display its first
+            # active animation instead of duplicating every material instance.
+            full_text = self.viewport.current_frame_text()
+            text = full_text.split("; ", 1)[0] if full_text else "No animation"
+        else:
+            text = "No animation"
+        self.snapshot_frame_label.setText(
+            f"Current Animation Frame: {text}")
         self.snapshot_next_frame_button.setEnabled(has_animation)
         self.snapshot_reset_frame_button.setEnabled(has_animation)
         self.snapshot_previous_frame_button.setEnabled(has_animation)
@@ -4559,6 +4578,24 @@ class AssemblyWindow(QMainWindow):
         self.statusBar().showMessage(
             f"Snapshot written to {path} ({image.width()} x {image.height()})")
 
+    @staticmethod
+    def _write_snapshot_png_atomic(image: QImage, path: Path) -> None:
+        """Write one PNG atomically without leaving a Windows-locked .part."""
+
+        target = QSaveFile(str(path))
+        if not target.open(QIODevice.OpenModeFlag.WriteOnly):
+            raise OSError(target.errorString() or f"Could not open {path}")
+        writer = QImageWriter(target, b"png")
+        if not writer.write(image):
+            error = writer.errorString() or f"Could not write {path}"
+            target.cancelWriting()
+            raise OSError(error)
+        # QSaveFile owns the device until commit, so Windows never sees a
+        # second os.replace() racing an open QImageWriter file handle.
+        del writer
+        if not target.commit():
+            raise OSError(target.errorString() or f"Could not commit {path}")
+
     def _export_figurine_set(self) -> None:
         """Export the current model from every canonical Snapshot angle."""
 
@@ -4607,16 +4644,7 @@ class AssemblyWindow(QMainWindow):
                     size, background, include_guides=include_guides)
                 if image.isNull():
                     raise OSError(f"Could not render {view}")
-                partial = path.with_suffix(path.suffix + ".part")
-                if partial.exists():
-                    partial.unlink()
-                writer = QImageWriter(str(partial), b"png")
-                if not writer.write(image):
-                    if partial.exists():
-                        partial.unlink()
-                    raise OSError(
-                        writer.errorString() or f"Could not write {path}")
-                os.replace(partial, path)
+                self._write_snapshot_png_atomic(image, path)
                 written.append(path)
         except (OSError, RuntimeError) as exc:
             QMessageBox.warning(
@@ -5326,8 +5354,9 @@ class AssemblyWindow(QMainWindow):
             })
         return specs
 
-    def _create_editable_base_copy(self, owner: str,
-                                   target: str | Path) -> Path:
+    def _create_editable_base_copy(
+            self, owner: str, target: str | Path,
+            edits: list[TextureNameEdit] | None = None) -> Path:
         """Export one archive OBJT as a verified loose BASE, never in-place."""
 
         family = self._family
@@ -5345,10 +5374,17 @@ class AssemblyWindow(QMainWindow):
                 "the editable copy cannot replace its read-only source")
         source_digest = hashlib.sha256(tree.data).digest()
         standalone = export_base_object_bytes(tree.data, fam_obj.base_object)
+        # export_base_object_bytes() promotes the selected OBJT to the root of
+        # the standalone file.  Remap only the proven direct-reference edits
+        # from its archive owner path to that new root identity.
+        standalone_edits = [
+            TextureNameEdit(
+                "root", edit.block_index, edit.name, edit.binding_slot)
+            for edit in (edits or [])]
         with tempfile.TemporaryDirectory(
                 prefix="OpenNeoUAStudio_editable_base_") as temp_dir:
             staged = Path(temp_dir) / destination.name
-            save_model_base_copy(standalone, [], [], staged)
+            save_model_base_copy(standalone, [], standalone_edits, staged)
             parsed = parse_base_bytes(staged.read_bytes(), destination.name)
             if parsed.root is None:
                 raise MappingEditError("editable BASE copy failed round-trip")
@@ -5358,38 +5394,9 @@ class AssemblyWindow(QMainWindow):
         return destination
 
     def _edit_base_dependencies(self, owner: str) -> None:
-        if self._family_entry_is_setbas_archive():
-            QMessageBox.information(
-                self, "Create an editable BASE copy",
-                "SET.BAS remains read-only. Choose a standalone BASE output; "
-                "the dependency editor will modify only that verified copy.")
-            fam_obj = self._owner_to_obj.get(owner)
-            base_name = self._base_entry_name(
-                self._family, fam_obj, owner) if fam_obj is not None else "MODEL.BASE"
-            suggested = self._last_directory / Path(base_name).name
-            if suggested.suffix.casefold() != ".base":
-                suggested = suggested.with_suffix(".BASE")
-            output, _ = QFileDialog.getSaveFileName(
-                self, "Create editable BASE copy", str(suggested),
-                "BASE model (*.BASE *.base);;All files (*)")
-            if not output:
-                return
-            try:
-                target = self._create_editable_base_copy(owner, output)
-            except (MappingEditError, OSError, _BundleCommitError) as exc:
-                QMessageBox.critical(
-                    self, "Editable copy failed - SET.BAS unchanged", str(exc))
-                return
-            archive_path = Path(self._setbas.path)
-            for root in (archive_path.parent, archive_path.parent.parent):
-                if root not in self._extra_roots:
-                    self._extra_roots.append(root)
-            self._last_directory = target.parent
-            self.open_base(target, confirm_discard=False)
-            owner = self._selected_owner or "root"
-            self._notify(
-                f"Editing standalone copy {target.name}; SET.BAS remains read-only.",
-                10000)
+        # Editing is always staged in memory first.  SET.BAS remains read-only,
+        # but the user chooses the standalone destination only when Save As is
+        # pressed inside the dependency editor itself.
         self._open_base_dependency_dialog(owner)
 
     def _open_base_dependency_dialog(self, owner: str) -> None:
@@ -5397,24 +5404,44 @@ class AssemblyWindow(QMainWindow):
         if fam_obj is None:
             return
         specs = self._base_dependency_edit_specs(fam_obj)
+        archive_source = self._family_entry_is_setbas_archive()
         dialog = QDialog(self)
         dialog.setWindowTitle("Edit BASE Dependencies")
-        dialog.resize(700, 430)
+        dialog.resize(900, 500)
         layout = QVBoxLayout(dialog)
         info = QLabel(
-            "Only native ILBM and BMPANIM/ANM c-string bindings with a "
-            "verified writer are editable. Other links are shown read-only.")
+            "Edit the native BASE references supported by the verified writer. "
+            + (
+                "SET.BAS stays read-only; Save As writes a standalone BASE copy."
+                if archive_source else
+                "Read-only reference types are shown for context."))
         info.setWordWrap(True)
         layout.addWidget(info)
         tree = QTreeWidget()
         tree.setHeaderLabels(["Reference", "Native name", "Writer support"])
+        tree.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        tree.setUniformRowHeights(True)
+        header = tree.header()
+        header.setSectionsMovable(False)
+        header.setStretchLastSection(True)
+        header.setSectionResizeMode(0, QHeaderView.ResizeMode.Interactive)
+        header.setSectionResizeMode(1, QHeaderView.ResizeMode.Interactive)
+        header.setSectionResizeMode(2, QHeaderView.ResizeMode.Stretch)
+        tree.setColumnWidth(0, 165)
+        tree.setColumnWidth(1, 285)
         base_name = self._base_entry_name(self._family, fam_obj, owner)
-        root = QTreeWidgetItem([f"BASE: {base_name}", "", "entry point"])
+        root = QTreeWidgetItem([f"BASE: {base_name}", "", "Entry point"])
         tree.addTopLevelItem(root)
         editors: list[tuple[dict, QLineEdit, str]] = []
         for spec in specs:
+            visible_support = (
+                f"Editable (max {spec['capacity'] - 1} bytes)"
+                if spec["editable"] else "Read-only")
             row = QTreeWidgetItem([
-                spec["kind"], spec["name"], spec["reason"]])
+                spec["kind"], "" if spec["editable"] else spec["name"],
+                visible_support])
+            for column in range(3):
+                row.setToolTip(column, spec["reason"])
             root.addChild(row)
             if spec["editable"]:
                 edit = QLineEdit(spec["name"])
@@ -5425,36 +5452,65 @@ class AssemblyWindow(QMainWindow):
             else:
                 row.setForeground(2, QColor(170, 170, 170))
         root.setExpanded(True)
-        tree.header().setSectionResizeMode(
-            0, QHeaderView.ResizeMode.ResizeToContents)
-        tree.header().setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
-        tree.header().setSectionResizeMode(
-            2, QHeaderView.ResizeMode.ResizeToContents)
         layout.addWidget(tree, 1)
+
         buttons = QDialogButtonBox(
-            QDialogButtonBox.StandardButton.Save
-            | QDialogButtonBox.StandardButton.Reset
+            QDialogButtonBox.StandardButton.Reset
             | QDialogButtonBox.StandardButton.Close)
         revert = buttons.button(QDialogButtonBox.StandardButton.Reset)
         revert.setText("Revert")
-        save = buttons.button(QDialogButtonBox.StandardButton.Save)
+        save = QPushButton("Save As" if archive_source else "Save")
         save.setEnabled(bool(editors))
+        buttons.addButton(save, QDialogButtonBox.ButtonRole.AcceptRole)
 
         def revert_changes() -> None:
             for _spec, edit, initial in editors:
                 edit.setText(initial)
 
-        def save_changes() -> None:
-            edits = [
+        def changed_edits() -> list[TextureNameEdit]:
+            return [
                 TextureNameEdit(
                     owner, spec["block_index"], edit.text().strip(),
                     spec["binding_slot"])
                 for spec, edit, initial in editors
                 if edit.text().strip() != initial]
+
+        def save_archive_copy(edits: list[TextureNameEdit]) -> bool:
+            base_label = self._base_entry_name(self._family, fam_obj, owner)
+            suggested = self._last_directory / Path(base_label).name
+            if suggested.suffix.casefold() != ".base":
+                suggested = suggested.with_suffix(".BASE")
+            output, _ = QFileDialog.getSaveFileName(
+                self, "Save BASE Dependencies As", str(suggested),
+                "BASE model (*.BASE *.base);;All files (*)")
+            if not output:
+                return False
+            try:
+                target = self._create_editable_base_copy(owner, output, edits)
+            except (MappingEditError, OSError, _BundleCommitError) as exc:
+                QMessageBox.critical(
+                    self, "Save As failed - SET.BAS unchanged", str(exc))
+                return False
+            archive_path = Path(self._setbas.path) if self._setbas else None
+            if archive_path is not None:
+                for search_root in (archive_path.parent, archive_path.parent.parent):
+                    if search_root not in self._extra_roots:
+                        self._extra_roots.append(search_root)
+            self._last_directory = target.parent
+            self.open_base(target, confirm_discard=False)
+            self._notify(
+                f"BASE dependency copy saved and verified: {target.name}.",
+                9000)
+            return True
+
+        def save_changes() -> None:
+            edits = changed_edits()
             if not edits:
                 self._notify("No BASE dependency reference changed.", 3500)
                 return
-            if self._save_base_dependency_edits(owner, edits):
+            saved = (save_archive_copy(edits) if archive_source
+                     else self._save_base_dependency_edits(owner, edits))
+            if saved:
                 dialog.accept()
 
         revert.clicked.connect(revert_changes)
@@ -10037,7 +10093,7 @@ class AssemblyWindow(QMainWindow):
         all_targets = [
             *skeleton_targets, base_target,
             *animation_targets, *texture_targets,
-            *profile_targets, manifest_target]
+            *profile_targets]
         target_keys = [str(path.resolve()).casefold() for path in all_targets]
         if len(target_keys) != len(set(target_keys)):
             QMessageBox.critical(
@@ -10280,18 +10336,45 @@ class AssemblyWindow(QMainWindow):
                     *temp_animations,
                     *temp_textures,
                     *temp_profiles,
-                    (temp_manifest, manifest_target),
                 ]
 
                 def verify_destination_package() -> None:
-                    committed = validate_family_package(package_root)
-                    if not committed.valid:
+                    # The JSON manifest is a staging/verification aid, not a
+                    # runtime asset.  Reopen the committed family in isolated
+                    # mode so validation stays strict without exporting it.
+                    DirectoryIndex.clear_cache()
+                    committed = load_asset_family(
+                        base_target, isolated_root=package_root)
+                    if committed.root_object is None:
                         raise AssetFamilyPackageError(
-                            "committed Asset Family failed isolated "
-                            "reload:\n" + "\n".join(committed.errors))
+                            "committed Asset Family entry BASE failed to parse")
+                    failures = [
+                        dep for dep in committed.dependencies
+                        if dep.status in ("missing", "ambiguous", "failed_load")]
+                    if failures:
+                        details = "; ".join(
+                            f"{dep.status} {dep.kind}: {dep.raw_ref}"
+                            for dep in failures[:8])
+                        raise AssetFamilyPackageError(
+                            "committed Asset Family failed isolated dependency "
+                            "reload: " + details)
+                    adapter, reason = IndexedFamilyAdapter.try_create(committed)
+                    if adapter is None:
+                        raise AssetFamilyPackageError(
+                            "committed indexed profile is incomplete: " + reason)
 
                 notes.extend(_commit_verified_files(
                     commit_pairs, verify=verify_destination_package))
+                # Eradicate any stale manifest created by an older Studio
+                # export in the same destination.  The current exporter never
+                # leaves this tool-side verification file in the asset family.
+                if manifest_target.exists():
+                    try:
+                        manifest_target.unlink()
+                    except OSError as exc:
+                        notes.append(
+                            f"warning: stale {ASSET_FAMILY_MANIFEST} could not "
+                            f"be removed: {exc}")
         except _BundleCommitError as exc:
             title = (
                 "Export failed - current files unchanged"

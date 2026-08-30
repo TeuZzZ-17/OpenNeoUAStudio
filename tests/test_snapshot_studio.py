@@ -97,12 +97,26 @@ class SnapshotStudioTests(unittest.TestCase):
         window = SnapshotStudioWindow()
         try:
             self.assertFalse(hasattr(window, "snapshot_guides_button"))
-            self.assertEqual(window.snapshot_next_frame_button.text(),
-                             "Next Frame >>")
             self.assertEqual(window.snapshot_previous_frame_button.text(),
                              "<< Previous Frame")
+            self.assertEqual(window.snapshot_next_frame_button.text(),
+                             "Next Frame >>")
             self.assertTrue(hasattr(window, "snapshot_figurine_button"))
             self.assertTrue(hasattr(window, "snapshot_opacity_spin"))
+        finally:
+            window.close()
+
+    def test_shared_view_actions_enable_snapshot_overlay_rendering(self):
+        window = SnapshotStudioWindow()
+        try:
+            self.assertFalse(window.viewport._snapshot_show_guides)
+            window.axes_check.setChecked(True)
+            self.app.processEvents()
+            self.assertTrue(window.viewport._snapshot_show_guides)
+            self.assertTrue(window.viewport._show_axes)
+            window.axes_check.setChecked(False)
+            self.app.processEvents()
+            self.assertFalse(window.viewport._snapshot_show_guides)
         finally:
             window.close()
 

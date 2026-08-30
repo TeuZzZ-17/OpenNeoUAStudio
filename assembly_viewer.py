@@ -2800,7 +2800,7 @@ class AssetViewport(QWidget):
             self.update()
 
     def set_snapshot_guides_visible(self, visible: bool) -> None:
-        """Show the saved regular overlays in preview and snapshot export."""
+        """Show the saved regular overlays in legacy/batch Snapshot paths."""
 
         self._snapshot_show_guides = bool(visible)
         state = self._snapshot_saved_state
@@ -2815,6 +2815,13 @@ class AssetViewport(QWidget):
             self._show_diag_overlay = (
                 state["show_diag_overlay"] if visible else False)
         self.update()
+
+    def set_snapshot_shared_overlays_enabled(self, enabled: bool) -> None:
+        """Let shared View actions control Snapshot without restoring old state."""
+
+        self._snapshot_show_guides = bool(enabled)
+        if self._snapshot_active:
+            self.update()
 
     def adjust_snapshot_zoom(self, factor: float) -> None:
         if factor > 0:
@@ -3227,10 +3234,10 @@ class AssetViewport(QWidget):
                 == len(self._edit_session.model.points)
             )
             poly_highlighted = bool(
-                not clean and face.primary
+                not clean and not self._snapshot_active and face.primary
                 and face.poly_id in self._highlight_polys)
             owner_highlighted = bool(
-                not clean
+                not clean and not self._snapshot_active
                 and self._selected_owner is not None
                 and face.owner == self._selected_owner
                 and (self._mode != "textured"
@@ -3450,7 +3457,8 @@ class AssetViewport(QWidget):
                 if polygon is not None and id(face) in visible_faces:
                     painter.drawPolygon(polygon)
 
-        if not clean and self._selected_poly is not None:
+        if not clean and not self._snapshot_active \
+                and self._selected_poly is not None:
             selected_face = next(
                 (face for face in self._faces
                  if face.primary and face.poly_id == self._selected_poly
@@ -3506,9 +3514,10 @@ class AssetViewport(QWidget):
                 and self._show_diag_overlay:
             self._draw_diagnostics_overlay(painter)
 
-        if not clean and self._edit_session is not None:
+        if not clean and not self._snapshot_active \
+                and self._edit_session is not None:
             self._draw_edit_overlay(painter, target, camera)
-        elif not clean:
+        elif not clean and not self._snapshot_active:
             self._draw_mode_label(painter, target, False)
 
     def _render_indexed_model(
