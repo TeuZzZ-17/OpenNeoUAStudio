@@ -22,7 +22,7 @@ class SnapshotStudioTests(unittest.TestCase):
             ]
             self.assertEqual(labels, ["Snapshot", "BAS Manager"])
             self.assertIs(
-                window._right_tabs.widget(0), window._snapshot_panel)
+                window._right_tabs.widget(0), window._snapshot_scroll)
             self.assertIs(window._right_tabs.widget(1), window._bas_panel)
             self.assertFalse(
                 isinstance(window._right_tabs.widget(0), QTabWidget))
@@ -76,19 +76,33 @@ class SnapshotStudioTests(unittest.TestCase):
         finally:
             window.close()
 
-    def test_view_menu_hides_unavailable_snapshot_filters(self):
+    def test_view_menu_reuses_shared_actions_with_snapshot_defaults(self):
         window = SnapshotStudioWindow()
         try:
-            for action in (
-                    window.sen_check,
-                    window.wire_check,
-                    window.axes_check,
-                    window.grid_check,
-                    window.overlay_check,
-                    window.mapping_diag_check):
-                self.assertFalse(action.isVisible())
-            self.assertTrue(window.cull_check.isVisible())
+            shared_actions = (
+                window.sen_check, window.wire_check, window.cull_check,
+                window.axes_check, window.grid_check, window.overlay_check,
+                window.mapping_diag_check, window.retail_distance_fade_check,
+            )
+            self.assertTrue(all(action.isVisible() for action in shared_actions))
+            self.assertTrue(window.cull_check.isChecked())
+            for action in shared_actions:
+                if action is not window.cull_check:
+                    self.assertFalse(action.isChecked())
             self.assertTrue(window.reset_camera_action.isVisible())
+        finally:
+            window.close()
+
+    def test_snapshot_controls_have_no_duplicate_guides_button(self):
+        window = SnapshotStudioWindow()
+        try:
+            self.assertFalse(hasattr(window, "snapshot_guides_button"))
+            self.assertEqual(window.snapshot_next_frame_button.text(),
+                             "Next Frame >>")
+            self.assertEqual(window.snapshot_previous_frame_button.text(),
+                             "<< Previous Frame")
+            self.assertTrue(hasattr(window, "snapshot_figurine_button"))
+            self.assertTrue(hasattr(window, "snapshot_opacity_spin"))
         finally:
             window.close()
 

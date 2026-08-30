@@ -243,7 +243,7 @@ class AssetDependenciesWorkflowTests(unittest.TestCase):
             finally:
                 window.close()
 
-    def test_editability_follows_base_entry_not_embedded_ref(self):
+    def test_archive_entry_is_editable_in_memory_but_stays_read_only(self):
         window = AssemblyWindow()
         try:
             archive = SimpleNamespace(path=Path("C:/UA/Set1/SET.BAS"))
@@ -257,19 +257,192 @@ class AssetDependenciesWorkflowTests(unittest.TestCase):
 
             window._family = SimpleNamespace(base_path=archive.path)
             self.assertTrue(window._selected_model_is_archive_read_only())
-            self.assertFalse(window._has_editable_model())
-
-            window._family = SimpleNamespace(
-                base_path=Path("C:/UA/Set1/Loose/VP_TEST.BASE"))
-            self.assertFalse(window._selected_model_is_archive_read_only())
             self.assertTrue(window._has_editable_model())
             window._snapshot_mode_active = False
             window._sync_edit_action_states()
             editor_index = window._right_tabs.indexOf(window._editor_tabs)
             self.assertTrue(window._right_tabs.isTabEnabled(editor_index))
             self.assertTrue(window.edit_toggle_action.isEnabled())
+            self.assertTrue(window.edit_menu.isEnabled())
+            self.assertTrue(window.mapping_repair_action.isEnabled())
+            self.assertIn(
+                "never overwritten",
+                window._right_tabs.tabToolTip(editor_index))
+
+            window._family = SimpleNamespace(
+                base_path=Path("C:/UA/Set1/Loose/VP_TEST.BASE"))
+            self.assertFalse(window._selected_model_is_archive_read_only())
+            self.assertTrue(window._has_editable_model())
         finally:
             window.close()
+
+    def test_active_model_texture_names_include_all_subtree_textures(self):
+        root_obj = FamilyObject(
+            base_object=BaseObject(
+                name="ROOT.BASE",
+                ades=[AmeshBlock(texture=TextureRef(
+                    class_id="ilbm.class", kind="ilbm",
+                    name="ROOT.ILBM"))]),
+            owner_path="root")
+        child_obj = FamilyObject(
+            base_object=BaseObject(
+                name="CHILD.BASE",
+                ades=[AmeshBlock(texture=TextureRef(
+                    class_id="ilbm.class", kind="ilbm",
+                    name="CHILD.ILBM"))]),
+            owner_path="root/kid[0]")
+        root_obj.kids = [child_obj]
+        family = AssetFamily(root_object=root_obj)
+
+        window = AssemblyWindow()
+        try:
+            window._family = family
+            window._owner_to_obj = {
+                "root": root_obj, "root/kid[0]": child_obj}
+            window._selected_owner = "root"
+            self.assertEqual(
+                window._active_model_texture_names(),
+                {"root.ilbm", "child.ilbm"})
+
+            window._selected_owner = "root/kid[0]"
+            self.assertEqual(
+                window._active_model_texture_names(), {"child.ilbm"})
+        finally:
+            window.close()
+
+
+    def test_asset_dependencies_are_always_scoped_to_selected_model(self):
+        root_obj = FamilyObject(
+            base_object=BaseObject(name="ROOT.BASE"),
+            owner_path="root")
+        child_obj = FamilyObject(
+            base_object=BaseObject(name="CHILD.BASE"),
+            owner_path="root/kid[0]")
+        root_obj.kids = [child_obj]
+        family = AssetFamily(
+            base_path=Path("C:/UA/Set1/SET.BAS"),
+            root_object=root_obj)
+
+        window = AssemblyWindow()
+        try:
+            window._family = family
+            window._owner_to_obj = {
+                "root": root_obj, "root/kid[0]": child_obj}
+            window._selected_owner = "root/kid[0]"
+            window._fill_asset_tree(family)
+            root = window.asset_tree.topLevelItem(0)
+            self.assertIn("CHILD.BASE", root.text(0))
+            self.assertNotIn("ROOT.BASE", root.text(0))
+        finally:
+            window.close()
+
+    def test_dependency_focus_includes_kids_and_nested_components(self):
+        root_obj = FamilyObject(
+            base_object=BaseObject(
+                name="ROOT.BASE",
+                ades=[AmeshBlock(texture=TextureRef(
+                    class_id="ilbm.class", kind="ilbm",
+                    name="ROOT.ILBM"))]),
+            owner_path="root")
+        child_obj = FamilyObject(
+            base_object=BaseObject(
+                name="CHILD.BASE",
+                ades=[AmeshBlock(texture=TextureRef(
+                    class_id="ilbm.class", kind="ilbm",
+                    name="CHILD.ILBM"))]),
+            owner_path="root/kid[0]")
+        root_obj.kids = [child_obj]
+        family = AssetFamily(root_object=root_obj)
+
+        window = AssemblyWindow()
+        try:
+            window._family = family
+            window._owner_to_obj = {
+                "root": root_obj, "root/kid[0]": child_obj}
+            window._selected_owner = "root"
+            window._fill_asset_tree(family)
+            focused = window._asset_dependency_focus_items("root")
+            labels = {item.text(0) for item in focused}
+            self.assertTrue(any("CHILD.BASE" in label for label in labels))
+            self.assertIn("ROOT.ILBM", labels)
+            self.assertIn("CHILD.ILBM", labels)
+        finally:
+            window.close()
+
+    def test_used_asset_textures_are_stably_prioritized_and_green(self):
+        entries = [
+            SimpleNamespace(
+                name="A.ILBM", reference=None, archive_resource=None,
+                status="found"),
+            SimpleNamespace(
+                name="USED.ILBM", reference=None, archive_resource=None,
+                status="found"),
+            SimpleNamespace(
+                name="B.ILBM", reference=None, archive_resource=None,
+                status="found"),
+        ]
+        family = SimpleNamespace(
+            setbas_archive=None, textures={}, texture_tracy_usage={},
+            external_palette=None)
+        window = AssemblyWindow()
+        try:
+            window._family = family
+            with patch(
+                    "assembly_window.build_texture_catalog",
+                    return_value=entries), patch.object(
+                        window, "_active_model_texture_names",
+                        return_value={"used.ilbm"}):
+                window._fill_textures(family)
+            names = [
+                window.texture_list.item(index).data(
+                    Qt.ItemDataRole.UserRole)
+                for index in range(window.texture_list.count())]
+            self.assertEqual(names, ["USED.ILBM", "A.ILBM", "B.ILBM"])
+            highlighted = window.texture_list.item(0).background().color()
+            self.assertGreater(highlighted.green(), highlighted.red())
+            self.assertEqual(
+                window.texture_list.item(0).foreground().color().name(),
+                "#eeeeee")
+            self.assertEqual(
+                window.texture_list.horizontalScrollBarPolicy(),
+                Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+
+            # A model switch must reprioritize the existing list immediately;
+            # the catalog is not rebuilt just to update usage focus.
+            with patch.object(
+                    window, "_active_model_texture_names",
+                    return_value={"b.ilbm"}):
+                window._refresh_texture_usage_highlight()
+            names = [
+                window.texture_list.item(index).data(
+                    Qt.ItemDataRole.UserRole)
+                for index in range(window.texture_list.count())]
+            self.assertEqual(names, ["B.ILBM", "USED.ILBM", "A.ILBM"])
+            self.assertGreater(
+                window.texture_list.item(0).background().color().green(),
+                window.texture_list.item(0).background().color().red())
+            self.assertEqual(
+                window.texture_list.item(1).background().style(),
+                Qt.BrushStyle.NoBrush)
+            self.assertIn("rgba(74, 112, 84, 180)",
+                          window.asset_tree.styleSheet())
+        finally:
+            window.close()
+
+    def test_asset_dependencies_context_menu_has_no_obsolete_actions(self):
+        source = (Path(__file__).resolve().parents[1] /
+                  "assembly_window.py").read_text(encoding="utf-8")
+        start = source.index("    def _show_asset_context_menu")
+        end = source.index("    def _selected_texture_names", start)
+        context_source = source[start:end]
+        self.assertNotIn('"Select model"', context_source)
+        self.assertNotIn('"Assign File..."', context_source)
+
+    def test_asset_textures_suppresses_expected_missing_cmap_noise(self):
+        source = (Path(__file__).resolve().parents[1] /
+                  "assembly_window.py").read_text(encoding="utf-8")
+        self.assertIn('"no cmap palette in file"', source.casefold())
+        self.assertIn("ScrollBarAlwaysOff", source)
 
     def test_shared_component_requires_explicit_base_owner_choice(self):
         texture = TextureRef(

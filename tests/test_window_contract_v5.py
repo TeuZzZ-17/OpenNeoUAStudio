@@ -82,7 +82,18 @@ class WindowContractV5Tests(unittest.TestCase):
                 [window._diagnostics_tabs.tabText(index)
                  for index in range(window._diagnostics_tabs.count())],
                 ["Warnings", "Validation", "Log"])
+            diagnostic_menu = next(
+                action.menu() for action in window.menuBar().actions()
+                if action.text().replace("&", "") == "Diagnostics")
+            diagnostic_labels = [
+                action.text() for action in diagnostic_menu.actions()
+                if not action.isSeparator()]
+            self.assertEqual(
+                diagnostic_labels, ["Show Diagnostic Panel", "Clear Log"])
             window._show_diagnostics(0)
+            self.assertEqual(
+                window.diagnostics_toggle_action.text(),
+                "Hide Diagnostic Panel")
             for _ in range(2):
                 self.app.processEvents()
                 QTest.qWait(5)
@@ -92,6 +103,9 @@ class WindowContractV5Tests(unittest.TestCase):
             self.assertLessEqual(diagnostic_height, 90)
             window._hide_diagnostics()
             self.assertFalse(window._diagnostics_dock.isVisible())
+            self.assertEqual(
+                window.diagnostics_toggle_action.text(),
+                "Show Diagnostic Panel")
 
             visible_modes = [
                 window.mode_combo.itemText(index).casefold()
@@ -951,7 +965,7 @@ class WindowContractV5Tests(unittest.TestCase):
         finally:
             window.close()
 
-    def test_embedded_setbas_model_is_not_editable(self):
+    def test_embedded_setbas_model_keeps_full_in_memory_edit_mode(self):
         window = AssemblyWindow()
         try:
             owner = "root"
@@ -967,14 +981,15 @@ class WindowContractV5Tests(unittest.TestCase):
                 )
             }
             self.assertTrue(window._selected_model_is_archive_read_only())
-            self.assertFalse(window._has_editable_model())
+            self.assertTrue(window._has_editable_model())
             window._sync_edit_action_states()
             editor_index = window._right_tabs.indexOf(window._editor_tabs)
             self.assertTrue(window._right_tabs.isTabEnabled(editor_index))
             self.assertIn(
-                "read-only archive", window._right_tabs.tabToolTip(editor_index))
-            self.assertFalse(window.edit_menu.isEnabled())
-            self.assertFalse(window.mapping_repair_action.isEnabled())
+                "never overwritten", window._right_tabs.tabToolTip(editor_index))
+            self.assertTrue(window.edit_menu.isEnabled())
+            self.assertTrue(window.mapping_repair_action.isEnabled())
+            self.assertTrue(window.edit_toggle_action.isEnabled())
         finally:
             window.close()
 
