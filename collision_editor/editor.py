@@ -70,6 +70,11 @@ from PySide6.QtWidgets import (
 from assembly_viewer import AssetViewport, VIEW_PRESETS
 from asset_family import AssetFamily, load_asset_family, load_manual_family
 from asset_tree_filter import filter_tree as filter_asset_tree
+from editor_widgets import (
+    choose_bas_archive,
+    create_import_bas_archive_action,
+    install_standard_file_menu_tail,
+)
 from model_space_gizmo import ModelSpaceGizmo
 from vp_manager import (
     EmbeddedVPSet,
@@ -3014,9 +3019,8 @@ class CollisionEditorWindow(QMainWindow):
     def _build_actions(self):
         file_menu = self.menuBar().addMenu("&File")
         self.file_menu = file_menu
-        self.open_base_action = QAction("Import BAS Archive", self)
-        self.open_base_action.setShortcut(QKeySequence.StandardKey.Open)
-        self.open_base_action.triggered.connect(self.open_base_dialog)
+        self.open_base_action = create_import_bas_archive_action(
+            self, self.open_base_dialog, shortcut=True)
         self.open_sklt_action = QAction("Import SKLT", self)
         self.open_sklt_action.triggered.connect(self.open_sklt_dialog)
         self.open_vehicle_script_action = QAction(
@@ -3062,10 +3066,9 @@ class CollisionEditorWindow(QMainWindow):
         self.file_script_menu.addAction(self.apply_script_action)
         self.file_script_menu.addAction(self.save_loaded_script_action)
 
-        file_menu.addSeparator()
-        self.exit_action = QAction("Exit", self)
-        self.exit_action.triggered.connect(self.close)
-        file_menu.addAction(self.exit_action)
+        (self.close_bas_archive_action,
+         self.exit_action) = install_standard_file_menu_tail(
+            file_menu, self, close_archive_callback=self.close_current_archive)
         self.create_suggested_action = QAction(
             "Create Suggested Sphere", self)
         self.create_suggested_action.triggered.connect(
@@ -4244,11 +4247,49 @@ class CollisionEditorWindow(QMainWindow):
         self._sync_gizmo_camera()
 
     def open_base_dialog(self):
-        path, _ = QFileDialog.getOpenFileName(
-            self, "Import BAS Archive", str(self._last_directory),
-            "BAS archives (SET.BAS *.bas *.BAS);;All files (*)")
+        path = choose_bas_archive(self, self._last_directory)
         if path:
             self.open_base(path)
+
+    def _bas_archive_is_open(self) -> bool:
+        path = self._active_base_path
+        return bool(
+            self.family is not None
+            and path is not None
+            and path.suffix.casefold() == ".bas")
+
+    def _sync_close_archive_action(self) -> None:
+        action = getattr(self, "close_bas_archive_action", None)
+        if action is not None:
+            action.setEnabled(self._bas_archive_is_open())
+
+    def close_current_archive(self) -> None:
+        """Detach the current BAS provider without touching collision work.
+
+        Collision spheres/script data are a separate authoring document.
+        Closing the BAS archive therefore clears only the visual/model provider
+        and VP lookup state, then re-applies the existing collision project to
+        the now-empty viewport.
+        """
+
+        if not self._bas_archive_is_open():
+            self._sync_close_archive_action()
+            return
+        self.viewport.clear()
+        self.family = None
+        self._vp_embedded = None
+        self._vp_table = None
+        self._vp_table_source = ""
+        self._active_base_path = None
+        self._current_owner = None
+        self._current_owner_base_bounds = None
+        self.model_tree.clear()
+        self.source_label.setText("No source loaded.")
+        self._sync_all()
+        self._update_window_title()
+        self._sync_close_archive_action()
+        self.statusBar().showMessage(
+            "BAS archive closed. Collision project kept in memory.", 5000)
 
     def _current_set_bas_path(self) -> Path | None:
         if self._vp_embedded is None:
@@ -4634,6 +4675,7 @@ class CollisionEditorWindow(QMainWindow):
         if vp_warnings:
             self.statusBar().showMessage(" ".join(vp_warnings), 9000)
         self._set_modified()
+        self._sync_close_archive_action()
         return True
 
     def open_sklt_dialog(self):
@@ -4669,6 +4711,7 @@ class CollisionEditorWindow(QMainWindow):
             f"{Path(path).name}\nExternal SKLT; geometry-only unless its "
             "material mapping is supplied by a BASE.")
         self._set_modified()
+        self._sync_close_archive_action()
 
     def _fill_models(self, family: AssetFamily):
         self.model_tree.clear()

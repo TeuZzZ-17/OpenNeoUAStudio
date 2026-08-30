@@ -11,7 +11,7 @@ from PySide6.QtCore import QEvent, QPointF, Qt
 from PySide6.QtGui import QColor, QKeyEvent, QMouseEvent
 from PySide6.QtWidgets import (
     QAbstractItemView, QApplication, QDialog, QHeaderView, QLabel, QMessageBox,
-    QSizePolicy, QPushButton, QToolBar, QToolButton,
+    QSizePolicy, QPushButton, QToolBar, QToolButton, QTreeWidgetItem,
 )
 
 from asset_family import AssetFamily, FamilyObject
@@ -1413,6 +1413,9 @@ class CollisionEditorTests(unittest.TestCase):
     def test_90d_file_action_names_are_compact(self):
         window = self._window()
         self.assertEqual(window.open_base_action.text(), "Import BAS Archive")
+        self.assertEqual(
+            window.close_bas_archive_action.text(), "Close BAS Archive")
+        self.assertFalse(window.close_bas_archive_action.isEnabled())
         self.assertEqual(window.open_sklt_action.text(), "Import SKLT")
         self.assertEqual(
             window.open_vehicle_script_action.text(),
@@ -1422,6 +1425,31 @@ class CollisionEditorTests(unittest.TestCase):
         self.assertEqual(
             window.apply_script_action.text(), "Apply to Existing Script")
         self.assertEqual(window.save_loaded_script_action.text(), "Overwrite")
+
+
+    def test_90da_close_bas_archive_detaches_visual_provider_only(self):
+        window = self._window()
+        window.project.name = "Keep collision work"
+        window.family = object()
+        window._active_base_path = Path("C:/UA/Data/Set1/Objects/SET.BAS")
+        window._vp_embedded = object()
+        window._vp_table = object()
+        window._vp_table_source = "embedded test"
+        window.model_tree.addTopLevelItem(QTreeWidgetItem(["Skeleton/test.sklt", "1"]))
+        window.source_label.setText("SET.BAS loaded")
+        window._sync_close_archive_action()
+        self.assertTrue(window.close_bas_archive_action.isEnabled())
+
+        window.close_current_archive()
+
+        self.assertIsNone(window.family)
+        self.assertIsNone(window._active_base_path)
+        self.assertIsNone(window._vp_embedded)
+        self.assertIsNone(window._vp_table)
+        self.assertEqual(window.model_tree.topLevelItemCount(), 0)
+        self.assertEqual(window.source_label.text(), "No source loaded.")
+        self.assertEqual(window.project.name, "Keep collision work")
+        self.assertFalse(window.close_bas_archive_action.isEnabled())
 
     def test_90e_script_dialog_filters_by_exact_id_or_name(self):
         text = (

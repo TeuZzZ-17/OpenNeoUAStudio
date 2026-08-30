@@ -28,6 +28,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from editor_widgets import install_standard_file_menu_tail
 from outline_editor import OutlineEditor
 from sklt_parser import (
     SkltModel,
@@ -241,11 +242,8 @@ class WireframeEditorWindow(QMainWindow):
         file_menu.addAction(self.save_action)
         file_menu.addAction(self.save_as_action)
 
-        file_menu.addSeparator()
-
-        self.exit_action = QAction("E&xit", self)
-        self.exit_action.triggered.connect(self.close)
-        file_menu.addAction(self.exit_action)
+        _close_action, self.exit_action = install_standard_file_menu_tail(
+            file_menu, self, exit_text="E&xit")
 
         edit_menu = self.menuBar().addMenu("&Edit")
 

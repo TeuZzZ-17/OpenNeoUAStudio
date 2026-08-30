@@ -126,6 +126,9 @@ from editor_widgets import (
     draw_uv_polygon as _draw_uv_polygon,
     qimage_from_ilbm as _qimage_from_ilbm,
     status_icon as _status_icon,
+    choose_bas_archive,
+    create_import_bas_archive_action,
+    install_standard_file_menu_tail,
 )
 from fx_element_editor import (
     FxElement,
@@ -970,9 +973,8 @@ class AssemblyWindow(QMainWindow):
         # --- File menu: explicit import/export workflow ---
         file_menu = self.menuBar().addMenu("&File")
         self.file_menu = file_menu
-        self.open_bas_archive_action = QAction("Import BAS Archive", self)
-        self.open_bas_archive_action.triggered.connect(
-            self.open_bas_archive_dialog)
+        self.open_bas_archive_action = create_import_bas_archive_action(
+            self, self.open_bas_archive_dialog)
         # Retain the public action attribute used by existing integrations;
         # its UI meaning remains the read-only archive import.
         self.open_base_action = self.open_bas_archive_action
@@ -1024,10 +1026,9 @@ class AssemblyWindow(QMainWindow):
                 self.overwrite_action):
             self.file_export_menu.addAction(action)
 
-        file_menu.addSeparator()
-        self.exit_action = QAction("Exit", self)
-        self.exit_action.triggered.connect(self.close)
-        file_menu.addAction(self.exit_action)
+        (self.close_bas_archive_action,
+         self.exit_action) = install_standard_file_menu_tail(
+            file_menu, self, close_archive_callback=self.close_current_archive)
 
         edit_menu = self.menuBar().addMenu("&Edit")
         self.edit_menu = edit_menu
@@ -2315,10 +2316,7 @@ class AssemblyWindow(QMainWindow):
     def open_bas_archive_dialog(self) -> None:
         """Import a read-only SET.BAS resource archive."""
 
-        path, _ = QFileDialog.getOpenFileName(
-            self, "Import BAS Archive", str(self._last_directory),
-            "SET.BAS archives (SET.BAS *.bas *.BAS);;All files (*)",
-        )
+        path = choose_bas_archive(self, self._last_directory)
         if not path:
             return
         self.open_setbas(Path(path))
@@ -2491,12 +2489,141 @@ class AssemblyWindow(QMainWindow):
         )
         self._open_manual_asset_family(sklt, base, textures, anms)
 
+    def _sync_close_archive_action(self) -> None:
+        """Enable Close BAS Archive only while a document/provider is open."""
+
+        action = getattr(self, "close_bas_archive_action", None)
+        if action is not None:
+            action.setEnabled(self._setbas is not None or self._family is not None)
+
+    def _close_archive_block_reason(self) -> str:
+        """Workspace hook for operations that must finish before closing."""
+
+        return ""
+
+    def close_current_archive(self) -> None:
+        """Unload the current BAS/BASE document and return to the empty UI.
+
+        This is deliberately a document close, not an application restart:
+        user view preferences and session-level settings stay intact, while
+        every resource/family/preview/edit state owned by the open document is
+        discarded. SET.BAS is never modified.
+        """
+
+        if self._setbas is None and self._family is None:
+            self._sync_close_archive_action()
+            return
+        reason = self._close_archive_block_reason()
+        if reason:
+            QMessageBox.information(self, "Close BAS Archive", reason)
+            return
+        if not self._confirm_discard_geometry():
+            return
+
+        self._cancel_live_transforms()
+        for dialog in list(self._preview_windows):
+            try:
+                dialog.close()
+            except RuntimeError:
+                pass
+        self._preview_windows.clear()
+        for attr in ("_base_dependency_dialog", "_mapping_dialog"):
+            dialog = getattr(self, attr, None)
+            if dialog is not None:
+                try:
+                    dialog.close()
+                except RuntimeError:
+                    pass
+            setattr(self, attr, None)
+
+        # Clear the shared viewport first so no stale edit/animation session can
+        # reference objects that are about to be detached from the workbench.
+        self.viewport.clear()
+
+        self._family = None
+        self._setbas = None
+        self._vp_embedded = None
+        self._vp_source_path = None
+        self._overrides.clear()
+        self._trial_names.clear()
+        self._kept_names.clear()
+        self._skipped_names.clear()
+        self._large_mode = False
+        self._selected_owner = None
+        self._owner_to_obj.clear()
+        self._owner_to_item.clear()
+        self._base_entry_names.clear()
+        self._last_component_selection = None
+        self._asset_focus_owner = None
+        self._asset_focus_restoring = False
+        self._asset_filter_expansion = None
+        self._mapping_index = None
+        self._workbench_obj = None
+        self._selected_poly = None
+        self._selected_polys.clear()
+        self._mirror_select_source_polys.clear()
+        self._repair_plan = None
+        self._pending_repairs.clear()
+        self._saved_repair_path = None
+        self._geom_dirty.clear()
+        self._geom_original.clear()
+        self._topology_original.clear()
+        self._geometry_clipboard = None
+        self._material_clipboard = None
+        self._uv_ctx = None
+        self._uv_contexts.clear()
+        self._uv_original.clear()
+        self._vanm_uv_original.clear()
+        self._texture_original.clear()
+        self._tab_edit_selection.clear()
+        self._setbas_context_item = None
+        self._setbas_preview_active = False
+        self._fx_preview_cache.clear()
+        self._picked_structure = None
+        self._geometry_writer_capability_cache.clear()
+        self._edit_undo_stack.clear()
+        self._edit_redo_stack.clear()
+        self._uv_history_before = None
+        self._fx_elements.clear()
+        self._bundle_targets.clear()
+        self._bundle_base_snapshots.clear()
+        self._texture_preview_cache.clear()
+        self._texture_qimage_cache.clear()
+        self._object_info_polygon_lines = []
+
+        # Resource browsers and diagnostics belonging to the closed document.
+        self.setbas_tree.clear()
+        self.setbas_search.clear()
+        self.setbas_label.setText("No SET.BAS loaded.")
+        self.asset_tree.clear()
+        self.tree_search.clear()
+        self.texture_list.clear()
+        self.chunk_tree.clear()
+        self.blocks_list.clear()
+        self.repair_preview.clear()
+        self.warning_list.clear()
+        self.checks_list.clear()
+        self._set_object_info(["No asset selected."])
+
+        self._set_vp_table(None, "unavailable")
+        self.vp_selected_base_label.setText("-")
+        self.vp_current_label.setText("-")
+        self.setbas_extract_button.setEnabled(False)
+        self.setbas_extract_all_button.setEnabled(False)
+        self.setbas_runtime_loose_button.setEnabled(False)
+        self.export_runtime_loose_action.setEnabled(False)
+
+        self._sync_animation_controls()
+        self._sync_geometry_save_controls()
+        self._update_editor_status()
+        self._update_reset_camera_action()
+        self._sync_close_archive_action()
+        self._set_document_title(None)
+        self.statusBar().showMessage(
+            "Archive closed. No resource is loaded.", 5000)
+
     def open_setbas_dialog(self) -> None:
-        path, _ = QFileDialog.getOpenFileName(
-            self, "Import SET.BAS as read-only resource provider",
-            str(self._last_directory),
-            "SET.BAS archives (SET.BAS *.bas *.BAS);;All files (*)",
-        )
+        path = choose_bas_archive(self, self._last_directory)
         if path:
             self.open_setbas(path)
 
@@ -2514,6 +2641,7 @@ class AssemblyWindow(QMainWindow):
             return
         self._texture_preview_cache.clear()
         self._setbas = archive
+        self._sync_close_archive_action()
         self._set_document_title(archive.path)
         self._load_vp_table(archive)
         self._fill_setbas(archive)
@@ -11834,6 +11962,7 @@ class AssemblyWindow(QMainWindow):
             self._bundle_base_snapshots.clear()
             self._geometry_writer_capability_cache.clear()
         self._family = family
+        self._sync_close_archive_action()
         # The viewport always renders the selected object plus its children.
         # This is predictable for normal assets and safe for huge SET.BAS
         # families without a second render-scope system.
