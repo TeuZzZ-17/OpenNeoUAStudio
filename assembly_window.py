@@ -365,6 +365,12 @@ class AssemblyWindow(QMainWindow):
         self._selected_owner: str | None = None
         self._owner_to_obj: dict[str, object] = {}
         self._owner_to_item: dict[str, QTreeWidgetItem] = {}
+        # Exact BASE entry names proven by the VP table/embedded OBJT mapping.
+        # This is intentionally owner-scoped: skeleton filenames are never
+        # guessed into BASE names.
+        self._base_entry_names: dict[str, str] = {}
+        self._last_component_selection: tuple[str, str] | None = None
+        self._base_dependency_dialog: QDialog | None = None
         # optional read-only SET.BAS resource provider
         self._setbas: SetBasArchive | None = None
         self._vp_table: VPTable | None = None
@@ -465,7 +471,7 @@ class AssemblyWindow(QMainWindow):
         self.asset_tree = QTreeWidget()
         self.asset_tree.setSelectionMode(
             QAbstractItemView.SelectionMode.ExtendedSelection)
-        self.asset_tree.setHeaderLabels(["Asset", "Status"])
+        self.asset_tree.setHeaderLabels(["Asset", "Status", "Source / Path"])
         self.asset_tree.setUniformRowHeights(True)
         self.asset_tree.setIndentation(12)
         self.asset_tree.setAnimated(False)
@@ -480,14 +486,17 @@ class AssemblyWindow(QMainWindow):
         asset_header.setMinimumSectionSize(40)
         asset_header.setDefaultAlignment(
             Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
-        for column in range(2):
+        for column in range(3):
             asset_header.setSectionResizeMode(
                 column, QHeaderView.ResizeMode.Interactive)
         self.asset_tree.setColumnWidth(0, 300)
         self.asset_tree.setColumnWidth(1, 105)
+        self.asset_tree.setColumnWidth(2, 190)
         self.asset_tree.setHorizontalScrollBarPolicy(
             Qt.ScrollBarPolicy.ScrollBarAsNeeded)
         self.asset_tree.currentItemChanged.connect(self._on_tree_node_selected)
+        self.asset_tree.itemClicked.connect(
+            lambda item, _column: self._remember_component_selection(item))
         self.asset_tree.itemDoubleClicked.connect(self._on_tree_double_clicked)
         self.asset_tree.setContextMenuPolicy(
             Qt.ContextMenuPolicy.CustomContextMenu)
@@ -507,32 +516,10 @@ class AssemblyWindow(QMainWindow):
             self._show_texture_context_menu)
         self.texture_list.itemClicked.connect(
             self._load_visual_texture_item)
+        self.texture_list.itemClicked.connect(
+            lambda item: self._remember_texture_selection(item))
         self.texture_list.itemDoubleClicked.connect(
             self._preview_visual_texture_item)
-        self.resolve_tree = QTreeWidget()
-        self.resolve_tree.setHeaderLabels(["Resource", "Status", "Path"])
-        resolve_header = self.resolve_tree.header()
-        resolve_header.setSectionsMovable(False)
-        resolve_header.setStretchLastSection(False)
-        resolve_header.setMinimumSectionSize(40)
-        resolve_header.setDefaultAlignment(
-            Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
-        for column in range(3):
-            resolve_header.setSectionResizeMode(
-                column, QHeaderView.ResizeMode.Interactive)
-        # Default Dependencies layout mirrors the compact, readable Windows
-        # arrangement: the resource remains dominant, status stays narrow,
-        # and the path receives the remaining useful width.  Every section
-        # remains Interactive, so users can still tune it manually.
-        self.resolve_tree.setColumnWidth(0, 260)
-        self.resolve_tree.setColumnWidth(1, 70)
-        self.resolve_tree.setColumnWidth(2, 165)
-        self.resolve_tree.setHorizontalScrollBarPolicy(
-            Qt.ScrollBarPolicy.ScrollBarAsNeeded)
-        self.resolve_tree.setContextMenuPolicy(
-            Qt.ContextMenuPolicy.CustomContextMenu)
-        self.resolve_tree.customContextMenuRequested.connect(
-            self._show_resolve_context_menu)
         self.setbas_tree = _BasResourceTree()
         self.setbas_tree.setHeaderLabels(["Resource", "Payload", "VP"])
         self.setbas_tree.setSelectionMode(
@@ -729,6 +716,11 @@ class AssemblyWindow(QMainWindow):
         self._setbas_context_item = item
         resources = self._setbas_selected_resources()
         kind = item.data(0, _BAS_KIND_ROLE) if item is not None else None
+        preview = menu.addAction(
+            "Preview", lambda: self._preview_setbas_resource(item))
+        preview.setEnabled(kind in (
+            "base", "sklt.class", "ilbm.class", "bmpanim.class"))
+        menu.addSeparator()
         extract = menu.addAction(
             f"Extract selected... ({len(resources)})" if len(resources) > 1
             else "Extract selected...")
@@ -741,6 +733,16 @@ class AssemblyWindow(QMainWindow):
             "Export Runtime Loose SET",
             self._export_runtime_loose_set).setEnabled(
                 self._setbas is not None)
+        if kind == "base" and item is not None:
+            base_name = (
+                item.data(0, _BAS_NAME_ROLE) or item.text(0)).strip()
+            menu.addSeparator()
+            menu.addAction(
+                "Show Dependencies",
+                lambda: self._show_setbas_base_dependencies(base_name))
+            menu.addAction(
+                "Edit BASE Dependencies...",
+                lambda: self._edit_setbas_base_dependencies(base_name))
         if resources:
             menu.addSeparator()
             copy_names = menu.addAction("Copy resource name(s)")
@@ -782,7 +784,26 @@ class AssemblyWindow(QMainWindow):
         if kind == "animation":
             ref = self._family.animation_refs.get(payload)
             return Path(ref.path) if ref and ref.path else None
+        if kind == "dependency_candidate":
+            _name, candidate = payload
+            if candidate and not str(candidate).startswith("SET.BAS:"):
+                return Path(candidate)
         return None
+
+    def _remember_component_selection(self, item) -> None:
+        data = item.data(0, Qt.ItemDataRole.UserRole) if item is not None else None
+        if data and data[0] in ("skeleton", "texture", "animation"):
+            kind, payload = data
+            name = (payload.base_object.skeleton_name
+                    if kind == "skeleton" else str(payload))
+            self._last_component_selection = (kind, name)
+        else:
+            self._last_component_selection = None
+
+    def _remember_texture_selection(self, item) -> None:
+        name = item.data(Qt.ItemDataRole.UserRole) if item is not None else None
+        self._last_component_selection = (
+            ("texture", str(name)) if name else None)
 
     def _reveal_asset_item(self, item) -> None:
         path = self._asset_item_path(item)
@@ -849,6 +870,35 @@ class AssemblyWindow(QMainWindow):
                                     and payload in self._family.animations)
                     play.triggered.connect(
                         lambda: self._play_asset_animation(item))
+            if kind in ("base", "child"):
+                menu.addAction(
+                    "Edit BASE Dependencies...",
+                    lambda: self._edit_base_dependencies_for_item(item))
+        dependency_target = self._dependency_target_for_item(item)
+        if dependency_target is not None:
+            logical_name, candidate = dependency_target
+            menu.addSeparator()
+            select_resource = menu.addAction(
+                "Select Resource...", self._select_dependency_resource)
+            select_resource.setEnabled(bool(logical_name))
+            use = menu.addAction(
+                "Use Selected Source", self._use_selected_candidate)
+            use.setEnabled(bool(candidate))
+            assign = menu.addAction("Assign File...", self._assign_manual_file)
+            assign.setEnabled(bool(logical_name))
+            keep = menu.addAction("Keep for Session", self._keep_for_session)
+            keep.setEnabled(bool(logical_name))
+            revert = menu.addAction("Revert Source", self._clear_override)
+            revert.setEnabled(bool(logical_name))
+            dep = self._dep_for_name(logical_name)
+            candidates = self._dependency_candidate_paths(logical_name, dep)
+            if candidates:
+                candidates_menu = menu.addMenu("Available Sources")
+                for label, path in candidates:
+                    candidates_menu.addAction(
+                        label, lambda checked=False, name=logical_name,
+                        selected=path: self._apply_dependency_candidate(
+                            name, selected))
         path = self._asset_item_path(item)
         if path is not None:
             menu.addAction("Reveal source file",
@@ -897,32 +947,18 @@ class AssemblyWindow(QMainWindow):
         menu.addAction("Select all textures", self.texture_list.selectAll)
         menu.exec(self.texture_list.viewport().mapToGlobal(position))
 
-    def _show_resolve_context_menu(self, position) -> None:
-        item = self._prepare_context_item(self.resolve_tree, position)
-        if item is None:
-            return
-        menu = QMenu(self.resolve_tree)
-        target = self._selected_resolve_target()
-        for text, slot in (
-                ("Use Selected Source", self._use_selected_candidate),
-                ("Keep for Session", self._keep_for_session),
-                ("Assign File...", self._assign_manual_file),
-                ("Revert Source", self._clear_override),
-                ("Reveal Source File", self._reveal_in_folder)):
-            action = menu.addAction(text, slot)
-            action.setEnabled(target is not None)
-        menu.addSeparator()
-        menu.addAction("Copy row", lambda: self._copy_text(
-            self._widget_item_text(self.resolve_tree, item),
-            "Dependency row copied successfully."))
-        menu.exec(self.resolve_tree.viewport().mapToGlobal(position))
-
     def _build_toolbar(self) -> None:
         # --- File menu: explicit import/export workflow ---
         file_menu = self.menuBar().addMenu("&File")
         self.file_menu = file_menu
-        self.open_base_action = QAction("Import BAS Archive", self)
-        self.open_base_action.triggered.connect(self.open_bas_archive_dialog)
+        self.open_bas_archive_action = QAction("Import BAS Archive", self)
+        self.open_bas_archive_action.triggered.connect(
+            self.open_bas_archive_dialog)
+        # Retain the public action attribute used by existing integrations;
+        # its UI meaning remains the read-only archive import.
+        self.open_base_action = self.open_bas_archive_action
+        self.import_base_action = QAction("Import BASE", self)
+        self.import_base_action.triggered.connect(self.open_base_dialog)
         self.open_sklt_action = QAction("Import SKLT", self)
         self.open_sklt_action.triggered.connect(self.open_sklt_dialog)
         self.open_ilbm_action = QAction("Import ILBM", self)
@@ -932,7 +968,8 @@ class AssemblyWindow(QMainWindow):
 
         self.file_import_menu = file_menu.addMenu("Import")
         for action in (
-                self.open_base_action, self.open_sklt_action,
+                self.open_bas_archive_action, self.import_base_action,
+                self.open_sklt_action,
                 self.open_ilbm_action, self.open_family_action):
             self.file_import_menu.addAction(action)
 
@@ -953,6 +990,9 @@ class AssemblyWindow(QMainWindow):
         self.save_ilbm_action = QAction("Export ILBM", self)
         self.save_ilbm_action.setEnabled(False)
         self.save_ilbm_action.triggered.connect(self._save_ilbm_as)
+        self.save_asset_family_action = QAction("Export Asset Family", self)
+        self.save_asset_family_action.setEnabled(False)
+        self.save_asset_family_action.triggered.connect(self._save_model_as)
         self.overwrite_action = QAction("Overwrite", self)
         self.overwrite_action.setEnabled(False)
         self.overwrite_action.triggered.connect(self._overwrite_model)
@@ -961,6 +1001,7 @@ class AssemblyWindow(QMainWindow):
         for action in (
                 self.export_runtime_loose_action, self.save_base_action,
                 self.save_sklt_action, self.save_ilbm_action,
+                self.save_asset_family_action,
                 self.overwrite_action):
             self.file_export_menu.addAction(action)
 
@@ -1332,6 +1373,11 @@ class AssemblyWindow(QMainWindow):
         asset_layout = QVBoxLayout(asset_panel)
         asset_layout.setContentsMargins(2, 2, 2, 2)
         asset_layout.setSpacing(2)
+        asset_help = QLabel(
+            "Family graph, resolver status and source provenance. "
+            "Right-click a dependency to assign, keep or revert its source.")
+        asset_help.setWordWrap(True)
+        asset_layout.addWidget(asset_help)
         asset_layout.addWidget(self.tree_search)
         asset_layout.addWidget(self.asset_tree, 1)
 
@@ -1586,7 +1632,7 @@ class AssemblyWindow(QMainWindow):
         self.model_save_button.clicked.connect(self._overwrite_model)
         save_buttons.addWidget(self.model_save_button, 0, 0)
         self.model_save_as_button = QPushButton(
-            "Export SET Family")
+            "Export Asset Family")
         self.model_save_as_button.setEnabled(False)
         self.model_save_as_button.setToolTip(
             "Export a portable BASE package with SKLT, ILBM, VANM, SET "
@@ -1794,35 +1840,6 @@ class AssemblyWindow(QMainWindow):
         snapshot_layout.addWidget(studio_box)
         snapshot_layout.addStretch(1)
 
-        # Dependency resolution remains a resource workflow; editing panels
-        # are grouped separately below.
-        resolve_panel = QWidget()
-        resolve_layout = QVBoxLayout(resolve_panel)
-        resolve_layout.setContentsMargins(5, 5, 5, 5)
-        resolve_layout.setSpacing(4)
-        resolve_help = QLabel(
-            "Choose a source for missing or ambiguous dependencies. "
-            "Changes apply only to this session.")
-        resolve_help.setWordWrap(True)
-        resolve_layout.addWidget(resolve_help)
-        resolve_layout.addWidget(self.resolve_tree, 1)
-        resolve_buttons = QGridLayout()
-        resolve_buttons.setHorizontalSpacing(4)
-        resolve_buttons.setVerticalSpacing(3)
-        self.use_candidate_button = QPushButton("Use Selected Source")
-        self.use_candidate_button.clicked.connect(self._use_selected_candidate)
-        resolve_buttons.addWidget(self.use_candidate_button, 0, 0)
-        self.keep_button = QPushButton("Keep for Session")
-        self.keep_button.clicked.connect(self._keep_for_session)
-        resolve_buttons.addWidget(self.keep_button, 0, 1)
-        self.assign_manual_button = QPushButton("Assign File...")
-        self.assign_manual_button.clicked.connect(self._assign_manual_file)
-        resolve_buttons.addWidget(self.assign_manual_button, 1, 0)
-        self.unload_button = QPushButton("Revert Source")
-        self.unload_button.clicked.connect(self._clear_override)
-        resolve_buttons.addWidget(self.unload_button, 1, 1)
-        resolve_layout.addLayout(resolve_buttons)
-
         def category_tabs() -> QTabWidget:
             category = QTabWidget()
             category.setDocumentMode(True)
@@ -1850,8 +1867,7 @@ class AssemblyWindow(QMainWindow):
 
         resources_tabs = category_tabs()
         resources_tabs.addTab(setbas_panel, "Bas Manager")
-        resources_tabs.addTab(asset_panel, "Assets")
-        resources_tabs.addTab(resolve_panel, "Dependencies")
+        resources_tabs.addTab(asset_panel, "Asset Dependencies")
 
         # The model editor is taller than the normal windowed viewport.
         # Keep its controls in document flow and scroll the page instead of
@@ -2246,22 +2262,18 @@ class AssemblyWindow(QMainWindow):
             )
 
     def open_bas_archive_dialog(self) -> None:
-        """Import SET.BAS through the archive browser, or a standalone BASE."""
+        """Import a read-only SET.BAS resource archive."""
 
         path, _ = QFileDialog.getOpenFileName(
             self, "Import BAS Archive", str(self._last_directory),
-            "Urban Assault BAS/BASE (*.bas *.base *.BAS *.BASE);;All files (*)",
+            "SET.BAS archives (SET.BAS *.bas *.BAS);;All files (*)",
         )
         if not path:
             return
-        source = Path(path)
-        if source.name.casefold() == "set.bas":
-            self.open_setbas(source)
-        else:
-            self.open_base(source)
+        self.open_setbas(Path(path))
 
     def open_base_dialog(self) -> None:
-        """Backward-compatible standalone BASE importer."""
+        """Import a standalone, exportable BASE family entry point."""
 
         path, _ = QFileDialog.getOpenFileName(
             self, "Import BASE asset", str(self._last_directory),
@@ -2270,7 +2282,11 @@ class AssemblyWindow(QMainWindow):
         if path:
             source = Path(path)
             if source.name.casefold() == "set.bas":
-                self.open_setbas(source)
+                QMessageBox.information(
+                    self, "Use Import BAS Archive",
+                    "SET.BAS is a read-only archive provider. Use File > "
+                    "Import > Import BAS Archive. Import BASE is for a "
+                    "standalone editable-copy workflow.")
             else:
                 self.open_base(source)
 
@@ -2392,6 +2408,14 @@ class AssemblyWindow(QMainWindow):
         # requested asset type instead of resetting to the session directory.
         dialog_directory = Path(self._last_directory)
 
+        base, _ = QFileDialog.getOpenFileName(
+            self, "Import BASE entry point - optional, Cancel to skip",
+            str(dialog_directory),
+            "Urban Assault BASE (*.base *.bas *.BASE *.BAS);;All files (*)",
+        )
+        if base:
+            dialog_directory = Path(base).parent
+
         sklt, _ = QFileDialog.getOpenFileName(
             self, "Import skeleton (.sklt/.skl) - optional, Cancel to skip",
             str(dialog_directory),
@@ -2399,14 +2423,6 @@ class AssemblyWindow(QMainWindow):
         )
         if sklt:
             dialog_directory = Path(sklt).parent
-
-        base, _ = QFileDialog.getOpenFileName(
-            self, "Import BASE file - optional, Cancel to skip",
-            str(dialog_directory),
-            "Urban Assault BASE (*.base *.bas *.BASE *.BAS);;All files (*)",
-        )
-        if base:
-            dialog_directory = Path(base).parent
 
         textures, _ = QFileDialog.getOpenFileNames(
             self, "Import texture files (.ilbm/.ilb/.vbmp) - optional",
@@ -2980,11 +2996,11 @@ class AssemblyWindow(QMainWindow):
             "animations and ILBM/VBMP textures.",
         )
 
-    def _preview_setbas_base(self, base_name: str) -> None:
-        """Preview one VP BASE object without leaving the Bas Manager tab."""
+    def _resolve_setbas_base(self, base_name: str):
+        """Return the family/object proven by the VP-to-OBJT mapping."""
 
         if self._setbas is None:
-            return
+            return None, None, None
         archive_path = Path(self._setbas.path)
         try:
             if self._family is not None \
@@ -2997,7 +3013,7 @@ class AssemblyWindow(QMainWindow):
             QMessageBox.warning(
                 self, "BASE preview failed",
                 f"{base_name} could not be loaded.\n\n{exc}")
-            return
+            return None, None, None
 
         normalized = normalize_base_name(base_name)
         source_offset = None
@@ -3024,20 +3040,52 @@ class AssemblyWindow(QMainWindow):
 
         target = next((obj for obj in family.all_objects()
                        if matches(obj)), None)
+        return family, target, source_offset
+
+    def _activate_setbas_base(self, base_name: str):
+        family, target, source_offset = self._resolve_setbas_base(base_name)
         if target is None:
             QMessageBox.information(
                 self, "BASE preview unavailable",
                 f"{base_name} is listed in the VP table, but its embedded "
                 "BASE object could not be resolved. No file was modified.")
             self._raise_setbas_tab()
-            return
+            return None
         if family is not self._family:
             self._set_family(family)
+        # The Asset Dependencies root represents one active VP BASE at a
+        # time.  Do not retain older archive selections: on a later reload
+        # their insertion order could otherwise focus the wrong BASE.
+        self._base_entry_names.clear()
+        self._base_entry_names[target.owner_path] = str(base_name)
+        self._selected_owner = target.owner_path
+        self._fill_asset_tree(family)
         self._select_owner(target.owner_path)
         self._apply_selected_children_scope()
+        return target
+
+    def _preview_setbas_base(self, base_name: str) -> None:
+        """Preview one VP BASE object without leaving the Bas Manager tab."""
+
+        target = self._activate_setbas_base(base_name)
+        if target is None:
+            return
         self._raise_setbas_tab()
         self.statusBar().showMessage(
             f"Previewing BASE {base_name} [{target.owner_path}]", 8000)
+
+    def _show_setbas_base_dependencies(self, base_name: str) -> None:
+        target = self._activate_setbas_base(base_name)
+        if target is None:
+            return
+        self._focus_assets_for_owner(target.owner_path, switch_tabs=True)
+        self.statusBar().showMessage(
+            f"Asset dependencies for {base_name} [{target.owner_path}]", 8000)
+
+    def _edit_setbas_base_dependencies(self, base_name: str) -> None:
+        target = self._activate_setbas_base(base_name)
+        if target is not None:
+            self._edit_base_dependencies(target.owner_path)
 
     def _show_image_preview(self, title: str, info_text: str,
                             image: QImage, tooltip: str = "") -> None:
@@ -3901,8 +3949,28 @@ class AssemblyWindow(QMainWindow):
         owner = self._selected_owner
         obj = self._owner_to_obj.get(owner) if owner else None
         return bool(
-            obj is not None and obj.skeleton is not None
+            obj is not None and getattr(obj, "skeleton", None) is not None
             and not self._is_embedded_geometry_source(obj))
+
+    def _family_entry_is_setbas_archive(self) -> bool:
+        """True only for a model whose BASE entry still lives in SET.BAS."""
+
+        family = self._family
+        archive = self._setbas
+        if family is None or archive is None or family.base_path is None:
+            return False
+        try:
+            return (Path(family.base_path).resolve()
+                    == Path(archive.path).resolve())
+        except OSError:
+            return False
+
+    @staticmethod
+    def _archive_read_only_message(action: str = "editing") -> str:
+        return (
+            "SET.BAS is a read-only archive provider. Use Show Dependencies "
+            "then Edit BASE Dependencies to create a standalone BASE copy, "
+            f"or use File > Import > Import BASE before {action}.")
 
     def _selected_model_is_archive_read_only(self) -> bool:
         """Return True only when the selected model comes from SET.BAS."""
@@ -3912,7 +3980,7 @@ class AssemblyWindow(QMainWindow):
         owner = self._selected_owner
         obj = self._owner_to_obj.get(owner) if owner else None
         return bool(
-            obj is not None and obj.skeleton is not None
+            obj is not None and getattr(obj, "skeleton", None) is not None
             and self._is_embedded_geometry_source(obj))
 
     def _editing_allowed(self) -> bool:
@@ -3968,8 +4036,7 @@ class AssemblyWindow(QMainWindow):
             if self.viewport.is_edit_mode:
                 self.viewport.exit_edit_mode()
             self._notify(
-                "SET.BAS resources are read-only. Export the SET Family or "
-                "load loose files before editing.", 7000)
+                self._archive_read_only_message(), 9000)
             return
 
         panel = self._active_editor_panel()
@@ -4111,6 +4178,9 @@ class AssemblyWindow(QMainWindow):
                            self.mapping_diag_check):
                 action.setEnabled(True)
         self._sync_tab_edit_mode()
+        if self._right_tabs.currentWidget() is self._editor_tabs \
+                and self._selected_model_is_archive_read_only():
+            self._notify(self._archive_read_only_message(), 9000)
         if tabs is not None:
             outer_index = tabs.currentIndex()
             outer = tabs.tabText(outer_index)
@@ -4368,16 +4438,94 @@ class AssemblyWindow(QMainWindow):
 
     # -- texture resolution (session-only overrides) -----------------------------
 
-    def _selected_resolve_target(self) -> tuple[str, str | None] | None:
-        """Returns (logical_name, candidate_path or None) for the selection."""
+    def _dependency_target_for_item(
+            self, item) -> tuple[str, str | None] | None:
+        """Return the resolver target carried by one unified tree row."""
 
-        item = self.resolve_tree.currentItem()
         if item is None:
             return None
         data = item.data(0, Qt.ItemDataRole.UserRole)
-        if data is None:
+        if not data:
             return None
-        return data
+        kind, payload = data
+        if kind == "dependency_candidate":
+            return payload
+        if kind == "dependency_info":
+            return payload[0], None
+        if kind == "texture" or kind == "animation":
+            return str(payload), None
+        if kind == "skeleton" and payload is not None:
+            name = getattr(payload.base_object, "skeleton_name", "")
+            return (name, None) if name else None
+        return None
+
+    def _selected_resolve_target(self) -> tuple[str, str | None] | None:
+        """Return the resolver target selected in Asset Dependencies."""
+
+        return self._dependency_target_for_item(self.asset_tree.currentItem())
+
+    def _dependency_candidate_paths(self, name: str, dep=None):
+        dep = dep or self._dep_for_name(name)
+        candidates: list[tuple[str, str]] = []
+        for candidate in getattr(dep, "candidates", ()):
+            candidates.append((f"Loose: {candidate}", str(candidate)))
+        ref = None
+        if self._family is not None:
+            ref = (self._matching_ref(
+                getattr(self._family, "texture_refs", {}), name)
+                or self._matching_ref(
+                    getattr(self._family, "animation_refs", {}), name))
+            if ref is None:
+                all_objects = getattr(self._family, "all_objects", lambda: [])
+                for fam_obj in all_objects():
+                    skeleton_ref = getattr(fam_obj, "skeleton_ref", None)
+                    if skeleton_ref is not None and str(
+                            skeleton_ref.logical_name).casefold() \
+                            == str(name).casefold():
+                        ref = skeleton_ref
+                        break
+        for embedded in getattr(ref, "embedded_candidates", ()):
+            candidates.append((f"SET.BAS fallback: {embedded}", embedded))
+        return candidates
+
+    def _apply_dependency_candidate(self, name: str, candidate: str) -> None:
+        if candidate.startswith("SET.BAS:"):
+            bare = name.replace("\\", "/").split("/")[-1]
+            self._apply_override(
+                bare, SETBAS_OVERRIDE_PREFIX + candidate[len("SET.BAS:"):])
+        else:
+            self._apply_override(name, candidate)
+
+    def _select_dependency_resource(self) -> None:
+        """Choose a resolver candidate, or browse when none is available."""
+
+        target = self._selected_resolve_target()
+        if target is None:
+            QMessageBox.information(
+                self, "No resource selected",
+                "Select the missing or ambiguous resource in Asset "
+                "Dependencies first.",
+            )
+            return
+        logical_name, _candidate = target
+        candidates = self._dependency_candidate_paths(logical_name)
+        browse_label = "Browse for a compatible file..."
+        choices = [label for label, _path in candidates]
+        choices.append(browse_label)
+        selected, accepted = QInputDialog.getItem(
+            self, "Select Resource",
+            f"Choose a source for {logical_name}:",
+            choices, 0, False,
+        )
+        if not accepted:
+            return
+        if selected == browse_label:
+            self._assign_manual_file()
+            return
+        for label, path in candidates:
+            if label == selected:
+                self._apply_dependency_candidate(logical_name, path)
+                return
 
     def _apply_override(self, logical_name: str, path: str,
                         trial: bool = True) -> None:
@@ -4406,7 +4554,7 @@ class AssemblyWindow(QMainWindow):
                 self._trial_names.discard(key)
                 self._kept_names.add(key)
                 self.statusBar().showMessage(f"Kept for session: {key}")
-                self._fill_resolve(self._family)
+                self._refresh_asset_dependencies()
                 return
         self.statusBar().showMessage(
             "Keep for session applies to a trial-loaded dependency."
@@ -4418,7 +4566,7 @@ class AssemblyWindow(QMainWindow):
             return
         logical_name, _candidate = target
         self._skipped_names.add(logical_name)
-        self._fill_resolve(self._family)
+        self._refresh_asset_dependencies()
         self._apply_diagnostics_filter()
         self.statusBar().showMessage(f"Skipped for this session: {logical_name}")
 
@@ -4528,7 +4676,9 @@ class AssemblyWindow(QMainWindow):
             len(self._geom_dirty) + len(self._uv_original)
             + len(self._vanm_uv_original) + len(self._texture_original))
         self.loaded_resource_label.setText(selected)
-        self.loaded_resource_label.setToolTip(selected)
+        self.loaded_resource_label.setToolTip(
+            self._archive_read_only_message()
+            if self._selected_model_is_archive_read_only() else selected)
         self.unsaved_edits_label.setText(f"Unsave edits: {n_dirty}")
         self.unsaved_edits_label.setVisible(n_dirty > 0)
 
@@ -4547,7 +4697,7 @@ class AssemblyWindow(QMainWindow):
     def _dep_for_name(self, name: str):
         if self._family is None:
             return None
-        for dep in self._family.dependencies:
+        for dep in getattr(self._family, "dependencies", ()):
             if dep.raw_ref == name:
                 return dep
         return None
@@ -4579,7 +4729,7 @@ class AssemblyWindow(QMainWindow):
         error = self._profile.save()
         self._log(f"profile: saved choice {name} -> {chosen}"
                   + (f" ({error})" if error else ""))
-        self._fill_resolve(self._family)
+        self._refresh_asset_dependencies()
 
     def _forget_choice(self) -> None:
         target = self._selected_resolve_target()
@@ -4594,7 +4744,7 @@ class AssemblyWindow(QMainWindow):
         error = self._profile.save()
         self._log(f"profile: {'forgot' if removed else 'no saved choice for'} "
                   f"{name}" + (f" ({error})" if error else ""))
-        self._fill_resolve(self._family)
+        self._refresh_asset_dependencies()
 
     def _saved_choice_for(self, name: str):
         if self._family is None or self._family.base_path is None:
@@ -4671,7 +4821,7 @@ class AssemblyWindow(QMainWindow):
         target = self._selected_resolve_target()
         if target is None or self._family is None:
             self.statusBar().showMessage(
-                "Select a candidate row in the Dependencies tree first."
+                "Select a candidate row in Asset Dependencies first."
             )
             return
         name, candidate = target
@@ -4789,6 +4939,25 @@ class AssemblyWindow(QMainWindow):
 
     def _reload_with_overrides(self) -> None:
         if self._family and self._family.base_path:
+            if self._family_entry_is_setbas_archive():
+                owner = self._selected_owner
+                exact_names = dict(self._base_entry_names)
+                try:
+                    family = load_asset_family(
+                        self._family.base_path, self._extra_roots,
+                        self._overrides, self._setbas)
+                except Exception as exc:
+                    QMessageBox.warning(
+                        self, "Dependency reload failed",
+                        f"No file was modified.\n\n{exc}")
+                    return
+                self._set_family(family)
+                self._base_entry_names.update(exact_names)
+                self._fill_asset_tree(family)
+                if owner in self._owner_to_obj:
+                    self._select_owner(owner)
+                    self._focus_assets_for_owner(owner, switch_tabs=True)
+                return
             self.open_base(self._family.base_path)
         else:
             self.statusBar().showMessage(
@@ -4800,7 +4969,7 @@ class AssemblyWindow(QMainWindow):
         if target is None:
             QMessageBox.information(
                 self, "No candidate selected",
-                "Select a candidate path in the Resolve tree first.",
+                "Select a candidate path in Asset Dependencies first.",
             )
             return
         logical_name, candidate = target
@@ -4824,15 +4993,16 @@ class AssemblyWindow(QMainWindow):
         if target is None:
             QMessageBox.information(
                 self, "No resource selected",
-                "Select the resource to bind in the Resolve tree first.",
+                "Select the resource to bind in Asset Dependencies first.",
             )
             return
         logical_name, _candidate = target
         path, _ = QFileDialog.getOpenFileName(
             self, f"Assign a file to {logical_name}",
             str(self._last_directory),
-            "Textures/animations (*.ilbm *.ilb *.lbm *.iff *.anm *.vanm "
-            "*.ILBM *.ILB *.ANM *.VANM);;All files (*)",
+            "Dependencies (*.sklt *.skl *.ilbm *.ilb *.lbm *.iff *.vbmp "
+            "*.anm *.vanm *.pal *.SKLT *.SKL *.ILBM *.ILB *.VBMP *.ANM "
+            "*.VANM *.PAL);;All files (*)",
         )
         if not path:
             return
@@ -4860,6 +5030,275 @@ class AssemblyWindow(QMainWindow):
             )
             self._reload_with_overrides()
 
+    def _edit_base_dependencies_for_item(self, item) -> None:
+        owner = self._tree_owner_for_item(item)
+        if owner is not None:
+            self._edit_base_dependencies(owner)
+
+    def _base_dependency_edit_specs(self, fam_obj) -> list[dict]:
+        """Describe native BASE references and their proven writer support."""
+
+        specs: list[dict] = []
+        base_object = fam_obj.base_object
+        if base_object.skeleton_name:
+            specs.append({
+                "kind": "Skeleton", "name": base_object.skeleton_name,
+                "editable": False,
+                "reason": "read-only: no structured skeleton-name writer",
+            })
+
+        def add_texture(block, block_index: int, slot: str,
+                        *, nested: bool = False) -> None:
+            texture = getattr(block, slot, None)
+            if texture is None or not texture.name:
+                return
+            supported = bool(
+                not nested and texture.kind in ("ilbm", "bmpanim")
+                and texture.name_payload_offset >= 0
+                and texture.name_capacity > 1)
+            label = "Animation" if texture.kind == "bmpanim" else "Texture"
+            if slot == "tracy_texture":
+                label += " (TRACY)"
+            specs.append({
+                "kind": label,
+                "name": texture.name,
+                "editable": supported,
+                "reason": (
+                    f"writable c-string, max {texture.name_capacity - 1} bytes"
+                    if supported else
+                    "read-only: nested/unsupported reference has no verified writer"),
+                "block_index": block_index,
+                "binding_slot": slot,
+                "capacity": texture.name_capacity,
+            })
+
+        for block_index, block in enumerate(base_object.ades):
+            add_texture(block, block_index, "texture")
+            add_texture(block, block_index, "tracy_texture")
+            for stage in getattr(block, "particle_stages", ()):
+                add_texture(stage, block_index, "texture", nested=True)
+                add_texture(stage, block_index, "tracy_texture", nested=True)
+
+        animation_names = {
+            spec["name"] for spec in specs if spec["kind"] == "Animation"}
+        if self._family is not None:
+            for animation_name in sorted(animation_names, key=str.casefold):
+                animation = next((
+                    value for key, value in self._family.animations.items()
+                    if str(key).casefold() == animation_name.casefold()), None)
+                for bitmap in getattr(animation, "bitmap_names", ()):
+                    specs.append({
+                        "kind": "VANM frame bitmap", "name": bitmap,
+                        "editable": False,
+                        "reason": "read-only: stored in the ANM/VANM asset",
+                    })
+        for index, kid in enumerate(base_object.kids):
+            specs.append({
+                "kind": f"KIDS #{index}",
+                "name": kid.name or kid.skeleton_name or "inline BASE object",
+                "editable": False,
+                "reason": "read-only: ordered inline object, not a filename link",
+            })
+        for embedded in base_object.embedded:
+            specs.append({
+                "kind": f"Embedded {embedded.class_id}",
+                "name": embedded.resource_name,
+                "editable": False,
+                "reason": "read-only: embedded payload/reference is preserved",
+            })
+        return specs
+
+    def _create_editable_base_copy(self, owner: str,
+                                   target: str | Path) -> Path:
+        """Export one archive OBJT as a verified loose BASE, never in-place."""
+
+        family = self._family
+        fam_obj = self._owner_to_obj.get(owner)
+        tree = getattr(getattr(family, "base_asset", None), "tree", None)
+        if family is None or fam_obj is None or tree is None:
+            raise MappingEditError("selected BASE has no parsed source OBJT")
+        destination = Path(target)
+        if destination.suffix.casefold() != ".base":
+            destination = destination.with_suffix(".BASE")
+        source_path = Path(family.base_path) if family.base_path else None
+        if source_path is not None \
+                and destination.resolve() == source_path.resolve():
+            raise MappingEditError(
+                "the editable copy cannot replace its read-only source")
+        source_digest = hashlib.sha256(tree.data).digest()
+        standalone = export_base_object_bytes(tree.data, fam_obj.base_object)
+        with tempfile.TemporaryDirectory(
+                prefix="OpenNeoUAStudio_editable_base_") as temp_dir:
+            staged = Path(temp_dir) / destination.name
+            save_model_base_copy(standalone, [], [], staged)
+            parsed = parse_base_bytes(staged.read_bytes(), destination.name)
+            if parsed.root is None:
+                raise MappingEditError("editable BASE copy failed round-trip")
+            _commit_verified_files([(staged, destination)])
+        if hashlib.sha256(tree.data).digest() != source_digest:
+            raise MappingEditError("the read-only SET.BAS bytes changed")
+        return destination
+
+    def _edit_base_dependencies(self, owner: str) -> None:
+        if self._family_entry_is_setbas_archive():
+            QMessageBox.information(
+                self, "Create an editable BASE copy",
+                "SET.BAS remains read-only. Choose a standalone BASE output; "
+                "the dependency editor will modify only that verified copy.")
+            fam_obj = self._owner_to_obj.get(owner)
+            base_name = self._base_entry_name(
+                self._family, fam_obj, owner) if fam_obj is not None else "MODEL.BASE"
+            suggested = self._last_directory / Path(base_name).name
+            if suggested.suffix.casefold() != ".base":
+                suggested = suggested.with_suffix(".BASE")
+            output, _ = QFileDialog.getSaveFileName(
+                self, "Create editable BASE copy", str(suggested),
+                "BASE model (*.BASE *.base);;All files (*)")
+            if not output:
+                return
+            try:
+                target = self._create_editable_base_copy(owner, output)
+            except (MappingEditError, OSError, _BundleCommitError) as exc:
+                QMessageBox.critical(
+                    self, "Editable copy failed - SET.BAS unchanged", str(exc))
+                return
+            archive_path = Path(self._setbas.path)
+            for root in (archive_path.parent, archive_path.parent.parent):
+                if root not in self._extra_roots:
+                    self._extra_roots.append(root)
+            self._last_directory = target.parent
+            self.open_base(target, confirm_discard=False)
+            owner = self._selected_owner or "root"
+            self._notify(
+                f"Editing standalone copy {target.name}; SET.BAS remains read-only.",
+                10000)
+        self._open_base_dependency_dialog(owner)
+
+    def _open_base_dependency_dialog(self, owner: str) -> None:
+        fam_obj = self._owner_to_obj.get(owner)
+        if fam_obj is None:
+            return
+        specs = self._base_dependency_edit_specs(fam_obj)
+        dialog = QDialog(self)
+        dialog.setWindowTitle("Edit BASE Dependencies")
+        dialog.resize(700, 430)
+        layout = QVBoxLayout(dialog)
+        info = QLabel(
+            "Only native ILBM and BMPANIM/ANM c-string bindings with a "
+            "verified writer are editable. Other links are shown read-only.")
+        info.setWordWrap(True)
+        layout.addWidget(info)
+        tree = QTreeWidget()
+        tree.setHeaderLabels(["Reference", "Native name", "Writer support"])
+        base_name = self._base_entry_name(self._family, fam_obj, owner)
+        root = QTreeWidgetItem([f"BASE: {base_name}", "", "entry point"])
+        tree.addTopLevelItem(root)
+        editors: list[tuple[dict, QLineEdit, str]] = []
+        for spec in specs:
+            row = QTreeWidgetItem([
+                spec["kind"], spec["name"], spec["reason"]])
+            root.addChild(row)
+            if spec["editable"]:
+                edit = QLineEdit(spec["name"])
+                edit.setMaxLength(spec["capacity"] - 1)
+                edit.setToolTip(spec["reason"])
+                tree.setItemWidget(row, 1, edit)
+                editors.append((spec, edit, spec["name"]))
+            else:
+                row.setForeground(2, QColor(170, 170, 170))
+        root.setExpanded(True)
+        tree.header().setSectionResizeMode(
+            0, QHeaderView.ResizeMode.ResizeToContents)
+        tree.header().setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
+        tree.header().setSectionResizeMode(
+            2, QHeaderView.ResizeMode.ResizeToContents)
+        layout.addWidget(tree, 1)
+        buttons = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Save
+            | QDialogButtonBox.StandardButton.Reset
+            | QDialogButtonBox.StandardButton.Close)
+        revert = buttons.button(QDialogButtonBox.StandardButton.Reset)
+        revert.setText("Revert")
+        save = buttons.button(QDialogButtonBox.StandardButton.Save)
+        save.setEnabled(bool(editors))
+
+        def revert_changes() -> None:
+            for _spec, edit, initial in editors:
+                edit.setText(initial)
+
+        def save_changes() -> None:
+            edits = [
+                TextureNameEdit(
+                    owner, spec["block_index"], edit.text().strip(),
+                    spec["binding_slot"])
+                for spec, edit, initial in editors
+                if edit.text().strip() != initial]
+            if not edits:
+                self._notify("No BASE dependency reference changed.", 3500)
+                return
+            if self._save_base_dependency_edits(owner, edits):
+                dialog.accept()
+
+        revert.clicked.connect(revert_changes)
+        save.clicked.connect(save_changes)
+        buttons.rejected.connect(dialog.reject)
+        layout.addWidget(buttons)
+        self._base_dependency_dialog = dialog
+        dialog.finished.connect(
+            lambda _result: setattr(self, "_base_dependency_dialog", None))
+        dialog.show()
+        dialog.raise_()
+        dialog.activateWindow()
+
+    def _save_base_dependency_edits(
+            self, owner: str, edits: list[TextureNameEdit]) -> bool:
+        family = self._family
+        source = Path(family.base_path) if family and family.base_path else None
+        if source is None or not source.is_file() \
+                or self._family_entry_is_setbas_archive():
+            QMessageBox.critical(
+                self, "Save refused",
+                "Dependency edits require a standalone loose BASE. SET.BAS "
+                "was not modified.")
+            return False
+        if (self._geom_dirty or self._uv_original or self._vanm_uv_original
+                or self._texture_original or self._pending_repairs):
+            QMessageBox.information(
+                self, "Save other edits first",
+                "Finish or export the current model edits before changing "
+                "BASE dependency references.")
+            return False
+        provider = Path(self._setbas.path) if self._setbas is not None else None
+        provider_digest = (
+            hashlib.sha256(provider.read_bytes()).digest()
+            if provider is not None and provider.is_file()
+            and provider.resolve() != source.resolve() else None)
+        backup = _next_backup_path(source)
+        try:
+            original = source.read_bytes()
+            with tempfile.TemporaryDirectory(
+                    prefix="OpenNeoUAStudio_base_dependencies_") as temp_dir:
+                staged = Path(temp_dir) / source.name
+                save_model_base_copy(original, [], edits, staged)
+                shutil.copy2(source, backup)
+                warnings = _commit_verified_files([(staged, source)])
+            if provider_digest is not None and hashlib.sha256(
+                    provider.read_bytes()).digest() != provider_digest:
+                raise MappingEditError("the attached SET.BAS bytes changed")
+        except (MappingEditError, OSError, _BundleCommitError) as exc:
+            QMessageBox.critical(
+                self, "Save failed - original BASE preserved",
+                f"{exc}\n\nBackup: {backup if backup.exists() else '-'}")
+            return False
+        self._log(
+            f"BASE dependency references saved to {source}; backup {backup}"
+            + ("; " + "; ".join(warnings) if warnings else ""))
+        self.open_base(source, confirm_discard=False)
+        self._notify(
+            f"BASE dependencies saved and verified. Backup: {backup.name}.",
+            9000)
+        return True
+
     def _effective_status(self, name: str, status: str) -> str:
         bare = name.replace("\\", "/").split("/")[-1]
         for key in (name, bare):
@@ -4871,89 +5310,13 @@ class AssemblyWindow(QMainWindow):
                 return "kept_for_session"
         return status
 
-    def _fill_resolve(self, family: AssetFamily) -> None:
-        self.resolve_tree.clear()
-        status_key = {
-            "auto_loaded": "found", "resolved": "found",
-            "trial_loaded": "manual", "kept_for_session": "manual",
-            "ambiguous": "ambiguous", "missing": "missing",
-            "failed_load": "decode failed",
-            "unsupported_loader": "ambiguous", "skipped": "missing",
-        }
-        for dep in family.dependencies:
-            status = self._effective_status(dep.raw_ref, dep.status)
-            owner = f" [{dep.owner_node}]" if dep.owner_node else ""
-            top = QTreeWidgetItem([
-                f"{dep.kind}: {dep.raw_ref}{owner}",
-                status,
-                dep.display_path() if dep.resolved_path else
-                (dep.error or dep.source or "-"),
-            ])
-            top.setIcon(0, _status_icon(status_key.get(status, status)))
-            top.setData(0, Qt.ItemDataRole.UserRole, (dep.raw_ref, None))
-            provenance = (
-                f"source={dep.resolution_source or '-'}\n"
-                f"rule={dep.resolution_rule or '-'}")
-            for column in range(3):
-                top.setToolTip(column, provenance)
-            self.resolve_tree.addTopLevelItem(top)
-
-            if dep.resolution_source or dep.resolution_rule:
-                rule_row = QTreeWidgetItem([
-                    "resolution provenance",
-                    dep.resolution_source or "-",
-                    dep.resolution_rule or "-",
-                ])
-                rule_row.setData(
-                    0, Qt.ItemDataRole.UserRole, (dep.raw_ref, None))
-                top.addChild(rule_row)
-
-            ref = (family.texture_refs.get(dep.raw_ref)
-                   or family.animation_refs.get(dep.raw_ref))
-            for candidate in dep.candidates:
-                child = QTreeWidgetItem(
-                    ["candidate (loose)",
-                     "current" if dep.resolved_path == candidate else "",
-                     str(candidate)]
-                )
-                child.setData(0, Qt.ItemDataRole.UserRole,
-                              (dep.raw_ref, str(candidate)))
-                top.addChild(child)
-            if ref is not None:
-                for embedded in ref.embedded_candidates:
-                    child = QTreeWidgetItem(
-                        ["candidate (SET.BAS)",
-                         "current" if ref.status in ("setbas",
-                                                     "manual (SET.BAS)")
-                         else "",
-                         embedded]
-                    )
-                    child.setData(0, Qt.ItemDataRole.UserRole,
-                                  (dep.raw_ref, embedded))
-                    top.addChild(child)
-            bare = dep.raw_ref.replace("\\", "/").split("/")[-1]
-            override = (family.overrides.get(dep.raw_ref)
-                        or family.overrides.get(bare))
-            if override:
-                note = QTreeWidgetItem(
-                    ["session override", "active", override]
-                )
-                note.setData(0, Qt.ItemDataRole.UserRole, (dep.raw_ref, None))
-                top.addChild(note)
-            saved = self._saved_choice_for(dep.raw_ref)
-            if saved is not None:
-                saved_row = QTreeWidgetItem([
-                    "saved choice (profile)",
-                    "STALE" if saved.stale else "available",
-                    saved.chosen_path,
-                ])
-                saved_row.setData(0, Qt.ItemDataRole.UserRole,
-                                  (dep.raw_ref,
-                                   None if saved.stale else saved.chosen_path))
-                if not saved.stale:
-                    saved_row.setForeground(0, QColor(110, 170, 255))
-                top.addChild(saved_row)
-        self.resolve_tree.expandAll()
+    def _refresh_asset_dependencies(self) -> None:
+        if self._family is None:
+            return
+        owner = self._selected_owner
+        self._fill_asset_tree(self._family)
+        if owner in self._owner_to_item:
+            self._focus_assets_for_owner(owner, switch_tabs=False)
 
     # -- FX Elements ---------------------------------------------------------------
 
@@ -7201,12 +7564,12 @@ class AssemblyWindow(QMainWindow):
             and self._standalone_sklt_source(fam_obj) is not None)
 
     def _is_embedded_geometry_source(self, fam_obj) -> bool:
-        ref = getattr(fam_obj, "skeleton_ref", None)
-        path = getattr(ref, "path", None)
-        status = (getattr(ref, "status", "") or "").lower()
-        source = (getattr(ref, "source", "") or "").lower()
-        return path is None or status in ("setbas", "manual (set.bas)") \
-            or source == "set.bas"
+        # A skeleton may legitimately have no loose path because it was
+        # decoded from a standalone BASE/self-provider. That model is still
+        # editable through the existing verified BASE + SKLT export path.
+        # Read-only follows the BASE entry point, never a stale ResolvedFile.
+        return bool(fam_obj is not None and
+                    self._family_entry_is_setbas_archive())
 
     def _current_viewport_position(self):
         cursor = self.viewport.mapFromGlobal(QCursor.pos())
@@ -7995,9 +8358,7 @@ class AssemblyWindow(QMainWindow):
     def _show_model_editor(self) -> None:
         if self._selected_model_is_archive_read_only():
             self._notify(
-                "SET.BAS resources are read-only. Export the SET Family or "
-                "load loose files before editing.", 7000)
-            return
+                self._archive_read_only_message(), 9000)
         if hasattr(self, "_right_tabs") and hasattr(self, "_editor_tabs"):
             self._right_tabs.setCurrentWidget(self._editor_tabs)
             self._editor_tabs.setCurrentWidget(self._model_editor_panel)
@@ -8007,8 +8368,7 @@ class AssemblyWindow(QMainWindow):
 
         if self._selected_model_is_archive_read_only():
             self._notify(
-                "SET.BAS resources are read-only. Export the SET Family or "
-                "load loose files before repairing mappings.", 7000)
+                self._archive_read_only_message("repairing mappings"), 9000)
             return
         self._show_model_editor()
         if self._mapping_dialog is None:
@@ -8035,8 +8395,7 @@ class AssemblyWindow(QMainWindow):
                     self.viewport.exit_edit_mode()
                 if self._selected_model_is_archive_read_only():
                     self._notify(
-                        "SET.BAS resources are read-only. Export the SET "
-                        "Family or load loose files before editing.", 7000)
+                        self._archive_read_only_message(), 9000)
                 return
             self._remember_geometry_original(self._selected_owner)
             self._sync_editor_context()
@@ -8116,12 +8475,13 @@ class AssemblyWindow(QMainWindow):
         if hasattr(self, "_right_tabs") and hasattr(self, "_editor_tabs"):
             editor_index = self._right_tabs.indexOf(self._editor_tabs)
             if editor_index >= 0:
-                self._right_tabs.setTabEnabled(
-                    editor_index, not archive_read_only)
-                if archive_read_only \
-                        and self._right_tabs.currentWidget() \
-                        is self._editor_tabs:
-                    self._right_tabs.setCurrentWidget(self._resources_tabs)
+                # The Editor remains inspectable in View Mode. Only mutating
+                # Edit Mode is disabled for a BASE still inside SET.BAS.
+                self._right_tabs.setTabEnabled(editor_index, True)
+                self._right_tabs.setTabToolTip(
+                    editor_index,
+                    self._archive_read_only_message()
+                    if archive_read_only else "Edit the selected loose model.")
         for name in ("edit_select_all_action", "edit_select_none_action"):
             action = getattr(self, name, None)
             if action is not None:
@@ -8276,6 +8636,7 @@ class AssemblyWindow(QMainWindow):
         self.save_base_action.setEnabled(family_export_enabled)
         self.save_sklt_action.setEnabled(sklt_export_enabled)
         self.save_ilbm_action.setEnabled(ilbm_export_enabled)
+        self.save_asset_family_action.setEnabled(family_export_enabled)
         self.overwrite_action.setEnabled(overwrite_enabled)
         owner = self._selected_owner
         can_reset = bool(
@@ -8734,8 +9095,8 @@ class AssemblyWindow(QMainWindow):
                 list(blocks[block_index].olpl[atts_index])))
         return uv_edits, texture_edits
 
-    def _model_save_context(self):
-        owner = self._selected_owner
+    def _model_save_context(self, owner: str | None = None):
+        owner = owner or self._selected_owner
         family = self._family
         fam_obj = self._owner_to_obj.get(owner) if owner else None
         model = getattr(fam_obj, "skeleton", None)
@@ -9086,8 +9447,98 @@ class AssemblyWindow(QMainWindow):
         self._last_directory = target.parent
         self._notify(f"ILBM exported to {result.output}.", 8000)
 
+    def _owners_for_component(self, kind: str, name: str) -> list[str]:
+        family = self._family
+        if family is None:
+            return []
+        folded = str(name).casefold()
+        owners = []
+        for fam_obj in family.all_objects():
+            matched = False
+            if kind == "skeleton":
+                matched = str(fam_obj.base_object.skeleton_name).casefold() \
+                    == folded
+            else:
+                animation_names = set()
+                texture_names = set()
+                for root_block in fam_obj.base_object.ades:
+                    blocks = (root_block.iter_visual_blocks()
+                              if hasattr(root_block, "iter_visual_blocks")
+                              else (root_block,))
+                    for block in blocks:
+                        for texture in (
+                                getattr(block, "texture", None),
+                                getattr(block, "tracy_texture", None)):
+                            texture_name = str(
+                                getattr(texture, "name", "") or "")
+                            if not texture_name:
+                                continue
+                            if str(getattr(texture, "kind", "")).casefold() \
+                                    == "bmpanim":
+                                animation_names.add(texture_name)
+                            else:
+                                texture_names.add(texture_name)
+                if kind == "animation":
+                    matched = any(value.casefold() == folded
+                                  for value in animation_names)
+                else:
+                    matched = any(value.casefold() == folded
+                                  for value in texture_names)
+                    if not matched:
+                        for animation_name in animation_names:
+                            animation = next((
+                                value for key, value in family.animations.items()
+                                if str(key).casefold()
+                                == animation_name.casefold()), None)
+                            if any(str(bitmap).casefold() == folded for bitmap in
+                                   getattr(animation, "bitmap_names", ())):
+                                matched = True
+                                break
+            if matched:
+                owners.append(fam_obj.owner_path)
+        return owners
+
+    def _export_owner_for_selection(self) -> str | None:
+        component = self._last_component_selection
+        if component is None:
+            item = self.asset_tree.currentItem()
+            data = item.data(
+                0, Qt.ItemDataRole.UserRole) if item is not None else None
+            if data and data[0] in ("skeleton", "texture", "animation"):
+                kind, payload = data
+                name = (payload.base_object.skeleton_name
+                        if kind == "skeleton" else str(payload))
+                component = kind, name
+        if component is None:
+            return self._selected_owner
+        kind, name = component
+        owners = self._owners_for_component(kind, name)
+        if not owners:
+            QMessageBox.information(
+                self, "Asset Family unavailable",
+                f"No BASE owner could be proven for {name}; nothing was "
+                "selected arbitrarily.")
+            return None
+        if len(owners) == 1:
+            return owners[0]
+        labels = []
+        label_to_owner = {}
+        for owner in owners:
+            fam_obj = self._owner_to_obj[owner]
+            label = f"{self._base_entry_name(self._family, fam_obj, owner)} [{owner}]"
+            labels.append(label)
+            label_to_owner[label] = owner
+        chosen, accepted = QInputDialog.getItem(
+            self, "Choose BASE owner",
+            f"{name} is shared by multiple BASE entries. Export which family?",
+            labels, 0, False)
+        return label_to_owner.get(chosen) if accepted else None
+
     def _save_model_as(self) -> None:
-        context = self._model_save_context()
+        owner = self._export_owner_for_selection()
+        if owner is None:
+            return
+        context = self._model_save_context(owner)
         if context is None:
             return
         owner, family, fam_obj, _model, _tree = context
@@ -9098,18 +9549,14 @@ class AssemblyWindow(QMainWindow):
                            base_label) or "MODEL"
         if Path(base_stem).suffix.casefold() == ".base":
             base_stem = Path(base_stem).stem or "MODEL"
-        suggested = self._last_directory / f"{base_stem}.BASE"
-        output, _selected_filter = QFileDialog.getSaveFileName(
-            self, "Export SET Family", str(suggested),
-            "BASE model (*.BASE *.base);;All files (*.*)",
-            options=QFileDialog.Option.DontConfirmOverwrite)
+        output = QFileDialog.getExistingDirectory(
+            self, "Choose Asset Family destination folder",
+            str(self._last_directory))
         if not output:
             self._notify("Asset-family export cancelled.", 3000)
             return
-        base_target = Path(output)
-        if base_target.suffix.casefold() != ".base":
-            base_target = base_target.with_suffix(".BASE")
-        output_root = base_target.parent
+        output_root = Path(output)
+        base_target = output_root / f"{base_stem}.BASE"
         skeleton_target = output_root / skeleton_relative
         if self._write_model_files(
                 owner, family, fam_obj, skeleton_target, base_target,
@@ -9174,7 +9621,7 @@ class AssemblyWindow(QMainWindow):
         targets = self._bundle_targets.get(owner)
         if targets is None:
             self._notify(
-                "Export SET Family before Overwrite.", 5000)
+                "Export Asset Family before Overwrite.", 5000)
             return
         skeleton_target, base_target = targets
         if self._write_model_files(
@@ -9187,7 +9634,7 @@ class AssemblyWindow(QMainWindow):
     def _write_model_files(self, owner: str, family: AssetFamily, fam_obj,
                            skeleton_target: Path, base_target: Path,
                            *, ask_replace: bool) -> bool:
-        """Export one portable SET Family package."""
+        """Export one portable Asset Family package."""
 
         model = fam_obj.skeleton
         tree = family.base_asset.tree
@@ -9313,7 +9760,7 @@ class AssemblyWindow(QMainWindow):
         if indexed_adapter is None:
             QMessageBox.critical(
                 self, "Export failed - current files unchanged",
-                "A SET Family must contain one coherent SET "
+                "An Asset Family must contain one coherent SET "
                 "palette/SHADERMP/TRACYRMP profile.\n\n" + indexed_reason)
             return False
         profile_exports = [
@@ -9576,7 +10023,7 @@ class AssemblyWindow(QMainWindow):
                 package_validation = validate_family_package(temp_root)
                 if not package_validation.valid:
                     raise AssetFamilyPackageError(
-                        "SET Family validation failed:\n"
+                        "Asset Family validation failed:\n"
                         + "\n".join(package_validation.errors))
                 reloaded_obj = package_validation.family.root_object
                 reloaded_model = (
@@ -9612,7 +10059,7 @@ class AssemblyWindow(QMainWindow):
                     committed = validate_family_package(package_root)
                     if not committed.valid:
                         raise AssetFamilyPackageError(
-                            "committed SET Family failed isolated "
+                            "committed Asset Family failed isolated "
                             "reload:\n" + "\n".join(committed.errors))
 
                 notes.extend(_commit_verified_files(
@@ -11070,6 +11517,8 @@ class AssemblyWindow(QMainWindow):
         self._texture_preview_cache.clear()
         self._texture_qimage_cache.clear()
         if family is not self._family:
+            self._base_entry_names.clear()
+            self._last_component_selection = None
             self._bundle_targets.clear()
             self._bundle_base_snapshots.clear()
             self._geometry_writer_capability_cache.clear()
@@ -11107,7 +11556,6 @@ class AssemblyWindow(QMainWindow):
             if selected_item is not None:
                 self.asset_tree.setCurrentItem(selected_item)
         self._fill_textures(family)
-        self._fill_resolve(family)
         self._fill_chunks(family)
         self._fill_checks(family)
         self._pending_repairs = []
@@ -11141,6 +11589,9 @@ class AssemblyWindow(QMainWindow):
         self._update_editor_status()
         # Reapply the active main-tab contract after the viewport rebuild.
         self._sync_tab_edit_mode()
+        # Family replacement is the final authority for every stale
+        # snapshot/paste/archive enable state.
+        self._sync_edit_action_states()
         self._update_reset_camera_action()
         status, _details = self._completeness(family)
         self._log(f"loaded {family.base_path}: {status}")
@@ -11149,7 +11600,7 @@ class AssemblyWindow(QMainWindow):
         self._set_document_title(title_path)
         name = title_path.name if title_path else "manual family"
         diag = (f", textured preview incomplete "
-                f"({len(family.textured_diagnostics)} issue(s), see Resolve)"
+                f"({len(family.textured_diagnostics)} issue(s), see Asset Dependencies)"
                 if family.textured_diagnostics else "")
         self.statusBar().showMessage(
             f"Loaded {name}: {len(family.all_objects())} object(s), "
@@ -11159,52 +11610,218 @@ class AssemblyWindow(QMainWindow):
             f"{diag}"
         )
 
-    def _tree_item(self, label: str, status: str, node_data) -> QTreeWidgetItem:
-        item = QTreeWidgetItem([label, status])
+    def _tree_item(self, label: str, status: str, node_data,
+                   source: str = "") -> QTreeWidgetItem:
+        item = QTreeWidgetItem([label, status, source])
         if node_data and node_data[0] == "group":
             # Pure category rows remain clickable for expand/collapse but are
             # not selectable, avoiding the accent stripe over their arrow.
             item.setFlags(item.flags() & ~Qt.ItemFlag.ItemIsSelectable)
-        item.setIcon(0, _status_icon({
+        status_key = {
             "auto_loaded": "found", "loaded": "found", "resolved": "found",
             "kept_for_session": "manual", "trial_loaded": "manual",
             "ambiguous": "ambiguous", "missing": "missing",
             "failed_load": "decode failed", "skipped": "missing",
             "unsupported_loader": "ambiguous",
-        }.get(status, status)))
+        }.get(status, status)
+        item.setIcon(0, _status_icon(status_key))
+        if status:
+            color = _STATUS_COLORS.get(status_key)
+            if color is not None:
+                item.setForeground(1, color)
         item.setData(0, Qt.ItemDataRole.UserRole, node_data)
         return item
+
+    def _dependency_for(self, family: AssetFamily, name: str,
+                        owner: str | None = None, kind: str | None = None):
+        folded = str(name).casefold()
+        matches = [
+            dep for dep in family.dependencies
+            if str(dep.raw_ref).casefold() == folded
+            and (kind is None or dep.kind == kind)]
+        if owner is not None:
+            exact = [dep for dep in matches if dep.owner_node == owner]
+            if exact:
+                return exact[0]
+        return matches[0] if matches else None
+
+    def _dependency_reference(self, family: AssetFamily, name: str):
+        ref = (self._matching_ref(
+            getattr(family, "texture_refs", {}), name)
+            or self._matching_ref(
+                getattr(family, "animation_refs", {}), name))
+        if ref is not None:
+            return ref
+        for fam_obj in getattr(family, "all_objects", lambda: [])():
+            skeleton_ref = getattr(fam_obj, "skeleton_ref", None)
+            if skeleton_ref is not None and str(
+                    skeleton_ref.logical_name).casefold() \
+                    == str(name).casefold():
+                return skeleton_ref
+        return None
+
+    def _decorate_dependency_node(self, item: QTreeWidgetItem, dep,
+                                  family: AssetFamily) -> None:
+        if dep is None:
+            return
+        status = self._effective_status(dep.raw_ref, dep.status)
+        status_key = {
+            "auto_loaded": "found", "resolved": "found",
+            "trial_loaded": "manual", "kept_for_session": "manual",
+            "ambiguous": "ambiguous", "missing": "missing",
+            "failed_load": "decode failed",
+            "unsupported_loader": "ambiguous", "skipped": "missing",
+        }.get(status, status)
+        item.setText(1, status)
+        item.setIcon(0, _status_icon(status_key))
+        color = _STATUS_COLORS.get(status_key)
+        if color is not None:
+            item.setForeground(1, color)
+        location = (dep.display_path() if dep.resolved_path is not None else
+                    dep.error or dep.source or "-")
+        if dep.resolution_source:
+            location = f"{dep.resolution_source}: {location}"
+        item.setText(2, location)
+        provenance = (
+            f"source={dep.resolution_source or '-'}\n"
+            f"rule={dep.resolution_rule or '-'}")
+        for column in range(3):
+            item.setToolTip(column, provenance)
+
+        if dep.resolution_source or dep.resolution_rule:
+            rule_row = self._tree_item(
+                "Resolution provenance", dep.resolution_source or "-",
+                ("dependency_info", (dep.raw_ref, None)),
+                dep.resolution_rule or "-")
+            item.addChild(rule_row)
+
+        ref = self._dependency_reference(family, dep.raw_ref)
+        for candidate in dep.candidates:
+            child = self._tree_item(
+                "Loose candidate",
+                "current" if dep.resolved_path == candidate else "available",
+                ("dependency_candidate", (dep.raw_ref, str(candidate))),
+                str(candidate))
+            item.addChild(child)
+        for embedded in getattr(ref, "embedded_candidates", ()):
+            child = self._tree_item(
+                "SET.BAS fallback",
+                "current" if getattr(ref, "status", "") in (
+                    "setbas", "manual (SET.BAS)") else "available",
+                ("dependency_candidate", (dep.raw_ref, embedded)), embedded)
+            item.addChild(child)
+
+        bare = dep.raw_ref.replace("\\", "/").split("/")[-1]
+        override = (family.overrides.get(dep.raw_ref)
+                    or family.overrides.get(bare))
+        if override:
+            item.addChild(self._tree_item(
+                "Session override", "active",
+                ("dependency_info", (dep.raw_ref, None)), override))
+        saved = self._saved_choice_for(dep.raw_ref)
+        if saved is not None:
+            saved_row = self._tree_item(
+                "Saved profile choice",
+                "STALE" if saved.stale else "available",
+                ("dependency_candidate", (
+                    dep.raw_ref,
+                    None if saved.stale else saved.chosen_path)),
+                saved.chosen_path)
+            if not saved.stale:
+                saved_row.setForeground(0, QColor(110, 170, 255))
+            item.addChild(saved_row)
+
+    def _base_entry_name(self, family: AssetFamily, fam_obj,
+                         owner: str) -> str:
+        exact = self._base_entry_names.get(owner)
+        if exact:
+            return exact
+        if owner == "root" and family.base_path is not None \
+                and not self._family_entry_is_setbas_archive():
+            return family.base_path.name
+        parsed = str(getattr(fam_obj.base_object, "name", "") or "").strip()
+        if parsed:
+            return parsed
+        offset = getattr(fam_obj.base_object, "source_objt_offset", -1)
+        return (f"BASE object at 0x{offset:X}" if offset >= 0 else
+                f"BASE object [{owner}]")
 
     def _fill_asset_tree(self, family: AssetFamily) -> None:
         self._asset_filter_expansion = None
         self.asset_tree.clear()
         self._owner_to_item = {}
-        root_label = family.base_path.name if family.base_path else "manual family"
-        root_item = self._tree_item(f"Root BASE: {root_label}", "loaded",
-                                    ("base", None))
+        if family.root_object is None:
+            root_item = self._tree_item(
+                "Manual family (no BASE)", "loaded", ("base", None),
+                str(family.base_path or "manual selection"))
+            self.asset_tree.addTopLevelItem(root_item)
+            return
+        display_root = family.root_object
+        display_owner = display_root.owner_path
+        if self._family_entry_is_setbas_archive() and self._base_entry_names:
+            scoped_owner = (
+                self._selected_owner
+                if self._selected_owner in self._base_entry_names else
+                next(iter(self._base_entry_names)))
+            scoped = next((
+                obj for obj in family.all_objects()
+                if obj.owner_path == scoped_owner), None)
+            if scoped is not None:
+                display_root = scoped
+                display_owner = scoped_owner
+        root_name = self._base_entry_name(
+            family, display_root, display_owner)
+        root_source = str(family.base_path or "manual family")
+        if self._family_entry_is_setbas_archive():
+            offset = getattr(display_root.base_object, "source_objt_offset", -1)
+            root_source = (
+                f"SET.BAS read-only provider; embedded OBJT @ 0x{offset:X}"
+                if offset >= 0 else "SET.BAS read-only provider")
+        root_item = self._tree_item(
+            f"Root BASE: {root_name}", "loaded",
+            ("base", display_root), root_source)
         self.asset_tree.addTopLevelItem(root_item)
-        if family.root_object is not None:
-            self._owner_to_item[family.root_object.owner_path] = root_item
+        self._owner_to_item[display_owner] = root_item
 
-        dep_status = {d.raw_ref: self._effective_status(d.raw_ref, d.status)
-                      for d in family.dependencies}
+        def texture_node(name: str, owner: str,
+                         dep_kind: str | None = None) -> QTreeWidgetItem:
+            dep = self._dependency_for(family, name, owner, dep_kind)
+            item = self._tree_item(name, dep.status if dep else "?",
+                                   ("texture", name))
+            self._decorate_dependency_node(item, dep, family)
+            return item
 
-        def texture_node(name: str) -> QTreeWidgetItem:
-            status = dep_status.get(name, "?")
-            return self._tree_item(name, status, ("texture", name))
-
-        def animation_node(name: str) -> QTreeWidgetItem:
-            status = dep_status.get(name, "?")
-            return self._tree_item(name, status, ("animation", name))
+        def animation_node(name: str, owner: str) -> QTreeWidgetItem:
+            dep = self._dependency_for(family, name, owner, "animation")
+            item = self._tree_item(name, dep.status if dep else "?",
+                                   ("animation", name))
+            self._decorate_dependency_node(item, dep, family)
+            animation = next((value for key, value in family.animations.items()
+                              if str(key).casefold() == str(name).casefold()),
+                             None)
+            bitmaps = list(dict.fromkeys(
+                getattr(animation, "bitmap_names", ()) if animation else ()))
+            if bitmaps:
+                frames = self._tree_item(
+                    f"Frame bitmaps ({len(bitmaps)})", "", ("group", None))
+                item.addChild(frames)
+                for bitmap in bitmaps:
+                    frames.addChild(texture_node(
+                        bitmap, "family", "anm_bitmap"))
+            return item
 
         def add_object(fam_obj, parent_item, owner: str):
             skel_name = fam_obj.base_object.skeleton_name
             if skel_name:
-                status = dep_status.get(
-                    skel_name, "auto_loaded" if fam_obj.skeleton else "missing")
-                parent_item.addChild(self._tree_item(
-                    f"Skeleton: {skel_name}", status,
-                    ("skeleton", fam_obj)))
+                dep = self._dependency_for(
+                    family, skel_name, owner, "skeleton")
+                skeleton_item = self._tree_item(
+                    f"Skeleton: {skel_name}",
+                    dep.status if dep else (
+                        "auto_loaded" if fam_obj.skeleton else "missing"),
+                    ("skeleton", fam_obj))
+                self._decorate_dependency_node(skeleton_item, dep, family)
+                parent_item.addChild(skeleton_item)
 
             textures = []
             animations = []
@@ -11221,13 +11838,29 @@ class AssemblyWindow(QMainWindow):
                                         "", ("group", None))
                 parent_item.addChild(group)
                 for name in textures:
-                    group.addChild(texture_node(name))
+                    group.addChild(texture_node(name, owner))
             if animations:
                 group = self._tree_item(f"Animations ({len(animations)})",
                                         "", ("group", None))
                 parent_item.addChild(group)
                 for name in animations:
-                    group.addChild(animation_node(name))
+                    group.addChild(animation_node(name, owner))
+
+            extra_deps = [
+                dep for dep in family.dependencies
+                if dep.owner_node == owner
+                and dep.kind in ("embedded", "unknown_chunk")]
+            if extra_deps:
+                extras = self._tree_item(
+                    f"Embedded / other ({len(extra_deps)})", "",
+                    ("group", None))
+                parent_item.addChild(extras)
+                for dep in extra_deps:
+                    node = self._tree_item(
+                        f"{dep.kind}: {dep.raw_ref}", dep.status,
+                        ("dependency_info", (dep.raw_ref, None)))
+                    self._decorate_dependency_node(node, dep, family)
+                    extras.addChild(node)
 
             if fam_obj.kids:
                 kids_group = self._tree_item(
@@ -11237,29 +11870,39 @@ class AssemblyWindow(QMainWindow):
                 for index, kid in enumerate(fam_obj.kids):
                     polys = (kid.skeleton.parsed_polygon_count
                              if kid.skeleton else 0)
+                    kid_owner = kid.owner_path
+                    kid_name = self._base_entry_name(
+                        family, kid, kid_owner)
+                    selected = " [selected entry point]" \
+                        if kid_owner in self._base_entry_names else ""
                     kid_item = self._tree_item(
-                        f"Child {index}: {kid.display_name} "
-                        f"({polys} polys)",
+                        f"BASE entry: {kid_name}{selected} "
+                        f"(KIDS #{index}, {polys} polys)",
                         "resolved" if kid.skeleton else "missing",
-                        ("child", kid))
+                        ("child", kid),
+                        f"inline BASE OBJT @ 0x{getattr(kid.base_object, 'source_objt_offset', -1):X}")
                     kid_item.setToolTip(0, kid.owner_path)
                     kids_group.addChild(kid_item)
                     self._owner_to_item[kid.owner_path] = kid_item
-                    add_object(kid, kid_item, kid.owner_path)
+                    add_object(kid, kid_item, kid_owner)
 
-        if family.root_object:
-            add_object(family.root_object, root_item, "root")
+        add_object(display_root, root_item, display_owner)
 
-        # VANM frame bitmaps not already shown
-        anm_bitmaps = [d.raw_ref for d in family.dependencies
-                       if d.kind == "anm_bitmap"]
-        if anm_bitmaps:
+        family_deps = [
+            dep for dep in family.dependencies
+            if dep.owner_node == "family"
+            and dep.kind in ("palette", "shader_remap", "tracy_remap")]
+        if family_deps:
             group = self._tree_item(
-                f"VANM frame bitmaps ({len(anm_bitmaps)})", "",
+                f"Palette / remap ({len(family_deps)})", "",
                 ("group", None))
             root_item.addChild(group)
-            for name in anm_bitmaps:
-                group.addChild(texture_node(name))
+            for dep in family_deps:
+                node = self._tree_item(
+                    f"{dep.kind}: {dep.raw_ref}", dep.status,
+                    ("dependency_info", (dep.raw_ref, None)))
+                self._decorate_dependency_node(node, dep, family)
+                group.addChild(node)
 
         self.asset_tree.expandAll()
         if self.tree_search.text().strip():
@@ -11291,8 +11934,6 @@ class AssemblyWindow(QMainWindow):
                     continue
                 if kind in ("skeleton", "texture", "animation"):
                     child.setSelected(True)
-                    if kind == "skeleton":
-                        focus_item = child
                 elif kind == "group" and not child.text(0).startswith(
                         "Children / KIDS"):
                     child.setExpanded(True)
@@ -11318,7 +11959,8 @@ class AssemblyWindow(QMainWindow):
                     return getattr(payload, "owner_path", None)
                 if kind == "base" and self._family \
                         and self._family.root_object:
-                    return self._family.root_object.owner_path
+                    return (getattr(payload, "owner_path", None)
+                            or self._family.root_object.owner_path)
             current = current.parent()
         return None
 
@@ -11643,11 +12285,11 @@ class AssemblyWindow(QMainWindow):
                     lines.append(ref.display_path)
                 elif entry.archive_resource is None:
                     lines.append(
-                        "NOT FOUND - use Dependencies to assign a file")
+                        "NOT FOUND - use Asset Dependencies to assign a file")
                 if len(ref.candidates) > 1:
                     lines.append(
                         f"{len(ref.candidates)} candidates "
-                        "(see Dependencies)")
+                        "(see Asset Dependencies)")
             resource = entry.archive_resource
             if resource is not None:
                 if resource.error:

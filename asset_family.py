@@ -210,7 +210,7 @@ def _resolve_with_setbas(family: AssetFamily, resolver: AssetResolver,
             family.warnings.append(
                 f"{name}: exists both loose ({ref.path}) and embedded in "
                 f"{family.setbas_archive.path.name}; loose wins (engine "
-                "precedence). Use the Resolve panel to compare sources."
+                "precedence). Use Asset Dependencies to compare sources."
             )
     elif ref.status == "ambiguous":
         # A plausible loose override must not be bypassed by silently using
@@ -251,7 +251,7 @@ def _load_texture(family: AssetFamily, resolver: AssetResolver, name: str) -> No
         family.warnings.append(
             f"Texture {name}: {len(ref.candidates)} plausible candidates - "
             "not auto-loaded (same-named ILBMs from other themes would look "
-            "wrong). Trial-load one in the Dependencies panel."
+            "wrong). Trial-load one in Asset Dependencies."
         )
         return
     if ref.path is None:
@@ -288,7 +288,7 @@ def _load_animation(family: AssetFamily, resolver: AssetResolver, name: str) -> 
     elif ref.status == "ambiguous" and ref.path is None:
         family.warnings.append(
             f"Animation {name}: {len(ref.candidates)} plausible candidates - "
-            "not auto-loaded. Trial-load one in the Dependencies panel."
+            "not auto-loaded. Trial-load one in Asset Dependencies."
         )
         return
     elif ref.path is None:
@@ -387,7 +387,7 @@ def _load_family_object(base_obj: BaseObject, family: AssetFamily,
             family.warnings.append(
                 f"Skeleton {base_obj.skeleton_name}: "
                 f"{len(ref.candidates)} plausible candidates - not "
-                "auto-loaded. Trial-load one in the Dependencies panel."
+                "auto-loaded. Trial-load one in Asset Dependencies."
             )
         elif ref.path is None:
             where = ("in the search roots or the SET.BAS archive"
@@ -677,17 +677,17 @@ def _collect_textured_diagnostics(family: AssetFamily) -> None:
         if ref.status == "ambiguous" and ref.path is None:
             family.diag(f"{name}: ambiguous ({len(ref.candidates)} candidates) "
                         "- not auto-loaded; trial-load one in the "
-                        "Dependencies panel.")
+                        "Asset Dependencies.")
             continue
         if not ref.found:
             family.diag(f"{name}: texture missing - assign it manually in the "
-                        "Dependencies panel.")
+                        "Asset Dependencies.")
             continue
         if ref.status == "ambiguous" and ref.path is not None:
             family.diag(f"{name}: ambiguous ({len(ref.candidates)} candidates) "
                         f"- using {ref.path.name} from "
                         f"{ref.path.parent.name}; pick the right one in the "
-                        "Dependencies panel.")
+                        "Asset Dependencies.")
         img = family.textures.get(name)
         if img is None:
             family.diag(f"{name}: decode failed - material color fallback.")
