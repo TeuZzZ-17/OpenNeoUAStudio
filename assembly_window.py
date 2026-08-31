@@ -761,6 +761,11 @@ class AssemblyWindow(QMainWindow):
             "Export Runtime Loose SET",
             self._export_runtime_loose_set).setEnabled(
                 self._setbas is not None)
+        export_family = menu.addAction(
+            "Export Asset Family",
+            lambda: self._export_setbas_resource_family(item))
+        export_family.setEnabled(kind in (
+            "base", "sklt.class", "ilbm.class", "bmpanim.class"))
         if kind == "base" and item is not None:
             base_name = (
                 item.data(0, _BAS_NAME_ROLE) or item.text(0)).strip()
@@ -921,6 +926,22 @@ class AssemblyWindow(QMainWindow):
                         label, lambda checked=False, name=logical_name,
                         selected=path: self._apply_dependency_candidate(
                             name, selected))
+        data = item.data(0, Qt.ItemDataRole.UserRole)
+        owner = self._tree_owner_for_item(item)
+        export_family = menu.addAction("Export Asset Family")
+        export_family.setEnabled(bool(owner or (data and data[0] in (
+            "skeleton", "texture", "animation"))))
+
+        def export_current_family() -> None:
+            if data and data[0] in ("skeleton", "texture", "animation"):
+                self._remember_component_selection(item)
+            else:
+                self._last_component_selection = None
+                if owner:
+                    self._selected_owner = owner
+            self._save_model_as()
+
+        export_family.triggered.connect(export_current_family)
         path = self._asset_item_path(item)
         if path is not None:
             menu.addAction("Reveal source file",
@@ -954,6 +975,16 @@ class AssemblyWindow(QMainWindow):
         export.setEnabled(bool(names))
         export.triggered.connect(
             lambda: self._export_family_textures_png(names))
+        export_family = menu.addAction("Export Asset Family")
+        export_family.setEnabled(len(names) == 1 and self._family is not None)
+
+        def export_texture_family() -> None:
+            if len(names) != 1:
+                return
+            self._last_component_selection = ("texture", str(names[0]))
+            self._save_model_as()
+
+        export_family.triggered.connect(export_texture_family)
         if len(names) == 1 and self._family is not None:
             ref = self._family.texture_refs.get(names[0])
             if ref and ref.path:
@@ -3261,6 +3292,51 @@ class AssemblyWindow(QMainWindow):
         target = self._activate_setbas_base(base_name)
         if target is not None:
             self._edit_base_dependencies(target.owner_path)
+
+    def _export_setbas_base_family(self, base_name: str) -> None:
+        """Export exactly the BASE family selected in the archive browser."""
+
+        target = self._activate_setbas_base(base_name)
+        if target is None:
+            return
+        self._last_component_selection = None
+        self._selected_owner = target.owner_path
+        self._save_model_as()
+
+    def _export_setbas_resource_family(self, item) -> None:
+        """Export the proven BASE owner of one BAS resource."""
+
+        if self._setbas is None or item is None:
+            return
+        kind = item.data(0, _BAS_KIND_ROLE)
+        if kind == "base":
+            base_name = item.data(0, _BAS_NAME_ROLE) or item.text(0)
+            self._export_setbas_base_family(str(base_name).strip())
+            return
+        component_kind = {
+            "sklt.class": "skeleton",
+            "ilbm.class": "texture",
+            "bmpanim.class": "animation",
+        }.get(kind)
+        index = item.data(0, Qt.ItemDataRole.UserRole)
+        if component_kind is None or index is None:
+            return
+        resource = self._setbas.resources[index]
+        archive_path = Path(self._setbas.path)
+        try:
+            if self._family is None or self._family.base_path != archive_path:
+                family = load_asset_family(
+                    archive_path, self._extra_roots, {}, self._setbas)
+                self._set_family(family)
+        except Exception as exc:
+            QMessageBox.warning(
+                self, "Asset Family unavailable",
+                f"{resource.resource_name} could not be mapped to its BASE "
+                f"family.\n\n{exc}")
+            return
+        self._last_component_selection = (
+            component_kind, str(resource.resource_name))
+        self._save_model_as()
 
     def _show_image_preview(self, title: str, info_text: str,
                             image: QImage, tooltip: str = "") -> None:
@@ -9420,27 +9496,36 @@ class AssemblyWindow(QMainWindow):
             self._skip_model_switch_warning = True
         return accepted
 
+    @staticmethod
+    def _flat_asset_family_path(relative: Path) -> Path:
+        """Keep model assets flat; PALETTE/REMAP are the only subfolders."""
+
+        return Path(relative.name)
+
     def _bundle_skeleton_relative_path(self, fam_obj) -> Path:
         logical = (fam_obj.base_object.skeleton_name
                    or getattr(fam_obj.skeleton, "source_name", "")
                    or "MODEL.SKLT")
         if logical.upper().startswith("SET.BAS:"):
             logical = logical[len("SET.BAS:"):]
-        return package_relative_path(
+        relative = package_relative_path(
             logical, default_name="MODEL.SKLT",
             extensions=(".SKLT", ".SKL"))
+        return self._flat_asset_family_path(relative)
 
     @staticmethod
     def _bundle_animation_relative_path(name: str) -> Path:
-        return package_relative_path(
+        relative = package_relative_path(
             name, default_name="ANIMATION.ANM",
             extensions=(".ANM", ".VANM"))
+        return AssemblyWindow._flat_asset_family_path(relative)
 
     @staticmethod
     def _bundle_texture_relative_path(name: str) -> Path:
-        return package_relative_path(
+        relative = package_relative_path(
             name, default_name="TEXTURE.ILBM",
             extensions=(".ILBM", ".ILB", ".LBM", ".IFF", ".VBMP"))
+        return AssemblyWindow._flat_asset_family_path(relative)
 
     @staticmethod
     def _matching_ref(mapping: dict, logical_name: str):
