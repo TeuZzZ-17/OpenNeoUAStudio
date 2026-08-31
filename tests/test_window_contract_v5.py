@@ -178,6 +178,13 @@ class WindowContractV5Tests(unittest.TestCase):
                 "Export Runtime Loose SET")
             self.assertFalse(window.setbas_runtime_loose_button.isEnabled())
             self.assertFalse(window.export_runtime_loose_action.isEnabled())
+            self.assertEqual(
+                window.setbas_edit_dependencies_button.text(),
+                "Edit BASE Dependencies")
+            self.assertFalse(
+                window.setbas_edit_dependencies_button.isEnabled())
+            self.assertEqual(
+                window.statusBar().objectName(), "operationStatusBar")
             source = (Path(__file__).resolve().parents[1] /
                       "assembly_window.py").read_text(encoding="utf-8")
             self.assertNotIn("Source (always read-only):", source)
@@ -235,7 +242,7 @@ class WindowContractV5Tests(unittest.TestCase):
                 action.text() for action in window.file_menu.actions()
                 if not action.isSeparator()]
             self.assertEqual(
-                labels, ["Import", "Export", "Close BAS Archive", "Exit"])
+                labels, ["Import", "Export", "Close Current Resource", "Exit"])
             self.assertFalse(window.close_bas_archive_action.isEnabled())
             self.assertEqual(
                 [action.text() for action in window.file_import_menu.actions()],

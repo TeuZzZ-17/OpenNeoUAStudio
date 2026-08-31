@@ -28,7 +28,10 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from editor_widgets import install_standard_file_menu_tail
+from editor_widgets import (
+    configure_operation_status_bar,
+    install_standard_file_menu_tail,
+)
 from outline_editor import OutlineEditor
 from sklt_parser import (
     SkltModel,
@@ -94,6 +97,7 @@ class WireframeEditorWindow(QMainWindow):
         self.add_circle_action: QAction | None = None
         self.edit_toolbar: QToolBar | None = None
 
+        configure_operation_status_bar(self)
         self._build_ui()
         self._build_menu()
         self._build_edit_toolbar()
