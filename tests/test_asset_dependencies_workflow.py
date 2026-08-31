@@ -438,6 +438,23 @@ class AssetDependenciesWorkflowTests(unittest.TestCase):
         self.assertNotIn('"Select model"', context_source)
         self.assertNotIn('"Assign File..."', context_source)
 
+
+    def test_export_asset_family_is_available_from_resource_contexts(self):
+        source = (Path(__file__).resolve().parents[1] /
+                  "assembly_window.py").read_text(encoding="utf-8")
+        setbas_start = source.index("    def _show_setbas_context_menu")
+        setbas_end = source.index("    def _asset_item_path", setbas_start)
+        self.assertIn(
+            '"Export Asset Family"', source[setbas_start:setbas_end])
+        asset_start = source.index("    def _show_asset_context_menu")
+        asset_end = source.index("    def _selected_texture_names", asset_start)
+        self.assertIn(
+            '"Export Asset Family"', source[asset_start:asset_end])
+        texture_start = source.index("    def _show_texture_context_menu")
+        texture_end = source.index("    def _build_toolbar", texture_start)
+        self.assertIn(
+            '"Export Asset Family"', source[texture_start:texture_end])
+
     def test_asset_textures_suppresses_expected_missing_cmap_noise(self):
         source = (Path(__file__).resolve().parents[1] /
                   "assembly_window.py").read_text(encoding="utf-8")

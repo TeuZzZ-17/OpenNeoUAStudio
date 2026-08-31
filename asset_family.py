@@ -817,7 +817,8 @@ def load_asset_family(base_path: str | Path,
             roots.append(extra)
     _attach_setbas(family, setbas, roots)
     file_overrides = _split_overrides(family, overrides)
-    resolver = AssetResolver(roots, file_overrides)
+    resolver = AssetResolver(
+        roots, file_overrides, prefer_earliest_root=True)
     family.search_roots = [str(r) for r in resolver.roots]
     family.search_root = str(path.parent)
 
