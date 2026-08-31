@@ -184,6 +184,63 @@ class AssetResolverIntegrityTests(unittest.TestCase):
             self.assertEqual(len(resolved.candidates), 2)
             self.assertIn("multiple", resolved.resolution_rule)
 
+    def test_standalone_family_root_precedence_keeps_flat_export_local(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            package = root / "exported_family"
+            old_a = root / "old_a"
+            old_b = root / "old_b"
+            for folder in (package, old_a, old_b):
+                folder.mkdir()
+            local_sklt = package / "VPWMIG.sklt"
+            local_tex = package / "HUBI.ILBM"
+            local_sklt.write_bytes(b"local skeleton")
+            local_tex.write_bytes(b"local texture")
+            for folder in (old_a, old_b):
+                (folder / "VPWMIG.sklt").write_bytes(b"stale skeleton")
+                (folder / "HUBI.ILBM").write_bytes(b"stale texture")
+
+            skeleton = AssetResolver(
+                [package, old_a, old_b],
+                prefer_earliest_root=True).resolve(
+                    "Skeleton/VPWMIG.sklt", "skeleton")
+            texture = AssetResolver(
+                [package, old_a, old_b],
+                prefer_earliest_root=True).resolve(
+                    "HUBI.ILBM", "texture")
+
+            self.assertEqual(skeleton.status, "found")
+            self.assertEqual(skeleton.path, local_sklt)
+            self.assertEqual(skeleton.source_root, package)
+            self.assertIn("highest-priority root", skeleton.resolution_rule)
+            self.assertEqual(texture.status, "found")
+            self.assertEqual(texture.path, local_tex)
+            self.assertEqual(texture.source_root, package)
+
+    def test_root_precedence_preserves_real_local_ambiguity(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            package = root / "package"
+            later = root / "later"
+            (package / "a").mkdir(parents=True)
+            (package / "b").mkdir()
+            later.mkdir()
+            (package / "a" / "HUBI.ILBM").write_bytes(b"one")
+            (package / "b" / "HUBI.ILBM").write_bytes(b"two")
+            (later / "HUBI.ILBM").write_bytes(b"later")
+
+            resolved = AssetResolver(
+                [package, later],
+                prefer_earliest_root=True).resolve(
+                    "HUBI.ILBM", "texture")
+
+            self.assertEqual(resolved.status, "ambiguous")
+            self.assertIsNone(resolved.path)
+            self.assertEqual(len(resolved.candidates), 2)
+            self.assertTrue(all(
+                path.is_relative_to(package)
+                for path in resolved.candidates))
+
     def test_package_logical_path_precedes_later_set_root(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)

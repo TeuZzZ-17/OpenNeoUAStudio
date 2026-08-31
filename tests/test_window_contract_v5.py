@@ -434,15 +434,14 @@ class WindowContractV5Tests(unittest.TestCase):
             context = ("root", family, fam_obj, object(), object())
             selected = Path("C:/chosen")
             expected_base = selected / "OriginalModel.BASE"
-            expected_skeleton = (
-                selected / "Skeleton" / "ORIGINAL.sklt")
+            expected_skeleton = selected / "ORIGINAL.sklt"
             with patch.object(
                     window, "_export_owner_for_selection",
                     return_value="root"), patch.object(
                     window, "_model_save_context",
                     return_value=context), patch.object(
                     window, "_bundle_skeleton_relative_path",
-                    return_value=Path("Skeleton/ORIGINAL.sklt")), patch.object(
+                    return_value=Path("ORIGINAL.sklt")), patch.object(
                     window, "_owner_vanm_uv_keys",
                     return_value=set()), patch.object(
                     assembly_window_module.QFileDialog,
@@ -461,6 +460,26 @@ class WindowContractV5Tests(unittest.TestCase):
                 window._bundle_targets["root"],
                 (expected_skeleton, expected_base))
             self.assertEqual(window._last_directory, selected)
+        finally:
+            window.close()
+
+
+    def test_asset_family_export_paths_are_flat_except_profile_folders(self):
+        window = AssemblyWindow()
+        try:
+            fam_obj = SimpleNamespace(
+                base_object=SimpleNamespace(
+                    skeleton_name="Skeleton/VP_HUBI1.sklt"),
+                skeleton=SimpleNamespace(source_name=""))
+            self.assertEqual(
+                window._bundle_skeleton_relative_path(fam_obj),
+                Path("VP_HUBI1.sklt"))
+            self.assertEqual(
+                window._bundle_animation_relative_path(
+                    "RsrcPool/PROP1.ANM"), Path("PROP1.ANM"))
+            self.assertEqual(
+                window._bundle_texture_relative_path(
+                    "Textures/HUBI.ILBM"), Path("HUBI.ILBM"))
         finally:
             window.close()
 
