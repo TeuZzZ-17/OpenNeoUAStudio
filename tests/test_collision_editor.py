@@ -1414,7 +1414,7 @@ class CollisionEditorTests(unittest.TestCase):
         window = self._window()
         self.assertEqual(window.open_base_action.text(), "Import BAS Archive")
         self.assertEqual(
-            window.close_bas_archive_action.text(), "Close BAS Archive")
+            window.close_bas_archive_action.text(), "Close Current Resource")
         self.assertFalse(window.close_bas_archive_action.isEnabled())
         self.assertEqual(window.open_sklt_action.text(), "Import SKLT")
         self.assertEqual(
@@ -1450,6 +1450,12 @@ class CollisionEditorTests(unittest.TestCase):
         self.assertEqual(window.source_label.text(), "No source loaded.")
         self.assertEqual(window.project.name, "Keep collision work")
         self.assertFalse(window.close_bas_archive_action.isEnabled())
+
+        # The shared action is resource-scoped, not SET.BAS-only.
+        window.family = object()
+        window._active_base_path = Path("C:/UA/Mods/Vehicle.BASE")
+        window._sync_close_archive_action()
+        self.assertTrue(window.close_bas_archive_action.isEnabled())
 
     def test_90e_script_dialog_filters_by_exact_id_or_name(self):
         text = (

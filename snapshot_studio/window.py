@@ -237,7 +237,7 @@ class SnapshotStudioWindow(AssemblyWindow):
         if panel is not None and panel.is_running:
             return (
                 "A Snapshot batch is still running. Cancel it or wait for the "
-                "current image to finish before closing the BAS archive.")
+                "current image to finish before closing the current resource.")
         return super()._close_archive_block_reason()
 
     def closeEvent(self, event) -> None:  # noqa: N802
