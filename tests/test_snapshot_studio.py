@@ -19,7 +19,7 @@ class SnapshotStudioTests(unittest.TestCase):
             labels = [
                 action.text() for action in window.file_menu.actions()
                 if not action.isSeparator()]
-            self.assertIn("Close BAS Archive", labels)
+            self.assertIn("Close Current Resource", labels)
             self.assertFalse(window.close_bas_archive_action.isEnabled())
         finally:
             window.close()

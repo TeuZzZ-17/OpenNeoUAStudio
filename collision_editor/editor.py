@@ -72,6 +72,7 @@ from asset_family import AssetFamily, load_asset_family, load_manual_family
 from asset_tree_filter import filter_tree as filter_asset_tree
 from editor_widgets import (
     choose_bas_archive,
+    configure_operation_status_bar,
     create_import_bas_archive_action,
     install_standard_file_menu_tail,
 )
@@ -2951,6 +2952,8 @@ class CollisionEditorWindow(QMainWindow):
         self._vehicle_preview_active_edits: set[str] = set()
         self._model_filter_expansion: dict[int, bool] | None = None
 
+        configure_operation_status_bar(self)
+
         self.viewport = CollisionViewport()
         self.viewport.spherePicked.connect(self._select_sphere)
         self.viewport.firePointPicked.connect(self._select_fire_point)
@@ -4251,28 +4254,24 @@ class CollisionEditorWindow(QMainWindow):
         if path:
             self.open_base(path)
 
-    def _bas_archive_is_open(self) -> bool:
-        path = self._active_base_path
-        return bool(
-            self.family is not None
-            and path is not None
-            and path.suffix.casefold() == ".bas")
+    def _current_visual_resource_is_open(self) -> bool:
+        return bool(self.family is not None or self._active_base_path is not None)
 
     def _sync_close_archive_action(self) -> None:
         action = getattr(self, "close_bas_archive_action", None)
         if action is not None:
-            action.setEnabled(self._bas_archive_is_open())
+            action.setEnabled(self._current_visual_resource_is_open())
 
     def close_current_archive(self) -> None:
-        """Detach the current BAS provider without touching collision work.
+        """Detach the current visual resource without touching collision work.
 
         Collision spheres/script data are a separate authoring document.
-        Closing the BAS archive therefore clears only the visual/model provider
-        and VP lookup state, then re-applies the existing collision project to
-        the now-empty viewport.
+        Closing the current visual resource therefore clears only the model/BAS
+        provider and VP lookup state, then re-applies the existing collision
+        project to the now-empty viewport.
         """
 
-        if not self._bas_archive_is_open():
+        if not self._current_visual_resource_is_open():
             self._sync_close_archive_action()
             return
         self.viewport.clear()
@@ -4289,7 +4288,8 @@ class CollisionEditorWindow(QMainWindow):
         self._update_window_title()
         self._sync_close_archive_action()
         self.statusBar().showMessage(
-            "BAS archive closed. Collision project kept in memory.", 5000)
+            "Current visual resource closed. Collision project kept in memory.",
+            5000)
 
     def _current_set_bas_path(self) -> Path | None:
         if self._vp_embedded is None:

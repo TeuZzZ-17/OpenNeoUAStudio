@@ -127,6 +127,7 @@ from editor_widgets import (
     qimage_from_ilbm as _qimage_from_ilbm,
     status_icon as _status_icon,
     choose_bas_archive,
+    configure_operation_status_bar,
     create_import_bas_archive_action,
     install_standard_file_menu_tail,
 )
@@ -637,11 +638,14 @@ class AssemblyWindow(QMainWindow):
 
         self._build_toolbar()
         self._build_layout()
+        # The bottom-left status line is the canonical non-blocking operation
+        # channel for the workbench. Keep it visually distinct from ordinary
+        # labels without replacing confirmations that require a user choice.
+        configure_operation_status_bar(self)
         self._sync_geometry_save_controls()
-        self.statusBar().showMessage(
+        self._notify(
             "Model exports are verified; overwriting a loose skeleton requires "
-            "confirmation and creates a .bak backup."
-        )
+            "confirmation and creates a .bak backup.", 12000)
 
     def closeEvent(self, event) -> None:  # noqa: N802 - Qt override
         if self.viewport.paste_preview_active:
@@ -1411,6 +1415,13 @@ class AssemblyWindow(QMainWindow):
             self._open_last_output_folder)
         self.setbas_open_output_button.setEnabled(False)
         setbas_buttons.addWidget(self.setbas_open_output_button, 1, 1)
+        self.setbas_edit_dependencies_button = QPushButton(
+            "Edit BASE Dependencies")
+        self.setbas_edit_dependencies_button.setEnabled(False)
+        self.setbas_edit_dependencies_button.clicked.connect(
+            self._edit_selected_setbas_base_dependencies)
+        setbas_buttons.addWidget(
+            self.setbas_edit_dependencies_button, 2, 0, 1, 2)
         setbas_layout.addLayout(setbas_buttons)
 
         # Asset family browser moved to the right so the 3D viewport gets the
@@ -2273,10 +2284,9 @@ class AssemblyWindow(QMainWindow):
     def _open_last_output_folder(self) -> None:
         folder = self._last_output_directory
         if folder is None or not folder.is_dir():
-            QMessageBox.information(
-                self, "No output folder",
-                "No extraction or conversion output folder is available "
-                "yet.")
+            self._notify(
+                "No extraction or conversion output folder is available yet.",
+                7000)
             return
         if not QDesktopServices.openUrl(QUrl.fromLocalFile(str(folder))):
             QMessageBox.warning(
@@ -2362,11 +2372,9 @@ class AssemblyWindow(QMainWindow):
         if path:
             source = Path(path)
             if source.name.casefold() == "set.bas":
-                QMessageBox.information(
-                    self, "Use Import BAS Archive",
-                    "SET.BAS is a read-only archive provider. Use File > "
-                    "Import > Import BAS Archive. Import BASE is for a "
-                    "standalone editable-copy workflow.")
+                self._notify(
+                    "SET.BAS is an archive provider: use Import BAS Archive; "
+                    "Import BASE is for standalone BASE files.", 10000)
             else:
                 self.open_base(source)
 
@@ -2521,7 +2529,7 @@ class AssemblyWindow(QMainWindow):
         self._open_manual_asset_family(sklt, base, textures, anms)
 
     def _sync_close_archive_action(self) -> None:
-        """Enable Close BAS Archive only while a document/provider is open."""
+        """Enable Close Current Resource while any Studio resource is open."""
 
         action = getattr(self, "close_bas_archive_action", None)
         if action is not None:
@@ -2533,7 +2541,7 @@ class AssemblyWindow(QMainWindow):
         return ""
 
     def close_current_archive(self) -> None:
-        """Unload the current BAS/BASE document and return to the empty UI.
+        """Unload the current resource and return to the empty workbench.
 
         This is deliberately a document close, not an application restart:
         user view preferences and session-level settings stay intact, while
@@ -2546,7 +2554,7 @@ class AssemblyWindow(QMainWindow):
             return
         reason = self._close_archive_block_reason()
         if reason:
-            QMessageBox.information(self, "Close BAS Archive", reason)
+            self._notify(reason, 10000)
             return
         if not self._confirm_discard_geometry():
             return
@@ -2642,6 +2650,7 @@ class AssemblyWindow(QMainWindow):
         self.setbas_extract_button.setEnabled(False)
         self.setbas_extract_all_button.setEnabled(False)
         self.setbas_runtime_loose_button.setEnabled(False)
+        self.setbas_edit_dependencies_button.setEnabled(False)
         self.export_runtime_loose_action.setEnabled(False)
 
         self._sync_animation_controls()
@@ -2650,8 +2659,8 @@ class AssemblyWindow(QMainWindow):
         self._update_reset_camera_action()
         self._sync_close_archive_action()
         self._set_document_title(None)
-        self.statusBar().showMessage(
-            "Archive closed. No resource is loaded.", 5000)
+        self._notify(
+            "Current resource closed. The workbench is empty.", 7000)
 
     def open_setbas_dialog(self) -> None:
         path = choose_bas_archive(self, self._last_directory)
@@ -2857,6 +2866,11 @@ class AssemblyWindow(QMainWindow):
             item.data(0, Qt.ItemDataRole.UserRole)
             if item is not None else None)
         self.setbas_extract_button.setEnabled(resource_index is not None)
+        edit_dependencies = getattr(
+            self, "setbas_edit_dependencies_button", None)
+        if edit_dependencies is not None:
+            edit_dependencies.setEnabled(
+                self._setbas is not None and kind == "base")
 
     def _raise_setbas_tab(self) -> None:
         """Bring the primary BAS panel to the front after loading it."""
@@ -3293,6 +3307,21 @@ class AssemblyWindow(QMainWindow):
         if target is not None:
             self._edit_base_dependencies(target.owner_path)
 
+    def _edit_selected_setbas_base_dependencies(self) -> None:
+        """Open the same BASE dependency editor used by the context menu."""
+
+        item = self.setbas_tree.currentItem()
+        if item is None or item.data(0, _BAS_KIND_ROLE) != "base":
+            self._notify(
+                "Select a BASE entry before editing its dependencies.", 6000)
+            return
+        base_name = str(
+            item.data(0, _BAS_NAME_ROLE) or item.text(0) or "").strip()
+        if not base_name:
+            self._notify("The selected BASE has no usable name.", 6000)
+            return
+        self._edit_setbas_base_dependencies(base_name)
+
     def _export_setbas_base_family(self, base_name: str) -> None:
         """Export exactly the BASE family selected in the archive browser."""
 
@@ -3717,7 +3746,7 @@ class AssemblyWindow(QMainWindow):
         if not out_dir:
             return
         from setbas_export import extract_archive
-        self.statusBar().showMessage("Extracting archive...")
+        self._notify("Extracting archive...", 0)
         try:
             summary = extract_archive(
                 self._setbas, out_dir,
@@ -3745,9 +3774,7 @@ class AssemblyWindow(QMainWindow):
             message += (f"; PNG: {summary['png_converted']} converted, "
                         f"{summary['png_errors']} error(s)")
         self._log(f"SET.BAS extraction: {message}")
-        self.statusBar().showMessage(message, 10000)
-        QMessageBox.information(self, "Extraction complete",
-                                f"{message}\n\nOutput: {out_dir}")
+        self._notify(f"{message} | Output: {out_dir}", 15000)
 
     def _export_runtime_loose_set(self) -> None:
         if self._setbas is None:
@@ -3807,7 +3834,7 @@ class AssemblyWindow(QMainWindow):
         try:
             loose_root, _set_id = resolve_runtime_loose_root(
                 target_edit.text().strip())
-            self.statusBar().showMessage("Exporting Runtime Loose SET...")
+            self._notify("Exporting Runtime Loose SET...", 0)
             QApplication.processEvents()
             summary = export_runtime_loose(
                 self._setbas, loose_root,
@@ -3834,15 +3861,11 @@ class AssemblyWindow(QMainWindow):
         if validation["issues"]:
             issue_text = "\n\n" + "\n".join(validation["issues"][:12])
         self._log(f"Runtime Loose SET: {message}")
-        self.statusBar().showMessage(message, 15000)
+        self._notify(f"{message} | Target: {loose_root}", 18000)
         if summary["errors"] or not validation["valid"]:
             QMessageBox.warning(
                 self, "Runtime Loose export needs attention",
                 f"{message}\n\nTarget: {loose_root}{issue_text}")
-        else:
-            QMessageBox.information(
-                self, "Runtime Loose export complete",
-                f"{message}\n\nTarget: {loose_root}")
 
     def _export_setbas_metadata(self) -> None:
         if self._setbas is None:
@@ -3875,9 +3898,7 @@ class AssemblyWindow(QMainWindow):
             f"{summary['unresolved_count']} unresolved reference(s)."
         )
         self._log(message)
-        QMessageBox.information(
-            self, "Metadata export complete",
-            f"{message}\n\nOutput: {metadata_dir}")
+        self._notify(f"{message} | Output: {metadata_dir}", 15000)
 
     def _preview_family_texture(self, name: str) -> None:
         if self._family is None:
@@ -4137,15 +4158,11 @@ class AssemblyWindow(QMainWindow):
         self._remember_output_folder(output_folder)
         message = (f"PNG to ILBM: {converted} converted, {skipped} skipped, "
                    f"{failed} failed, {warnings} warning(s)")
-        self.statusBar().showMessage(message, 10000)
+        self._notify(f"{message} | Output: {output_folder}", 15000)
         if failed or skipped:
             QMessageBox.warning(
                 self, "Conversion completed with issues",
                 message + "\n\nSee Diagnostics > Log.")
-        else:
-            QMessageBox.information(
-                self, "ILBM conversion complete",
-                message + f"\n\nOutput: {output_folder}")
 
     def _toggle_play(self, playing: bool) -> None:
         self.viewport.play_animation(playing)
@@ -10063,6 +10080,9 @@ class AssemblyWindow(QMainWindow):
             owner, _family, fam_obj, model = sklt_context
             source = self._standalone_sklt_source(fam_obj)
             if source is not None:
+                self._notify(
+                    f"Overwrite requested for {source.name}; confirmation is "
+                    "required and a .bak backup will be created.", 12000)
                 answer = QMessageBox.question(
                     self, "Overwrite SKLT",
                     f"Overwrite the imported skeleton?\n\n{source}\n\n"
@@ -10324,6 +10344,9 @@ class AssemblyWindow(QMainWindow):
 
         existing = [path for path in all_targets if path.exists()]
         if ask_replace and existing:
+            self._notify(
+                f"Asset Family export would replace {len(existing)} existing "
+                "file(s); confirmation is required.", 12000)
             answer = QMessageBox.warning(
                 self, "Replace exported files?",
                 "The following file(s) already exist:\n"

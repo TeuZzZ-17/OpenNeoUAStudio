@@ -54,11 +54,26 @@ def choose_bas_archive(parent, directory) -> str:
     return path
 
 
+
+
+def configure_operation_status_bar(window):
+    """Style the shared bottom-left non-blocking operation channel."""
+
+    bar = window.statusBar()
+    bar.setObjectName("operationStatusBar")
+    bar.setMinimumHeight(30)
+    bar.setStyleSheet(
+        "QStatusBar#operationStatusBar {"
+        " color: #ff7474; font-size: 15px; font-weight: 600;"
+        " padding-left: 4px; }"
+        "QStatusBar#operationStatusBar::item { border: none; }")
+    return bar
+
 def install_standard_file_menu_tail(
         file_menu, parent, *, close_archive_callback=None, exit_text="Exit"):
-    """Install the canonical Close BAS Archive / Exit tail.
+    """Install the canonical Close Current Resource / Exit tail.
 
-    Editors that do not own a BAS provider omit ``close_archive_callback`` and
+    Editors that do not own a closeable Studio resource omit ``close_archive_callback`` and
     receive only the shared separator + Exit action.  The actual close
     lifecycle remains editor-owned; only the action semantics and placement
     are centralized here.
@@ -66,7 +81,7 @@ def install_standard_file_menu_tail(
 
     close_action = None
     if close_archive_callback is not None:
-        close_action = QAction("Close BAS Archive", parent)
+        close_action = QAction("Close Current Resource", parent)
         close_action.setEnabled(False)
         close_action.triggered.connect(close_archive_callback)
         file_menu.addAction(close_action)
