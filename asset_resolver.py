@@ -216,7 +216,8 @@ class AssetResolver:
     """
 
     def __init__(self, roots: list[Path | str],
-                 overrides: dict[str, Path] | None = None):
+                 overrides: dict[str, Path] | None = None, *,
+                 prefer_earliest_root: bool = False):
         self.roots: list[Path] = []
         for root in roots:
             path = Path(root)
@@ -224,6 +225,12 @@ class AssetResolver:
                 path = path.parent
             if path.is_dir() and path not in self.roots:
                 self.roots.append(path)
+        # Standalone BASE families use ordered search roots as real fallback
+        # layers: a unique dependency beside the BASE (or in the next local
+        # package root) must not become ambiguous merely because historical
+        # extra roots contain same-named assets. Direct AssetResolver callers
+        # retain the conservative all-roots ambiguity behavior by default.
+        self.prefer_earliest_root = bool(prefer_earliest_root)
         self.overrides: dict[str, Path] = {}
         for name, target in (overrides or {}).items():
             self.set_override(name, target)
@@ -320,9 +327,51 @@ class AssetResolver:
                         "path in the same priority root")
                 return result
 
-        # Priority 2/3: recursive filename match (Windows filesystems are
-        # case-insensitive, so exact and case-insensitive coincide here) over
-        # the one-time index of every root.
+        # Priority 2: for a standalone BASE family, ordered roots are true
+        # fallback layers.  This is what makes an exported flat Asset Family
+        # self-contained: e.g. ``Skeleton/SHIP.SKLT`` can resolve to the unique
+        # ``SHIP.SKLT`` beside the BASE without unrelated copies in old search
+        # roots turning it ambiguous.  Ambiguity *inside* the first root that
+        # contains matches is still surfaced and never guessed away.
+        if self.prefer_earliest_root:
+            for root in self.roots:
+                index = DirectoryIndex.get(root)
+                result.searched.append(
+                    f"<priority index {root} ({index.file_count} files)>")
+                root_matches: list[Path] = []
+                for name in names:
+                    for hit in index.find_name(name):
+                        if hit not in root_matches:
+                            root_matches.append(hit)
+                if not root_matches:
+                    continue
+                root_matches = _rank_candidates(
+                    root_matches, file_name, kind, [root])
+                result.candidates = root_matches
+                exact = [
+                    match for match in root_matches
+                    if match.name.casefold() == file_name.casefold()]
+                if len(root_matches) == 1 or len(exact) == 1:
+                    result.status = "found"
+                    result.path = (exact or root_matches)[0]
+                    result.source = "filesystem"
+                    result.source_root = root
+                    result.resolution_rule = (
+                        "unique exact filename in highest-priority root"
+                        if len(exact) == 1 else
+                        "unique filename or shared extension alias in "
+                        "highest-priority root")
+                else:
+                    result.status = "ambiguous"
+                    result.path = None
+                    result.resolution_rule = (
+                        "multiple filename or extension-alias candidates in "
+                        "highest-priority root")
+                return result
+
+        # Priority 2/3 (conservative mode): recursive filename match (Windows
+        # filesystems are case-insensitive, so exact and case-insensitive
+        # coincide here) over the one-time index of every root.
         matches: list[Path] = []
         for root in self.roots:
             index = DirectoryIndex.get(root)
