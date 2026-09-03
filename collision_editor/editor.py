@@ -113,6 +113,39 @@ TYPE_COLORS = {
 }
 FIRE_POINT_COLOR = QColor(235, 60, 60)
 GUN_POINT_COLOR = QColor(178, 78, 238)
+TURRET_SIDE_COLOR = QColor(65, 205, 235)
+TURRET_UP_COLOR = QColor(90, 225, 120)
+TURRET_DOWN_COLOR = QColor(255, 175, 70)
+GUN_ANGLE_SCALE = 1000.0
+GUN_ANGLE_MAX = 3200
+# NC_STACK_ypagun disables the side clamp above 3.1 radians. 3200 is the
+# conventional script value for a freely rotating turret.
+GUN_FREE_SIDE_THRESHOLD = 3100
+GUN_POINT_TABLE_BASE_WIDTHS = (38, 76, 56, 44, 34, 48, 34, 34, 34)
+GUN_POINT_TABLE_GROWTH = (0, 18, 12, 14, 12, 14, 10, 10, 10)
+# Ordered around the XZ plane from +Z toward +X. Diagonals intentionally keep
+# the vanilla script form (1/1) rather than storing normalized decimals; the
+# runtime normalizes gun_dir when it builds the gun basis.
+GUN_DIRECTION_SEQUENCE = (
+    (0.0, 1.0),
+    (1.0, 1.0),
+    (1.0, 0.0),
+    (1.0, -1.0),
+    (0.0, -1.0),
+    (-1.0, -1.0),
+    (-1.0, 0.0),
+    (-1.0, 1.0),
+)
+GUN_DIRECTION_LABELS = (
+    "0 deg (+Z)",
+    "45 deg (+X +Z)",
+    "90 deg (+X)",
+    "135 deg (+X -Z)",
+    "180 deg (-Z)",
+    "225 deg (-X -Z)",
+    "270 deg (-X)",
+    "315 deg (-X +Z)",
+)
 SCRIPT_TYPES = (
     "new_vehicle", "modify_vehicle", "new_weapon", "modify_weapon",
 )
@@ -303,6 +336,32 @@ class GunPoint:
 
 
 @dataclass
+class TurretLimits:
+    """Runtime gun envelope owned by one referenced vehicle prototype.
+
+    Gun Points store only mount position/direction and the referenced vehicle
+    ID. ``gun_side_angle``/``gun_up_angle``/``gun_down_angle`` belong to that
+    referenced vehicle definition, so all mounts using the same ID deliberately
+    share one instance in :class:`CollisionProject`.
+    """
+
+    vehicle_id: int
+    enabled: bool = False
+    side: int = 0
+    up: int = 0
+    down: int = 0
+    source_kind: str = "new_vehicle"
+    source_name: str = ""
+    dirty: bool = False
+
+    def clone(self) -> "TurretLimits":
+        return TurretLimits(
+            self.vehicle_id, self.enabled, self.side, self.up, self.down,
+            self.source_kind, self.source_name, self.dirty,
+        )
+
+
+@dataclass
 class CollisionProject:
     name: str = ""
     source_model: str = ""
@@ -332,6 +391,10 @@ class CollisionProject:
     gun_points_enabled: bool = False
     gun_points: list[GunPoint] = field(default_factory=list)
     unit_gun_default_icon: str = ""
+    # Effective angle limits indexed by the mounted gun's vehicle prototype ID.
+    # Entries are populated from the same script that supplied the Gun Points;
+    # only explicitly edited (dirty) entries are written back.
+    turret_limits: dict[int, TurretLimits] = field(default_factory=dict)
     # OpenNeoUA-only modern cockpit camera position. The engine consumes these
     # values directly in vehicle-local model space; there is deliberately no
     # editor-authored rotation because OpenNeoUA keeps the vehicle orientation.
@@ -368,6 +431,11 @@ class CollisionProject:
                 point.dir_x, point.dir_y, point.dir_z, point.gun_type,
                 point.name, point.icon,
             ) for point in self.gun_points),
+            tuple((
+                vehicle_id, limits.enabled, limits.side, limits.up,
+                limits.down, limits.source_kind, limits.source_name,
+                limits.dirty,
+            ) for vehicle_id, limits in sorted(self.turret_limits.items())),
             one(self.legacy),
             tuple(one(sphere) for sphere in self.compound),
         )
@@ -384,8 +452,12 @@ class CollisionProject:
          self.gun_points_enabled, self.unit_gun_default_icon,
          self.cockpit_camera_enabled,
          self.cockpit_camera_offset_x, self.cockpit_camera_offset_y,
-         self.cockpit_camera_offset_z, gun_points, legacy, compound) = state
+         self.cockpit_camera_offset_z, gun_points, turret_limits,
+         legacy, compound) = state
         self.gun_points = [GunPoint(*values) for values in gun_points]
+        self.turret_limits = {
+            values[0]: TurretLimits(*values) for values in turret_limits
+        }
         self.legacy = one(legacy)
         self.compound = [one(values) for values in compound]
 
@@ -1008,6 +1080,103 @@ def import_gun_points_block(
     return enabled, families["robo"] + families["unit"], unit_default_icon
 
 
+_TURRET_LIMIT_KEYS = {
+    "gun_side_angle": "side",
+    "gun_up_angle": "up",
+    "gun_down_angle": "down",
+}
+
+
+def _script_integer(raw: str, key: str) -> int:
+    token = raw.strip().split()[0]
+    try:
+        value = int(token, 0)
+    except ValueError:
+        try:
+            value = int(token, 10)
+        except ValueError as exc:
+            raise CollisionScriptError(
+                f"Valore intero non valido per {key}: {raw}") from exc
+    if not -(2 ** 31) <= value <= 2 ** 31 - 1:
+        raise CollisionScriptError(
+            f"Valore fuori dall'intervallo int32 per {key}: {raw}")
+    return value
+
+
+def import_turret_limits(text: str) -> dict[int, TurretLimits]:
+    """Resolve gun-angle values by vehicle ID using script override order.
+
+    The last active assignment wins exactly as it does while OpenNeoUA parses
+    ``new_vehicle``/``modify_vehicle`` blocks. The write target is the last
+    block that actually authored an angle, or the vehicle's ``new_vehicle``
+    block when the three parameters are currently absent.
+    """
+
+    lines_by_vehicle: dict[int, list[ScriptBlock]] = {}
+    for block in find_script_blocks(text):
+        if block.complete and block.kind in ("new_vehicle", "modify_vehicle"):
+            lines_by_vehicle.setdefault(block.object_id, []).append(block)
+
+    result: dict[int, TurretLimits] = {}
+    for vehicle_id, blocks in lines_by_vehicle.items():
+        limits = TurretLimits(vehicle_id=vehicle_id)
+        target = next(
+            (block for block in blocks if block.kind == "new_vehicle"),
+            blocks[0],
+        )
+        for block in blocks:
+            if block.name:
+                limits.source_name = block.name
+            block_has_limit = False
+            for _line, key, raw, _indent in _top_level_assignment_rows(
+                    text, block):
+                field_name = _TURRET_LIMIT_KEYS.get(key)
+                if field_name is None:
+                    continue
+                value = _script_integer(raw, key)
+                if value < 0:
+                    raise CollisionScriptError(
+                        f"Valore negativo non valido per {key}: {raw}")
+                # The editor deliberately exposes the canonical OpenNeoUA
+                # range only. Legacy values above 3200 are normalized on load
+                # instead of leaking outside the controls' valid range.
+                setattr(limits, field_name, min(GUN_ANGLE_MAX, value))
+                limits.enabled = True
+                block_has_limit = True
+            if block_has_limit:
+                target = block
+        limits.source_kind = target.kind
+        result[vehicle_id] = limits
+    return result
+
+
+def turret_limit_data_lines(limits: TurretLimits) -> list[str]:
+    if not limits.enabled:
+        return []
+    return [
+        f"gun_side_angle = {max(0, min(GUN_ANGLE_MAX, int(limits.side)))}",
+        f"gun_up_angle = {max(0, min(GUN_ANGLE_MAX, int(limits.up)))}",
+        f"gun_down_angle = {max(0, min(GUN_ANGLE_MAX, int(limits.down)))}",
+    ]
+
+
+def gun_angle_degrees(value: int) -> float:
+    """Convert OpenNeoUA's radians-times-1000 script unit to degrees."""
+
+    return math.degrees(float(value) / GUN_ANGLE_SCALE)
+
+
+def gun_direction_index(dir_x: float, dir_z: float) -> int | None:
+    """Return the nearest ordered 45-degree XZ direction."""
+
+    x = float(dir_x)
+    z = float(dir_z)
+    if not (math.isfinite(x) and math.isfinite(z)) or math.hypot(x, z) <= 1e-9:
+        return None
+    angle = math.atan2(x, z) % (2.0 * math.pi)
+    return int(math.floor(angle / (math.pi / 4.0) + 0.5)) % 8
+
+
 def gun_point_data_lines(project: CollisionProject) -> list[str]:
     """Render gun mounts without changing their script family."""
 
@@ -1106,11 +1275,107 @@ def export_collision_text(project: CollisionProject) -> str:
         "",
     ]
     data = collision_data_lines(project)
-    return "\n".join(header + data).rstrip() + "\n"
+    referenced: list[str] = []
+    dirty_limits = sorted(
+        (limits for limits in project.turret_limits.values() if limits.dirty),
+        key=lambda limits: limits.vehicle_id,
+    )
+    if dirty_limits:
+        referenced.extend(["", "; Referenced gun vehicle turret limits"])
+        for limits in dirty_limits:
+            name = f" - {limits.source_name}" if limits.source_name else ""
+            referenced.append(
+                f"; Vehicle {limits.vehicle_id}{name}")
+            if limits.enabled:
+                referenced.append(f"modify_vehicle {limits.vehicle_id}")
+                referenced.extend(
+                    "    " + line for line in turret_limit_data_lines(limits))
+                referenced.append("end")
+            else:
+                referenced.append(
+                    "; Disable/remove gun_side_angle, gun_up_angle and "
+                    "gun_down_angle in this vehicle definition.")
+    return "\n".join(header + data + referenced).rstrip() + "\n"
 
 
 def _line_ending(text: str) -> str:
     return "\r\n" if "\r\n" in text else "\n"
+
+
+def _apply_turret_limit_updates(
+        text: str, project: CollisionProject, *, comment_missing: bool) -> str:
+    """Patch only edited referenced-gun definitions in the selected script."""
+
+    updated = text
+    dirty_limits = sorted(
+        (limits for limits in project.turret_limits.values() if limits.dirty),
+        key=lambda limits: limits.vehicle_id,
+    )
+    for limits in dirty_limits:
+        matches = [
+            block for block in find_script_blocks(updated)
+            if block.kind == limits.source_kind
+            and block.object_id == limits.vehicle_id
+        ]
+        if len(matches) != 1:
+            raise CollisionScriptError(
+                "Impossibile aggiornare i limiti torretta: atteso un solo "
+                f"{limits.source_kind} {limits.vehicle_id}, trovati "
+                f"{len(matches)}.")
+        block = matches[0]
+        if not block.complete:
+            raise CollisionScriptError(
+                f"Parsing incompleto: manca end per {block.kind} "
+                f"{block.object_id}.")
+
+        newline = _line_ending(updated)
+        had_final_newline = updated.endswith(("\n", "\r"))
+        lines = updated.splitlines()
+        rows = [
+            row for row in _top_level_assignment_rows(updated, block)
+            if row[1] in _TURRET_LIMIT_KEYS
+        ]
+        indent = next(
+            (row[3] for row in rows if row[3]),
+            re.match(r"^(\s*)", lines[block.start_line]).group(1) + "    ",
+        )
+        rendered = [
+            indent + line for line in turret_limit_data_lines(limits)
+        ]
+        replace: dict[int, list[str]] = {}
+        delete: set[int] = set()
+        insert_before_end: list[str] = []
+        if rendered:
+            if rows:
+                replace[rows[0][0]] = rendered
+                delete.update(row[0] for row in rows[1:])
+            else:
+                insert_before_end = rendered
+        elif rows and comment_missing:
+            first = rows[0][0]
+            replace[first] = [
+                indent + "; Collision Editor disabled: turret limits",
+                indent + "; " + lines[first].lstrip(),
+            ]
+            for row in rows[1:]:
+                replace[row[0]] = [indent + "; " + lines[row[0]].lstrip()]
+        elif rows:
+            delete.update(row[0] for row in rows)
+
+        output: list[str] = []
+        for index, line in enumerate(lines):
+            if index == block.end_line and insert_before_end:
+                if output and output[-1].strip():
+                    output.append("")
+                output.extend(insert_before_end)
+            if index in delete:
+                continue
+            if index in replace:
+                output.extend(replace[index])
+            else:
+                output.append(line)
+        updated = newline.join(output) + (newline if had_final_newline else "")
+    return updated
 
 
 def plan_script_update(
@@ -1201,6 +1466,8 @@ def plan_script_update(
                 continue
             output.append(line)
         updated = newline.join(output) + (newline if had_final_newline else "")
+        updated = _apply_turret_limit_updates(
+            updated, project, comment_missing=comment_missing)
         preview = "".join(difflib.unified_diff(
             text.splitlines(keepends=True),
             updated.splitlines(keepends=True),
@@ -1286,6 +1553,8 @@ def plan_script_update(
         else:
             output.append(line)
     updated = newline.join(output) + (newline if had_final_newline else "")
+    updated = _apply_turret_limit_updates(
+        updated, project, comment_missing=comment_missing)
     preview = "".join(difflib.unified_diff(
         text.splitlines(keepends=True),
         updated.splitlines(keepends=True),
@@ -1384,6 +1653,16 @@ def validate_project(
             if not (0 <= int(point.gun_type) <= 255):
                 errors.append(
                     f"Gun Point {index}: gun type deve essere 0..255.")
+        for vehicle_id, limits in project.turret_limits.items():
+            if not limits.enabled:
+                continue
+            for label, value in (
+                    ("Side", limits.side), ("Up", limits.up),
+                    ("Down", limits.down)):
+                if not 0 <= int(value) <= GUN_ANGLE_MAX:
+                    errors.append(
+                        f"Vehicle {vehicle_id}: Gun {label} Angle deve essere "
+                        f"compreso tra 0 e {GUN_ANGLE_MAX}.")
     for index, sphere in enumerate(project.spheres()):
         if not all(math.isfinite(value) for value in (
                 sphere.x, sphere.y, sphere.z, sphere.radius)):
@@ -1401,6 +1680,107 @@ def validate_project(
                     f"Sfera compound {index} molto distante dai bounds del "
                     "modello.")
     return errors, warnings
+
+
+def _normalized_vector3(vector) -> tuple[float, float, float] | None:
+    values = tuple(float(value) for value in vector)
+    length = math.sqrt(sum(value * value for value in values))
+    if not math.isfinite(length) or length <= 1e-9:
+        return None
+    return tuple(value / length for value in values)
+
+
+def _cross3(a, b) -> tuple[float, float, float]:
+    return (
+        a[1] * b[2] - a[2] * b[1],
+        a[2] * b[0] - a[0] * b[2],
+        a[0] * b[1] - a[1] * b[0],
+    )
+
+
+def turret_limit_grid(
+        origin, direction, side: int, up: int, down: int, radius: float,
+        segments: int = 32) -> dict[str, list[list[tuple[float, float, float]]]]:
+    """Build the runtime aiming envelope around one Gun Point direction.
+
+    UA model space uses +Y downward, so positive elevation moves toward -Y.
+    The frame follows ``ypagun_func128``: the authored ``gun_dir`` is the
+    neutral forward axis and side/up/down limits rotate around that axis.
+    """
+
+    forward = _normalized_vector3(direction)
+    if forward is None or not math.isfinite(radius) or radius <= 0.0:
+        return {}
+    origin = tuple(float(value) for value in origin)
+    side = max(0, min(GUN_ANGLE_MAX, int(side)))
+    up = max(0, min(GUN_ANGLE_MAX, int(up)))
+    down = max(0, min(GUN_ANGLE_MAX, int(down)))
+
+    # Match the engine's preferred local Y axis: world +Y projected onto the
+    # plane perpendicular to gun_dir, with +Z as the vertical-direction
+    # fallback used by ypagun_func128.
+    world_down = (0.0, 1.0, 0.0)
+    projection = sum(a * b for a, b in zip(world_down, forward))
+    down_axis = _normalized_vector3(tuple(
+        world_down[index] - forward[index] * projection
+        for index in range(3)))
+    if down_axis is None:
+        fallback = (0.0, 0.0, 1.0)
+        projection = sum(a * b for a, b in zip(fallback, forward))
+        down_axis = _normalized_vector3(tuple(
+            fallback[index] - forward[index] * projection
+            for index in range(3)))
+    if down_axis is None:
+        return {}
+    right_axis = _normalized_vector3(_cross3(down_axis, forward))
+    if right_axis is None:
+        return {}
+
+    full_side = int(side) > GUN_FREE_SIDE_THRESHOLD
+    side_radians = math.pi if full_side else min(
+        math.pi, max(0.0, float(side) / GUN_ANGLE_SCALE))
+    # Target directions cannot exceed a hemisphere even when a larger script
+    # value is authored. Clamp only the visualization, never the saved value.
+    up_radians = min(math.pi / 2.0, max(0.0, float(up) / GUN_ANGLE_SCALE))
+    down_radians = min(
+        math.pi / 2.0, max(0.0, float(down) / GUN_ANGLE_SCALE))
+    segments = max(4, int(segments))
+
+    def sample(start: float, end: float) -> list[float]:
+        return [
+            start + (end - start) * index / segments
+            for index in range(segments + 1)
+        ]
+
+    yaw_values = sample(-math.pi, math.pi) if full_side else sample(
+        -side_radians, side_radians)
+
+    def point(yaw: float, pitch: float):
+        cy, sy = math.cos(yaw), math.sin(yaw)
+        cp, sp = math.cos(pitch), math.sin(pitch)
+        horizontal = tuple(
+            forward[index] * cy + right_axis[index] * sy
+            for index in range(3))
+        vector = tuple(
+            horizontal[index] * cp - down_axis[index] * sp
+            for index in range(3))
+        return tuple(
+            origin[index] + vector[index] * radius for index in range(3))
+
+    yaw_guides = (
+        (-math.pi, -math.pi / 2.0, 0.0, math.pi / 2.0)
+        if full_side else (-side_radians, 0.0, side_radians)
+    )
+    pitch_values = sample(-down_radians, up_radians)
+    return {
+        "side": [[point(yaw, 0.0) for yaw in yaw_values]],
+        "up": [[point(yaw, up_radians) for yaw in yaw_values]],
+        "down": [[point(yaw, -down_radians) for yaw in yaw_values]],
+        "meridians": [
+            [point(yaw, pitch) for pitch in pitch_values]
+            for yaw in yaw_guides
+        ],
+    }
 
 
 class CollisionMoveGizmo(ModelSpaceGizmo):
@@ -1593,6 +1973,11 @@ class CollisionViewport(AssetViewport):
         self._gun_directions: list[tuple[float, float, float]] = []
         self._gun_point_selected = -1
         self._gun_points_visible = True
+        self._turret_limits: tuple[
+            tuple[float, float, float], tuple[float, float, float],
+            int, int, int,
+        ] | None = None
+        self._turret_limits_visible = True
         self._cockpit_preview_active = False
         self._cockpit_offset = (0.0, 0.0, 0.0)
         # Cockpit preview always fills the editor viewport. The only aspect
@@ -1761,6 +2146,7 @@ class CollisionViewport(AssetViewport):
         self._gun_points = []
         self._gun_directions = []
         self._gun_point_selected = -1
+        self._turret_limits = None
         self._collision_selected = -1
         self._model_preview_base_faces = []
         self._model_preview_base_sen_boxes = []
@@ -1918,6 +2304,24 @@ class CollisionViewport(AssetViewport):
 
     def set_gun_points_visible(self, visible: bool) -> None:
         self._gun_points_visible = bool(visible)
+        self.update()
+
+    def set_turret_limits(
+            self, origin, direction, limits: TurretLimits | None) -> None:
+        if limits is None:
+            self._turret_limits = None
+        else:
+            self._turret_limits = (
+                tuple(float(value) for value in origin),
+                tuple(float(value) for value in direction),
+                max(0, min(GUN_ANGLE_MAX, int(limits.side))),
+                max(0, min(GUN_ANGLE_MAX, int(limits.up))),
+                max(0, min(GUN_ANGLE_MAX, int(limits.down))),
+            )
+        self.update()
+
+    def set_turret_limits_visible(self, visible: bool) -> None:
+        self._turret_limits_visible = bool(visible)
         self.update()
 
 
@@ -2339,6 +2743,81 @@ class CollisionViewport(AssetViewport):
                 QColor(255, 255, 255) if selected else GUN_POINT_COLOR, 1.5))
             painter.drawText(screen + QPointF(9.0, -9.0), f"G{index + 1}")
 
+    def _draw_turret_limits_overlay(self, painter: QPainter) -> None:
+        if not (self._ground_alignment_source_loaded
+                and self._turret_limits_visible
+                and self._turret_limits is not None):
+            return
+        origin, direction, side, up, down = self._turret_limits
+        radius = max(1.0, 1.0 / max(abs(float(self._scale)), 1e-9))
+        curves = turret_limit_grid(
+            origin, direction, side, up, down, radius)
+        if not curves:
+            return
+
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+
+        def draw_curves(groups, pen):
+            painter.setPen(pen)
+            painter.setBrush(Qt.BrushStyle.NoBrush)
+            for points in groups:
+                projected = [self._project_visible_world(point)
+                             for point in points]
+                for start, end in zip(projected, projected[1:]):
+                    if start is not None and end is not None:
+                        painter.drawLine(start, end)
+
+        guide_pen = QPen(QColor(180, 205, 215, 155), 1.1)
+        guide_pen.setStyle(Qt.PenStyle.DashLine)
+        draw_curves(curves["meridians"], guide_pen)
+        side_curve = curves["side"][0]
+        midpoint = len(side_curve) // 2
+        spoke_targets = [
+            side_curve[midpoint],
+            curves["up"][0][midpoint],
+            curves["down"][0][midpoint],
+        ]
+        if side <= GUN_FREE_SIDE_THRESHOLD:
+            spoke_targets.extend((side_curve[0], side_curve[-1]))
+        draw_curves([[origin, target] for target in spoke_targets], guide_pen)
+        draw_curves(curves["side"], QPen(TURRET_SIDE_COLOR, 2.6))
+        draw_curves(curves["up"], QPen(TURRET_UP_COLOR, 2.1))
+        draw_curves(curves["down"], QPen(TURRET_DOWN_COLOR, 2.1))
+
+        origin_screen = self._project_visible_world(origin)
+        if origin_screen is not None:
+            painter.setPen(QPen(QColor(255, 255, 255), 1.8))
+            painter.setBrush(QColor(
+                TURRET_SIDE_COLOR.red(), TURRET_SIDE_COLOR.green(),
+                TURRET_SIDE_COLOR.blue(), 220))
+            painter.drawEllipse(origin_screen, 4.5, 4.5)
+
+        def label(point, text, color, offset):
+            screen = self._project_visible_world(point)
+            if screen is None:
+                return
+            painter.setPen(QPen(color, 1.0))
+            painter.drawText(screen + offset, text)
+
+        side_text = (
+            f"SIDE {side} / FULL 360 deg"
+            if side > GUN_FREE_SIDE_THRESHOLD
+            else f"SIDE +/-{side} / +/-{gun_angle_degrees(side):.1f} deg")
+        side_points = curves["side"][0]
+        label(
+            side_points[
+                -1 if side <= GUN_FREE_SIDE_THRESHOLD
+                else len(side_points) // 2],
+            side_text, TURRET_SIDE_COLOR, QPointF(7.0, -7.0))
+        label(
+            curves["up"][0][len(curves["up"][0]) // 2],
+            f"UP {up} / {gun_angle_degrees(up):.1f} deg",
+            TURRET_UP_COLOR, QPointF(7.0, -7.0))
+        label(
+            curves["down"][0][len(curves["down"][0]) // 2],
+            f"DOWN {down} / {gun_angle_degrees(down):.1f} deg",
+            TURRET_DOWN_COLOR, QPointF(7.0, 15.0))
+
 
     def paintEvent(self, event) -> None:  # noqa: N802
         if self._cockpit_preview_active:
@@ -2405,6 +2884,7 @@ class CollisionViewport(AssetViewport):
                 color.red(), color.green(), color.blue(), 235))
             painter.drawEllipse(center, 6.0, 6.0)
         self._draw_fire_points_overlay(painter)
+        self._draw_turret_limits_overlay(painter)
         self._draw_gun_points_overlay(painter)
         painter.end()
 
@@ -2930,12 +3410,13 @@ class CollisionEditorWindow(QMainWindow):
         # points keep their original robo_* / unit_* scheme unless explicitly
         # removed and recreated, avoiding silent script-family conversions.
         self._new_gun_point_scheme = "unit"
-        # Reset All Gun Points returns to the exact source state captured by
-        # the last explicit script load/import, not to guessed hard-coded data.
+        # Reset All returns Gun Points and their referenced turret limits to
+        # the source state captured by the last explicit script load/import.
         self._loaded_gun_points_enabled = False
         self._loaded_gun_points: list[GunPoint] = []
         self._loaded_unit_gun_default_icon = ""
         self._loaded_gun_point_scheme = "unit"
+        self._loaded_turret_limits: dict[int, TurretLimits] = {}
         # Script-authored cockpit baseline. This is source state, not part of
         # undo/redo: Restore Script Position always returns to the coordinates
         # read during the last explicit script load/import.
@@ -2950,6 +3431,8 @@ class CollisionEditorWindow(QMainWindow):
         self._radius_spin_active = False
         self._overeof_spin_active = False
         self._vehicle_preview_active_edits: set[str] = set()
+        self._turret_slider_active_edits: set[str] = set()
+        self._gun_direction_slider_active = False
         self._model_filter_expansion: dict[int, bool] | None = None
 
         configure_operation_status_bar(self)
@@ -2992,7 +3475,11 @@ class CollisionEditorWindow(QMainWindow):
         self.fire_point_tree.currentItemChanged.connect(
             self._fire_point_tree_selection_changed)
         self.gun_point_tree = QTreeWidget()
-        self.gun_point_tree.setHeaderLabels(["Gun", "Family", "X", "Y", "Z"])
+        self.gun_point_tree.setHeaderLabels([
+            "Gun", "Family", "Vehicle", "Side", "Up", "Down", "X", "Y", "Z",
+        ])
+        self.gun_point_tree.setRootIsDecorated(False)
+        self.gun_point_tree.setIndentation(0)
         self.gun_point_tree.setSelectionMode(
             QAbstractItemView.SelectionMode.SingleSelection)
         self.gun_point_tree.currentItemChanged.connect(
@@ -3161,12 +3648,20 @@ class CollisionEditorWindow(QMainWindow):
              self.viewport.set_fire_points_visible),
             ("Show Gun Points", True,
              self.viewport.set_gun_points_visible),
+            ("Show Turret Limits", True,
+             self.viewport.set_turret_limits_visible),
         )
         for text, checked, slot in viewpoint_options:
             action = QAction(text, self)
             action.setCheckable(True)
             action.setChecked(checked)
             action.toggled.connect(slot)
+            if text in {
+                    "Show Legacy Radius", "Show Vehicle Collisions",
+                    "Show Weapon Collisions", "Show Ground Simulation",
+                    "Show Overeof", "Show Fire Points", "Show Gun Points",
+                    "Show Turret Limits"}:
+                action.toggled.connect(self._sync_workspace_overlay_visibility)
             self.viewpoint_menu.addAction(action)
             self.viewpoint_actions[text] = action
 
@@ -3492,6 +3987,38 @@ class CollisionEditorWindow(QMainWindow):
         spheres_layout.setContentsMargins(6, 4, 6, 4)
         spheres_layout.setSpacing(3)
         self.spheres_box = spheres_box
+
+        sphere_buttons_top = QHBoxLayout()
+        sphere_buttons_top.setContentsMargins(0, 0, 0, 0)
+        sphere_buttons_top.setSpacing(5)
+        self.add_legacy_button = QPushButton("Add Legacy Radius")
+        self.add_vehicle_collision_button = QPushButton(
+            "Add Vehicle Collision")
+        self.add_weapon_collision_button = QPushButton(
+            "Add Weapon Collision")
+        self.add_legacy_button.clicked.connect(
+            self.add_legacy_action.trigger)
+        self.add_vehicle_collision_button.clicked.connect(
+            self.add_vehicle_action.trigger)
+        self.add_weapon_collision_button.clicked.connect(
+            self.add_weapon_action.trigger)
+        sphere_buttons_top.addWidget(self.add_legacy_button)
+        sphere_buttons_top.addWidget(self.add_vehicle_collision_button)
+        sphere_buttons_top.addWidget(self.add_weapon_collision_button)
+        spheres_layout.addLayout(sphere_buttons_top)
+
+        sphere_buttons_bottom = QHBoxLayout()
+        sphere_buttons_bottom.setContentsMargins(0, 0, 0, 0)
+        sphere_buttons_bottom.setSpacing(5)
+        self.delete_sphere_button = QPushButton("Delete Sphere")
+        self.reset_collisions_button = QPushButton("Delete All Collisions")
+        self.delete_sphere_button.clicked.connect(self.delete_action.trigger)
+        self.reset_collisions_button.clicked.connect(
+            self.reset_collisions_action.trigger)
+        sphere_buttons_bottom.addWidget(self.delete_sphere_button)
+        sphere_buttons_bottom.addWidget(self.reset_collisions_button)
+        spheres_layout.addLayout(sphere_buttons_bottom)
+
         self.sphere_tree.setMinimumHeight(82)
         self.sphere_tree.setSizePolicy(
             QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
@@ -3698,11 +4225,11 @@ class CollisionEditorWindow(QMainWindow):
             "changing its direction, type, name or script family.")
         self.reset_gun_point_button.clicked.connect(
             self._reset_gun_point_position)
-        self.reset_all_gun_points_button = QPushButton("Reset All Gun Points")
+        self.reset_all_gun_points_button = QPushButton("Reset All")
         self.reset_all_gun_points_button.setToolTip(
-            "Restore every Gun Point to the values loaded from the current "
-            "script. If the loaded source contained no Gun Points, remove all "
-            "points authored after load.")
+            "Restore every Gun Point and all referenced turret angles to the "
+            "values loaded from the current script. If the loaded source "
+            "contained no Gun Points, remove all points authored after load.")
         self.reset_all_gun_points_button.clicked.connect(
             self._reset_all_gun_points)
         gun_buttons.addWidget(self.add_gun_point_button, 0, 0)
@@ -3784,7 +4311,33 @@ class CollisionEditorWindow(QMainWindow):
             self.gun_dir_spins[axis.lower()] = dir_spin
             gun_fields_grid.addWidget(dir_spin, 1, field_column)
 
-        gun_fields_grid.addWidget(QLabel("Vehicle"), 2, 0)
+        gun_fields_grid.addWidget(QLabel("Direction"), 2, 0)
+        self.gun_direction_slider = QSlider(Qt.Orientation.Horizontal)
+        self.gun_direction_slider.setRange(0, len(GUN_DIRECTION_SEQUENCE) - 1)
+        self.gun_direction_slider.setSingleStep(1)
+        self.gun_direction_slider.setPageStep(1)
+        self.gun_direction_slider.setTickInterval(1)
+        self.gun_direction_slider.setTickPosition(
+            QSlider.TickPosition.TicksBelow)
+        self.gun_direction_slider.setToolTip(
+            "Rotate gun_dir through adjacent X/Z directions: +Z, +X/+Z, +X, "
+            "+X/-Z, -Z, -X/-Z, -X, -X/+Z. The 3D envelope updates live.")
+        self.gun_direction_slider.sliderPressed.connect(
+            self._begin_gun_direction_slider)
+        self.gun_direction_slider.valueChanged.connect(
+            self._gun_direction_slider_changed)
+        self.gun_direction_slider.sliderReleased.connect(
+            self._finish_gun_direction_slider)
+        gun_fields_grid.addWidget(self.gun_direction_slider, 2, 1, 1, 4)
+        self.gun_direction_value = QLabel("")
+        self.gun_direction_value.setAlignment(
+            Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+        self.gun_direction_value.setMinimumWidth(108)
+        self.gun_direction_value.setStyleSheet(
+            "font-size: 10px; color: #aeb6c2;")
+        gun_fields_grid.addWidget(self.gun_direction_value, 2, 5)
+
+        gun_fields_grid.addWidget(QLabel("Vehicle"), 3, 0)
         self.gun_type_spin = QSpinBox()
         self.gun_type_spin.setRange(0, 255)
         self.gun_type_spin.setMinimumWidth(82)
@@ -3796,32 +4349,103 @@ class CollisionEditorWindow(QMainWindow):
         self.gun_type_spin.valueChanged.connect(self._gun_type_changed)
         self.gun_type_spin.editingFinished.connect(
             lambda: self._finish_vehicle_preview_edit("gun_type"))
-        gun_fields_grid.addWidget(self.gun_type_spin, 2, 1)
+        gun_fields_grid.addWidget(self.gun_type_spin, 3, 1)
 
-        gun_fields_grid.addWidget(QLabel("Name"), 2, 2)
+        gun_fields_grid.addWidget(QLabel("Name"), 3, 2)
         self.gun_name_edit = QLineEdit()
         self.gun_name_edit.setPlaceholderText("optional")
         self.gun_name_edit.setToolTip(
-            "Optional robo_gun_name / unit_gun_name for this mount.")
+            "When the referenced Vehicle is loaded, this shows its script "
+            "name read-only. Otherwise edit robo_gun_name / unit_gun_name "
+            "for this mount.")
         self.gun_name_edit.setSizePolicy(
             QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
         self.gun_name_edit.editingFinished.connect(self._gun_name_changed)
-        gun_fields_grid.addWidget(self.gun_name_edit, 2, 3, 1, 3)
+        gun_fields_grid.addWidget(self.gun_name_edit, 3, 3, 1, 3)
         gun_layout.addLayout(gun_fields_grid)
+
+        self.turret_limits_group = QGroupBox("Turret Limits (referenced Vehicle)")
+        turret_layout = QGridLayout(self.turret_limits_group)
+        turret_layout.setContentsMargins(6, 4, 6, 4)
+        turret_layout.setHorizontalSpacing(6)
+        turret_layout.setVerticalSpacing(3)
+        self.turret_limits_source = QLabel("Select a Gun Point")
+        self.turret_limits_source.setAlignment(
+            Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
+        self.turret_limits_source.setStyleSheet(
+            "font-size: 10px; color: #aeb6c2;")
+        turret_layout.addWidget(self.turret_limits_source, 0, 0, 1, 4)
+        self.turret_limit_sliders = {}
+        self.turret_limit_spins = {}
+        angle_specs = (
+            ("side", "Side", TURRET_SIDE_COLOR),
+            ("up", "Up", TURRET_UP_COLOR),
+            ("down", "Down", TURRET_DOWN_COLOR),
+        )
+        for row, (field, label, color) in enumerate(angle_specs, 1):
+            title = QLabel(label)
+            title.setStyleSheet(
+                f"color: rgb({color.red()}, {color.green()}, {color.blue()});")
+            turret_layout.addWidget(title, row, 0)
+            slider = QSlider(Qt.Orientation.Horizontal)
+            slider.setRange(0, GUN_ANGLE_MAX)
+            slider.setSingleStep(10)
+            slider.setPageStep(100)
+            slider.setToolTip(
+                f"gun_{field}_angle in radians x 1000. The 3D arc updates "
+                "while this slider moves.")
+            slider.sliderPressed.connect(
+                lambda name=field: self._begin_turret_limit_slider(name))
+            slider.valueChanged.connect(
+                lambda value, name=field:
+                self._turret_limit_value_changed(
+                    name, value, from_slider=True))
+            slider.sliderReleased.connect(
+                lambda name=field: self._finish_turret_limit_slider(name))
+            turret_layout.addWidget(slider, row, 1, 1, 2)
+            spin = QSpinBox()
+            spin.setRange(0, GUN_ANGLE_MAX)
+            spin.setSingleStep(10)
+            spin.setKeyboardTracking(True)
+            spin.setMinimumWidth(76)
+            spin.setMaximumWidth(104)
+            spin.setToolTip(
+                f"Exact gun_{field}_angle script value (radians x 1000).")
+            spin.valueChanged.connect(
+                lambda value, name=field:
+                self._turret_limit_value_changed(name, value))
+            spin.editingFinished.connect(
+                lambda name=field:
+                self._finish_vehicle_preview_edit(f"turret_{name}"))
+            turret_layout.addWidget(spin, row, 3)
+            self.turret_limit_sliders[field] = slider
+            self.turret_limit_spins[field] = spin
+        turret_layout.setColumnStretch(1, 1)
+        turret_layout.setColumnStretch(2, 1)
+        self.turret_limits_effective = QLabel("")
+        self.turret_limits_effective.setWordWrap(True)
+        self.turret_limits_effective.setStyleSheet(
+            "font-size: 10px; color: #aeb6c2;")
+        turret_layout.addWidget(self.turret_limits_effective, 4, 0, 1, 4)
+        gun_layout.addWidget(self.turret_limits_group)
 
         self.gun_point_tree.setMinimumHeight(82)
         self.gun_point_tree.setSizePolicy(
             QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
         gun_header = self.gun_point_tree.header()
-        gun_header.setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
-        gun_header.setSectionResizeMode(
-            1, QHeaderView.ResizeMode.ResizeToContents)
-        for column in (2, 3, 4):
-            gun_header.setSectionResizeMode(
-                column, QHeaderView.ResizeMode.ResizeToContents)
+        gun_header.setStretchLastSection(False)
+        for column, width in enumerate(GUN_POINT_TABLE_BASE_WIDTHS):
+            gun_header.setSectionResizeMode(column, QHeaderView.ResizeMode.Fixed)
+            self.gun_point_tree.setColumnWidth(column, width)
             self.gun_point_tree.headerItem().setTextAlignment(
-                column, Qt.AlignmentFlag.AlignRight
+                column, (Qt.AlignmentFlag.AlignLeft if column in (0, 1)
+                         else Qt.AlignmentFlag.AlignRight)
                 | Qt.AlignmentFlag.AlignVCenter)
+        self.gun_point_tree.setHorizontalScrollBarPolicy(
+            Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+        self.gun_point_tree.viewport().installEventFilter(self)
+        self._layout_gun_point_columns(
+            self.gun_point_tree.viewport().width())
         gun_layout.addWidget(self.gun_point_tree, 1)
         self.gun_points_box.setSizePolicy(
             QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
@@ -4034,8 +4658,10 @@ class CollisionEditorWindow(QMainWindow):
         self.move_strength_spin = QSpinBox()
         self.move_strength_spin.setRange(1, 1_000_000)
         self.move_strength_spin.setValue(1)
-        self.move_strength_spin.setMinimumWidth(58)
-        self.move_strength_spin.setMaximumWidth(72)
+        # Leave enough room for the full 1,000,000 range plus the
+        # QSpinBox step buttons; the old 58-72 px box clipped typed values.
+        self.move_strength_spin.setMinimumWidth(96)
+        self.move_strength_spin.setMaximumWidth(112)
         self.move_strength_value = self.move_strength_spin
         self.move_strength_slider.valueChanged.connect(
             self._move_strength_slider_changed)
@@ -4091,6 +4717,28 @@ class CollisionEditorWindow(QMainWindow):
         # wide enough for full resource names, while the properties column is
         # compact and the viewport remains the flexible central workspace.
         splitter.setSizes([230, 850, 430])
+
+    def eventFilter(self, watched, event):
+        if (hasattr(self, "gun_point_tree")
+                and watched is self.gun_point_tree.viewport()
+                and event.type() == QEvent.Type.Resize):
+            self._layout_gun_point_columns(event.size().width())
+        return super().eventFilter(watched, event)
+
+    def _layout_gun_point_columns(self, available_width: int) -> None:
+        """Fit every Gun Point column while preserving useful proportions."""
+
+        base_total = sum(GUN_POINT_TABLE_BASE_WIDTHS)
+        available = max(base_total, int(available_width))
+        extra = available - base_total
+        widths = [
+            base + extra * growth // 100
+            for base, growth in zip(
+                GUN_POINT_TABLE_BASE_WIDTHS, GUN_POINT_TABLE_GROWTH)
+        ]
+        widths[-1] += available - sum(widths)
+        for column, width in enumerate(widths):
+            self.gun_point_tree.setColumnWidth(column, width)
 
     def _fit_initial_window_to_screen(self) -> None:
         """Keep the initial editor window inside the usable desktop area."""
@@ -4197,6 +4845,7 @@ class CollisionEditorWindow(QMainWindow):
             return
         self._radius_spin_active = False
         self._vehicle_preview_active_edits.clear()
+        self._turret_slider_active_edits.clear()
         self._redo.append(self.project.snapshot())
         self.project.restore(self._undo.pop())
         self._selected = min(
@@ -4211,6 +4860,7 @@ class CollisionEditorWindow(QMainWindow):
             return
         self._radius_spin_active = False
         self._vehicle_preview_active_edits.clear()
+        self._turret_slider_active_edits.clear()
         self._undo.append(self.project.snapshot())
         self.project.restore(self._redo.pop())
         self._selected = min(
@@ -4305,6 +4955,7 @@ class CollisionEditorWindow(QMainWindow):
         self._loaded_gun_points = []
         self._loaded_unit_gun_default_icon = ""
         self._loaded_gun_point_scheme = "unit"
+        self._loaded_turret_limits = {}
         self._loaded_cockpit_camera_enabled = False
         self._loaded_cockpit_camera_offset = (0.0, 0.0, 0.0)
 
@@ -4332,6 +4983,7 @@ class CollisionEditorWindow(QMainWindow):
         try:
             text, _encoding, _bom = read_script_file(script_path)
             references = script_model_references(text)
+            script_turret_limits = import_turret_limits(text)
         except (OSError, UnicodeError, CollisionScriptError) as exc:
             QMessageBox.critical(
                 self, "Script object load failed", str(exc))
@@ -4449,6 +5101,7 @@ class CollisionEditorWindow(QMainWindow):
             gun_points_enabled=gun_enabled,
             gun_points=gun_points,
             unit_gun_default_icon=unit_gun_default_icon,
+            turret_limits=script_turret_limits if target_category == VEHICLE else {},
             cockpit_camera_enabled=cockpit_enabled,
             cockpit_camera_offset_x=cockpit_x,
             cockpit_camera_offset_y=cockpit_y,
@@ -4619,6 +5272,9 @@ class CollisionEditorWindow(QMainWindow):
         dialog.kind_combo.setEnabled(False)
         dialog.id_spin.setEnabled(False)
         if dialog.exec() == QDialog.DialogCode.Accepted:
+            for limits in self.project.turret_limits.values():
+                limits.dirty = False
+            self._capture_loaded_gun_points()
             self._set_modified(False)
             self.statusBar().showMessage(
                 f"Loaded definition overwritten. Backup: "
@@ -5111,7 +5767,7 @@ class CollisionEditorWindow(QMainWindow):
             self._reset_gun_point_position,
             self.reset_gun_point_button.isEnabled())
         self._context_action(
-            menu, "Reset All Gun Points", self._reset_all_gun_points,
+            menu, "Reset All", self._reset_all_gun_points,
             self.reset_all_gun_points_button.isEnabled())
 
         type_menu = menu.addMenu("New Gun Point Type")
@@ -5243,6 +5899,11 @@ class CollisionEditorWindow(QMainWindow):
         self._selected = index
         self._selected_fire_point = -1
         self._selected_gun_point = -1
+        if (0 <= index < len(self.project.spheres())
+                and self.properties_tabs.currentIndex()
+                != self.collision_tab_index):
+            with QSignalBlocker(self.properties_tabs):
+                self.properties_tabs.setCurrentIndex(self.collision_tab_index)
         self._sync_all()
 
     def _select_fire_point(self, index: int):
@@ -5272,6 +5933,12 @@ class CollisionEditorWindow(QMainWindow):
             return self.project.gun_points[index]
         return None
 
+    def _selected_turret_limits(self) -> TurretLimits | None:
+        gun = self._selected_gun()
+        if gun is None:
+            return None
+        return self.project.turret_limits.get(int(gun.gun_type))
+
     def _select_gun_point(self, index: int):
         self._radius_spin_active = False
         self._vehicle_preview_active_edits.clear()
@@ -5285,6 +5952,12 @@ class CollisionEditorWindow(QMainWindow):
             self._new_gun_point_scheme = selected.scheme
         self._selected_fire_point = -1
         self._selected = -1
+        if (self._selected_gun_point >= 0
+                and self.properties_tabs.currentIndex()
+                != self.gun_points_tab_index):
+            with QSignalBlocker(self.properties_tabs):
+                self.properties_tabs.setCurrentIndex(
+                    self.gun_points_tab_index)
         self._sync_all()
 
 
@@ -5462,6 +6135,46 @@ class CollisionEditorWindow(QMainWindow):
         self._set_modified()
         self._sync_all()
 
+    def _sync_workspace_overlay_visibility(self, *_args) -> None:
+        """Show only overlays owned by the active properties workspace.
+
+        Viewpoint menu actions remain per-overlay user preferences, but they
+        cannot make an overlay leak into another tab. Model/textures stay
+        global because they are the common editing reference for every tab.
+        """
+
+        if not (hasattr(self, "properties_tabs")
+                and hasattr(self, "viewpoint_actions")):
+            return
+
+        active = self.properties_tabs.currentIndex()
+        collision_tab = active == self.collision_tab_index
+        fire_tab = active == self.fire_points_tab_index
+        gun_tab = active == self.gun_points_tab_index
+
+        def wanted(label: str) -> bool:
+            action = self.viewpoint_actions.get(label)
+            return action is None or action.isChecked()
+
+        self.viewport.set_collision_category_visible(
+            LEGACY, collision_tab and wanted("Show Legacy Radius"))
+        self.viewport.set_collision_category_visible(
+            VEHICLE, collision_tab and wanted("Show Vehicle Collisions"))
+        self.viewport.set_collision_category_visible(
+            WEAPON, collision_tab and wanted("Show Weapon Collisions"))
+        self.viewport.set_ground_simulation_visible(
+            collision_tab and wanted("Show Ground Simulation"))
+        self.viewport.set_overeof_visible(
+            collision_tab and wanted("Show Overeof"))
+
+        self.viewport.set_fire_points_visible(
+            fire_tab and wanted("Show Fire Points"))
+
+        self.viewport.set_gun_points_visible(
+            gun_tab and wanted("Show Gun Points"))
+        self.viewport.set_turret_limits_visible(
+            gun_tab and wanted("Show Turret Limits"))
+
     def _is_cockpit_tab_selected(self) -> bool:
         return (hasattr(self, "properties_tabs")
                 and self.properties_tabs.currentIndex()
@@ -5480,6 +6193,7 @@ class CollisionEditorWindow(QMainWindow):
         # the viewport presentation and which object the shared gizmo moves.
         cockpit_selected = self._is_cockpit_tab_selected()
         cockpit_active = self._is_cockpit_tab_active()
+        self._sync_workspace_overlay_visibility()
         self.viewport.set_cockpit_preview_active(cockpit_active)
         if hasattr(self, "toolbar_view_preset_combo"):
             self.toolbar_view_preset_combo.setEnabled(not cockpit_active)
@@ -5755,7 +6469,7 @@ class CollisionEditorWindow(QMainWindow):
         self._sync_all()
 
     def _capture_loaded_gun_points(self) -> None:
-        """Snapshot source-authored Gun Points for Reset All Gun Points."""
+        """Snapshot source-authored mounts and turret limits for Reset All."""
 
         self._loaded_gun_points_enabled = bool(
             self.project.gun_points_enabled)
@@ -5764,16 +6478,26 @@ class CollisionEditorWindow(QMainWindow):
         self._loaded_unit_gun_default_icon = (
             self.project.unit_gun_default_icon)
         self._loaded_gun_point_scheme = self._new_gun_point_scheme
+        self._loaded_turret_limits = {
+            vehicle_id: limits.clone()
+            for vehicle_id, limits in self.project.turret_limits.items()
+        }
 
     def _reset_all_gun_points(self) -> None:
-        """Restore all mounts to the state captured from the loaded script."""
+        """Restore all mounts and turret limits captured from the script."""
 
         if self.project.target_category != VEHICLE:
             return
+        selected_index = self._selected_gun_point
         baseline = [point.clone() for point in self._loaded_gun_points]
         current = [point.clone() for point in self.project.gun_points]
         same_points = (current == baseline)
+        baseline_limits = {
+            vehicle_id: limits.clone()
+            for vehicle_id, limits in self._loaded_turret_limits.items()
+        }
         if (same_points
+                and self.project.turret_limits == baseline_limits
                 and self.project.gun_points_enabled
                     == self._loaded_gun_points_enabled
                 and self.project.unit_gun_default_icon
@@ -5785,8 +6509,12 @@ class CollisionEditorWindow(QMainWindow):
         self.project.gun_points = baseline
         self.project.unit_gun_default_icon = (
             self._loaded_unit_gun_default_icon)
+        self.project.turret_limits = baseline_limits
         self._new_gun_point_scheme = self._loaded_gun_point_scheme
-        self._selected_gun_point = 0 if baseline else -1
+        self._selected_gun_point = (
+            selected_index
+            if 0 <= selected_index < len(baseline)
+            else -1)
         self._set_modified()
         self._sync_all()
 
@@ -5819,6 +6547,75 @@ class CollisionEditorWindow(QMainWindow):
         self._begin_vehicle_preview_edit(f"gun_{field}")
         setattr(point, field, value)
         self.project.gun_points_enabled = True
+        self._set_modified()
+        self._sync_all()
+
+    def _begin_gun_direction_slider(self) -> None:
+        point = self._selected_gun()
+        if point is None:
+            return
+        self._vehicle_preview_active_edits.clear()
+        self._push_undo()
+        self._gun_direction_slider_active = True
+        if gun_direction_index(point.dir_x, point.dir_z) is None:
+            point.dir_x, point.dir_z = GUN_DIRECTION_SEQUENCE[
+                self.gun_direction_slider.value()]
+            self.project.gun_points_enabled = True
+            self._set_modified()
+            self._sync_all()
+
+    def _finish_gun_direction_slider(self) -> None:
+        self._gun_direction_slider_active = False
+
+    def _gun_direction_slider_changed(self, index: int) -> None:
+        if self._syncing or self.project.target_category != VEHICLE:
+            return
+        point = self._selected_gun()
+        if point is None:
+            return
+        index = max(0, min(len(GUN_DIRECTION_SEQUENCE) - 1, int(index)))
+        dir_x, dir_z = GUN_DIRECTION_SEQUENCE[index]
+        if (abs(float(point.dir_x) - dir_x) < 1e-9
+                and abs(float(point.dir_z) - dir_z) < 1e-9):
+            return
+        if not self._gun_direction_slider_active:
+            self._vehicle_preview_active_edits.clear()
+            self._push_undo()
+        point.dir_x = dir_x
+        point.dir_z = dir_z
+        self.project.gun_points_enabled = True
+        self._set_modified()
+        self._sync_all()
+
+    def _begin_turret_limit_slider(self, field: str) -> None:
+        limits = self._selected_turret_limits()
+        if limits is None:
+            return
+        self._vehicle_preview_active_edits.discard(f"turret_{field}")
+        self._push_undo()
+        self._turret_slider_active_edits.add(field)
+
+    def _finish_turret_limit_slider(self, field: str) -> None:
+        self._turret_slider_active_edits.discard(field)
+
+    def _turret_limit_value_changed(
+            self, field: str, value: int, *, from_slider: bool = False) -> None:
+        if self._syncing or self.project.target_category != VEHICLE:
+            return
+        limits = self._selected_turret_limits()
+        if limits is None or field not in {"side", "up", "down"}:
+            return
+        value = max(0, min(GUN_ANGLE_MAX, int(value)))
+        if int(getattr(limits, field)) == value:
+            return
+        if from_slider:
+            if field not in self._turret_slider_active_edits:
+                self._push_undo()
+        else:
+            self._begin_vehicle_preview_edit(f"turret_{field}")
+        setattr(limits, field, value)
+        limits.enabled = True
+        limits.dirty = True
         self._set_modified()
         self._sync_all()
 
@@ -6121,21 +6918,47 @@ class CollisionEditorWindow(QMainWindow):
                     label = f"G{index + 1}"
                     if point.name:
                         label += f" — {point.name}"
+                    full_label = label
+                    label = f"G{index + 1}"
                     family_label = (
                         "Vanilla" if point.scheme == "robo" else "OpenNeoUA")
+                    limits = self.project.turret_limits.get(
+                        int(point.gun_type))
+                    angle_values = (
+                        [str(max(0, min(GUN_ANGLE_MAX, int(value)))) for value in
+                         (limits.side, limits.up, limits.down)]
+                        if limits is not None
+                        else ["-", "-", "-"]
+                    )
                     item = QTreeWidgetItem([
-                        label, family_label, _number(point.x),
-                        _number(point.y), _number(point.z),
+                        label, family_label, str(int(point.gun_type)),
+                        *angle_values,
+                        _number(point.x), _number(point.y), _number(point.z),
                     ])
                     item.setData(0, _GUN_POINT_INDEX_ROLE, index)
                     item.setForeground(0, QBrush(GUN_POINT_COLOR))
+                    item.setTextAlignment(
+                        0, Qt.AlignmentFlag.AlignCenter
+                        | Qt.AlignmentFlag.AlignVCenter)
                     family = (
                         "Legacy Host Station robo_* gun mount"
                         if point.scheme == "robo"
                         else "Generic OpenNeoUA unit_* vehicle gun mount")
-                    item.setToolTip(0, family)
+                    item.setToolTip(0, f"{full_label}\n{family}")
                     item.setToolTip(1, family)
-                    for column in (2, 3, 4):
+                    item.setToolTip(
+                        2, "Referenced gun vehicle prototype ID.")
+                    if limits is None:
+                        angle_tip = (
+                            f"Vehicle {int(point.gun_type)} was not found in "
+                            "the loaded/imported script.")
+                    else:
+                        angle_tip = (
+                            "Shared vanilla turret limits for referenced "
+                            f"Vehicle {int(point.gun_type)} (radians x 1000).")
+                    for column in (3, 4, 5):
+                        item.setToolTip(column, angle_tip)
+                    for column in range(2, 9):
                         item.setTextAlignment(
                             column, Qt.AlignmentFlag.AlignRight
                             | Qt.AlignmentFlag.AlignVCenter)
@@ -6276,8 +7099,10 @@ class CollisionEditorWindow(QMainWindow):
                 self.gun_point_spins["x"], self.gun_point_spins["y"],
                 self.gun_point_spins["z"],
                 self.gun_dir_spins["x"], self.gun_dir_spins["z"],
-                self.gun_type_spin,
-                self.gun_name_edit, self.gun_point_type_combo)
+                self.gun_direction_slider, self.gun_type_spin,
+                self.gun_name_edit, self.gun_point_type_combo,
+                *self.turret_limit_sliders.values(),
+                *self.turret_limit_spins.values())
         ]
         self.name_edit.setText(self.project.name)
         self.model_scale_x_spin.setValue(self.project.model_scale_x)
@@ -6416,14 +7241,21 @@ class CollisionEditorWindow(QMainWindow):
         self.remove_gun_point_button.setEnabled(gun is not None)
         self.reset_gun_point_button.setEnabled(gun is not None)
         self.reset_all_gun_points_button.setEnabled(vehicle_mode)
+        referenced_vehicle = (
+            self.project.turret_limits.get(int(gun.gun_type))
+            if gun is not None else None)
+        direction_index = None
         if gun is None:
             self.gun_family_value.setText("No point selected")
             for spin in self.gun_point_spins.values():
                 spin.setValue(0.0)
             for spin in self.gun_dir_spins.values():
                 spin.setValue(0.0)
+            self.gun_direction_slider.setValue(0)
+            self.gun_direction_value.clear()
             self.gun_type_spin.setValue(0)
             self.gun_name_edit.clear()
+            self.gun_name_edit.setReadOnly(True)
         else:
             family_text = (
                 "Host Station legacy · robo_*" if gun.scheme == "robo"
@@ -6434,14 +7266,70 @@ class CollisionEditorWindow(QMainWindow):
             self.gun_point_spins["z"].setValue(gun.z)
             self.gun_dir_spins["x"].setValue(gun.dir_x)
             self.gun_dir_spins["z"].setValue(gun.dir_z)
+            direction_index = gun_direction_index(gun.dir_x, gun.dir_z)
+            if direction_index is None:
+                self.gun_direction_slider.setValue(0)
+                self.gun_direction_value.setText("Unset")
+            else:
+                self.gun_direction_slider.setValue(direction_index)
+                self.gun_direction_value.setText(
+                    GUN_DIRECTION_LABELS[direction_index])
             self.gun_type_spin.setValue(
                 max(0, min(255, int(gun.gun_type))))
-            self.gun_name_edit.setText(gun.name)
+            if referenced_vehicle is not None:
+                self.gun_name_edit.setText(referenced_vehicle.source_name)
+                self.gun_name_edit.setReadOnly(True)
+                self.gun_name_edit.setToolTip(
+                    f"Read-only script name of referenced Vehicle "
+                    f"{int(gun.gun_type)}. The mount's "
+                    "robo_gun_name / unit_gun_name is preserved unchanged.")
+            else:
+                self.gun_name_edit.setText(gun.name)
+                self.gun_name_edit.setReadOnly(False)
+                self.gun_name_edit.setToolTip(
+                    "Referenced Vehicle not found in the loaded script. "
+                    "Edit robo_gun_name / unit_gun_name for this mount.")
         for widget in (
                 *self.gun_point_spins.values(),
                 *self.gun_dir_spins.values(),
+                self.gun_direction_slider,
                 self.gun_type_spin, self.gun_name_edit):
             widget.setEnabled(gun is not None)
+        self.gun_direction_value.setEnabled(gun is not None)
+
+        limits = referenced_vehicle
+        limits_available = vehicle_mode and gun is not None and limits is not None
+        if gun is None:
+            self.turret_limits_source.setText("Select a Gun Point")
+        elif limits is None:
+            self.turret_limits_source.setText(
+                f"Vehicle {int(gun.gun_type)} not found in loaded script")
+        else:
+            suffix = f" - {limits.source_name}" if limits.source_name else ""
+            self.turret_limits_source.setText(
+                f"Vehicle {limits.vehicle_id}{suffix}")
+        for field in ("side", "up", "down"):
+            value = (max(0, min(GUN_ANGLE_MAX, int(getattr(limits, field))))
+                     if limits is not None else 0)
+            self.turret_limit_spins[field].setValue(value)
+            self.turret_limit_sliders[field].setValue(value)
+            self.turret_limit_spins[field].setEnabled(bool(limits_available))
+            self.turret_limit_sliders[field].setEnabled(bool(limits_available))
+        if limits is None:
+            limits_text = (
+                "Load/import the script containing this Vehicle ID to edit "
+                "its vanilla gun limits.")
+        else:
+            side_text = (
+                "free 360 deg" if limits.side > GUN_FREE_SIDE_THRESHOLD
+                else f"+/-{gun_angle_degrees(limits.side):.1f} deg")
+            limits_text = (
+                f"Effective: Side {side_text}; "
+                f"Up {gun_angle_degrees(limits.up):.1f} deg; "
+                f"Down {gun_angle_degrees(limits.down):.1f} deg.")
+            if _normalized_vector3(gun.direction) is None:
+                limits_text += " gun_dir is zero, so no oriented arc can be drawn."
+        self.turret_limits_effective.setText(limits_text)
 
         sphere = self._selected_sphere()
         fire_selected = (
@@ -6569,15 +7457,29 @@ class CollisionEditorWindow(QMainWindow):
             ]
         self.viewport.set_gun_points(
             gun_points, gun_directions, self._selected_gun_point)
+        if gun is not None and limits is not None:
+            self.viewport.set_turret_limits(
+                (gun.x, gun.y + preview_offset_y, gun.z),
+                gun.direction, limits)
+        else:
+            self.viewport.set_turret_limits((0.0, 0.0, 0.0),
+                                            (0.0, 0.0, 1.0), None)
         self._sync_gizmo_camera()
         self.undo_action.setEnabled(bool(self._undo))
         self.redo_action.setEnabled(bool(self._redo))
         self.save_loaded_script_action.setEnabled(
             self._active_script_path is not None
             and self._active_script_id is not None)
+        self.add_legacy_action.setEnabled(self.project.legacy is None)
+        self.add_legacy_button.setEnabled(self.project.legacy is None)
+        self.add_vehicle_collision_button.setEnabled(
+            self.add_vehicle_action.isEnabled())
+        self.add_weapon_collision_button.setEnabled(
+            self.add_weapon_action.isEnabled())
         self.duplicate_action.setEnabled(
             sphere is not None and sphere.category != LEGACY)
         self.delete_action.setEnabled(sphere is not None)
+        self.delete_sphere_button.setEnabled(sphere is not None)
         self.change_type_action.setEnabled(sphere is not None)
         self.change_type_button.setEnabled(sphere is not None)
         self.change_to_legacy_action.setEnabled(
@@ -6593,8 +7495,10 @@ class CollisionEditorWindow(QMainWindow):
                 self.mirror_z_action):
             action.setEnabled(mirror_enabled)
         self.mirror_sphere_button.setEnabled(mirror_enabled)
-        self.reset_collisions_action.setEnabled(
-            bool(self.project.spheres()))
+        collisions_present = bool(self.project.spheres())
+        self.reset_collisions_action.setEnabled(collisions_present)
+        self.reset_collisions_button.setEnabled(collisions_present)
+        self._sync_workspace_overlay_visibility()
         del blockers
         self._syncing = False
 
@@ -6676,6 +7580,7 @@ class CollisionEditorWindow(QMainWindow):
                 import_cockpit_camera_block(text, block))
             gun_enabled, gun_points, unit_gun_default_icon = (
                 import_gun_points_block(text, block))
+            script_turret_limits = import_turret_limits(text)
         except CollisionScriptError as exc:
             QMessageBox.warning(self, "Import failed", str(exc))
             return
@@ -6707,6 +7612,8 @@ class CollisionEditorWindow(QMainWindow):
         self.project.gun_points = gun_points if vehicle_block else []
         self.project.unit_gun_default_icon = (
             unit_gun_default_icon if vehicle_block else "")
+        self.project.turret_limits = (
+            script_turret_limits if vehicle_block else {})
         self._capture_loaded_gun_points()
         self._capture_loaded_cockpit_camera()
         if block.name:
