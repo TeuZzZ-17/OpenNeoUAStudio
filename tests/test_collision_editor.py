@@ -25,6 +25,7 @@ from collision_editor import (
     CollisionSphere,
     CollisionViewport,
     GunPoint,
+    TurretLimits,
     OpenScriptObjectDialog,
     LEGACY,
     VEHICLE,
@@ -43,10 +44,12 @@ from collision_editor import (
     import_fire_points_block,
     import_gun_points_block,
     import_overeof_block,
+    import_turret_limits,
     plan_script_update,
     read_script_file,
     runtime_vp_table,
     script_model_references,
+    turret_limit_grid,
     validate_project,
     vehicle_model_references,
     weapon_model_references,
@@ -1917,8 +1920,9 @@ class CollisionEditorTests(unittest.TestCase):
         window.project.gun_points_enabled = True
         window.project.gun_points = points
         window._sync_all()
-        self.assertEqual(window.gun_point_tree.topLevelItem(0).text(0),
-                         "G1 — FLAK1")
+        self.assertEqual(window.gun_point_tree.topLevelItem(0).text(0), "G1")
+        self.assertIn(
+            "G1 — FLAK1", window.gun_point_tree.topLevelItem(0).toolTip(0))
         self.assertEqual(window.gun_point_tree.topLevelItem(0).text(1),
                          "Vanilla")
 
@@ -2382,7 +2386,8 @@ class CollisionEditorTests(unittest.TestCase):
         gun_texts = [action.text() for action in gun_menu.actions()]
         self.assertIn("Add Gun Point", gun_texts)
         self.assertIn("Remove Selected Gun Point", gun_texts)
-        self.assertIn("Reset All Gun Points", gun_texts)
+        self.assertIn("Reset All", gun_texts)
+        self.assertNotIn("Reset All Gun Points", gun_texts)
         gun_submenus = {
             action.text(): action.menu() for action in gun_menu.actions()
             if action.menu() is not None
@@ -2400,6 +2405,179 @@ class CollisionEditorTests(unittest.TestCase):
         }
         self.assertIn("Runtime Model", cockpit_submenus)
         self.assertIn("Runtime Aspect", cockpit_submenus)
+
+    def test_126_turret_limits_follow_vehicle_override_order(self):
+        text = (
+            "new_vehicle 90\n"
+            " name = Flak\n"
+            " gun_side_angle = 1000\n"
+            " gun_up_angle = 500\n"
+            "end\n"
+            "modify_vehicle 90\n"
+            " gun_side_angle = 3200\n"
+            " gun_down_angle = 300\n"
+            "end\n"
+            "new_vehicle 91\n"
+            " name = Locked\n"
+            "end\n"
+            "new_vehicle 92\n"
+            " gun_side_angle = 3211\n"
+            " gun_up_angle = 9999\n"
+            " gun_down_angle = 3201\n"
+            "end\n"
+        )
+        limits = import_turret_limits(text)
+        self.assertEqual(
+            (limits[90].side, limits[90].up, limits[90].down),
+            (3200, 500, 300))
+        self.assertTrue(limits[90].enabled)
+        self.assertEqual(limits[90].source_kind, "modify_vehicle")
+        self.assertFalse(limits[91].enabled)
+        self.assertEqual(limits[91].source_kind, "new_vehicle")
+        self.assertEqual(
+            (limits[92].side, limits[92].up, limits[92].down),
+            (3200, 3200, 3200))
+
+    def test_127_turret_update_patches_referenced_vehicle_not_mount(self):
+        text = (
+            "new_vehicle 56\n"
+            " name = Carrier\n"
+            " unit_num_guns = 1\n"
+            " unit_act_gun = 0\n"
+            " unit_gun_type = 90\n"
+            "end\n"
+            "new_vehicle 90\n"
+            " name = Flak\n"
+            " gun_side_angle = 1000\n"
+            " gun_up_angle = 500\n"
+            " gun_down_angle = 200\n"
+            "end\n"
+        )
+        limits = import_turret_limits(text)
+        limits[90].side = 2300
+        limits[90].up = 1200
+        limits[90].down = 900
+        limits[90].dirty = True
+        project = CollisionProject(
+            name="Carrier", source_model="carrier.sklt",
+            target_category=VEHICLE, gun_points_enabled=True,
+            gun_points=[GunPoint(gun_type=90, dir_z=1)],
+            turret_limits=limits,
+        )
+        updated, preview, _name = plan_script_update(
+            text, "new_vehicle", 56, project)
+        carrier_text, flak_text = updated.split("new_vehicle 90", 1)
+        self.assertNotIn("gun_side_angle", carrier_text)
+        self.assertIn("gun_side_angle = 2300", flak_text)
+        self.assertIn("gun_up_angle = 1200", flak_text)
+        self.assertIn("gun_down_angle = 900", flak_text)
+        self.assertIn("new_vehicle 90", preview)
+
+    def test_128_turret_grid_rotates_with_gun_direction(self):
+        forward = turret_limit_grid(
+            (1, 2, 3), (0, 0, 1), 1000, 500, 250, 10, segments=4)
+        rotated = turret_limit_grid(
+            (1, 2, 3), (1, 0, 0), 1000, 500, 250, 10, segments=4)
+        self.assertEqual(forward["side"][0][2], (1.0, 2.0, 13.0))
+        self.assertEqual(rotated["side"][0][2], (11.0, 2.0, 3.0))
+        self.assertLess(forward["up"][0][2][1], 2.0)
+        self.assertGreater(forward["down"][0][2][1], 2.0)
+        self.assertEqual(turret_limit_grid(
+            (0, 0, 0), (0, 0, 0), 1000, 500, 250, 10), {})
+
+    def test_129_gun_point_table_keeps_family_and_adds_live_limits(self):
+        window = self._window()
+        window.project.gun_points_enabled = True
+        window.project.gun_points = [
+            GunPoint(scheme="unit", x=4, y=5, z=6, dir_z=1,
+                     gun_type=90, name="Flak"),
+            GunPoint(scheme="unit", x=-4, y=5, z=6, dir_z=1,
+                     gun_type=90, name="Flak twin"),
+        ]
+        window.project.turret_limits = {
+            90: TurretLimits(90, True, 2300, 1200, 900,
+                             "new_vehicle", "Flak")}
+        window._select_gun_point(0)
+        headers = [
+            window.gun_point_tree.headerItem().text(index)
+            for index in range(window.gun_point_tree.columnCount())
+        ]
+        self.assertEqual(headers[:6], [
+            "Gun", "Family", "Vehicle", "Side", "Up", "Down"])
+        self.assertFalse(hasattr(window, "turret_limits_check"))
+        self.assertEqual(window.reset_all_gun_points_button.text(), "Reset All")
+        self.assertEqual(window.turret_limit_sliders["side"].maximum(), 3200)
+        self.assertEqual(window.turret_limit_spins["side"].maximum(), 3200)
+        self.assertFalse(window.gun_point_tree.rootIsDecorated())
+        self.assertEqual(window.gun_point_tree.indentation(), 0)
+        widths = [
+            window.gun_point_tree.columnWidth(index)
+            for index in range(window.gun_point_tree.columnCount())]
+        self.assertEqual(widths[0], 38)
+        self.assertGreaterEqual(widths[1], 76)
+        self.assertGreaterEqual(widths[2], 56)
+        self.assertEqual(sum(widths), max(
+            398, window.gun_point_tree.viewport().width()))
+        first = window.gun_point_tree.topLevelItem(0)
+        self.assertEqual(
+            [first.text(index) for index in range(1, 6)],
+            ["OpenNeoUA", "90", "2300", "1200", "900"])
+
+        window.turret_limit_sliders["side"].setValue(2400)
+        self.assertEqual(window.project.turret_limits[90].side, 2400)
+        self.assertTrue(window.project.turret_limits[90].dirty)
+        self.assertEqual(window.turret_limit_spins["side"].value(), 2400)
+        self.assertEqual(window.gun_point_tree.topLevelItem(0).text(3), "2400")
+        self.assertEqual(window.gun_point_tree.topLevelItem(1).text(3), "2400")
+        self.assertEqual(window.viewport._turret_limits[1], (0.0, 0.0, 1.0))
+
+        window.gun_dir_spins["x"].setValue(1)
+        window.gun_dir_spins["z"].setValue(0)
+        self.assertEqual(window.viewport._turret_limits[1], (1.0, 0.0, 0.0))
+
+        window.turret_limit_spins["up"].setValue(9999)
+        self.assertEqual(window.project.turret_limits[90].up, 3200)
+
+    def test_130_side_values_above_3100_render_as_full_rotation(self):
+        grid = turret_limit_grid(
+            (0, 0, 0), (0, 0, 1), 3200, 1200, 900, 10, segments=8)
+        first = grid["side"][0][0]
+        last = grid["side"][0][-1]
+        self.assertAlmostEqual(first[0], last[0], places=7)
+        self.assertAlmostEqual(first[2], last[2], places=7)
+        self.assertEqual(len(grid["meridians"]), 4)
+
+    def test_131_reset_all_restores_mounts_and_all_turret_angles(self):
+        window = self._window()
+        window.project.gun_points_enabled = True
+        window.project.gun_points = [
+            GunPoint(scheme="unit", x=4, y=5, z=6, dir_z=1,
+                     gun_type=90, name="Flak"),
+        ]
+        window.project.turret_limits = {
+            90: TurretLimits(90, True, 2300, 1200, 900,
+                             "new_vehicle", "Flak"),
+            91: TurretLimits(91, True, 3200, 750, 400,
+                             "new_vehicle", "Flak 2"),
+        }
+        window._capture_loaded_gun_points()
+
+        window.project.gun_points[0].x = 99
+        window.project.turret_limits[90].side = 100
+        window.project.turret_limits[90].dirty = True
+        window.project.turret_limits[91].down = 2000
+        window.project.turret_limits[91].dirty = True
+        window._reset_all_gun_points()
+
+        self.assertEqual(window.project.gun_points[0].position, (4, 5, 6))
+        self.assertEqual(
+            (window.project.turret_limits[90].side,
+             window.project.turret_limits[90].up,
+             window.project.turret_limits[90].down),
+            (2300, 1200, 900))
+        self.assertEqual(window.project.turret_limits[91].down, 400)
+        self.assertFalse(window.project.turret_limits[90].dirty)
+        self.assertFalse(window.project.turret_limits[91].dirty)
 
 
 
