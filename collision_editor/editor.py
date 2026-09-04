@@ -194,6 +194,55 @@ def _radius_number(value: float) -> str:
     return str(int(round(value)))
 
 
+def _parse_num_weapons_range(raw: str) -> tuple[int, int]:
+    """Parse OpenNeoUA's fixed ``value`` or inclusive ``min_max`` syntax."""
+
+    parts = raw.strip().split("_")
+    if len(parts) not in (1, 2) or any(not part for part in parts):
+        raise ValueError(raw)
+    try:
+        values = [int(part, 0) for part in parts]
+    except ValueError as exc:
+        raise ValueError(raw) from exc
+    if len(values) == 1:
+        minimum = maximum = values[0]
+    else:
+        minimum, maximum = sorted(values)
+
+    # Match the runtime contract: fixed 0 preserves vanilla one-projectile
+    # semantics. Mixed zero ranges are invalid; authored ranges are 1..255.
+    if minimum == 0 and maximum == 0:
+        return 0, 0
+    if minimum < 1 or maximum > 255:
+        raise ValueError(raw)
+    return minimum, maximum
+
+
+def _project_num_weapons_range(
+        project: "CollisionProject",
+) -> tuple[int, int]:
+    minimum = int(project.num_weapons)
+    maximum = (
+        minimum if int(project.num_weapons_max) < 0
+        else int(project.num_weapons_max)
+    )
+    if maximum < minimum:
+        minimum, maximum = maximum, minimum
+    return minimum, maximum
+
+
+def _num_weapons_text(project: "CollisionProject") -> str:
+    minimum, maximum = _project_num_weapons_range(project)
+    return str(minimum) if minimum == maximum else f"{minimum}_{maximum}"
+
+
+def _fire_point_preview_count(project: "CollisionProject") -> int:
+    """Preview the largest possible random salvo in the shared 3D rack."""
+
+    _minimum, maximum = _project_num_weapons_range(project)
+    return max(1, maximum)
+
+
 def fire_point_positions(project: "CollisionProject") -> list[tuple[float, float, float]]:
     """Return the exact vanilla projectile spawn offsets for a vehicle.
 
@@ -203,7 +252,7 @@ def fire_point_positions(project: "CollisionProject") -> list[tuple[float, float
     ``-abs(fire_x)`` to ``+abs(fire_x)`` while preserving fire Y and Z.
     """
 
-    count = max(1, int(project.num_weapons))
+    count = _fire_point_preview_count(project)
     if count == 1:
         xs = [float(project.fire_x)]
     else:
@@ -384,6 +433,9 @@ class CollisionProject:
     fire_y: float = 0.0
     fire_z: float = 0.0
     num_weapons: int = 1
+    # -1 means "same as num_weapons" for backward compatibility with older
+    # callers/tests that construct CollisionProject with only the scalar.
+    num_weapons_max: int = -1
     # Vehicle gun mounts. ``robo`` preserves the original Host Station syntax;
     # ``unit`` is OpenNeoUA's generic vehicle-side implementation. Existing
     # scripts retain their family; the editor explicitly chooses the family
@@ -421,7 +473,8 @@ class CollisionProject:
             self.model_scale_x, self.model_scale_y, self.model_scale_z,
             self.overeof_enabled, self.overeof,
             self.fire_points_enabled,
-            self.fire_x, self.fire_y, self.fire_z, self.num_weapons,
+            self.fire_x, self.fire_y, self.fire_z,
+            self.num_weapons, self.num_weapons_max,
             self.gun_points_enabled, self.unit_gun_default_icon,
             self.cockpit_camera_enabled,
             self.cockpit_camera_offset_x, self.cockpit_camera_offset_y,
@@ -448,7 +501,8 @@ class CollisionProject:
          self.model_scale_x, self.model_scale_y, self.model_scale_z,
          self.overeof_enabled, self.overeof,
          self.fire_points_enabled,
-         self.fire_x, self.fire_y, self.fire_z, self.num_weapons,
+         self.fire_x, self.fire_y, self.fire_z,
+         self.num_weapons, self.num_weapons_max,
          self.gun_points_enabled, self.unit_gun_default_icon,
          self.cockpit_camera_enabled,
          self.cockpit_camera_offset_x, self.cockpit_camera_offset_y,
@@ -836,7 +890,7 @@ def import_overeof_block(
 
 def import_fire_points_block(
         text: str, block: ScriptBlock,
-) -> tuple[bool, float, float, float, int]:
+) -> tuple[bool, float, float, float, int, int]:
     """Read active top-level vanilla vehicle fire-point parameters.
 
     ``num_weapons`` is a projectile-count parameter used independently by the
@@ -854,11 +908,22 @@ def import_fire_points_block(
         "fire_x": 0.0,
         "fire_y": 0.0,
         "fire_z": 0.0,
-        "num_weapons": 1.0,
     }
+    num_weapons_min = 1
+    num_weapons_max = 1
     enabled = False
     for _line, key, raw, _indent in _parameter_rows(
             text.splitlines(), block):
+        if key == "num_weapons":
+            try:
+                num_weapons_min, num_weapons_max = (
+                    _parse_num_weapons_range(raw))
+            except ValueError as exc:
+                raise CollisionScriptError(
+                    f"Valore non valido per num_weapons: {raw}. "
+                    "Usa 0, un valore 1-255 o un range min_max 1-255."
+                ) from exc
+            continue
         if key not in values:
             continue
         try:
@@ -871,7 +936,7 @@ def import_fire_points_block(
     return (
         enabled,
         values["fire_x"], values["fire_y"], values["fire_z"],
-        max(0, min(255, int(values["num_weapons"]))),
+        num_weapons_min, num_weapons_max,
     )
 
 
@@ -1242,7 +1307,7 @@ def collision_data_lines(project: CollisionProject) -> list[str]:
             f"fire_x = {_number(project.fire_x)}",
             f"fire_y = {_number(project.fire_y)}",
             f"fire_z = {_number(project.fire_z)}",
-            f"num_weapons = {max(0, min(255, int(project.num_weapons)))}",
+            f"num_weapons = {_num_weapons_text(project)}",
         ])
     if project.target_category == VEHICLE and project.gun_points_enabled:
         gun_lines = gun_point_data_lines(project)
@@ -1530,8 +1595,7 @@ def plan_script_update(
                 f"fire_x = {_number(project.fire_x)}",
                 f"fire_y = {_number(project.fire_y)}",
                 f"fire_z = {_number(project.fire_z)}",
-                "num_weapons = "
-                f"{max(0, min(255, int(project.num_weapons)))}",
+                f"num_weapons = {_num_weapons_text(project)}",
             ],
             "fire points",
         )
@@ -1630,8 +1694,12 @@ def validate_project(
         if not all(math.isfinite(value) for value in (
                 project.fire_x, project.fire_y, project.fire_z)):
             errors.append("Fire X/Y/Z devono essere numeri finiti.")
-        if not (0 <= int(project.num_weapons) <= 255):
-            errors.append("Num Weapons deve essere compreso tra 0 e 255.")
+        minimum, maximum = _project_num_weapons_range(project)
+        if not ((minimum == 0 and maximum == 0) or
+                (1 <= minimum <= maximum <= 255)):
+            errors.append(
+                "Num Weapons deve essere 0, un valore 1-255 o un range "
+                "min_max interamente compreso tra 1 e 255.")
     if project.target_category == VEHICLE and project.gun_points_enabled:
         if len(project.gun_points) > 40:
             errors.append(
@@ -4141,19 +4209,34 @@ class CollisionEditorWindow(QMainWindow):
         self.fire_x_spin = self.fire_point_spins["x"]
         self.fire_y_spin = self.fire_point_spins["y"]
         self.fire_z_spin = self.fire_point_spins["z"]
-        fire_grid.addWidget(QLabel("Weapons"), 1, 2)
+        fire_grid.addWidget(QLabel("Weapons Min"), 2, 0)
         self.num_weapons_spin = QSpinBox()
         self.num_weapons_spin.setRange(0, 255)
         self.num_weapons_spin.setValue(1)
         self.num_weapons_spin.setMinimumWidth(72)
         self.num_weapons_spin.setToolTip(
-            "Vanilla num_weapons. Values 0 and 1 produce one point; two "
-            "or more points stay evenly distributed and symmetric on X.")
+            "OpenNeoUA num_weapons lower endpoint. Set Min = Max for a fixed "
+            "count; Min < Max exports the inclusive min_max range. Fixed 0 "
+            "keeps vanilla one-projectile semantics.")
         self.num_weapons_spin.valueChanged.connect(
             self._num_weapons_changed)
         self.num_weapons_spin.editingFinished.connect(
             lambda: self._finish_vehicle_preview_edit("num_weapons"))
-        fire_grid.addWidget(self.num_weapons_spin, 1, 3)
+        fire_grid.addWidget(self.num_weapons_spin, 2, 1)
+        fire_grid.addWidget(QLabel("Weapons Max"), 2, 2)
+        self.num_weapons_max_spin = QSpinBox()
+        self.num_weapons_max_spin.setRange(0, 255)
+        self.num_weapons_max_spin.setValue(1)
+        self.num_weapons_max_spin.setMinimumWidth(72)
+        self.num_weapons_max_spin.setToolTip(
+            "OpenNeoUA num_weapons upper endpoint. The 3D Fire Point preview "
+            "shows the largest possible salvo; lower random rolls are re-spaced "
+            "by the runtime using the same vanilla symmetric rack rule.")
+        self.num_weapons_max_spin.valueChanged.connect(
+            self._num_weapons_max_changed)
+        self.num_weapons_max_spin.editingFinished.connect(
+            lambda: self._finish_vehicle_preview_edit("num_weapons_max"))
+        fire_grid.addWidget(self.num_weapons_max_spin, 2, 3)
         fire_grid.setColumnStretch(1, 1)
         fire_grid.setColumnStretch(3, 1)
         fire_layout.addLayout(fire_grid)
@@ -5060,7 +5143,8 @@ class CollisionEditorWindow(QMainWindow):
             if target_category == VEHICLE:
                 overeof_enabled, overeof = import_overeof_block(text, block)
                 (fire_enabled, fire_x, fire_y, fire_z,
-                 num_weapons) = import_fire_points_block(text, block)
+                 num_weapons, num_weapons_max) = import_fire_points_block(
+                    text, block)
                 (cockpit_enabled, cockpit_x, cockpit_y,
                  cockpit_z) = import_cockpit_camera_block(text, block)
                 (gun_enabled, gun_points,
@@ -5068,7 +5152,7 @@ class CollisionEditorWindow(QMainWindow):
             else:
                 overeof_enabled, overeof = False, 0.0
                 fire_enabled, fire_x, fire_y, fire_z = False, 0.0, 0.0, 0.0
-                num_weapons = 1
+                num_weapons, num_weapons_max = 1, 1
                 cockpit_enabled, cockpit_x, cockpit_y, cockpit_z = (
                     False, 0.0, 0.0, 0.0)
                 gun_enabled, gun_points, unit_gun_default_icon = False, [], ""
@@ -5098,6 +5182,7 @@ class CollisionEditorWindow(QMainWindow):
             fire_y=fire_y,
             fire_z=fire_z,
             num_weapons=num_weapons,
+            num_weapons_max=num_weapons_max,
             gun_points_enabled=gun_enabled,
             gun_points=gun_points,
             unit_gun_default_icon=unit_gun_default_icon,
@@ -6281,7 +6366,8 @@ class CollisionEditorWindow(QMainWindow):
         if self.project.target_category != VEHICLE:
             return
         if self.project.fire_points_enabled:
-            count = max(1, int(self.project.num_weapons))
+            minimum, maximum = _project_num_weapons_range(self.project)
+            count = max(1, maximum)
             if count >= 255:
                 self.statusBar().showMessage(
                     "Vanilla num_weapons is already at its maximum (255).",
@@ -6294,10 +6380,15 @@ class CollisionEditorWindow(QMainWindow):
             # authored muzzle, not resurrection of a stale disabled count.
             self.project.fire_points_enabled = True
             self.project.num_weapons = 1
+            self.project.num_weapons_max = 1
             self._selected_fire_point = 0
         else:
-            self.project.num_weapons = count + 1
-            self._selected_fire_point = self.project.num_weapons - 1
+            if minimum == maximum:
+                self.project.num_weapons = count + 1
+                self.project.num_weapons_max = count + 1
+            else:
+                self.project.num_weapons_max = count + 1
+            self._selected_fire_point = count
         self._selected = -1
         self._selected_gun_point = -1
         self._set_modified()
@@ -6307,7 +6398,8 @@ class CollisionEditorWindow(QMainWindow):
         if (self.project.target_category != VEHICLE
                 or not self.project.fire_points_enabled):
             return
-        count = max(1, int(self.project.num_weapons))
+        minimum, maximum = _project_num_weapons_range(self.project)
+        count = max(1, maximum)
         index = self._selected_fire_point
         if not (0 <= index < count):
             return
@@ -6319,10 +6411,16 @@ class CollisionEditorWindow(QMainWindow):
             # export/overwrite until the user adds it again.
             self.project.fire_points_enabled = False
             self.project.num_weapons = 1
+            self.project.num_weapons_max = 1
             self._selected_fire_point = -1
         else:
-            self.project.num_weapons = count - 1
-            self._selected_fire_point = min(index, self.project.num_weapons - 1)
+            if minimum == maximum:
+                self.project.num_weapons = count - 1
+                self.project.num_weapons_max = count - 1
+            else:
+                self.project.num_weapons_max = max(minimum, count - 1)
+            self._selected_fire_point = min(
+                index, _fire_point_preview_count(self.project) - 1)
             self.statusBar().showMessage(
                 "Vanilla Fire Points share one symmetric rack; removing a "
                 "point re-spaced the remaining muzzles.", 5000)
@@ -6334,14 +6432,11 @@ class CollisionEditorWindow(QMainWindow):
 
         if self.project.target_category != VEHICLE:
             return
-        target_count = (
-            max(1, int(self.project.num_weapons))
-            if self.project.fire_points_enabled else 1)
-        if (self.project.fire_points_enabled
+        was_enabled = self.project.fire_points_enabled
+        if (was_enabled
                 and self.project.fire_x == 0.0
                 and self.project.fire_y == 0.0
-                and self.project.fire_z == 0.0
-                and self.project.num_weapons == target_count):
+                and self.project.fire_z == 0.0):
             return
         self._vehicle_preview_active_edits.clear()
         self._push_undo()
@@ -6349,7 +6444,9 @@ class CollisionEditorWindow(QMainWindow):
         self.project.fire_x = 0.0
         self.project.fire_y = 0.0
         self.project.fire_z = 0.0
-        self.project.num_weapons = target_count
+        if not was_enabled:
+            self.project.num_weapons = 1
+            self.project.num_weapons_max = 1
         if self._selected_fire_point < 0:
             self._selected_fire_point = 0
         self._selected = -1
@@ -6376,12 +6473,42 @@ class CollisionEditorWindow(QMainWindow):
         if self._syncing or self.project.target_category != VEHICLE:
             return
         value = max(0, min(255, int(value)))
-        if value == self.project.num_weapons:
+        old_min, old_max = _project_num_weapons_range(self.project)
+        if value == old_min:
             return
         self._begin_vehicle_preview_edit("num_weapons")
         self.project.num_weapons = value
+        if value == 0:
+            self.project.num_weapons_max = 0
+        elif old_min == old_max:
+            self.project.num_weapons_max = value
+        else:
+            self.project.num_weapons_max = max(value, old_max)
         self.project.fire_points_enabled = True
-        point_count = max(1, value)
+        point_count = _fire_point_preview_count(self.project)
+        if self._selected_fire_point >= point_count:
+            self._selected_fire_point = point_count - 1
+        self._set_modified()
+        self._sync_all()
+
+    def _num_weapons_max_changed(self, value: int) -> None:
+        if self._syncing or self.project.target_category != VEHICLE:
+            return
+        value = max(0, min(255, int(value)))
+        old_min, old_max = _project_num_weapons_range(self.project)
+        if value == old_max:
+            return
+        self._begin_vehicle_preview_edit("num_weapons_max")
+        if value == 0:
+            self.project.num_weapons = 0
+            self.project.num_weapons_max = 0
+        else:
+            if old_min == 0:
+                self.project.num_weapons = 1
+                old_min = 1
+            self.project.num_weapons_max = max(old_min, value)
+        self.project.fire_points_enabled = True
+        point_count = _fire_point_preview_count(self.project)
         if self._selected_fire_point >= point_count:
             self._selected_fire_point = point_count - 1
         self._set_modified()
@@ -6699,7 +6826,7 @@ class CollisionEditorWindow(QMainWindow):
         dx = float(direction[0]) * step
         dy = float(direction[1]) * step
         dz = float(direction[2]) * step
-        count = max(1, int(self.project.num_weapons))
+        count = _fire_point_preview_count(self.project)
         factor = None
         if dx and count > 1:
             factor = -1.0 + (2.0 * index / (count - 1))
@@ -7026,7 +7153,8 @@ class CollisionEditorWindow(QMainWindow):
                      if self.project.overeof_enabled
                      else "Overeof not included")),
             "Fire points: "
-            + (f"{max(1, int(self.project.num_weapons))} at "
+            + (f"{_num_weapons_text(self.project)} "
+               f"(preview {_fire_point_preview_count(self.project)}) at "
                f"({_number(self.project.fire_x)}, "
                f"{_number(self.project.fire_y)}, "
                f"{_number(self.project.fire_z)})"
@@ -7092,7 +7220,7 @@ class CollisionEditorWindow(QMainWindow):
                 self.model_scale_z_spin, self.overeof_check,
                 self.overeof_spin,
                 self.fire_x_spin, self.fire_y_spin, self.fire_z_spin,
-                self.num_weapons_spin,
+                self.num_weapons_spin, self.num_weapons_max_spin,
                 self.cockpit_camera_spins["x"],
                 self.cockpit_camera_spins["y"],
                 self.cockpit_camera_spins["z"],
@@ -7218,8 +7346,12 @@ class CollisionEditorWindow(QMainWindow):
         self.fire_x_spin.setValue(self.project.fire_x)
         self.fire_y_spin.setValue(self.project.fire_y)
         self.fire_z_spin.setValue(self.project.fire_z)
+        num_weapons_min, num_weapons_max = _project_num_weapons_range(
+            self.project)
         self.num_weapons_spin.setValue(
-            max(0, min(255, int(self.project.num_weapons))))
+            max(0, min(255, num_weapons_min)))
+        self.num_weapons_max_spin.setValue(
+            max(0, min(255, num_weapons_max)))
         fire_controls_enabled = (
             vehicle_mode and self.project.fire_points_enabled)
         self.remove_fire_point_button.setEnabled(
@@ -7227,7 +7359,7 @@ class CollisionEditorWindow(QMainWindow):
         self.reset_fire_point_button.setEnabled(vehicle_mode)
         for widget in (
                 self.fire_x_spin, self.fire_y_spin, self.fire_z_spin,
-                self.num_weapons_spin):
+                self.num_weapons_spin, self.num_weapons_max_spin):
             widget.setEnabled(fire_controls_enabled)
 
         self.gun_points_box.setVisible(vehicle_mode)
@@ -7574,7 +7706,8 @@ class CollisionEditorWindow(QMainWindow):
             legacy, compound, warnings = import_collision_block(
                 text, block, category)
             overeof_enabled, overeof = import_overeof_block(text, block)
-            fire_enabled, fire_x, fire_y, fire_z, num_weapons = (
+            (fire_enabled, fire_x, fire_y, fire_z,
+             num_weapons, num_weapons_max) = (
                 import_fire_points_block(text, block))
             cockpit_enabled, cockpit_x, cockpit_y, cockpit_z = (
                 import_cockpit_camera_block(text, block))
@@ -7600,6 +7733,8 @@ class CollisionEditorWindow(QMainWindow):
         self.project.fire_y = fire_y if vehicle_block else 0.0
         self.project.fire_z = fire_z if vehicle_block else 0.0
         self.project.num_weapons = num_weapons if vehicle_block else 1
+        self.project.num_weapons_max = (
+            num_weapons_max if vehicle_block else 1)
         self.project.cockpit_camera_enabled = (
             vehicle_block and cockpit_enabled)
         self.project.cockpit_camera_offset_x = (

@@ -1312,8 +1312,32 @@ class CollisionEditorTests(unittest.TestCase):
         block = find_script_blocks(text)[0]
         self.assertEqual(
             import_fire_points_block(text, block),
-            (True, 30.0, -5.0, 44.0, 3),
+            (True, 30.0, -5.0, 44.0, 3, 3),
         )
+
+    def test_86b_random_num_weapons_round_trips_and_previews_maximum(self):
+        text = (
+            "new_vehicle 8\n"
+            " fire_x = 30\n fire_y = -5\n fire_z = 44\n"
+            " num_weapons = 4_2\nend\n"
+        )
+        block = find_script_blocks(text)[0]
+        self.assertEqual(
+            import_fire_points_block(text, block),
+            (True, 30.0, -5.0, 44.0, 2, 4),
+        )
+        project = CollisionProject(
+            target_category=VEHICLE,
+            fire_points_enabled=True,
+            fire_x=30.0,
+            fire_y=-5.0,
+            fire_z=44.0,
+            num_weapons=2,
+            num_weapons_max=4,
+        )
+        output = export_collision_text(project)
+        self.assertIn("num_weapons = 2_4", output)
+        self.assertEqual(len(fire_point_positions(project)), 4)
 
 
 
