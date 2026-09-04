@@ -216,9 +216,9 @@ class VPSnapshotBatchPanel(QGroupBox):
         if self._running:
             return
 
-        manager = getattr(self.window, "_vp_manager", None)
+        table = getattr(self.window, "_vp_table", None)
         archive = getattr(self.window, "_setbas", None)
-        entries = tuple(manager.table.entries) if manager is not None else ()
+        entries = tuple(table.entries) if table is not None else ()
         sklt_resources = (
             tuple(
                 resource for resource in archive.resources
@@ -303,15 +303,16 @@ class VPSnapshotBatchPanel(QGroupBox):
         if self._running:
             return
 
-        manager = getattr(self.window, "_vp_manager", None)
+        table = getattr(self.window, "_vp_table", None)
         archive = getattr(self.window, "_setbas", None)
-        if manager is None or archive is None:
+        if archive is None:
             QMessageBox.information(
                 self,
                 "No SET.BAS loaded",
                 "Open a SET.BAS archive in BAS Manager first.",
             )
             return
+        entries = tuple(table.entries) if table is not None else ()
 
         output_text = self.output_edit.text().strip()
         if not output_text:
@@ -356,7 +357,7 @@ class VPSnapshotBatchPanel(QGroupBox):
                 )
 
             self._sources = self._build_sources(
-                manager.table.entries, archive, self._family)
+                entries, archive, self._family)
         except Exception as exc:
             self._set_running(False)
             QMessageBox.critical(
