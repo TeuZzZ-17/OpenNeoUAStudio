@@ -708,10 +708,14 @@ class VPSnapshotBatchPanel(QGroupBox):
                 partial_path.unlink()
             writer = QImageWriter(str(partial_path), b"png")
             try:
-                if not writer.write(image):
-                    raise OSError(
-                        writer.errorString()
-                        or f"Could not write {output_path}")
+                try:
+                    if not writer.write(image):
+                        raise OSError(
+                            writer.errorString()
+                            or f"Could not write {output_path}")
+                finally:
+                    # Release the Windows file handle before rename or cleanup.
+                    writer.device().close()
                 os.replace(partial_path, output_path)
             except Exception:
                 if partial_path.exists():
