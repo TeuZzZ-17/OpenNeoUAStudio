@@ -24,6 +24,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 import bisect
 import math
+import time
 
 from PySide6.QtCore import (
     QEvent,
@@ -158,6 +159,7 @@ class PickShape:
 @dataclass
 class PastePreviewState:
     clipboard: object
+    operation: str
     delta_model: tuple[float, float, float]
     raw_delta_model: tuple[float, float, float]
     source_pivot_world: tuple[float, float, float]
@@ -170,6 +172,7 @@ class PastePreviewState:
     axis: str | None = None
     numeric: str = ""
     camera_inspect: bool = False
+    camera_inspect_anchor_screen: QPointF | None = None
 
 
 @dataclass(frozen=True)
@@ -435,6 +438,7 @@ class AssetViewport(QWidget):
     manualCameraChanged = Signal()  # orbit, pan or zoom changed by the user
     pastePreviewConfirmRequested = Signal()
     pastePreviewActiveChanged = Signal(bool)
+    movePlacementRequested = Signal()
 
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
@@ -451,6 +455,7 @@ class AssetViewport(QWidget):
         self._diagnostics: list[str] = []
         self._center = (0.0, 0.0, 0.0)
         self._scale = 1.0
+        self._home_camera_state: dict | None = None
 
         # Polygon Mapping Workbench state
         self._selected_poly: int | None = None
@@ -494,6 +499,7 @@ class AssetViewport(QWidget):
         self._modal_op: str | None = None       # "grab" | "rotate" | "scale"
         self._modal_axis: str | None = None
         self._modal_numeric = ""
+        self._modal_keyboard_delta = (0.0, 0.0, 0.0)
         self._modal_start = QPoint()
         self._modal_last_mouse = QPoint()
         self._modal_center_screen = QPointF()
@@ -521,6 +527,7 @@ class AssetViewport(QWidget):
         self._direct_grab_active = False
         self._direct_transform_mode = "move"
         self._direct_transform_intensity = 0.5
+        self._move_nudge_step = 0.5
         self._active_edit_vertex: int | None = None
         self._direct_grab_selected_only = False
         self._edit_pick_polygons = False
@@ -531,6 +538,8 @@ class AssetViewport(QWidget):
         self._box_start: QPoint | None = None
         self._box_rect: QRect | None = None
         self._marquee_candidate = False
+        self._modal_mouse_tracking_before = None
+        self._paste_left_pressed_at = None
         self._vertex_press: VertexPressState | None = None
         self._mode_label_rect: QRect | None = None
 
@@ -634,6 +643,19 @@ class AssetViewport(QWidget):
                     primary_owner: str | None = None,
                     reuse_indexed_adapter: bool = False) -> None:
         same_family = family is self._family_ref
+        previous_scope = (
+            None if self._visible_owners is None
+            else frozenset(self._visible_owners)
+        )
+        next_scope = (
+            None if visible_owners is None
+            else frozenset(visible_owners)
+        )
+        same_scope = previous_scope == next_scope
+        preserved_camera = (
+            self._camera_state()
+            if keep_camera and same_family and same_scope else None
+        )
         cached_indexed_adapter = self._indexed_adapter
         cached_indexed_reason = self._indexed_unavailable_reason
         previous_bounds = (
@@ -683,20 +705,42 @@ class AssetViewport(QWidget):
 
         points = [v for face in self._faces for v in face.vertices]
         points.extend(p for box in self._sen_boxes for p in box)
-        if points:
-            xs = [p[0] for p in points]
-            ys = [p[1] for p in points]
-            zs = [p[2] for p in points]
-            self._center = (
-                (min(xs) + max(xs)) / 2,
-                (min(ys) + max(ys)) / 2,
-                (min(zs) + max(zs)) / 2,
-            )
-            extent = max(max(xs) - min(xs), max(ys) - min(ys),
-                         max(zs) - min(zs), 1e-6)
-            self._scale = 2.0 / extent
-        if not keep_camera:
-            self.reset_view()
+        if preserved_camera is None:
+            if points:
+                xs = [p[0] for p in points]
+                ys = [p[1] for p in points]
+                zs = [p[2] for p in points]
+                self._center = (
+                    (min(xs) + max(xs)) / 2,
+                    (min(ys) + max(ys)) / 2,
+                    (min(zs) + max(zs)) / 2,
+                )
+                extent = max(max(xs) - min(xs), max(ys) - min(ys),
+                             max(zs) - min(zs), 1e-6)
+                self._scale = 2.0 / extent
+            else:
+                self._center = (0.0, 0.0, 0.0)
+                self._scale = 1.0
+        if preserved_camera is not None:
+            # A geometry/material refresh of the same visible object is not a
+            # camera command. Keep its exact framing even if a moved/copied
+            # piece expands the bounds, otherwise untouched geometry appears
+            # to jump. Changing the visible owner/resource is different: that
+            # must recompute center/scale so the newly selected object is framed.
+            self._set_camera_state(preserved_camera)
+        elif not keep_camera:
+            self._yaw = self.RESET_YAW
+            self._pitch = self.RESET_PITCH
+            self._zoom = self.RESET_ZOOM
+            self._pan = QPointF(0.0, 0.0)
+            self._home_camera_state = self._camera_state()
+        elif same_family and not same_scope:
+            # A real owner/resource scope change deliberately re-frames the
+            # newly visible object.  That newly presented view is now the
+            # correct Reset View destination for this scope.  Geometry and
+            # material refreshes keep the same scope and therefore never
+            # overwrite the stored home camera.
+            self._home_camera_state = self._camera_state()
         self._reset_animation_states()
 
     # -- object selection / isolation ---------------------------------------------
@@ -843,6 +887,8 @@ class AssetViewport(QWidget):
             return
         self._direct_transform_mode = normalized
         self._direct_transform_intensity = max(0.001, float(intensity))
+        if normalized == "move":
+            self._move_nudge_step = self._direct_transform_intensity
         self.update()
 
     def set_edit_read_only_vertices(self, indices) -> None:
@@ -879,9 +925,23 @@ class AssetViewport(QWidget):
 
     @property
     def camera_is_reset(self) -> bool:
-        """Return whether orbit, pan and zoom match the canonical view."""
+        """Return whether the camera matches the captured Reset View."""
 
         epsilon = self.CAMERA_EPSILON
+        home = self._home_camera_state
+        if home is not None:
+            center = home["center"]
+            return (
+                abs(self._yaw - home["yaw"]) <= epsilon
+                and abs(self._pitch - home["pitch"]) <= epsilon
+                and abs(self._zoom - home["zoom"]) <= epsilon
+                and abs(self._pan.x() - home["pan"].x()) <= epsilon
+                and abs(self._pan.y() - home["pan"].y()) <= epsilon
+                and abs(self._center[0] - center[0]) <= epsilon
+                and abs(self._center[1] - center[1]) <= epsilon
+                and abs(self._center[2] - center[2]) <= epsilon
+                and abs(self._scale - home["scale"]) <= epsilon
+            )
         return (
             abs(self._yaw - self.RESET_YAW) <= epsilon
             and abs(self._pitch - self.RESET_PITCH) <= epsilon
@@ -895,6 +955,12 @@ class AssetViewport(QWidget):
         """Reset is meaningful only for a loaded, displaced camera."""
 
         return self.has_loaded_resource and not self.camera_is_reset
+
+    def capture_reset_view(self) -> None:
+        """Capture the current camera as the stable Reset View destination."""
+
+        if self.has_loaded_resource:
+            self._home_camera_state = self._camera_state()
 
     @property
     def edit_model_matrix(self):
@@ -1094,7 +1160,8 @@ class AssetViewport(QWidget):
 
     @staticmethod
     def _feature_label(index: int) -> str:
-        return ("min", "center", "max")[index]
+        return {0: "min", 1: "center", 2: "max", 3: "vertex"}.get(
+            index, "feature")
 
     def _auto_axis_delta(self, delta, pivot):
         if not self._auto_align_enabled:
@@ -1150,7 +1217,30 @@ class AssetViewport(QWidget):
             self._auto_axis_lock = None
         guides = []
         if self._auto_align_enabled and not bypass:
-            source_features = self._bounds_features(values)
+            bounds_features = self._bounds_features(values)
+            # BBox min/center/max are useful for broad alignment, but edited
+            # UA pieces are often wedges and irregular panels. Include the
+            # actual selected vertex coordinates too so corners can magnetise
+            # to reference vertices, edge midpoints and coplanar faces.
+            source_features = []
+            for axis in range(3):
+                candidates = [
+                    (bounds_features[axis][0], 0),
+                    (bounds_features[axis][1], 1),
+                    (bounds_features[axis][2], 2),
+                ]
+                unique_vertices = sorted({
+                    round(point[axis], 9) for point in values
+                    if math.isfinite(point[axis])
+                })
+                # Keep snapping predictable on very large selections while
+                # retaining all coordinates for the usual small UA polygons.
+                if len(unique_vertices) > 48:
+                    stride = max(1, len(unique_vertices) // 48)
+                    unique_vertices = unique_vertices[::stride][:48]
+                candidates.extend((float(value), 3)
+                                  for value in unique_vertices)
+                source_features.append(tuple(candidates))
             axes = (
                 ("XYZ".index(axis_name),) if axis_name is not None
                 else (
@@ -1164,8 +1254,7 @@ class AssetViewport(QWidget):
                 if pixels_per_unit <= 1e-9:
                     continue
                 best = None
-                for feature_index, source_value in enumerate(
-                        source_features[axis]):
+                for source_value, feature_index in source_features[axis]:
                     moved = source_value + mutable[axis]
                     near_targets = self._near_alignment_targets(axis, moved)
                     if any(
@@ -1175,7 +1264,7 @@ class AssetViewport(QWidget):
                     for target in near_targets:
                         correction = target.value - moved
                         pixels = abs(correction) * pixels_per_unit
-                        if pixels < 1e-6 or pixels > 8.0:
+                        if pixels < 1e-6 or pixels > 10.0:
                             continue
                         candidate = (
                             pixels, correction, feature_index, target)
@@ -1282,9 +1371,23 @@ class AssetViewport(QWidget):
         state = self._paste_preview
         return state.delta_model if state is not None else None
 
+    @property
+    def paste_preview_operation(self) -> str | None:
+        state = self._paste_preview
+        return state.operation if state is not None else None
+
+    @property
+    def paste_preview_clipboard(self):
+        state = self._paste_preview
+        return state.clipboard if state is not None else None
+
     def begin_paste_preview(self, clipboard: object,
-                            position: QPoint) -> bool:
+                            position: QPoint, *,
+                            operation: str = "copy") -> bool:
         session = self._edit_session
+        operation = str(operation).casefold()
+        if operation not in ("copy", "move"):
+            operation = "copy"
         if session is None or self._edit_owner != clipboard.owner \
                 or id(session.model) != clipboard.model_identity:
             self.statusMessage.emit(
@@ -1332,9 +1435,11 @@ class AssetViewport(QWidget):
         delta = self._snap_translation(
             clipboard.points, raw_delta, allow_axis_lock=True)
         previous = self.hasMouseTracking()
+        self._paste_left_pressed_at = None
         self.setMouseTracking(True)
         self._paste_preview = PastePreviewState(
             clipboard=clipboard,
+            operation=operation,
             delta_model=delta,
             raw_delta_model=raw_delta,
             source_pivot_world=source_world,
@@ -1345,29 +1450,41 @@ class AssetViewport(QWidget):
             material_ids=tuple(material_ids),
             previous_mouse_tracking=previous,
         )
+        if operation == "move":
+            # Textured mode caches the full indexed frame. Move Preview hides
+            # the source faces, so its start/end must invalidate that derived
+            # image or the old source can remain visible from cache.
+            self._invalidate_indexed_view_cache()
         self.pastePreviewActiveChanged.emit(True)
         self._emit_paste_hint()
         self.update()
         return True
 
     def cancel_paste_preview(self) -> bool:
+        self._paste_left_pressed_at = None
         state = self._paste_preview
         if state is None:
             return False
         self._paste_preview = None
+        if state.operation == "move":
+            self._invalidate_indexed_view_cache()
         self.setMouseTracking(state.previous_mouse_tracking)
         self.editHint.emit("")
         self.pastePreviewActiveChanged.emit(False)
-        self.statusMessage.emit("Paste Geometry cancelled.")
+        self.statusMessage.emit(
+            f"{state.operation.title()} Geometry cancelled.")
         self._clear_precision_guides()
         self.update()
         return True
 
     def finish_paste_preview(self) -> None:
+        self._paste_left_pressed_at = None
         state = self._paste_preview
         if state is None:
             return
         self._paste_preview = None
+        if state.operation == "move":
+            self._invalidate_indexed_view_cache()
         self.setMouseTracking(state.previous_mouse_tracking)
         self.editHint.emit("")
         self.pastePreviewActiveChanged.emit(False)
@@ -1383,6 +1500,53 @@ class AssetViewport(QWidget):
         return max(_PICK_NEAR_DISTANCE,
                    _PICK_CAMERA_DISTANCE
                    - self._camera_vertex(world_point)[2])
+
+    def _paste_destination_world(self):
+        """Return the current paste-preview pivot in world coordinates."""
+
+        state = self._paste_preview
+        session = self._edit_session
+        if state is None or session is None:
+            return None
+        destination_model = tuple(
+            state.clipboard.pivot[axis] + state.delta_model[axis]
+            for axis in range(3))
+        return _apply(session.matrix, destination_model, session.position)
+
+    def _begin_paste_camera_inspect(self) -> None:
+        """Start orbit inspection without changing the viewport framing.
+
+        The preview pivot is captured at its current screen position.  Camera
+        rotation will keep that screen position stable by correcting only pan;
+        the model-wide center/scale are never replaced with the preview pivot.
+        This avoids the old one-frame jump of all untouched geometry.
+        """
+
+        state = self._paste_preview
+        destination = self._paste_destination_world()
+        if state is None or destination is None:
+            return
+        state.camera_inspect = True
+        state.camera_inspect_anchor_screen = QPointF(
+            self._project(self._camera_vertex(destination)))
+
+    def _stabilize_paste_orbit_pivot(self) -> None:
+        """Keep the placement pivot fixed on screen after yaw/pitch changes."""
+
+        state = self._paste_preview
+        destination = self._paste_destination_world()
+        if state is None or destination is None:
+            return
+        anchor = state.camera_inspect_anchor_screen
+        if anchor is None:
+            anchor = QPointF(self._project(self._camera_vertex(destination)))
+            state.camera_inspect_anchor_screen = QPointF(anchor)
+            return
+        projected = self._project(self._camera_vertex(destination))
+        self._pan += QPointF(
+            anchor.x() - projected.x(),
+            anchor.y() - projected.y(),
+        )
 
     def _reanchor_paste_mouse(self, position: QPoint | None = None) -> None:
         state = self._paste_preview
@@ -1420,7 +1584,8 @@ class AssetViewport(QWidget):
                 self._emit_paste_hint()
                 self.update()
                 return
-        denominator = self._camera_denominator(state.source_pivot_world)
+        pivot_world = self._paste_destination_world() or state.source_pivot_world
+        denominator = self._camera_denominator(pivot_world)
         world_delta = self._screen_delta_to_world_at_depth(
             position.x() - state.mouse_anchor.x(),
             position.y() - state.mouse_anchor.y(), denominator)
@@ -1438,13 +1603,48 @@ class AssetViewport(QWidget):
         self._emit_paste_hint()
         self.update()
 
+    def _screen_direction_model_delta(
+            self, dx_sign: float, dy_sign: float, amount: float,
+            pivot_world) -> tuple[float, float, float]:
+        """Return an exact model-space step pointing along the screen plane."""
+
+        session = self._edit_session
+        if session is None:
+            return (0.0, 0.0, 0.0)
+        denominator = self._camera_denominator(pivot_world)
+        world = self._screen_delta_to_world_at_depth(
+            float(dx_sign), float(dy_sign), denominator)
+        model = session.world_delta_to_model(world)
+        length = math.sqrt(sum(value * value for value in model))
+        if length <= 1e-12:
+            return (0.0, 0.0, 0.0)
+        scale = max(0.001, float(amount)) / length
+        return tuple(value * scale for value in model)
+
+    def nudge_paste_preview_step(
+            self, dx_sign: float, dy_sign: float, amount: float) -> bool:
+        state = self._paste_preview
+        if state is None:
+            return False
+        pivot_world = self._paste_destination_world() or state.source_pivot_world
+        step = self._screen_direction_model_delta(
+            dx_sign, dy_sign, amount, pivot_world)
+        if state.axis is not None:
+            axis = "XYZ".index(state.axis)
+            sign = 1.0 if step[axis] >= 0.0 else -1.0
+            step = tuple(
+                sign * max(0.001, float(amount)) if index == axis else 0.0
+                for index in range(3))
+        return self.nudge_paste_preview_model(*step)
+
     def nudge_paste_preview(self, dx_pixels: float,
                             dy_pixels: float) -> bool:
         state = self._paste_preview
         session = self._edit_session
         if state is None or session is None:
             return False
-        denominator = self._camera_denominator(state.source_pivot_world)
+        pivot_world = self._paste_destination_world() or state.source_pivot_world
+        denominator = self._camera_denominator(pivot_world)
         world = self._screen_delta_to_world_at_depth(
             dx_pixels, dy_pixels, denominator)
         step = session.world_delta_to_model(world)
@@ -1472,10 +1672,8 @@ class AssetViewport(QWidget):
             state.delta_model[index] + (dx, dy, dz)[index]
             for index in range(3))
         state.raw_delta_model = raw
-        # Model-space gizmo movement is exact and never uses Auto Align.
-        state.delta_model = raw
-        self._precision_guides = ()
-        self._precision_bbox_points = ()
+        state.delta_model = self._snap_translation(
+            state.clipboard.points, raw, state.axis, allow_axis_lock=False)
         state.numeric = ""
         self._reanchor_paste_mouse(state.last_mouse)
         self._emit_paste_hint()
@@ -1491,13 +1689,16 @@ class AssetViewport(QWidget):
         aligned = (
             f" | {self._precision_guides[0].label}"
             if self._precision_guides else "")
+        action = "Move" if state.operation == "move" else "Copy"
         label = (
-            f"Paste {getattr(state.clipboard, 'fx_name')} FX Preview"
+            f"{action} {getattr(state.clipboard, 'fx_name')} FX Preview"
             if getattr(state.clipboard, "fx_name", None)
-            else "Copy Preview")
+            else f"{action} Preview")
         self.editHint.emit(
             f"{label} | X {dx:+.2f} Y {dy:+.2f} Z {dz:+.2f} | "
-            f"{mode}{aligned} | Paste/LMB/Enter confirm | RMB/Esc cancel")
+            f"{mode}{aligned} | Arrows nudge | Shift+arrows faster | "
+            "Click/Enter confirm | Hold LMB 350 ms + drag: orbit | "
+            "RMB/Esc cancel")
 
     def toggle_edit_mode(self) -> bool:
         if self._snapshot_active:
@@ -1757,6 +1958,23 @@ class AssetViewport(QWidget):
         self.update()
         return changed
 
+    def nudge_edit_selection_step(
+            self, dx_sign: float, dy_sign: float, amount: float) -> bool:
+        """Nudge the active selection by the configured Move-step magnitude."""
+
+        session = self._edit_session
+        if session is None or not session.selection:
+            self.statusMessage.emit(
+                "Nudge: enable Edit Mode and select one or more vertices.")
+            return False
+        pivot = session.selection_pivot()
+        if pivot is None or session.modal_active:
+            return False
+        pivot_world = _apply(session.matrix, pivot, session.position)
+        delta = self._screen_direction_model_delta(
+            dx_sign, dy_sign, amount, pivot_world)
+        return self.nudge_edit_selection_model(*delta)
+
     def nudge_edit_selection(self, dx_pixels: float,
                              dy_pixels: float) -> bool:
         """Move selected vertices in the current screen plane."""
@@ -1790,6 +2008,12 @@ class AssetViewport(QWidget):
             return False
         self._model_nudge_before = session.modal_origin_points()
         self._model_nudge_delta = (0.0, 0.0, 0.0)
+        origin = self._model_nudge_before or []
+        selected = [
+            origin[index] for index in sorted(session.selection)
+            if index < len(origin)
+        ]
+        self._prepare_alignment_targets(selected, session.selection)
         return True
 
     def nudge_edit_selection_model(
@@ -1806,13 +2030,18 @@ class AssetViewport(QWidget):
             self._model_nudge_delta[index] + (dx, dy, dz)[index]
             for index in range(3))
         self._model_nudge_delta = raw
-        # Auto Align is intentionally limited to direct viewport editing.
-        # Gizmo actions must apply the exact configured step on every axis.
-        session.preview_grab(raw)
+        origin = self._model_nudge_before or []
+        selected = [
+            origin[index] for index in sorted(session.selection)
+            if index < len(origin)
+        ]
+        snapped = self._snap_translation(
+            selected, raw, allow_axis_lock=False) if selected else raw
+        session.preview_grab(snapped)
         self._refresh_edit_faces(invalidate_visibility=False)
         self.editHint.emit(
-            f"Move Gizmo | X {raw[0]:+.3f} "
-            f"Y {raw[1]:+.3f} Z {raw[2]:+.3f}")
+            f"Move Gizmo | X {snapped[0]:+.3f} "
+            f"Y {snapped[1]:+.3f} Z {snapped[2]:+.3f}")
         self.update()
         if started_here:
             return self.end_model_nudge()
@@ -2177,12 +2406,23 @@ class AssetViewport(QWidget):
             self.update()
             return
         screen_points = self._edit_screen_points()
-        available = self._available_edit_vertices(screen_points)
+        available = set(range(len(screen_points))) - self._edit_read_only_vertices
         hits = {
             index for index, screen in enumerate(screen_points)
             if index in available
             if rect.contains(int(screen.x()), int(screen.y()))
         }
+        if self._edit_pick_polygons:
+            region = QPainterPath()
+            region.addRect(QRectF(rect))
+            for polygon in session.model.polygons:
+                if len(polygon) < 3 or not set(polygon).issubset(available):
+                    continue
+                path = QPainterPath()
+                path.addPolygon(QPolygonF([screen_points[i] for i in polygon]))
+                path.closeSubpath()
+                if region.intersects(path) or region.contains(path):
+                    hits.update(polygon)
         session.selection = (session.selection | hits) if extend else hits
         self._active_edit_vertex = min(hits, default=min(
             session.selection, default=None))
@@ -2218,6 +2458,8 @@ class AssetViewport(QWidget):
             return
         if not session.begin_modal():
             return
+        self._modal_mouse_tracking_before = self.hasMouseTracking()
+        self.setMouseTracking(True)
         pivot = session.selection_pivot() or (0.0, 0.0, 0.0)
         self._modal_pivot_world = _apply(session.matrix, pivot,
                                          session.position)
@@ -2227,6 +2469,7 @@ class AssetViewport(QWidget):
         self._modal_op = op
         self._modal_axis = None
         self._modal_numeric = ""
+        self._modal_keyboard_delta = (0.0, 0.0, 0.0)
         self._direct_grab_active = direct_grab
         cursor = (start if start is not None
                   else self.mapFromGlobal(QCursor.pos()))
@@ -2246,9 +2489,13 @@ class AssetViewport(QWidget):
             return
         before = session.modal_origin_points()
         changed = session.commit_modal()
+        if self._modal_mouse_tracking_before is not None:
+            self.setMouseTracking(self._modal_mouse_tracking_before)
+            self._modal_mouse_tracking_before = None
         self._modal_op = None
         self._modal_axis = None
         self._modal_numeric = ""
+        self._modal_keyboard_delta = (0.0, 0.0, 0.0)
         self._direct_grab_active = False
         self._refresh_edit_faces()
         if changed:
@@ -2263,8 +2510,12 @@ class AssetViewport(QWidget):
             return
         session.cancel_modal()
         self._modal_op = None
+        if self._modal_mouse_tracking_before is not None:
+            self.setMouseTracking(self._modal_mouse_tracking_before)
+            self._modal_mouse_tracking_before = None
         self._modal_axis = None
         self._modal_numeric = ""
+        self._modal_keyboard_delta = (0.0, 0.0, 0.0)
         self._direct_grab_active = False
         self._refresh_edit_faces()
         self.editHint.emit("")
@@ -2346,7 +2597,10 @@ class AssetViewport(QWidget):
         if session is None or self._modal_op is None:
             return
         numeric = self._numeric_value()
-        suffix = " | X/Y/Z axis - type a number - LMB/Enter ok, RMB/Esc cancel"
+        suffix = " | X/Y/Z axis"
+        if self._modal_op == "grab":
+            suffix += " - arrows nudge - Shift+arrows faster"
+        suffix += " - type a number - LMB/Enter ok, RMB/Esc cancel"
         if self._modal_numeric:
             suffix += f" | typed: {self._modal_numeric}"
 
@@ -2360,6 +2614,9 @@ class AssetViewport(QWidget):
                     pos.x() - self._modal_start.x(),
                     pos.y() - self._modal_start.y())
                 delta = session.world_delta_to_model(world)
+            delta = tuple(
+                delta[index] + self._modal_keyboard_delta[index]
+                for index in range(3))
             if self._direct_grab_active:
                 step = self._direct_transform_intensity
                 length = math.sqrt(sum(value * value for value in delta))
@@ -2915,10 +3172,13 @@ class AssetViewport(QWidget):
         return image
 
     def reset_view(self) -> None:
-        self._yaw = self.RESET_YAW
-        self._pitch = self.RESET_PITCH
-        self._zoom = self.RESET_ZOOM
-        self._pan = QPointF(0.0, 0.0)
+        if self._home_camera_state is not None:
+            self._set_camera_state(self._home_camera_state)
+        else:
+            self._yaw = self.RESET_YAW
+            self._pitch = self.RESET_PITCH
+            self._zoom = self.RESET_ZOOM
+            self._pan = QPointF(0.0, 0.0)
         self.update()
 
     def fit_view(self) -> None:
@@ -3293,7 +3553,22 @@ class AssetViewport(QWidget):
         triangles: list[CameraPolygon] = []
         source_order = 0
         wireframe_polygons: dict[int, QPolygonF] = {}
+        placement = self._paste_preview
+        hidden_move_owner = None
+        hidden_move_polys: set[int] = set()
+        if placement is not None and placement.operation == "move":
+            hidden_move_owner = getattr(placement.clipboard, "owner", None)
+            source_poly_ids = getattr(
+                placement.clipboard, "source_poly_ids", None)
+            if source_poly_ids is not None:
+                hidden_move_polys.update(int(poly_id) for poly_id in source_poly_ids)
+            else:
+                hidden_move_polys.update(
+                    int(copied.source_poly_id)
+                    for copied in getattr(placement.clipboard, "polygons", ()))
         for face_order, face in enumerate(self._faces):
+            if hidden_move_owner == face.owner and face.poly_id in hidden_move_polys:
+                continue
             if (not clean and not face.mapped
                     and not self._mapping_diagnostics):
                 continue
@@ -3515,7 +3790,9 @@ class AssetViewport(QWidget):
             self._draw_diagnostics_overlay(painter)
 
         if not clean and not self._snapshot_active \
-                and self._edit_session is not None:
+                and self._edit_session is not None \
+                and not (self._paste_preview is not None
+                         and self._paste_preview.operation == "move"):
             self._draw_edit_overlay(painter, target, camera)
         elif not clean and not self._snapshot_active:
             self._draw_mode_label(painter, target, False)
@@ -3749,10 +4026,11 @@ class AssetViewport(QWidget):
 
         dx, dy, dz = delta
         mode = f"Axis {state.axis}" if state.axis else "View Plane"
+        action = "Move" if state.operation == "move" else "Copy"
         label = (
-            f"Paste {getattr(state.clipboard, 'fx_name')} FX Preview"
+            f"{action} {getattr(state.clipboard, 'fx_name')} FX Preview"
             if getattr(state.clipboard, "fx_name", None)
-            else "Copy Preview")
+            else f"{action} Preview")
         lines = [
             label,
             f"X: {dx:+.2f}",
@@ -4022,23 +4300,32 @@ class AssetViewport(QWidget):
     def mousePressEvent(self, event: QMouseEvent) -> None:  # noqa: N802
         self._camera_interacting = False
         pos = event.position().toPoint()
+        if event.button() == Qt.MouseButton.MiddleButton:
+            # Middle-click is a viewport shortcut for the existing Reset View
+            # command.  Keep a single camera-reset implementation and let the
+            # normal camera-changed signal resync the toolbar/gizmo state.
+            self.reset_view()
+            self.manualCameraChanged.emit()
+            event.accept()
+            return
         if event.button() == Qt.MouseButton.LeftButton:
             self._press_additive = bool(
                 event.modifiers() & Qt.KeyboardModifier.ControlModifier)
         if self._paste_preview is not None:
             if event.button() == Qt.MouseButton.LeftButton \
                     and event.modifiers() & Qt.KeyboardModifier.AltModifier:
-                self._paste_preview.camera_inspect = True
+                self._begin_paste_camera_inspect()
                 self._last_mouse = pos
                 event.accept()
                 return
             if event.button() == Qt.MouseButton.MiddleButton:
-                self._paste_preview.camera_inspect = True
+                self._begin_paste_camera_inspect()
                 self._last_mouse = pos
                 event.accept()
                 return
             if event.button() == Qt.MouseButton.LeftButton:
-                self.pastePreviewConfirmRequested.emit()
+                self._paste_left_pressed_at = time.monotonic()
+                self._last_mouse = pos
             elif event.button() == Qt.MouseButton.RightButton:
                 self._suppress_next_context_menu = True
                 self.cancel_paste_preview()
@@ -4077,7 +4364,8 @@ class AssetViewport(QWidget):
                     self._press_pos = pos
                     event.accept()
                     return
-                if vertex is not None:
+                if vertex is not None and not (
+                        event.modifiers() & Qt.KeyboardModifier.AltModifier):
                     selection = set(self._edit_session.selection)
                     self._vertex_press = VertexPressState(
                         vertex=vertex,
@@ -4101,8 +4389,18 @@ class AssetViewport(QWidget):
         if was_camera_interacting:
             self.update()
         if self._paste_preview is not None:
+            pressed_at = self._paste_left_pressed_at
+            confirm = (
+                event.button() == Qt.MouseButton.LeftButton
+                and pressed_at is not None
+                and time.monotonic() - pressed_at < 0.350
+                and not self._paste_preview.camera_inspect)
+            self._paste_left_pressed_at = None
             self._paste_preview.camera_inspect = False
+            self._paste_preview.camera_inspect_anchor_screen = None
             self._reanchor_paste_mouse(event.position().toPoint())
+            if confirm:
+                self.pastePreviewConfirmRequested.emit()
             event.accept()
             return
         if self._edit_session is not None and not self._snapshot_active:
@@ -4195,7 +4493,7 @@ class AssetViewport(QWidget):
                 and self._family_ref is not None and not self._snapshot_active:
             if self._paste_preview is not None:
                 self.statusMessage.emit(
-                    "Finish or cancel Copy Preview before leaving Edit Mode.")
+                    "Finish or cancel the active placement preview before leaving Edit Mode.")
                 return True
             self.toggle_edit_mode()
             return True
@@ -4209,7 +4507,32 @@ class AssetViewport(QWidget):
         mods = event.modifiers()
 
         if self._modal_op is not None:
-            if key == Qt.Key.Key_Escape:
+            if self._modal_op == "grab" and key in (
+                    Qt.Key.Key_Left, Qt.Key.Key_Right,
+                    Qt.Key.Key_Up, Qt.Key.Key_Down):
+                amount = self._move_nudge_step
+                if mods & Qt.KeyboardModifier.ShiftModifier:
+                    amount *= 5.0
+                dx_sign, dy_sign = {
+                    Qt.Key.Key_Left: (-1.0, 0.0),
+                    Qt.Key.Key_Right: (1.0, 0.0),
+                    Qt.Key.Key_Up: (0.0, -1.0),
+                    Qt.Key.Key_Down: (0.0, 1.0),
+                }[key]
+                step = self._screen_direction_model_delta(
+                    dx_sign, dy_sign, amount, self._modal_pivot_world)
+                if self._modal_axis is not None:
+                    axis = "XYZ".index(self._modal_axis)
+                    sign = 1.0 if step[axis] >= 0.0 else -1.0
+                    step = tuple(
+                        sign * amount if index == axis else 0.0
+                        for index in range(3))
+                self._modal_keyboard_delta = tuple(
+                    self._modal_keyboard_delta[index] + step[index]
+                    for index in range(3))
+                self._modal_numeric = ""
+                self._update_modal(self._modal_last_mouse)
+            elif key == Qt.Key.Key_Escape:
                 self._cancel_modal()
             elif key in (Qt.Key.Key_Return, Qt.Key.Key_Enter):
                 self._commit_modal()
@@ -4237,7 +4560,7 @@ class AssetViewport(QWidget):
             self.update()
             return True
         if key == Qt.Key.Key_G:
-            self._begin_modal("grab")
+            self.movePlacementRequested.emit()
             return True
         if key == Qt.Key.Key_R:
             self._begin_modal("rotate")
@@ -4256,6 +4579,19 @@ class AssetViewport(QWidget):
                 and mods & Qt.KeyboardModifier.ControlModifier:
             self.redoRequested.emit()
             return True
+        if key in (Qt.Key.Key_Left, Qt.Key.Key_Right,
+                   Qt.Key.Key_Up, Qt.Key.Key_Down):
+            amount = self._move_nudge_step
+            if mods & Qt.KeyboardModifier.ShiftModifier:
+                amount *= 5.0
+            dx_sign, dy_sign = {
+                Qt.Key.Key_Left: (-1.0, 0.0),
+                Qt.Key.Key_Right: (1.0, 0.0),
+                Qt.Key.Key_Up: (0.0, -1.0),
+                Qt.Key.Key_Down: (0.0, 1.0),
+            }[key]
+            return self.nudge_edit_selection_step(
+                dx_sign, dy_sign, amount)
         return False
 
     def _paste_key_press(self, event) -> bool:
@@ -4263,7 +4599,20 @@ class AssetViewport(QWidget):
         if state is None:
             return False
         key = event.key()
-        if key == Qt.Key.Key_Escape:
+        mods = event.modifiers()
+        if key in (Qt.Key.Key_Left, Qt.Key.Key_Right,
+                   Qt.Key.Key_Up, Qt.Key.Key_Down):
+            amount = self._move_nudge_step
+            if mods & Qt.KeyboardModifier.ShiftModifier:
+                amount *= 5.0
+            dx_sign, dy_sign = {
+                Qt.Key.Key_Left: (-1.0, 0.0),
+                Qt.Key.Key_Right: (1.0, 0.0),
+                Qt.Key.Key_Up: (0.0, -1.0),
+                Qt.Key.Key_Down: (0.0, 1.0),
+            }[key]
+            self.nudge_paste_preview_step(dx_sign, dy_sign, amount)
+        elif key == Qt.Key.Key_Escape:
             self.cancel_paste_preview()
         elif key in (Qt.Key.Key_Return, Qt.Key.Key_Enter):
             self.pastePreviewConfirmRequested.emit()
@@ -4304,6 +4653,11 @@ class AssetViewport(QWidget):
         current = event.position().toPoint()
         if self._paste_preview is not None:
             state = self._paste_preview
+            if self._paste_left_pressed_at is not None \
+                    and event.buttons() & Qt.MouseButton.LeftButton \
+                    and time.monotonic() - self._paste_left_pressed_at >= 0.350:
+                if not state.camera_inspect:
+                    self._begin_paste_camera_inspect()
             if state.camera_inspect:
                 delta = current - self._last_mouse
                 self._last_mouse = current
@@ -4311,6 +4665,7 @@ class AssetViewport(QWidget):
                     self._yaw += delta.x() * 0.6
                     self._pitch = max(
                         -89.0, min(89.0, self._pitch + delta.y() * 0.6))
+                    self._stabilize_paste_orbit_pivot()
                 elif event.buttons() & Qt.MouseButton.MiddleButton:
                     self._pan += QPointF(delta.x(), delta.y())
                 self._reanchor_paste_mouse(current)
@@ -4318,6 +4673,8 @@ class AssetViewport(QWidget):
                 self.update()
             elif not event.buttons():
                 self._update_paste_preview(current)
+            else:
+                self._last_mouse = current
             event.accept()
             return
         if self._edit_session is not None and not self._snapshot_active:
@@ -4378,8 +4735,7 @@ class AssetViewport(QWidget):
                 self._camera_interacting = True
                 self.manualCameraChanged.emit()
             self.update()
-        elif event.buttons() & (Qt.MouseButton.RightButton
-                                | Qt.MouseButton.MiddleButton):
+        elif event.buttons() & Qt.MouseButton.RightButton:
             if not delta.isNull():
                 self._camera_interacting = True
                 self._pan += QPointF(delta.x(), delta.y())

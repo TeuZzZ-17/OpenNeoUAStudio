@@ -39,7 +39,7 @@ class SnapshotStudioWindow(AssemblyWindow):
         "edit_select_none_action",
         "copy_geometry_action",
         "paste_geometry_action",
-        "cut_geometry_action",
+        "edit_move_action",
         "delete_geometry_action",
         "add_fx_action",
         "edit_scale_action",

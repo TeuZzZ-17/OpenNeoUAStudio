@@ -56,7 +56,6 @@ class FxElementCapabilities:
     can_scale: bool
     can_copy: bool
     can_paste: bool
-    can_cut: bool
     can_delete: bool
     can_add_similar: bool
     can_save: bool
