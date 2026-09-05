@@ -2,8 +2,7 @@
 
 OpenNeoUA Studio (technical project name: `OpenNeoUAStudio`) is an independent,
 community-developed editing workbench for OpenNeoUA and Microsoft Urban Assault
-(1998). It is derived from the `UA_source`/OpenUA tool lineage without hiding
-that provenance.
+(1998). 
 
 The project brings together tools and workflows for inspecting, editing, converting, and creating compatible game data.
 
@@ -29,22 +28,6 @@ On normal startup, OpenNeoUA Studio first shows a tool selector for the Main
 Suite, Map Editor, Collision Editor, or Wireframe Editor.
 
 A precompiled Windows executable may also be included in the repository for convenience.
-
-### Model Editor mouse controls
-
-In Edit Mode, drag with the left mouse button to select vertices inside a
-rectangle. Complete polygons are derived from the selected vertices. Hold Ctrl
-to add to the current selection; Alt + left drag orbits the camera.
-
-Use Edit > Move, the viewport context menu > Move, or G to move the selection.
-The Transform panel also provides Move. During the interactive move, X/Y/Z
-constrain the axis, a number sets the distance, click/Enter confirms and Esc
-cancels. Confirmed movement supports Undo/Redo.
-
-During Copy/Paste Preview, a short left click confirms on release. Hold the
-left button for at least 350 ms and drag to orbit instead; releasing retains
-the pending copy. Move the cursor to position it, then short-click to paste.
-Alt + left drag orbits immediately; middle drag pans; right click/Esc cancels.
 
 ## License
 
