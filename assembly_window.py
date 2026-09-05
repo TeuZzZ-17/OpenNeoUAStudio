@@ -470,6 +470,8 @@ class AssemblyWindow(QMainWindow):
             self._confirm_paste_geometry)
         self.viewport.pastePreviewActiveChanged.connect(
             self._on_paste_preview_active_changed)
+        self.viewport.movePlacementRequested.connect(
+            self._move_selected_geometry)
         self.viewport.undoRequested.connect(self._undo_edit)
         self.viewport.redoRequested.connect(self._redo_edit)
         self.viewport.animationFrameChanged.connect(
@@ -1091,7 +1093,7 @@ class AssemblyWindow(QMainWindow):
             Qt.ShortcutContext.WindowShortcut)
         self.edit_redo_action.triggered.connect(self._redo_edit)
         edit_menu.addAction(self.edit_redo_action)
-        self.edit_reset_action = QAction("Reset Model...", self)
+        self.edit_reset_action = QAction("Reset Model", self)
         self.edit_reset_action.triggered.connect(self._reset_model)
         edit_menu.addAction(self.edit_reset_action)
         edit_menu.addSeparator()
@@ -1122,15 +1124,6 @@ class AssemblyWindow(QMainWindow):
         self.paste_geometry_action.triggered.connect(self._paste_geometry)
         self.viewport.addAction(self.paste_geometry_action)
         edit_menu.addAction(self.paste_geometry_action)
-        self.cut_geometry_action = QAction("Cut", self.viewport)
-        self.cut_geometry_action.setShortcut(QKeySequence.StandardKey.Cut)
-        self.cut_geometry_action.setShortcutContext(
-            Qt.ShortcutContext.WidgetShortcut)
-        self.cut_geometry_action.setStatusTip(
-            "Copy and atomically remove the selected polygons.")
-        self.cut_geometry_action.triggered.connect(self._cut_geometry)
-        self.viewport.addAction(self.cut_geometry_action)
-        edit_menu.addAction(self.cut_geometry_action)
         self.delete_geometry_action = QAction("Delete", self.viewport)
         self.delete_geometry_action.setShortcut(
             QKeySequence(Qt.Key.Key_Delete))
@@ -1147,6 +1140,12 @@ class AssemblyWindow(QMainWindow):
             "Clone one compatible existing FX element exactly.")
         self.add_fx_action.triggered.connect(self._add_fx_element)
         edit_menu.addAction(self.add_fx_action)
+        self.edit_move_action = QAction("Move", self)
+        self.edit_move_action.setStatusTip(
+            "Move selected vertices/polygons continuously in place (G); "
+            "click or Enter confirms, Esc cancels.")
+        self.edit_move_action.triggered.connect(self._move_selected_geometry)
+        edit_menu.addAction(self.edit_move_action)
         self.edit_scale_action = QAction("Scale...", self)
         self.edit_scale_action.triggered.connect(self._scale_selected_geometry)
         edit_menu.addAction(self.edit_scale_action)
@@ -1193,7 +1192,7 @@ class AssemblyWindow(QMainWindow):
                        self.mapping_diag_check):
             action.toggled.connect(self._sync_snapshot_view_render_mode)
         view_menu.addSeparator()
-        self.reset_camera_action = QAction("Reset camera", self)
+        self.reset_camera_action = QAction("Reset View", self)
         self.reset_camera_action.setEnabled(False)
         self.reset_camera_action.triggered.connect(
             self._reset_view_and_gizmo)
@@ -1267,6 +1266,21 @@ class AssemblyWindow(QMainWindow):
         toolbar.setMovable(False)
         self.addToolBar(Qt.ToolBarArea.TopToolBarArea, toolbar)
 
+        self.global_undo_button = QPushButton("< Undo")
+        self.global_undo_button.setEnabled(False)
+        self.global_undo_button.setMinimumWidth(88)
+        self.global_undo_button.setToolTip(
+            "Undo the latest geometry, texture or UV edit.")
+        self.global_undo_button.clicked.connect(self._undo_edit)
+        toolbar.addWidget(self.global_undo_button)
+
+        self.global_redo_button = QPushButton("Redo >")
+        self.global_redo_button.setEnabled(False)
+        self.global_redo_button.setMinimumWidth(88)
+        self.global_redo_button.setToolTip(
+            "Redo the latest geometry, texture or UV edit.")
+        self.global_redo_button.clicked.connect(self._redo_edit)
+        toolbar.addWidget(self.global_redo_button)
 
         self.mode_combo = QComboBox()
         for mode in (candidate for candidate in VIEW_MODES
@@ -1294,6 +1308,21 @@ class AssemblyWindow(QMainWindow):
         self.viewport.manualCameraChanged.connect(
             self._on_manual_camera_changed)
         toolbar.addWidget(self.toolbar_view_preset_combo)
+        self.toolbar_reset_view_button = QPushButton("Reset View")
+        self.toolbar_reset_view_button.setEnabled(False)
+        self.toolbar_reset_view_button.setToolTip(
+            "Restore the camera to the original view used when this model "
+            "was loaded.")
+        self.toolbar_reset_view_button.clicked.connect(
+            self._reset_view_and_gizmo)
+        toolbar.addWidget(self.toolbar_reset_view_button)
+
+        self.toolbar_reset_model_button = QPushButton("Reset Model")
+        self.toolbar_reset_model_button.setEnabled(False)
+        self.toolbar_reset_model_button.setToolTip(
+            "Discard unsaved geometry, texture and UV edits for the current model.")
+        self.toolbar_reset_model_button.clicked.connect(self._reset_model)
+        toolbar.addWidget(self.toolbar_reset_model_button)
 
         # Animation controls (enabled only when a VANM is loaded)
         anim_bar = QToolBar("Animation", self)
@@ -1320,20 +1349,6 @@ class AssemblyWindow(QMainWindow):
         self.speed_spin.setValue(1.0)
         self.speed_spin.valueChanged.connect(self._on_animation_speed_changed)
         anim_bar.addWidget(self.speed_spin)
-        self.global_undo_button = QPushButton("< Undo")
-        self.global_undo_button.setEnabled(False)
-        self.global_undo_button.setMinimumWidth(88)
-        self.global_undo_button.setToolTip(
-            "Undo the latest geometry, texture or UV edit.")
-        self.global_undo_button.clicked.connect(self._undo_edit)
-        self.global_redo_button = QPushButton("Redo >")
-        self.global_redo_button.setEnabled(False)
-        self.global_redo_button.setMinimumWidth(88)
-        self.global_redo_button.setToolTip(
-            "Redo the latest geometry, texture or UV edit.")
-        self.global_redo_button.clicked.connect(self._redo_edit)
-        anim_bar.addWidget(self.global_undo_button)
-        anim_bar.addWidget(self.global_redo_button)
 
     def _build_layout(self) -> None:
         tabs = QTabWidget()
@@ -4607,14 +4622,23 @@ class AssemblyWindow(QMainWindow):
 
     def _update_reset_camera_action(self) -> None:
         action = getattr(self, "reset_camera_action", None)
+        enabled = self.viewport.can_reset_camera
         if action is not None:
-            action.setEnabled(self.viewport.can_reset_camera)
+            action.setEnabled(enabled)
+        button = getattr(self, "toolbar_reset_view_button", None)
+        if button is not None:
+            button.setEnabled(enabled)
 
     def _reset_view_and_gizmo(self) -> None:
         if not self.viewport.can_reset_camera:
             self._update_reset_camera_action()
             return
         self.viewport.reset_view()
+        combo = (self.snapshot_view_combo if self._snapshot_mode_active
+                 else self.toolbar_view_preset_combo)
+        combo.blockSignals(True)
+        combo.setCurrentText("Current View")
+        combo.blockSignals(False)
         if self._snapshot_mode_active:
             self._sync_snapshot_zoom_from_viewport()
         self._sync_gizmo_camera()
@@ -5862,7 +5886,7 @@ class AssemblyWindow(QMainWindow):
         if resolved and not self._active_fx_elements():
             return (
                 "FX elements cannot be combined with other polygons in one "
-                "Copy, Cut or Delete operation")
+                "Copy, Move or Delete operation")
         return ""
 
     def _refresh_fx_elements(self) -> None:
@@ -5938,7 +5962,6 @@ class AssemblyWindow(QMainWindow):
                 f"scale={capabilities.can_scale}, "
                 f"copy={capabilities.can_copy}, "
                 f"paste={capabilities.can_paste}, "
-                f"cut={capabilities.can_cut}, "
                 f"delete={capabilities.can_delete}, "
                 f"add similar={capabilities.can_add_similar}, "
                 f"save={capabilities.can_save}, "
@@ -6143,7 +6166,6 @@ class AssemblyWindow(QMainWindow):
             can_scale=can_move,
             can_copy=can_copy,
             can_paste=can_copy,
-            can_cut=can_copy and can_delete,
             can_delete=can_delete,
             can_add_similar=can_add_similar,
             can_save=can_save,
@@ -7669,6 +7691,76 @@ class AssemblyWindow(QMainWindow):
                 unsafe.update(selected & element_polys)
         return unsafe
 
+    def _build_geometry_placement_clipboard(self, elements=None):
+        """Build the one immutable source used by both Copy and Move."""
+
+        explicit_elements = tuple(elements) if elements is not None else None
+        fx_elements = (
+            explicit_elements if explicit_elements is not None
+            else tuple(self._active_fx_elements()))
+        if fx_elements:
+            element = fx_elements[0]
+            family = self._family
+            fam_obj = self._owner_to_obj.get(element.owner_path)
+            if family is None or fam_obj is None:
+                raise GeometryClipboardError(
+                    "the source FX model is unavailable")
+            clipboard = build_fx_elements_clipboard(
+                fam_obj, fx_elements, family.animations)
+            self._selected_polys = {
+                poly_id for selected in fx_elements
+                for poly_id in selected.poly_ids}
+            self.viewport.set_highlight_polys(self._selected_polys)
+            descriptor = (
+                f"{len(fx_elements)} mirrored {element.fx_name} "
+                f"{'VANM ' if element.source_kind == 'VANM' else ''}elements"
+                if len(fx_elements) > 1 else
+                f"{element.fx_name} "
+                f"{'VANM ' if element.source_kind == 'VANM' else ''}Element")
+            return clipboard, descriptor
+
+        owner = self.viewport.edit_owner
+        fam_obj = self._owner_to_obj.get(owner) if owner else None
+        if fam_obj is None:
+            raise GeometryClipboardError(
+                "the editable source model is unavailable")
+        selected = self._resolved_geometry_polys()
+        mapping = MappingIndex(fam_obj)
+        clipboard = build_geometry_clipboard(
+            fam_obj, owner, selected, mapping,
+            self._unsafe_fx_geometry_polys(owner, selected),
+            require_writable_chunks=False)
+        return clipboard, f"{len(clipboard.polygons)} polygon(s)"
+
+    def _start_geometry_placement(
+            self, operation: str, clipboard, descriptor: str,
+            *, position=None, store_copy: bool = False) -> bool:
+        """Start the shared placement controller used by Move and Copy."""
+
+        operation = str(operation).casefold()
+        if operation not in ("copy", "move"):
+            operation = "copy"
+        if store_copy:
+            self._geometry_clipboard = clipboard
+        if position is None or not hasattr(position, "x"):
+            position = self._current_viewport_position()
+        # Placement is a translation operation in both modes.  This also makes
+        # keyboard arrows and gizmo handles use the visible Move-step value.
+        self._set_transform_mode("move")
+        started = self.viewport.begin_paste_preview(
+            clipboard, position, operation=operation)
+        self._sync_edit_action_states()
+        self.viewport.setFocus()
+        if not started:
+            self._notify(
+                f"{operation.title()} {descriptor} could not start.", 9000)
+            return False
+        action = "Copied" if operation == "copy" else "Moving"
+        self._notify(
+            f"{action} {descriptor}. Move the transparent preview; "
+            "LMB/Enter confirms, RMB/Esc cancels.", 12000)
+        return True
+
     def _copy_geometry(self) -> None:
         if self.viewport.paste_preview_active:
             self.viewport.cancel_paste_preview()
@@ -7676,36 +7768,13 @@ class AssemblyWindow(QMainWindow):
         if reason:
             self._notify(f"Copy refused: {reason}.", 7000)
             return
-        fx_elements = self._active_fx_elements()
-        if fx_elements:
-            self._copy_fx_elements(fx_elements)
-            return
-        owner = self.viewport.edit_owner
-        fam_obj = self._owner_to_obj[owner]
-        selected = self._resolved_geometry_polys()
-        mapping = MappingIndex(fam_obj)
         try:
-            clipboard = build_geometry_clipboard(
-                fam_obj, owner, selected, mapping,
-                self._unsafe_fx_geometry_polys(
-                    owner, selected),
-                require_writable_chunks=False)
+            clipboard, descriptor = self._build_geometry_placement_clipboard()
         except GeometryClipboardError as exc:
-            self._notify(f"Copy refused: {exc}.", 8000)
+            self._notify(f"Copy refused: {exc}.", 9000)
             return
-        self._geometry_clipboard = clipboard
-        position = self._current_viewport_position()
-        started = self.viewport.begin_paste_preview(clipboard, position)
-        self._sync_edit_action_states()
-        self.viewport.setFocus()
-        if not started:
-            self._notify(
-                f"Copied {len(clipboard.polygons)} polygon(s), but the preview "
-                f"could not start: {self._preview_geometry_reason()}.", 9000)
-            return
-        self._notify(
-            f"Copied {len(clipboard.polygons)} polygon(s). Move the transparent "
-            "preview and press Paste, LMB or Enter to confirm.", 12000)
+        self._start_geometry_placement(
+            "copy", clipboard, descriptor, store_copy=True)
 
     def _copy_fx_element(self, element: FxElement) -> None:
         self._copy_fx_elements((element,))
@@ -7714,41 +7783,14 @@ class AssemblyWindow(QMainWindow):
         elements = tuple(elements)
         if not elements:
             return
-        element = elements[0]
-        family = self._family
-        fam_obj = self._owner_to_obj.get(element.owner_path)
-        if family is None or fam_obj is None:
-            self._notify("Copy FX refused: the source model is unavailable.",
-                         8000)
-            return
         try:
-            clipboard = build_fx_elements_clipboard(
-                fam_obj, elements, family.animations)
+            clipboard, descriptor = self._build_geometry_placement_clipboard(
+                elements)
         except GeometryClipboardError as exc:
             self._notify(f"Copy FX refused: {exc}.", 9000)
             return
-        self._selected_polys = {
-            poly_id for selected in elements for poly_id in selected.poly_ids}
-        self.viewport.set_highlight_polys(self._selected_polys)
-        self._geometry_clipboard = clipboard
-        position = self._current_viewport_position()
-        started = self.viewport.begin_paste_preview(clipboard, position)
-        self._sync_edit_action_states()
-        self.viewport.setFocus()
-        descriptor = (
-            f"{len(elements)} mirrored {element.fx_name} "
-            f"{'VANM ' if element.source_kind == 'VANM' else ''}elements"
-            if len(elements) > 1 else
-            f"{element.fx_name} "
-            f"{'VANM ' if element.source_kind == 'VANM' else ''}Element")
-        if not started:
-            self._notify(
-                f"Copied {descriptor}, but its preview could not start: "
-                f"{self._preview_geometry_reason()}.", 9000)
-            return
-        self._notify(
-            f"Copied {descriptor}. Move the transparent FX preview and press "
-            "Paste, LMB or Enter to confirm.", 12000)
+        self._start_geometry_placement(
+            "copy", clipboard, descriptor, store_copy=True)
 
     def _geometry_context(self):
         owner = self.viewport.edit_owner
@@ -7823,7 +7865,7 @@ class AssemblyWindow(QMainWindow):
     def _copy_geometry_reason(self) -> str:
         session, owner, fam_obj = self._geometry_context()
         if self.viewport.paste_preview_active:
-            return "finish or cancel the active Copy Preview first"
+            return "finish or cancel the active placement preview first"
         if session is None or owner is None:
             return "enable Edit Mode on one model"
         if fam_obj is None or fam_obj is not self._workbench_obj:
@@ -8084,7 +8126,7 @@ class AssemblyWindow(QMainWindow):
         if position is None or not hasattr(position, "x"):
             position = self._current_viewport_position()
         if self.viewport.begin_paste_preview(
-                self._geometry_clipboard, position):
+                self._geometry_clipboard, position, operation="copy"):
             self.viewport.setFocus()
             label = (
                 "Paste FX Preview"
@@ -8207,13 +8249,133 @@ class AssemblyWindow(QMainWindow):
                 session._redo.clear()
         return True
 
+    @staticmethod
+    def _clipboard_source_polygon_ids(clipboard) -> set[int]:
+        source = getattr(clipboard, "source_poly_ids", None)
+        if source is not None:
+            return {int(poly_id) for poly_id in source}
+        return {
+            int(copied.source_poly_id)
+            for copied in getattr(clipboard, "polygons", ())}
+
+    @staticmethod
+    def _clipboard_source_vertex_ids(clipboard) -> tuple[int, ...]:
+        return tuple(sorted(
+            int(original)
+            for original, _local in getattr(
+                clipboard, "original_to_local", ())))
+
+    def _confirm_move_placement(self, clipboard, delta) -> None:
+        """Commit Move using the exact same preview/controller as Copy."""
+
+        owner = self.viewport.edit_owner
+        fam_obj = self._owner_to_obj.get(owner) if owner else None
+        model = getattr(fam_obj, "skeleton", None)
+        session = self.viewport.edit_session
+        if clipboard is None or delta is None or fam_obj is None \
+                or model is None or session is None:
+            self._notify("Move refused: the target context changed.", 8000)
+            return
+        if owner != getattr(clipboard, "owner", None) \
+                or id(model) != getattr(clipboard, "model_identity", None):
+            self._notify("Move refused: the source model changed.", 8000)
+            return
+        if not all(math.isfinite(float(value)) for value in delta):
+            self._notify("Move refused: invalid movement delta.", 8000)
+            return
+
+        pairs = tuple(getattr(clipboard, "original_to_local", ()))
+        points = tuple(getattr(clipboard, "points", ()))
+        if not pairs:
+            self._notify("Move refused: no source vertices are available.", 8000)
+            return
+        before = [tuple(point) for point in model.points]
+        previous_selected_owner = self._selected_owner
+        previous_selected_polys = set(self._selected_polys)
+        previous_selected_poly = self._selected_poly
+        try:
+            self._remember_geometry_original(owner)
+            for original, local in pairs:
+                if not (0 <= original < len(model.points)
+                        and 0 <= local < len(points)):
+                    raise GeometryClipboardError(
+                        "the Move source vertex mapping is no longer valid")
+                source = tuple(points[local])
+                # A placement preview never edits live geometry.  If another
+                # path changed the source underneath it, fail closed instead
+                # of moving unrelated data.
+                if tuple(model.points[original]) != source:
+                    raise GeometryClipboardError(
+                        "the Move source geometry changed during preview")
+                model.points[original] = tuple(
+                    source[axis] + delta[axis] for axis in range(3))
+
+            moved_polys = self._clipboard_source_polygon_ids(clipboard)
+            moved_vertices = self._clipboard_source_vertex_ids(clipboard)
+            self.viewport.finish_paste_preview()
+            self._refresh_object_material_faces(fam_obj)
+            self._selected_owner = owner
+            self._selected_polys = moved_polys
+            self._selected_poly = min(moved_polys, default=None)
+            # Same-owner geometry refresh must preserve the exact viewport
+            # framing.  Only the selected vertices change coordinates.
+            self.viewport.refresh_family_materials()
+            self._rebuild_workbench(self._family, owner)
+            self._refresh_fx_elements()
+            self.viewport.set_selected_owner(owner)
+            self.viewport.set_selected_polygon(self._selected_poly)
+            self.viewport.set_highlight_polys(moved_polys)
+            if moved_vertices:
+                self.viewport.enter_edit_mode_with_vertices(
+                    owner, moved_vertices, pick_polygons=True)
+            self._on_geometry_edited(owner)
+            after = [tuple(point) for point in model.points]
+            self._record_edit_command({
+                "kind": "geometry",
+                "owner": owner,
+                "before": before,
+                "after": after,
+                "label": "Move Geometry",
+            })
+            self._fill_polygon_inspector(self._selected_poly)
+            self._sync_editor_context()
+            self._notify(
+                f"Moved {len(moved_polys)} polygon(s) with "
+                f"{len(moved_vertices)} source vertex/vertices.", 8000)
+        except Exception as exc:
+            model.points[:] = before
+            self._selected_owner = previous_selected_owner
+            self._selected_polys = previous_selected_polys
+            self._selected_poly = previous_selected_poly
+            self.viewport.cancel_paste_preview()
+            try:
+                self._refresh_object_material_faces(fam_obj)
+                self.viewport.refresh_family_materials()
+                self._rebuild_workbench(self._family, owner)
+                self._refresh_fx_elements()
+                self.viewport.set_selected_owner(previous_selected_owner)
+                self.viewport.set_selected_polygon(previous_selected_poly)
+                self.viewport.set_highlight_polys(previous_selected_polys)
+                self._sync_editor_context()
+            except Exception as refresh_exc:
+                self._log(f"Move rollback UI refresh failed: {refresh_exc}")
+            self._notify(f"Move failed and was rolled back: {exc}.", 10000)
+
     def _confirm_paste_geometry(self) -> None:
-        if not self._require_editing("Paste Geometry"):
+        operation = self.viewport.paste_preview_operation or "copy"
+        action_label = "Move Geometry" if operation == "move" else "Paste Geometry"
+        if not self._require_editing(action_label):
             if self.viewport.paste_preview_active:
                 self.viewport.cancel_paste_preview()
             return
-        clipboard = self._geometry_clipboard
+        clipboard = (
+            self.viewport.paste_preview_clipboard
+            if self.viewport.paste_preview_active
+            else self._geometry_clipboard)
         delta = self.viewport.paste_preview_delta
+        if operation == "move":
+            self._confirm_move_placement(clipboard, delta)
+            return
         owner = self.viewport.edit_owner
         fam_obj = self._owner_to_obj.get(owner) if owner else None
         model = getattr(fam_obj, "skeleton", None)
@@ -8376,7 +8538,7 @@ class AssemblyWindow(QMainWindow):
             return "enable Edit Mode on one model"
         session, owner, fam_obj = self._geometry_context()
         if self.viewport.paste_preview_active:
-            return "cancel the active Copy Preview first"
+            return "cancel the active placement preview first"
         if session is None or owner is None:
             return "enable Edit Mode on one model"
         if fam_obj is None or fam_obj is not self._workbench_obj:
@@ -8413,9 +8575,6 @@ class AssemblyWindow(QMainWindow):
 
     def can_delete_geometry(self) -> bool:
         return not self._delete_geometry_reason()
-
-    def can_cut_geometry(self) -> bool:
-        return self.can_copy_geometry() and self.can_delete_geometry()
 
     def _apply_delete_plan(self, owner: str, fam_obj, plan,
                            *, label: str,
@@ -8559,65 +8718,28 @@ class AssemblyWindow(QMainWindow):
         ) + "This operation can be undone."
         self._notify(deleted_message, 8000)
 
-    def _cut_geometry(self) -> None:
-        if not self._require_editing("Cut Geometry"):
+    def _move_selected_geometry(self) -> None:
+        if not self._require_editing("Move"):
+            return
+        if self.viewport.paste_preview_active:
+            self._notify(
+                "Move refused: finish or cancel the active placement first.",
+                7000)
+            return
+        session = self.viewport.edit_session
+        if session is None or session.modal_active:
             return
         reason = self._copy_geometry_reason()
         if reason:
-            self._notify(f"Cut refused: {reason}.", 8000)
+            self._notify(f"Move refused: {reason}.", 7000)
             return
-        owner = self.viewport.edit_owner
-        fam_obj = self._owner_to_obj[owner]
-        element = self._active_fx_selection()
-        fx_elements = self._active_fx_elements()
-        selected = self._resolved_geometry_polys()
-        mapping = MappingIndex(fam_obj)
         try:
-            if fx_elements:
-                clipboard = build_fx_elements_clipboard(
-                    fam_obj, fx_elements,
-                    self._family.animations if self._family else {})
-            else:
-                clipboard = build_geometry_clipboard(
-                    fam_obj, owner, selected, mapping,
-                    self._unsafe_fx_geometry_polys(
-                        owner, selected),
-                    require_writable_chunks=False)
-            plan = plan_delete_geometry(
-                fam_obj, selected, mapping,
-                self._unsafe_fx_geometry_polys(
-                    owner, selected))
+            clipboard, descriptor = self._build_geometry_placement_clipboard()
         except GeometryClipboardError as exc:
-            self._notify(f"Cut refused: {exc}.", 8000)
+            self._notify(f"Move refused: {exc}.", 9000)
             return
-        previous_clipboard = self._geometry_clipboard
-        try:
-            cut_count = self._apply_delete_plan(
-                owner, fam_obj, plan,
-                label=(
-                    "Cut mirrored FX elements"
-                    if len(fx_elements) > 1 else
-                    f"Cut {element.fx_name} FX"
-                    if element is not None else "Cut Geometry"))
-        except GeometryClipboardError as exc:
-            self._geometry_clipboard = previous_clipboard
-            self._notify(f"Cut refused: {exc}.", 8000)
-            return
-        self._geometry_clipboard = clipboard
-        self.viewport.setFocus()
-        self._sync_edit_action_states()
-        self._notify(
-            (
-                f"Cut {len(fx_elements)} mirrored FX elements. "
-                "Press Paste to place the copied FX selection."
-                if len(fx_elements) > 1 else
-                f"Cut {element.fx_name} "
-                f"{'VANM ' if element.source_kind == 'VANM' else ''}"
-                "FX Element. Press Paste to place the copied FX."
-                if element is not None else
-                f"Cut {cut_count} polygon(s). Press Paste to place the "
-                "copied geometry."
-            ), 9000)
+        self._start_geometry_placement(
+            "move", clipboard, descriptor, store_copy=False)
 
     def _scale_selected_geometry(self) -> None:
         if not self._require_editing("Scale"):
@@ -8754,7 +8876,7 @@ class AssemblyWindow(QMainWindow):
         undo.setEnabled(editing and bool(self._edit_undo_stack))
         redo = menu.addAction("Redo", self._redo_edit)
         redo.setEnabled(editing and bool(self._edit_redo_stack))
-        reset = menu.addAction("Reset Model...", self._reset_model)
+        reset = menu.addAction("Reset Model", self._reset_model)
         reset.setEnabled(getattr(self, "edit_reset_action", None) is not None
                          and self.edit_reset_action.isEnabled())
         menu.addSeparator()
@@ -8791,17 +8913,14 @@ class AssemblyWindow(QMainWindow):
         commit_reason = (
             self._commit_geometry_reason() if not preview_reason else "")
         paste_geometry.setToolTip(
-            "Confirm the current Copy Preview."
+            (f"Confirm the current "
+             f"{(self.viewport.paste_preview_operation or 'copy').title()} Preview.")
             if self.viewport.paste_preview_active else
             preview_reason or (
                 f"Preview is available; confirmation will be refused: "
                 f"{commit_reason}."
                 if commit_reason else
                 "Start a Copy Preview."))
-        cut_geometry = menu.addAction(
-            "Cut FX Element" if active_fx is not None else "Cut",
-            self._cut_geometry)
-        cut_geometry.setEnabled(self.can_cut_geometry())
         if active_fx is not None:
             active_fx_elements = self._active_fx_elements()
             delete_geometry = menu.addAction(
@@ -8821,6 +8940,7 @@ class AssemblyWindow(QMainWindow):
             (lambda: self._add_fx_element(preferred=active_fx))
             if active_fx is not None else self._add_fx_element)
         add_fx.setEnabled(self._can_add_fx_element())
+        menu.addAction(self.edit_move_action)
         scale = menu.addAction(
             "Scale...", self._scale_selected_geometry)
         scale.setEnabled(editing and self._family is not None)
@@ -8948,6 +9068,7 @@ class AssemblyWindow(QMainWindow):
         active = session is not None
         editing = self._editing_allowed()
         paste_preview = self.viewport.paste_preview_active
+        preview_operation = self.viewport.paste_preview_operation
         archive_read_only = self._selected_model_is_archive_read_only()
         copy_reason = self._copy_geometry_reason()
         delete_reason = self._delete_geometry_reason()
@@ -9026,9 +9147,8 @@ class AssemblyWindow(QMainWindow):
             fx_clipboard = isinstance(
                 self._geometry_clipboard, FxElementClipboard)
             paste_reason = (
-                "Confirm the current Paste FX Preview."
-                if paste_preview and fx_clipboard else
-                "Confirm the current Copy Preview."
+                f"Confirm the current {(preview_operation or 'copy').title()} "
+                f"{'FX ' if fx_clipboard else ''}Preview."
                 if paste_preview else self._preview_geometry_reason())
             if not paste_reason and not self.can_commit_geometry():
                 paste_reason = (
@@ -9040,15 +9160,6 @@ class AssemblyWindow(QMainWindow):
                     if fx_clipboard else "Start a Copy Preview.")
             self.paste_geometry_action.setToolTip(paste_reason)
             self.paste_geometry_action.setStatusTip(paste_reason)
-        if hasattr(self, "cut_geometry_action"):
-            self.cut_geometry_action.setEnabled(
-                editing and can_copy and can_delete)
-            cut_tip = (
-                f"Copy and atomically remove the complete {fx_descriptor}."
-                if active_fx is not None else
-                "Copy and atomically remove the selected geometry.")
-            self.cut_geometry_action.setToolTip(cut_tip)
-            self.cut_geometry_action.setStatusTip(cut_tip)
         if hasattr(self, "delete_geometry_action"):
             self.delete_geometry_action.setEnabled(
                 editing and can_delete)
@@ -9095,6 +9206,10 @@ class AssemblyWindow(QMainWindow):
             self.model_gizmo.setEnabled(can_use_gizmo)
             self.gizmo_intensity_slider.setEnabled(can_use_gizmo)
             self.gizmo_intensity_spin.setEnabled(can_use_gizmo)
+        if hasattr(self, "edit_move_action"):
+            self.edit_move_action.setEnabled(
+                editing and can_copy and session is not None
+                and not session.modal_active and not paste_preview)
         if hasattr(self, "edit_scale_action"):
             self.edit_scale_action.setEnabled(
                 editing and self._family is not None and not paste_preview)
@@ -9140,6 +9255,9 @@ class AssemblyWindow(QMainWindow):
         reset_action = getattr(self, "edit_reset_action", None)
         if reset_action is not None:
             reset_action.setEnabled(can_reset)
+        reset_button = getattr(self, "toolbar_reset_model_button", None)
+        if reset_button is not None:
+            reset_button.setEnabled(can_reset)
         self._sync_edit_action_states()
 
     def _on_geometry_edited(self, owner: str) -> None:
@@ -12098,6 +12216,10 @@ class AssemblyWindow(QMainWindow):
         if self._selected_owner:
             self.viewport.set_selected_owner(self._selected_owner)
             self.viewport.frame_owner(self._selected_owner)
+            # Reset View means the exact camera the user receives when this
+            # model opens, not a later bbox fit after geometry changes.
+            self.viewport.capture_reset_view()
+            self._update_reset_camera_action()
         self._fill_asset_tree(family)
         if self._selected_owner:
             selected_item = self._owner_to_item.get(self._selected_owner)
