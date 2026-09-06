@@ -10,8 +10,9 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 from PySide6.QtCore import QEvent, QPointF, Qt
 from PySide6.QtGui import QColor, QKeyEvent, QMouseEvent
 from PySide6.QtWidgets import (
-    QAbstractItemView, QApplication, QDialog, QHeaderView, QLabel, QMessageBox,
-    QSizePolicy, QPushButton, QToolBar, QToolButton, QTreeWidgetItem,
+    QAbstractItemView, QApplication, QDialog, QGridLayout, QHeaderView, QLabel,
+    QMessageBox, QSizePolicy, QPushButton, QToolBar, QToolButton,
+    QTreeWidgetItem,
 )
 
 from asset_family import AssetFamily, FamilyObject
@@ -145,6 +146,18 @@ class CollisionEditorTests(unittest.TestCase):
         window.model_tree.setCurrentItem(second)
         self.assertEqual(window.project.source_model, "kid.sklt")
         self.assertEqual(window._current_owner, "root/kid[0]")
+
+    def test_02a_model_browser_is_greyed_until_normal_resource_import(self):
+        window = self._window()
+        self.assertFalse(window.model_tree.isEnabled())
+        self.assertFalse(window.model_search.isEnabled())
+        with patch("collision_editor.load_asset_family", return_value=_family()):
+            window.open_base("sample.base")
+        self.assertTrue(window.model_tree.isEnabled())
+        self.assertTrue(window.model_search.isEnabled())
+        window._set_model_browser_enabled(False)
+        self.assertFalse(window.model_tree.isEnabled())
+        self.assertFalse(window.model_search.isEnabled())
 
     def test_03_base_texture_family_reaches_existing_viewport(self):
         family = _family()
@@ -442,7 +455,14 @@ class CollisionEditorTests(unittest.TestCase):
         self.assertEqual([
             action.text().replace("&", "")
             for action in window.menuBar().actions()
-        ], ["File", "Edit", "Viewpoint", "Project Summary"])
+        ], ["File", "Edit", "Add", "Viewpoint", "Project Summary"])
+        self.assertEqual([
+            action.text() for action in window.add_menu.actions()
+        ], [
+            "Add Legacy Radius",
+            "Add Vehicle Collision",
+            "Add Weapon Collision",
+        ])
         self.assertTrue(all(
             action.isCheckable()
             for action in window.viewpoint_menu.actions()))
@@ -457,14 +477,22 @@ class CollisionEditorTests(unittest.TestCase):
             not action.isEnabled()
             for action in window.project_summary_menu.actions()))
 
-    def test_31_toolbar_is_simplified_and_has_view_preset(self):
+    def test_30a_add_collision_actions_switch_to_collision_tab(self):
         window = self._window()
-        toolbar = window.findChild(QToolBar, "collisionTools")
-        labels = [action.text() for action in toolbar.actions()]
-        for removed in (
-                "Select", "Move Sphere", "Scale Sphere", "Frame Model"):
-            self.assertNotIn(removed, labels)
-        self.assertIn("Add Legacy Radius", labels)
+        window.properties_tabs.setCurrentIndex(window.gun_points_tab_index)
+        window.add_vehicle_action.trigger()
+        self.assertEqual(
+            window.properties_tabs.currentIndex(), window.collision_tab_index)
+        window.properties_tabs.setCurrentIndex(window.fire_points_tab_index)
+        window.add_weapon_action.trigger()
+        self.assertEqual(
+            window.properties_tabs.currentIndex(), window.collision_tab_index)
+
+    def test_31_collision_editor_uses_single_toolbar_with_view_preset(self):
+        window = self._window()
+        self.assertIsNone(window.findChild(QToolBar, "collisionTools"))
+        toolbar = window.findChild(QToolBar, "modelPreviewScaleTools")
+        self.assertIsNotNone(toolbar)
         self.assertEqual(
             window.toolbar_view_preset_combo.count(), len(VIEW_PRESETS))
         self.assertIs(
@@ -597,22 +625,17 @@ class CollisionEditorTests(unittest.TestCase):
         self.assertLess(
             labels.index("Map Editor"), labels.index("Mapping Repair..."))
 
-    def test_39_toolbar_hides_file_import_actions_but_keeps_undo_redo(self):
+    def test_39_file_commands_are_not_repeated_in_a_collision_toolbar(self):
         window = self._window()
-        toolbar = window.findChild(QToolBar, "collisionTools")
-        labels = [action.text() for action in toolbar.actions()]
-        self.assertNotIn("Import BAS Archive", labels)
-        self.assertNotIn("Import SKLT", labels)
-        self.assertNotIn("Script Object", labels)
+        self.assertIsNone(window.findChild(QToolBar, "collisionTools"))
         file_labels = [
             action.text() for action in window.file_import_menu.actions()]
         self.assertIn("Import BAS Archive", file_labels)
         self.assertIn("Import SKLT", file_labels)
-        self.assertLess(labels.index("Reset View"), labels.index("Undo"))
-        self.assertLess(labels.index("Undo"), labels.index("Redo"))
         self.assertEqual(window.undo_action.iconText(), "< Undo")
         self.assertEqual(window.redo_action.iconText(), "Redo >")
-        self.assertIn("Reset Collisions", labels)
+        self.assertEqual(window.undo_button.text(), "Undo")
+        self.assertEqual(window.redo_button.text(), "Redo")
 
     def test_40_radius_list_and_export_are_whole_numbers(self):
         project = CollisionProject(
@@ -634,24 +657,25 @@ class CollisionEditorTests(unittest.TestCase):
         self.assertEqual(window.sphere_tree.topLevelItem(1).text(1), "78")
         self.assertEqual(window.radius_spin.decimals(), 0)
 
-    def test_41_reset_collisions_is_undoable_and_in_edit_menu(self):
+    def test_41_delete_all_collisions_is_undoable_and_not_in_edit_menu(self):
         window = self._window()
         window.add_legacy()
         window.add_compound(VEHICLE)
         with patch(
                 "collision_editor.QMessageBox.question",
                 return_value=QMessageBox.StandardButton.Yes):
-            window.reset_collisions()
+            window.delete_all_collisions()
         self.assertFalse(window.project.spheres())
         window.undo()
         self.assertEqual(len(window.project.spheres()), 2)
         edit_menu_action = window.menuBar().actions()[1]
         edit_labels = [
             action.text() for action in edit_menu_action.menu().actions()]
-        for label in (
-                "Undo", "Redo", "Duplicate Sphere", "Delete Sphere",
-                "Reset Collisions", "Add Vehicle Collision"):
-            self.assertIn(label, edit_labels)
+        self.assertEqual(edit_labels, ["Undo", "Redo"])
+        self.assertNotIn("Add Vehicle Collision", edit_labels)
+        self.assertIn(
+            "Add Vehicle Collision",
+            [action.text() for action in window.add_menu.actions()])
 
     def test_42_context_menu_reuses_full_toolbar_action_set(self):
         window = self._window()
@@ -662,7 +686,7 @@ class CollisionEditorTests(unittest.TestCase):
         for label in (
                 "Undo", "Redo", "Add Legacy Radius",
                 "Add Vehicle Collision", "Add Weapon Collision",
-                "Duplicate Sphere", "Delete Sphere", "Reset Collisions",
+                "Duplicate Sphere", "Delete Sphere", "Delete All Collisions",
                 "Reset View", "Import BAS Archive", "Import SKLT",
                 "View Preset"):
             self.assertIn(label, labels)
@@ -1047,20 +1071,15 @@ class CollisionEditorTests(unittest.TestCase):
     def test_70_change_type_and_mirror_use_explicit_submenus(self):
         window = self._window()
         window.add_compound(VEHICLE)
-        toolbar = window.findChild(QToolBar, "collisionTools")
-        buttons = {
-            button.text(): button for button in toolbar.findChildren(QToolButton)
-        }
-        self.assertIn("Change Sphere Type", buttons)
-        self.assertIn("Mirror Selected Sphere", buttons)
         change_labels = [
-            action.text() for action in
-            buttons["Change Sphere Type"].menu().actions()]
+            action.text() for action in window.change_type_button.menu().actions()]
         self.assertEqual(change_labels, [
             "Change to Legacy Radius",
             "Change to Vehicle Collision",
             "Change to Weapon Collision",
         ])
+        self.assertEqual(window.change_type_button.text(), "Change Sphere Type")
+        self.assertEqual(window.mirror_sphere_button.text(), "Mirror Selected Sphere")
         context = window._create_sphere_context_menu(0)
         submenus = {
             action.text(): action.menu() for action in context.actions()
@@ -1230,28 +1249,24 @@ class CollisionEditorTests(unittest.TestCase):
         window.overeof_spin.setValue(20.0)
         self.assertNotIn("0000", window.overeof_spin.text())
 
-    def test_83_output_actions_follow_scale_reset_on_toolbar(self):
+    def test_83_output_actions_live_only_in_file_menus(self):
         window = self._window()
-        toolbar = window.model_preview_scale_toolbar
-        actions = toolbar.actions()
-        reset_index = next(
-            index for index, action in enumerate(actions)
-            if toolbar.widgetForAction(action)
-            is window.reset_model_scale_button)
-        output_actions = (
-            window.create_suggested_action,
-            window.export_action,
-            window.copy_output_action,
-            window.import_action,
-            window.apply_script_action,
-        )
-        for action in output_actions:
-            self.assertIn(action, actions)
-            self.assertGreater(actions.index(action), reset_index)
+        self.assertIsNone(window.findChild(QToolBar, "collisionTools"))
+        self.assertIn(window.export_action, window.file_export_menu.actions())
+        self.assertIn(window.copy_output_action, window.file_export_menu.actions())
+        self.assertIn(window.import_action, window.file_import_menu.actions())
+        self.assertIn(window.apply_script_action, window.file_script_menu.actions())
+        self.assertEqual(window.create_suggested_button.text(),
+                         "Create Suggested Sphere")
+        for action in (
+                window.export_action, window.copy_output_action,
+                window.import_action, window.apply_script_action):
+            self.assertNotIn(
+                action, window.model_preview_scale_toolbar.actions())
         central_button_texts = {
             button.text() for button in
             window.centralWidget().findChildren(QPushButton)}
-        self.assertNotIn("Create Suggested Sphere", central_button_texts)
+        self.assertIn("Create Suggested Sphere", central_button_texts)
         self.assertNotIn("Export Collision Text", central_button_texts)
         self.assertNotIn("Copy Output to Clipboard", central_button_texts)
         self.assertNotIn("Import Collision Text", central_button_texts)
@@ -1387,6 +1402,31 @@ class CollisionEditorTests(unittest.TestCase):
         window._sync_all()
         self.assertTrue(window.fire_points_box.isHidden())
 
+
+    def test_89_fire_point_coordinates_share_one_row_and_range_is_marked(self):
+        window = self._window()
+        root_layout = window.fire_points_box.layout()
+        fire_grid = None
+        for index in range(root_layout.count()):
+            candidate = root_layout.itemAt(index).layout()
+            if isinstance(candidate, QGridLayout):
+                fire_grid = candidate
+                break
+        self.assertIsNotNone(fire_grid)
+
+        positions = {}
+        for axis, spin in window.fire_point_spins.items():
+            item_index = fire_grid.indexOf(spin)
+            row, column, _row_span, _column_span = (
+                fire_grid.getItemPosition(item_index))
+            positions[axis] = (row, column)
+        self.assertEqual(positions["x"][0], 0)
+        self.assertEqual(positions["y"][0], 0)
+        self.assertEqual(positions["z"][0], 0)
+        self.assertEqual(
+            window.fire_point_range_notice.text(),
+            "Weapons Min / Max range is an OpenNeoUA-only feature.")
+        self.assertIn("#d9a35f", window.fire_point_range_notice.styleSheet())
 
     def test_90_vehicle_model_reference_reads_vp_and_preview_scale(self):
         text = (
@@ -1631,10 +1671,7 @@ class CollisionEditorTests(unittest.TestCase):
         preset_index = widgets.index(window.toolbar_view_preset_combo)
         scale_index = widgets.index(window.model_scale_x_spin)
         self.assertLess(preset_index, scale_index)
-        collision_toolbar = window.findChild(QToolBar, "collisionTools")
-        self.assertNotIn(
-            window.toolbar_view_preset_combo,
-            collision_toolbar.findChildren(type(window.toolbar_view_preset_combo)))
+        self.assertIsNone(window.findChild(QToolBar, "collisionTools"))
 
     def test_95_fire_points_are_listed_and_selectable(self):
         window = self._window()
@@ -2001,7 +2038,7 @@ class CollisionEditorTests(unittest.TestCase):
              for index in range(window.properties_tabs.count())],
             ["Collision", "Fire Points", "Gun Points", "Cockpit View"])
 
-    def test_113_gun_point_type_selector_is_explicit_and_non_converting(self):
+    def test_113_gun_point_type_selector_converts_selected_point_and_output(self):
         window = self._window()
         combo = window.gun_point_type_combo
         self.assertEqual(combo.itemData(0), "robo")
@@ -2010,10 +2047,33 @@ class CollisionEditorTests(unittest.TestCase):
         self.assertIn("All vehicle classes", combo.itemText(1))
 
         window.project.gun_points_enabled = True
-        window.project.gun_points = [GunPoint(scheme="robo", name="FLAK1")]
+        window.project.unit_gun_default_icon = "default_icon.bmp"
+        window.project.gun_points = [
+            GunPoint(scheme="unit", dir_z=1, gun_type=90, name="FLAK1")]
         window._select_gun_point(0)
-        self.assertEqual(window._new_gun_point_scheme, "robo")
+        combo.setCurrentIndex(combo.findData("robo"))
+
         self.assertEqual(window.project.gun_points[0].scheme, "robo")
+        self.assertEqual(window._new_gun_point_scheme, "robo")
+        self.assertEqual(window.gun_point_tree.topLevelItem(0).text(1),
+                         "Vanilla")
+        self.assertIn("robo_*", window.gun_family_value.text())
+
+        output = export_collision_text(window.project)
+        self.assertIn("robo_num_guns = 1", output)
+        self.assertIn("robo_gun_type = 90", output)
+        self.assertNotIn("unit_num_guns", output)
+        self.assertNotIn("unit_gun_icon", output)
+
+    def test_113a_collision_add_buttons_match_sphere_colors(self):
+        window = self._window()
+        for button, category in (
+                (window.add_legacy_button, LEGACY),
+                (window.add_vehicle_collision_button, VEHICLE),
+                (window.add_weapon_collision_button, WEAPON)):
+            color = TYPE_COLORS[category]
+            expected = f"rgb({color.red()}, {color.green()}, {color.blue()})"
+            self.assertIn(expected, button.styleSheet())
 
 
     def test_114_cockpit_parser_reads_partial_axes_with_zero_fallback(self):
@@ -2460,7 +2520,7 @@ class CollisionEditorTests(unittest.TestCase):
         self.assertEqual(limits[91].source_kind, "new_vehicle")
         self.assertEqual(
             (limits[92].side, limits[92].up, limits[92].down),
-            (3200, 3200, 3200))
+            (3200, 1600, 1600))
 
     def test_127_turret_update_patches_referenced_vehicle_not_mount(self):
         text = (
@@ -2532,6 +2592,10 @@ class CollisionEditorTests(unittest.TestCase):
         self.assertEqual(window.reset_all_gun_points_button.text(), "Reset All")
         self.assertEqual(window.turret_limit_sliders["side"].maximum(), 3200)
         self.assertEqual(window.turret_limit_spins["side"].maximum(), 3200)
+        self.assertEqual(window.turret_limit_sliders["up"].maximum(), 1600)
+        self.assertEqual(window.turret_limit_spins["up"].maximum(), 1600)
+        self.assertEqual(window.turret_limit_sliders["down"].maximum(), 1600)
+        self.assertEqual(window.turret_limit_spins["down"].maximum(), 1600)
         self.assertFalse(window.gun_point_tree.rootIsDecorated())
         self.assertEqual(window.gun_point_tree.indentation(), 0)
         widths = [
@@ -2560,7 +2624,7 @@ class CollisionEditorTests(unittest.TestCase):
         self.assertEqual(window.viewport._turret_limits[1], (1.0, 0.0, 0.0))
 
         window.turret_limit_spins["up"].setValue(9999)
-        self.assertEqual(window.project.turret_limits[90].up, 3200)
+        self.assertEqual(window.project.turret_limits[90].up, 1600)
 
     def test_130_side_values_above_3100_render_as_full_rotation(self):
         grid = turret_limit_grid(
@@ -2603,6 +2667,274 @@ class CollisionEditorTests(unittest.TestCase):
         self.assertFalse(window.project.turret_limits[90].dirty)
         self.assertFalse(window.project.turret_limits[91].dirty)
 
+
+
+    def test_132_second_toolbar_has_tab_reset_reset_view_and_vanm_controls(self):
+        window = self._window()
+        toolbar = window.model_preview_scale_toolbar
+        widgets = [
+            toolbar.widgetForAction(action) for action in toolbar.actions()]
+        reset_index = widgets.index(window.reset_tab_button)
+        reset_view_index = widgets.index(window.toolbar_reset_view_button)
+        play_index = widgets.index(window.play_button)
+        step_index = widgets.index(window.step_button)
+        speed_index = widgets.index(window.speed_spin)
+        scale_index = widgets.index(window.model_scale_x_spin)
+        self.assertLess(reset_index, reset_view_index)
+        self.assertLess(reset_view_index, play_index)
+        self.assertLess(play_index, step_index)
+        self.assertLess(step_index, speed_index)
+        self.assertLess(speed_index, scale_index)
+        self.assertEqual(window.reset_tab_button.text(), "Reset")
+        self.assertEqual(window.toolbar_reset_view_button.text(), "Reset View")
+        self.assertEqual(window.play_button.text(), "Play")
+        self.assertEqual(window.step_button.text(), ">>")
+        self.assertEqual(window.speed_spin.value(), 1.0)
+
+    def test_132a_collision_tab_owns_sphere_editing_and_history_buttons(self):
+        window = self._window()
+        labels = {
+            button.text() for button in (
+                window.spheres_box.findChildren(QPushButton)
+                + window.spheres_box.findChildren(QToolButton))
+        }
+        for label in (
+                "Add Legacy Radius", "Add Vehicle Collision",
+                "Add Weapon Collision", "Duplicate Sphere", "Delete Sphere",
+                "Create Suggested Sphere", "Change Sphere Type",
+                "Mirror Selected Sphere", "Undo", "Redo",
+                "Delete All Collisions"):
+            self.assertIn(label, labels)
+        self.assertIsNone(window.findChild(QToolBar, "collisionTools"))
+
+    def test_133_reset_current_tab_keeps_other_workspace_changes(self):
+        window = self._window()
+        window.project.legacy = CollisionSphere(LEGACY, radius=10)
+        window.project.fire_points_enabled = True
+        window.project.fire_x = 12
+        window._capture_tab_reset_baseline()
+
+        window.project.legacy.radius = 99
+        window.project.fire_x = 77
+        window.properties_tabs.setCurrentIndex(window.collision_tab_index)
+        window._sync_all()
+        self.assertTrue(window.reset_tab_button.isEnabled())
+        with patch(
+                "collision_editor.editor.QMessageBox.question",
+                return_value=QMessageBox.StandardButton.Yes):
+            window._reset_current_tab()
+
+        self.assertEqual(window.project.legacy.radius, 10)
+        self.assertEqual(window.project.fire_x, 77)
+        window.undo()
+        self.assertEqual(window.project.legacy.radius, 99)
+
+    def test_134_source_context_is_red_and_reports_workspace(self):
+        window = self._window()
+        window._sync_all()
+        self.assertIn("#e06060", window.source_detail_label.styleSheet())
+        self.assertIn("Workspace: Collision", window.source_detail_label.text())
+        self.assertIn("Script link:", window.source_detail_label.text())
+        self.assertIn("VANM animation:", window.source_detail_label.text())
+
+
+    def test_135_host_station_export_updates_referenced_gun_vehicle(self):
+        text = (
+            "new_vehicle 56\n"
+            "    model = robo\n"
+            "    name = Resistance_Host_Station\n"
+            "    shield = 70\n"
+            "    robo_num_guns = 1\n"
+            "    robo_act_gun = 0\n"
+            "    robo_gun_pos_x = 0\n"
+            "    robo_gun_pos_y = -200\n"
+            "    robo_gun_pos_z = 55\n"
+            "    robo_gun_dir_x = 0\n"
+            "    robo_gun_dir_y = 0\n"
+            "    robo_gun_dir_z = 1\n"
+            "    robo_gun_type = 90\n"
+            "    robo_gun_name = Resistance_Hs_Flak_1\n"
+            "end\n\n"
+            "new_vehicle 90\n"
+            "    model = gun\n"
+            "    name = Resistance_Hs_Flak_1\n"
+            "    energy = 10000\n"
+            "    gun_side_angle = 2550\n"
+            "    gun_up_angle = 1500\n"
+            "    gun_down_angle = 1000\n"
+            "end\n"
+        )
+        carrier = find_script_blocks(text)[0]
+        _enabled, points, default_icon = import_gun_points_block(text, carrier)
+        limits = import_turret_limits(text)
+        self.assertEqual(points[0].gun_type, 90)
+        self.assertEqual(limits[90].source_name, "Resistance_Hs_Flak_1")
+
+        limits[90].side = 500
+        limits[90].dirty = True
+        project = CollisionProject(
+            name="Resistance_Host_Station",
+            source_model="VP_ROBO.sklt",
+            target_category=VEHICLE,
+            gun_points_enabled=True,
+            gun_points=points,
+            unit_gun_default_icon=default_icon,
+            turret_limits=limits,
+        )
+        updated, preview, name = plan_script_update(
+            text, "new_vehicle", 56, project, replace_all_managed=True)
+
+        self.assertEqual(name, "Resistance_Host_Station")
+        host_text, flak_text = updated.split("new_vehicle 90", 1)
+        self.assertIn("shield = 70", host_text)
+        self.assertIn("robo_gun_type = 90", host_text)
+        self.assertNotIn("gun_side_angle", host_text)
+        self.assertIn("name = Resistance_Hs_Flak_1", flak_text)
+        self.assertIn("energy = 10000", flak_text)
+        self.assertIn("gun_side_angle = 500", flak_text)
+        self.assertIn("gun_up_angle = 1500", flak_text)
+        self.assertIn("gun_down_angle = 1000", flak_text)
+        self.assertNotIn("gun_side_angle = 2550", updated)
+        self.assertIn("new_vehicle 90", preview)
+        self.assertIn("gun_side_angle = 500", preview)
+
+    def test_136_export_round_trip_preserves_unmanaged_data_and_updates_all_workspaces(self):
+        text = (
+            "; preserve header\r\n"
+            "new_vehicle 56\r\n"
+            "    name = Resistance_Host_Station\r\n"
+            "    mass = 10000\r\n"
+            "    radius = 200\r\n"
+            "    overeof = 150\r\n"
+            "    fire_x = 10\r\n"
+            "    fire_y = 20\r\n"
+            "    fire_z = 30\r\n"
+            "    num_weapons = 2\r\n"
+            "    cockpit_camera_offset_x = 1\r\n"
+            "    cockpit_camera_offset_y = 2\r\n"
+            "    cockpit_camera_offset_z = 3\r\n"
+            "    robo_num_guns = 1\r\n"
+            "    robo_act_gun = 0\r\n"
+            "    robo_gun_pos_x = 0\r\n"
+            "    robo_gun_pos_y = -200\r\n"
+            "    robo_gun_pos_z = 55\r\n"
+            "    robo_gun_dir_x = 0\r\n"
+            "    robo_gun_dir_y = 0\r\n"
+            "    robo_gun_dir_z = 1\r\n"
+            "    robo_gun_type = 90\r\n"
+            "    robo_gun_name = Resistance_Hs_Flak_1\r\n"
+            "    coll_num = 1\r\n"
+            "    coll_act = 0\r\n"
+            "    coll_x = 1\r\n"
+            "    coll_y = 2\r\n"
+            "    coll_z = 3\r\n"
+            "    coll_radius = 100\r\n"
+            "    begin_chain_fx\r\n"
+            "        offset_x = 999\r\n"
+            "    end\r\n"
+            "end\r\n"
+            "new_vehicle 90\r\n"
+            "    name = Resistance_Hs_Flak_1\r\n"
+            "    gun_side_angle = 2550\r\n"
+            "    gun_up_angle = 1500\r\n"
+            "    gun_down_angle = 1000\r\n"
+            "end\r\n"
+        )
+        limits = import_turret_limits(text)
+        limits[90].down = 777
+        limits[90].dirty = True
+        project = CollisionProject(
+            name="Resistance_Host_Station", source_model="VP_ROBO.sklt",
+            target_category=VEHICLE,
+            legacy=CollisionSphere(LEGACY, radius=222),
+            compound=[CollisionSphere(VEHICLE, 11, 12, 13, 144)],
+            overeof_enabled=True, overeof=175,
+            fire_points_enabled=True, fire_x=40, fire_y=50, fire_z=60,
+            num_weapons=3, num_weapons_max=5,
+            cockpit_camera_enabled=True,
+            cockpit_camera_offset_x=7, cockpit_camera_offset_y=8,
+            cockpit_camera_offset_z=9,
+            gun_points_enabled=True,
+            gun_points=[GunPoint(
+                scheme="robo", x=4, y=-210, z=65,
+                dir_x=1, dir_y=0, dir_z=0,
+                gun_type=90, name="Resistance_Hs_Flak_1")],
+            turret_limits=limits,
+        )
+        updated, _preview, _name = plan_script_update(
+            text, "new_vehicle", 56, project, replace_all_managed=True)
+
+        self.assertIn("\r\n", updated)
+        self.assertIn("mass = 10000", updated)
+        self.assertIn("begin_chain_fx\r\n        offset_x = 999\r\n    end", updated)
+        for expected in (
+                "radius = 222", "overeof = 175", "fire_x = 40",
+                "fire_y = 50", "fire_z = 60", "num_weapons = 3_5",
+                "cockpit_camera_offset_x = 7",
+                "cockpit_camera_offset_y = 8",
+                "cockpit_camera_offset_z = 9",
+                "robo_gun_pos_x = 4", "robo_gun_pos_y = -210",
+                "robo_gun_pos_z = 65", "robo_gun_dir_x = 1",
+                "robo_gun_dir_z = 0", "robo_gun_type = 90",
+                "coll_num = 1", "coll_x = 11", "coll_y = 12",
+                "coll_z = 13", "coll_radius = 144",
+                "gun_down_angle = 777"):
+            self.assertIn(expected, updated)
+
+    def test_137_vertical_turret_limits_clamp_to_1600_but_side_keeps_3200(self):
+        text = (
+            "new_vehicle 90\n"
+            " gun_side_angle = 9999\n"
+            " gun_up_angle = 9999\n"
+            " gun_down_angle = 9999\n"
+            "end\n"
+        )
+        limits = import_turret_limits(text)
+        self.assertEqual(
+            (limits[90].side, limits[90].up, limits[90].down),
+            (3200, 1600, 1600))
+        limits[90].dirty = True
+        rendered = export_collision_text(CollisionProject(
+            name="x", source_model="x.sklt", target_category=VEHICLE,
+            turret_limits=limits))
+        self.assertIn("gun_side_angle = 3200", rendered)
+        self.assertIn("gun_up_angle = 1600", rendered)
+        self.assertIn("gun_down_angle = 1600", rendered)
+
+    def test_138_last_modify_vehicle_angle_override_is_patched(self):
+        text = (
+            "new_vehicle 56\n"
+            " name = Carrier\n"
+            " unit_num_guns = 1\n"
+            " unit_act_gun = 0\n"
+            " unit_gun_type = 90\n"
+            "end\n"
+            "new_vehicle 90\n"
+            " name = Flak\n"
+            " gun_side_angle = 1000\n"
+            "end\n"
+            "modify_vehicle 90\n"
+            " gun_side_angle = 1400\n"
+            "end\n"
+            "modify_vehicle 90\n"
+            " gun_side_angle = 2000\n"
+            " gun_up_angle = 500\n"
+            "end\n"
+        )
+        limits = import_turret_limits(text)
+        self.assertEqual(limits[90].side, 2000)
+        self.assertEqual(limits[90].source_kind, "modify_vehicle")
+        limits[90].side = 500
+        limits[90].dirty = True
+        project = CollisionProject(
+            name="Carrier", source_model="carrier.sklt",
+            target_category=VEHICLE, gun_points_enabled=True,
+            gun_points=[GunPoint(gun_type=90)], turret_limits=limits)
+        updated, _preview, _name = plan_script_update(
+            text, "new_vehicle", 56, project)
+        self.assertEqual(updated.count("gun_side_angle = 1400"), 1)
+        self.assertEqual(updated.count("gun_side_angle = 500"), 1)
+        self.assertNotIn("gun_side_angle = 2000", updated)
 
 
 if __name__ == "__main__":
