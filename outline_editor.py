@@ -78,7 +78,7 @@ class OutlineCanvas(QWidget):
         self._selected_indices: set[int] = set()
         self._selected_edge: tuple[int, int] | None = None
         self._selected_edges: set[tuple[int, int]] = set()
-        self._message = "No editable vertex data in this file."
+        self._message = ""
         self._fixed_byte_space = False
         self._dragging_point = False
         self._panning = False
@@ -103,14 +103,6 @@ class OutlineCanvas(QWidget):
         self._box_select_current = QPointF()
         self._box_select_additive = False
         self._box_select_moved = False
-        self._tool_mode = "move"
-        self._transforming_selection = False
-        self._transform_moved = False
-        self._transform_start_screen = QPointF()
-        self._transform_start_points: dict[int, ProjectedPoint] = {}
-        self._transform_center: ProjectedPoint = (0.0, 0.0)
-        self._transform_start_angle = 0.0
-        self._transform_start_distance = 1.0
         self._auto_align_enabled = True
         self._snap_preview_pairs: list[tuple[ProjectedPoint, ProjectedPoint]] = []
         self._link_mode_active = False
@@ -146,7 +138,7 @@ class OutlineCanvas(QWidget):
             }
         if self._selected_edge is None and self._selected_edges:
             self._selected_edge = sorted(self._selected_edges)[0]
-        self._message = message or "No editable vertex data in this file."
+        self._message = message
         self._fixed_byte_space = fixed_byte_space
         if (
             self._view_bounds is None
@@ -191,9 +183,6 @@ class OutlineCanvas(QWidget):
         self._show_vertex_indices = enabled
         self.update()
 
-    def set_tool_mode(self, mode: str) -> None:
-        self._tool_mode = mode if mode in {"move", "rotate", "resize"} else "move"
-
     def set_auto_align_enabled(self, enabled: bool) -> None:
         self._auto_align_enabled = bool(enabled)
         if not self._auto_align_enabled:
@@ -215,6 +204,53 @@ class OutlineCanvas(QWidget):
             self._view_bounds_fixed = None
         self.update()
 
+    def set_empty_workspace_view(self) -> None:
+        """Use the neutral empty-wireframe framing without creating geometry.
+
+        Keeping explicit bounds here is important: if the empty workspace leaves
+        ``_view_bounds`` as ``None``, the first added vertex makes ``set_view``
+        auto-fit around that single point.  That looks like an unexpected zoom/
+        teleport even though the vertex itself was created at the clicked world
+        position.  Explicit neutral bounds let the first edit reuse the exact
+        same grid framing.
+        """
+        if self._fixed_byte_space:
+            return
+        self._view_bounds = (-100.0, 100.0, -100.0, 100.0)
+        self._view_bounds_fixed = False
+        self._zoom = 1.0
+        self._pan = QPointF(0.0, 0.0)
+        self.update()
+
+    def ensure_points_visible(self, indices: object, margin: float = 28.0) -> None:
+        """Keep newly-created vertices visible without reframing normal moves.
+
+        The canvas intentionally keeps its original view bounds while existing
+        vertices move, so editing does not make the whole wireframe jump around.
+        Structural additions are different: a new primitive can legitimately
+        fall outside those cached bounds.  Refit only when one of the supplied
+        new vertices is actually outside the usable viewport.
+        """
+        if not self._points or not isinstance(indices, (set, list, tuple)):
+            return
+        valid = [
+            index for index in indices
+            if isinstance(index, int) and 0 <= index < len(self._points)
+        ]
+        if not valid:
+            return
+
+        transform = self._make_transform()
+        visible = QRectF(
+            margin,
+            margin,
+            max(1.0, float(self.width()) - margin * 2.0),
+            max(1.0, float(self.height()) - margin * 2.0),
+        )
+        if all(visible.contains(self._to_screen(self._points[index], transform)) for index in valid):
+            return
+        self.reset_view(fit_content=True)
+
     def view_center_world(self) -> ProjectedPoint:
         if not self._points:
             return (0.0, 0.0)
@@ -225,17 +261,18 @@ class OutlineCanvas(QWidget):
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
         painter.fillRect(self.rect(), QColor(24, 26, 31))
 
-        if self._points:
-            transform = self._make_transform()
-            self._draw_grid(painter, transform)
+        # The grid is the editing workspace itself, so keep it visible even
+        # when the current wireframe contains no vertices yet.
+        transform = self._make_transform()
+        self._draw_grid(painter, transform)
 
         if not self._points:
-            painter.setPen(QColor(180, 185, 192))
-            painter.drawText(self.rect(), Qt.AlignmentFlag.AlignCenter, self._message)
+            if self._message:
+                painter.setPen(QColor(180, 185, 192))
+                painter.drawText(self.rect(), Qt.AlignmentFlag.AlignCenter, self._message)
             painter.end()
             return
 
-        transform = self._make_transform()
         normal_pen = QPen(QColor(100, 210, 255), 1.5)
         selected_pen = QPen(QColor(245, 245, 245), 2.5)
 
@@ -378,43 +415,6 @@ class OutlineCanvas(QWidget):
             index = self._nearest_point(event.position())
             edge = self._nearest_line(event.position()) if index < 0 else None
 
-            if self._tool_mode in {"rotate", "resize"}:
-                # In transform modes, right-drag acts on the element under the cursor.
-                # This prevents stale selections from transforming a different part of the model.
-                if index >= 0 and index not in self._selected_indices:
-                    self._selected_indices = {index}
-                    self._selected_edges.clear()
-                    self._selected_index = index
-                    self._selected_edge = None
-                    self.pointSelectionRequested.emit(index, False)
-                elif edge is not None:
-                    edge_key = _edge_key(*edge)
-                    if edge_key not in self._selected_edges:
-                        self._selected_index = -1
-                        self._selected_indices.clear()
-                        self._selected_edge = edge_key
-                        self._selected_edges = {edge_key}
-                        self.lineSelectionRequested.emit(edge_key[0], edge_key[1], False)
-
-                if self._drag_indices_for_selection():
-                    self._transforming_selection = True
-                    self._transform_moved = False
-                    self._transform_start_screen = event.position()
-                    self._transform_start_points = {
-                        point_index: self._points[point_index]
-                        for point_index in self._drag_indices_for_selection()
-                        if 0 <= point_index < len(self._points)
-                    }
-                    self._transform_center = _points_center(list(self._transform_start_points.values()))
-                    start_world = self._from_screen(event.position())
-                    rel_x = start_world[0] - self._transform_center[0]
-                    rel_y = start_world[1] - self._transform_center[1]
-                    self._transform_start_angle = math.atan2(rel_y, rel_x) if abs(rel_x) + abs(rel_y) > 0.000001 else 0.0
-                    self._transform_start_distance = max(0.000001, math.hypot(rel_x, rel_y))
-                    self._drag_start_indices = sorted(self._transform_start_points)
-                    event.accept()
-                    return
-
             if index >= 0:
                 if index not in self._selected_indices:
                     self._selected_indices = {index}
@@ -448,9 +448,11 @@ class OutlineCanvas(QWidget):
             self._pending_empty_context_menu = True
             self._last_pan_pos = event.position()
             self._empty_context_screen = event.position()
-            self._empty_context_world = (
-                self._from_screen(event.position()) if self._points else (0.0, 0.0)
-            )
+            # Context-menu placement must use the clicked world position even
+            # for a brand-new empty wireframe.  The empty canvas already has a
+            # neutral transform, so forcing (0, 0) here made the first
+            # "Vertex Here" appear at the origin regardless of the click.
+            self._empty_context_world = self._from_screen(event.position())
             self._empty_context_global = event.globalPosition().toPoint()
             event.accept()
             return
@@ -473,16 +475,6 @@ class OutlineCanvas(QWidget):
             if (self._box_select_current - self._box_select_start).manhattanLength() > 4.0:
                 self._box_select_moved = True
             self.update()
-            event.accept()
-            return
-
-        if self._transforming_selection:
-            positions = self._transform_positions_from_screen(event.position())
-            if (event.position() - self._transform_start_screen).manhattanLength() > 4.0:
-                self._transform_moved = True
-            if positions:
-                self._update_snap_preview(positions)
-                self.pointsMoved.emit(positions, False)
             event.accept()
             return
 
@@ -533,24 +525,6 @@ class OutlineCanvas(QWidget):
             event.accept()
             return
 
-        if event.button() == Qt.MouseButton.RightButton and self._transforming_selection:
-            positions = self._transform_positions_from_screen(event.position())
-            was_moved = self._transform_moved
-            if positions and was_moved:
-                self.pointsMoved.emit(positions, True)
-            self._transforming_selection = False
-            self._transform_moved = False
-            self._transform_start_points.clear()
-            self._drag_start_indices = []
-            self._snap_preview_pairs.clear()
-            self.setCursor(Qt.CursorShape.ArrowCursor)
-            self.update()
-            if not was_moved:
-                x_value, z_value = self._from_screen(event.position())
-                self.selectionContextMenuRequested.emit(x_value, z_value, event.globalPosition().toPoint())
-            event.accept()
-            return
-
         if event.button() == Qt.MouseButton.RightButton and self._panning:
             self._panning = False
             if self._pending_empty_context_menu:
@@ -566,14 +540,14 @@ class OutlineCanvas(QWidget):
 
     def wheelEvent(self, event: QWheelEvent) -> None:  # noqa: N802 - Qt override
         if (
-            not self._points
-            or self._dragging_point
-            or self._transforming_selection
+            self._dragging_point
             or self._box_selecting
             or self._panning
         ):
             # Trackpads can emit wheel events while a button is held. Never
             # let that change the view while the user is manipulating geometry.
+            # An empty New session is still a real editable workspace, though,
+            # so wheel zoom must work before the first vertex exists.
             event.accept()
             return
 
@@ -725,72 +699,6 @@ class OutlineCanvas(QWidget):
                 moved[index] = (x, y)
         return moved
 
-    def _transform_positions_from_screen(self, screen_pos: QPointF) -> dict[int, ProjectedPoint]:
-        if not self._transform_start_points:
-            return {}
-        center_x, center_y = self._transform_center
-        moved: dict[int, ProjectedPoint] = {}
-        current_world = self._from_screen(screen_pos)
-        rel_x = current_world[0] - center_x
-        rel_y = current_world[1] - center_y
-        current_distance = max(0.000001, math.hypot(rel_x, rel_y))
-
-        if self._tool_mode == "rotate":
-            current_angle = math.atan2(rel_y, rel_x) if abs(rel_x) + abs(rel_y) > 0.000001 else self._transform_start_angle
-            angle = current_angle - self._transform_start_angle
-            # Do not live-snap rotation: even gentle angle correction feels
-            # jittery/spastic during right-drag on irregular wireframes.
-            self._drag_snap_message = ""
-            cos_a = math.cos(angle)
-            sin_a = math.sin(angle)
-            for index, start_point in self._transform_start_points.items():
-                point_rel_x = start_point[0] - center_x
-                point_rel_y = start_point[1] - center_y
-                moved[index] = (
-                    center_x + point_rel_x * cos_a - point_rel_y * sin_a,
-                    center_y + point_rel_x * sin_a + point_rel_y * cos_a,
-                )
-        elif self._tool_mode == "resize":
-            # Screen-drag resize is more predictable than radial-distance resize:
-            # drag right/up to grow, left/down to shrink. It works even if the
-            # drag starts close to the transform center.
-            screen_delta = screen_pos - self._transform_start_screen
-            drag_amount = (screen_delta.x() - screen_delta.y()) / 180.0
-            factor = max(0.05, min(25.0, 2.0 ** drag_amount))
-            if self._auto_align_enabled:
-                factor = self._snap_resize_factor(factor)
-            for index, start_point in self._transform_start_points.items():
-                moved[index] = (
-                    center_x + (start_point[0] - center_x) * factor,
-                    center_y + (start_point[1] - center_y) * factor,
-                )
-        return moved
-
-    def _snap_rotation_angle(self, angle: float) -> float:
-        # Gentle rotation snap only near clean right angles.  The previous 15°
-        # snap was too aggressive and made right-drag rotation feel jittery.
-        snap_step = math.radians(90.0)
-        snap_threshold = math.radians(1.5)
-        snapped = round(angle / snap_step) * snap_step
-        if abs(angle - snapped) <= snap_threshold:
-            self._drag_snap_message = f"Auto Align: rotate {math.degrees(snapped):.0f}°"
-            return snapped
-        self._drag_snap_message = ""
-        return angle
-
-    def _snap_resize_factor(self, factor: float) -> float:
-        if factor <= 0.0:
-            return factor
-        # Gentle resize snap points. This helps make duplicated primitives feel
-        # hand-editable without forcing every scale movement onto a grid.
-        candidates = [0.25, 0.5, 0.75, 1.0, 1.25, 1.5, 2.0, 3.0, 4.0]
-        nearest = min(candidates, key=lambda value: abs(value - factor))
-        if abs(nearest - factor) <= max(0.04, nearest * 0.035):
-            self._drag_snap_message = f"Auto Align: resize {nearest:.2g}x"
-            return nearest
-        self._drag_snap_message = ""
-        return factor
-
     def _draw_grid(self, painter: QPainter, transform: tuple[QRectF, float, float, float, float, float]) -> None:
         rect, scale, min_x, min_y, offset_x, offset_y = transform
         viewport = QRectF(0.0, 0.0, float(self.width()), float(self.height()))
@@ -861,26 +769,15 @@ class OutlineCanvas(QWidget):
         if not stable_indices:
             self.update()
             return
-        xs = [point[0] for point in self._points]
-        ys = [point[1] for point in self._points]
-        extent = max(max(xs) - min(xs), max(ys) - min(ys), 1.0)
-        point_threshold = max(8.0, extent * 0.018)
-        point_threshold_sq = point_threshold * point_threshold
-        line_threshold = max(8.0, extent * 0.018)
+        transform = self._make_transform()
+        scale = max(abs(transform[1]), 1.0e-9)
+        # Screen-space sensitivity stays stable when model extents change.
+        line_threshold = 10.0 / scale
         edges = self._iter_edges()
         preview_pairs: set[tuple[ProjectedPoint, ProjectedPoint]] = set()
         for index, point in moved_positions.items():
             if not (0 <= index < len(self._points)):
                 continue
-            nearest = min(
-                stable_indices,
-                key=lambda candidate: (self._points[candidate][0] - point[0]) ** 2
-                + (self._points[candidate][1] - point[1]) ** 2,
-            )
-            target = self._points[nearest]
-            distance_sq = (target[0] - point[0]) ** 2 + (target[1] - point[1]) ** 2
-            if distance_sq <= point_threshold_sq:
-                preview_pairs.add((point, target))
 
             x_candidates, z_candidates = _axis_aligned_line_snap_candidates(
                 self._points, edges, moved_indices, point, line_threshold
@@ -932,7 +829,11 @@ class OutlineCanvas(QWidget):
                 self._points, self._fixed_byte_space)
             self._view_bounds_fixed = self._fixed_byte_space
         if self._view_bounds is None:
-            min_x, max_x, min_y, max_y = 0.0, 1.0, 0.0, 1.0
+            if self._fixed_byte_space:
+                min_x, max_x, min_y, max_y = 0.0, 255.0, 0.0, 255.0
+            else:
+                # Neutral empty-wireframe workspace with the origin centered.
+                min_x, max_x, min_y, max_y = -100.0, 100.0, -100.0, 100.0
         else:
             min_x, max_x, min_y, max_y = self._view_bounds
 
@@ -990,7 +891,6 @@ class OutlineEditor(QWidget):
         self._drag_start_state: EditorState | None = None
         self._link_start_index = -1
         self._last_auto_align_message = ""
-        self._transform_mode = "move"
         self._syncing_controls = False
 
         self.canvas = OutlineCanvas()
@@ -1090,6 +990,18 @@ class OutlineEditor(QWidget):
         return bool(self._redo_stack)
 
     @property
+    def can_reset(self) -> bool:
+        if self._loaded_state is None:
+            return False
+        loaded_signature = (
+            self._loaded_state.mode,
+            self._loaded_state.points_2d,
+            self._loaded_state.points_3d,
+            self._loaded_state.groups,
+        )
+        return self._current_signature() != loaded_signature
+
+    @property
     def selected_index(self) -> int:
         return self._selected_index
 
@@ -1110,20 +1022,22 @@ class OutlineEditor(QWidget):
         return len(self._selected_edges)
 
     @property
+    def selected_vertex_indices(self) -> tuple[int, ...]:
+        """Selected vertex IDs in stable display order."""
+        return tuple(sorted(self._selected_indices))
+
+    @property
+    def selected_edges(self) -> tuple[tuple[int, int], ...]:
+        """Selected connection endpoint IDs in stable display order."""
+        return tuple(sorted(self._selected_edges))
+
+    @property
     def has_clipboard(self) -> bool:
         return self._clipboard is not None and bool(self._clipboard.points)
 
     @property
-    def transform_mode(self) -> str:
-        return self._transform_mode
-
-    @property
     def has_any_selection(self) -> bool:
         return bool(self._selected_indices or self._selected_edges)
-
-    @property
-    def can_transform_selection(self) -> bool:
-        return self._mode == "poo2" and self.has_any_selection
 
     @property
     def uses_projected_hud_mode(self) -> bool:
@@ -1168,7 +1082,9 @@ class OutlineEditor(QWidget):
             self._groups = [list(group) for group in model.outline_groups]
             self._selected_index = 0 if self._points_2d else -1
             self._selected_indices = {self._selected_index} if self._selected_index >= 0 else set()
-        elif model.points and model.poo2_payload_offset is not None and model.pol2_payload_offset is not None:
+        elif model.poo2_payload_offset is not None and model.pol2_payload_offset is not None:
+            # Empty POO2/POL2 is a valid editable New document.  Do not require
+            # a synthetic origin vertex just to enter wireframe edit mode.
             self._mode = "poo2"
             self._groups = [list(group) for group in model.polygons]
             self._selected_index = 0 if self._points_3d else -1
@@ -1190,17 +1106,9 @@ class OutlineEditor(QWidget):
         self.mark_clean()
         self.canvas.reset_view(fit_content=False)
         self._refresh_canvas()
+        if self._mode == "poo2" and not self._points_3d:
+            self.canvas.set_empty_workspace_view()
         self._update_controls()
-
-    def set_transform_mode(self, mode: str) -> None:
-        self._transform_mode = mode if mode in {"move", "rotate", "resize"} else "move"
-        self.canvas.set_tool_mode(self._transform_mode)
-        self._last_auto_align_message = (
-            "Move mode" if self._transform_mode == "move"
-            else f"{self._transform_mode.capitalize()} mode: hold right mouse and drag selection"
-        )
-        self._update_controls()
-        self.undoRedoChanged.emit()
 
     def prepare_selection_drag(self) -> None:
         # Dragging is intentionally simple again: selected vertices/link endpoints
@@ -1409,7 +1317,7 @@ class OutlineEditor(QWidget):
             self._drag_start_state = self._snapshot()
 
         self._selected_link = sorted(self._selected_edges)[0] if self._selected_edges else None
-        if self._mode == "poo2" and self._transform_mode == "move":
+        if self._mode == "poo2":
             valid_positions = self._snap_moved_group_center_to_origin(valid_positions)
 
         use_single_vertex_snap = len(valid_positions) == 1 and self._mode == "poo2"
@@ -1431,10 +1339,6 @@ class OutlineEditor(QWidget):
                 new_point = (coords[0], coords[1], coords[2])
                 if self._points_3d[index] != new_point:
                     self._points_3d[index] = new_point
-
-        if commit_undo:
-            self._auto_snap_and_link_moved_vertices(set(valid_positions))
-            self._merge_overlapping_vertices()
 
         if self._selected_indices:
             self._selected_index = sorted(self._selected_indices)[0]
@@ -1459,23 +1363,9 @@ class OutlineEditor(QWidget):
             return positions
         center_x = sum(point[0] for point in positions.values()) / len(positions)
         center_z = sum(point[1] for point in positions.values()) / len(positions)
-        selection_extent = max(
-            max((point[0] for point in positions.values()), default=0.0)
-            - min((point[0] for point in positions.values()), default=0.0),
-            max((point[1] for point in positions.values()), default=0.0)
-            - min((point[1] for point in positions.values()), default=0.0),
-            1.0,
-        )
-        all_projected = self._projected_points()
-        if all_projected:
-            scene_extent = max(
-                max(point[0] for point in all_projected) - min(point[0] for point in all_projected),
-                max(point[1] for point in all_projected) - min(point[1] for point in all_projected),
-                1.0,
-            )
-        else:
-            scene_extent = selection_extent
-        threshold = max(12.0, min(scene_extent * 0.025, selection_extent * 0.25 + 8.0))
+        transform = self.canvas._make_transform()
+        scale = max(abs(transform[1]), 1.0e-9)
+        threshold = 12.0 / scale
         if math.hypot(center_x, center_z) > threshold:
             return positions
         self._last_auto_align_message = "Auto Align: centered selection on origin"
@@ -1483,60 +1373,6 @@ class OutlineEditor(QWidget):
             index: (point[0] - center_x, point[1] - center_z)
             for index, point in positions.items()
         }
-
-    def _auto_snap_and_link_moved_vertices(self, moved_indices: set[int]) -> None:
-        if (
-            self._mode != "poo2"
-            or not self.auto_align_check.isChecked()
-            or not moved_indices
-            or not self._points_3d
-        ):
-            return
-
-        projected = self._projected_points()
-        xs = [point[0] for point in projected]
-        zs = [point[1] for point in projected]
-        extent = max(max(xs) - min(xs), max(zs) - min(zs), 1.0)
-        snap_threshold = max(8.0, extent * 0.018)
-        created_links = 0
-        snapped = 0
-
-        stable_indices = [
-            index for index in range(len(projected))
-            if index not in moved_indices
-        ]
-        if not stable_indices:
-            return
-
-        for index in sorted(moved_indices):
-            if not (0 <= index < len(self._points_3d)):
-                continue
-            point = projected[index]
-            nearest = min(
-                stable_indices,
-                key=lambda candidate: (projected[candidate][0] - point[0]) ** 2
-                + (projected[candidate][1] - point[1]) ** 2,
-            )
-            target = projected[nearest]
-            distance_sq = (target[0] - point[0]) ** 2 + (target[1] - point[1]) ** 2
-            if distance_sq > snap_threshold * snap_threshold:
-                continue
-
-            coords = list(self._points_3d[index])
-            coords[HUD_PROJECTION_AXES[0]] = target[0]
-            coords[HUD_PROJECTION_AXES[1]] = target[1]
-            self._points_3d[index] = (coords[0], coords[1], coords[2])
-            snapped += 1
-            if index != nearest and not self._has_edge(index, nearest):
-                self._groups.append([index, nearest])
-                self._selected_edges.add(_edge_key(index, nearest))
-                created_links += 1
-
-        if snapped:
-            self._last_auto_align_message = (
-                f"Auto Align: snapped {snapped} vertex/vertices"
-                + (f", created {created_links} link(s)" if created_links else "")
-            )
 
     def _merge_overlapping_vertices(self, tolerance: float = 0.0001) -> None:
         """Collapse truly overlapping projected POO2 vertices into one vertex.
@@ -1686,6 +1522,7 @@ class OutlineEditor(QWidget):
         self._last_auto_align_message = f"Added {shape}"
         self._push_history(before, self._snapshot())
         self._after_edit()
+        self.canvas.ensure_points_visible(new_indices)
         self.selectionChanged.emit(self._selected_index)
 
     def _add_poo2_point(self, point: EditablePoint) -> None:
@@ -1698,6 +1535,9 @@ class OutlineEditor(QWidget):
         self._selected_indices = {self._selected_index}
         self._push_history(before, self._snapshot())
         self._after_edit()
+        # Adding a single vertex is a local edit, never a camera command.
+        # In particular, the first "Vertex Here" in a New document must keep
+        # the empty grid framing exactly as the user saw it before the click.
 
     def delete_selected_point(self) -> None:
         self.delete_selection(confirm=False)
@@ -1755,22 +1595,16 @@ class OutlineEditor(QWidget):
         self._groups = remapped_groups
 
     def _delete_edges(self, edges: set[tuple[int, int]]) -> tuple[int, int]:
-        endpoint_candidates: set[int] = set()
         removed_count = 0
         for first, second in sorted(edges):
             if self._has_edge(first, second):
-                endpoint_candidates.update((first, second))
                 self._remove_edge_from_groups(first, second)
                 removed_count += 1
 
-        # Delete only endpoints that became truly orphaned because of this link
-        # deletion. Shared vertices stay intact, so neighbouring geometry is not
-        # damaged when a single line or polygon edge is removed.
-        referenced_vertices = {index for group in self._groups for index in group}
-        orphaned_vertices = endpoint_candidates - referenced_vertices
-        if orphaned_vertices:
-            self._delete_vertices(orphaned_vertices)
-        return removed_count, len(orphaned_vertices)
+        # Deleting a connection must never delete its vertices implicitly.
+        # Standalone vertices are valid editable data and may be linked again
+        # later; removing them here made link editing look destructive/random.
+        return removed_count, 0
 
     def start_link(self) -> None:
         if (
@@ -1888,6 +1722,18 @@ class OutlineEditor(QWidget):
     def _auto_align_projected_vertex(
         self, index: int, first_axis_value: float, second_axis_value: float
     ) -> tuple[float, float]:
+        """Magnetically snap a vertex without ever rewriting topology.
+
+        Point targets are strongest: when the cursor enters the screen-space
+        magnet radius of another vertex (or the grid origin), Auto Align tries
+        to snap both projected axes together.  Outside that radius each axis
+        may still snap independently to any stable vertex or aligned edge.
+
+        A connected endpoint is the one safety exception: Auto Align may align
+        both axes toward it, but the final zero-length guard releases one axis
+        if the result would collapse a live connection.  IDs and links are
+        never merged, deleted or remapped by snapping.
+        """
         if (
             self._mode != "poo2"
             or not self.auto_align_check.isChecked()
@@ -1897,22 +1743,49 @@ class OutlineEditor(QWidget):
             return first_axis_value, second_axis_value
 
         projected = self._projected_points()
-        xs = [point[0] for point in projected]
-        zs = [point[1] for point in projected]
-        extent = max(max(xs) - min(xs), max(zs) - min(zs), 1.0)
-        vertex_snap_threshold = max(4.0, extent * 0.012)
-        line_snap_threshold = max(8.0, extent * 0.018)
+        transform = self.canvas._make_transform()
+        scale = max(abs(transform[1]), 1.0e-9)
 
+        # Keep the magnetic feel stable in screen space, independent of model
+        # dimensions or current zoom.  Point snapping is intentionally a touch
+        # stronger than line snapping.
+        point_snap_threshold = 14.0 / scale
+        axis_snap_threshold = 12.0 / scale
+        line_snap_threshold = 10.0 / scale
+
+        connected_vertices = set(self._connected_vertices(index))
+        point_candidates: list[tuple[float, float, float, str]] = []
         x_candidates: list[tuple[float, float, str]] = []
         z_candidates: list[tuple[float, float, str]] = []
-        for candidate in self._connected_vertices(index):
-            x_value, z_value = projected[candidate]
+
+        # The visible grid origin is a real magnetic point, not a fake vertex.
+        origin_distance = math.hypot(first_axis_value, second_axis_value)
+        if origin_distance <= point_snap_threshold:
+            point_candidates.append((origin_distance, 0.0, 0.0, "origin"))
+        else:
+            if abs(first_axis_value) <= axis_snap_threshold:
+                x_candidates.append((abs(first_axis_value), 0.0, "origin"))
+            if abs(second_axis_value) <= axis_snap_threshold:
+                z_candidates.append((abs(second_axis_value), 0.0, "origin"))
+
+        # Every stable vertex can act as a magnet, not only already-connected
+        # endpoints.  Close 2D targets pull on both X and Z together; otherwise
+        # either axis can align independently.
+        for candidate, (x_value, z_value) in enumerate(projected):
+            if candidate == index:
+                continue
             x_distance = abs(x_value - first_axis_value)
             z_distance = abs(z_value - second_axis_value)
-            if x_distance <= vertex_snap_threshold:
-                x_candidates.append((x_distance, x_value, f"v{candidate}"))
-            if z_distance <= vertex_snap_threshold:
-                z_candidates.append((z_distance, z_value, f"v{candidate}"))
+            point_distance = math.hypot(x_distance, z_distance)
+            if point_distance <= point_snap_threshold:
+                point_candidates.append(
+                    (point_distance, x_value, z_value, f"v{candidate}")
+                )
+            else:
+                if x_distance <= axis_snap_threshold:
+                    x_candidates.append((x_distance, x_value, f"v{candidate}"))
+                if z_distance <= axis_snap_threshold:
+                    z_candidates.append((z_distance, z_value, f"v{candidate}"))
 
         line_x_candidates, line_z_candidates = _axis_aligned_line_snap_candidates(
             projected,
@@ -1936,14 +1809,54 @@ class OutlineEditor(QWidget):
         snapped_z = second_axis_value
         message_parts: list[str] = []
 
-        if x_candidates:
-            _distance, value, label = min(x_candidates, key=lambda item: item[0])
-            snapped_x = value
-            message_parts.append(f"X→{label}")
-        if z_candidates:
-            _distance, value, label = min(z_candidates, key=lambda item: item[0])
-            snapped_z = value
-            message_parts.append(f"Z→{label}")
+        if point_candidates:
+            _distance, target_x, target_z, label = min(
+                point_candidates, key=lambda item: item[0]
+            )
+            snapped_x = target_x
+            snapped_z = target_z
+            message_parts.extend((f"X→{label}", f"Z→{label}"))
+        else:
+            if x_candidates:
+                _distance, value, label = min(x_candidates, key=lambda item: item[0])
+                snapped_x = value
+                message_parts.append(f"X→{label}")
+            if z_candidates:
+                _distance, value, label = min(z_candidates, key=lambda item: item[0])
+                snapped_z = value
+                message_parts.append(f"Z→{label}")
+
+        # Auto Align must never collapse a live connection to zero length.
+        # Preserve the strongest axis and release the other one when a magnetic
+        # two-axis snap lands exactly on a connected endpoint.
+        for candidate in connected_vertices:
+            target_x, target_z = projected[candidate]
+            if abs(snapped_x - target_x) > 1.0e-6 or abs(snapped_z - target_z) > 1.0e-6:
+                continue
+            x_was_snapped = abs(snapped_x - first_axis_value) > 1.0e-6
+            z_was_snapped = abs(snapped_z - second_axis_value) > 1.0e-6
+            if x_was_snapped and z_was_snapped:
+                # Keep the axis requiring the smaller correction: it feels like
+                # the stronger magnetic alignment while keeping the link visible.
+                x_delta = abs(target_x - first_axis_value)
+                z_delta = abs(target_z - second_axis_value)
+                if x_delta <= z_delta:
+                    snapped_z = second_axis_value
+                    message_parts = [
+                        part for part in message_parts if not part.startswith("Z→")
+                    ]
+                else:
+                    snapped_x = first_axis_value
+                    message_parts = [
+                        part for part in message_parts if not part.startswith("X→")
+                    ]
+            elif x_was_snapped:
+                snapped_x = first_axis_value
+                message_parts = [part for part in message_parts if not part.startswith("X→")]
+            elif z_was_snapped:
+                snapped_z = second_axis_value
+                message_parts = [part for part in message_parts if not part.startswith("Z→")]
+            break
 
         self._last_auto_align_message = (
             "Auto Align: " + ", ".join(message_parts) if message_parts else ""
@@ -2053,6 +1966,7 @@ class OutlineEditor(QWidget):
         self._last_auto_align_message = f"Pasted {len(new_indices)} vertex/vertices"
         self._push_history(before, self._snapshot())
         self._after_edit()
+        self.canvas.ensure_points_visible(new_indices)
         self.selectionChanged.emit(self._selected_index)
 
     def _selected_vertices_explicit_only(self) -> set[int]:
@@ -2066,21 +1980,6 @@ class OutlineEditor(QWidget):
             if 0 <= second < len(self._points_3d):
                 vertices.add(second)
         return sorted(vertices)
-
-    def _add_transform_actions_to_menu(self, menu: QMenu) -> tuple[object, object]:
-        rotate_action = menu.addAction("Rotate")
-        resize_action = menu.addAction("Resize")
-        return rotate_action, resize_action
-
-    def _handle_transform_menu_action(self, chosen: object, actions: tuple[object, object]) -> bool:
-        rotate_action, resize_action = actions
-        if chosen == rotate_action:
-            self.set_transform_mode("rotate")
-            return True
-        if chosen == resize_action:
-            self.set_transform_mode("resize")
-            return True
-        return False
 
     def _add_add_actions_to_menu(self, menu: QMenu) -> tuple[object, object, object, object, object]:
         add_menu = menu.addMenu("Add")
@@ -2271,6 +2170,7 @@ class OutlineEditor(QWidget):
         menu.addSeparator()
         add_actions = self._add_add_actions_to_menu(menu)
         reset_action = menu.addAction("Reset")
+        reset_action.setEnabled(self.can_reset)
         menu.addSeparator()
         cancel_action = menu.addAction("Cancel")
 
@@ -2306,6 +2206,8 @@ class OutlineEditor(QWidget):
             self._restore_state(self._loaded_state)
             self._after_edit()
         self.canvas.reset_view()
+        if self._mode == "poo2" and not self._points_3d:
+            self.canvas.set_empty_workspace_view()
         self.resetApplied.emit()
 
     def mark_clean(self) -> None:
@@ -2414,7 +2316,7 @@ class OutlineEditor(QWidget):
                 [],
                 [],
                 -1,
-                "No OTL2/OLPL or POO2/POL2 vertex data available.",
+                "",
                 False,
                 None,
                 set(),
@@ -2495,6 +2397,7 @@ class OutlineEditor(QWidget):
         self.delete_point_button.setEnabled(can_edit_structure and has_any_selection)
         self.undo_button.setEnabled(self.can_undo)
         self.redo_button.setEnabled(self.can_redo)
+        self.reset_button.setEnabled(self.can_reset)
         self._syncing_controls = False
 
     def _has_edge(self, first: int, second: int) -> bool:
