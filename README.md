@@ -2,7 +2,8 @@
 
 OpenNeoUA Studio (technical project name: `OpenNeoUAStudio`) is an independent,
 community-developed editing workbench for OpenNeoUA and Microsoft Urban Assault
-(1998). 
+(1998). It is derived from the `UA_source`/OpenUA tool lineage without hiding
+that provenance.
 
 The project brings together tools and workflows for inspecting, editing, converting, and creating compatible game data.
 
