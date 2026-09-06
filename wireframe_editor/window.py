@@ -10,9 +10,10 @@ from pathlib import Path
 import sys
 
 from PySide6.QtCore import Qt
-from PySide6.QtGui import QAction, QActionGroup, QKeySequence
+from PySide6.QtGui import QAction, QKeySequence
 from PySide6.QtWidgets import (
     QApplication,
+    QAbstractItemView,
     QCheckBox,
     QFileDialog,
     QFormLayout,
@@ -23,6 +24,7 @@ from PySide6.QtWidgets import (
     QMainWindow,
     QMessageBox,
     QSplitter,
+    QSizePolicy,
     QToolBar,
     QVBoxLayout,
     QWidget,
@@ -70,12 +72,12 @@ class WireframeEditorWindow(QMainWindow):
         self.sensors_value = QLabel("0")
         self.outline_lines_value = QLabel("0")
         self.selection_value = QLabel("No selection")
+        self.selected_elements_list = QListWidget()
         self.status_value = QLabel("Ready to import a file")
         self.warning_status_label = QLabel("No warnings")
         self.warning_list = QListWidget()
         self.new_action: QAction | None = None
         self.save_action: QAction | None = None
-        self.save_as_action: QAction | None = None
         self.undo_action: QAction | None = None
         self.redo_action: QAction | None = None
         self.copy_action: QAction | None = None
@@ -88,8 +90,6 @@ class WireframeEditorWindow(QMainWindow):
         self.align_horizontal_action: QAction | None = None
         self.align_vertical_action: QAction | None = None
         self.reset_action: QAction | None = None
-        self.rotate_mode_action: QAction | None = None
-        self.resize_mode_action: QAction | None = None
         self.add_vertex_action: QAction | None = None
         self.add_triangle_action: QAction | None = None
         self.add_square_action: QAction | None = None
@@ -101,9 +101,10 @@ class WireframeEditorWindow(QMainWindow):
         self._build_ui()
         self._build_menu()
         self._build_edit_toolbar()
-        self._update_save_controls()
-        self._update_edit_controls()
-        self.statusBar().showMessage("Ready")
+        # Start in the same editable empty-wireframe state as File -> New,
+        # but keep the untouched startup document clean so opening an existing
+        # file does not prompt to export an empty session.
+        self._start_new_session(mark_dirty=False)
 
     def _build_ui(self) -> None:
         side_panel = QWidget()
@@ -197,6 +198,24 @@ class WireframeEditorWindow(QMainWindow):
         selection_layout.addWidget(selection_hint)
         side_layout.addWidget(selection_box)
 
+        selected_elements_box = QGroupBox("Selected Elements")
+        selected_elements_layout = QVBoxLayout(selected_elements_box)
+        selected_elements_layout.setContentsMargins(8, 6, 8, 8)
+        selected_elements_layout.setSpacing(4)
+        self.selected_elements_list.setAlternatingRowColors(True)
+        self.selected_elements_list.setMinimumHeight(220)
+        self.selected_elements_list.setSizePolicy(
+            QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding
+        )
+        self.selected_elements_list.setSelectionMode(
+            QAbstractItemView.SelectionMode.NoSelection
+        )
+        selected_elements_layout.addWidget(self.selected_elements_list)
+        selected_elements_box.setSizePolicy(
+            QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding
+        )
+        side_layout.addWidget(selected_elements_box, 3)
+
         self.warning_box = QGroupBox("Review")
         warning_layout = QVBoxLayout(self.warning_box)
         warning_layout.setContentsMargins(8, 6, 8, 8)
@@ -206,10 +225,16 @@ class WireframeEditorWindow(QMainWindow):
         warning_layout.addWidget(
             self.warning_status_label, 1, Qt.AlignmentFlag.AlignCenter)
         self.warning_list.setAlternatingRowColors(True)
-        self.warning_list.setMinimumHeight(70)
+        self.warning_list.setMinimumHeight(110)
+        self.warning_list.setSizePolicy(
+            QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding
+        )
         warning_layout.addWidget(self.warning_list)
         self.warning_list.setVisible(False)
-        side_layout.addWidget(self.warning_box, 1)
+        self.warning_box.setSizePolicy(
+            QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding
+        )
+        side_layout.addWidget(self.warning_box, 2)
 
         splitter = QSplitter(Qt.Orientation.Horizontal)
         splitter.addWidget(self.outline_editor)
@@ -237,14 +262,8 @@ class WireframeEditorWindow(QMainWindow):
         self.save_action.triggered.connect(self.save_current_file)
         self.export_action = self.save_action
 
-        self.save_as_action = QAction("Export &As...", self)
-        self.save_as_action.setShortcut(QKeySequence.StandardKey.SaveAs)
-        self.save_as_action.triggered.connect(self.save_outline_as)
-        self.export_as_action = self.save_as_action
-
         file_menu.addAction(self.import_action)
         file_menu.addAction(self.save_action)
-        file_menu.addAction(self.save_as_action)
 
         _close_action, self.exit_action = install_standard_file_menu_tail(
             file_menu, self, exit_text="E&xit")
@@ -309,18 +328,6 @@ class WireframeEditorWindow(QMainWindow):
         self.reset_action.triggered.connect(self.reset_active_view)
         edit_menu.addAction(self.reset_action)
 
-        mode_menu = self.menuBar().addMenu("&Mode")
-        mode_group = QActionGroup(self)
-        mode_group.setExclusive(True)
-        self.rotate_mode_action = QAction("&Rotate", self)
-        self.resize_mode_action = QAction("&Resize", self)
-        for action in (self.rotate_mode_action, self.resize_mode_action):
-            action.setCheckable(True)
-            mode_group.addAction(action)
-            mode_menu.addAction(action)
-        self.rotate_mode_action.triggered.connect(lambda: self._set_transform_mode("rotate"))
-        self.resize_mode_action.triggered.connect(lambda: self._set_transform_mode("resize"))
-
         add_menu = self.menuBar().addMenu("&Add")
         self.add_vertex_action = QAction("&Vertex", self)
         self.add_triangle_action = QAction("&Triangle", self)
@@ -344,19 +351,17 @@ class WireframeEditorWindow(QMainWindow):
         self.edit_toolbar.setMovable(False)
         self.edit_toolbar.setFloatable(False)
 
+        # Reuse the editor's existing history/reset controls so menu, context
+        # menu and toolbar all share the same Undo/Redo/Reset implementation.
+        self.edit_toolbar.addWidget(self.outline_editor.undo_button)
+        self.edit_toolbar.addWidget(self.outline_editor.redo_button)
+        self.edit_toolbar.addWidget(self.outline_editor.reset_button)
+        self.edit_toolbar.addSeparator()
         self.outline_editor.show_indices_check.setText("Vertex IDs")
         self.edit_toolbar.addWidget(self.outline_editor.show_indices_check)
         self.edit_toolbar.addSeparator()
         self.edit_toolbar.addWidget(self.outline_editor.auto_align_check)
         self.addToolBar(Qt.ToolBarArea.TopToolBarArea, self.edit_toolbar)
-
-    def _set_transform_mode(self, mode: str) -> None:
-        self.outline_editor.set_transform_mode(mode)
-        if mode == "rotate" and self.rotate_mode_action:
-            self.rotate_mode_action.setChecked(True)
-        elif mode == "resize" and self.resize_mode_action:
-            self.resize_mode_action.setChecked(True)
-        self._update_edit_controls()
 
     def _maybe_save_dirty(self) -> bool:
         if not self.outline_editor.is_dirty:
@@ -380,10 +385,7 @@ class WireframeEditorWindow(QMainWindow):
             return False
         if reply == QMessageBox.StandardButton.Discard:
             return True
-        if self._current_file_path:
-            self.save_current_file()
-        else:
-            self.save_outline_as()
+        self.save_current_file()
         return not self.outline_editor.is_dirty
 
     def closeEvent(self, event) -> None:  # noqa: N802 - Qt override
@@ -392,21 +394,32 @@ class WireframeEditorWindow(QMainWindow):
         else:
             event.ignore()
 
-    def new_file(self) -> None:
-        if not self._maybe_save_dirty():
-            return
+    def _start_new_session(self, *, mark_dirty: bool) -> None:
+        """Initialize the shared empty editable wireframe session.
 
+        Startup and File -> New deliberately use the same model/setup path.
+        The only difference is dirtiness: an untouched startup session is clean
+        so importing a real file does not trigger an unnecessary save prompt.
+        """
         model = create_minimal_sklt_model("Untitled.SKL")
         self._current_file_path = None
         self._current_model = model
         self._skip_save_confirmation_this_session = False
         self._show_model(model, Path("Untitled.SKL"))
-        self.outline_editor.mark_dirty()
+        if mark_dirty:
+            self.outline_editor.mark_dirty()
+        else:
+            self.outline_editor.mark_clean()
         self._update_metadata_from_editor()
         self._update_window_title()
         self._update_save_controls()
         self._update_edit_controls()
-        self.statusBar().showMessage("New SKLT session: one vertex at origin")
+        self.statusBar().showMessage("New SKLT session: empty wireframe")
+
+    def new_file(self) -> None:
+        if not self._maybe_save_dirty():
+            return
+        self._start_new_session(mark_dirty=True)
 
     def open_dialog(self) -> None:
         path, _ = QFileDialog.getOpenFileName(
@@ -424,7 +437,7 @@ class WireframeEditorWindow(QMainWindow):
         if not self.outline_editor.can_save or not self.outline_editor.is_dirty:
             return
         if not self._current_file_path:
-            self.save_outline_as()
+            self._export_to_chosen_path()
             return
         if not self._confirm_save_over_original():
             return
@@ -443,7 +456,7 @@ class WireframeEditorWindow(QMainWindow):
         QMessageBox.information(self, "File exported", message)
         self._show_model(saved_model, self._current_file_path)
 
-    def save_outline_as(self) -> None:
+    def _export_to_chosen_path(self) -> None:
         if not self._current_model or not self.outline_editor.can_save:
             QMessageBox.information(
                 self,
@@ -470,7 +483,7 @@ class WireframeEditorWindow(QMainWindow):
                 self,
                 "Choose a different file",
                 "Direct overwrite of the loaded original is disabled. "
-                "Choose a different Export As destination.",
+                "Choose a different export destination.",
             )
             return
 
@@ -479,7 +492,7 @@ class WireframeEditorWindow(QMainWindow):
             saved_model = parse_sklt_file(output_path)
         except SkltParseError as exc:
             QMessageBox.warning(self, "Could not export file", str(exc))
-            self.statusBar().showMessage("Export As failed")
+            self.statusBar().showMessage("Export failed")
             return
 
         message = f"Exported edited {save_label} to {output_path.name}."
@@ -599,6 +612,7 @@ class WireframeEditorWindow(QMainWindow):
 
     def _outline_geometry_changed(self) -> None:
         self._update_metadata_from_editor()
+        self._update_selected_elements()
 
     def _outline_reset_applied(self) -> None:
         if self.outline_editor.save_mode == "poo2":
@@ -625,13 +639,49 @@ class WireframeEditorWindow(QMainWindow):
             self.polygons_value.setText("0")
             self.outline_lines_value.setText("0")
 
+    def _update_selected_elements(self) -> None:
+        """Show every explicitly selected vertex/connection in the side panel."""
+        self.selected_elements_list.clear()
+
+        vertex_ids = self.outline_editor.selected_vertex_indices
+        edge_ids = self.outline_editor.selected_edges
+        if not vertex_ids and not edge_ids:
+            self.selected_elements_list.addItem("No selected elements")
+            return
+
+        if self.outline_editor.save_mode == "poo2":
+            points = self.outline_editor.projected_points
+            for index in vertex_ids:
+                if 0 <= index < len(points):
+                    x, y, z = points[index]
+                    self.selected_elements_list.addItem(
+                        f"Vertex {index}   X {x:.3f}   Y {y:.3f}   Z {z:.3f}"
+                    )
+        elif self.outline_editor.save_mode == "otl2":
+            points = self.outline_editor.outline_points
+            for index in vertex_ids:
+                if 0 <= index < len(points):
+                    x, y = points[index]
+                    self.selected_elements_list.addItem(
+                        f"Vertex {index}   X {x}   Y {y}"
+                    )
+        else:
+            for index in vertex_ids:
+                self.selected_elements_list.addItem(f"Vertex {index}")
+
+        for first, second in edge_ids:
+            self.selected_elements_list.addItem(
+                f"Connection {first} ↔ {second}"
+            )
+
     def _update_save_controls(self) -> None:
-        can_save_as = bool(self._current_model and self.outline_editor.can_save)
-        can_save = can_save_as and self.outline_editor.is_dirty
+        can_save = bool(
+            self._current_model
+            and self.outline_editor.can_save
+            and self.outline_editor.is_dirty
+        )
         if self.save_action:
             self.save_action.setEnabled(can_save)
-        if self.save_as_action:
-            self.save_as_action.setEnabled(can_save_as)
         self._update_status_value()
 
     def _update_status_value(self) -> None:
@@ -667,16 +717,7 @@ class WireframeEditorWindow(QMainWindow):
         if self.align_vertical_action:
             self.align_vertical_action.setEnabled(can_edit_structure and has_single_selection)
         if self.reset_action:
-            self.reset_action.setEnabled(self._current_model is not None)
-        if self.rotate_mode_action:
-            self.rotate_mode_action.setEnabled(can_edit_structure and has_any_selection)
-        if self.resize_mode_action:
-            self.resize_mode_action.setEnabled(can_edit_structure and has_any_selection)
-        mode = self.outline_editor.transform_mode
-        if self.rotate_mode_action:
-            self.rotate_mode_action.setChecked(mode == "rotate")
-        if self.resize_mode_action:
-            self.resize_mode_action.setChecked(mode == "resize")
+            self.reset_action.setEnabled(self.outline_editor.can_reset)
         for action in (
             self.add_vertex_action,
             self.add_triangle_action,
@@ -700,6 +741,7 @@ class WireframeEditorWindow(QMainWindow):
                 + ("" if selected_links == 1 else "s"))
         self.selection_value.setText(
             " + ".join(selection_parts) if selection_parts else "No selection")
+        self._update_selected_elements()
 
     def _update_window_title(self) -> None:
         dirty_marker = " *" if self.outline_editor.is_dirty else ""
