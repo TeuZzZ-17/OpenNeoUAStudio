@@ -30,6 +30,10 @@ from PySide6.QtWidgets import (
 )
 
 
+# Canonical red used for selected editable vertices in the Model Editor.
+MODEL_EDIT_SELECTION_RED = QColor(255, 32, 48)
+
+
 BAS_ARCHIVE_FILTER = (
     "SET.BAS archives (SET.BAS *.bas *.BAS);;All files (*)"
 )
