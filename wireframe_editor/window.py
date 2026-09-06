@@ -14,7 +14,6 @@ from PySide6.QtGui import QAction, QKeySequence
 from PySide6.QtWidgets import (
     QApplication,
     QAbstractItemView,
-    QCheckBox,
     QFileDialog,
     QFormLayout,
     QGridLayout,
@@ -55,7 +54,6 @@ class WireframeEditorWindow(QMainWindow):
         self._last_directory = Path.cwd()
         self._current_model: SkltModel | None = None
         self._current_file_path: Path | None = None
-        self._skip_save_confirmation_this_session = False
 
         self.outline_editor = OutlineEditor()
         self.outline_editor.show_indices_check.setChecked(True)
@@ -78,6 +76,7 @@ class WireframeEditorWindow(QMainWindow):
         self.warning_list = QListWidget()
         self.new_action: QAction | None = None
         self.save_action: QAction | None = None
+        self.save_as_action: QAction | None = None
         self.undo_action: QAction | None = None
         self.redo_action: QAction | None = None
         self.copy_action: QAction | None = None
@@ -257,13 +256,19 @@ class WireframeEditorWindow(QMainWindow):
         self.import_action.setShortcut(QKeySequence.StandardKey.Open)
         self.import_action.triggered.connect(self.open_dialog)
 
-        self.save_action = QAction("&Export", self)
+        self.save_action = QAction("&Export / Overwrite", self)
         self.save_action.setShortcut(QKeySequence.StandardKey.Save)
         self.save_action.triggered.connect(self.save_current_file)
         self.export_action = self.save_action
 
+        self.save_as_action = QAction("Export &As...", self)
+        self.save_as_action.setShortcut(QKeySequence.StandardKey.SaveAs)
+        self.save_as_action.triggered.connect(self.save_outline_as)
+        self.export_as_action = self.save_as_action
+
         file_menu.addAction(self.import_action)
         file_menu.addAction(self.save_action)
+        file_menu.addAction(self.save_as_action)
 
         _close_action, self.exit_action = install_standard_file_menu_tail(
             file_menu, self, exit_text="E&xit")
@@ -404,7 +409,6 @@ class WireframeEditorWindow(QMainWindow):
         model = create_minimal_sklt_model("Untitled.SKL")
         self._current_file_path = None
         self._current_model = model
-        self._skip_save_confirmation_this_session = False
         self._show_model(model, Path("Untitled.SKL"))
         if mark_dirty:
             self.outline_editor.mark_dirty()
@@ -437,11 +441,8 @@ class WireframeEditorWindow(QMainWindow):
         if not self.outline_editor.can_save or not self.outline_editor.is_dirty:
             return
         if not self._current_file_path:
-            self._export_to_chosen_path()
+            self.save_outline_as()
             return
-        if not self._confirm_save_over_original():
-            return
-
         save_mode = self.outline_editor.save_mode
         try:
             self._write_edited_file(self._current_file_path)
@@ -456,7 +457,7 @@ class WireframeEditorWindow(QMainWindow):
         QMessageBox.information(self, "File exported", message)
         self._show_model(saved_model, self._current_file_path)
 
-    def _export_to_chosen_path(self) -> None:
+    def save_outline_as(self) -> None:
         if not self._current_model or not self.outline_editor.can_save:
             QMessageBox.information(
                 self,
@@ -523,32 +524,6 @@ class WireframeEditorWindow(QMainWindow):
                 self._current_model, self.outline_editor.projected_points, output_path
             )
         raise SkltParseError("No editable data is available to export.")
-
-    def _confirm_save_over_original(self) -> bool:
-        if self._skip_save_confirmation_this_session:
-            return True
-
-        message_box = QMessageBox(self)
-        message_box.setIcon(QMessageBox.Icon.Warning)
-        message_box.setWindowTitle("Overwrite loaded file?")
-        message_box.setText("Export will modify the currently loaded SKLT/SKL file.")
-        message_box.setInformativeText(
-            "Export only when you are ready to overwrite the loaded file."
-        )
-        message_box.setStandardButtons(
-            QMessageBox.StandardButton.Save | QMessageBox.StandardButton.Cancel
-        )
-        message_box.setDefaultButton(QMessageBox.StandardButton.Cancel)
-        export_button = message_box.button(QMessageBox.StandardButton.Save)
-        if export_button:
-            export_button.setText("Export")
-        checkbox = QCheckBox("Do not ask again this session")
-        message_box.setCheckBox(checkbox)
-
-        accepted = message_box.exec() == QMessageBox.StandardButton.Save
-        if accepted and checkbox.isChecked():
-            self._skip_save_confirmation_this_session = True
-        return accepted
 
     def open_file(self, path: str | Path) -> None:
         if not self._maybe_save_dirty():
@@ -675,13 +650,15 @@ class WireframeEditorWindow(QMainWindow):
             )
 
     def _update_save_controls(self) -> None:
-        can_save = bool(
-            self._current_model
-            and self.outline_editor.can_save
-            and self.outline_editor.is_dirty
-        )
+        # Export / Overwrite only makes sense for pending edits, while Export
+        # As remains available for any editable wireframe so an imported file
+        # can always be written to a different destination.
+        can_export_as = bool(self._current_model and self.outline_editor.can_save)
+        can_overwrite = can_export_as and self.outline_editor.is_dirty
         if self.save_action:
-            self.save_action.setEnabled(can_save)
+            self.save_action.setEnabled(can_overwrite)
+        if self.save_as_action:
+            self.save_as_action.setEnabled(can_export_as)
         self._update_status_value()
 
     def _update_status_value(self) -> None:
