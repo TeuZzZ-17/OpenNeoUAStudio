@@ -20,6 +20,8 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from editor_widgets import MODEL_EDIT_SELECTION_RED
+from screen_label_layout import choose_screen_label_rect
 from sklt_parser import OutlineGroup, Point2D, Point3D, Polygon, SkltModel
 
 
@@ -311,7 +313,7 @@ class OutlineCanvas(QWidget):
 
         for index in sorted(visual_selected_indices):
             if 0 <= index < len(self._points):
-                painter.setBrush(QColor(255, 204, 70))
+                painter.setBrush(MODEL_EDIT_SELECTION_RED)
                 screen = self._to_screen(self._points[index], transform)
                 radius = 7.0 if index == self._selected_index else 5.5
                 painter.drawEllipse(screen, radius, radius)
@@ -335,9 +337,62 @@ class OutlineCanvas(QWidget):
 
         if self._show_vertex_indices:
             painter.setPen(QColor(230, 230, 210))
+            metrics = painter.fontMetrics()
+            label_bounds = QRectF(self.rect()).adjusted(5.0, 5.0, -5.0, -5.0)
+            bounds_tuple = (
+                label_bounds.left(), label_bounds.top(),
+                label_bounds.right(), label_bounds.bottom(),
+            )
+
+            # Vertex numbers are editor annotations, not geometry.  Resolve
+            # them entirely in screen space so zoom/pan never lets a label
+            # sit on top of a vertex, a link or another number.  The grid is
+            # intentionally excluded from the obstacle set.
+            point_obstacles = []
             for index, point in enumerate(self._points):
                 screen = self._to_screen(point, transform)
-                painter.drawText(screen + QPointF(6.0, -6.0), str(index))
+                radius = 9.0 if index in visual_selected_indices else 6.0
+                point_obstacles.append((
+                    screen.x() - radius, screen.y() - radius,
+                    screen.x() + radius, screen.y() + radius,
+                ))
+
+            geometry_segments = []
+            for first, second in self._iter_edges():
+                start = self._to_screen(self._points[first], transform)
+                end = self._to_screen(self._points[second], transform)
+                geometry_segments.append(
+                    ((start.x(), start.y()), (end.x(), end.y()))
+                )
+            for moving_point, target_point in self._snap_preview_pairs:
+                start = self._to_screen(moving_point, transform)
+                end = self._to_screen(target_point, transform)
+                geometry_segments.append(
+                    ((start.x(), start.y()), (end.x(), end.y()))
+                )
+
+            occupied_labels = []
+            point_obstacles_tuple = tuple(point_obstacles)
+            geometry_segments_tuple = tuple(geometry_segments)
+            for index, point in enumerate(self._points):
+                text = str(index)
+                width = float(metrics.horizontalAdvance(text))
+                height = float(metrics.height())
+                ascent = float(metrics.ascent())
+                screen = self._to_screen(point, transform)
+                rect = choose_screen_label_rect(
+                    (screen.x(), screen.y()),
+                    (width, height),
+                    bounds_tuple,
+                    point_obstacles=point_obstacles_tuple,
+                    segments=geometry_segments_tuple,
+                    occupied_labels=tuple(occupied_labels),
+                )
+                if rect is None:
+                    continue
+                left, top, right, bottom = rect
+                occupied_labels.append(rect)
+                painter.drawText(QPointF(left, top + ascent), text)
 
         painter.end()
 
@@ -529,7 +584,18 @@ class OutlineCanvas(QWidget):
             self._panning = False
             if self._pending_empty_context_menu:
                 x, y = self._empty_context_world
-                self.emptyContextMenuRequested.emit(x, y, self._empty_context_global)
+                # When geometry is already selected, an empty-space right click
+                # still belongs to that selection.  Open the selection menu so
+                # Copy/Cut/Delete remain available without requiring the user
+                # to hit a tiny vertex or connection exactly.
+                if self._selected_indices or self._selected_edges:
+                    self.selectionContextMenuRequested.emit(
+                        x, y, self._empty_context_global
+                    )
+                else:
+                    self.emptyContextMenuRequested.emit(
+                        x, y, self._empty_context_global
+                    )
             self._pending_empty_context_menu = False
             event.accept()
             return
@@ -1546,24 +1612,22 @@ class OutlineEditor(QWidget):
         if self._mode != "poo2":
             return
         edges = set(self._selected_edges)
-        # If the user selected only links, Delete must remove only those links.
-        # Vertex deletion happens only when vertices are explicitly selected.
         vertices = set(self._selected_indices)
+        # A selected connection visually selects its two endpoints as well.
+        # Keep Delete semantics identical to what the user sees: deleting a
+        # selected link therefore deletes the selected endpoint vertices too,
+        # together with every incident connection that cannot survive them.
+        for first, second in edges:
+            vertices.add(first)
+            vertices.add(second)
         if not vertices and not edges:
             return
 
         # No safety dialog here: Undo is available and faster for editing workflows.
-
         before = self._snapshot()
         self._link_start_index = -1
-        if vertices:
-            self._delete_vertices(vertices)
-            self._last_auto_align_message = "Deleted selection"
-        elif edges:
-            removed_links, removed_vertices = self._delete_edges(edges)
-            self._last_auto_align_message = _deleted_links_message(
-                removed_links, removed_vertices
-            )
+        self._delete_vertices(vertices)
+        self._last_auto_align_message = "Deleted selection"
         self._selected_indices.clear()
         self._selected_index = -1
         self._selected_edges.clear()
@@ -2096,7 +2160,7 @@ class OutlineEditor(QWidget):
         elif chosen == paste_action:
             self.paste_clipboard_at_projected(x_value, z_value)
         elif chosen == delete_link_action:
-            self.delete_selected_link()
+            self.delete_selection()
         elif chosen == cancel_action:
             self.clear_selection()
 
