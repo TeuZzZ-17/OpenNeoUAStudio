@@ -1,12 +1,14 @@
 import os
+from pathlib import Path
 import unittest
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 from PySide6.QtCore import QEvent, QPointF, Qt
-from PySide6.QtGui import QImage, QMouseEvent, QPainter, QWheelEvent
+from PySide6.QtGui import QColor, QImage, QMouseEvent, QPainter, QWheelEvent
 from PySide6.QtWidgets import QApplication
 
+from editor_widgets import MODEL_EDIT_SELECTION_RED
 from outline_editor import OutlineCanvas, OutlineEditor
 from sklt_parser import create_minimal_sklt_model
 from wireframe_editor.window import WireframeEditorWindow
@@ -181,6 +183,41 @@ class WireframeEditorUiTests(unittest.TestCase):
         self.assertAlmostEqual(emitted[0][1], expected[1])
         self.assertNotEqual(emitted[0], (0.0, 0.0))
 
+    def test_empty_space_right_click_uses_selection_context_when_selection_exists(self):
+        canvas = OutlineCanvas()
+        canvas.resize(640, 480)
+        canvas.set_view(
+            [(0.0, 0.0), (100.0, 0.0)],
+            [[0, 1]],
+            selected_index=0,
+            selected_indices={0},
+        )
+        selection_menus = []
+        empty_menus = []
+        canvas.selectionContextMenuRequested.connect(
+            lambda x, z, _global: selection_menus.append((x, z))
+        )
+        canvas.emptyContextMenuRequested.connect(
+            lambda x, z, _global: empty_menus.append((x, z))
+        )
+
+        target = QPointF(560.0, 420.0)
+        press = QMouseEvent(
+            QEvent.Type.MouseButtonPress, target, target, target,
+            Qt.MouseButton.RightButton, Qt.MouseButton.RightButton,
+            Qt.KeyboardModifier.NoModifier,
+        )
+        canvas.mousePressEvent(press)
+        release = QMouseEvent(
+            QEvent.Type.MouseButtonRelease, target, target, target,
+            Qt.MouseButton.RightButton, Qt.MouseButton.NoButton,
+            Qt.KeyboardModifier.NoModifier,
+        )
+        canvas.mouseReleaseEvent(release)
+
+        self.assertEqual(len(selection_menus), 1)
+        self.assertEqual(empty_menus, [])
+
     def test_selected_elements_panel_lists_all_selected_vertices_and_connections(self):
         window = self._window()
         model = create_minimal_sklt_model()
@@ -202,6 +239,16 @@ class WireframeEditorUiTests(unittest.TestCase):
         self.assertTrue(any(text.startswith("Vertex 0 ") for text in items))
         self.assertTrue(any(text.startswith("Vertex 2 ") for text in items))
         self.assertIn("Connection 1 ↔ 2", items)
+
+    def test_selection_context_menus_expose_copy(self):
+        source = Path(__file__).resolve().parents[1].joinpath("outline_editor.py").read_text(encoding="utf-8")
+        self.assertGreaterEqual(source.count('menu.addAction("Copy")'), 3)
+        self.assertIn("selectionContextMenuRequested.emit", source)
+
+    def test_wireframe_selected_vertices_use_model_editor_selection_red(self):
+        self.assertEqual(MODEL_EDIT_SELECTION_RED, QColor(255, 32, 48))
+        source = Path(__file__).resolve().parents[1].joinpath("outline_editor.py").read_text(encoding="utf-8")
+        self.assertIn("painter.setBrush(MODEL_EDIT_SELECTION_RED)", source)
 
     def test_canvas_keeps_view_scale_while_points_move(self):
         canvas = OutlineCanvas()
@@ -262,16 +309,36 @@ class WireframeEditorUiTests(unittest.TestCase):
         self.assertEqual(editor.projected_points[0], editor.projected_points[1])
         self.assertEqual(editor.polygons, [[0, 1]])
 
-    def test_deleting_link_never_deletes_its_vertices(self):
+    def test_generic_delete_of_selected_link_deletes_visually_selected_endpoints_too(self):
         editor = self._poo2_editor(
             [(0.0, 0.0, 0.0), (100.0, 0.0, 0.0)],
             [[0, 1]],
         )
         editor.select_link(0, 1)
 
-        editor.delete_selected_link()
+        editor.delete_selection()
 
-        self.assertEqual(len(editor.projected_points), 2)
+        self.assertEqual(editor.projected_points, [])
+        self.assertEqual(editor.polygons, [])
+
+    def test_generic_delete_of_mixed_selection_removes_vertices_and_incident_links(self):
+        editor = self._poo2_editor(
+            [
+                (0.0, 0.0, 0.0),
+                (100.0, 0.0, 0.0),
+                (200.0, 0.0, 0.0),
+                (300.0, 0.0, 0.0),
+            ],
+            [[0, 1], [1, 2], [2, 3]],
+        )
+        editor.select_box({3}, {(0, 1)}, False)
+
+        editor.delete_selection()
+
+        # Selected edge endpoints 0/1 plus explicitly selected vertex 3 are
+        # deleted.  Vertex 2 survives, and no incident link can remain.
+        self.assertEqual(len(editor.projected_points), 1)
+        self.assertEqual(editor.projected_points[0], (200.0, 0.0))
         self.assertEqual(editor.polygons, [])
 
     def test_linking_new_vertices_preserves_both_vertices(self):

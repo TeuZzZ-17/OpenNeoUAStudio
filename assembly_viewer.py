@@ -68,6 +68,7 @@ from indexed_family_adapter import (
     VANILLA_GAMEPLAY_FADE_START,
     VANILLA_GAMEPLAY_VIS_LIMIT,
 )
+from editor_widgets import MODEL_EDIT_SELECTION_RED
 from indexed_renderer import (
     IndexedPiece,
     IndexedRasterizer,
@@ -3924,7 +3925,7 @@ class AssetViewport(QWidget):
                 painter.drawRect(QRectF(
                     point.x() - 3.0, point.y() - 3.0, 6.0, 6.0))
         mode_color = {
-            "move": QColor(255, 32, 48),
+            "move": MODEL_EDIT_SELECTION_RED,
             "rotate": QColor(70, 130, 255),
             "scale": QColor(62, 205, 105),
         }[self._direct_transform_mode]
