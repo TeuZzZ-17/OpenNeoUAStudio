@@ -31,7 +31,16 @@ class WireframeEditorUiTests(unittest.TestCase):
             if not action.isSeparator()
         ]
         self.assertEqual(
-            labels, ["New", "Import", "Export", "Exit"])
+            labels, ["New", "Import", "Export / Overwrite", "Export As...", "Exit"])
+        self.assertIs(window.export_action, window.save_action)
+        self.assertIs(window.export_as_action, window.save_as_action)
+
+
+    def test_export_as_stays_available_without_pending_edits(self):
+        window = self._window()
+        self.assertFalse(window.outline_editor.is_dirty)
+        self.assertFalse(window.save_action.isEnabled())
+        self.assertTrue(window.save_as_action.isEnabled())
 
     def test_wireframe_editor_has_no_mode_menu(self):
         window = self._window()
