@@ -1,5 +1,7 @@
 # OpenNeoUA Studio
 
+Urban Assault Metropolisdawn thread: https://metropolisdawn.de/forum/thread/870-release-openuastudio-all-in-one-urban-assault-asset-editor-and-extraction-tool/
+
 OpenNeoUA Studio (technical project name: `OpenNeoUAStudio`) is an independent,
 community-developed editing workbench for OpenNeoUA and Microsoft Urban Assault
 (1998). It is derived from the `UA_source`/OpenUA tool lineage without hiding
