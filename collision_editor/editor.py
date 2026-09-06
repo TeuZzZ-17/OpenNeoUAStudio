@@ -117,9 +117,11 @@ TURRET_SIDE_COLOR = QColor(65, 205, 235)
 TURRET_UP_COLOR = QColor(90, 225, 120)
 TURRET_DOWN_COLOR = QColor(255, 175, 70)
 GUN_ANGLE_SCALE = 1000.0
-GUN_ANGLE_MAX = 3200
+GUN_SIDE_ANGLE_MAX = 3200
+GUN_VERTICAL_ANGLE_MAX = 1600
 # NC_STACK_ypagun disables the side clamp above 3.1 radians. 3200 is the
-# conventional script value for a freely rotating turret.
+# conventional script value for a freely rotating turret. Up/Down remain
+# intentionally limited to 1600 (~91.7 deg) in the editor.
 GUN_FREE_SIDE_THRESHOLD = 3100
 GUN_POINT_TABLE_BASE_WIDTHS = (38, 76, 56, 44, 34, 48, 34, 34, 34)
 GUN_POINT_TABLE_GROWTH = (0, 18, 12, 14, 12, 14, 10, 10, 10)
@@ -146,6 +148,32 @@ GUN_DIRECTION_LABELS = (
     "270 deg (-X)",
     "315 deg (-X +Z)",
 )
+
+
+def _gun_angle_max(field: str) -> int:
+    """Return the editor/runtime-safe maximum for one gun-angle field."""
+
+    return (
+        GUN_SIDE_ANGLE_MAX
+        if field == "side" else GUN_VERTICAL_ANGLE_MAX
+    )
+
+
+def _clamp_gun_angle(field: str, value: int) -> int:
+    return max(0, min(_gun_angle_max(field), int(value)))
+
+
+def _type_button_stylesheet(category: str) -> str:
+    """Return the solid add-button color used by the matching sphere type."""
+
+    color = TYPE_COLORS[category]
+    return (
+        "QPushButton {"
+        f" background-color: rgb({color.red()}, {color.green()}, {color.blue()});"
+        " color: rgb(18, 20, 24);"
+        " font-weight: 600;"
+        "}"
+    )
 SCRIPT_TYPES = (
     "new_vehicle", "modify_vehicle", "new_weapon", "modify_weapon",
 )
@@ -1202,10 +1230,9 @@ def import_turret_limits(text: str) -> dict[int, TurretLimits]:
                 if value < 0:
                     raise CollisionScriptError(
                         f"Valore negativo non valido per {key}: {raw}")
-                # The editor deliberately exposes the canonical OpenNeoUA
-                # range only. Legacy values above 3200 are normalized on load
-                # instead of leaking outside the controls' valid range.
-                setattr(limits, field_name, min(GUN_ANGLE_MAX, value))
+                # Keep the editor inside its authored limits: Side may use
+                # the full 0..3200 range, while Up/Down are capped at 1600.
+                setattr(limits, field_name, _clamp_gun_angle(field_name, value))
                 limits.enabled = True
                 block_has_limit = True
             if block_has_limit:
@@ -1219,9 +1246,9 @@ def turret_limit_data_lines(limits: TurretLimits) -> list[str]:
     if not limits.enabled:
         return []
     return [
-        f"gun_side_angle = {max(0, min(GUN_ANGLE_MAX, int(limits.side)))}",
-        f"gun_up_angle = {max(0, min(GUN_ANGLE_MAX, int(limits.up)))}",
-        f"gun_down_angle = {max(0, min(GUN_ANGLE_MAX, int(limits.down)))}",
+        f"gun_side_angle = {_clamp_gun_angle('side', limits.side)}",
+        f"gun_up_angle = {_clamp_gun_angle('up', limits.up)}",
+        f"gun_down_angle = {_clamp_gun_angle('down', limits.down)}",
     ]
 
 
@@ -1382,12 +1409,31 @@ def _apply_turret_limit_updates(
             if block.kind == limits.source_kind
             and block.object_id == limits.vehicle_id
         ]
-        if len(matches) != 1:
+        if not matches:
             raise CollisionScriptError(
-                "Impossibile aggiornare i limiti torretta: atteso un solo "
-                f"{limits.source_kind} {limits.vehicle_id}, trovati "
-                f"{len(matches)}.")
-        block = matches[0]
+                "Impossibile aggiornare i limiti torretta: "
+                f"{limits.source_kind} {limits.vehicle_id} non trovato.")
+        if len(matches) == 1:
+            block = matches[0]
+        elif limits.source_kind == "modify_vehicle":
+            # Multiple modify_vehicle blocks for the same ID are legal in
+            # override-style scripts. Patch the final matching block that
+            # actually authors at least one gun angle, exactly mirroring the
+            # import override order.
+            authored = [
+                candidate for candidate in matches
+                if any(
+                    key in _TURRET_LIMIT_KEYS
+                    for _line, key, _raw, _indent
+                    in _top_level_assignment_rows(updated, candidate)
+                )
+            ]
+            block = authored[-1] if authored else matches[-1]
+        else:
+            raise CollisionScriptError(
+                "Impossibile aggiornare i limiti torretta: definizione "
+                f"ambigua per {limits.source_kind} {limits.vehicle_id} "
+                f"({len(matches)} blocchi).")
         if not block.complete:
             raise CollisionScriptError(
                 f"Parsing incompleto: manca end per {block.kind} "
@@ -1724,13 +1770,15 @@ def validate_project(
         for vehicle_id, limits in project.turret_limits.items():
             if not limits.enabled:
                 continue
-            for label, value in (
-                    ("Side", limits.side), ("Up", limits.up),
-                    ("Down", limits.down)):
-                if not 0 <= int(value) <= GUN_ANGLE_MAX:
+            for field, label, value in (
+                    ("side", "Side", limits.side),
+                    ("up", "Up", limits.up),
+                    ("down", "Down", limits.down)):
+                maximum = _gun_angle_max(field)
+                if not 0 <= int(value) <= maximum:
                     errors.append(
                         f"Vehicle {vehicle_id}: Gun {label} Angle deve essere "
-                        f"compreso tra 0 e {GUN_ANGLE_MAX}.")
+                        f"compreso tra 0 e {maximum}.")
     for index, sphere in enumerate(project.spheres()):
         if not all(math.isfinite(value) for value in (
                 sphere.x, sphere.y, sphere.z, sphere.radius)):
@@ -1780,9 +1828,9 @@ def turret_limit_grid(
     if forward is None or not math.isfinite(radius) or radius <= 0.0:
         return {}
     origin = tuple(float(value) for value in origin)
-    side = max(0, min(GUN_ANGLE_MAX, int(side)))
-    up = max(0, min(GUN_ANGLE_MAX, int(up)))
-    down = max(0, min(GUN_ANGLE_MAX, int(down)))
+    side = _clamp_gun_angle("side", side)
+    up = _clamp_gun_angle("up", up)
+    down = _clamp_gun_angle("down", down)
 
     # Match the engine's preferred local Y axis: world +Y projected onto the
     # plane perpendicular to gun_dir, with +Z as the vertical-direction
@@ -2382,9 +2430,9 @@ class CollisionViewport(AssetViewport):
             self._turret_limits = (
                 tuple(float(value) for value in origin),
                 tuple(float(value) for value in direction),
-                max(0, min(GUN_ANGLE_MAX, int(limits.side))),
-                max(0, min(GUN_ANGLE_MAX, int(limits.up))),
-                max(0, min(GUN_ANGLE_MAX, int(limits.down))),
+                _clamp_gun_angle("side", limits.side),
+                _clamp_gun_angle("up", limits.up),
+                _clamp_gun_angle("down", limits.down),
             )
         self.update()
 
@@ -2860,17 +2908,87 @@ class CollisionViewport(AssetViewport):
                 TURRET_SIDE_COLOR.blue(), 220))
             painter.drawEllipse(origin_screen, 4.5, 4.5)
 
-        def label(point, text, color, offset):
+        # Angle labels are a screen-space annotation, so resolve collisions in
+        # screen space too. Moving them in model XYZ would only fix one camera
+        # angle and they could overlap again as soon as the view rotates.
+        occupied_label_rects: list[QRectF] = []
+        metrics = painter.fontMetrics()
+        label_bounds = QRectF(self.rect()).adjusted(5.0, 5.0, -5.0, -5.0)
+
+        def label(point, text, color, preferred_offset):
             screen = self._project_visible_world(point)
             if screen is None:
                 return
-            painter.setPen(QPen(color, 1.0))
-            painter.drawText(screen + offset, text)
 
-        side_text = (
-            f"SIDE {side} / FULL 360 deg"
-            if side > GUN_FREE_SIDE_THRESHOLD
-            else f"SIDE +/-{side} / +/-{gun_angle_degrees(side):.1f} deg")
+            width = float(metrics.horizontalAdvance(text))
+            height = float(metrics.height())
+            ascent = float(metrics.ascent())
+            left_offset = -width - 7.0
+            offsets = (
+                preferred_offset,
+                QPointF(preferred_offset.x(), preferred_offset.y() - height - 5.0),
+                QPointF(preferred_offset.x(), preferred_offset.y() + height + 5.0),
+                QPointF(left_offset, preferred_offset.y()),
+                QPointF(left_offset, preferred_offset.y() - height - 5.0),
+                QPointF(left_offset, preferred_offset.y() + height + 5.0),
+            )
+
+            chosen_rect = None
+            chosen_baseline = None
+            for offset in offsets:
+                baseline = screen + offset
+                rect = QRectF(
+                    baseline.x(), baseline.y() - ascent, width, height)
+
+                # Keep the complete label visible even near viewport edges.
+                dx = 0.0
+                dy = 0.0
+                if rect.left() < label_bounds.left():
+                    dx = label_bounds.left() - rect.left()
+                elif rect.right() > label_bounds.right():
+                    dx = label_bounds.right() - rect.right()
+                if rect.top() < label_bounds.top():
+                    dy = label_bounds.top() - rect.top()
+                elif rect.bottom() > label_bounds.bottom():
+                    dy = label_bounds.bottom() - rect.bottom()
+                rect.translate(dx, dy)
+                padded = rect.adjusted(-3.0, -2.0, 3.0, 2.0)
+                if not any(padded.intersects(other)
+                           for other in occupied_label_rects):
+                    chosen_rect = rect
+                    chosen_baseline = QPointF(
+                        rect.left(), rect.top() + ascent)
+                    break
+
+            if chosen_rect is None:
+                # Three labels and six candidates make this rare, but keep a
+                # deterministic final fallback rather than allowing overlap.
+                baseline = screen + preferred_offset
+                rect = QRectF(
+                    baseline.x(), baseline.y() - ascent, width, height)
+                for step in range(1, 12):
+                    rect.moveTop(screen.y() + step * (height + 4.0))
+                    if rect.bottom() > label_bounds.bottom():
+                        rect.moveTop(screen.y() - step * (height + 4.0))
+                    if (rect.top() >= label_bounds.top()
+                            and rect.bottom() <= label_bounds.bottom()
+                            and not any(
+                                rect.adjusted(-3.0, -2.0, 3.0, 2.0).intersects(
+                                    other)
+                                for other in occupied_label_rects)):
+                        chosen_rect = rect
+                        chosen_baseline = QPointF(
+                            rect.left(), rect.top() + ascent)
+                        break
+
+            if chosen_rect is None or chosen_baseline is None:
+                return
+            occupied_label_rects.append(
+                chosen_rect.adjusted(-3.0, -2.0, 3.0, 2.0))
+            painter.setPen(QPen(color, 1.0))
+            painter.drawText(chosen_baseline, text)
+
+        side_text = f"Side Angle: {side}"
         side_points = curves["side"][0]
         label(
             side_points[
@@ -2879,11 +2997,11 @@ class CollisionViewport(AssetViewport):
             side_text, TURRET_SIDE_COLOR, QPointF(7.0, -7.0))
         label(
             curves["up"][0][len(curves["up"][0]) // 2],
-            f"UP {up} / {gun_angle_degrees(up):.1f} deg",
+            f"Up Angle: {up}",
             TURRET_UP_COLOR, QPointF(7.0, -7.0))
         label(
             curves["down"][0][len(curves["down"][0]) // 2],
-            f"DOWN {down} / {gun_angle_degrees(down):.1f} deg",
+            f"Down Angle: {down}",
             TURRET_DOWN_COLOR, QPointF(7.0, 15.0))
 
 
@@ -3340,7 +3458,7 @@ class ApplyScriptDialog(QDialog):
     def _browse(self):
         path, _ = QFileDialog.getOpenFileName(
             self, "Select OpenNeoUA script", "",
-            "Text scripts (*.txt *.ini);;All files (*)")
+            "OpenNeoUA scripts (*.scr *.txt *.ini *.ldf);;All files (*)")
         if path:
             self.path_edit.setText(path)
 
@@ -3490,6 +3608,12 @@ class CollisionEditorWindow(QMainWindow):
         # read during the last explicit script load/import.
         self._loaded_cockpit_camera_enabled = False
         self._loaded_cockpit_camera_offset = (0.0, 0.0, 0.0)
+        # Source/import baseline used by the toolbar Reset command.  Reset is
+        # deliberately workspace-scoped: Collision, Fire Points, Gun Points
+        # and Cockpit View can be reverted independently without disturbing
+        # edits made in the other tabs.
+        self._tab_reset_baseline = self.project.snapshot()
+        self._tab_reset_gun_point_scheme = self._new_gun_point_scheme
         self._modified = False
         self._syncing = False
         self._last_directory = Path.home()
@@ -3502,6 +3626,10 @@ class CollisionEditorWindow(QMainWindow):
         self._turret_slider_active_edits: set[str] = set()
         self._gun_direction_slider_active = False
         self._model_filter_expansion: dict[int, bool] | None = None
+        # The resource list must not be allowed to change the VP/model behind
+        # an imported script definition.  It becomes interactive only in the
+        # normal archive/SKLT browsing workflow.
+        self._model_browser_enabled = False
 
         configure_operation_status_bar(self)
 
@@ -3515,6 +3643,8 @@ class CollisionEditorWindow(QMainWindow):
         self.viewport.cockpitNudgeRequested.connect(self._cockpit_nudge)
         self.viewport.statusMessage.connect(
             lambda text: self.statusBar().showMessage(text, 4500))
+        self.viewport.animationFrameChanged.connect(
+            self._on_animation_frame_changed)
         self.model_tree = QTreeWidget()
         self.model_tree.setHeaderLabels(["Internal path", "VP"])
         self.model_tree.setSelectionMode(
@@ -3568,6 +3698,7 @@ class CollisionEditorWindow(QMainWindow):
 
         self._build_actions()
         self._build_ui()
+        self._set_model_browser_enabled(False)
         self._fit_initial_window_to_screen()
         self._sync_all()
         self.statusBar().showMessage(
@@ -3644,7 +3775,6 @@ class CollisionEditorWindow(QMainWindow):
             QKeySequence.StandardKey.Redo, QKeySequence("Ctrl+Shift+Z")])
         self.redo_action.triggered.connect(self.redo)
         edit_menu.addAction(self.redo_action)
-        edit_menu.addSeparator()
 
         self.add_legacy_action = QAction("Add Legacy Radius", self)
         self.add_legacy_action.triggered.connect(self.add_legacy)
@@ -3681,21 +3811,20 @@ class CollisionEditorWindow(QMainWindow):
             lambda: self.mirror_selected_sphere("y"))
         self.mirror_z_action.triggered.connect(
             lambda: self.mirror_selected_sphere("z"))
-        self.reset_collisions_action = QAction("Reset Collisions", self)
-        self.reset_collisions_action.triggered.connect(self.reset_collisions)
-        for action in (
-                self.add_legacy_action, self.add_vehicle_action,
-                self.add_weapon_action, self.duplicate_action,
-                self.delete_action):
-            edit_menu.addAction(action)
-        change_type_menu = edit_menu.addMenu("Change Sphere Type")
-        self._populate_change_type_menu(change_type_menu)
-        self.change_type_action = change_type_menu.menuAction()
-        mirror_menu = edit_menu.addMenu("Mirror Selected Sphere")
-        mirror_menu.addAction(self.mirror_x_action)
-        mirror_menu.addAction(self.mirror_y_action)
-        mirror_menu.addAction(self.mirror_z_action)
-        edit_menu.addAction(self.reset_collisions_action)
+        self.delete_all_collisions_action = QAction(
+            "Delete All Collisions", self)
+        self.delete_all_collisions_action.triggered.connect(
+            self.delete_all_collisions)
+        # Sphere-specific editing controls live inside the Collision tab.
+        # Edit keeps only the standard history commands, avoiding a second,
+        # generic home for controls that are meaningful only for collisions.
+
+        # Collision Editor owns this menu locally.  The three creation actions
+        # no longer consume toolbar width and no longer live under Edit.
+        self.add_menu = self.menuBar().addMenu("&Add")
+        self.add_menu.addAction(self.add_legacy_action)
+        self.add_menu.addAction(self.add_vehicle_action)
+        self.add_menu.addAction(self.add_weapon_action)
 
         self.viewpoint_menu = self.menuBar().addMenu("Viewpoint")
         self.viewpoint_actions = {}
@@ -3740,55 +3869,15 @@ class CollisionEditorWindow(QMainWindow):
             QMenu::separator { background: #397f96; height: 1px;
                                margin: 4px 8px; }
         """)
-
-        toolbar = QToolBar("Collision tools", self)
-        toolbar.setObjectName("collisionTools")
-        toolbar.setMovable(False)
-        self.addToolBar(Qt.ToolBarArea.TopToolBarArea, toolbar)
-        for action in (
-                self.add_legacy_action, self.add_vehicle_action,
-                self.add_weapon_action, self.duplicate_action,
-                self.delete_action):
-            toolbar.addAction(action)
-        self.change_type_button = QToolButton()
-        self.change_type_button.setText("Change Sphere Type")
-        self.change_type_button.setToolTip(
-            "Choose exactly which collision category the selected sphere "
-            "should become.")
-        self.change_type_button.setPopupMode(
-            QToolButton.ToolButtonPopupMode.InstantPopup)
-        change_type_button_menu = QMenu(self.change_type_button)
-        self._populate_change_type_menu(change_type_button_menu)
-        self.change_type_button.setMenu(change_type_button_menu)
-        toolbar.addWidget(self.change_type_button)
-        self.mirror_sphere_button = QToolButton()
-        self.mirror_sphere_button.setText("Mirror Selected Sphere")
-        self.mirror_sphere_button.setToolTip(
-            "Duplicate the selected compound sphere on the opposite side "
-            "of the chosen model axis.")
-        self.mirror_sphere_button.setPopupMode(
-            QToolButton.ToolButtonPopupMode.InstantPopup)
-        mirror_button_menu = QMenu(self.mirror_sphere_button)
-        mirror_button_menu.addAction(self.mirror_x_action)
-        mirror_button_menu.addAction(self.mirror_y_action)
-        mirror_button_menu.addAction(self.mirror_z_action)
-        self.mirror_sphere_button.setMenu(mirror_button_menu)
-        toolbar.addWidget(self.mirror_sphere_button)
-        toolbar.addAction(self.reset_collisions_action)
         self.reset_view_action = QAction("Reset View", self)
         self.reset_view_action.triggered.connect(self._reset_view)
-        toolbar.addAction(self.reset_view_action)
-        toolbar.addSeparator()
-        toolbar.addAction(self.undo_action)
-        toolbar.addAction(self.redo_action)
         self._build_model_preview_toolbar()
         self.viewport.manualCameraChanged.connect(
             self._on_manual_camera_changed)
 
     def _build_model_preview_toolbar(self):
-        """Create a full-width second row for visual-only VP scaling."""
+        """Create the single compact toolbar used by the Collision Editor."""
 
-        self.addToolBarBreak(Qt.ToolBarArea.TopToolBarArea)
         toolbar = QToolBar("Model Preview Scale", self)
         toolbar.setObjectName("modelPreviewScaleTools")
         toolbar.setMovable(False)
@@ -3800,6 +3889,53 @@ class CollisionEditorWindow(QMainWindow):
             self._on_view_preset_changed)
         toolbar.addWidget(self.toolbar_view_preset_combo)
         toolbar.addSeparator()
+        self.reset_tab_button = QPushButton("Reset")
+        self.reset_tab_button.setToolTip(
+            "Reset all authored changes in the current Collision Editor tab "
+            "to the last loaded/imported state. Confirmation is required.")
+        self.reset_tab_button.clicked.connect(self._reset_current_tab)
+        toolbar.addWidget(self.reset_tab_button)
+        # Compatibility alias for older integrations that only locate the
+        # button by attribute; its meaning is now the requested tab reset.
+        self.reset_model_scale_button = self.reset_tab_button
+
+        # Match the Model Editor's Reset View control and semantics: same
+        # button text/tooltip, immediately after Reset, and a stable captured
+        # camera destination for each selected model.
+        self.toolbar_reset_view_button = QPushButton("Reset View")
+        self.toolbar_reset_view_button.setEnabled(False)
+        self.toolbar_reset_view_button.setToolTip(
+            "Restore the camera to the original view used when this model "
+            "was loaded.")
+        self.toolbar_reset_view_button.clicked.connect(
+            self.reset_view_action.trigger)
+        toolbar.addWidget(self.toolbar_reset_view_button)
+        toolbar.addSeparator()
+
+        # Reuse AssetViewport's animation engine exactly as the Model Editor
+        # does.  Only the compact UI shell is repeated here; frame stepping,
+        # timing and VANM playback remain one shared implementation.
+        toolbar.addWidget(QLabel(" VANM preview: "))
+        self.play_button = QPushButton("Play")
+        self.play_button.setCheckable(True)
+        self.play_button.setEnabled(False)
+        self.play_button.toggled.connect(self._toggle_play)
+        toolbar.addWidget(self.play_button)
+        self.step_button = QPushButton(">>")
+        self.step_button.setEnabled(False)
+        self.step_button.clicked.connect(self.viewport.step_animation)
+        toolbar.addWidget(self.step_button)
+        toolbar.addWidget(QLabel(" Speed: "))
+        self.speed_spin = QDoubleSpinBox()
+        self.speed_spin.setRange(0.05, 8.0)
+        self.speed_spin.setSingleStep(0.25)
+        self.speed_spin.setValue(1.0)
+        self.speed_spin.setEnabled(False)
+        self.speed_spin.valueChanged.connect(
+            self._on_animation_speed_changed)
+        toolbar.addWidget(self.speed_spin)
+        toolbar.addSeparator()
+
         toolbar.addWidget(QLabel(" Model Preview Scale: "))
         self.model_scale_spins = {}
         for axis in ("X", "Y", "Z"):
@@ -3823,24 +3959,6 @@ class CollisionEditorWindow(QMainWindow):
         self.model_scale_y_spin = self.model_scale_spins["y"]
         self.model_scale_z_spin = self.model_scale_spins["z"]
         toolbar.addSeparator()
-        self.reset_model_scale_button = QPushButton("Reset")
-        self.reset_model_scale_button.setToolTip(
-            "Reset the model preview to X 1.0, Y 1.0, Z 1.0.")
-        self.reset_model_scale_button.clicked.connect(
-            self._reset_model_preview_scale)
-        toolbar.addWidget(self.reset_model_scale_button)
-        toolbar.addSeparator()
-        # Keep the output/apply workflow on the full-width toolbar. These
-        # actions are shared with the File menu, so there is one execution
-        # path and no duplicate button logic hiding at the bottom of the
-        # properties panel.
-        for action in (
-                self.create_suggested_action,
-                self.export_action,
-                self.copy_output_action,
-                self.import_action,
-                self.apply_script_action):
-            toolbar.addAction(action)
         self.model_preview_scale_toolbar = toolbar
         # Compatibility alias retained for integrations that only used this
         # attribute to locate the preview-scale controls.
@@ -3869,6 +3987,14 @@ class CollisionEditorWindow(QMainWindow):
         self.source_label = QLabel("No source loaded.")
         self.source_label.setWordWrap(True)
         source_layout.addWidget(self.source_label)
+        self.source_detail_label = QLabel()
+        self.source_detail_label.setWordWrap(True)
+        self.source_detail_label.setStyleSheet(
+            "color: #e06060; font-size: 10px;")
+        self.source_detail_label.setToolTip(
+            "Live Collision Editor context: selected VP/model, linked script, "
+            "active workspace, animation availability and unsaved state.")
+        source_layout.addWidget(self.source_detail_label)
         model_header = self.model_tree.header()
         model_header.setMinimumSectionSize(36)
         # QHeaderView stretches the last section by default.  With VP as the
@@ -4064,6 +4190,12 @@ class CollisionEditorWindow(QMainWindow):
             "Add Vehicle Collision")
         self.add_weapon_collision_button = QPushButton(
             "Add Weapon Collision")
+        self.add_legacy_button.setStyleSheet(
+            _type_button_stylesheet(LEGACY))
+        self.add_vehicle_collision_button.setStyleSheet(
+            _type_button_stylesheet(VEHICLE))
+        self.add_weapon_collision_button.setStyleSheet(
+            _type_button_stylesheet(WEAPON))
         self.add_legacy_button.clicked.connect(
             self.add_legacy_action.trigger)
         self.add_vehicle_collision_button.clicked.connect(
@@ -4075,17 +4207,70 @@ class CollisionEditorWindow(QMainWindow):
         sphere_buttons_top.addWidget(self.add_weapon_collision_button)
         spheres_layout.addLayout(sphere_buttons_top)
 
-        sphere_buttons_bottom = QHBoxLayout()
-        sphere_buttons_bottom.setContentsMargins(0, 0, 0, 0)
-        sphere_buttons_bottom.setSpacing(5)
+        sphere_edit_buttons = QHBoxLayout()
+        sphere_edit_buttons.setContentsMargins(0, 0, 0, 0)
+        sphere_edit_buttons.setSpacing(5)
+        self.duplicate_sphere_button = QPushButton("Duplicate Sphere")
         self.delete_sphere_button = QPushButton("Delete Sphere")
-        self.reset_collisions_button = QPushButton("Delete All Collisions")
+        self.create_suggested_button = QPushButton("Create Suggested Sphere")
+        self.duplicate_sphere_button.clicked.connect(
+            self.duplicate_action.trigger)
         self.delete_sphere_button.clicked.connect(self.delete_action.trigger)
-        self.reset_collisions_button.clicked.connect(
-            self.reset_collisions_action.trigger)
-        sphere_buttons_bottom.addWidget(self.delete_sphere_button)
-        sphere_buttons_bottom.addWidget(self.reset_collisions_button)
-        spheres_layout.addLayout(sphere_buttons_bottom)
+        self.create_suggested_button.clicked.connect(
+            self.create_suggested_action.trigger)
+        sphere_edit_buttons.addWidget(self.duplicate_sphere_button)
+        sphere_edit_buttons.addWidget(self.delete_sphere_button)
+        sphere_edit_buttons.addWidget(self.create_suggested_button)
+        spheres_layout.addLayout(sphere_edit_buttons)
+
+        sphere_modifier_buttons = QHBoxLayout()
+        sphere_modifier_buttons.setContentsMargins(0, 0, 0, 0)
+        sphere_modifier_buttons.setSpacing(5)
+        self.change_type_button = QToolButton()
+        self.change_type_button.setText("Change Sphere Type")
+        self.change_type_button.setToolTip(
+            "Choose exactly which collision category the selected sphere "
+            "should become.")
+        self.change_type_button.setPopupMode(
+            QToolButton.ToolButtonPopupMode.InstantPopup)
+        change_type_button_menu = QMenu(self.change_type_button)
+        self._populate_change_type_menu(change_type_button_menu)
+        self.change_type_button.setMenu(change_type_button_menu)
+        self.change_type_button.setSizePolicy(
+            QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        self.mirror_sphere_button = QToolButton()
+        self.mirror_sphere_button.setText("Mirror Selected Sphere")
+        self.mirror_sphere_button.setToolTip(
+            "Duplicate the selected compound sphere on the opposite side "
+            "of the chosen model axis.")
+        self.mirror_sphere_button.setPopupMode(
+            QToolButton.ToolButtonPopupMode.InstantPopup)
+        mirror_button_menu = QMenu(self.mirror_sphere_button)
+        mirror_button_menu.addAction(self.mirror_x_action)
+        mirror_button_menu.addAction(self.mirror_y_action)
+        mirror_button_menu.addAction(self.mirror_z_action)
+        self.mirror_sphere_button.setMenu(mirror_button_menu)
+        self.mirror_sphere_button.setSizePolicy(
+            QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        sphere_modifier_buttons.addWidget(self.change_type_button, 1)
+        sphere_modifier_buttons.addWidget(self.mirror_sphere_button, 1)
+        spheres_layout.addLayout(sphere_modifier_buttons)
+
+        sphere_history_buttons = QHBoxLayout()
+        sphere_history_buttons.setContentsMargins(0, 0, 0, 0)
+        sphere_history_buttons.setSpacing(5)
+        self.undo_button = QPushButton("Undo")
+        self.redo_button = QPushButton("Redo")
+        self.delete_all_collisions_button = QPushButton(
+            "Delete All Collisions")
+        self.undo_button.clicked.connect(self.undo_action.trigger)
+        self.redo_button.clicked.connect(self.redo_action.trigger)
+        self.delete_all_collisions_button.clicked.connect(
+            self.delete_all_collisions_action.trigger)
+        sphere_history_buttons.addWidget(self.undo_button)
+        sphere_history_buttons.addWidget(self.redo_button)
+        sphere_history_buttons.addWidget(self.delete_all_collisions_button, 1)
+        spheres_layout.addLayout(sphere_history_buttons)
 
         self.sphere_tree.setMinimumHeight(82)
         self.sphere_tree.setSizePolicy(
@@ -4188,8 +4373,8 @@ class CollisionEditorWindow(QMainWindow):
         fire_grid.setVerticalSpacing(3)
         self.fire_point_spins = {}
         for index, axis in enumerate(("X", "Y", "Z")):
-            row, pair = divmod(index, 2)
-            fire_grid.addWidget(QLabel(axis), row, pair * 2)
+            column = index * 2
+            fire_grid.addWidget(QLabel(axis), 0, column)
             spin = CompactScaleSpinBox()
             spin.setRange(-1_000_000.0, 1_000_000.0)
             spin.setDecimals(3)
@@ -4205,11 +4390,11 @@ class CollisionEditorWindow(QMainWindow):
             spin.editingFinished.connect(
                 lambda field=key: self._finish_vehicle_preview_edit(field))
             self.fire_point_spins[axis.lower()] = spin
-            fire_grid.addWidget(spin, row, pair * 2 + 1)
+            fire_grid.addWidget(spin, 0, column + 1)
         self.fire_x_spin = self.fire_point_spins["x"]
         self.fire_y_spin = self.fire_point_spins["y"]
         self.fire_z_spin = self.fire_point_spins["z"]
-        fire_grid.addWidget(QLabel("Weapons Min"), 2, 0)
+        fire_grid.addWidget(QLabel("Weapons Min"), 1, 0)
         self.num_weapons_spin = QSpinBox()
         self.num_weapons_spin.setRange(0, 255)
         self.num_weapons_spin.setValue(1)
@@ -4222,8 +4407,8 @@ class CollisionEditorWindow(QMainWindow):
             self._num_weapons_changed)
         self.num_weapons_spin.editingFinished.connect(
             lambda: self._finish_vehicle_preview_edit("num_weapons"))
-        fire_grid.addWidget(self.num_weapons_spin, 2, 1)
-        fire_grid.addWidget(QLabel("Weapons Max"), 2, 2)
+        fire_grid.addWidget(self.num_weapons_spin, 1, 1, 1, 2)
+        fire_grid.addWidget(QLabel("Weapons Max"), 1, 3)
         self.num_weapons_max_spin = QSpinBox()
         self.num_weapons_max_spin.setRange(0, 255)
         self.num_weapons_max_spin.setValue(1)
@@ -4236,9 +4421,15 @@ class CollisionEditorWindow(QMainWindow):
             self._num_weapons_max_changed)
         self.num_weapons_max_spin.editingFinished.connect(
             lambda: self._finish_vehicle_preview_edit("num_weapons_max"))
-        fire_grid.addWidget(self.num_weapons_max_spin, 2, 3)
-        fire_grid.setColumnStretch(1, 1)
-        fire_grid.setColumnStretch(3, 1)
+        fire_grid.addWidget(self.num_weapons_max_spin, 1, 4, 1, 2)
+        for column in (1, 3, 5):
+            fire_grid.setColumnStretch(column, 1)
+        self.fire_point_range_notice = QLabel(
+            "Weapons Min / Max range is an OpenNeoUA-only feature.")
+        self.fire_point_range_notice.setStyleSheet(
+            "color: #d9a35f; font-size: 10px;")
+        self.fire_point_range_notice.setWordWrap(True)
+        fire_grid.addWidget(self.fire_point_range_notice, 2, 0, 1, 6)
         fire_layout.addLayout(fire_grid)
         self.fire_point_notice = QLabel("")
         self.fire_point_notice.hide()
@@ -4283,10 +4474,11 @@ class CollisionEditorWindow(QMainWindow):
         self.gun_point_type_combo.setSizePolicy(
             QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
         self.gun_point_type_combo.setToolTip(
-            "Chooses the script family used only for newly-added Gun Points. "
-            "Vanilla writes robo_* and is intended for Host Station/Robo "
-            "classes; OpenNeoUA writes generic unit_* and works on all vehicle "
-            "classes. Existing imported points keep their original family.")
+            "Chooses the script family for the selected Gun Point, converting "
+            "it immediately when one is selected. With no point selected it "
+            "sets the family used by newly-added Gun Points. Vanilla writes "
+            "robo_* and is intended for Host Station/Robo classes; OpenNeoUA "
+            "writes generic unit_* and works on all vehicle classes.")
         self.gun_point_type_combo.currentIndexChanged.connect(
             self._new_gun_point_scheme_changed)
         gun_family_row.addWidget(self.gun_point_type_combo, 1)
@@ -4327,8 +4519,9 @@ class CollisionEditorWindow(QMainWindow):
         self.gun_family_value.setStyleSheet(
             "color: rgb(178, 78, 238); font-size: 10px;")
         self.gun_family_value.setToolTip(
-            "Existing robo_* Host Station points keep their legacy syntax; "
-            "generic unit_* points are valid for any OpenNeoUA vehicle class.")
+            "Shows the actual script family of the selected point. Changing "
+            "Gun Point type converts between legacy robo_* and generic unit_* "
+            "syntax and the exported script follows the new family.")
         gun_layout.addWidget(self.gun_family_value)
 
         # The right pane is now deliberately wider, so Gun Point authoring can
@@ -4471,7 +4664,7 @@ class CollisionEditorWindow(QMainWindow):
                 f"color: rgb({color.red()}, {color.green()}, {color.blue()});")
             turret_layout.addWidget(title, row, 0)
             slider = QSlider(Qt.Orientation.Horizontal)
-            slider.setRange(0, GUN_ANGLE_MAX)
+            slider.setRange(0, _gun_angle_max(field))
             slider.setSingleStep(10)
             slider.setPageStep(100)
             slider.setToolTip(
@@ -4487,7 +4680,7 @@ class CollisionEditorWindow(QMainWindow):
                 lambda name=field: self._finish_turret_limit_slider(name))
             turret_layout.addWidget(slider, row, 1, 1, 2)
             spin = QSpinBox()
-            spin.setRange(0, GUN_ANGLE_MAX)
+            spin.setRange(0, _gun_angle_max(field))
             spin.setSingleStep(10)
             spin.setKeyboardTracking(True)
             spin.setMinimumWidth(76)
@@ -4969,23 +5162,92 @@ class CollisionEditorWindow(QMainWindow):
         with QSignalBlocker(self.toolbar_view_preset_combo):
             self.toolbar_view_preset_combo.setCurrentText("Current View")
         self._sync_gizmo_camera()
+        self._update_reset_view_controls()
 
     def _on_view_preset_changed(self, preset: str):
         if preset != "Current View":
             self.viewport.apply_view_preset(
                 preset, self.viewport.size(), 100)
         self._sync_gizmo_camera()
+        self._update_reset_view_controls()
 
     def _reset_view(self):
+        if not self.viewport.can_reset_camera:
+            self._update_reset_view_controls()
+            return
         self.viewport.reset_view()
         with QSignalBlocker(self.toolbar_view_preset_combo):
             self.toolbar_view_preset_combo.setCurrentText("Current View")
         self._sync_gizmo_camera()
+        self._update_reset_view_controls()
+
+    def _update_reset_view_controls(self) -> None:
+        """Mirror Model Editor Reset View enable/disable semantics."""
+
+        enabled = (
+            self.viewport.can_reset_camera
+            and not self._is_cockpit_tab_active()
+        )
+        if hasattr(self, "reset_view_action"):
+            self.reset_view_action.setEnabled(enabled)
+        if hasattr(self, "toolbar_reset_view_button"):
+            self.toolbar_reset_view_button.setEnabled(enabled)
+
+    def _toggle_play(self, playing: bool) -> None:
+        """Use AssetViewport's shared VANM playback implementation."""
+
+        self.viewport.play_animation(playing)
+        self.play_button.setText("Pause" if playing else "Play")
+        self.statusBar().showMessage(
+            "Animation playing." if playing else "Animation paused.", 3500)
+
+    def _on_animation_speed_changed(self, speed: float) -> None:
+        self.viewport.set_animation_speed(speed)
+        self.statusBar().showMessage(
+            f"Animation speed set to {speed:.2f}x.", 3000)
+
+    def _on_animation_frame_changed(self, text: str) -> None:
+        if text:
+            self.statusBar().showMessage(text, 2500)
+
+    def _sync_animation_controls(self) -> None:
+        """Keep Collision Editor animation controls honest after reloads."""
+
+        if not hasattr(self, "play_button"):
+            return
+        has_anim = self.viewport.has_animation
+        self.play_button.setEnabled(has_anim)
+        self.step_button.setEnabled(has_anim)
+        self.speed_spin.setEnabled(has_anim)
+        if not has_anim:
+            with QSignalBlocker(self.play_button):
+                self.play_button.setChecked(False)
+            self.play_button.setText("Play")
+            self.viewport.play_animation(False)
+            return
+        self.play_button.setText(
+            "Pause" if self.play_button.isChecked() else "Play")
+        self.viewport.play_animation(self.play_button.isChecked())
 
     def open_base_dialog(self):
         path = choose_bas_archive(self, self._last_directory)
         if path:
             self.open_base(path)
+
+    def _set_model_browser_enabled(self, enabled: bool) -> None:
+        """Enable model browsing only for the normal archive/SKLT workflow."""
+
+        self._model_browser_enabled = bool(enabled)
+        if hasattr(self, "model_tree"):
+            self.model_tree.setEnabled(self._model_browser_enabled)
+            self.model_tree.setToolTip(
+                "Browse models from the imported BAS/SKLT resource."
+                if self._model_browser_enabled else
+                "Model selection is locked while a script-imported vehicle "
+                "or weapon is active. Import a BAS archive or SKLT normally "
+                "to browse this list.")
+        if hasattr(self, "model_search"):
+            self.model_search.setEnabled(self._model_browser_enabled)
 
     def _current_visual_resource_is_open(self) -> bool:
         return bool(self.family is not None or self._active_base_path is not None)
@@ -5017,6 +5279,8 @@ class CollisionEditorWindow(QMainWindow):
         self._current_owner_base_bounds = None
         self.model_tree.clear()
         self.source_label.setText("No source loaded.")
+        self._set_model_browser_enabled(False)
+        self._sync_animation_controls()
         self._sync_all()
         self._update_window_title()
         self._sync_close_archive_action()
@@ -5205,6 +5469,7 @@ class CollisionEditorWindow(QMainWindow):
             self._new_gun_point_scheme = "unit"
         self._capture_loaded_gun_points()
         self._capture_loaded_cockpit_camera()
+        self._capture_tab_reset_baseline()
         self._active_script_path = script_path
         self._active_script_kind = block.kind
         self._active_script_id = block.object_id
@@ -5225,6 +5490,12 @@ class CollisionEditorWindow(QMainWindow):
             f"{source_model or '<model>'}\n"
             f"VP source: {self._vp_table_source}\n"
             f"Script: {script_path.name} — {block.kind} {block.object_id}")
+        # Script import binds authored data to one exact VP.  Scrolling or
+        # clicking another entry in the archive list would desynchronize the
+        # preview from that definition, so keep the populated browser visible
+        # but deliberately greyed out until a normal BAS/SKLT import starts a
+        # free-browsing session again.
+        self._set_model_browser_enabled(False)
         self._sync_all()
         message = (
             f"Loaded {block.kind} {block.object_id} through VP "
@@ -5315,6 +5586,7 @@ class CollisionEditorWindow(QMainWindow):
                 self.project.overeof_enabled,
                 self.project.overeof)
             self._viewport_owner = desired_owner
+            self._sync_animation_controls()
 
         if hasattr(self, "cockpit_preview_info"):
             self.cockpit_preview_info.setText(info)
@@ -5360,6 +5632,8 @@ class CollisionEditorWindow(QMainWindow):
             for limits in self.project.turret_limits.values():
                 limits.dirty = False
             self._capture_loaded_gun_points()
+            self._capture_loaded_cockpit_camera()
+            self._capture_tab_reset_baseline()
             self._set_modified(False)
             self.statusBar().showMessage(
                 f"Loaded definition overwritten. Backup: "
@@ -5413,6 +5687,7 @@ class CollisionEditorWindow(QMainWindow):
             f"{len([o for o in family.all_objects() if o.skeleton])} models; "
             f"{len(family.textures)} textures loaded"
             + (f"\nVP source: {vp_source}" if vp_source else ""))
+        self._set_model_browser_enabled(True)
         if vp_warnings:
             self.statusBar().showMessage(" ".join(vp_warnings), 9000)
         self._set_modified()
@@ -5451,6 +5726,7 @@ class CollisionEditorWindow(QMainWindow):
         self.source_label.setText(
             f"{Path(path).name}\nExternal SKLT; geometry-only unless its "
             "material mapping is supplied by a BASE.")
+        self._set_model_browser_enabled(True)
         self._set_modified()
         self._sync_close_archive_action()
 
@@ -5552,10 +5828,15 @@ class CollisionEditorWindow(QMainWindow):
             self.viewport._model_preview_base_owner_bounds.get(owner))
         self._viewport_owner = owner
         self.viewport.frame_owner(owner)
+        # Same contract as Model Editor: Reset View restores the exact camera
+        # first presented for this selected model, not a later re-fit.
+        self.viewport.capture_reset_view()
         self.project.source_model = current.data(0, _MODEL_NAME_ROLE)
         with QSignalBlocker(self.toolbar_view_preset_combo):
             self.toolbar_view_preset_combo.setCurrentText("Current View")
+        self._sync_animation_controls()
         self._sync_gizmo_camera()
+        self._update_reset_view_controls()
         self._set_modified()
         self._sync_all()
 
@@ -5602,6 +5883,7 @@ class CollisionEditorWindow(QMainWindow):
         self._selected_fire_point = -1
         self._selected_gun_point = -1
         self._set_modified()
+        self.properties_tabs.setCurrentIndex(self.collision_tab_index)
         self._sync_all()
 
     def add_compound(self, category: str):
@@ -5611,6 +5893,7 @@ class CollisionEditorWindow(QMainWindow):
         self._selected_fire_point = -1
         self._selected_gun_point = -1
         self._set_modified()
+        self.properties_tabs.setCurrentIndex(self.collision_tab_index)
         self._sync_all()
 
     def create_suggested(self):
@@ -5743,11 +6026,11 @@ class CollisionEditorWindow(QMainWindow):
         self._set_modified()
         self._sync_all()
 
-    def reset_collisions(self):
+    def delete_all_collisions(self):
         if not self.project.spheres():
             return
         result = QMessageBox.question(
-            self, "Reset Collisions",
+            self, "Delete All Collisions",
             "Delete every Legacy, Vehicle and Weapon collision sphere?",
             QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
             QMessageBox.StandardButton.No)
@@ -5761,6 +6044,11 @@ class CollisionEditorWindow(QMainWindow):
         self._selected_gun_point = -1
         self._set_modified()
         self._sync_all()
+
+    def reset_collisions(self):
+        """Compatibility alias for older callers; no longer exposed in UI."""
+
+        self.delete_all_collisions()
 
     def _create_sphere_context_menu(self, index: int) -> QMenu:
         menu = QMenu(self)
@@ -5780,7 +6068,7 @@ class CollisionEditorWindow(QMainWindow):
         mirror_menu.addAction(self.mirror_y_action)
         mirror_menu.addAction(self.mirror_z_action)
         menu.addSeparator()
-        menu.addAction(self.reset_collisions_action)
+        menu.addAction(self.delete_all_collisions_action)
         menu.addAction(self.reset_view_action)
         menu.addSeparator()
         menu.addAction(self.open_base_action)
@@ -5855,7 +6143,7 @@ class CollisionEditorWindow(QMainWindow):
             menu, "Reset All", self._reset_all_gun_points,
             self.reset_all_gun_points_button.isEnabled())
 
-        type_menu = menu.addMenu("New Gun Point Type")
+        type_menu = menu.addMenu("Gun Point Type")
         for index in range(self.gun_point_type_combo.count()):
             text = self.gun_point_type_combo.itemText(index)
             data = self.gun_point_type_combo.itemData(index)
@@ -6282,8 +6570,7 @@ class CollisionEditorWindow(QMainWindow):
         self.viewport.set_cockpit_preview_active(cockpit_active)
         if hasattr(self, "toolbar_view_preset_combo"):
             self.toolbar_view_preset_combo.setEnabled(not cockpit_active)
-        if hasattr(self, "reset_view_action"):
-            self.reset_view_action.setEnabled(not cockpit_active)
+        self._update_reset_view_controls()
         if hasattr(self, "selected_box"):
             self.selected_box.setVisible(not cockpit_active)
         if hasattr(self, "transform_box"):
@@ -6610,6 +6897,141 @@ class CollisionEditorWindow(QMainWindow):
             for vehicle_id, limits in self.project.turret_limits.items()
         }
 
+    def _capture_tab_reset_baseline(self) -> None:
+        """Remember the last explicit source/import state for tab Reset."""
+
+        self._tab_reset_baseline = self.project.snapshot()
+        self._tab_reset_gun_point_scheme = self._new_gun_point_scheme
+
+    def _baseline_project(self) -> CollisionProject:
+        baseline = CollisionProject()
+        baseline.restore(self._tab_reset_baseline)
+        return baseline
+
+    @staticmethod
+    def _workspace_state(project: CollisionProject, tab_index: int) -> tuple:
+        def sphere_state(sphere):
+            return None if sphere is None else (
+                sphere.category, sphere.x, sphere.y, sphere.z,
+                sphere.radius, sphere.visible,
+            )
+
+        if tab_index == 0:  # Collision
+            return (
+                project.overeof_enabled, project.overeof,
+                sphere_state(project.legacy),
+                tuple(sphere_state(sphere) for sphere in project.compound),
+            )
+        if tab_index == 1:  # Fire Points
+            return (
+                project.fire_points_enabled,
+                project.fire_x, project.fire_y, project.fire_z,
+                project.num_weapons, project.num_weapons_max,
+            )
+        if tab_index == 2:  # Gun Points
+            return (
+                project.gun_points_enabled,
+                project.unit_gun_default_icon,
+                tuple((
+                    point.scheme, point.x, point.y, point.z,
+                    point.dir_x, point.dir_y, point.dir_z,
+                    point.gun_type, point.name, point.icon,
+                ) for point in project.gun_points),
+                tuple((
+                    vehicle_id, limits.enabled, limits.side, limits.up,
+                    limits.down, limits.source_kind, limits.source_name,
+                    limits.dirty,
+                ) for vehicle_id, limits in sorted(
+                    project.turret_limits.items())),
+            )
+        # Cockpit View
+        return (
+            project.cockpit_camera_enabled,
+            project.cockpit_camera_offset_x,
+            project.cockpit_camera_offset_y,
+            project.cockpit_camera_offset_z,
+        )
+
+    def _current_tab_has_changes(self) -> bool:
+        if not hasattr(self, "properties_tabs"):
+            return False
+        tab_index = self.properties_tabs.currentIndex()
+        baseline = self._baseline_project()
+        return (
+            self._workspace_state(self.project, tab_index)
+            != self._workspace_state(baseline, tab_index)
+        )
+
+    def _reset_current_tab(self) -> None:
+        """Revert only the active authoring workspace after confirmation."""
+
+        if not hasattr(self, "properties_tabs"):
+            return
+        tab_index = self.properties_tabs.currentIndex()
+        if not self._current_tab_has_changes():
+            return
+        tab_name = self.properties_tabs.tabText(tab_index)
+        answer = QMessageBox.question(
+            self, "Reset Current Tab",
+            f"Reset all changes in the {tab_name} tab to the last "
+            "loaded/imported state?\n\nChanges in the other tabs are kept.",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No)
+        if answer != QMessageBox.StandardButton.Yes:
+            return
+
+        baseline = self._baseline_project()
+        self._vehicle_preview_active_edits.clear()
+        self._push_undo()
+
+        if tab_index == self.collision_tab_index:
+            self.project.overeof_enabled = baseline.overeof_enabled
+            self.project.overeof = baseline.overeof
+            self.project.legacy = (
+                baseline.legacy.clone() if baseline.legacy is not None
+                else None)
+            self.project.compound = [
+                sphere.clone() for sphere in baseline.compound]
+            self._selected = min(
+                self._selected, len(self.project.spheres()) - 1)
+        elif tab_index == self.fire_points_tab_index:
+            self.project.fire_points_enabled = baseline.fire_points_enabled
+            self.project.fire_x = baseline.fire_x
+            self.project.fire_y = baseline.fire_y
+            self.project.fire_z = baseline.fire_z
+            self.project.num_weapons = baseline.num_weapons
+            self.project.num_weapons_max = baseline.num_weapons_max
+            self._selected_fire_point = -1
+        elif tab_index == self.gun_points_tab_index:
+            self.project.gun_points_enabled = baseline.gun_points_enabled
+            self.project.gun_points = [
+                point.clone() for point in baseline.gun_points]
+            self.project.unit_gun_default_icon = (
+                baseline.unit_gun_default_icon)
+            self.project.turret_limits = {
+                vehicle_id: limits.clone()
+                for vehicle_id, limits in baseline.turret_limits.items()
+            }
+            self._new_gun_point_scheme = self._tab_reset_gun_point_scheme
+            self._selected_gun_point = min(
+                self._selected_gun_point,
+                len(self.project.gun_points) - 1)
+        elif tab_index == self.cockpit_tab_index:
+            self.project.cockpit_camera_enabled = (
+                baseline.cockpit_camera_enabled)
+            self.project.cockpit_camera_offset_x = (
+                baseline.cockpit_camera_offset_x)
+            self.project.cockpit_camera_offset_y = (
+                baseline.cockpit_camera_offset_y)
+            self.project.cockpit_camera_offset_z = (
+                baseline.cockpit_camera_offset_z)
+
+        self._set_modified(
+            self.project.snapshot() != self._tab_reset_baseline)
+        self._sync_all()
+        self.statusBar().showMessage(
+            f"{tab_name} restored to the last loaded/imported state.", 5000)
+
     def _reset_all_gun_points(self) -> None:
         """Restore all mounts and turret limits captured from the script."""
 
@@ -6732,7 +7154,7 @@ class CollisionEditorWindow(QMainWindow):
         limits = self._selected_turret_limits()
         if limits is None or field not in {"side", "up", "down"}:
             return
-        value = max(0, min(GUN_ANGLE_MAX, int(value)))
+        value = _clamp_gun_angle(field, value)
         if int(getattr(limits, field)) == value:
             return
         if from_slider:
@@ -6887,9 +7309,44 @@ class CollisionEditorWindow(QMainWindow):
         if self._syncing:
             return
         scheme = self.gun_point_type_combo.currentData()
-        if scheme in {"robo", "unit"}:
-            # Choosing the authoring family alone does not modify script data.
+        if scheme not in {"robo", "unit"}:
+            return
+
+        selected = self._selected_gun()
+        if selected is None:
             self._new_gun_point_scheme = scheme
+            return
+
+        if selected.scheme == scheme:
+            self._new_gun_point_scheme = scheme
+            return
+
+        # Each runtime family has its own 20-slot array. Converting an
+        # existing mount must therefore respect the same limit as Add Gun
+        # Point instead of generating an invalid script on export.
+        target_count = sum(
+            point.scheme == scheme for point in self.project.gun_points)
+        if target_count >= 20:
+            self.statusBar().showMessage(
+                "Cannot convert Gun Point: target family already has 20 "
+                "mounts.", 5000)
+            self._sync_all()
+            return
+
+        self._push_undo()
+        old_scheme = selected.scheme
+        selected.scheme = scheme
+        if (old_scheme == "unit" and scheme == "robo"
+                and not any(
+                    point is not selected and point.scheme == "unit"
+                    for point in self.project.gun_points)):
+            # unit_gun_icon is meaningful only for the generic unit_* family.
+            # Converting the final generic mount to vanilla must not leave an
+            # otherwise-empty unit_* family behind in canonical script output.
+            self.project.unit_gun_default_icon = ""
+        self._new_gun_point_scheme = scheme
+        self._set_modified()
+        self._sync_all()
 
     def _visibility_changed(self, visible: bool):
         if self._syncing:
@@ -7052,8 +7509,9 @@ class CollisionEditorWindow(QMainWindow):
                     limits = self.project.turret_limits.get(
                         int(point.gun_type))
                     angle_values = (
-                        [str(max(0, min(GUN_ANGLE_MAX, int(value)))) for value in
-                         (limits.side, limits.up, limits.down)]
+                        [str(_clamp_gun_angle(field, value)) for field, value in
+                         (("side", limits.side), ("up", limits.up),
+                          ("down", limits.down))]
                         if limits is not None
                         else ["-", "-", "-"]
                     )
@@ -7185,6 +7643,38 @@ class CollisionEditorWindow(QMainWindow):
         for line in lines:
             action = menu.addAction(line)
             action.setEnabled(False)
+
+    def _refresh_source_detail_label(self) -> None:
+        """Show compact live context in red at the lower-left source panel."""
+
+        if not hasattr(self, "source_detail_label"):
+            return
+        current = self.model_tree.currentItem()
+        vp_text = "—"
+        if current is not None:
+            vp_ids = current.data(0, _MODEL_VP_ROLE) or ()
+            if vp_ids:
+                vp_text = ", ".join(str(value) for value in vp_ids)
+        script_text = "not linked"
+        if (self._active_script_path is not None
+                and self._active_script_id is not None
+                and self._active_script_kind):
+            script_text = (
+                f"{self._active_script_path.name} — "
+                f"{self._active_script_kind} {self._active_script_id}")
+        workspace = "—"
+        if hasattr(self, "properties_tabs"):
+            workspace = self.properties_tabs.tabText(
+                self.properties_tabs.currentIndex())
+        animation = "available" if self.viewport.has_animation else "none"
+        dirty = "yes" if self._modified else "no"
+        browser = "enabled" if self._model_browser_enabled else "locked"
+        self.source_detail_label.setText(
+            f"Selected VP: {vp_text}\n"
+            f"Script link: {script_text}\n"
+            f"Workspace: {workspace}\n"
+            f"Model browser: {browser}\n"
+            f"VANM animation: {animation} | Unsaved changes: {dirty}")
 
     def _preview_spheres(self) -> list[CollisionSphere]:
         """Return collision preview matching the current OpenNeoUA engine rule.
@@ -7363,12 +7853,14 @@ class CollisionEditorWindow(QMainWindow):
             widget.setEnabled(fire_controls_enabled)
 
         self.gun_points_box.setVisible(vehicle_mode)
-        scheme_index = self.gun_point_type_combo.findData(
-            self._new_gun_point_scheme)
+        gun = self._selected_gun() if vehicle_mode else None
+        displayed_scheme = (
+            gun.scheme if gun is not None and gun.scheme in {"robo", "unit"}
+            else self._new_gun_point_scheme)
+        scheme_index = self.gun_point_type_combo.findData(displayed_scheme)
         self.gun_point_type_combo.setCurrentIndex(
             scheme_index if scheme_index >= 0 else 1)
         self.gun_point_type_combo.setEnabled(vehicle_mode)
-        gun = self._selected_gun() if vehicle_mode else None
         self.add_gun_point_button.setEnabled(vehicle_mode)
         self.remove_gun_point_button.setEnabled(gun is not None)
         self.reset_gun_point_button.setEnabled(gun is not None)
@@ -7441,7 +7933,7 @@ class CollisionEditorWindow(QMainWindow):
             self.turret_limits_source.setText(
                 f"Vehicle {limits.vehicle_id}{suffix}")
         for field in ("side", "up", "down"):
-            value = (max(0, min(GUN_ANGLE_MAX, int(getattr(limits, field))))
+            value = (_clamp_gun_angle(field, getattr(limits, field))
                      if limits is not None else 0)
             self.turret_limit_spins[field].setValue(value)
             self.turret_limit_sliders[field].setValue(value)
@@ -7610,9 +8102,10 @@ class CollisionEditorWindow(QMainWindow):
             self.add_weapon_action.isEnabled())
         self.duplicate_action.setEnabled(
             sphere is not None and sphere.category != LEGACY)
+        self.duplicate_sphere_button.setEnabled(
+            self.duplicate_action.isEnabled())
         self.delete_action.setEnabled(sphere is not None)
         self.delete_sphere_button.setEnabled(sphere is not None)
-        self.change_type_action.setEnabled(sphere is not None)
         self.change_type_button.setEnabled(sphere is not None)
         self.change_to_legacy_action.setEnabled(
             sphere is not None and sphere.category != LEGACY
@@ -7628,8 +8121,16 @@ class CollisionEditorWindow(QMainWindow):
             action.setEnabled(mirror_enabled)
         self.mirror_sphere_button.setEnabled(mirror_enabled)
         collisions_present = bool(self.project.spheres())
-        self.reset_collisions_action.setEnabled(collisions_present)
-        self.reset_collisions_button.setEnabled(collisions_present)
+        self.delete_all_collisions_action.setEnabled(collisions_present)
+        self.delete_all_collisions_button.setEnabled(collisions_present)
+        self.create_suggested_button.setEnabled(
+            self._model_bounds() is not None)
+        self.undo_button.setEnabled(bool(self._undo))
+        self.redo_button.setEnabled(bool(self._redo))
+        if hasattr(self, "reset_tab_button"):
+            self.reset_tab_button.setEnabled(self._current_tab_has_changes())
+        self._update_reset_view_controls()
+        self._refresh_source_detail_label()
         self._sync_workspace_overlay_visibility()
         del blockers
         self._syncing = False
@@ -7685,7 +8186,7 @@ class CollisionEditorWindow(QMainWindow):
         path, _ = QFileDialog.getOpenFileName(
             self, "Import collisions from script",
             str(self._last_directory),
-            "Text scripts (*.txt *.ini);;All files (*)")
+            "OpenNeoUA scripts (*.scr *.txt *.ini *.ldf);;All files (*)")
         if not path:
             return
         try:
@@ -7751,6 +8252,7 @@ class CollisionEditorWindow(QMainWindow):
             script_turret_limits if vehicle_block else {})
         self._capture_loaded_gun_points()
         self._capture_loaded_cockpit_camera()
+        self._capture_tab_reset_baseline()
         if block.name:
             self.project.name = block.name
         self._selected = 0 if self.project.spheres() else -1
@@ -7786,6 +8288,7 @@ class CollisionEditorWindow(QMainWindow):
         dialog = ApplyScriptDialog(
             self, self.project, initial_path=path)
         if dialog.exec() == QDialog.DialogCode.Accepted:
+            self._capture_tab_reset_baseline()
             self.statusBar().showMessage(
                 f"Script updated. Backup: {dialog.backup_path}", 10000)
 

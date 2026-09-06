@@ -1470,42 +1470,66 @@ class AssemblyWindow(QMainWindow):
         model_box_layout = QVBoxLayout(model_box)
         model_box_layout.setSpacing(5)
 
-        poly_id_row = QHBoxLayout()
-        poly_id_row.setSpacing(4)
-        poly_id_row.addWidget(QLabel("Poly ID:"))
+        # Give polygon selection the same visual hierarchy as Transform:
+        # a normal QGroupBox using the application's existing group-box style.
+        # Keeping the title in the frame removes the need for any special-case
+        # label spacing while still making the selector read as one compact unit.
+        self.poly_id_box = QGroupBox("Poly ID")
+        self.poly_id_box.setSizePolicy(
+            QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
+        poly_id_row = QHBoxLayout(self.poly_id_box)
+        self.poly_id_row_layout = poly_id_row
         self.poly_id_spin = QSpinBox()
         self.poly_id_spin.setRange(0, 0)
         self.poly_id_spin.setEnabled(False)
         self.poly_id_spin.setKeyboardTracking(False)
+        # Keep the Poly ID strip usable when the Model Editor is not
+        # maximized.  The old row let the two navigation buttons consume the
+        # same horizontal space as full text buttons, which could squeeze the
+        # spin value and clip Select/Deselect labels in a narrow right pane.
+        self.poly_id_spin.setMinimumWidth(72)
+        self.poly_id_spin.setMaximumWidth(96)
         self.poly_id_spin.setToolTip(
             "Select and inspect a polygon by its persistent zero-based ID.")
         self.poly_id_spin.valueChanged.connect(self._on_poly_id_changed)
         self.poly_id_spin.editingFinished.connect(
             lambda: self._on_poly_id_changed(self.poly_id_spin.value()))
-        poly_id_row.addWidget(self.poly_id_spin, 1)
+        poly_id_row.addWidget(self.poly_id_spin)
         self.poly_id_previous_button = QPushButton("<")
         self.poly_id_previous_button.setEnabled(False)
+        self.poly_id_previous_button.setFixedWidth(36)
         self.poly_id_previous_button.setToolTip("Previous polygon")
         self.poly_id_previous_button.clicked.connect(
             lambda: self._step_poly_id(-1))
         poly_id_row.addWidget(self.poly_id_previous_button)
         self.poly_id_next_button = QPushButton(">")
         self.poly_id_next_button.setEnabled(False)
+        self.poly_id_next_button.setFixedWidth(36)
         self.poly_id_next_button.setToolTip("Next polygon")
         self.poly_id_next_button.clicked.connect(
             lambda: self._step_poly_id(1))
         poly_id_row.addWidget(self.poly_id_next_button)
         self.poly_select_all_button = QPushButton("Select All")
         self.poly_select_all_button.setEnabled(False)
+        self.poly_select_all_button.setMinimumWidth(max(
+            72,
+            self.poly_select_all_button.fontMetrics().horizontalAdvance(
+                self.poly_select_all_button.text()) + 18,
+        ))
         self.poly_select_all_button.clicked.connect(
             self.viewport.select_all_edit_vertices)
         poly_id_row.addWidget(self.poly_select_all_button)
         self.poly_deselect_all_button = QPushButton("Deselect All")
         self.poly_deselect_all_button.setEnabled(False)
+        self.poly_deselect_all_button.setMinimumWidth(max(
+            84,
+            self.poly_deselect_all_button.fontMetrics().horizontalAdvance(
+                self.poly_deselect_all_button.text()) + 18,
+        ))
         self.poly_deselect_all_button.clicked.connect(
             self.viewport.select_no_edit_vertices)
         poly_id_row.addWidget(self.poly_deselect_all_button)
-        model_box_layout.addLayout(poly_id_row)
+        model_box_layout.addWidget(self.poly_id_box)
 
         gizmo_box = QGroupBox("Transform")
         self.transform_box = gizmo_box
