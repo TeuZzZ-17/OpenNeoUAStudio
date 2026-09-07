@@ -1200,10 +1200,13 @@ class CollisionEditorTests(unittest.TestCase):
     def test_78_overeof_numeric_edit_is_live_undoable_and_resettable(self):
         window = self._window()
         window.overeof_check.setChecked(True)
+        revision_before = window.viewport._indexed_render_revision
         window.overeof_spin.setValue(18.5)
         self.assertTrue(window.project.overeof_enabled)
         self.assertEqual(window.project.overeof, 18.5)
         self.assertEqual(window.viewport.overeof_preview_offset, -18.5)
+        self.assertGreater(
+            window.viewport._indexed_render_revision, revision_before)
         window._finish_overeof_edit()
         window.undo()
         self.assertNotEqual(window.project.overeof, 18.5)

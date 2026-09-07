@@ -2371,9 +2371,20 @@ class CollisionViewport(AssetViewport):
         value = float(overeof)
         if not math.isfinite(value):
             return
-        self._ground_alignment_available = bool(available)
-        self._ground_alignment_authored = bool(authored)
+        available = bool(available)
+        authored = bool(authored)
+        if (self._ground_alignment_available == available
+                and self._ground_alignment_authored == authored
+                and abs(self._overeof - value) < 1e-9):
+            return
+        self._ground_alignment_available = available
+        self._ground_alignment_authored = authored
         self._overeof = value
+        # Textured previews cache the indexed model frame. Overeof changes the
+        # actual preview vertices, so invalidate that frame before repainting;
+        # otherwise overlays move live while the textured model stays at the
+        # previous height until another event happens to refresh the cache.
+        self._invalidate_indexed_view_cache()
         self._apply_model_preview_scale()
 
     def set_ground_simulation_visible(self, visible: bool) -> None:
