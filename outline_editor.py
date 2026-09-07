@@ -6,8 +6,13 @@ from dataclasses import dataclass
 import math
 
 from PySide6.QtCore import QPoint, QPointF, QRectF, Qt, Signal
-from PySide6.QtGui import QColor, QKeyEvent, QMouseEvent, QPainter, QPen, QWheelEvent
+from PySide6.QtGui import QAction, QActionGroup, QColor, QKeyEvent, QMouseEvent, QPainter, QPen, QWheelEvent
 from PySide6.QtWidgets import (
+    QApplication,
+    QAbstractSpinBox,
+    QLineEdit,
+    QPlainTextEdit,
+    QTextEdit,
     QCheckBox,
     QDoubleSpinBox,
     QFormLayout,
@@ -70,6 +75,8 @@ class OutlineCanvas(QWidget):
     emptyContextMenuRequested = Signal(float, float, QPoint)
     selectionContextMenuRequested = Signal(float, float, QPoint)
     selectionDragStarted = Signal()
+    selectionDragFinished = Signal()
+    pointerMoved = Signal(object)
 
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
@@ -82,7 +89,13 @@ class OutlineCanvas(QWidget):
         self._selected_edges: set[tuple[int, int]] = set()
         self._message = ""
         self._fixed_byte_space = False
+        self.transform_mode = "move"
+        self.transform_feedback = ""
+        self.ghost_points: list[ProjectedPoint] = []
+        self.ghost_groups: tuple[tuple[int, ...], ...] = ()
+        self.last_pointer: QPointF | None = None
         self._dragging_point = False
+        self._transform_moved = False
         self._panning = False
         self._pending_empty_context_menu = False
         self._drag_start_index = -1
@@ -268,6 +281,8 @@ class OutlineCanvas(QWidget):
         transform = self._make_transform()
         self._draw_grid(painter, transform)
 
+        self._draw_transform_overlay(painter, transform)
+
         if not self._points:
             if self._message:
                 painter.setPen(QColor(180, 185, 192))
@@ -396,7 +411,54 @@ class OutlineCanvas(QWidget):
 
         painter.end()
 
+    def selection_pivot(self) -> ProjectedPoint | None:
+        points = list(self._drag_start_points.values()) if self._drag_start_points else [
+            self._points[index] for index in self._drag_indices_for_selection()
+        ]
+        if not points:
+            return None
+        return _points_center(points)
+
+    def _draw_transform_overlay(self, painter, transform) -> None:
+        painter.save()
+        painter.setPen(QPen(QColor(150, 230, 255, 130), 1.5, Qt.PenStyle.DashLine))
+        painter.setBrush(QColor(150, 230, 255, 100))
+        for group in self.ghost_groups:
+            for first, second in zip(group, group[1:]):
+                painter.drawLine(self._to_screen(self.ghost_points[first], transform),
+                                 self._to_screen(self.ghost_points[second], transform))
+        for point in self.ghost_points:
+            painter.drawEllipse(self._to_screen(point, transform), 4.0, 4.0)
+        pivot = self.selection_pivot()
+        if self.transform_mode != "move" and pivot is not None:
+            screen = self._to_screen(pivot, transform)
+            painter.setPen(QPen(QColor(255, 204, 70), 1.5))
+            painter.setBrush(Qt.BrushStyle.NoBrush)
+            painter.drawEllipse(screen, 8.0, 8.0)
+            painter.drawLine(screen + QPointF(-12, 0), screen + QPointF(12, 0))
+            painter.drawLine(screen + QPointF(0, -12), screen + QPointF(0, 12))
+        if self.transform_feedback or self.ghost_points:
+            painter.setPen(QColor(255, 220, 130))
+            painter.drawText(QPointF(12, 24), self.transform_feedback or "Clipboard preview — Paste to insert · Esc to hide")
+        painter.restore()
+
+    def cancel_drag(self) -> None:
+        self._dragging_point = False
+        self._drag_start_index = -1
+        self._drag_start_indices = []
+        self._drag_start_points.clear()
+        self._drag_transform = None
+        self._snap_preview_pairs.clear()
+        self._box_selecting = False
+        self._box_select_moved = False
+        self.transform_feedback = ""
+        self.setCursor(Qt.CursorShape.ArrowCursor)
+        self.update()
+
     def mousePressEvent(self, event: QMouseEvent) -> None:  # noqa: N802 - Qt override
+        self.setFocus(Qt.FocusReason.MouseFocusReason)
+        self.last_pointer = event.position()
+        self.pointerMoved.emit(event.position())
         if event.button() == Qt.MouseButton.LeftButton:
             toggle = bool(event.modifiers() & Qt.KeyboardModifier.ControlModifier)
             index = self._nearest_point(event.position(), 24.0 if self._link_mode_active else 12.0)
@@ -414,23 +476,13 @@ class OutlineCanvas(QWidget):
                     event.accept()
                     return
 
-                if index not in self._selected_indices:
+                if index not in self._drag_indices_for_selection():
                     self._selected_indices = {index}
                     self._selected_edges.clear()
                     self.pointSelectionRequested.emit(index, False)
                 self._selected_index = index
                 self._selected_edge = None
-                self._dragging_point = True
-                self._drag_start_index = index
-                self._drag_start_indices = self._drag_indices_for(index)
-                self._drag_transform = self._make_transform()
-                # Keep the original grab offset so the vertex remains attached
-                # to the cursor instead of jumping on the first move event.
-                self._drag_start_screen = event.position()
-                self._drag_start_points = {
-                    drag_index: self._points[drag_index] for drag_index in self._drag_start_indices
-                }
-                self.setCursor(Qt.CursorShape.ClosedHandCursor)
+                self._begin_selection_drag(event.position())
                 self.update()
                 event.accept()
                 return
@@ -471,7 +523,7 @@ class OutlineCanvas(QWidget):
             edge = self._nearest_line(event.position()) if index < 0 else None
 
             if index >= 0:
-                if index not in self._selected_indices:
+                if index not in self._drag_indices_for_selection():
                     self._selected_indices = {index}
                     self._selected_edges.clear()
                     self._selected_index = index
@@ -518,10 +570,13 @@ class OutlineCanvas(QWidget):
             event.accept()
 
     def mouseMoveEvent(self, event: QMouseEvent) -> None:  # noqa: N802 - Qt override
+        self.last_pointer = event.position()
+        self.pointerMoved.emit(event.position())
         if self._dragging_point and self._drag_start_indices:
+            self._transform_moved = True
             positions = self._drag_positions_from_screen(event)
-            self._update_snap_preview(positions)
             self.pointsMoved.emit(positions, False)
+            self.update()
             event.accept()
             return
 
@@ -541,14 +596,17 @@ class OutlineCanvas(QWidget):
             ).manhattanLength() > 4.0:
                 self._pending_empty_context_menu = False
             self._pan += delta
+            self.pointerMoved.emit(event.position())
             self.update()
             event.accept()
 
     def mouseReleaseEvent(self, event: QMouseEvent) -> None:  # noqa: N802 - Qt override
         if event.button() == Qt.MouseButton.LeftButton and self._dragging_point:
             self._dragging_point = False
-            if self._drag_start_indices:
+            if self._drag_start_indices and self._transform_moved:
                 self.pointsMoved.emit(self._drag_positions_from_screen(event), True)
+            self.selectionDragFinished.emit()
+            self.transform_feedback = ""
             self._drag_start_index = -1
             self._drag_start_indices = []
             self._drag_start_points.clear()
@@ -629,6 +687,8 @@ class OutlineCanvas(QWidget):
         transform = self._make_transform()
         screen_after = self._to_screen(world_under_cursor, transform)
         self._pan += cursor - screen_after
+        self.last_pointer = cursor
+        self.pointerMoved.emit(cursor)
         self.update()
         event.accept()
 
@@ -691,6 +751,8 @@ class OutlineCanvas(QWidget):
         drag_indices = self._drag_indices_for_selection()
         if not drag_indices:
             return
+        self.selectionDragStarted.emit()
+        self._transform_moved = False
         self._dragging_point = True
         self._drag_start_index = drag_indices[0]
         self._drag_start_indices = drag_indices
@@ -700,15 +762,6 @@ class OutlineCanvas(QWidget):
         }
         self._drag_transform = self._make_transform()
         self.setCursor(Qt.CursorShape.ClosedHandCursor)
-
-    def _drag_indices_for(self, clicked_index: int) -> list[int]:
-        drag_indices = set(self._selected_indices)
-        for first, second in self._selected_edges:
-            drag_indices.add(first)
-            drag_indices.add(second)
-        if clicked_index not in drag_indices:
-            drag_indices = {clicked_index}
-        return sorted(index for index in drag_indices if 0 <= index < len(self._points))
 
     def _connected_vertices(self, index: int) -> set[int]:
         connected: set[int] = set()
@@ -755,14 +808,44 @@ class OutlineCanvas(QWidget):
         precision = 0.25 if event.modifiers() & Qt.KeyboardModifier.ShiftModifier else 1.0
         delta_x = (delta.x() / scale) * precision
         delta_y = -(delta.y() / scale) * precision
+        pivot = self.selection_pivot()
+        angle = 0.0
+        factor = 1.0
+        if pivot is not None and self.transform_mode != "move":
+            pivot_screen = self._to_screen(pivot, transform)
+            initial = self._drag_start_screen - pivot_screen
+            current = event.position() - pivot_screen
+            if self.transform_mode == "rotate":
+                if math.hypot(initial.x(), initial.y()) >= 8.0:
+                    angle = math.atan2(-current.y(), current.x()) - math.atan2(-initial.y(), initial.x())
+                else:
+                    angle = delta.x() * math.pi / 180.0
+                angle = math.atan2(math.sin(angle), math.cos(angle))
+                self.transform_feedback = f"Rotate {math.degrees(angle):+.1f}° · Esc to cancel"
+            else:
+                radius = math.hypot(initial.x(), initial.y())
+                factor = (math.hypot(current.x(), current.y()) / radius if radius >= 8.0
+                          else math.exp(max(-9.0, min(9.0, delta.x() / 100.0))))
+                factor = max(0.001, min(1000.0, 1.0 + (factor - 1.0) * precision))
+                self.transform_feedback = f"Scale ×{factor:.3f} · Esc to cancel"
         moved: dict[int, ProjectedPoint] = {}
         for index, start_point in self._drag_start_points.items():
             x = start_point[0] + delta_x
             y = start_point[1] + delta_y
+            if pivot is not None and self.transform_mode != "move":
+                dx, dy = start_point[0] - pivot[0], start_point[1] - pivot[1]
+                x = pivot[0] + factor * (dx * math.cos(angle) - dy * math.sin(angle))
+                y = pivot[1] + factor * (dx * math.sin(angle) + dy * math.cos(angle))
             if self._fixed_byte_space:
+                if self.transform_mode != "move" and not (0 <= x <= 255 and 0 <= y <= 255):
+                    self.transform_feedback = "Transform limited by OTL2 coordinates (0–255)"
+                    return {}
                 moved[index] = (_clamp_byte(round(x)), _clamp_byte(round(y)))
             else:
                 moved[index] = (x, y)
+        if self.transform_mode != "move" and len(set(moved.values())) < len(set(self._drag_start_points.values())):
+            self.transform_feedback = "Transform limited: vertices would collapse"
+            return {}
         return moved
 
     def _draw_grid(self, painter: QPainter, transform: tuple[QRectF, float, float, float, float, float]) -> None:
@@ -831,10 +914,13 @@ class OutlineCanvas(QWidget):
             self.update()
             return
         moved_indices = set(moved_positions)
-        stable_indices = [index for index in range(len(self._points)) if index not in moved_indices]
-        if not stable_indices:
+        if len(moved_positions) > 1:
+            center = _points_center(list(moved_positions.values()))
+            if math.hypot(*center) < 1.0e-6:
+                self._snap_preview_pairs.append((center, (0.0, 0.0)))
             self.update()
             return
+        stable_indices = [index for index in range(len(self._points)) if index not in moved_indices]
         transform = self._make_transform()
         scale = max(abs(transform[1]), 1.0e-9)
         # Screen-space sensitivity stays stable when model extents change.
@@ -845,13 +931,19 @@ class OutlineCanvas(QWidget):
             if not (0 <= index < len(self._points)):
                 continue
 
+            targets = [(0.0, 0.0)] + [self._points[i] for i in stable_indices]
+            for axis in (0, 1):
+                aligned_targets = [target for target in targets if abs(point[axis] - target[axis]) < 1.0e-6]
+                if aligned_targets:
+                    target = min(aligned_targets, key=lambda p: math.hypot(p[0] - point[0], p[1] - point[1]))
+                    preview_pairs.add((point, target))
             x_candidates, z_candidates = _axis_aligned_line_snap_candidates(
                 self._points, edges, moved_indices, point, line_threshold
             )
-            if x_candidates:
-                preview_pairs.add((point, min(x_candidates, key=lambda item: item[0])[2]))
-            if z_candidates:
-                preview_pairs.add((point, min(z_candidates, key=lambda item: item[0])[2]))
+            for axis, candidates in enumerate((x_candidates, z_candidates)):
+                aligned = [item for item in candidates if abs(point[axis] - item[1]) < 1.0e-6]
+                if aligned:
+                    preview_pairs.add((point, min(aligned, key=lambda item: item[0])[2]))
 
         self._snap_preview_pairs.extend(sorted(preview_pairs))
         self.update()
@@ -959,7 +1051,20 @@ class OutlineEditor(QWidget):
         self._last_auto_align_message = ""
         self._syncing_controls = False
 
+        self._ghost_target: ProjectedPoint | None = None
         self.canvas = OutlineCanvas()
+        self.canvas.pointerMoved.connect(self._update_clipboard_preview)
+        self.transform_actions = {}
+        self.transform_action_group = QActionGroup(self)
+        self.transform_action_group.setExclusive(True)
+        for mode, key in (("move", "G"), ("rotate", "R"), ("scale", "S")):
+            action = QAction(mode.title(), self)
+            action.setCheckable(True)
+            action.setShortcut(key)
+            action.triggered.connect(lambda checked=False, mode=mode: self.set_transform_mode(mode))
+            self.transform_action_group.addAction(action)
+            self.transform_actions[mode] = action
+        self.transform_actions["move"].setChecked(True)
         self.canvas.pointSelectionRequested.connect(self.select_point)
         self.canvas.pointsMoved.connect(self.move_projected_points)
         self.canvas.lineSelectionRequested.connect(self.select_link)
@@ -970,6 +1075,7 @@ class OutlineEditor(QWidget):
         self.canvas.emptyContextMenuRequested.connect(self._show_empty_context_menu)
         self.canvas.selectionContextMenuRequested.connect(self._show_selection_context_menu)
         self.canvas.selectionDragStarted.connect(self.prepare_selection_drag)
+        self.canvas.selectionDragFinished.connect(self.finish_selection_drag)
 
         self.selected_label = QLabel("None")
         self.x_spin = self._make_float_spinbox()
@@ -992,8 +1098,10 @@ class OutlineEditor(QWidget):
         self.auto_align_check = QCheckBox("Auto Align")
         self.auto_align_check.setChecked(True)
         self.auto_align_check.toggled.connect(self.canvas.set_auto_align_enabled)
+        self.auto_align_check.toggled.connect(lambda: self._update_clipboard_preview(self.canvas.last_pointer))
         self.auto_align_check.setToolTip(
-            "Snaps a dragged vertex to connected vertices when it is close to a straight horizontal or vertical line."
+            "Move: snap a vertex to nearby vertices, axes or aligned connections; "
+            "snap a selection's center to the origin. Also snaps the clipboard anchor."
         )
         self.status_label = QLabel("")
         self.reset_button = QPushButton("Reset")
@@ -1002,16 +1110,45 @@ class OutlineEditor(QWidget):
         self._build_ui()
         self._update_controls()
 
-    def keyPressEvent(self, event: QKeyEvent) -> None:  # noqa: N802 - Qt override
-        if event.key() == Qt.Key.Key_Escape and self._link_start_index >= 0:
-            self.cancel_link()
-            event.accept()
-            return
-        if event.key() == Qt.Key.Key_Escape and (self._selected_indices or self._selected_edges):
-            self.clear_selection()
+    def keyPressEvent(self, event: QKeyEvent) -> None:
+        focus = QApplication.focusWidget()
+        while focus is not None and focus is not self:
+            if isinstance(focus, (QLineEdit, QTextEdit, QPlainTextEdit, QAbstractSpinBox)):
+                super().keyPressEvent(event)
+                return
+            focus = focus.parentWidget()
+        if event.key() == Qt.Key.Key_Escape:
+            self.cancel_operation()
             event.accept()
             return
         super().keyPressEvent(event)
+
+    def cancel_operation(self) -> None:
+        active = self.canvas._dragging_point or self.canvas._box_selecting or self._ghost_target is not None
+        before = self._drag_start_state
+        self._drag_start_state = None
+        self.canvas.cancel_drag()
+        self._close_clipboard_preview()
+        if before is not None:
+            self._restore_state(before)
+            self._after_edit()
+        if self._link_start_index >= 0:
+            self.cancel_link()
+        elif not active:
+            self.clear_selection()
+
+    def set_transform_mode(self, mode: str) -> None:
+        if mode not in self.transform_actions:
+            return
+        if self.canvas._dragging_point:
+            self.cancel_operation()
+        self.canvas.transform_mode = mode
+        self.canvas._snap_preview_pairs.clear()
+        self.transform_actions[mode].setChecked(True)
+        self.canvas.update()
+
+    def select_all(self) -> None:
+        self.select_box(set(range(self._point_count())), set(self._iter_edges()), False)
 
     @property
     def save_mode(self) -> str:
@@ -1139,6 +1276,7 @@ class OutlineEditor(QWidget):
         return _outline_line_count(self._groups)
 
     def set_model(self, model: SkltModel) -> None:
+        self.cancel_operation()
         self._model = model
         self._points_2d = list(model.outline_points)
         self._points_3d = [(point[0], point[1], point[2]) for point in model.points]
@@ -1177,9 +1315,14 @@ class OutlineEditor(QWidget):
         self._update_controls()
 
     def prepare_selection_drag(self) -> None:
-        # Dragging is intentionally simple again: selected vertices/link endpoints
-        # move as-is. Do not detach/clone connected geometry during mouse drag.
-        return
+        self._close_clipboard_preview()
+        self._drag_start_state = self._snapshot()
+
+    def finish_selection_drag(self) -> None:
+        # Also handles a click without movement, or an invalid final sample.
+        if self._drag_start_state is not None:
+            self._push_history(self._drag_start_state, self._snapshot())
+            self._drag_start_state = None
 
     def select_point(self, index: int, toggle: bool = False) -> None:
         point_count = self._point_count()
@@ -1207,7 +1350,7 @@ class OutlineEditor(QWidget):
         self.selectionChanged.emit(self._selected_index)
 
     def select_link(self, first: int, second: int, toggle: bool = False) -> None:
-        if self._mode != "poo2" or not self._has_edge(first, second):
+        if self._mode not in ("poo2", "otl2") or not self._has_edge(first, second):
             return
         self._link_start_index = -1
         edge = _edge_key(first, second)
@@ -1374,7 +1517,10 @@ class OutlineEditor(QWidget):
             if len(value) != 2:
                 continue
             if 0 <= index < self._point_count():
-                valid_positions[index] = (float(value[0]), float(value[1]))
+                coordinates = (float(value[0]), float(value[1]))
+                if not all(math.isfinite(v) and abs(v) <= 1.0e30 for v in coordinates):
+                    return
+                valid_positions[index] = coordinates
         if not valid_positions:
             return
 
@@ -1383,10 +1529,10 @@ class OutlineEditor(QWidget):
             self._drag_start_state = self._snapshot()
 
         self._selected_link = sorted(self._selected_edges)[0] if self._selected_edges else None
-        if self._mode == "poo2":
+        if self._mode == "poo2" and self.canvas.transform_mode == "move":
             valid_positions = self._snap_moved_group_center_to_origin(valid_positions)
 
-        use_single_vertex_snap = len(valid_positions) == 1 and self._mode == "poo2"
+        use_single_vertex_snap = len(valid_positions) == 1 and self._mode == "poo2" and self.canvas.transform_mode == "move"
         for index, (first_axis_value, second_axis_value) in valid_positions.items():
             if self._mode == "otl2":
                 new_point = (_clamp_byte(round(first_axis_value)), _clamp_byte(round(second_axis_value)))
@@ -1413,6 +1559,9 @@ class OutlineEditor(QWidget):
             self._selected_indices = {self._selected_index}
         self._after_edit()
 
+        if self._mode == "poo2" and self.canvas.transform_mode == "move" and self.canvas._dragging_point:
+            projected = self._projected_points()
+            self.canvas._update_snap_preview({i: projected[i] for i in valid_positions})
         if commit_undo:
             before = self._drag_start_state or before or self._snapshot()
             self._drag_start_state = None
@@ -1501,6 +1650,8 @@ class OutlineEditor(QWidget):
         self._last_auto_align_message = "Merged overlapping vertex/vertices"
 
     def undo(self) -> None:
+        if self.canvas._dragging_point:
+            self.cancel_operation()
         if not self._undo_stack:
             return
 
@@ -1510,6 +1661,8 @@ class OutlineEditor(QWidget):
         self._after_edit()
 
     def redo(self) -> None:
+        if self.canvas._dragging_point:
+            self.cancel_operation()
         if not self._redo_stack:
             return
 
@@ -1609,6 +1762,8 @@ class OutlineEditor(QWidget):
         self.delete_selection(confirm=False)
 
     def delete_selection(self, confirm: bool = False) -> None:
+        if self.canvas._dragging_point:
+            self.cancel_operation()
         if self._mode != "poo2":
             return
         edges = set(self._selected_edges)
@@ -1671,6 +1826,8 @@ class OutlineEditor(QWidget):
         return removed_count, 0
 
     def start_link(self) -> None:
+        if self.canvas._dragging_point:
+            self.cancel_operation()
         if (
             self._mode != "poo2"
             or len(self._selected_indices) != 1
@@ -1801,7 +1958,7 @@ class OutlineEditor(QWidget):
         if (
             self._mode != "poo2"
             or not self.auto_align_check.isChecked()
-            or not (0 <= index < len(self._points_3d))
+            or not (-1 <= index < len(self._points_3d))
         ):
             self._last_auto_align_message = ""
             return first_axis_value, second_axis_value
@@ -1960,6 +2117,8 @@ class OutlineEditor(QWidget):
         self._groups = new_groups
 
     def copy_selection(self) -> None:
+        if self.canvas._dragging_point:
+            self.cancel_operation()
         if self._mode != "poo2":
             return
         vertex_indices = self._selected_vertices_for_clipboard()
@@ -1974,6 +2133,8 @@ class OutlineEditor(QWidget):
                 copied_groups.append((index_map[first], index_map[second]))
 
         self._clipboard = ClipboardPayload(points=points, groups=tuple(copied_groups))
+        self._ghost_target = self.canvas.view_center_world()
+        self._update_clipboard_preview(self.canvas.last_pointer)
         self._last_auto_align_message = (
             f"Copied {len(points)} vertex/vertices"
             + (f" and {len(copied_groups)} link(s)" if copied_groups else "")
@@ -1988,31 +2149,56 @@ class OutlineEditor(QWidget):
             return
         self.copy_selection()
         self.delete_selection(confirm=False)
+        self._update_clipboard_preview(self.canvas.last_pointer)
+
+    def _close_clipboard_preview(self) -> None:
+        self._ghost_target = None
+        self.canvas.ghost_points = []
+        self.canvas.ghost_groups = ()
+        self.canvas._snap_preview_pairs.clear()
+        self.canvas.update()
+
+    def _clipboard_placement(self, target: ProjectedPoint) -> list[EditablePoint]:
+        if not self.has_clipboard:
+            return []
+        points = self._clipboard.points
+        cx = sum(p[0] for p in points) / len(points)
+        cz = sum(p[2] for p in points) / len(points)
+        return [(p[0] + target[0] - cx, p[1], p[2] + target[1] - cz) for p in points]
+
+    def _update_clipboard_preview(self, screen_pos=None) -> None:
+        if self._ghost_target is None or not self.has_clipboard:
+            return
+        target = self.canvas._from_screen(screen_pos) if screen_pos is not None else self._ghost_target
+        # Reuse the point magnet for the clipboard anchor; -1 has no incident edges.
+        target = self._auto_align_projected_vertex(-1, *target)
+        self._ghost_target = target
+        self.canvas.ghost_points = [(p[0], p[2]) for p in self._clipboard_placement(target)]
+        self.canvas.ghost_groups = self._clipboard.groups
+        self.canvas.update()
+
+    def _paste_from_context(self, x_value: float, z_value: float) -> None:
+        if self._ghost_target is not None:
+            self.paste_clipboard()
+        else:
+            self.paste_clipboard_at_projected(x_value, z_value)
 
     def paste_clipboard(self) -> None:
-        target_x, target_z = self.canvas.view_center_world()
+        target_x, target_z = self._ghost_target or self.canvas.view_center_world()
         self.paste_clipboard_at_projected(target_x, target_z)
 
     def paste_clipboard_at_projected(self, target_x: float, target_z: float) -> None:
+        if self.canvas._dragging_point:
+            self.cancel_operation()
         if self._mode != "poo2" or self._clipboard is None or not self._clipboard.points:
             return
 
         before = self._snapshot()
-        points = list(self._clipboard.points)
-        projected = [(point[HUD_PROJECTION_AXES[0]], point[HUD_PROJECTION_AXES[1]]) for point in points]
-        center_x = sum(point[0] for point in projected) / len(projected)
-        center_z = sum(point[1] for point in projected) / len(projected)
-        delta_x = target_x - center_x
-        delta_z = target_z - center_z
-
+        points = self._clipboard_placement((target_x, target_z))
         first_new_index = len(self._points_3d)
-        new_indices: list[int] = []
-        for point in points:
-            coords = list(point)
-            coords[HUD_PROJECTION_AXES[0]] = float(coords[HUD_PROJECTION_AXES[0]] + delta_x)
-            coords[HUD_PROJECTION_AXES[1]] = float(coords[HUD_PROJECTION_AXES[1]] + delta_z)
-            self._points_3d.append((coords[0], coords[1], coords[2]))
-            new_indices.append(len(self._points_3d) - 1)
+        self._points_3d.extend(points)
+        new_indices = list(range(first_new_index, len(self._points_3d)))
+        self._close_clipboard_preview()
 
         new_edges: set[tuple[int, int]] = set()
         for group in self._clipboard.groups:
@@ -2080,10 +2266,15 @@ class OutlineEditor(QWidget):
         return False
 
     def _show_selection_context_menu(self, x_value: float, z_value: float, global_pos: QPoint) -> None:
+        if self._mode == "otl2":
+            self._show_outline_transform_menu(global_pos)
+            return
         if self._mode != "poo2":
             return
 
         menu = QMenu(self)
+        menu.addActions(list(self.transform_actions.values()))
+        menu.addSeparator()
         undo_action = menu.addAction("< Undo")
         undo_action.setEnabled(self.can_undo)
         redo_action = menu.addAction("Redo >")
@@ -2115,7 +2306,7 @@ class OutlineEditor(QWidget):
         elif chosen == cut_action:
             self.cut_selection()
         elif chosen == paste_action:
-            self.paste_clipboard_at_projected(x_value, z_value)
+            self._paste_from_context(x_value, z_value)
         elif chosen == link_action:
             self.start_link()
         elif chosen == delete_action:
@@ -2123,9 +2314,12 @@ class OutlineEditor(QWidget):
         elif self._handle_add_menu_action(chosen, add_actions, x_value, z_value):
             return
         elif chosen == cancel_action:
-            self.clear_selection()
+            self.cancel_operation()
 
     def _show_link_context_menu(self, first: int, second: int, x_value: float, z_value: float, global_pos: QPoint) -> None:
+        if self._mode == "otl2":
+            self._show_outline_transform_menu(global_pos)
+            return
         if self._mode != "poo2" or not self._has_edge(first, second):
             return
 
@@ -2134,6 +2328,8 @@ class OutlineEditor(QWidget):
             self.select_link(first, second, False)
 
         menu = QMenu(self)
+        menu.addActions(list(self.transform_actions.values()))
+        menu.addSeparator()
         undo_action = menu.addAction("< Undo")
         undo_action.setEnabled(self.can_undo)
         redo_action = menu.addAction("Redo >")
@@ -2158,21 +2354,26 @@ class OutlineEditor(QWidget):
         elif chosen == cut_action:
             self.cut_selection()
         elif chosen == paste_action:
-            self.paste_clipboard_at_projected(x_value, z_value)
+            self._paste_from_context(x_value, z_value)
         elif chosen == delete_link_action:
             self.delete_selection()
         elif chosen == cancel_action:
-            self.clear_selection()
+            self.cancel_operation()
 
     def _show_point_context_menu(self, index: int, x_value: float, z_value: float, global_pos: QPoint) -> None:
+        if self._mode == "otl2":
+            self._show_outline_transform_menu(global_pos)
+            return
         if self._mode != "poo2" or not (0 <= index < len(self._points_3d)):
             return
 
         self._link_start_index = -1
-        if index not in self._selected_indices:
+        if index not in self._selected_vertices_for_clipboard():
             self.select_point(index, False)
 
         menu = QMenu(self)
+        menu.addActions(list(self.transform_actions.values()))
+        menu.addSeparator()
         undo_action = menu.addAction("< Undo")
         undo_action.setEnabled(self.can_undo)
         redo_action = menu.addAction("Redo >")
@@ -2205,7 +2406,7 @@ class OutlineEditor(QWidget):
         elif chosen == cut_action:
             self.cut_selection()
         elif chosen == paste_action:
-            self.paste_clipboard_at_projected(x_value, z_value)
+            self._paste_from_context(x_value, z_value)
         elif chosen == link_action:
             self.start_link()
         elif chosen == delete_action:
@@ -2217,13 +2418,18 @@ class OutlineEditor(QWidget):
         elif chosen == align_v_action:
             self.align_selected_vertical()
         elif chosen == cancel_action:
-            self.clear_selection()
+            self.cancel_operation()
 
     def _show_empty_context_menu(self, x_value: float, z_value: float, global_pos: QPoint) -> None:
+        if self._mode == "otl2":
+            self._show_outline_transform_menu(global_pos)
+            return
         if self._mode != "poo2":
             return
 
         menu = QMenu(self)
+        menu.addActions(list(self.transform_actions.values()))
+        menu.addSeparator()
         undo_action = menu.addAction("< Undo")
         undo_action.setEnabled(self.can_undo)
         redo_action = menu.addAction("Redo >")
@@ -2244,15 +2450,22 @@ class OutlineEditor(QWidget):
         elif chosen == redo_action:
             self.redo()
         elif chosen == paste_action:
-            self.paste_clipboard_at_projected(x_value, z_value)
+            self._paste_from_context(x_value, z_value)
         elif self._handle_add_menu_action(chosen, add_actions, x_value, z_value):
             return
         elif chosen == reset_action:
             self.reset_to_loaded()
         elif chosen == cancel_action:
-            self.clear_selection()
+            self.cancel_operation()
+
+    def _show_outline_transform_menu(self, global_pos: QPoint) -> None:
+        menu = QMenu(self)
+        menu.addActions(list(self.transform_actions.values()))
+        menu.exec(global_pos)
 
     def reset_to_loaded(self) -> None:
+        if self.canvas._dragging_point:
+            self.cancel_operation()
         if self._loaded_state is None:
             self.canvas.reset_view()
             self.resetApplied.emit()
@@ -2528,8 +2741,7 @@ class OutlineEditor(QWidget):
         self._update_dirty_from_signature()
         self._refresh_canvas()
         self._update_controls()
-        if self._mode == "poo2":
-            self.geometryChanged.emit()
+        self.geometryChanged.emit()
         self.undoRedoChanged.emit()
 
     def _current_signature(self) -> tuple:
