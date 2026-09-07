@@ -5,3 +5,5 @@ build/
 __pycache__/
 *.pyc
 Riduci_Spazio_Git.bat
+.codex
+AGENTS.md

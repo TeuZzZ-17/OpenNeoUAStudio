@@ -22,6 +22,7 @@ class WireframeEditorUiTests(unittest.TestCase):
     def _window(self):
         window = WireframeEditorWindow()
         self.addCleanup(window.close)
+        self.addCleanup(window.outline_editor.mark_clean)
         return window
 
     def test_file_menu_uses_import_and_export_labels(self):
@@ -54,11 +55,11 @@ class WireframeEditorUiTests(unittest.TestCase):
         self.assertFalse(hasattr(window, "rotate_mode_action"))
         self.assertFalse(hasattr(window, "resize_mode_action"))
 
-    def test_no_warnings_is_centered_in_review_panel(self):
+    def test_no_warnings_occupies_no_status_space(self):
         window = self._window()
-        alignment = window.warning_status_label.alignment()
-        self.assertTrue(alignment & Qt.AlignmentFlag.AlignHCenter)
-        self.assertTrue(alignment & Qt.AlignmentFlag.AlignVCenter)
+        self.assertFalse(hasattr(window, "warning_box"))
+        self.assertTrue(window.warning_status_label.isHidden())
+        self.assertEqual(window.warning_status_label.text(), "")
 
     def test_toolbar_ends_before_vertex_details(self):
         window = self._window()
@@ -130,7 +131,7 @@ class WireframeEditorUiTests(unittest.TestCase):
         )
         editor.auto_align_check.setChecked(True)
         editor.move_projected_points({1: (2.0, 3.0)}, True)
-        self.assertEqual(editor.projected_points[1], (0.0, 0.0))
+        self.assertEqual(editor.projected_points[1], (0.0, 0.0, 0.0))
 
     def test_auto_align_never_collapses_connected_link_even_with_two_axis_magnet(self):
         editor = self._poo2_editor(
@@ -142,12 +143,9 @@ class WireframeEditorUiTests(unittest.TestCase):
         self.assertNotEqual(editor.projected_points[1], editor.projected_points[0])
         self.assertEqual(editor.polygons, [[0, 1]])
 
-    def test_selected_elements_panel_is_taller_than_review_list(self):
+    def test_selected_elements_panel_remains_readable(self):
         window = self._window()
-        self.assertGreater(
-            window.selected_elements_list.minimumHeight(),
-            window.warning_list.minimumHeight(),
-        )
+        self.assertGreaterEqual(window.selected_elements_list.minimumHeight(), 150)
 
 
     def test_empty_editor_does_not_show_obsolete_no_data_message(self):
@@ -338,7 +336,7 @@ class WireframeEditorUiTests(unittest.TestCase):
         # Selected edge endpoints 0/1 plus explicitly selected vertex 3 are
         # deleted.  Vertex 2 survives, and no incident link can remain.
         self.assertEqual(len(editor.projected_points), 1)
-        self.assertEqual(editor.projected_points[0], (200.0, 0.0))
+        self.assertEqual(editor.projected_points[0], (200.0, 0.0, 0.0))
         self.assertEqual(editor.polygons, [])
 
     def test_linking_new_vertices_preserves_both_vertices(self):
