@@ -9,10 +9,17 @@ from __future__ import annotations
 from pathlib import Path
 import sys
 
-from PySide6.QtCore import Qt
+from PySide6.QtCore import QEvent, Qt
 from PySide6.QtGui import QAction, QKeySequence
 from PySide6.QtWidgets import (
     QApplication,
+    QAbstractSpinBox,
+    QComboBox,
+    QHBoxLayout,
+    QLineEdit,
+    QPlainTextEdit,
+    QTextEdit,
+    QToolButton,
     QAbstractItemView,
     QFileDialog,
     QFormLayout,
@@ -72,8 +79,7 @@ class WireframeEditorWindow(QMainWindow):
         self.selection_value = QLabel("No selection")
         self.selected_elements_list = QListWidget()
         self.status_value = QLabel("Ready to import a file")
-        self.warning_status_label = QLabel("No warnings")
-        self.warning_list = QListWidget()
+
         self.new_action: QAction | None = None
         self.save_action: QAction | None = None
         self.save_as_action: QAction | None = None
@@ -99,11 +105,27 @@ class WireframeEditorWindow(QMainWindow):
         configure_operation_status_bar(self)
         self._build_ui()
         self._build_menu()
+        QApplication.instance().installEventFilter(self)
         self._build_edit_toolbar()
         # Start in the same editable empty-wireframe state as File -> New,
         # but keep the untouched startup document clean so opening an existing
         # file does not prompt to export an empty session.
         self._start_new_session(mark_dirty=False)
+
+    def eventFilter(self, watched, event) -> bool:
+        if event.type() == QEvent.Type.ShortcutOverride:
+            widget = QApplication.focusWidget()
+            editable = False
+            while widget is not None and widget is not self:
+                if isinstance(widget, (QLineEdit, QTextEdit, QPlainTextEdit, QAbstractSpinBox)) or (
+                    isinstance(widget, QComboBox) and widget.isEditable()
+                ):
+                    editable = True
+                widget = widget.parentWidget()
+            if widget is self and editable:
+                event.accept()
+                return True
+        return super().eventFilter(watched, event)
 
     def _build_ui(self) -> None:
         side_panel = QWidget()
@@ -202,7 +224,7 @@ class WireframeEditorWindow(QMainWindow):
         selected_elements_layout.setContentsMargins(8, 6, 8, 8)
         selected_elements_layout.setSpacing(4)
         self.selected_elements_list.setAlternatingRowColors(True)
-        self.selected_elements_list.setMinimumHeight(220)
+        self.selected_elements_list.setMinimumHeight(150)
         self.selected_elements_list.setSizePolicy(
             QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding
         )
@@ -215,25 +237,23 @@ class WireframeEditorWindow(QMainWindow):
         )
         side_layout.addWidget(selected_elements_box, 3)
 
-        self.warning_box = QGroupBox("Review")
-        warning_layout = QVBoxLayout(self.warning_box)
-        warning_layout.setContentsMargins(8, 6, 8, 8)
-        warning_layout.setSpacing(5)
-        self.warning_status_label.setObjectName("mutedValue")
-        self.warning_status_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        warning_layout.addWidget(
-            self.warning_status_label, 1, Qt.AlignmentFlag.AlignCenter)
-        self.warning_list.setAlternatingRowColors(True)
-        self.warning_list.setMinimumHeight(110)
-        self.warning_list.setSizePolicy(
-            QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding
-        )
-        warning_layout.addWidget(self.warning_list)
-        self.warning_list.setVisible(False)
-        self.warning_box.setSizePolicy(
-            QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding
-        )
-        side_layout.addWidget(self.warning_box, 2)
+        transform_box = QGroupBox("Transform")
+        transform_layout = QHBoxLayout(transform_box)
+        self.transform_buttons = {}
+        for mode, action in self.outline_editor.transform_actions.items():
+            button = QToolButton()
+            button.setDefaultAction(action)
+            button.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+            transform_layout.addWidget(button)
+            self.transform_buttons[mode] = button
+        side_layout.addWidget(transform_box)
+        self.warning_status_label = QLabel()
+        self.warning_status_label.setTextFormat(Qt.TextFormat.PlainText)
+        self.warning_status_label.setWordWrap(True)
+        self.warning_status_label.setMaximumHeight(54)
+        self.warning_status_label.setStyleSheet("color: #efb86c;")
+        self.statusBar().addPermanentWidget(self.warning_status_label, 1)
+        self.warning_status_label.hide()
 
         splitter = QSplitter(Qt.Orientation.Horizontal)
         splitter.addWidget(self.outline_editor)
@@ -274,6 +294,17 @@ class WireframeEditorWindow(QMainWindow):
             file_menu, self, exit_text="E&xit")
 
         edit_menu = self.menuBar().addMenu("&Edit")
+        self.edit_menu = edit_menu
+        edit_menu.addActions(list(self.outline_editor.transform_actions.values()))
+        edit_menu.addSeparator()
+        self.select_all_action = QAction("Select All", self)
+        self.select_all_action.setShortcut(QKeySequence.StandardKey.SelectAll)
+        self.select_all_action.triggered.connect(self.outline_editor.select_all)
+        edit_menu.addAction(self.select_all_action)
+        self.cancel_action = QAction("Cancel Operation", self)
+        self.cancel_action.setShortcut("Esc")
+        self.cancel_action.triggered.connect(self.outline_editor.cancel_operation)
+        edit_menu.addAction(self.cancel_action)
 
         self.undo_action = QAction("&Undo", self)
         self.undo_action.setShortcut(QKeySequence.StandardKey.Undo)
@@ -436,6 +467,8 @@ class WireframeEditorWindow(QMainWindow):
             self.open_file(path)
 
     def save_current_file(self) -> None:
+        if self.outline_editor.canvas._dragging_point:
+            self.outline_editor.cancel_operation()
         if not self._current_model:
             return
         if not self.outline_editor.can_save or not self.outline_editor.is_dirty:
@@ -458,6 +491,8 @@ class WireframeEditorWindow(QMainWindow):
         self._show_model(saved_model, self._current_file_path)
 
     def save_outline_as(self) -> None:
+        if self.outline_editor.canvas._dragging_point:
+            self.outline_editor.cancel_operation()
         if not self._current_model or not self.outline_editor.can_save:
             QMessageBox.information(
                 self,
@@ -556,18 +591,12 @@ class WireframeEditorWindow(QMainWindow):
         self.sensors_value.setText(str(len(model.sensors)))
         self._update_metadata_from_editor()
 
-        self.warning_list.clear()
-        if model.warnings:
-            self.warning_list.addItems(model.warnings)
-            self.warning_status_label.setText(
-                f"{len(model.warnings)} item(s) to review before export.")
-            self.warning_status_label.setAlignment(
-                Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
-            self.warning_list.setVisible(True)
-        else:
-            self.warning_status_label.setText("No warnings")
-            self.warning_status_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-            self.warning_list.setVisible(False)
+        warning_text = "\n".join(model.warnings)
+        self.warning_status_label.setText(
+            f"{len(model.warnings)} warning(s): {model.warnings[0]}" if model.warnings else ""
+        )
+        self.warning_status_label.setToolTip(warning_text)
+        self.warning_status_label.setVisible(bool(model.warnings))
 
         self._update_window_title()
         self._update_save_controls()
