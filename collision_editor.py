@@ -67,19 +67,17 @@ from model_space_gizmo import ModelSpaceGizmo
 
 
 LEGACY = "legacy"
-VEHICLE = "vehicle"
-WEAPON = "weapon"
-COMPOUND_TYPES = (VEHICLE, WEAPON)
+OPENNEOUA = "openneoua"
+VEHICLE = "vehicle"  # target category only
+WEAPON = "weapon"    # target category only
+COMPOUND_TYPES = (OPENNEOUA,)
 TYPE_LABELS = {
     LEGACY: "Legacy Radius",
-    VEHICLE: "Vehicle Collision",
-    WEAPON: "Weapon Collision",
+    OPENNEOUA: "OpenNeoUA Collision",
 }
-# Exact F10 debug colors from OpenNeoUA src/yw_game.cpp.
 TYPE_COLORS = {
     LEGACY: QColor(220, 60, 60),
-    VEHICLE: QColor(60, 220, 60),
-    WEAPON: QColor(60, 130, 235),
+    OPENNEOUA: QColor(60, 220, 60),
 }
 SCRIPT_TYPES = (
     "new_vehicle", "modify_vehicle", "new_weapon", "modify_weapon",
@@ -756,14 +754,11 @@ class ImportCollisionDialog(QDialog):
         self.block_combo = QComboBox()
         for block in self.blocks:
             self.block_combo.addItem(block.label, block)
-        self.category_combo = QComboBox()
-        self.category_combo.addItem("Vehicle Collision (green)", VEHICLE)
-        self.category_combo.addItem("Weapon Collision (blue)", WEAPON)
         form.addRow("Definition", self.block_combo)
-        form.addRow("Interpret coll_* as", self.category_combo)
         layout.addLayout(form)
         note = QLabel(
-            "Green/blue is editor-only. Imported coll_* data is unchanged.")
+            "coll_* imports as OpenNeoUA Collision. Vehicle/weapon remains "
+            "the target category of the selected script block.")
         note.setWordWrap(True)
         layout.addWidget(note)
         buttons = QDialogButtonBox(
@@ -774,10 +769,10 @@ class ImportCollisionDialog(QDialog):
         layout.addWidget(buttons)
 
     def selected(self):
-        return (
-            self.block_combo.currentData(),
-            self.category_combo.currentData(),
-        )
+        block = self.block_combo.currentData()
+        target_category = (
+            WEAPON if block is not None and "weapon" in block.kind else VEHICLE)
+        return block, target_category
 
 
 class ApplyScriptDialog(QDialog):
@@ -977,12 +972,9 @@ class CollisionEditorWindow(QMainWindow):
 
         self.add_legacy_action = QAction("Add Legacy Radius", self)
         self.add_legacy_action.triggered.connect(self.add_legacy)
-        self.add_vehicle_action = QAction("Add Vehicle Collision", self)
-        self.add_vehicle_action.triggered.connect(
-            lambda: self.add_compound(VEHICLE))
-        self.add_weapon_action = QAction("Add Weapon Collision", self)
-        self.add_weapon_action.triggered.connect(
-            lambda: self.add_compound(WEAPON))
+        self.add_openneoua_action = QAction("Add OpenNeoUA Collision", self)
+        self.add_openneoua_action.triggered.connect(
+            lambda: self.add_compound(OPENNEOUA))
         self.duplicate_action = QAction("Duplicate Sphere", self)
         self.duplicate_action.setShortcut(QKeySequence("Ctrl+D"))
         self.duplicate_action.triggered.connect(self.duplicate_sphere)
@@ -992,9 +984,9 @@ class CollisionEditorWindow(QMainWindow):
         self.reset_collisions_action = QAction("Reset Collisions", self)
         self.reset_collisions_action.triggered.connect(self.reset_collisions)
         for action in (
-                self.add_legacy_action, self.add_vehicle_action,
-                self.add_weapon_action, self.duplicate_action,
-                self.delete_action, self.reset_collisions_action):
+                self.add_legacy_action, self.add_openneoua_action,
+                self.duplicate_action, self.delete_action,
+                self.reset_collisions_action):
             edit_menu.addAction(action)
 
         self.viewpoint_menu = self.menuBar().addMenu("Viewpoint")
@@ -1004,10 +996,8 @@ class CollisionEditorWindow(QMainWindow):
             ("Show Textures", True, self.viewport.set_textures_visible),
             ("Show Legacy Radius", True, lambda value:
              self.viewport.set_collision_category_visible(LEGACY, value)),
-            ("Show Vehicle Collisions", True, lambda value:
-             self.viewport.set_collision_category_visible(VEHICLE, value)),
-            ("Show Weapon Collisions", True, lambda value:
-             self.viewport.set_collision_category_visible(WEAPON, value)),
+            ("Show OpenNeoUA Collisions", True, lambda value:
+             self.viewport.set_collision_category_visible(OPENNEOUA, value)),
         )
         for text, checked, slot in viewpoint_options:
             action = QAction(text, self)
@@ -1042,9 +1032,9 @@ class CollisionEditorWindow(QMainWindow):
             toolbar.addAction(action)
         toolbar.addSeparator()
         for action in (
-                self.add_legacy_action, self.add_vehicle_action,
-                self.add_weapon_action, self.duplicate_action,
-                self.delete_action, self.reset_collisions_action):
+                self.add_legacy_action, self.add_openneoua_action,
+                self.duplicate_action, self.delete_action,
+                self.reset_collisions_action):
             toolbar.addAction(action)
         self.reset_view_action = QAction("Reset View", self)
         self.reset_view_action.triggered.connect(self._reset_view)
@@ -1391,7 +1381,7 @@ class CollisionEditorWindow(QMainWindow):
             QMessageBox.warning(
                 self, "No model", "Load and select a model first.")
             return
-        self.add_compound(self.target_combo.currentData())
+        self.add_compound(OPENNEOUA)
 
     def duplicate_sphere(self):
         sphere = self._selected_sphere()
@@ -1580,10 +1570,8 @@ class CollisionEditorWindow(QMainWindow):
     def _refresh_project_summary_menu(self):
         menu = self.project_summary_menu
         menu.clear()
-        vehicle_count = sum(
-            sphere.category == VEHICLE for sphere in self.project.compound)
-        weapon_count = sum(
-            sphere.category == WEAPON for sphere in self.project.compound)
+        openneoua_count = sum(
+            sphere.category == OPENNEOUA for sphere in self.project.compound)
         sphere = self._selected_sphere()
         selected = (
             self._sphere_display_name(sphere) if sphere is not None else "None")
@@ -1592,8 +1580,7 @@ class CollisionEditorWindow(QMainWindow):
             f"Source model: {self.project.source_model or '<none>'}",
             f"Legacy Radius: "
             f"{'Present' if self.project.legacy is not None else 'Missing'}",
-            f"Vehicle Collision Spheres: {vehicle_count}",
-            f"Weapon Collision Spheres: {weapon_count}",
+            f"OpenNeoUA Collision Spheres: {openneoua_count}",
             f"Total Compound Spheres: {len(self.project.compound)}",
             f"Selected Sphere: {selected}",
         ]
@@ -1720,7 +1707,7 @@ class CollisionEditorWindow(QMainWindow):
         block, category = dialog.selected()
         try:
             legacy, compound, warnings = import_collision_block(
-                text, block, category)
+                text, block, OPENNEOUA)
         except CollisionScriptError as exc:
             QMessageBox.warning(self, "Import failed", str(exc))
             return
