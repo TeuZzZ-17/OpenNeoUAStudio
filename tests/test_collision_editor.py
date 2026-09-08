@@ -636,6 +636,8 @@ class CollisionEditorTests(unittest.TestCase):
         self.assertEqual(window.redo_action.iconText(), "Redo >")
         self.assertEqual(window.undo_button.text(), "Undo")
         self.assertEqual(window.redo_button.text(), "Redo")
+        self.assertEqual(window.toolbar_undo_button.text(), "< Undo")
+        self.assertEqual(window.toolbar_redo_button.text(), "Redo >")
 
     def test_40_radius_list_and_export_are_whole_numbers(self):
         project = CollisionProject(
@@ -686,10 +688,11 @@ class CollisionEditorTests(unittest.TestCase):
         for label in (
                 "Undo", "Redo", "Add Legacy Radius",
                 "Add Vehicle Collision", "Add Weapon Collision",
-                "Duplicate Sphere", "Delete Sphere", "Delete All Collisions",
+                "Duplicate Sphere", "Delete Sphere",
                 "Reset View", "Import BAS Archive", "Import SKLT",
                 "View Preset"):
             self.assertIn(label, labels)
+        self.assertNotIn("Delete All Collisions", labels)
 
     def test_43_mouse_drag_on_sphere_does_not_move_collision(self):
         viewport = CollisionViewport()
@@ -856,6 +859,286 @@ class CollisionEditorTests(unittest.TestCase):
         item.setText(1, "144")
         self.assertEqual(window.project.compound[0].radius, 144.0)
         self.assertEqual(window.radius_spin.value(), 144.0)
+
+    def test_53b_sphere_multiselect_syncs_tree_viewport_and_select_all(self):
+        window = self._window()
+        window.add_compound(VEHICLE)
+        window.add_compound(VEHICLE)
+        window.add_compound(WEAPON)
+        self.assertEqual(
+            window.sphere_tree.selectionMode(),
+            QAbstractItemView.SelectionMode.ExtendedSelection)
+
+        window._select_sphere(0)
+        window._toggle_sphere(2)
+        self.assertEqual(window._selected_sphere_indices(), {0, 2})
+        self.assertEqual(window._selected, 2)
+        selected_tree = {
+            item.data(0, editor_module._SPHERE_INDEX_ROLE)
+            for item in window.sphere_tree.selectedItems()
+        }
+        self.assertEqual(selected_tree, {0, 2})
+        self.assertEqual(
+            window.viewport._collision_selected_indices, {0, 2})
+
+        window.select_all_spheres()
+        self.assertEqual(window._selected_sphere_indices(), {0, 1, 2})
+        self.assertEqual(
+            window.viewport._collision_selected_indices, {0, 1, 2})
+        self.assertTrue(window.select_all_spheres_button.isEnabled())
+
+    def test_53c_nudge_moves_all_selected_compound_spheres_once(self):
+        window = self._window()
+        window.project.compound = [
+            CollisionSphere(VEHICLE, 1, 2, 3, 10),
+            CollisionSphere(VEHICLE, 4, 5, 6, 10),
+            CollisionSphere(WEAPON, 7, 8, 9, 10),
+        ]
+        window._selected = 0
+        window._selected_spheres = {0, 2}
+        window._sync_all()
+        window.move_strength_spin.setValue(5)
+        before = [sphere.center for sphere in window.project.compound]
+
+        window._gizmo_nudge((1, 0, 0))
+
+        self.assertEqual(window.project.compound[0].x, before[0][0] + 5)
+        self.assertEqual(window.project.compound[1].center, before[1])
+        self.assertEqual(window.project.compound[2].x, before[2][0] + 5)
+        window.undo()
+        self.assertEqual(
+            [sphere.center for sphere in window.project.compound], before)
+
+    def test_53d_ctrl_click_toggles_and_ctrl_drag_emits_marquee_selection(self):
+        viewport = CollisionViewport()
+        self.addCleanup(viewport.close)
+        viewport.resize(500, 350)
+        sphere = CollisionSphere(VEHICLE, radius=0.7)
+        viewport.set_collision_spheres([sphere], -1)
+        center = viewport._project(viewport._camera_vertex(sphere.center))
+        toggled = []
+        boxed = []
+        viewport.sphereToggleRequested.connect(toggled.append)
+        viewport.sphereBoxSelectionRequested.connect(
+            lambda indices, additive: boxed.append((set(indices), additive)))
+
+        press = QMouseEvent(
+            QEvent.Type.MouseButtonPress, center, center, center,
+            Qt.MouseButton.LeftButton, Qt.MouseButton.LeftButton,
+            Qt.KeyboardModifier.ControlModifier)
+        viewport.mousePressEvent(press)
+        release = QMouseEvent(
+            QEvent.Type.MouseButtonRelease, center, center, center,
+            Qt.MouseButton.LeftButton, Qt.MouseButton.NoButton,
+            Qt.KeyboardModifier.ControlModifier)
+        viewport.mouseReleaseEvent(release)
+        self.assertEqual(toggled, [0])
+
+        start = QPointF(20, 20)
+        end = QPointF(140, 130)
+        press = QMouseEvent(
+            QEvent.Type.MouseButtonPress, start, start, start,
+            Qt.MouseButton.LeftButton, Qt.MouseButton.LeftButton,
+            Qt.KeyboardModifier.ControlModifier)
+        viewport.mousePressEvent(press)
+        move = QMouseEvent(
+            QEvent.Type.MouseMove, end, end, end,
+            Qt.MouseButton.NoButton, Qt.MouseButton.LeftButton,
+            Qt.KeyboardModifier.ControlModifier)
+        with patch.object(
+                viewport, "_sphere_selection_in_box",
+                return_value={0}):
+            viewport.mouseMoveEvent(move)
+            release = QMouseEvent(
+                QEvent.Type.MouseButtonRelease, end, end, end,
+                Qt.MouseButton.LeftButton, Qt.MouseButton.NoButton,
+                Qt.KeyboardModifier.ControlModifier)
+            viewport.mouseReleaseEvent(release)
+        self.assertEqual(boxed, [({0}, True)])
+
+    def test_53e_radius_column_is_read_only_and_uses_controls_below(self):
+        window = self._window()
+        window.add_compound(VEHICLE)
+        self.assertEqual(
+            window.sphere_tree.editTriggers(),
+            QAbstractItemView.EditTrigger.NoEditTriggers)
+        item = window.sphere_tree.topLevelItem(0)
+        self.assertFalse(bool(item.flags() & Qt.ItemFlag.ItemIsEditable))
+        self.assertEqual(item.toolTip(1), "")
+
+    def test_53f_context_click_selected_viewport_sphere_preserves_group(self):
+        viewport = CollisionViewport()
+        self.addCleanup(viewport.close)
+        viewport.set_collision_spheres(
+            [CollisionSphere(VEHICLE, radius=10),
+             CollisionSphere(VEHICLE, x=30, radius=10),
+             CollisionSphere(VEHICLE, x=60, radius=10)],
+            selected=0, selected_indices={0, 1})
+        picked = []
+        context = []
+        viewport.spherePicked.connect(picked.append)
+        viewport.sphereContextMenuRequested.connect(
+            lambda index, pos: context.append(index))
+        pos = QPointF(40, 40)
+
+        with patch.object(viewport, "_hit_sphere", return_value=1):
+            event = QMouseEvent(
+                QEvent.Type.MouseButtonPress, pos, pos, pos,
+                Qt.MouseButton.RightButton, Qt.MouseButton.RightButton,
+                Qt.KeyboardModifier.NoModifier)
+            viewport.mousePressEvent(event)
+        self.assertEqual(picked, [])
+        self.assertEqual(context, [1])
+        self.assertEqual(viewport._collision_selected_indices, {0, 1})
+
+        with patch.object(viewport, "_hit_sphere", return_value=2):
+            event = QMouseEvent(
+                QEvent.Type.MouseButtonPress, pos, pos, pos,
+                Qt.MouseButton.RightButton, Qt.MouseButton.RightButton,
+                Qt.KeyboardModifier.NoModifier)
+            viewport.mousePressEvent(event)
+        self.assertEqual(picked, [2])
+
+    def test_53g_duplicate_sphere_duplicates_entire_multiselection(self):
+        window = self._window()
+        window.project.compound = [
+            CollisionSphere(VEHICLE, x=10, radius=10),
+            CollisionSphere(VEHICLE, x=20, radius=20),
+            CollisionSphere(WEAPON, x=30, radius=30),
+        ]
+        window._selected = 0
+        window._selected_spheres = {0, 2}
+        window._sync_all()
+
+        window.duplicate_sphere()
+
+        self.assertEqual(len(window.project.compound), 5)
+        self.assertEqual(
+            [sphere.x for sphere in window.project.compound],
+            [10, 10, 20, 30, 30])
+        self.assertEqual(window._selected_sphere_indices(), {1, 4})
+        window.undo()
+        self.assertEqual(
+            [sphere.x for sphere in window.project.compound], [10, 20, 30])
+
+    def test_53h_delete_sphere_deletes_all_selected_spheres(self):
+        window = self._window()
+        window.project.legacy = CollisionSphere(LEGACY, radius=40)
+        window.project.compound = [
+            CollisionSphere(VEHICLE, x=10, radius=10),
+            CollisionSphere(VEHICLE, x=20, radius=20),
+            CollisionSphere(WEAPON, x=30, radius=30),
+        ]
+        window._selected = 0
+        window._selected_spheres = {0, 1, 2, 3}
+        window._sync_all()
+
+        window.delete_sphere()
+
+        self.assertEqual(window.project.spheres(), [])
+        self.assertEqual(window._selected_sphere_indices(), set())
+        window.undo()
+        self.assertIsNotNone(window.project.legacy)
+        self.assertEqual(len(window.project.compound), 3)
+
+    def test_53i_mirror_sphere_mirrors_entire_multiselection(self):
+        window = self._window()
+        window.project.compound = [
+            CollisionSphere(VEHICLE, x=10, radius=10),
+            CollisionSphere(VEHICLE, x=20, radius=20),
+            CollisionSphere(WEAPON, x=30, radius=30),
+        ]
+        window._selected = 0
+        window._selected_spheres = {0, 2}
+        window._sync_all()
+
+        window.mirror_selected_sphere("x")
+
+        self.assertEqual(
+            [sphere.x for sphere in window.project.compound],
+            [10, -10, 20, 30, -30])
+        self.assertEqual(window._selected_sphere_indices(), {1, 4})
+
+    def test_53j_change_type_applies_to_valid_multiselection(self):
+        window = self._window()
+        legacy = CollisionSphere(LEGACY, radius=40)
+        vehicle = CollisionSphere(VEHICLE, x=10, radius=10)
+        window.project.legacy = legacy
+        window.project.compound = [vehicle]
+        window._selected = 0
+        window._selected_spheres = {0, 1}
+        window._sync_all()
+
+        window.change_sphere_type(WEAPON)
+
+        self.assertIsNone(window.project.legacy)
+        self.assertEqual(len(window.project.compound), 2)
+        self.assertTrue(
+            all(sphere.category == WEAPON for sphere in window.project.compound))
+        self.assertEqual(window._selected_sphere_indices(), {0, 1})
+
+    def test_53k_multiselect_disables_ambiguous_common_radius_controls(self):
+        window = self._window()
+        window.project.compound = [
+            CollisionSphere(VEHICLE, radius=10),
+            CollisionSphere(VEHICLE, radius=20),
+        ]
+        window._selected = 0
+        window._selected_spheres = {0, 1}
+        window._sync_all()
+        self.assertFalse(window.radius_spin.isEnabled())
+        self.assertFalse(window.radius_slider.isEnabled())
+        self.assertIn("controls below", window.radius_spin.toolTip())
+        self.assertEqual(
+            window.selected_element_label.text(),
+            "2 Collision Spheres Selected")
+
+    def test_53l_tree_right_click_selected_row_keeps_multiselection(self):
+        window = self._window()
+        window.project.compound = [
+            CollisionSphere(VEHICLE, radius=10),
+            CollisionSphere(VEHICLE, radius=20),
+            CollisionSphere(WEAPON, radius=30),
+        ]
+        window._selected = 0
+        window._selected_spheres = {0, 1}
+        window._sync_all()
+        window.sphere_tree.resize(500, 240)
+        window.sphere_tree.show()
+        self.app.processEvents()
+        item = window.sphere_tree.topLevelItem(1)
+        rect = window.sphere_tree.visualItemRect(item)
+        pos = QPointF(rect.center())
+        event = QMouseEvent(
+            QEvent.Type.MouseButtonPress, pos, pos, pos,
+            Qt.MouseButton.RightButton, Qt.MouseButton.RightButton,
+            Qt.KeyboardModifier.NoModifier)
+
+        window.sphere_tree.mousePressEvent(event)
+
+        selected = {
+            row.data(0, editor_module._SPHERE_INDEX_ROLE)
+            for row in window.sphere_tree.selectedItems()
+        }
+        self.assertEqual(selected, {0, 1})
+        self.assertEqual(window._selected_sphere_indices(), {0, 1})
+
+    def test_53m_visibility_toggle_applies_to_complete_multiselection(self):
+        window = self._window()
+        window.project.compound = [
+            CollisionSphere(VEHICLE, radius=10, visible=True),
+            CollisionSphere(VEHICLE, radius=20, visible=False),
+            CollisionSphere(WEAPON, radius=30, visible=True),
+        ]
+        window._selected = 0
+        window._selected_spheres = {0, 1}
+        window._sync_all()
+
+        window._visibility_changed(False)
+
+        self.assertFalse(window.project.compound[0].visible)
+        self.assertFalse(window.project.compound[1].visible)
+        self.assertTrue(window.project.compound[2].visible)
 
     def test_54_move_strength_accepts_manual_values(self):
         window = self._window()
@@ -1671,8 +1954,12 @@ class CollisionEditorTests(unittest.TestCase):
         toolbar = window.model_preview_scale_toolbar
         widgets = [
             toolbar.widgetForAction(action) for action in toolbar.actions()]
+        undo_index = widgets.index(window.toolbar_undo_button)
+        redo_index = widgets.index(window.toolbar_redo_button)
         preset_index = widgets.index(window.toolbar_view_preset_combo)
         scale_index = widgets.index(window.model_scale_x_spin)
+        self.assertLess(undo_index, redo_index)
+        self.assertLess(redo_index, preset_index)
         self.assertLess(preset_index, scale_index)
         self.assertIsNone(window.findChild(QToolBar, "collisionTools"))
 
@@ -2704,10 +2991,11 @@ class CollisionEditorTests(unittest.TestCase):
         for label in (
                 "Add Legacy Radius", "Add Vehicle Collision",
                 "Add Weapon Collision", "Duplicate Sphere", "Delete Sphere",
-                "Create Suggested Sphere", "Change Sphere Type",
-                "Mirror Selected Sphere", "Undo", "Redo",
-                "Delete All Collisions"):
+                "Create Suggested Sphere", "Select All Spheres",
+                "Change Sphere Type",
+                "Mirror Selected Sphere", "Undo", "Redo"):
             self.assertIn(label, labels)
+        self.assertNotIn("Delete All Collisions", labels)
         self.assertIsNone(window.findChild(QToolBar, "collisionTools"))
 
     def test_133_reset_current_tab_keeps_other_workspace_changes(self):

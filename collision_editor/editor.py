@@ -17,7 +17,15 @@ import shutil
 import sys
 
 from PySide6.QtCore import (
-    QEvent, QPoint, QPointF, QRectF, QSignalBlocker, QSize, Qt, Signal,
+    QEvent,
+    QItemSelectionModel,
+    QPoint,
+    QPointF,
+    QRectF,
+    QSignalBlocker,
+    QSize,
+    Qt,
+    Signal,
 )
 from PySide6.QtGui import (
     QAction,
@@ -64,7 +72,6 @@ from PySide6.QtWidgets import (
     QPlainTextEdit,
     QScrollArea,
     QSizePolicy,
-    QStyledItemDelegate,
 )
 
 from assembly_viewer import AssetViewport, VIEW_PRESETS
@@ -2011,33 +2018,27 @@ class CollisionMoveGizmo(ModelSpaceGizmo):
         super().mouseDoubleClickEvent(event)
 
 
-class RadiusItemDelegate(QStyledItemDelegate):
-    """Compact whole-number editor for the Radius column only."""
+class SphereTreeWidget(QTreeWidget):
+    """Sphere list with context-click behavior that respects multiselect."""
 
-    def createEditor(self, parent, option, index):  # noqa: N802
-        if index.column() != 1:
-            return None
-        editor = QSpinBox(parent)
-        editor.setRange(1, 1_000_000)
-        editor.setSingleStep(1)
-        editor.setFrame(False)
-        return editor
-
-    def setEditorData(self, editor, index):  # noqa: N802
-        if isinstance(editor, QSpinBox):
-            try:
-                value = int(round(float(index.data())))
-            except (TypeError, ValueError):
-                value = 1
-            editor.setValue(max(1, value))
-            return
-        super().setEditorData(editor, index)
-
-    def setModelData(self, editor, model, index):  # noqa: N802
-        if isinstance(editor, QSpinBox):
-            model.setData(index, str(editor.value()), Qt.ItemDataRole.EditRole)
-            return
-        super().setModelData(editor, model, index)
+    def mousePressEvent(self, event: QMouseEvent) -> None:  # noqa: N802
+        if event.button() == Qt.MouseButton.RightButton:
+            pos = event.position().toPoint()
+            item = self.itemAt(pos)
+            if item is not None and item.isSelected():
+                # Native QAbstractItemView right-click handling can collapse an
+                # ExtendedSelection before the custom context menu opens. Keep
+                # the group intact when the clicked row already belongs to it;
+                # only make that row current without changing selection.
+                model_index = self.indexAt(pos)
+                if model_index.isValid():
+                    self.selectionModel().setCurrentIndex(
+                        model_index,
+                        QItemSelectionModel.SelectionFlag.NoUpdate)
+                self.setFocus(Qt.FocusReason.MouseFocusReason)
+                event.accept()
+                return
+        super().mousePressEvent(event)
 
 
 class CompactScaleSpinBox(QDoubleSpinBox):
@@ -2055,6 +2056,8 @@ class CollisionViewport(AssetViewport):
     """Existing AssetViewport plus the exact F10 three-ring overlay."""
 
     spherePicked = Signal(int)
+    sphereToggleRequested = Signal(int)
+    sphereBoxSelectionRequested = Signal(object, bool)
     firePointPicked = Signal(int)
     gunPointPicked = Signal(int)
     sphereContextMenuRequested = Signal(int, QPoint)
@@ -2068,6 +2071,11 @@ class CollisionViewport(AssetViewport):
         super().__init__(parent)
         self._collision_spheres: list[CollisionSphere] = []
         self._collision_selected = -1
+        self._collision_selected_indices: set[int] = set()
+        self._sphere_marquee_candidate = False
+        self._sphere_press_pos: QPointF | None = None
+        self._sphere_box_start: QPointF | None = None
+        self._sphere_box_rect: QRectF | None = None
         self._collision_show = {
             LEGACY: True, VEHICLE: True, WEAPON: True,
         }
@@ -2264,6 +2272,11 @@ class CollisionViewport(AssetViewport):
         self._gun_point_selected = -1
         self._turret_limits = None
         self._collision_selected = -1
+        self._collision_selected_indices.clear()
+        self._sphere_marquee_candidate = False
+        self._sphere_press_pos = None
+        self._sphere_box_start = None
+        self._sphere_box_rect = None
         self._model_preview_base_faces = []
         self._model_preview_base_sen_boxes = []
         self._model_preview_base_owner_bounds = {}
@@ -2454,10 +2467,33 @@ class CollisionViewport(AssetViewport):
 
     def set_collision_spheres(
         self, spheres: list[CollisionSphere], selected: int = -1,
+        selected_indices: set[int] | None = None,
     ) -> None:
         self._collision_spheres = list(spheres)
-        self._collision_selected = selected
+        if selected_indices is None:
+            selected_indices = {selected} if selected >= 0 else set()
+        self._collision_selected_indices = {
+            int(index) for index in selected_indices
+            if 0 <= int(index) < len(self._collision_spheres)
+        }
+        self._collision_selected = (
+            selected if selected in self._collision_selected_indices
+            else min(self._collision_selected_indices, default=-1)
+        )
         self.update()
+
+    def _sphere_selection_in_box(self, rect: QRectF) -> set[int]:
+        """Return visible sphere centres inside the shared marquee rectangle."""
+
+        hits: set[int] = set()
+        normalized = rect.normalized()
+        for index, sphere in enumerate(self._collision_spheres):
+            if not self._is_sphere_drawn(sphere):
+                continue
+            center = self._project_visible_world(sphere.center)
+            if center is not None and normalized.contains(center):
+                hits.add(index)
+        return hits
 
     def set_collision_category_visible(self, category: str, visible: bool):
         self._collision_show[category] = bool(visible)
@@ -3055,41 +3091,89 @@ class CollisionViewport(AssetViewport):
         self._draw_ground_alignment_overlay(painter)
         # OpenNeoUA F10 uses unfilled, aliased one-pixel lines and 12 segments.
         painter.setRenderHint(QPainter.RenderHint.Antialiasing, False)
-        selected_pair = None
+        selected_pairs = []
         for index, sphere in enumerate(self._collision_spheres):
             if not self._is_sphere_drawn(sphere):
                 continue
-            if index == self._collision_selected:
-                selected_pair = (index, sphere)
+            if index in self._collision_selected_indices:
+                selected_pairs.append((index, sphere))
                 continue
             color = TYPE_COLORS[sphere.category]
             self._draw_collision_rings(
                 painter, sphere, QPen(color, 1.0))
         painter.setRenderHint(QPainter.RenderHint.Antialiasing, False)
-        if selected_pair is not None:
-            _index, sphere = selected_pair
+        for index, sphere in selected_pairs:
             color = TYPE_COLORS[sphere.category]
+            primary = index == self._collision_selected
             self._draw_collision_rings(
                 painter, sphere, QPen(
-                    QColor(255, 255, 255), self.SELECTED_HALO_WIDTH))
+                    QColor(255, 255, 255),
+                    self.SELECTED_HALO_WIDTH if primary else 4.6))
             self._draw_collision_rings(
                 painter, sphere, QPen(
-                    color, self.SELECTED_COLOR_WIDTH))
+                    color,
+                    self.SELECTED_COLOR_WIDTH if primary else 2.6))
             center = self._project(self._camera_vertex(sphere.center))
             painter.setPen(QPen(QColor(255, 255, 255), 2.0))
             painter.setBrush(QColor(
                 color.red(), color.green(), color.blue(), 235))
-            painter.drawEllipse(center, 6.0, 6.0)
+            extent = 6.0 if primary else 4.0
+            painter.drawEllipse(center, extent, extent)
         self._draw_fire_points_overlay(painter)
         self._draw_turret_limits_overlay(painter)
         self._draw_gun_points_overlay(painter)
+        if self._sphere_box_rect is not None:
+            painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+            painter.setPen(QPen(
+                QColor(90, 230, 255), 1.0, Qt.PenStyle.DashLine))
+            painter.setBrush(QColor(90, 230, 255, 40))
+            painter.drawRect(self._sphere_box_rect.normalized())
         painter.end()
 
     def mouseMoveEvent(self, event: QMouseEvent) -> None:  # noqa: N802
         if self._cockpit_preview_active:
             event.accept()
             return
+        if self._sphere_press_pos is not None \
+                and event.buttons() & Qt.MouseButton.LeftButton:
+            current = event.position()
+            if self._sphere_box_start is not None:
+                self._sphere_box_rect = QRectF(
+                    self._sphere_box_start, current).normalized()
+                self.update()
+                event.accept()
+                return
+            if self._sphere_marquee_candidate:
+                delta = current - self._sphere_press_pos
+                if abs(delta.x()) > 4.0 or abs(delta.y()) > 4.0:
+                    self._sphere_box_start = QPointF(self._sphere_press_pos)
+                    self._sphere_box_rect = QRectF(
+                        self._sphere_box_start, current).normalized()
+                    self._sphere_marquee_candidate = False
+                    self.update()
+                event.accept()
+                return
         super().mouseMoveEvent(event)
+
+    def mouseReleaseEvent(self, event: QMouseEvent) -> None:  # noqa: N802
+        if event.button() == Qt.MouseButton.LeftButton \
+                and self._sphere_press_pos is not None:
+            if self._sphere_box_start is not None \
+                    and self._sphere_box_rect is not None:
+                hits = self._sphere_selection_in_box(self._sphere_box_rect)
+                self.sphereBoxSelectionRequested.emit(hits, True)
+            else:
+                index = self._hit_sphere(event.position())
+                if index >= 0:
+                    self.sphereToggleRequested.emit(index)
+            self._sphere_marquee_candidate = False
+            self._sphere_press_pos = None
+            self._sphere_box_start = None
+            self._sphere_box_rect = None
+            self.update()
+            event.accept()
+            return
+        super().mouseReleaseEvent(event)
 
     def wheelEvent(self, event) -> None:  # noqa: N802
         if self._cockpit_preview_active:
@@ -3127,6 +3211,20 @@ class CollisionViewport(AssetViewport):
                 self._last_mouse = event.position().toPoint()
                 self.firePointPicked.emit(fire_index)
                 self.update()
+                event.accept()
+                return
+            if event.modifiers() & Qt.KeyboardModifier.ControlModifier:
+                # Match the existing Model/Wireframe editor convention:
+                # Ctrl+click toggles one item, while Ctrl+drag grows a marquee
+                # and adds every sphere whose projected centre falls inside.
+                self.setFocus(Qt.FocusReason.MouseFocusReason)
+                self._sphere_marquee_candidate = True
+                self._sphere_press_pos = QPointF(event.position())
+                self._sphere_box_start = None
+                self._sphere_box_rect = None
+                self._camera_interacting = False
+                self._press_pos = None
+                self._last_mouse = event.position().toPoint()
                 event.accept()
                 return
             index = self._hit_sphere(event.position())
@@ -3167,10 +3265,15 @@ class CollisionViewport(AssetViewport):
                 return
             index = self._hit_sphere(event.position(), cycle=False)
             if index >= 0:
-                self._collision_selected = index
                 self._fire_point_selected = -1
                 self._gun_point_selected = -1
-                self.spherePicked.emit(index)
+                if index not in self._collision_selected_indices:
+                    # Standard editor behavior: context-clicking an unselected
+                    # sphere makes it the sole selection. Context-clicking any
+                    # member of an existing multiselection must preserve the
+                    # whole group so Delete/Duplicate/Mirror act on it.
+                    self._collision_selected = index
+                    self.spherePicked.emit(index)
                 self.update()
             self.sphereContextMenuRequested.emit(
                 index, event.globalPosition().toPoint())
@@ -3601,6 +3704,7 @@ class CollisionEditorWindow(QMainWindow):
         self._current_owner_base_bounds: tuple[float, float, float, float, float, float] | None = None
         self._viewport_owner: str | None = None
         self._selected = -1
+        self._selected_spheres: set[int] = set()
         self._selected_fire_point = -1
         self._selected_gun_point = -1
         # Family used only when authoring a new Gun Point. Existing imported
@@ -3646,6 +3750,9 @@ class CollisionEditorWindow(QMainWindow):
 
         self.viewport = CollisionViewport()
         self.viewport.spherePicked.connect(self._select_sphere)
+        self.viewport.sphereToggleRequested.connect(self._toggle_sphere)
+        self.viewport.sphereBoxSelectionRequested.connect(
+            self._select_sphere_box)
         self.viewport.firePointPicked.connect(self._select_fire_point)
         self.viewport.gunPointPicked.connect(self._select_gun_point)
         self.viewport.sphereContextMenuRequested.connect(
@@ -3661,22 +3768,15 @@ class CollisionEditorWindow(QMainWindow):
         self.model_tree.setSelectionMode(
             QAbstractItemView.SelectionMode.SingleSelection)
         self.model_tree.currentItemChanged.connect(self._model_changed)
-        self.sphere_tree = QTreeWidget()
+        self.sphere_tree = SphereTreeWidget()
         self.sphere_tree.setHeaderLabels(
             ["Sphere", "Radius", "Visible", "Index"])
         self.sphere_tree.setSelectionMode(
-            QAbstractItemView.SelectionMode.SingleSelection)
+            QAbstractItemView.SelectionMode.ExtendedSelection)
         self.sphere_tree.setEditTriggers(
-            QAbstractItemView.EditTrigger.DoubleClicked
-            | QAbstractItemView.EditTrigger.EditKeyPressed)
-        self.sphere_tree.setItemDelegate(
-            RadiusItemDelegate(self.sphere_tree))
-        self.sphere_tree.currentItemChanged.connect(
+            QAbstractItemView.EditTrigger.NoEditTriggers)
+        self.sphere_tree.itemSelectionChanged.connect(
             self._sphere_tree_selection_changed)
-        self.sphere_tree.itemDoubleClicked.connect(
-            self._sphere_tree_double_clicked)
-        self.sphere_tree.itemChanged.connect(
-            self._sphere_tree_item_changed)
         self.fire_point_tree = QTreeWidget()
         self.fire_point_tree.setHeaderLabels(["Point", "X", "Y", "Z"])
         self.fire_point_tree.setSelectionMode(
@@ -3822,10 +3922,6 @@ class CollisionEditorWindow(QMainWindow):
             lambda: self.mirror_selected_sphere("y"))
         self.mirror_z_action.triggered.connect(
             lambda: self.mirror_selected_sphere("z"))
-        self.delete_all_collisions_action = QAction(
-            "Delete All Collisions", self)
-        self.delete_all_collisions_action.triggered.connect(
-            self.delete_all_collisions)
         # Sphere-specific editing controls live inside the Collision tab.
         # Edit keeps only the standard history commands, avoiding a second,
         # generic home for controls that are meaningful only for collisions.
@@ -3893,6 +3989,25 @@ class CollisionEditorWindow(QMainWindow):
         toolbar.setObjectName("modelPreviewScaleTools")
         toolbar.setMovable(False)
         self.addToolBar(Qt.ToolBarArea.TopToolBarArea, toolbar)
+
+        # Match the main Model Editor toolbar: expose the same Undo/Redo
+        # history actions as compact buttons before View preset.
+        self.toolbar_undo_button = QPushButton("< Undo")
+        self.toolbar_undo_button.setEnabled(False)
+        self.toolbar_undo_button.setMinimumWidth(88)
+        self.toolbar_undo_button.setToolTip(
+            "Undo the latest Collision Editor edit.")
+        self.toolbar_undo_button.clicked.connect(self.undo_action.trigger)
+        toolbar.addWidget(self.toolbar_undo_button)
+
+        self.toolbar_redo_button = QPushButton("Redo >")
+        self.toolbar_redo_button.setEnabled(False)
+        self.toolbar_redo_button.setMinimumWidth(88)
+        self.toolbar_redo_button.setToolTip(
+            "Redo the latest Collision Editor edit.")
+        self.toolbar_redo_button.clicked.connect(self.redo_action.trigger)
+        toolbar.addWidget(self.toolbar_redo_button)
+
         toolbar.addWidget(QLabel(" View preset: "))
         self.toolbar_view_preset_combo = QComboBox()
         self.toolbar_view_preset_combo.addItems(VIEW_PRESETS)
@@ -4234,6 +4349,17 @@ class CollisionEditorWindow(QMainWindow):
         sphere_edit_buttons.addWidget(self.create_suggested_button)
         spheres_layout.addLayout(sphere_edit_buttons)
 
+        sphere_selection_buttons = QHBoxLayout()
+        sphere_selection_buttons.setContentsMargins(0, 0, 0, 0)
+        sphere_selection_buttons.setSpacing(5)
+        self.select_all_spheres_button = QPushButton("Select All Spheres")
+        self.select_all_spheres_button.setToolTip(
+            "Select every collision sphere in the current Collision tab.")
+        self.select_all_spheres_button.clicked.connect(
+            self.select_all_spheres)
+        sphere_selection_buttons.addWidget(self.select_all_spheres_button)
+        spheres_layout.addLayout(sphere_selection_buttons)
+
         sphere_modifier_buttons = QHBoxLayout()
         sphere_modifier_buttons.setContentsMargins(0, 0, 0, 0)
         sphere_modifier_buttons.setSpacing(5)
@@ -4272,15 +4398,10 @@ class CollisionEditorWindow(QMainWindow):
         sphere_history_buttons.setSpacing(5)
         self.undo_button = QPushButton("Undo")
         self.redo_button = QPushButton("Redo")
-        self.delete_all_collisions_button = QPushButton(
-            "Delete All Collisions")
         self.undo_button.clicked.connect(self.undo_action.trigger)
         self.redo_button.clicked.connect(self.redo_action.trigger)
-        self.delete_all_collisions_button.clicked.connect(
-            self.delete_all_collisions_action.trigger)
-        sphere_history_buttons.addWidget(self.undo_button)
-        sphere_history_buttons.addWidget(self.redo_button)
-        sphere_history_buttons.addWidget(self.delete_all_collisions_button, 1)
+        sphere_history_buttons.addWidget(self.undo_button, 1)
+        sphere_history_buttons.addWidget(self.redo_button, 1)
         spheres_layout.addLayout(sphere_history_buttons)
 
         self.sphere_tree.setMinimumHeight(82)
@@ -4303,8 +4424,6 @@ class CollisionEditorWindow(QMainWindow):
             2, Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
         self.sphere_tree.headerItem().setTextAlignment(
             3, Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
-        self.sphere_tree.headerItem().setToolTip(
-            1, "Double-click a Radius value to edit the sphere size.")
         spheres_layout.addWidget(self.sphere_tree)
 
         # Radius belongs to the Spheres workspace rather than being another
@@ -5490,6 +5609,8 @@ class CollisionEditorWindow(QMainWindow):
             with QSignalBlocker(self.cockpit_model_state_combo):
                 self.cockpit_model_state_combo.setCurrentIndex(0)
         self._selected = 0 if self.project.spheres() else -1
+        self._selected_spheres = (
+            {self._selected} if self._selected >= 0 else set())
         self._selected_fire_point = -1
         self._selected_gun_point = -1
         self._undo.clear()
@@ -5891,6 +6012,7 @@ class CollisionEditorWindow(QMainWindow):
             sphere.x = sphere.y = sphere.z = 0.0
             self.project.legacy = sphere
         self._selected = 0
+        self._selected_spheres = {0}
         self._selected_fire_point = -1
         self._selected_gun_point = -1
         self._set_modified()
@@ -5901,6 +6023,7 @@ class CollisionEditorWindow(QMainWindow):
         self._push_undo()
         self.project.compound.append(self._default_sphere(category))
         self._selected = len(self.project.spheres()) - 1
+        self._selected_spheres = {self._selected}
         self._selected_fire_point = -1
         self._selected_gun_point = -1
         self._set_modified()
@@ -5915,27 +6038,40 @@ class CollisionEditorWindow(QMainWindow):
         self.add_compound(self.target_combo.currentData())
 
     def duplicate_sphere(self):
-        sphere = self._selected_sphere()
-        if sphere is None:
+        entries = self._selected_sphere_entries()
+        selected_compound = [
+            sphere for _index, sphere in entries
+            if sphere.category != LEGACY
+        ]
+        if not entries:
             return
-        if sphere.category == LEGACY:
+        if not selected_compound:
             QMessageBox.information(
                 self, "Single legacy radius",
                 "A project can contain only one Legacy Radius.")
             return
+
         self._push_undo()
-        compound_index = self._selected_compound_index()
-        if compound_index is None:
-            return
-        duplicate = sphere.clone()
-        self.project.compound.insert(compound_index + 1, duplicate)
-        self._selected = (
-            (1 if self.project.legacy is not None else 0)
-            + compound_index + 1)
+        selected_ids = {id(sphere) for sphere in selected_compound}
+        duplicates = []
+        rebuilt = []
+        for sphere in self.project.compound:
+            rebuilt.append(sphere)
+            if id(sphere) in selected_ids:
+                duplicate = sphere.clone()
+                rebuilt.append(duplicate)
+                duplicates.append(duplicate)
+        self.project.compound[:] = rebuilt
+        self._select_sphere_objects(duplicates)
         self._selected_fire_point = -1
         self._selected_gun_point = -1
         self._set_modified()
         self._sync_all()
+        skipped = len(entries) - len(selected_compound)
+        detail = " Legacy Radius was skipped." if skipped else ""
+        self.statusBar().showMessage(
+            f"Duplicated {len(duplicates)} selected collision sphere"
+            f"{'s' if len(duplicates) != 1 else ''}.{detail}", 4500)
 
     def _populate_change_type_menu(self, menu: QMenu) -> None:
         menu.addAction(self.change_to_legacy_action)
@@ -5943,99 +6079,149 @@ class CollisionEditorWindow(QMainWindow):
         menu.addAction(self.change_to_weapon_action)
 
     def change_sphere_type(self, target_category: str):
-        """Convert the selected sphere to an explicitly chosen category."""
+        """Convert the complete current sphere selection when valid."""
 
         if target_category not in (LEGACY, VEHICLE, WEAPON):
             raise ValueError(
                 f"Unsupported collision category: {target_category}")
-        sphere = self._selected_sphere()
-        if sphere is None or sphere.category == target_category:
-            return
-        if target_category == LEGACY and self.project.legacy is not None:
-            self.statusBar().showMessage(
-                "A project can contain only one Legacy Radius.", 5000)
+        entries = self._selected_sphere_entries()
+        if not entries:
             return
 
-        previous_category = sphere.category
-        self._push_undo()
+        selected_spheres = [sphere for _index, sphere in entries]
         if target_category == LEGACY:
-            compound_index = self._selected_compound_index()
+            if len(selected_spheres) != 1:
+                self.statusBar().showMessage(
+                    "Legacy Radius is singular: select exactly one sphere "
+                    "before converting to Legacy Radius.", 5500)
+                return
+            sphere = selected_spheres[0]
+            if sphere.category == LEGACY:
+                return
+            if self.project.legacy is not None:
+                self.statusBar().showMessage(
+                    "A project can contain only one Legacy Radius.", 5000)
+                return
+            compound_index = next((
+                index for index, candidate in enumerate(self.project.compound)
+                if candidate is sphere
+            ), None)
             if compound_index is None:
                 return
+            self._push_undo()
             del self.project.compound[compound_index]
             sphere.category = LEGACY
             sphere.x = sphere.y = sphere.z = 0.0
             self.project.legacy = sphere
-            self._selected = 0
+            self._select_sphere_objects([sphere])
             detail = (
                 " Positional offsets were reset because vanilla radius "
                 "has no offset.")
-        elif previous_category == LEGACY:
-            self.project.legacy = None
-            sphere.category = target_category
-            self.project.compound.insert(0, sphere)
-            self._selected = 0
-            detail = ""
+            changed_count = 1
         else:
-            sphere.category = target_category
+            changing = [
+                sphere for sphere in selected_spheres
+                if sphere.category != target_category
+            ]
+            if not changing:
+                return
+            self._push_undo()
+            legacy = self.project.legacy
+            converted_legacy = (
+                legacy is not None
+                and any(candidate is legacy for candidate in changing))
+            if converted_legacy:
+                self.project.legacy = None
+                legacy.category = target_category
+                # Legacy has no authored offset, so its existing origin is the
+                # correct compound position when it becomes movable.
+                self.project.compound.insert(0, legacy)
+            for sphere in changing:
+                if sphere is legacy:
+                    continue
+                sphere.category = target_category
+            self._select_sphere_objects(selected_spheres)
             detail = ""
+            changed_count = len(changing)
 
         self._selected_fire_point = -1
         self._selected_gun_point = -1
         self._set_modified()
         self._sync_all()
+        label = TYPE_LABELS[target_category]
         self.statusBar().showMessage(
-            f"{TYPE_LABELS[previous_category]} changed to "
-            f"{TYPE_LABELS[target_category]}.{detail}", 5000)
+            f"Changed {changed_count} selected sphere"
+            f"{'s' if changed_count != 1 else ''} to {label}.{detail}", 5000)
 
     def mirror_selected_sphere(self, axis: str):
-        """Duplicate a compound sphere across the selected model axis."""
+        """Mirror every selected compound sphere across one model axis."""
 
-        sphere = self._selected_sphere()
-        if sphere is None:
+        if axis not in ("x", "y", "z"):
+            raise ValueError(f"Unsupported mirror axis: {axis}")
+        entries = self._selected_sphere_entries()
+        if not entries:
             return
-        if sphere.category == LEGACY:
+        selected_compound = [
+            sphere for _index, sphere in entries
+            if sphere.category != LEGACY
+        ]
+        if not selected_compound:
             self.statusBar().showMessage(
                 "Legacy Radius is fixed at the origin and cannot be mirrored.",
                 5000)
             return
-        if axis not in ("x", "y", "z"):
-            raise ValueError(f"Unsupported mirror axis: {axis}")
-        compound_index = self._selected_compound_index()
-        if compound_index is None:
-            return
+
         self._push_undo()
-        mirrored = sphere.clone()
-        setattr(mirrored, axis, -getattr(mirrored, axis))
-        self.project.compound.insert(compound_index + 1, mirrored)
-        self._selected = (
-            (1 if self.project.legacy is not None else 0)
-            + compound_index + 1)
+        selected_ids = {id(sphere) for sphere in selected_compound}
+        mirrored_spheres = []
+        rebuilt = []
+        for sphere in self.project.compound:
+            rebuilt.append(sphere)
+            if id(sphere) in selected_ids:
+                mirrored = sphere.clone()
+                setattr(mirrored, axis, -getattr(mirrored, axis))
+                rebuilt.append(mirrored)
+                mirrored_spheres.append(mirrored)
+        self.project.compound[:] = rebuilt
+        self._select_sphere_objects(mirrored_spheres)
+        self._selected_fire_point = -1
+        self._selected_gun_point = -1
+        self._set_modified()
+        self._sync_all()
+        skipped = len(entries) - len(selected_compound)
+        detail = " Legacy Radius was skipped." if skipped else ""
+        self.statusBar().showMessage(
+            f"Mirrored {len(mirrored_spheres)} selected collision sphere"
+            f"{'s' if len(mirrored_spheres) != 1 else ''} across the "
+            f"{axis.upper()} axis.{detail}", 4500)
+
+    def delete_sphere(self):
+        entries = self._selected_sphere_entries()
+        if not entries:
+            return
+        selected_indices = {index for index, _sphere in entries}
+        selected_ids = {id(sphere) for _index, sphere in entries}
+        anchor = min(selected_indices)
+
+        self._push_undo()
+        if self.project.legacy is not None \
+                and id(self.project.legacy) in selected_ids:
+            self.project.legacy = None
+        self.project.compound[:] = [
+            sphere for sphere in self.project.compound
+            if id(sphere) not in selected_ids
+        ]
+        count = len(self.project.spheres())
+        self._selected = min(anchor, count - 1) if count else -1
+        self._selected_spheres = (
+            {self._selected} if self._selected >= 0 else set())
         self._selected_fire_point = -1
         self._selected_gun_point = -1
         self._set_modified()
         self._sync_all()
         self.statusBar().showMessage(
-            f"Mirrored selected sphere across the {axis.upper()} axis.", 4000)
-
-    def delete_sphere(self):
-        sphere = self._selected_sphere()
-        if sphere is None:
-            return
-        self._push_undo()
-        if sphere.category == LEGACY:
-            self.project.legacy = None
-        else:
-            compound_index = self._selected_compound_index()
-            if compound_index is None:
-                return
-            del self.project.compound[compound_index]
-        self._selected = min(
-            self._selected, len(self.project.spheres()) - 1)
-        self._selected_fire_point = -1
-        self._selected_gun_point = -1
-        self._set_modified()
-        self._sync_all()
+            f"Deleted {len(entries)} selected collision sphere"
+            f"{'s' if len(entries) != 1 else ''}.", 4000)
 
     def delete_all_collisions(self):
         if not self.project.spheres():
@@ -6051,6 +6237,7 @@ class CollisionEditorWindow(QMainWindow):
         self.project.legacy = None
         self.project.compound.clear()
         self._selected = -1
+        self._selected_spheres.clear()
         self._selected_fire_point = -1
         self._selected_gun_point = -1
         self._set_modified()
@@ -6079,7 +6266,6 @@ class CollisionEditorWindow(QMainWindow):
         mirror_menu.addAction(self.mirror_y_action)
         mirror_menu.addAction(self.mirror_z_action)
         menu.addSeparator()
-        menu.addAction(self.delete_all_collisions_action)
         menu.addAction(self.reset_view_action)
         menu.addSeparator()
         menu.addAction(self.open_base_action)
@@ -6256,10 +6442,11 @@ class CollisionEditorWindow(QMainWindow):
         item = self.sphere_tree.itemAt(local_pos)
         index = -1
         if item is not None:
-            self.sphere_tree.setCurrentItem(item)
             candidate = item.data(0, _SPHERE_INDEX_ROLE)
             if isinstance(candidate, int):
                 index = candidate
+                if index not in self._selected_sphere_indices():
+                    self._select_sphere(index)
         self._show_sphere_context_menu(
             index, self.sphere_tree.viewport().mapToGlobal(local_pos))
 
@@ -6267,6 +6454,41 @@ class CollisionEditorWindow(QMainWindow):
         spheres = self.project.spheres()
         return spheres[self._selected] if 0 <= self._selected < len(
             spheres) else None
+
+    def _selected_sphere_indices(self) -> set[int]:
+        count = len(self.project.spheres())
+        selected = {
+            index for index in self._selected_spheres
+            if 0 <= index < count
+        }
+        if selected:
+            if self._selected not in selected:
+                self._selected = min(selected)
+        elif 0 <= self._selected < count:
+            selected = {self._selected}
+        else:
+            self._selected = -1
+        self._selected_spheres = selected
+        return set(selected)
+
+    def _selected_sphere_entries(self) -> list[tuple[int, CollisionSphere]]:
+        spheres = self.project.spheres()
+        return [
+            (index, spheres[index])
+            for index in sorted(self._selected_sphere_indices())
+            if 0 <= index < len(spheres)
+        ]
+
+    def _select_sphere_objects(self, spheres) -> None:
+        """Restore a selection by object identity after list mutations."""
+
+        wanted = {id(sphere) for sphere in spheres}
+        selected = {
+            index for index, sphere in enumerate(self.project.spheres())
+            if id(sphere) in wanted
+        }
+        self._selected_spheres = selected
+        self._selected = min(selected, default=-1)
 
     def _selected_compound_index(self) -> int | None:
         if self._selected < 0:
@@ -6280,12 +6502,75 @@ class CollisionEditorWindow(QMainWindow):
     def _select_sphere(self, index: int):
         self._radius_spin_active = False
         self._vehicle_preview_active_edits.clear()
-        self._selected = index
+        count = len(self.project.spheres())
+        self._selected = index if 0 <= index < count else -1
+        self._selected_spheres = (
+            {self._selected} if self._selected >= 0 else set())
         self._selected_fire_point = -1
         self._selected_gun_point = -1
         if (0 <= index < len(self.project.spheres())
                 and self.properties_tabs.currentIndex()
                 != self.collision_tab_index):
+            with QSignalBlocker(self.properties_tabs):
+                self.properties_tabs.setCurrentIndex(self.collision_tab_index)
+        self._sync_all()
+
+    def _toggle_sphere(self, index: int):
+        self._radius_spin_active = False
+        self._vehicle_preview_active_edits.clear()
+        count = len(self.project.spheres())
+        if not (0 <= index < count):
+            return
+        selected = self._selected_sphere_indices()
+        if index in selected:
+            selected.remove(index)
+            self._selected = min(selected, default=-1)
+        else:
+            selected.add(index)
+            self._selected = index
+        self._selected_spheres = selected
+        self._selected_fire_point = -1
+        self._selected_gun_point = -1
+        if (selected and self.properties_tabs.currentIndex()
+                != self.collision_tab_index):
+            with QSignalBlocker(self.properties_tabs):
+                self.properties_tabs.setCurrentIndex(self.collision_tab_index)
+        self._sync_all()
+
+    def _select_sphere_box(self, indices, additive: bool = True):
+        self._radius_spin_active = False
+        self._vehicle_preview_active_edits.clear()
+        count = len(self.project.spheres())
+        hits = {
+            int(index) for index in indices
+            if isinstance(index, int) and 0 <= index < count
+        }
+        selected = self._selected_sphere_indices() if additive else set()
+        selected |= hits
+        self._selected_spheres = selected
+        if hits:
+            self._selected = min(hits)
+        elif self._selected not in selected:
+            self._selected = min(selected, default=-1)
+        self._selected_fire_point = -1
+        self._selected_gun_point = -1
+        if (selected and self.properties_tabs.currentIndex()
+                != self.collision_tab_index):
+            with QSignalBlocker(self.properties_tabs):
+                self.properties_tabs.setCurrentIndex(self.collision_tab_index)
+        self._sync_all()
+
+    def select_all_spheres(self):
+        count = len(self.project.spheres())
+        if count <= 0:
+            return
+        selected = set(range(count))
+        self._selected_spheres = selected
+        if self._selected not in selected:
+            self._selected = 0
+        self._selected_fire_point = -1
+        self._selected_gun_point = -1
+        if self.properties_tabs.currentIndex() != self.collision_tab_index:
             with QSignalBlocker(self.properties_tabs):
                 self.properties_tabs.setCurrentIndex(self.collision_tab_index)
         self._sync_all()
@@ -6299,6 +6584,7 @@ class CollisionEditorWindow(QMainWindow):
                       and 0 <= index < point_count) else -1)
         self._selected_gun_point = -1
         self._selected = -1
+        self._selected_spheres.clear()
         if (self._selected_fire_point >= 0
                 and self.properties_tabs.currentIndex()
                 != self.fire_points_tab_index):
@@ -6336,6 +6622,7 @@ class CollisionEditorWindow(QMainWindow):
             self._new_gun_point_scheme = selected.scheme
         self._selected_fire_point = -1
         self._selected = -1
+        self._selected_spheres.clear()
         if (self._selected_gun_point >= 0
                 and self.properties_tabs.currentIndex()
                 != self.gun_points_tab_index):
@@ -6361,50 +6648,28 @@ class CollisionEditorWindow(QMainWindow):
             self._select_gun_point(index)
 
 
-    def _sphere_tree_selection_changed(self, current, _previous):
-        if self._syncing or current is None:
+    def _sphere_tree_selection_changed(self):
+        if self._syncing:
             return
-        index = current.data(0, _SPHERE_INDEX_ROLE)
-        if isinstance(index, int):
-            self._select_sphere(index)
-
-    def _sphere_tree_double_clicked(self, item, column: int):
-        """Edit Radius in place; the name and runtime index stay read-only."""
-
-        if item is None or column != 1:
-            return
-        index = item.data(0, _SPHERE_INDEX_ROLE)
-        if not isinstance(index, int):
-            return
-        self.sphere_tree.setCurrentItem(item)
-        self.sphere_tree.editItem(item, 1)
-
-    def _sphere_tree_item_changed(self, item, column: int):
-        if self._syncing or item is None or column != 1:
-            return
-        index = item.data(0, _SPHERE_INDEX_ROLE)
-        spheres = self.project.spheres()
-        if not isinstance(index, int) or not (0 <= index < len(spheres)):
-            return
-        try:
-            value = max(1, int(round(float(item.text(1)))))
-        except (TypeError, ValueError):
-            with QSignalBlocker(self.sphere_tree):
-                item.setText(1, _radius_number(spheres[index].radius))
-            self.statusBar().showMessage(
-                "Radius must be a positive whole number.", 4000)
-            return
-        sphere = spheres[index]
-        if abs(sphere.radius - value) < 1e-9:
-            with QSignalBlocker(self.sphere_tree):
-                item.setText(1, str(value))
-            return
-        self._push_undo()
-        self._selected = index
+        selected: set[int] = set()
+        for item in self.sphere_tree.selectedItems():
+            index = item.data(0, _SPHERE_INDEX_ROLE)
+            if isinstance(index, int):
+                selected.add(index)
+        current = self.sphere_tree.currentItem()
+        primary = -1
+        if current is not None:
+            index = current.data(0, _SPHERE_INDEX_ROLE)
+            if isinstance(index, int) and index in selected:
+                primary = index
+        if primary < 0:
+            primary = min(selected, default=-1)
+        self._radius_spin_active = False
+        self._vehicle_preview_active_edits.clear()
+        self._selected_spheres = selected
+        self._selected = primary
         self._selected_fire_point = -1
         self._selected_gun_point = -1
-        sphere.radius = float(value)
-        self._set_modified()
         self._sync_all()
 
     def _move_strength_slider_changed(self, value: int):
@@ -7218,20 +7483,33 @@ class CollisionEditorWindow(QMainWindow):
         active_tab = self.properties_tabs.currentIndex()
 
         if active_tab == self.collision_tab_index:
-            sphere = self._selected_sphere()
-            if sphere is None:
+            spheres = self.project.spheres()
+            selected_indices = self._selected_sphere_indices()
+            selected_spheres = [
+                spheres[index] for index in sorted(selected_indices)
+                if 0 <= index < len(spheres)
+            ]
+            if not selected_spheres:
                 return
-            if sphere.category == LEGACY:
+            movable = [
+                sphere for sphere in selected_spheres
+                if sphere.category != LEGACY
+            ]
+            if not movable:
                 self.statusBar().showMessage(
                     "Legacy Radius has no script offset and remains at origin.",
                     5000)
                 return
             self._push_undo()
-            sphere.x += direction[0] * step
-            sphere.y += direction[1] * step
-            sphere.z += direction[2] * step
+            for sphere in movable:
+                sphere.x += direction[0] * step
+                sphere.y += direction[1] * step
+                sphere.z += direction[2] * step
             self._set_modified()
             self._sync_all()
+            if len(movable) > 1:
+                self.statusBar().showMessage(
+                    f"Moved {len(movable)} selected collision spheres.", 3000)
             return
 
         if active_tab == self.gun_points_tab_index:
@@ -7362,11 +7640,19 @@ class CollisionEditorWindow(QMainWindow):
     def _visibility_changed(self, visible: bool):
         if self._syncing:
             return
-        sphere = self._selected_sphere()
-        if sphere is None:
+        entries = self._selected_sphere_entries()
+        if not entries:
+            return
+        value = bool(visible)
+        changing = [
+            sphere for _index, sphere in entries
+            if sphere.visible != value
+        ]
+        if not changing:
             return
         self._push_undo()
-        sphere.visible = bool(visible)
+        for sphere in changing:
+            sphere.visible = value
         self._set_modified()
         self._sync_all()
 
@@ -7428,7 +7714,9 @@ class CollisionEditorWindow(QMainWindow):
     def _refresh_sphere_tree(self):
         with QSignalBlocker(self.sphere_tree):
             self.sphere_tree.clear()
-            selected_item = None
+            selected_items = []
+            primary_item = None
+            selected_indices = self._selected_sphere_indices()
             compound_index = 0
             compound_mode = bool(self.project.compound)
             for flat_index, sphere in enumerate(self.project.spheres()):
@@ -7446,12 +7734,8 @@ class CollisionEditorWindow(QMainWindow):
                     "Visible" if sphere.visible else "",
                     index_text,
                 ])
-                item.setFlags(
-                    item.flags() | Qt.ItemFlag.ItemIsEditable)
                 item.setData(0, _SPHERE_INDEX_ROLE, flat_index)
                 item.setForeground(0, QBrush(TYPE_COLORS[sphere.category]))
-                item.setToolTip(
-                    1, "Double-click this Radius value to edit the sphere size.")
                 item.setTextAlignment(
                     1, Qt.AlignmentFlag.AlignRight
                     | Qt.AlignmentFlag.AlignVCenter)
@@ -7470,10 +7754,14 @@ class CollisionEditorWindow(QMainWindow):
                     for column in range(4):
                         item.setToolTip(column, message)
                 self.sphere_tree.addTopLevelItem(item)
+                if flat_index in selected_indices:
+                    selected_items.append(item)
                 if flat_index == self._selected:
-                    selected_item = item
-            if selected_item is not None:
-                self.sphere_tree.setCurrentItem(selected_item)
+                    primary_item = item
+            if primary_item is not None:
+                self.sphere_tree.setCurrentItem(primary_item)
+                for item in selected_items:
+                    item.setSelected(True)
             else:
                 self.sphere_tree.setCurrentItem(None)
                 self.sphere_tree.clearSelection()
@@ -7576,8 +7864,11 @@ class CollisionEditorWindow(QMainWindow):
         weapon_count = sum(
             sphere.category == WEAPON for sphere in self.project.compound)
         sphere = self._selected_sphere()
+        selected_sphere_count = len(self._selected_sphere_indices())
         compound_index = self._selected_compound_index()
-        if sphere is not None:
+        if selected_sphere_count > 1:
+            selected = f"{selected_sphere_count} Collision Spheres"
+        elif sphere is not None:
             selected = self._sphere_display_name(sphere, compound_index)
         elif (self.project.target_category == VEHICLE
               and self.project.gun_points_enabled
@@ -7712,6 +8003,7 @@ class CollisionEditorWindow(QMainWindow):
         return previews
 
     def _sync_all(self):
+        self._selected_sphere_indices()
         self._syncing = True
         blockers = [
             QSignalBlocker(widget) for widget in (
@@ -7967,23 +8259,39 @@ class CollisionEditorWindow(QMainWindow):
         self.turret_limits_effective.setText(limits_text)
 
         sphere = self._selected_sphere()
+        selected_sphere_entries = self._selected_sphere_entries()
+        selected_sphere_count = len(selected_sphere_entries)
         fire_selected = (
             vehicle_mode and self.project.fire_points_enabled
             and 0 <= self._selected_fire_point
             < len(fire_point_positions(self.project)))
         gun_selected = gun is not None
         enabled = sphere is not None
-        for widget in (
-                self.radius_slider, self.radius_spin, self.visible_check):
-            widget.setEnabled(enabled)
+        radius_enabled = selected_sphere_count == 1
+        self.radius_slider.setEnabled(radius_enabled)
+        self.radius_spin.setEnabled(radius_enabled)
+        self.visible_check.setEnabled(enabled)
         self.visible_check.setVisible(enabled)
+        self.visible_check.setTristate(selected_sphere_count > 1)
+        if selected_sphere_count > 1:
+            radius_tip = (
+                "Multiple spheres selected. Select one sphere to edit its "
+                "Radius with the controls below the list.")
+            self.radius_slider.setToolTip(radius_tip)
+            self.radius_spin.setToolTip(radius_tip)
+        else:
+            self.radius_slider.setToolTip("")
         active_tab = self.properties_tabs.currentIndex()
         cockpit_selected = self._is_cockpit_tab_selected()
         gizmo_enabled = False
         if cockpit_active:
             gizmo_enabled = True
         elif active_tab == self.collision_tab_index:
-            gizmo_enabled = sphere is not None and sphere.category != LEGACY
+            spheres = self.project.spheres()
+            gizmo_enabled = any(
+                spheres[index].category != LEGACY
+                for index in self._selected_sphere_indices()
+                if 0 <= index < len(spheres))
         elif active_tab == self.fire_points_tab_index:
             gizmo_enabled = fire_selected
         elif active_tab == self.gun_points_tab_index:
@@ -8031,21 +8339,42 @@ class CollisionEditorWindow(QMainWindow):
             self.runtime_radius_value.hide()
             self.radius_spin.setToolTip("")
         else:
-            self.selected_element_label.setText(
-                self._sphere_display_name(
-                    sphere, self._selected_compound_index()))
-            self.type_value.setText(TYPE_LABELS[sphere.category])
-            if sphere.category == LEGACY:
-                index_text = "Legacy"
+            if selected_sphere_count > 1:
+                self.selected_element_label.setText(
+                    f"{selected_sphere_count} Collision Spheres Selected")
+                categories = {
+                    candidate.category
+                    for _index, candidate in selected_sphere_entries
+                }
+                self.type_value.setText(
+                    TYPE_LABELS[next(iter(categories))]
+                    if len(categories) == 1 else "Mixed")
+                self.index_value.setText("Multiple")
             else:
-                compound_index = self._selected_compound_index()
-                index_text = str(compound_index) if compound_index is not None \
-                    else "None"
-            self.index_value.setText(index_text)
+                self.selected_element_label.setText(
+                    self._sphere_display_name(
+                        sphere, self._selected_compound_index()))
+                self.type_value.setText(TYPE_LABELS[sphere.category])
+                if sphere.category == LEGACY:
+                    index_text = "Legacy"
+                else:
+                    compound_index = self._selected_compound_index()
+                    index_text = (
+                        str(compound_index)
+                        if compound_index is not None else "None")
+                self.index_value.setText(index_text)
             self.radius_spin.setValue(sphere.radius)
             self.radius_slider.setValue(
                 self._radius_to_slider(sphere.radius))
-            self.visible_check.setChecked(sphere.visible)
+            visibility_values = {
+                candidate.visible
+                for _index, candidate in selected_sphere_entries
+            }
+            if selected_sphere_count > 1 and len(visibility_values) > 1:
+                self.visible_check.setCheckState(
+                    Qt.CheckState.PartiallyChecked)
+            else:
+                self.visible_check.setChecked(sphere.visible)
             if sphere.category == LEGACY and self.project.compound:
                 self.runtime_radius_value.setText(
                     "Legacy disabled by compound coll_*")
@@ -8053,18 +8382,21 @@ class CollisionEditorWindow(QMainWindow):
                     "Manual compound collision spheres replace Legacy Radius. "
                     "OpenNeoUA F10 shows only the compound spheres.")
                 self.runtime_radius_value.show()
-                self.radius_spin.setToolTip(
-                    "Stored authored radius. It is inactive while compound "
-                    "coll_* spheres are present.")
+                if selected_sphere_count == 1:
+                    self.radius_spin.setToolTip(
+                        "Stored authored radius. It is inactive while compound "
+                        "coll_* spheres are present.")
             else:
                 self.runtime_radius_value.clear()
                 self.runtime_radius_value.hide()
-                self.radius_spin.setToolTip("")
+                if selected_sphere_count == 1:
+                    self.radius_spin.setToolTip("")
         self._refresh_sphere_tree()
         self._refresh_gun_point_tree()
         self._refresh_project_summary_menu()
         self.viewport.set_collision_spheres(
-            self._preview_spheres(), self._selected)
+            self._preview_spheres(), self._selected,
+            self._selected_sphere_indices())
         preview_offset_y = (
             -self.project.overeof
             if (vehicle_mode and self.project.overeof_enabled)
@@ -8111,33 +8443,55 @@ class CollisionEditorWindow(QMainWindow):
             self.add_vehicle_action.isEnabled())
         self.add_weapon_collision_button.setEnabled(
             self.add_weapon_action.isEnabled())
-        self.duplicate_action.setEnabled(
-            sphere is not None and sphere.category != LEGACY)
-        self.duplicate_sphere_button.setEnabled(
-            self.duplicate_action.isEnabled())
-        self.delete_action.setEnabled(sphere is not None)
-        self.delete_sphere_button.setEnabled(sphere is not None)
-        self.change_type_button.setEnabled(sphere is not None)
+        selected_spheres = [
+            sphere for _index, sphere in selected_sphere_entries
+        ]
+        compound_selected = [
+            sphere for sphere in selected_spheres
+            if sphere.category != LEGACY
+        ]
+        multi_selected = selected_sphere_count > 1
+        duplicate_enabled = bool(compound_selected)
+        self.duplicate_action.setEnabled(duplicate_enabled)
+        self.duplicate_action.setText(
+            "Duplicate Spheres" if multi_selected else "Duplicate Sphere")
+        self.duplicate_sphere_button.setEnabled(duplicate_enabled)
+        self.duplicate_sphere_button.setText(self.duplicate_action.text())
+        self.delete_action.setEnabled(bool(selected_spheres))
+        self.delete_action.setText(
+            "Delete Spheres" if multi_selected else "Delete Sphere")
+        self.delete_sphere_button.setEnabled(bool(selected_spheres))
+        self.delete_sphere_button.setText(self.delete_action.text())
+        self.change_type_button.setEnabled(bool(selected_spheres))
+        self.change_type_button.setText(
+            "Change Sphere Types" if multi_selected else "Change Sphere Type")
         self.change_to_legacy_action.setEnabled(
-            sphere is not None and sphere.category != LEGACY
+            selected_sphere_count == 1
+            and selected_spheres[0].category != LEGACY
             and self.project.legacy is None)
         self.change_to_vehicle_action.setEnabled(
-            sphere is not None and sphere.category != VEHICLE)
+            bool(selected_spheres)
+            and any(sphere.category != VEHICLE for sphere in selected_spheres))
         self.change_to_weapon_action.setEnabled(
-            sphere is not None and sphere.category != WEAPON)
-        mirror_enabled = sphere is not None and sphere.category != LEGACY
+            bool(selected_spheres)
+            and any(sphere.category != WEAPON for sphere in selected_spheres))
+        mirror_enabled = bool(compound_selected)
         for action in (
                 self.mirror_x_action, self.mirror_y_action,
                 self.mirror_z_action):
             action.setEnabled(mirror_enabled)
         self.mirror_sphere_button.setEnabled(mirror_enabled)
+        self.mirror_sphere_button.setText(
+            "Mirror Selected Spheres" if multi_selected
+            else "Mirror Selected Sphere")
         collisions_present = bool(self.project.spheres())
-        self.delete_all_collisions_action.setEnabled(collisions_present)
-        self.delete_all_collisions_button.setEnabled(collisions_present)
+        self.select_all_spheres_button.setEnabled(collisions_present)
         self.create_suggested_button.setEnabled(
             self._model_bounds() is not None)
         self.undo_button.setEnabled(bool(self._undo))
         self.redo_button.setEnabled(bool(self._redo))
+        self.toolbar_undo_button.setEnabled(bool(self._undo))
+        self.toolbar_redo_button.setEnabled(bool(self._redo))
         if hasattr(self, "reset_tab_button"):
             self.reset_tab_button.setEnabled(self._current_tab_has_changes())
         self._update_reset_view_controls()
@@ -8267,6 +8621,8 @@ class CollisionEditorWindow(QMainWindow):
         if block.name:
             self.project.name = block.name
         self._selected = 0 if self.project.spheres() else -1
+        self._selected_spheres = (
+            {self._selected} if self._selected >= 0 else set())
         self._selected_fire_point = -1
         self._selected_gun_point = -1
         self._last_directory = Path(path).parent
