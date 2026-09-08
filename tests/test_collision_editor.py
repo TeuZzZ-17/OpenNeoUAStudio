@@ -29,6 +29,7 @@ from collision_editor import (
     TurretLimits,
     OpenScriptObjectDialog,
     LEGACY,
+    OPENNEOUA,
     VEHICLE,
     WEAPON,
     TYPE_COLORS,
@@ -91,8 +92,8 @@ def _mixed_project():
         source_base="user.base",
         legacy=CollisionSphere(LEGACY, radius=35),
         compound=[
-            CollisionSphere(VEHICLE, 0, -50, 120, 85),
-            CollisionSphere(WEAPON, 80, -15, 10, 45),
+            CollisionSphere(OPENNEOUA, 0, -50, 120, 85),
+            CollisionSphere(OPENNEOUA, 80, -15, 10, 45),
         ],
     )
 
@@ -180,7 +181,7 @@ class CollisionEditorTests(unittest.TestCase):
 
     def test_05_f10_geometry_has_three_twelve_segment_rings(self):
         viewport = CollisionViewport()
-        sphere = CollisionSphere(VEHICLE, radius=1)
+        sphere = CollisionSphere(OPENNEOUA, radius=1)
         self.assertEqual(viewport.RING_SEGMENTS, 12)
         self.assertEqual(
             [len(viewport._ring_points(sphere, axis)) for axis in range(3)],
@@ -189,8 +190,8 @@ class CollisionEditorTests(unittest.TestCase):
 
     def test_06_f10_colors_match_openneoua(self):
         self.assertEqual(TYPE_COLORS[LEGACY], QColor(220, 60, 60))
-        self.assertEqual(TYPE_COLORS[VEHICLE], QColor(60, 220, 60))
-        self.assertEqual(TYPE_COLORS[WEAPON], QColor(60, 130, 235))
+        self.assertEqual(TYPE_COLORS[OPENNEOUA], QColor(60, 220, 60))
+        self.assertEqual(TYPE_COLORS[OPENNEOUA], QColor(60, 130, 235))
 
     def test_07_add_single_legacy_radius_at_runtime_origin(self):
         window = self._window()
@@ -203,8 +204,8 @@ class CollisionEditorTests(unittest.TestCase):
 
     def test_08_add_vehicle_and_weapon_categories(self):
         window = self._window()
-        window.add_compound(VEHICLE)
-        window.add_compound(WEAPON)
+        window.add_compound(OPENNEOUA)
+        window.add_compound(OPENNEOUA)
         self.assertEqual(
             [sphere.category for sphere in window.project.compound],
             [VEHICLE, WEAPON],
@@ -212,7 +213,7 @@ class CollisionEditorTests(unittest.TestCase):
 
     def test_09_move_gizmo_updates_compound_coordinates(self):
         window = self._window()
-        window.add_compound(VEHICLE)
+        window.add_compound(OPENNEOUA)
         window.move_strength_slider.setValue(3)
         window._gizmo_nudge((1, 0, 0))
         window._gizmo_nudge((0, -1, 0))
@@ -227,7 +228,7 @@ class CollisionEditorTests(unittest.TestCase):
 
     def test_11_radius_slider_scales_one_effective_radius(self):
         window = self._window()
-        window.add_compound(VEHICLE)
+        window.add_compound(OPENNEOUA)
         slider_value = window._radius_to_slider(85.0)
         expected = round(window._slider_to_radius(slider_value))
         window._begin_radius_slider()
@@ -239,9 +240,9 @@ class CollisionEditorTests(unittest.TestCase):
 
     def test_12_duplicate_and_delete_keep_dense_order(self):
         window = self._window()
-        window.add_compound(VEHICLE)
+        window.add_compound(OPENNEOUA)
         window.duplicate_sphere()
-        window.add_compound(WEAPON)
+        window.add_compound(OPENNEOUA)
         window._selected = 1
         window.delete_sphere()
         output = export_collision_text(window.project)
@@ -268,10 +269,10 @@ class CollisionEditorTests(unittest.TestCase):
     def test_15_green_and_blue_export_identically(self):
         green = CollisionProject(
             name="A", source_model="a.sklt",
-            compound=[CollisionSphere(VEHICLE, 1, 2, 3, 4)])
+            compound=[CollisionSphere(OPENNEOUA, 1, 2, 3, 4)])
         blue = CollisionProject(
             name="A", source_model="a.sklt",
-            compound=[CollisionSphere(WEAPON, 1, 2, 3, 4)])
+            compound=[CollisionSphere(OPENNEOUA, 1, 2, 3, 4)])
         green_data = export_collision_text(green).split("coll_num", 1)[1]
         blue_data = export_collision_text(blue).split("coll_num", 1)[1]
         self.assertEqual(green_data, blue_data)
@@ -285,10 +286,10 @@ class CollisionEditorTests(unittest.TestCase):
             " coll_radius = 4\nend\n")
         block = find_script_blocks(text)[0]
         legacy, compound, warnings = import_collision_block(
-            text, block, VEHICLE)
+            text, block, OPENNEOUA)
         self.assertEqual(legacy.radius, 35)
         self.assertEqual(compound[0].center, (1, 2, 3))
-        self.assertEqual(compound[0].category, VEHICLE)
+        self.assertEqual(compound[0].category, OPENNEOUA)
         self.assertFalse(warnings)
 
     def test_17_import_new_weapon_is_editor_blue_only(self):
@@ -298,8 +299,8 @@ class CollisionEditorTests(unittest.TestCase):
             " coll_radius = 8\nend\n")
         block = find_script_blocks(text)[0]
         _legacy, compound, _warnings = import_collision_block(
-            text, block, WEAPON)
-        self.assertEqual(compound[0].category, WEAPON)
+            text, block, OPENNEOUA)
+        self.assertEqual(compound[0].category, OPENNEOUA)
 
     def test_18_nested_begin_end_does_not_truncate_target(self):
         text = (
@@ -351,11 +352,11 @@ class CollisionEditorTests(unittest.TestCase):
         incomplete = "new_weapon 2\n radius = 3\n"
         block = find_script_blocks(incomplete)[0]
         with self.assertRaises(CollisionScriptError):
-            import_collision_block(incomplete, block, WEAPON)
+            import_collision_block(incomplete, block, OPENNEOUA)
         bad = "new_weapon 2\n radius = nope\nend\n"
         with self.assertRaises(CollisionScriptError):
             import_collision_block(
-                bad, find_script_blocks(bad)[0], WEAPON)
+                bad, find_script_blocks(bad)[0], OPENNEOUA)
 
     def test_23_backup_is_created_before_script_write(self):
         with tempfile.TemporaryDirectory() as temp:
@@ -421,7 +422,7 @@ class CollisionEditorTests(unittest.TestCase):
     def test_27_validation_warns_for_distant_sphere(self):
         project = CollisionProject(
             name="Far", source_model="far.sklt",
-            compound=[CollisionSphere(VEHICLE, 1000, 0, 0, 1)])
+            compound=[CollisionSphere(OPENNEOUA, 1000, 0, 0, 1)])
         _errors, warnings = validate_project(
             project, (-1, -1, -1, 1, 1, 1))
         self.assertTrue(any("distante" in warning for warning in warnings))
@@ -460,15 +461,14 @@ class CollisionEditorTests(unittest.TestCase):
             action.text() for action in window.add_menu.actions()
         ], [
             "Add Legacy Radius",
-            "Add Vehicle Collision",
-            "Add Weapon Collision",
+            "Add OpenNeoUA Collision",
         ])
         self.assertTrue(all(
             action.isCheckable()
             for action in window.viewpoint_menu.actions()))
         window.project.name = "Wasp"
         window.project.source_model = "wasp.sklt"
-        window.add_compound(VEHICLE)
+        window.add_compound(OPENNEOUA)
         summary = [
             action.text() for action in window.project_summary_menu.actions()]
         self.assertIn("Project: Wasp", summary)
@@ -480,11 +480,11 @@ class CollisionEditorTests(unittest.TestCase):
     def test_30a_add_collision_actions_switch_to_collision_tab(self):
         window = self._window()
         window.properties_tabs.setCurrentIndex(window.gun_points_tab_index)
-        window.add_vehicle_action.trigger()
+        window.add_openneoua_action.trigger()
         self.assertEqual(
             window.properties_tabs.currentIndex(), window.collision_tab_index)
         window.properties_tabs.setCurrentIndex(window.fire_points_tab_index)
-        window.add_weapon_action.trigger()
+        window.add_openneoua_action.trigger()
         self.assertEqual(
             window.properties_tabs.currentIndex(), window.collision_tab_index)
 
@@ -514,20 +514,20 @@ class CollisionEditorTests(unittest.TestCase):
     def test_33_sphere_list_selects_named_sphere_and_shows_radius(self):
         window = self._window()
         window.add_legacy()
-        window.add_compound(VEHICLE)
-        window.add_compound(WEAPON)
+        window.add_compound(OPENNEOUA)
+        window.add_compound(OPENNEOUA)
         self.assertEqual(window.sphere_tree.topLevelItemCount(), 3)
         self.assertEqual(
             window.sphere_tree.topLevelItem(0).text(0), "Legacy Radius")
         self.assertEqual(
             window.sphere_tree.topLevelItem(1).text(0),
-            "Vehicle Collision")
+            "OpenNeoUA Collision")
         self.assertEqual(window.sphere_tree.topLevelItem(1).text(2), "Visible")
         self.assertEqual(window.sphere_tree.topLevelItem(1).text(3), "0")
         third = window.sphere_tree.topLevelItem(2)
         window.sphere_tree.setCurrentItem(third)
         self.assertEqual(window._selected, 2)
-        self.assertEqual(window.type_value.text(), "Weapon Collision")
+        self.assertEqual(window.type_value.text(), "OpenNeoUA Collision")
         self.assertEqual(third.text(2), "Visible")
         self.assertEqual(third.text(3), "1")
         self.assertEqual(
@@ -569,7 +569,7 @@ class CollisionEditorTests(unittest.TestCase):
             Qt.KeyboardModifier.NoModifier)
         QApplication.sendEvent(window.viewport, key)
         self.assertFalse(window.viewport.is_edit_mode)
-        window.add_compound(VEHICLE)
+        window.add_compound(OPENNEOUA)
         window._gizmo_nudge((1, 0, 0))
         self.assertEqual(window.project.compound[0].x, 1.0)
         window.viewport._mode_label_rect = object()
@@ -591,7 +591,7 @@ class CollisionEditorTests(unittest.TestCase):
         viewport = CollisionViewport()
         viewport.resize(420, 260)
         viewport.set_collision_spheres([
-            CollisionSphere(VEHICLE, radius=0.7)], -1)
+            CollisionSphere(OPENNEOUA, radius=0.7)], -1)
         viewport.show()
         QApplication.processEvents()
         plain = viewport.grab().toImage()
@@ -644,7 +644,7 @@ class CollisionEditorTests(unittest.TestCase):
             name="Rounded", source_model="rounded.sklt",
             legacy=CollisionSphere(LEGACY, radius=89.1251),
             compound=[
-                CollisionSphere(VEHICLE, radius=78.379051),
+                CollisionSphere(OPENNEOUA, radius=78.379051),
             ])
         output = export_collision_text(project)
         self.assertIn("radius = 89", output)
@@ -662,7 +662,7 @@ class CollisionEditorTests(unittest.TestCase):
     def test_41_delete_all_collisions_is_undoable_and_not_in_edit_menu(self):
         window = self._window()
         window.add_legacy()
-        window.add_compound(VEHICLE)
+        window.add_compound(OPENNEOUA)
         with patch(
                 "collision_editor.QMessageBox.question",
                 return_value=QMessageBox.StandardButton.Yes):
@@ -674,20 +674,20 @@ class CollisionEditorTests(unittest.TestCase):
         edit_labels = [
             action.text() for action in edit_menu_action.menu().actions()]
         self.assertEqual(edit_labels, ["Undo", "Redo"])
-        self.assertNotIn("Add Vehicle Collision", edit_labels)
+        self.assertNotIn("Add OpenNeoUA Collision", edit_labels)
         self.assertIn(
-            "Add Vehicle Collision",
+            "Add OpenNeoUA Collision",
             [action.text() for action in window.add_menu.actions()])
 
     def test_42_context_menu_reuses_full_toolbar_action_set(self):
         window = self._window()
-        window.add_compound(VEHICLE)
+        window.add_compound(OPENNEOUA)
         labels = [
             action.text()
             for action in window._create_sphere_context_menu(0).actions()]
         for label in (
                 "Undo", "Redo", "Add Legacy Radius",
-                "Add Vehicle Collision", "Add Weapon Collision",
+                "Add OpenNeoUA Collision",
                 "Duplicate Sphere", "Delete Sphere",
                 "Reset View", "Import BAS Archive", "Import SKLT",
                 "View Preset"):
@@ -697,7 +697,7 @@ class CollisionEditorTests(unittest.TestCase):
     def test_43_mouse_drag_on_sphere_does_not_move_collision(self):
         viewport = CollisionViewport()
         viewport.resize(500, 350)
-        sphere = CollisionSphere(VEHICLE, radius=0.7)
+        sphere = CollisionSphere(OPENNEOUA, radius=0.7)
         viewport.set_collision_spheres([sphere], 0)
         press_point = viewport._ring_points(sphere, 0)[0]
         original = sphere.center
@@ -725,7 +725,7 @@ class CollisionEditorTests(unittest.TestCase):
         window = self._window()
         self.assertNotIn("Show Sphere Labels", window.viewpoint_actions)
         self.assertFalse(hasattr(window, "step_spin"))
-        window.add_compound(VEHICLE)
+        window.add_compound(OPENNEOUA)
         window.move_strength_slider.setValue(140)
         window._gizmo_nudge((0, 0, 1))
         self.assertEqual(window.project.compound[0].z, 140.0)
@@ -734,7 +734,7 @@ class CollisionEditorTests(unittest.TestCase):
     def test_45_center_handle_still_selects_without_direct_drag(self):
         viewport = CollisionViewport()
         viewport.resize(500, 350)
-        sphere = CollisionSphere(VEHICLE, radius=0.7)
+        sphere = CollisionSphere(OPENNEOUA, radius=0.7)
         viewport.set_collision_spheres([sphere], -1)
         selected = []
         viewport.spherePicked.connect(selected.append)
@@ -755,7 +755,7 @@ class CollisionEditorTests(unittest.TestCase):
 
     def test_46_double_click_empty_space_deselects_every_sphere(self):
         window = self._window()
-        window.add_compound(VEHICLE)
+        window.add_compound(OPENNEOUA)
         self.assertEqual(window._selected, 0)
         empty = QPointF(3.0, 3.0)
         event = QMouseEvent(
@@ -793,7 +793,7 @@ class CollisionEditorTests(unittest.TestCase):
 
     def test_48_identical_spheres_keep_distinct_dense_indices(self):
         window = self._window()
-        window.add_compound(VEHICLE)
+        window.add_compound(OPENNEOUA)
         window.duplicate_sphere()
         window.duplicate_sphere()
         indices = [
@@ -802,7 +802,7 @@ class CollisionEditorTests(unittest.TestCase):
         self.assertEqual(indices, ["0", "1", "2"])
         self.assertTrue(all(
             window.sphere_tree.topLevelItem(index).text(0)
-            == "Vehicle Collision"
+            == "OpenNeoUA Collision"
             for index in range(window.sphere_tree.topLevelItemCount())))
         window._selected = 1
         window.delete_sphere()
@@ -832,8 +832,8 @@ class CollisionEditorTests(unittest.TestCase):
         viewport = CollisionViewport()
         viewport.resize(500, 350)
         spheres = [
-            CollisionSphere(VEHICLE, radius=0.7),
-            CollisionSphere(VEHICLE, radius=0.7),
+            CollisionSphere(OPENNEOUA, radius=0.7),
+            CollisionSphere(OPENNEOUA, radius=0.7),
         ]
         viewport.set_collision_spheres(spheres, -1)
         point = viewport._ring_points(spheres[0], 0)[0]
@@ -851,7 +851,7 @@ class CollisionEditorTests(unittest.TestCase):
 
     def test_53_radius_can_be_edited_from_sphere_table(self):
         window = self._window()
-        window.add_compound(VEHICLE)
+        window.add_compound(OPENNEOUA)
         self.assertTrue(
             window.sphere_tree.editTriggers()
             & QAbstractItemView.EditTrigger.DoubleClicked)
@@ -862,9 +862,9 @@ class CollisionEditorTests(unittest.TestCase):
 
     def test_53b_sphere_multiselect_syncs_tree_viewport_and_select_all(self):
         window = self._window()
-        window.add_compound(VEHICLE)
-        window.add_compound(VEHICLE)
-        window.add_compound(WEAPON)
+        window.add_compound(OPENNEOUA)
+        window.add_compound(OPENNEOUA)
+        window.add_compound(OPENNEOUA)
         self.assertEqual(
             window.sphere_tree.selectionMode(),
             QAbstractItemView.SelectionMode.ExtendedSelection)
@@ -890,9 +890,9 @@ class CollisionEditorTests(unittest.TestCase):
     def test_53c_nudge_moves_all_selected_compound_spheres_once(self):
         window = self._window()
         window.project.compound = [
-            CollisionSphere(VEHICLE, 1, 2, 3, 10),
-            CollisionSphere(VEHICLE, 4, 5, 6, 10),
-            CollisionSphere(WEAPON, 7, 8, 9, 10),
+            CollisionSphere(OPENNEOUA, 1, 2, 3, 10),
+            CollisionSphere(OPENNEOUA, 4, 5, 6, 10),
+            CollisionSphere(OPENNEOUA, 7, 8, 9, 10),
         ]
         window._selected = 0
         window._selected_spheres = {0, 2}
@@ -913,7 +913,7 @@ class CollisionEditorTests(unittest.TestCase):
         viewport = CollisionViewport()
         self.addCleanup(viewport.close)
         viewport.resize(500, 350)
-        sphere = CollisionSphere(VEHICLE, radius=0.7)
+        sphere = CollisionSphere(OPENNEOUA, radius=0.7)
         viewport.set_collision_spheres([sphere], -1)
         center = viewport._project(viewport._camera_vertex(sphere.center))
         toggled = []
@@ -958,7 +958,7 @@ class CollisionEditorTests(unittest.TestCase):
 
     def test_53e_radius_column_is_read_only_and_uses_controls_below(self):
         window = self._window()
-        window.add_compound(VEHICLE)
+        window.add_compound(OPENNEOUA)
         self.assertEqual(
             window.sphere_tree.editTriggers(),
             QAbstractItemView.EditTrigger.NoEditTriggers)
@@ -970,9 +970,9 @@ class CollisionEditorTests(unittest.TestCase):
         viewport = CollisionViewport()
         self.addCleanup(viewport.close)
         viewport.set_collision_spheres(
-            [CollisionSphere(VEHICLE, radius=10),
-             CollisionSphere(VEHICLE, x=30, radius=10),
-             CollisionSphere(VEHICLE, x=60, radius=10)],
+            [CollisionSphere(OPENNEOUA, radius=10),
+             CollisionSphere(OPENNEOUA, x=30, radius=10),
+             CollisionSphere(OPENNEOUA, x=60, radius=10)],
             selected=0, selected_indices={0, 1})
         picked = []
         context = []
@@ -1002,9 +1002,9 @@ class CollisionEditorTests(unittest.TestCase):
     def test_53g_duplicate_sphere_duplicates_entire_multiselection(self):
         window = self._window()
         window.project.compound = [
-            CollisionSphere(VEHICLE, x=10, radius=10),
-            CollisionSphere(VEHICLE, x=20, radius=20),
-            CollisionSphere(WEAPON, x=30, radius=30),
+            CollisionSphere(OPENNEOUA, x=10, radius=10),
+            CollisionSphere(OPENNEOUA, x=20, radius=20),
+            CollisionSphere(OPENNEOUA, x=30, radius=30),
         ]
         window._selected = 0
         window._selected_spheres = {0, 2}
@@ -1025,9 +1025,9 @@ class CollisionEditorTests(unittest.TestCase):
         window = self._window()
         window.project.legacy = CollisionSphere(LEGACY, radius=40)
         window.project.compound = [
-            CollisionSphere(VEHICLE, x=10, radius=10),
-            CollisionSphere(VEHICLE, x=20, radius=20),
-            CollisionSphere(WEAPON, x=30, radius=30),
+            CollisionSphere(OPENNEOUA, x=10, radius=10),
+            CollisionSphere(OPENNEOUA, x=20, radius=20),
+            CollisionSphere(OPENNEOUA, x=30, radius=30),
         ]
         window._selected = 0
         window._selected_spheres = {0, 1, 2, 3}
@@ -1044,9 +1044,9 @@ class CollisionEditorTests(unittest.TestCase):
     def test_53i_mirror_sphere_mirrors_entire_multiselection(self):
         window = self._window()
         window.project.compound = [
-            CollisionSphere(VEHICLE, x=10, radius=10),
-            CollisionSphere(VEHICLE, x=20, radius=20),
-            CollisionSphere(WEAPON, x=30, radius=30),
+            CollisionSphere(OPENNEOUA, x=10, radius=10),
+            CollisionSphere(OPENNEOUA, x=20, radius=20),
+            CollisionSphere(OPENNEOUA, x=30, radius=30),
         ]
         window._selected = 0
         window._selected_spheres = {0, 2}
@@ -1062,14 +1062,14 @@ class CollisionEditorTests(unittest.TestCase):
     def test_53j_change_type_applies_to_valid_multiselection(self):
         window = self._window()
         legacy = CollisionSphere(LEGACY, radius=40)
-        vehicle = CollisionSphere(VEHICLE, x=10, radius=10)
+        vehicle = CollisionSphere(OPENNEOUA, x=10, radius=10)
         window.project.legacy = legacy
         window.project.compound = [vehicle]
         window._selected = 0
         window._selected_spheres = {0, 1}
         window._sync_all()
 
-        window.change_sphere_type(WEAPON)
+        window.change_sphere_type(OPENNEOUA)
 
         self.assertIsNone(window.project.legacy)
         self.assertEqual(len(window.project.compound), 2)
@@ -1080,8 +1080,8 @@ class CollisionEditorTests(unittest.TestCase):
     def test_53k_multiselect_disables_ambiguous_common_radius_controls(self):
         window = self._window()
         window.project.compound = [
-            CollisionSphere(VEHICLE, radius=10),
-            CollisionSphere(VEHICLE, radius=20),
+            CollisionSphere(OPENNEOUA, radius=10),
+            CollisionSphere(OPENNEOUA, radius=20),
         ]
         window._selected = 0
         window._selected_spheres = {0, 1}
@@ -1096,9 +1096,9 @@ class CollisionEditorTests(unittest.TestCase):
     def test_53l_tree_right_click_selected_row_keeps_multiselection(self):
         window = self._window()
         window.project.compound = [
-            CollisionSphere(VEHICLE, radius=10),
-            CollisionSphere(VEHICLE, radius=20),
-            CollisionSphere(WEAPON, radius=30),
+            CollisionSphere(OPENNEOUA, radius=10),
+            CollisionSphere(OPENNEOUA, radius=20),
+            CollisionSphere(OPENNEOUA, radius=30),
         ]
         window._selected = 0
         window._selected_spheres = {0, 1}
@@ -1126,9 +1126,9 @@ class CollisionEditorTests(unittest.TestCase):
     def test_53m_visibility_toggle_applies_to_complete_multiselection(self):
         window = self._window()
         window.project.compound = [
-            CollisionSphere(VEHICLE, radius=10, visible=True),
-            CollisionSphere(VEHICLE, radius=20, visible=False),
-            CollisionSphere(WEAPON, radius=30, visible=True),
+            CollisionSphere(OPENNEOUA, radius=10, visible=True),
+            CollisionSphere(OPENNEOUA, radius=20, visible=False),
+            CollisionSphere(OPENNEOUA, radius=30, visible=True),
         ]
         window._selected = 0
         window._selected_spheres = {0, 1}
@@ -1142,7 +1142,7 @@ class CollisionEditorTests(unittest.TestCase):
 
     def test_54_move_strength_accepts_manual_values(self):
         window = self._window()
-        window.add_compound(VEHICLE)
+        window.add_compound(OPENNEOUA)
         window.move_strength_spin.setValue(1200)
         window._gizmo_nudge((1, 0, 0))
         self.assertEqual(window.project.compound[0].x, 1200.0)
@@ -1159,7 +1159,7 @@ class CollisionEditorTests(unittest.TestCase):
                     VEHICLE, 2.459262, -3.46734, 57.795378, 59),
                 CollisionSphere(
                     VEHICLE, -0.805237, -4.454739, -3.599648, 59),
-                CollisionSphere(VEHICLE, 0, -9.5, 11.5, 90),
+                CollisionSphere(OPENNEOUA, 0, -9.5, 11.5, 90),
             ],
         )
         self.assertAlmostEqual(effective_runtime_radius(project), 116.95, 1)
@@ -1177,7 +1177,7 @@ class CollisionEditorTests(unittest.TestCase):
     def test_55b_compound_broad_extent_ignores_larger_legacy_radius(self):
         project = CollisionProject(
             legacy=CollisionSphere(LEGACY, radius=200),
-            compound=[CollisionSphere(VEHICLE, 0, 0, 0, 10)],
+            compound=[CollisionSphere(OPENNEOUA, 0, 0, 0, 10)],
         )
         self.assertEqual(effective_runtime_radius(project), 10)
         project.compound.clear()
@@ -1185,7 +1185,7 @@ class CollisionEditorTests(unittest.TestCase):
 
     def test_56_selected_panel_is_compact_and_index_is_in_table(self):
         window = self._window()
-        window.add_compound(VEHICLE)
+        window.add_compound(OPENNEOUA)
         self.assertTrue(window.type_value.isHidden())
         self.assertTrue(window.index_value.isHidden())
         self.assertEqual(window.sphere_tree.columnCount(), 4)
@@ -1228,7 +1228,7 @@ class CollisionEditorTests(unittest.TestCase):
         window = self._window()
         with patch("collision_editor.load_asset_family", return_value=family):
             window.open_base("sample.base")
-        window.add_compound(VEHICLE)
+        window.add_compound(OPENNEOUA)
         sphere_before = window.project.compound[0].clone()
         source_points = list(family.root_object.skeleton.points)
         window.model_scale_x_spin.setValue(2.0)
@@ -1289,22 +1289,22 @@ class CollisionEditorTests(unittest.TestCase):
     def test_65_change_sphere_type_uses_explicit_target_menu(self):
         window = self._window()
         window.add_legacy()
-        window.add_compound(VEHICLE)
-        window.change_sphere_type(WEAPON)
-        self.assertEqual(window.project.compound[0].category, WEAPON)
+        window.add_compound(OPENNEOUA)
+        window.change_sphere_type(OPENNEOUA)
+        self.assertEqual(window.project.compound[0].category, OPENNEOUA)
         window.change_sphere_type(LEGACY)
-        self.assertEqual(window.project.compound[0].category, WEAPON)
+        self.assertEqual(window.project.compound[0].category, OPENNEOUA)
         self.assertIsNotNone(window.project.legacy)
         window._selected = 0
-        window.change_sphere_type(VEHICLE)
+        window.change_sphere_type(OPENNEOUA)
         self.assertIsNone(window.project.legacy)
-        self.assertEqual(window.project.compound[0].category, VEHICLE)
-        window.change_sphere_type(WEAPON)
-        self.assertEqual(window.project.compound[0].category, WEAPON)
+        self.assertEqual(window.project.compound[0].category, OPENNEOUA)
+        window.change_sphere_type(OPENNEOUA)
+        self.assertEqual(window.project.compound[0].category, OPENNEOUA)
 
     def test_66_radius_spin_updates_preview_while_value_changes(self):
         window = self._window()
-        window.add_compound(VEHICLE)
+        window.add_compound(OPENNEOUA)
         window.radius_spin.setValue(123)
         self.assertEqual(window.project.compound[0].radius, 123.0)
         self.assertEqual(window.viewport._collision_spheres[0].radius, 123.0)
@@ -1315,7 +1315,7 @@ class CollisionEditorTests(unittest.TestCase):
 
     def test_67_arrow_keys_request_nudges_at_current_strength(self):
         window = self._window()
-        window.add_compound(VEHICLE)
+        window.add_compound(OPENNEOUA)
         window.move_strength_spin.setValue(7)
         for key in (Qt.Key.Key_Right, Qt.Key.Key_Down):
             event = QKeyEvent(
@@ -1341,7 +1341,7 @@ class CollisionEditorTests(unittest.TestCase):
     def test_69_mirror_selected_sphere_supports_all_three_axes(self):
         window = self._window()
         window.project.compound = [
-            CollisionSphere(VEHICLE, 2.5, -3.0, 4.5, 10)]
+            CollisionSphere(OPENNEOUA, 2.5, -3.0, 4.5, 10)]
         window._selected = 0
         window._sync_all()
         window.mirror_selected_sphere("x")
@@ -1353,13 +1353,12 @@ class CollisionEditorTests(unittest.TestCase):
 
     def test_70_change_type_and_mirror_use_explicit_submenus(self):
         window = self._window()
-        window.add_compound(VEHICLE)
+        window.add_compound(OPENNEOUA)
         change_labels = [
             action.text() for action in window.change_type_button.menu().actions()]
         self.assertEqual(change_labels, [
             "Change to Legacy Radius",
-            "Change to Vehicle Collision",
-            "Change to Weapon Collision",
+            "Change to OpenNeoUA Collision",
         ])
         self.assertEqual(window.change_type_button.text(), "Change Sphere Type")
         self.assertEqual(window.mirror_sphere_button.text(), "Mirror Selected Sphere")
@@ -1403,7 +1402,7 @@ class CollisionEditorTests(unittest.TestCase):
             name="Tank", source_model="tank.sklt",
             target_category=VEHICLE,
             overeof_enabled=True, overeof=12.5,
-            compound=[CollisionSphere(VEHICLE, 0, 0, 0, 20)],
+            compound=[CollisionSphere(OPENNEOUA, 0, 0, 0, 20)],
         )
         output = export_collision_text(project)
         self.assertIn("overeof = 12.5", output)
@@ -1451,7 +1450,7 @@ class CollisionEditorTests(unittest.TestCase):
         with patch("collision_editor.load_asset_family", return_value=family):
             window.open_base("sample.base")
         window.project.compound = [
-            CollisionSphere(VEHICLE, 1.0, 2.0, 3.0, 4.0)]
+            CollisionSphere(OPENNEOUA, 1.0, 2.0, 3.0, 4.0)]
         window.project.overeof_enabled = True
         window.project.overeof = 12.0
         source_vertex_y = (
@@ -1511,7 +1510,7 @@ class CollisionEditorTests(unittest.TestCase):
         project = CollisionProject(
             name="Unit", source_model="unit.sklt",
             target_category=VEHICLE,
-            compound=[CollisionSphere(VEHICLE, radius=10)],
+            compound=[CollisionSphere(OPENNEOUA, radius=10)],
         )
         _errors, warnings = validate_project(project, None)
         self.assertTrue(any("Overeof" in warning for warning in warnings))
@@ -1593,7 +1592,7 @@ class CollisionEditorTests(unittest.TestCase):
             fire_points_enabled=True,
             fire_x=25.0, fire_y=-8.0, fire_z=40.0,
             num_weapons=2,
-            compound=[CollisionSphere(VEHICLE, radius=20.0)],
+            compound=[CollisionSphere(OPENNEOUA, radius=20.0)],
         )
         output = export_collision_text(project)
         self.assertIn("fire_x = 25", output)
@@ -1875,7 +1874,7 @@ class CollisionEditorTests(unittest.TestCase):
             overeof_enabled=True, overeof=12,
             fire_points_enabled=True,
             fire_x=30, fire_y=-5, fire_z=44, num_weapons=2,
-            compound=[CollisionSphere(VEHICLE, 1, 2, 3, 40)],
+            compound=[CollisionSphere(OPENNEOUA, 1, 2, 3, 40)],
         )
         updated, _preview, _name = plan_script_update(
             text, "new_vehicle", 17, project,
@@ -2082,7 +2081,7 @@ class CollisionEditorTests(unittest.TestCase):
         window.project.num_weapons = 2
         window._select_fire_point(1)
         self.assertEqual(window._selected_fire_point, 1)
-        window.add_compound(VEHICLE)
+        window.add_compound(OPENNEOUA)
         self.assertEqual(window._selected_fire_point, -1)
         self.assertGreaterEqual(window._selected, 0)
 
@@ -2696,7 +2695,7 @@ class CollisionEditorTests(unittest.TestCase):
     def test_123_shared_gizmo_moves_only_active_tab_domain(self):
         window = self._window()
         window.project.compound = [
-            CollisionSphere(VEHICLE, x=1, y=2, z=3, radius=10)]
+            CollisionSphere(OPENNEOUA, x=1, y=2, z=3, radius=10)]
         window.project.fire_points_enabled = True
         window.project.fire_x = 4
         window.project.fire_y = 5
@@ -2989,8 +2988,8 @@ class CollisionEditorTests(unittest.TestCase):
                 + window.spheres_box.findChildren(QToolButton))
         }
         for label in (
-                "Add Legacy Radius", "Add Vehicle Collision",
-                "Add Weapon Collision", "Duplicate Sphere", "Delete Sphere",
+                "Add Legacy Radius", "Add OpenNeoUA Collision",
+                "Duplicate Sphere", "Delete Sphere",
                 "Create Suggested Sphere", "Select All Spheres",
                 "Change Sphere Type",
                 "Mirror Selected Sphere", "Undo", "Redo"):
@@ -3138,7 +3137,7 @@ class CollisionEditorTests(unittest.TestCase):
             name="Resistance_Host_Station", source_model="VP_ROBO.sklt",
             target_category=VEHICLE,
             legacy=CollisionSphere(LEGACY, radius=222),
-            compound=[CollisionSphere(VEHICLE, 11, 12, 13, 144)],
+            compound=[CollisionSphere(OPENNEOUA, 11, 12, 13, 144)],
             overeof_enabled=True, overeof=175,
             fire_points_enabled=True, fire_x=40, fire_y=50, fire_z=60,
             num_weapons=3, num_weapons_max=5,
