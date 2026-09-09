@@ -18,7 +18,6 @@ from base_parser import AmeshBlock, AttsEntry, parse_base_bytes
 from fx_element_editor import (
     append_fx_element_clipboard,
     build_fx_element_clipboard,
-    build_new_fx_clipboard,
     detect_fx_elements,
 )
 from geometry_editor import (
@@ -315,9 +314,7 @@ class AreaFxStructuralTests(unittest.TestCase):
                 if set(element.poly_ids) == set(pasted.polygon_indices))
             self.assertTrue(pasted_element.bilateral)
 
-            added = build_new_fx_clipboard(
-                obj, pasted_element, {}, 3.0, True, "XZ")
-            self.assertTrue(all(point[1] == 0.0 for point in added.points))
+            added = build_fx_element_clipboard(obj, pasted_element, {})
             second = append_fx_element_clipboard(
                 obj, added, (10.0, 0.0, 0.0))
             self.assertEqual(len(second.polygon_indices), 2)
@@ -429,10 +426,10 @@ class AreaFxStructuralTests(unittest.TestCase):
                 self.assertEqual(window._delete_geometry_reason(), "")
                 menu = window._create_viewport_context_menu()
                 labels = [action.text() for action in menu.actions()]
-                self.assertIn("Copy FX Element", labels)
-                self.assertIn("Cut FX Element", labels)
+                self.assertIn("Clone FX Element", labels)
+                self.assertIn("Move", labels)
                 self.assertIn("Delete FX Element...", labels)
-                self.assertIn("Add Similar FX Element...", labels)
+                self.assertIn("Add FX...", labels)
             finally:
                 window.close()
 

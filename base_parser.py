@@ -150,6 +150,13 @@ class AmeshBlock:
     particle_attributes: ParticleAttributes | None = None
     particle_stages: list["AmeshBlock"] = field(default_factory=list)
 
+    @property
+    def uses_atts_only_mapping(self) -> bool:
+        """Untextured and animated AMESH may legitimately omit fixed UVs."""
+        return bool(
+            (self.class_id or "").casefold() == "amesh.class" and not self.olpl
+            and (self.texture is None or self.texture.kind == "bmpanim"))
+
     # AREA_POL_FLAG_* bits (CONFIRMED, area.h)
     @property
     def map_mode(self) -> str:

@@ -78,6 +78,7 @@ from asset_family import (
     load_asset_family,
     load_manual_family,
     rebuild_materials,
+    _load_texture,
 )
 from asset_family_package import (
     MANIFEST_NAME as ASSET_FAMILY_MANIFEST,
@@ -123,6 +124,7 @@ from editor_widgets import (
     TexturePickerDialog,
     ViewportWidthScrollArea as _ViewportWidthScrollArea,
     checker_thumbnail as _checker_thumbnail,
+    configure_stable_image_preview,
     draw_uv_polygon as _draw_uv_polygon,
     qimage_from_ilbm as _qimage_from_ilbm,
     status_icon as _status_icon,
@@ -141,6 +143,10 @@ from fx_element_editor import (
     detach_shared_fx_vertices,
     detect_fx_elements,
     validate_fx_element_clipboard,
+)
+from fx_authoring import (
+    ImportedFxClipboard, prepare_fx_clipboard,
+    stage_fx_clipboard,
 )
 from polygon_reference_graph import diagnose_polygon_references
 from setbas_reader import (
@@ -170,6 +176,7 @@ from model_space_gizmo import ModelSpaceGizmo
 from texture_catalog import build_texture_catalog
 from texture_assignment import classify_texture_assignment
 from texture_convert import TextureConvertError, write_image_as_ilbm
+from editor_widgets import crop_uv_region
 from transform_dialogs import LiveRotateDialog, LiveScaleDialog
 from uv_editor_widget import UVEditorWidget, UVLoop
 from uv_topology_editor import (
@@ -180,6 +187,7 @@ from uv_topology_editor import (
     plan_uv_vertex_insertion,
 )
 from vp_manager import (
+    DUMMY_BASE_NAME,
     VPEmbeddedError,
     VPTable,
     normalize_base_name,
@@ -251,31 +259,60 @@ class AddFxElementDialog(QDialog):
 
     def __init__(self, templates: list[FxElement], parent=None,
                  preferred: FxElement | None = None,
-                 preview_provider=None) -> None:
+                 preview_provider=None, source_loader=None) -> None:
         super().__init__(parent)
         self.setWindowTitle("Add FX Element")
         self._preview_provider = preview_provider
+        self._source_loader = source_loader
+        self._sources = {}
         self._preview_frames: list[QImage] = []
         self._preview_frame = 0
         self._preview_timer = QTimer(self)
         self._preview_timer.setInterval(180)
         self._preview_timer.timeout.connect(self._advance_preview)
+        self._current_templates = list(templates)
+        self._preferred_identity = (
+            preferred.identity if preferred is not None else None)
         layout = QVBoxLayout(self)
-        layout.addWidget(QLabel("Existing FX element"))
+
+        # Keep the proven current-model initialization path used by the old
+        # dialog.  Source switching only replaces the combo contents after the
+        # dialog already exists, which avoids doing external/source plumbing
+        # during construction.
+        self.source_label = QLabel("Source: Current model")
+        self.source_label.setWordWrap(True)
+        self.source_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        layout.addWidget(QLabel("FX Element List:"))
         self.material_combo = QComboBox()
-        for element in templates:
-            kind = "VANM" if element.source_kind == "VANM" else "direct"
-            material = ", ".join(element.material_names)
+        for element in self._current_templates:
             self.material_combo.addItem(
-                f"{element.fx_name} | {kind} | {material}", element)
-            if preferred is not None \
-                    and element.identity == preferred.identity:
+                self._source_item_text(None, element), element)
+            if self._preferred_identity is not None \
+                    and element.identity == self._preferred_identity:
                 self.material_combo.setCurrentIndex(
                     self.material_combo.count() - 1)
         layout.addWidget(self.material_combo)
+        layout.addWidget(self.source_label)
+
+        source_row = QHBoxLayout()
+        self.current_source_button = QPushButton("From Current Model")
+        self.current_source_button.setEnabled(False)
+        self.current_source_button.clicked.connect(
+            lambda _checked=False: self._restore_current_source())
+        source_row.addWidget(self.current_source_button)
+        self.other_model_source_button = QPushButton("From Another Model...")
+        self.other_model_source_button.setEnabled(source_loader is not None)
+        self.other_model_source_button.clicked.connect(
+            lambda _checked=False: self._load_source("model"))
+        source_row.addWidget(self.other_model_source_button)
+        self.bas_source_button = QPushButton("From BAS Archive...")
+        self.bas_source_button.setEnabled(source_loader is not None)
+        self.bas_source_button.clicked.connect(
+            lambda _checked=False: self._load_source("bas"))
+        source_row.addWidget(self.bas_source_button)
+        layout.addLayout(source_row)
         self.preview_label = QLabel("Preview unavailable")
-        self.preview_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.preview_label.setMinimumSize(180, 120)
+        configure_stable_image_preview(self.preview_label, 360)
         self.preview_label.setStyleSheet(
             "background: #22252b; border: 1px solid #555b66;")
         layout.addWidget(self.preview_label)
@@ -287,10 +324,73 @@ class AddFxElementDialog(QDialog):
             | QDialogButtonBox.StandardButton.Cancel)
         buttons.accepted.connect(self.accept)
         buttons.rejected.connect(self.reject)
+        self._ok_button = buttons.button(QDialogButtonBox.StandardButton.Ok)
+        self._ok_button.setEnabled(bool(templates))
         layout.addWidget(buttons)
         self.material_combo.currentIndexChanged.connect(
             self._refresh_preview)
         self._refresh_preview()
+
+    @staticmethod
+    def _source_item_text(obj, element: FxElement) -> str:
+        kind = "VANM" if element.source_kind == "VANM" else "direct"
+        material = ", ".join(element.material_names)
+        if obj is None:
+            return f"{element.fx_name} | {kind} | {material}"
+        return f"{obj.display_name} | {element.fx_name} | {kind} | {material}"
+
+    def _set_source_elements(
+            self, sources, label: str, *, current_model: bool = False) -> None:
+        self._preview_timer.stop()
+        self._sources.clear()
+        self.material_combo.blockSignals(True)
+        self.material_combo.clear()
+        preferred_index = -1
+        for index, source in enumerate(sources):
+            if len(source) == 3:
+                family, obj, element = source
+                self._sources[id(element)] = (family, obj)
+            else:
+                family = obj = None
+                element = source[0]
+            self.material_combo.addItem(
+                self._source_item_text(obj, element), element)
+            if self._preferred_identity is not None \
+                    and element.identity == self._preferred_identity:
+                preferred_index = index
+        if self.material_combo.count():
+            self.material_combo.setCurrentIndex(
+                preferred_index if preferred_index >= 0 else 0)
+        self.material_combo.blockSignals(False)
+        self.source_label.setText(f"Source: {label}")
+        self.current_source_button.setEnabled(not current_model)
+        self._ok_button.setEnabled(self.material_combo.count() > 0)
+        self._refresh_preview()
+
+    def _restore_current_source(self) -> None:
+        self._set_source_elements(
+            [(element,) for element in self._current_templates],
+            "Current model", current_model=True)
+
+    def _load_source(self, kind):
+        try:
+            loaded = self._source_loader(kind)
+            if not loaded:
+                return
+            if isinstance(loaded, tuple) and len(loaded) == 2 \
+                    and isinstance(loaded[0], str):
+                label, sources = loaded
+            else:
+                label, sources = (
+                    "Another model" if kind == "model" else "BAS Archive",
+                    loaded)
+            if sources:
+                self._set_source_elements(sources, label)
+        except Exception as exc:
+            QMessageBox.warning(self, "FX source unavailable", str(exc))
+
+    def source_context(self, element):
+        return self._sources.get(id(element))
 
     def selected_template(self) -> FxElement | None:
         value = self.material_combo.currentData()
@@ -320,14 +420,58 @@ class AddFxElementDialog(QDialog):
         self._preview_frame = 0
         element = self.selected_template()
         info = []
-        if element is not None and self._preview_provider is not None:
-            try:
+        try:
+            context = (
+                self.source_context(element) if element is not None else None)
+            if context is not None:
+                family, obj = context
+                for index, name in enumerate(element.material_names):
+                    animation = family.animations.get(name)
+                    if animation is not None:
+                        samples = [
+                            (animation.bitmap_names[frame.frame_id],
+                             animation.texcoord_groups[frame.texcoords_id])
+                            for frame in animation.frames
+                            if 0 <= frame.frame_id < len(animation.bitmap_names)
+                            and 0 <= frame.texcoords_id
+                            < len(animation.texcoord_groups)
+                        ]
+                    else:
+                        if index >= len(element.block_indices) \
+                                or index >= len(element.atts_indices):
+                            continue
+                        block_index = element.block_indices[index]
+                        if not 0 <= block_index < len(obj.base_object.ades):
+                            continue
+                        block = obj.base_object.ades[block_index]
+                        atts = element.atts_indices[index]
+                        samples = (
+                            [(name, block.olpl[atts])]
+                            if 0 <= atts < len(block.olpl) else [])
+                    for bitmap_name, uvs in samples:
+                        bitmap = family.textures.get(bitmap_name)
+                        if bitmap is None:
+                            continue
+                        image = _qimage_from_ilbm(
+                            bitmap, family.external_palette)
+                        frame = crop_uv_region(image, [uvs])
+                        if not frame.isNull():
+                            self._preview_frames.append(frame)
+                info = [
+                    f"{element.source_kind} | "
+                    f"{len(element.poly_ids)} polygon(s)",
+                    "Clone preserves geometry, materials and all UV phases.",
+                ]
+            elif element is not None and self._preview_provider is not None:
                 frames, info = self._preview_provider(element)
                 self._preview_frames = [
                     frame for frame in frames
                     if isinstance(frame, QImage) and not frame.isNull()]
-            except Exception as exc:
-                info = [f"Preview diagnostic: {exc}"]
+        except Exception as exc:
+            # A bad/missing source asset must never take down the editor just
+            # because the Add FX picker tried to render its preview.
+            self._preview_frames = []
+            info = [f"Preview diagnostic: {exc}"]
         self.preview_info.setText("\n".join(info))
         self._show_preview_frame()
         if len(self._preview_frames) > 1:
@@ -351,6 +495,7 @@ class AssemblyWindow(QMainWindow):
         super().__init__(parent)
         self.setWindowTitle(WINDOW_TITLE)
         self.resize(1320, 800)
+        self._fx_aliases = {}
         self._family: AssetFamily | None = None
         self._last_directory = Path.home()
         self._last_output_directory: Path | None = None
@@ -1134,12 +1279,18 @@ class AssemblyWindow(QMainWindow):
         self.delete_geometry_action.triggered.connect(self._delete_geometry)
         self.viewport.addAction(self.delete_geometry_action)
         edit_menu.addAction(self.delete_geometry_action)
-        self.add_fx_action = QAction("Add FX Element...", self)
+        self.add_fx_action = QAction("Add FX...", self)
         self.add_fx_action.setEnabled(False)
         self.add_fx_action.setStatusTip(
-            "Clone one compatible existing FX element exactly.")
+            "Add an FX from this model or another model.")
         self.add_fx_action.triggered.connect(self._add_fx_element)
         edit_menu.addAction(self.add_fx_action)
+        self.clone_fx_action = QAction("Clone FX Element", self)
+        self.clone_fx_action.triggered.connect(self._copy_geometry)
+        edit_menu.addAction(self.clone_fx_action)
+        self.rename_fx_action = QAction("Rename FX...", self)
+        self.rename_fx_action.triggered.connect(self._rename_selected_fx)
+        edit_menu.addAction(self.rename_fx_action)
         self.edit_move_action = QAction("Move", self)
         self.edit_move_action.setStatusTip(
             "Move selected vertices/polygons continuously in place (G); "
@@ -1625,24 +1776,31 @@ class AssemblyWindow(QMainWindow):
         for column in range(3):
             transform_options.setColumnStretch(column, 1)
         gizmo_layout.addLayout(transform_options)
+        self.transform_presets = QWidget()
+        preset_layout = QHBoxLayout(self.transform_presets)
+        preset_layout.setContentsMargins(0, 0, 0, 0)
+        self.transform_preset_axis = QComboBox()
+        self.transform_preset_axis.addItems(["X", "Y", "Z"])
+        preset_layout.addWidget(self.transform_preset_axis)
+        self.transform_preset_buttons = []
+        for index in range(5):
+            button = QPushButton()
+            button.clicked.connect(lambda _checked=False, i=index: self._apply_transform_preset(i))
+            self.transform_preset_buttons.append(button)
+            preset_layout.addWidget(button)
+        self.transform_presets.hide()
+        gizmo_layout.addWidget(self.transform_presets)
         self.viewport.set_direct_transform("move", 0.50)
         self._apply_transform_mode_colors()
         model_box_layout.addWidget(gizmo_box)
 
-        self.model_texture_label = QLabel("Current texture: -")
+        self.model_texture_label = QLabel("Current FX Texture: -")
         self.model_texture_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.model_texture_label.setWordWrap(True)
         model_box_layout.addWidget(self.model_texture_label)
-        self.load_texture_button = QPushButton("Load Texture...")
-        self.load_texture_button.setEnabled(False)
-        self.load_texture_button.setToolTip(
-            "Replace the texture only on the selected polygon segments. "
-            "Select multiple segments to update them together.")
-        self.load_texture_button.clicked.connect(self._load_model_texture)
-        model_box_layout.addWidget(self.load_texture_button)
 
         fx_row = QHBoxLayout()
-        fx_row.addWidget(QLabel("FX element:"))
+        fx_row.addWidget(QLabel("FX element list:"))
         self.fx_combo.setMinimumWidth(0)
         self.fx_combo.setSizePolicy(
             QSizePolicy.Policy.Ignored,
@@ -1655,13 +1813,17 @@ class AssemblyWindow(QMainWindow):
         self.fx_combo.customContextMenuRequested.connect(
             self._show_fx_combo_context_menu)
         fx_buttons = QHBoxLayout()
-        self.add_fx_button = QPushButton("Add FX Element...")
+        self.add_fx_button = QPushButton("Add FX...")
         self.add_fx_button.setEnabled(False)
         self.add_fx_button.setToolTip(
-            "Clone one compatible existing FX element exactly, then choose "
-            "only its position in the viewport.")
-        self.add_fx_button.clicked.connect(self._add_fx_element)
+            "Add an FX from the current model, another model, or a VP-defined "
+            "model in a BAS archive.")
+        self.add_fx_button.clicked.connect(self.add_fx_action.trigger)
         fx_buttons.addWidget(self.add_fx_button)
+        self.clone_fx_button = QPushButton("Clone FX...")
+        self.clone_fx_button.setEnabled(False)
+        self.clone_fx_button.clicked.connect(self.clone_fx_action.trigger)
+        fx_buttons.addWidget(self.clone_fx_button)
         self.delete_fx_button = QPushButton("Delete Selected FX")
         self.delete_fx_button.setEnabled(False)
         self.delete_fx_button.setToolTip(
@@ -1670,9 +1832,22 @@ class AssemblyWindow(QMainWindow):
         self.delete_fx_button.clicked.connect(
             self._delete_selected_fx_element)
         fx_buttons.addWidget(self.delete_fx_button)
-        model_box_layout.addLayout(fx_buttons)
 
-        uv_box = QGroupBox("Texture UV preview")
+        self.rename_fx_button = QPushButton("Rename FX...")
+        self.rename_fx_button.clicked.connect(self.rename_fx_action.trigger)
+        # Rename occupies the former Replace FX Texture slot, directly below the
+        # FX selection.  Replace FX Texture moves to Rename's former lower slot.
+        model_box_layout.addWidget(self.rename_fx_button)
+        model_box_layout.addLayout(fx_buttons)
+        self.load_texture_button = QPushButton("Replace FX Texture...")
+        self.load_texture_button.setEnabled(False)
+        self.load_texture_button.setToolTip(
+            "Replace the texture only on the selected polygon segments. "
+            "Select multiple segments to update them together.")
+        self.load_texture_button.clicked.connect(self._load_model_texture)
+        model_box_layout.addWidget(self.load_texture_button)
+
+        uv_box = QGroupBox("Texture and FX editor")
         uv_layout = QVBoxLayout(uv_box)
         uv_layout.setContentsMargins(5, 5, 5, 5)
         self.uv_editor = UVEditorWidget()
@@ -1683,6 +1858,11 @@ class AssemblyWindow(QMainWindow):
         self.uv_editor.handleContextMenuRequested.connect(
             self._show_uv_handle_context_menu)
         uv_layout.addWidget(self.uv_editor, 1)
+        self.uv_phase_combo = QComboBox()
+        self.uv_phase_combo.setToolTip(
+            "Choose which UV phase is visible. All UV phases is the default.")
+        self.uv_phase_combo.activated.connect(self._select_uv_phase)
+        uv_layout.addWidget(self.uv_phase_combo)
         self.uv_auto_align_check = QCheckBox("Auto Align UV")
         self.uv_auto_align_check.setChecked(True)
         self.uv_auto_align_check.setToolTip(
@@ -3274,32 +3454,39 @@ class AssemblyWindow(QMainWindow):
                 f"{base_name} could not be loaded.\n\n{exc}")
             return None, None, None
 
-        normalized = normalize_base_name(base_name)
         source_offset = None
         if self._vp_embedded is not None:
             entry = next((candidate for candidate in self._vp_embedded.entries
-                          if candidate.normalized_base == normalized), None)
+                          if candidate.normalized_base
+                          == normalize_base_name(base_name)), None)
             if entry is not None and entry.source_objt_offset >= 0:
                 source_offset = entry.source_objt_offset
+        target = self._resolve_family_base_object(
+            family, base_name, source_offset)
+        return family, target, source_offset
 
-        def matches(candidate) -> bool:
+    @staticmethod
+    def _resolve_family_base_object(
+            family, base_name: str, source_offset: int | None = None):
+        """Resolve one BASE object by embedded offset first, then by name."""
+
+        normalized = normalize_base_name(base_name)
+        for candidate in family.all_objects():
             base_object = getattr(candidate, "base_object", None)
             if base_object is None:
-                return False
-            if source_offset is not None \
+                continue
+            if source_offset is not None and source_offset >= 0 \
                     and getattr(base_object, "source_objt_offset", -1) \
                     == source_offset:
-                return True
+                return candidate
             name = str(getattr(base_object, "name", "") or "").strip()
             if not name:
-                return False
+                continue
             if not name.casefold().endswith(".base"):
                 name += ".base"
-            return normalize_base_name(name) == normalized
-
-        target = next((obj for obj in family.all_objects()
-                       if matches(obj)), None)
-        return family, target, source_offset
+            if normalize_base_name(name) == normalized:
+                return candidate
+        return None
 
     def _activate_setbas_base(self, base_name: str):
         family, target, source_offset = self._resolve_setbas_base(base_name)
@@ -4748,7 +4935,6 @@ class AssemblyWindow(QMainWindow):
         self._update_snapshot_frame_text(text)
         element = self._fx_element_for_polygon(self._selected_poly)
         if element is not None and element.source_kind == "VANM":
-            self._update_uv_editor(self._selected_poly)
             self._fill_fx_inspector(element, self._selected_poly)
             return
         if self._mapping_index is not None and self._selected_poly is not None:
@@ -5874,8 +6060,7 @@ class AssemblyWindow(QMainWindow):
         resolved = self._resolved_geometry_polys()
         selected = self._selected_fx_element()
         if selected is not None and selected.owner_path == owner \
-                and (resolved.intersection(selected.poly_ids)
-                     or self.fx_combo.currentIndex() > 0):
+                and resolved.intersection(selected.poly_ids):
             return selected
         return next(
             (element for element in self._fx_elements
@@ -5952,6 +6137,7 @@ class AssemblyWindow(QMainWindow):
                 f"{','.join(str(poly_id) for poly_id in element.poly_ids)} "
                 f"({status})"
             )
+            label = self._fx_aliases.get((element.owner_path, element.poly_ids), label)
             self.fx_combo.addItem(label, element)
             index = self.fx_combo.count() - 1
             details = [
@@ -6019,8 +6205,7 @@ class AssemblyWindow(QMainWindow):
     def _on_fx_selected(self, _index: int) -> None:
         element = self._selected_fx_element()
         if not isinstance(element, FxElement):
-            self.viewport.set_highlight_polys(set())
-            self._sync_edit_action_states()
+            self._clear_model_selection()
             return
         identity = element.identity
         self._select_highlight_fx()
@@ -6158,7 +6343,7 @@ class AssemblyWindow(QMainWindow):
             plan_delete_geometry(
                 fam_obj, selected, MappingIndex(fam_obj),
                 self._unsafe_fx_geometry_polys(
-                    element.owner_path, selected))
+                    element.owner_path, selected), allow_empty=True)
         except GeometryClipboardError as exc:
             return str(exc)
         return ""
@@ -6231,11 +6416,31 @@ class AssemblyWindow(QMainWindow):
         self._sync_editor_context()
         self._delete_geometry()
 
+    def _rename_selected_fx(self) -> None:
+        element = self._selected_fx_element()
+        if element is None:
+            return
+        key = (element.owner_path, element.poly_ids)
+        value, accepted = QInputDialog.getText(
+            self, "Rename FX", "Name in this editing session (empty resets):",
+            text=self._fx_aliases.get(key, ""))
+        if not accepted:
+            return
+        if value.strip():
+            self._fx_aliases[key] = value.strip()
+        else:
+            self._fx_aliases.pop(key, None)
+        self._refresh_fx_elements()
+        self._select_highlight_fx()
+        self._sync_edit_action_states()
+
     def _show_fx_combo_context_menu(self, position) -> None:
         menu = QMenu(self.fx_combo)
         add_action = menu.addAction(
-            "Add FX Element...", self._add_fx_element)
+            "Add FX...", self._add_fx_element)
         add_action.setEnabled(self._can_add_fx_element())
+        menu.addAction(self.clone_fx_action)
+        menu.addAction(self.rename_fx_action)
         delete_action = menu.addAction(
             "Delete Selected FX Element...",
             self._delete_selected_fx_element)
@@ -6341,56 +6546,105 @@ class AssemblyWindow(QMainWindow):
         return result
 
     @staticmethod
-    def _fx_uv_preview_image(
-            image: QImage,
-            groups: list[list[tuple[int, int]]]) -> QImage:
-        """Draw the exact cloned UV outlines with the classic yellow style."""
-
-        output = image.convertToFormat(
-            QImage.Format.Format_ARGB32).copy()
-        if output.isNull():
-            return output
-        painter = QPainter(output)
-        color = QColor(255, 255, 90)
-        painter.setPen(QPen(color, 1.6))
-        painter.setBrush(color)
-        width = output.width()
-        height = output.height()
-        for group in groups:
-            points = QPolygonF([
-                QPointF(
-                    float(u) / 256.0 * width,
-                    float(v) / 256.0 * height)
-                for u, v in group
-            ])
-            if len(points) >= 2:
-                painter.setBrush(Qt.BrushStyle.NoBrush)
-                painter.drawPolygon(points)
-                painter.setBrush(color)
-            for point in points:
-                painter.drawEllipse(point, 2.5, 2.5)
-        painter.end()
-        return output
+    def _fx_uv_preview_image(image, groups):
+        return crop_uv_region(image, groups)
 
     def _can_add_fx_element(self) -> bool:
         return bool(
             self._editing_allowed()
             and not self.viewport.paste_preview_active
-            and self._fx_add_templates())
+            and self._workbench_obj is not None
+            and self._workbench_obj.skeleton is not None)
+
+    def _load_fx_source(self, kind):
+        family = self._family
+        if family is None:
+            return []
+        if kind == "model":
+            filename, _ = QFileDialog.getOpenFileName(
+                self, "Choose a model containing FX", str(self._last_directory),
+                "BASE models (*.base *.BASE)")
+            if not filename:
+                return []
+            source_family = load_asset_family(
+                filename, self._extra_roots, setbas=self._setbas)
+            sources = self._fx_sources_for_objects(
+                source_family, source_family.all_objects())
+            if not sources:
+                raise GeometryClipboardError(
+                    "This model has no readable FX geometry/material pair.")
+            return Path(filename).name, sources
+        if kind == "bas":
+            archive = self._setbas
+            if archive is None:
+                path = choose_bas_archive(self, self._last_directory)
+                if not path:
+                    return []
+                archive = read_setbas(path)
+            embedded = (
+                self._vp_embedded
+                if archive is self._setbas and self._vp_embedded is not None
+                else reconstruct_embedded_vps(archive.path))
+            entries = [
+                entry for entry in embedded.entries
+                if entry.normalized_base != DUMMY_BASE_NAME
+            ]
+            if not entries:
+                raise VPEmbeddedError(
+                    "This BAS archive has no usable VP-defined models.")
+            labels = [
+                f"VP {entry.index}: {entry.base_name}"
+                + (f" | {entry.skeleton_name}" if entry.skeleton_name else "")
+                for entry in entries
+            ]
+            selected, accepted = QInputDialog.getItem(
+                self, "Choose BAS model", "VP-defined model:",
+                labels, 0, False)
+            if not accepted:
+                return []
+            entry = entries[labels.index(selected)]
+            source_family = load_asset_family(
+                Path(archive.path), self._extra_roots, {}, archive)
+            source_obj = self._resolve_family_base_object(
+                source_family, entry.base_name, entry.source_objt_offset)
+            if source_obj is None:
+                raise VPEmbeddedError(
+                    f"VP {entry.index} ({entry.base_name}) could not be "
+                    "resolved to its embedded BASE object.")
+            sources = self._fx_sources_for_objects(
+                source_family, list(source_obj.iter_tree()))
+            if not sources:
+                raise GeometryClipboardError(
+                    f"VP {entry.index} ({entry.base_name}) has no readable "
+                    "FX geometry/material pair.")
+            return f"VP {entry.index}: {entry.base_name}", sources
+        return []
+
+    @staticmethod
+    def _fx_sources_for_objects(source_family, objects):
+        """Return only FX elements proven copyable from the given objects."""
+
+        sources = []
+        for obj in objects:
+            for element in detect_fx_elements(
+                    obj, source_family.animations):
+                try:
+                    build_fx_element_clipboard(
+                        obj, element, source_family.animations)
+                except GeometryClipboardError:
+                    continue
+                sources.append((source_family, obj, element))
+        return sources
 
     def _add_fx_element(
             self, *, preferred: FxElement | None = None) -> None:
         if not self._require_editing("Add FX Element"):
             return
         templates = self._fx_add_templates()
-        if not templates:
-            self._notify(
-                "Add FX Element unavailable: this owner has no compatible "
-                "existing FX1/FX2 or VANM quad material.", 9000)
-            return
         dialog = AddFxElementDialog(
             templates, self, preferred=preferred,
-            preview_provider=self._fx_template_preview)
+            preview_provider=self._fx_template_preview,
+            source_loader=self._load_fx_source)
         if dialog.exec() != QDialog.DialogCode.Accepted:
             self._notify("Add FX Element cancelled.", 3000)
             return
@@ -6401,9 +6655,16 @@ class AssemblyWindow(QMainWindow):
             self._notify("Add FX Element refused: the target changed.", 7000)
             return
         try:
-            clipboard = build_fx_element_clipboard(
-                fam_obj, template, family.animations)
-        except GeometryClipboardError as exc:
+            context = dialog.source_context(template)
+            if context is not None:
+                source_family, source = context
+                clipboard = prepare_fx_clipboard(
+                    fam_obj, source_family, source, template)
+                stage_fx_clipboard(family, fam_obj, clipboard)
+            else:
+                clipboard = build_fx_element_clipboard(
+                    fam_obj, template, family.animations)
+        except (GeometryClipboardError, MappingEditError) as exc:
             self._notify(f"Add FX Element refused: {exc}.", 9000)
             return
         self._geometry_clipboard = clipboard
@@ -6446,6 +6707,7 @@ class AssemblyWindow(QMainWindow):
         self._selected_polys = set(selected_polys)
         self.viewport.set_selected_polygon(primary_poly)
         self.viewport.set_highlight_polys(self._selected_polys)
+        self._sync_poly_id_control()
         self._fill_polygon_inspector(primary_poly)
         self._update_repair_buttons()
         self.statusBar().showMessage(
@@ -6676,10 +6938,6 @@ class AssemblyWindow(QMainWindow):
             return "select an editable model owner first"
         if self._pending_repairs:
             return "export or revert pending Mapping Repairs first"
-        if any(key[0] == owner for key in self._uv_original):
-            return "save or reset pending UV edits before changing ADES order"
-        if self._owner_vanm_uv_keys(owner):
-            return "save or reset pending VANM UV edits before changing ADES order"
         if any(key[0] == owner for key in self._texture_original):
             return "save or reset pending material previews first"
         return ""
@@ -6704,6 +6962,7 @@ class AssemblyWindow(QMainWindow):
             self._topology_original.setdefault(owner, copy.deepcopy(before))
             self._remember_geometry_original(owner)
             result = operation()
+            self._remap_uv_tracking(owner, before)
             self._refresh_object_material_faces(fam_obj)
             self._selected_owner = owner
             self.viewport.refresh_family_materials()
@@ -6906,13 +7165,14 @@ class AssemblyWindow(QMainWindow):
                     mirrored_polys)
         else:
             self._mirror_select_source_polys.clear()
+            picked_polys = self._complete_fx_polygon_selection({poly_id})
             if additive:
                 if was_selected:
-                    self._selected_polys.remove(poly_id)
+                    self._selected_polys.difference_update(picked_polys)
                 else:
-                    self._selected_polys.add(poly_id)
+                    self._selected_polys.update(picked_polys)
             else:
-                self._selected_polys = {poly_id}
+                self._selected_polys = picked_polys
         self._selected_poly = (
             poly_id if poly_id in self._selected_polys else
             (min(self._selected_polys, default=None)))
@@ -6938,6 +7198,8 @@ class AssemblyWindow(QMainWindow):
             and picked[0] == self._selected_owner
             and picked[1] == poly_id else None)
         element = self._fx_element_for_polygon(poly_id, block_index)
+        if poly_id not in self._selected_polys:
+            element = self._fx_element_for_polygon(self._selected_poly)
         self.fx_combo.blockSignals(True)
         self.fx_combo.setCurrentIndex(
             self._fx_combo_index(element.identity) if element else 0)
@@ -6965,6 +7227,9 @@ class AssemblyWindow(QMainWindow):
                 selected_only=False, pick_polygons=True)
         elif mirror_active and self.viewport.edit_session is not None:
             self.viewport.edit_session.select_none()
+        elif not self._selected_polys and self.viewport.edit_session is not None:
+            self.viewport.edit_session.select_none()
+        self._sync_edit_action_states()
 
     def _fx_element_for_polygon(
             self, poly_id: int | None,
@@ -7009,91 +7274,70 @@ class AssemblyWindow(QMainWindow):
     def _update_fx_uv_editor(self, element: FxElement) -> None:
         self._uv_ctx = None
         self._uv_contexts = {}
+        self._uv_phase_links = {}
         obj = self._owner_to_obj.get(element.owner_path)
         model = getattr(obj, "skeleton", None)
-        loops = []
+        loops, keys = [], set()
+        phase_shapes = {}
         image = None
-        descriptions = []
-        editable_count = 0
-        loop_keys = set()
-        for poly_id, block_index, atts_index, block, material in \
-                self._fx_face_records(element):
-            if model is None or not (0 <= poly_id < len(model.polygons)):
+        for poly_id, block_index, atts_index, block, material in self._fx_face_records(element):
+            if model is None or not 0 <= poly_id < len(model.polygons):
                 continue
             vertex_count = len(model.polygons[poly_id])
-            uvs = []
-            if element.source_kind == "VANM" \
-                    or (block.texture is not None
-                        and block.texture.kind == "bmpanim"):
-                frame = self.viewport.current_animation_frame_data(
-                    element.owner_path, block_index)
-                animation_group = self.viewport.current_animation_group(
-                    element.owner_path, block_index)
-                if frame is not None:
-                    if image is None:
-                        image = frame[0]
-                    uvs = list(frame[1][:vertex_count])
-                    descriptions.append(frame[2])
-            if not uvs and 0 <= atts_index < len(block.olpl):
-                uvs = list(block.olpl[atts_index])
-            if not uvs and poly_id == element.poly_ids[0]:
-                uvs = list(element.olpl_uvs[:vertex_count])
-            if image is None and material and material != "-":
+            animation_entry = self._animation_for_name(material) if block.texture and block.texture.kind == "bmpanim" else None
+            if animation_entry is not None:
+                name, animation = animation_entry
+                # UV groups are authored phases, not the current playback frame.
+                # Repeated frames share one group and must edit it only once.
+                for frame in animation.frames:
+                    group = frame.texcoords_id
+                    if not 0 <= group < len(animation.texcoord_groups):
+                        continue
+                    key = ("@VANM", name, group)
+                    if key in keys:
+                        continue
+                    keys.add(key)
+                    uvs = list(animation.texcoord_groups[group])
+                    editable = self._editing_allowed() and len(uvs) == vertex_count and self._animation_uv_writable(name, group)
+                    bitmap = animation.bitmap_names[frame.frame_id] if 0 <= frame.frame_id < len(animation.bitmap_names) else ""
+                    shape = (name, bitmap.casefold(), tuple(sorted(uvs)))
+                    if editable:
+                        self._uv_contexts[key] = (obj, None, name, group, poly_id)
+                    # Rotated windings of the same footprint are animation
+                    # samples of one phase. Keep their corner correspondence.
+                    if shape in phase_shapes and len(set(uvs)) == len(uvs):
+                        primary, primary_uvs = phase_shapes[shape]
+                        self._uv_phase_links.setdefault(primary, []).append(
+                            (key, tuple(primary_uvs.index(uv) for uv in uvs)))
+                        continue
+                    phase_shapes[shape] = (key, uvs)
+                    if image is None and 0 <= frame.frame_id < len(animation.bitmap_names):
+                        image = self._texture_qimage(animation.bitmap_names[frame.frame_id])
+                    loops.append(UVLoop(key, poly_id, uvs, editable))
+                    if editable:
+                        self._uv_contexts[key] = (obj, None, name, group, poly_id)
+                continue
+            key = (element.owner_path, block_index, atts_index)
+            if key in keys or not 0 <= atts_index < len(block.olpl):
+                continue
+            keys.add(key)
+            uvs = list(block.olpl[atts_index])
+            editable = bool(self._editing_allowed() and element.editable
+                            and len(uvs) == vertex_count
+                            and (block.class_id or "").casefold() in ("amesh.class", "area.class"))
+            if image is None:
                 image = self._texture_qimage(material)
-            if uvs:
-                vanm_context = (
-                    animation_group
-                    if element.source_kind == "VANM" else None)
-                key = (
-                    ("@VANM", vanm_context[0], vanm_context[1])
-                    if vanm_context is not None else
-                    (element.owner_path, block_index, atts_index))
-                if key in loop_keys:
-                    continue
-                loop_keys.add(key)
-                editable = bool(self._editing_allowed() and (
-                    (vanm_context is not None
-                     and self._animation_uv_writable(
-                         vanm_context[0], vanm_context[1]))
-                    or (
-                        element.editable
-                        and element.source_kind == "direct"
-                        and element.uv_source == "OLPL"
-                        and (block.class_id or "").casefold() == "amesh.class"
-                        and 0 <= atts_index < len(block.olpl)
-                        and len(block.olpl[atts_index]) == vertex_count)))
-                if editable:
-                    context = (
-                        (obj, None, vanm_context[0],
-                         vanm_context[1], poly_id)
-                        if vanm_context is not None else
-                        (obj, block, block_index, atts_index, poly_id))
-                    self._uv_contexts[key] = context
-                    if self._uv_ctx is None and vanm_context is None:
-                        self._uv_ctx = context
-                    editable_count += 1
-                loops.append(UVLoop(
-                    key, poly_id, uvs, editable))
-        if editable_count:
-            message = (
-                f"UV source: VANM. {editable_count} current frame group(s) "
-                "are editable and exported as verified ANM files by Export "
-                "Asset Family. "
-                + "; ".join(dict.fromkeys(descriptions))
-                if element.source_kind == "VANM" else
-                f"UV source: OLPL. {editable_count} direct {element.fx_name} "
-                "loop(s) are editable and exported through verified BASE "
-                "output.")
-        elif descriptions:
-            message = (
-                "UV source: VANM. No writable fixed-size UV group is "
-                "available. Current "
-                + "; ".join(dict.fromkeys(descriptions)))
-        else:
-            message = (
-                f"UV source: {element.uv_source}. No unambiguous writable "
-                "UV group is available for this element.")
-        self.uv_editor.set_loops(image, loops, message)
+            loops.append(UVLoop(key, poly_id, uvs, editable))
+            if editable:
+                context = (obj, block, block_index, atts_index, poly_id)
+                self._uv_contexts[key] = context
+                if self._uv_ctx is None:
+                    self._uv_ctx = context
+        self.uv_editor.set_loops(
+            image, loops,
+            f"{len(loops)} UV phases shown together by default. Use the phase "
+            "selector to isolate one phase; drag to move, wheel to zoom, "
+            "middle drag to pan. Yellow and cyan identify the phases.")
         self._sync_uv_add_vertex_button()
 
     def _fill_fx_inspector(self, element: FxElement, poly_id: int) -> None:
@@ -7131,7 +7375,7 @@ class AssemblyWindow(QMainWindow):
                     lines.append(f"current VANM: {frame[2]}")
         label = ", ".join(dict.fromkeys(value for value in labels if value))
         self.model_texture_label.setText(
-            "Current texture: " + (label or "-"))
+            "Current FX Texture: " + (label or "-"))
         self.load_texture_button.setToolTip(
             "Replace the selected FX segment texture or VANM binding without "
             "changing its geometry, winding or animation data.")
@@ -7141,7 +7385,7 @@ class AssemblyWindow(QMainWindow):
         self._update_uv_editor(poly_id)
         self.poly_uv_label.clear()
         self.poly_uv_label.setText("Select a polygon in the viewport.")
-        self.model_texture_label.setText("Current texture: -")
+        self.model_texture_label.setText("Current FX Texture: -")
         self.load_texture_button.setEnabled(False)
         if poly_id is None or self._workbench_obj is None \
                 or self._workbench_obj.skeleton is None:
@@ -7193,7 +7437,7 @@ class AssemblyWindow(QMainWindow):
                    if ref.atts_index < len(block.olpl) else [])
             self._draw_uv_overlay(tex, uvs, poly_id)
         self.model_texture_label.setText(
-            "Current texture: " + ", ".join(dict.fromkeys(texture_names)))
+            "Current FX Texture: " + ", ".join(dict.fromkeys(texture_names)))
         self._set_polygon_object_info(lines)
 
     def _texture_qimage(self, tex_name: str) -> QImage | None:
@@ -7338,6 +7582,14 @@ class AssemblyWindow(QMainWindow):
         self.transform_step_label.setText(settings["label"])
         self.transform_help_label.setText(settings["help"])
         self.auto_align_check.setVisible(mode == "move")
+        self.transform_presets.setVisible(mode == "rotate")
+        self.transform_preset_axis.setVisible(mode == "rotate")
+        if mode == "rotate":
+            for button, value in zip(
+                    self.transform_preset_buttons, (-90, -45, 45, 90, 180)):
+                button.setText(f"{value}°")
+                button.setToolTip(
+                    "Apply to the current selection; Undo restores it.")
         self._transform_options_layout.removeWidget(
             self.mirror_select_check)
         self._transform_options_layout.addWidget(
@@ -7365,6 +7617,22 @@ class AssemblyWindow(QMainWindow):
         slider.setToolTip(settings["tip"])
         slider.blockSignals(False)
         self.viewport.set_direct_transform(mode, spin.value())
+
+    def _apply_transform_preset(self, index):
+        if not self._editing_allowed() or self.viewport.paste_preview_active:
+            return
+        session = self.viewport.edit_session
+        if session is None or not session.selection or session.modal_active:
+            self._notify("Select geometry before applying a preset.", 4000)
+            return
+        if self._transform_mode == "rotate":
+            direction = tuple(
+                int(i == self.transform_preset_axis.currentIndex())
+                for i in range(3))
+            if self.viewport.begin_model_transform("rotate", direction):
+                self.viewport.rotate_edit_selection_model(
+                    math.radians((-90, -45, 45, 90, 180)[index]))
+                self.viewport.end_model_transform()
 
     def _mirror_axes(self) -> tuple[int, ...]:
         return (0, 1, 2)
@@ -7957,10 +8225,13 @@ class AssemblyWindow(QMainWindow):
             if mapping.duplicates:
                 return "the model contains duplicate polygon mappings"
             try:
-                validate_fx_element_clipboard(
-                    fam_obj, clipboard,
-                    self._family.animations if self._family else {})
-            except GeometryClipboardError as exc:
+                if isinstance(clipboard, ImportedFxClipboard):
+                    stage_fx_clipboard(self._family, fam_obj, clipboard)
+                else:
+                    validate_fx_element_clipboard(
+                        fam_obj, clipboard,
+                        self._family.animations if self._family else {})
+            except (GeometryClipboardError, MappingEditError) as exc:
                 return str(exc)
             return ""
         if len(model.points) + len(clipboard.points) > 0x10000:
@@ -8160,6 +8431,19 @@ class AssemblyWindow(QMainWindow):
                 f"{label}: move the transparent copy; Paste/LMB/Enter "
                 "confirms; RMB/Esc cancels.", 12000)
 
+    def _remap_uv_tracking(self, owner, before, polygon_remap=None):
+        mapping = MappingIndex(self._owner_to_obj[owner])
+        self._uv_original = {key: value for key, value in self._uv_original.items() if key[0] != owner}
+        for key, original in before.get("uv_original", {}).items():
+            block = before["blocks"][key[1]]
+            poly = block.atts[key[2]].poly_id
+            if polygon_remap is not None:
+                poly = polygon_remap.get(poly)
+            refs = mapping.refs.get(poly, [])
+            if len(refs) == 1:
+                ref = refs[0]
+                self._uv_original[(owner, ref.block_index, ref.atts_index)] = copy.deepcopy(original)
+
     def _capture_topology_state(self, owner: str) -> dict | None:
         fam_obj = self._owner_to_obj.get(owner)
         model = getattr(fam_obj, "skeleton", None)
@@ -8171,6 +8455,8 @@ class AssemblyWindow(QMainWindow):
             if session is not None and self.viewport.edit_owner == owner
             else ())
         return {
+            "uv_original": {key: copy.deepcopy(value) for key, value in self._uv_original.items() if key[0] == owner},
+            "fx_aliases": {key: value for key, value in self._fx_aliases.items() if key[0] == owner},
             "points": [tuple(point) for point in model.points],
             "polygons": [list(polygon) for polygon in model.polygons],
             "parsed_polygon_count": model.parsed_polygon_count,
@@ -8233,6 +8519,10 @@ class AssemblyWindow(QMainWindow):
         model.points[:] = [tuple(point) for point in state["points"]]
         model.polygons[:] = [list(polygon) for polygon in state["polygons"]]
         model.parsed_polygon_count = state["parsed_polygon_count"]
+        self._fx_aliases = {key: value for key, value in self._fx_aliases.items() if key[0] != owner}
+        self._fx_aliases.update(state.get("fx_aliases", {}))
+        self._uv_original = {key: value for key, value in self._uv_original.items() if key[0] != owner}
+        self._uv_original.update(copy.deepcopy(state.get("uv_original", {})))
         saved_blocks = copy.deepcopy(state["blocks"])
         if len(blocks) == len(saved_blocks) and all(
                 (current.class_id or "").lower()
@@ -8427,7 +8717,17 @@ class AssemblyWindow(QMainWindow):
         try:
             self._topology_original.setdefault(owner, copy.deepcopy(before))
             self._remember_geometry_original(owner)
-            if isinstance(clipboard, FxElementClipboard):
+            resources_before = self._capture_family_resource_state(self._family)
+            if isinstance(clipboard, ImportedFxClipboard):
+                staged_family, staged, result = stage_fx_clipboard(
+                    self._family, fam_obj, clipboard, delta)
+                model.points[:] = staged.skeleton.points
+                model.polygons[:] = staged.skeleton.polygons
+                model.parsed_polygon_count = staged.skeleton.parsed_polygon_count
+                fam_obj.base_object.ades[:] = staged.base_object.ades
+                self._restore_family_resource_state(
+                    self._family, self._capture_family_resource_state(staged_family))
+            elif isinstance(clipboard, FxElementClipboard):
                 result = append_fx_element_clipboard(
                     fam_obj, clipboard, delta,
                     self._family.animations if self._family else {})
@@ -8473,10 +8773,12 @@ class AssemblyWindow(QMainWindow):
                 raise GeometryClipboardError(
                     "the committed topology could not be verified")
             self._record_edit_command({
-                "kind": "topology",
+                "kind": "material_topology" if isinstance(clipboard, ImportedFxClipboard) else "topology",
                 "owner": owner,
                 "before": before,
                 "after": after,
+                "resource_before": resources_before,
+                "resource_after": self._capture_family_resource_state(self._family),
                 "label": (
                     f"Paste {clipboard.fx_name} FX"
                     if isinstance(clipboard, FxElementClipboard)
@@ -8500,6 +8802,8 @@ class AssemblyWindow(QMainWindow):
                 ),
                 10000)
         except Exception as exc:
+            if isinstance(clipboard, ImportedFxClipboard) and 'resources_before' in locals():
+                self._restore_family_resource_state(self._family, resources_before)
             try:
                 rolled_back = self._restore_topology_state(owner, before)
             except Exception as rollback_exc:
@@ -8555,7 +8859,7 @@ class AssemblyWindow(QMainWindow):
         mapping = MappingIndex(fam_obj)
         return plan_delete_geometry(
             fam_obj, selected, mapping,
-            self._unsafe_fx_geometry_polys(owner, selected))
+            self._unsafe_fx_geometry_polys(owner, selected), allow_empty=bool(element))
 
     def _delete_geometry_reason(self) -> str:
         if not self._editing_allowed():
@@ -8574,15 +8878,9 @@ class AssemblyWindow(QMainWindow):
         if element is not None and element.shared_state == "invalid":
             return (
                 f"{element.fx_name} is structurally invalid")
-        selected = (
-            set(element.poly_ids) if element is not None
-            else self._resolved_geometry_polys())
+        selected = self._resolved_geometry_polys()
         if not selected:
             return "select one or more complete polygons first"
-        if any(key[0] == owner for key in self._uv_original):
-            return "save or reset pending UV edits before changing topology"
-        if self._owner_vanm_uv_keys(owner):
-            return "save or reset pending VANM UV edits before changing topology"
         if any(key[0] == owner for key in self._texture_original):
             return (
                 "save or reset pending material previews before changing "
@@ -8592,7 +8890,7 @@ class AssemblyWindow(QMainWindow):
             plan_delete_geometry(
                 fam_obj, selected, mapping,
                 self._unsafe_fx_geometry_polys(
-                    owner, selected))
+                    owner, selected), allow_empty=bool(element))
         except GeometryClipboardError as exc:
             return str(exc)
         return ""
@@ -8618,6 +8916,11 @@ class AssemblyWindow(QMainWindow):
             result = apply_delete_geometry(
                 model, fam_obj.base_object.ades, plan)
             polygon_remap = dict(result.old_to_new_polygon)
+            self._remap_uv_tracking(owner, before, polygon_remap)
+            self._fx_aliases = {
+                ((key[0], tuple(polygon_remap[p] for p in key[1])) if key[0] == owner else key): value
+                for key, value in self._fx_aliases.items()
+                if key[0] != owner or all(p in polygon_remap for p in key[1])}
             point_remap = dict(result.old_to_new_point)
             remapped_polygons = {
                 polygon_remap[poly_id]
@@ -8923,28 +9226,12 @@ class AssemblyWindow(QMainWindow):
         deselect.setEnabled(has_selection)
         menu.addSeparator()
         active_fx = self._active_fx_selection()
-        copy_label = "Copy FX Element" if active_fx is not None else "Copy"
-        copy_geometry = menu.addAction(copy_label, self._copy_geometry)
-        copy_geometry.setEnabled(self.can_copy_geometry())
-        clipboard_is_fx = isinstance(
-            self._geometry_clipboard, FxElementClipboard)
-        paste_label = "Paste FX Element" if clipboard_is_fx else "Paste"
-        paste_geometry = menu.addAction(
-            paste_label, lambda: self._paste_geometry(position))
-        paste_geometry.setEnabled(
-            editing and self._geometry_clipboard is not None)
-        preview_reason = self._preview_geometry_reason()
-        commit_reason = (
-            self._commit_geometry_reason() if not preview_reason else "")
-        paste_geometry.setToolTip(
-            (f"Confirm the current "
-             f"{(self.viewport.paste_preview_operation or 'copy').title()} Preview.")
-            if self.viewport.paste_preview_active else
-            preview_reason or (
-                f"Preview is available; confirmation will be refused: "
-                f"{commit_reason}."
-                if commit_reason else
-                "Start a Copy Preview."))
+        if active_fx is not None:
+            menu.addAction(self.clone_fx_action)
+        else:
+            menu.addAction(self.copy_geometry_action)
+            if not isinstance(self._geometry_clipboard, FxElementClipboard):
+                menu.addAction(self.paste_geometry_action)
         if active_fx is not None:
             active_fx_elements = self._active_fx_elements()
             delete_geometry = menu.addAction(
@@ -8958,12 +9245,9 @@ class AssemblyWindow(QMainWindow):
         else:
             delete_geometry = menu.addAction("Delete", self._delete_geometry)
             delete_geometry.setEnabled(self.can_delete_geometry())
-        add_fx = menu.addAction(
-            "Add Similar FX Element..." if active_fx is not None
-            else "Add FX Element...",
-            (lambda: self._add_fx_element(preferred=active_fx))
-            if active_fx is not None else self._add_fx_element)
-        add_fx.setEnabled(self._can_add_fx_element())
+        menu.addAction(self.add_fx_action)
+        if active_fx is not None:
+            menu.addAction(self.rename_fx_action)
         menu.addAction(self.edit_move_action)
         scale = menu.addAction(
             "Scale...", self._scale_selected_geometry)
@@ -9198,6 +9482,13 @@ class AssemblyWindow(QMainWindow):
             self.add_fx_action.setEnabled(can_add_fx)
         if hasattr(self, "add_fx_button"):
             self.add_fx_button.setEnabled(can_add_fx)
+        if hasattr(self, "clone_fx_action"):
+            can_clone = editing and can_copy and bool(self._active_fx_elements())
+            self.clone_fx_action.setEnabled(can_clone)
+            self.clone_fx_button.setEnabled(can_clone)
+            can_rename = editing and self._selected_fx_element() is not None and not paste_preview
+            self.rename_fx_action.setEnabled(can_rename)
+            self.rename_fx_button.setEnabled(can_rename)
         if hasattr(self, "delete_fx_button"):
             can_delete_fx = (
                 editing
@@ -9738,6 +10029,8 @@ class AssemblyWindow(QMainWindow):
                     or atts_index >= len(blocks[block_index].olpl):
                 raise MappingEditError(
                     "an edited UV group no longer exists in the selected BASE")
+            if (blocks[block_index].class_id or "").casefold() == "area.class":
+                continue
             uv_edits.append(UVEdit(
                 "root", block_index, atts_index,
                 list(blocks[block_index].olpl[atts_index])))
@@ -9838,11 +10131,7 @@ class AssemblyWindow(QMainWindow):
         states = []
         for block_index, current in enumerate(current_blocks):
             class_id = (current.class_id or "").lower()
-            atts_only = bool(
-                class_id == "amesh.class"
-                and current.texture is not None
-                and current.texture.kind == "bmpanim"
-                and not current.olpl)
+            atts_only = current.uses_atts_only_mapping
             if class_id == "amesh.class" \
                     and not atts_only \
                     and len(current.atts) != len(current.olpl):
@@ -10883,7 +11172,27 @@ class AssemblyWindow(QMainWindow):
                 return ""
         return "The selected UV handles have no pending changes to revert."
 
+    def _select_uv_phase(self, index):
+        key = self.uv_phase_combo.itemData(index)
+        self.uv_editor.set_visible_loop_key(key)
+        if key is None:
+            self.uv_editor.select_all()
+        else:
+            self.uv_editor.select_handles({
+                (key, i)
+                for i in range(len(self.uv_editor.loop_uvs().get(key, ())))
+            })
+
     def _sync_uv_add_vertex_button(self, *_args) -> None:
+        combo = getattr(self, "uv_phase_combo", None)
+        if combo is not None:
+            keys = self.uv_editor.loop_keys()
+            if tuple(combo.itemData(i) for i in range(1, combo.count())) != keys:
+                combo.clear()
+                combo.addItem("All UV phases", None)
+                for index, key in enumerate(keys):
+                    combo.addItem(f"Phase {index + 1} — {'Yellow' if index % 2 == 0 else 'Cyan'}", key)
+            combo.setEnabled(bool(keys))
         add_button = getattr(self, "uv_add_vertex_button", None)
         if add_button is not None:
             reason = self._uv_add_vertex_reason()
@@ -10911,7 +11220,7 @@ class AssemblyWindow(QMainWindow):
             owner = self._selected_owner
             changed = bool(
                 self._editing_allowed() and owner is not None
-                and any(key[0] == owner for key in self._uv_original))
+                and (any(key[0] == owner for key in self._uv_original) or self._owner_vanm_uv_keys(owner)))
             reset_all.setEnabled(changed)
             reset_all.setToolTip(
                 "Restore every changed editable UV loop in the active model."
@@ -11128,6 +11437,7 @@ class AssemblyWindow(QMainWindow):
             self._sync_uv_add_vertex_button()
 
     def _update_uv_editor(self, poly_id: int | None) -> None:
+        self._uv_phase_links = {}
         self._uv_ctx = None
         self._uv_contexts = {}
         if poly_id is None or self._workbench_obj is None \
@@ -11294,12 +11604,21 @@ class AssemblyWindow(QMainWindow):
         self.uv_editor.set_loops(image, loops, message)
         self._sync_uv_add_vertex_button()
 
+    def _expand_uv_phase_updates(self, loop_uvs):
+        expanded = dict(loop_uvs)
+        for primary, links in getattr(self, "_uv_phase_links", {}).items():
+            if primary in expanded:
+                for key, indices in links:
+                    expanded[key] = [expanded[primary][index] for index in indices]
+        return expanded
+
     def _on_uv_changed(self, loop_uvs: dict) -> None:
         if not self._editing_allowed():
             self._update_uv_editor(self._selected_poly)
             return
         if not self._uv_contexts:
             return
+        loop_uvs = self._expand_uv_phase_updates(loop_uvs)
         changed = {}
         before = {}
         for key, uvs in loop_uvs.items():
@@ -11409,6 +11728,12 @@ class AssemblyWindow(QMainWindow):
             target = targets.setdefault(key, list(current))
             target[index] = tuple(original[index])
             reverted_count += 1
+        targets = self._expand_uv_phase_updates(targets)
+        for key in targets:
+            if key not in before:
+                storage = self._uv_storage(key)
+                if storage is not None:
+                    before[key] = self._uv_storage_points(storage)
         if not targets or not self._apply_uv_histories(targets):
             self._notify(
                 "UV revert failed; all selected loops were left unchanged.",
@@ -11704,33 +12029,41 @@ class AssemblyWindow(QMainWindow):
         family.textures[resource.resource_name] = decoded
         return self._texture_qimage(resource.resource_name)
 
-    def _binding_thumbnail_for_picker(
-            self, name: str, binding_kind: str) -> QImage | None:
-        if binding_kind != "bmpanim":
-            return self._texture_thumbnail_for_picker(name)
-        family = self._family
-        if family is None:
-            return None
-        animation = next((
-            value for key, value in family.animations.items()
-            if key.casefold() == name.casefold()
-        ), None)
-        if animation is None:
-            return None
-        for bitmap_name in animation.bitmap_names:
-            image = self._texture_thumbnail_for_picker(bitmap_name)
-            if image is not None and not image.isNull():
-                return image
-        return None
+    def _binding_preview_frames(self, name: str, binding_kind: str):
+        if binding_kind == "bmpanim":
+            entry = self._animation_for_name(name)
+            if entry is None:
+                return []
+            animation = entry[1]
+            frames = []
+            for frame in animation.frames:
+                if not (0 <= frame.frame_id < len(animation.bitmap_names) and
+                        0 <= frame.texcoords_id < len(animation.texcoord_groups)):
+                    continue
+                image = self._texture_thumbnail_for_picker(animation.bitmap_names[frame.frame_id])
+                cropped = crop_uv_region(image, [animation.texcoord_groups[frame.texcoords_id]])
+                if not cropped.isNull():
+                    frames.append((cropped, frame.duration_ms))
+            return frames
+        image = self._texture_thumbnail_for_picker(name)
+        groups = list(self.uv_editor.loop_uvs().values())
+        cropped = crop_uv_region(image, groups)
+        return [(cropped, 180)] if not cropped.isNull() else []
 
-    def _choose_model_texture(self, names: list[str],
-                              current: str,
+    def _binding_thumbnail_for_picker(self, name: str, binding_kind: str) -> QImage | None:
+        frames = self._binding_preview_frames(name, binding_kind)
+        return frames[0][0] if frames else None
+
+    def _choose_model_texture(self, names: list[str], current: str,
                               binding_kind: str = "ilbm") -> str | None:
+        cache = {}
+        def frames(name):
+            if name not in cache:
+                cache[name] = self._binding_preview_frames(name, binding_kind)
+            return cache[name]
         dialog = TexturePickerDialog(
-            names, current,
-            lambda name: self._binding_thumbnail_for_picker(
-                name, binding_kind),
-            self)
+            names, current, lambda name: frames(name)[0][0] if frames(name) else None,
+            self, frame_loader=frames)
         if dialog.exec() != QDialog.DialogCode.Accepted:
             self._notify("Texture selection cancelled.", 3000)
             return None
@@ -12256,6 +12589,7 @@ class AssemblyWindow(QMainWindow):
         self._geom_dirty = {}
         self._geom_original = {}
         self._topology_original = {}
+        self._fx_aliases.clear()
         self._geometry_clipboard = None
         self._uv_ctx = None
         self._uv_contexts = {}
@@ -12801,7 +13135,8 @@ class AssemblyWindow(QMainWindow):
             self._selected_polys = self._mirrored_polygon_selection(
                 self._mirror_select_source_polys)
         else:
-            self._selected_polys.discard(poly_id)
+            self._selected_polys.difference_update(
+                self._complete_fx_polygon_selection({poly_id}))
         context = self._mirror_selection_context()
         if context is not None:
             session, _owner, fam_obj = context
@@ -12814,6 +13149,10 @@ class AssemblyWindow(QMainWindow):
                         fam_obj.skeleton,
                         self._mirror_select_source_polys))
         self._selected_poly = min(self._selected_polys, default=None)
+        element = self._fx_element_for_polygon(self._selected_poly)
+        self.fx_combo.blockSignals(True)
+        self.fx_combo.setCurrentIndex(self._fx_combo_index(element.identity) if element else 0)
+        self.fx_combo.blockSignals(False)
         self.viewport.set_selected_polygon(self._selected_poly)
         self.viewport.set_highlight_polys(self._selected_polys)
         self._sync_poly_id_control()

@@ -217,6 +217,31 @@ class UVPhase3Tests(unittest.TestCase):
         finally:
             window.close()
 
+    def test_phase_visibility_filter_preserves_all_loaded_uv_data(self):
+        editor = UVEditorWidget()
+        try:
+            editor.set_loops(None, [
+                UVLoop("phase-1", 0, [(10, 10), (40, 10), (40, 40)]),
+                UVLoop("phase-2", 0, [(80, 80), (120, 80), (120, 120)]),
+            ])
+            self.assertEqual(
+                [loop.key for loop in editor._visible_loops()],
+                ["phase-1", "phase-2"])
+
+            editor.set_visible_loop_key("phase-2")
+            self.assertEqual(
+                [loop.key for loop in editor._visible_loops()],
+                ["phase-2"])
+            self.assertEqual(
+                set(editor.loop_uvs()), {"phase-1", "phase-2"})
+
+            editor.set_visible_loop_key(None)
+            self.assertEqual(
+                [loop.key for loop in editor._visible_loops()],
+                ["phase-1", "phase-2"])
+        finally:
+            editor.close()
+
     def test_multi_loop_nudge_clamps_to_one_shared_boundary_delta(self):
         editor = UVEditorWidget()
         try:

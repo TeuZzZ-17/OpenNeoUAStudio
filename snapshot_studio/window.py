@@ -42,6 +42,8 @@ class SnapshotStudioWindow(AssemblyWindow):
         "edit_move_action",
         "delete_geometry_action",
         "add_fx_action",
+        "clone_fx_action",
+        "rename_fx_action",
         "edit_scale_action",
         "edit_rotate_action",
     )

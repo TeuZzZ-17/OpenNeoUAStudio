@@ -43,6 +43,9 @@ class UVEditorWidget(QWidget):
         self._image: QImage | None = None
         self._loops: list[UVLoop] = []
         self._loop_indices: dict[Hashable, int] = {}
+        # None renders every UV phase; otherwise only the matching loop is
+        # shown and hit-testable. The underlying UV data always stays loaded.
+        self._visible_loop_key: Hashable | None = None
         # Compatibility mirrors for the primary loop.
         self._uvs: list[tuple[int, int]] = []
         self._editable = False
@@ -77,6 +80,9 @@ class UVEditorWidget(QWidget):
 
     def set_loops(self, image: QImage | None, loops: list[UVLoop],
                   message: str = "") -> None:
+        old_lengths = {loop.key: len(loop.uvs) for loop in self._loops}
+        previous_selection = set(self._selected_handles)
+        previous_active = self._active_handle
         self._image = image
         self._loops = []
         self._loop_indices = {}
@@ -90,12 +96,20 @@ class UVEditorWidget(QWidget):
                 [tuple(uv) for uv in loop.uvs],
                 bool(loop.editable),
             ))
+        if (self._visible_loop_key is not None
+                and self._visible_loop_key not in self._loop_indices):
+            self._visible_loop_key = None
         self._sync_primary_uvs()
         self._editable = any(loop.editable and loop.uvs
                              for loop in self._loops)
         self.setToolTip(message)
-        self._active_handle = None
-        self._selected_handles.clear()
+        self._selected_handles = {
+            handle for handle in previous_selection
+            if self._valid_handle(handle)
+            and old_lengths.get(handle[0]) == len(self._loop(handle[0]).uvs)}
+        self._active_handle = (
+            previous_active if previous_active in self._selected_handles
+            else self._first_handle(self._selected_handles))
         self._sync_legacy_selection()
         self._dragging = False
         self._box_start = None
@@ -130,6 +144,19 @@ class UVEditorWidget(QWidget):
     def loop_count(self) -> int:
         return len(self._loops)
 
+    def set_visible_loop_key(self, key: Hashable | None) -> None:
+        """Show all UV phases, or only one phase, without changing UV data."""
+
+        self._visible_loop_key = (
+            key if key is None or key in self._loop_indices else None)
+        self.update()
+
+    def _visible_loops(self) -> list[UVLoop]:
+        if self._visible_loop_key is None:
+            return self._loops
+        loop = self._loop(self._visible_loop_key)
+        return [loop] if loop is not None else []
+
     def loop_keys(self) -> tuple[Hashable, ...]:
         return tuple(loop.key for loop in self._loops)
 
@@ -142,8 +169,12 @@ class UVEditorWidget(QWidget):
 
     def loop_color(self, key: Hashable) -> QColor:
         index = self._loop_indices.get(key, 0)
-        # Golden-angle spacing remains distinct and deterministic.
-        return QColor.fromHsv((48 + index * 137) % 360, 190, 255)
+        return QColor(255, 220, 0) if index % 2 == 0 else QColor(0, 220, 255)
+
+    @staticmethod
+    def _opposite_loop_color(color: QColor) -> QColor:
+        return QColor(0, 220, 255) if color == QColor(255, 220, 0) \
+            else QColor(255, 220, 0)
 
     def uvs(self) -> list[tuple[int, int]]:
         return list(self._uvs)
@@ -305,6 +336,83 @@ class UVEditorWidget(QWidget):
         self.update()
         self._finish_programmatic_edit(before)
 
+    def _selected_editable_handles(self):
+        return sorted(
+            self._editable_selected_handles(), key=self._handle_sort_key)
+
+    def _transform_selected(self, transform) -> bool:
+        handles = self._selected_editable_handles()
+        if not handles:
+            return False
+        before = self.loop_uvs()
+        points = [self._handle_uv(handle) for handle in handles]
+        pivot = (
+            sum(point[0] for point in points) / len(points),
+            sum(point[1] for point in points) / len(points),
+        )
+        import math
+        moved = {}
+        for handle in handles:
+            u, v = transform(self._handle_uv(handle), pivot)
+            if not (isinstance(u, (int, float)) and isinstance(v, (int, float))):
+                return False
+            if not math.isfinite(u) or not math.isfinite(v):
+                return False
+            target = (round(u), round(v))
+            if not all(0 <= value <= 255 for value in target):
+                return False
+            moved[handle] = target
+        for key in {handle[0] for handle in handles}:
+            loop_values = list(self._loop(key).uvs)
+            for handle, target in moved.items():
+                if handle[0] == key:
+                    loop_values[handle[1]] = target
+            if len(set(loop_values)) != len(loop_values):
+                return False
+        if all(self._handle_uv(handle) == target
+               for handle, target in moved.items()):
+            return False
+        for handle, target in moved.items():
+            self._set_handle_uv(handle, target)
+        self.update()
+        self._finish_programmatic_edit(before)
+        return True
+
+    def rotate_selected(self, degrees: float) -> bool:
+        """Rotate selected editable handles around their arithmetic centroid."""
+        import math
+        if not isinstance(degrees, (int, float)) or not math.isfinite(degrees):
+            return False
+        angle = math.radians(float(degrees))
+        cosine, sine = math.cos(angle), math.sin(angle)
+
+        def transform(point, pivot):
+            dx, dy = point[0] - pivot[0], point[1] - pivot[1]
+            return (pivot[0] + dx * cosine - dy * sine,
+                    pivot[1] + dx * sine + dy * cosine)
+
+        return self._transform_selected(transform)
+
+    def scale_selected(self, percent: float) -> bool:
+        """Uniformly scale selected handles by a percentage around the centroid."""
+        import math
+        if not isinstance(percent, (int, float)) or not math.isfinite(percent):
+            return False
+        factor = float(percent) / 100.0
+        if factor <= 0.0 or factor > 1000.0:
+            return False
+        return self._transform_selected(
+            lambda point, pivot: (
+                pivot[0] + (point[0] - pivot[0]) * factor,
+                pivot[1] + (point[1] - pivot[1]) * factor))
+
+    def flip_selected(self, horizontal: bool = True) -> bool:
+        """Reflect selected handles around the centroid on one UV axis."""
+        return self._transform_selected(
+            lambda point, pivot: (
+                2.0 * pivot[0] - point[0] if horizontal else point[0],
+                point[1] if horizontal else 2.0 * pivot[1] - point[1]))
+
     def set_point(self, index: int, u: int, v: int,
                   notify: bool = True) -> None:
         if not self._loops:
@@ -326,6 +434,34 @@ class UVEditorWidget(QWidget):
     def reset_view(self) -> None:
         self._zoom = 1.0
         self._pan = QPointF(0.0, 0.0)
+        self.update()
+
+    def fit_selection(self) -> None:
+        """Fit selected handles, or all UV content when nothing is selected."""
+        handles = self._selected_editable_handles() or {
+            (loop.key, index)
+            for loop in self._loops
+            for index in range(len(loop.uvs))
+        }
+        points = [self._handle_uv(handle) for handle in handles]
+        if not points:
+            self.reset_view()
+            return
+        min_u = min(point[0] for point in points)
+        max_u = max(point[0] for point in points)
+        min_v = min(point[1] for point in points)
+        max_v = max(point[1] for point in points)
+        span = max(max_u - min_u, max_v - min_v, 16.0)
+        base = max(64.0, min(self.width(), self.height()) - 8.0)
+        self._zoom = max(1.0, min(6.0, 256.0 * 0.82 / span))
+        self._pan = QPointF(0.0, 0.0)
+        _ox, _oy, size = self._canvas_rect()
+        center = QPointF(
+            (min_u + max_u) / 512.0 * size,
+            (min_v + max_v) / 512.0 * size)
+        self._pan = QPointF(
+            self.width() * 0.5 - ((self.width() - size) * 0.5 + center.x()),
+            self.height() * 0.5 - ((self.height() - size) * 0.5 + center.y()))
         self.update()
 
     def _canvas_rect(self) -> tuple[float, float, float]:
@@ -520,8 +656,7 @@ class UVEditorWidget(QWidget):
             )
         if self._loops:
             painter.setRenderHint(QPainter.RenderHint.Antialiasing)
-            multi_loop = len(self._loops) > 1
-            for loop in self._loops:
+            for loop in self._visible_loops():
                 color = self.loop_color(loop.key)
                 points = [self._uv_to_screen(uv) for uv in loop.uvs]
                 painter.setPen(QPen(color, 1.8))
@@ -532,18 +667,12 @@ class UVEditorWidget(QWidget):
                     active = handle == self._active_handle
                     selected = handle in self._selected_handles
                     painter.setBrush(
-                        QColor(90, 230, 255) if active else
-                        QColor(255, 145, 55) if selected else color)
+                        self._opposite_loop_color(color)
+                        if (active or selected) else color)
                     painter.setPen(QPen(
                         QColor(255, 255, 255) if selected
                         else QColor(20, 20, 20), 1.4))
                     painter.drawEllipse(point, HANDLE_RADIUS, HANDLE_RADIUS)
-                    painter.setPen(QColor(255, 255, 255))
-                    prefix = f"P{loop.poly_id}:" if multi_loop else ""
-                    painter.drawText(
-                        point + QPointF(8, -6),
-                        f"{prefix}{index} ({loop.uvs[index][0]},"
-                        f"{loop.uvs[index][1]})")
         if self._snap_guides:
             painter.setPen(QPen(
                 QColor(120, 230, 255, 180), 1.0, Qt.PenStyle.DashLine))
@@ -572,7 +701,8 @@ class UVEditorWidget(QWidget):
 
     def _hit_point(self, pos: QPointF):
         hits = []
-        for loop_index, loop in enumerate(self._loops):
+        visible = self._visible_loops()
+        for loop_index, loop in enumerate(visible):
             for point_index, uv in enumerate(loop.uvs):
                 point = self._uv_to_screen(uv)
                 distance = (point - pos).manhattanLength()
@@ -695,7 +825,7 @@ class UVEditorWidget(QWidget):
             else:
                 hits = {
                     (loop.key, index)
-                    for loop in self._loops
+                    for loop in self._visible_loops()
                     for index, uv in enumerate(loop.uvs)
                     if self._box_rect.contains(self._uv_to_screen(uv))
                 }
@@ -736,8 +866,16 @@ class UVEditorWidget(QWidget):
         super().keyPressEvent(event)
 
     def wheelEvent(self, event) -> None:  # noqa: N802
+        cursor = event.position()
+        world_under_cursor = self._screen_to_uv(cursor)
         factor = 1.15 if event.angleDelta().y() > 0 else 1 / 1.15
-        self._zoom = max(1.0, min(6.0, self._zoom * factor))
+        new_zoom = max(1.0, min(6.0, self._zoom * factor))
+        if new_zoom == self._zoom:
+            event.accept()
+            return
+        self._zoom = new_zoom
+        after = self._uv_to_screen(world_under_cursor)
+        self._pan += cursor - after
         if self._zoom == 1.0:
             self._pan = QPointF(0.0, 0.0)
         self.update()

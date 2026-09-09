@@ -56,6 +56,16 @@ def _material_code(polflags: Any) -> int:
     return int(polflags) & ~_RETAIL_IGNORED_POLFLAG_BITS
 
 
+def validate_retail_polygon_flags(polflags: int) -> int:
+    """Return the proven retail dispatch code, or explain an unsupported material."""
+    code = _material_code(polflags)
+    if code not in _RETAIL_MATERIAL_CODES:
+        raise UnsupportedIndexedMaterialError(
+            f"unsupported retail polygon flags 0x{polflags:x} "
+            f"(dispatch code 0x{code:x})")
+    return code
+
+
 def _constant_shade_row(raw_shade: int) -> int:
     return (253 * raw_shade + 0x180) >> 8
 
@@ -398,11 +408,7 @@ class IndexedFamilyAdapter:
                 f"polygon {getattr(face, 'poly_id', -1)} has no ATTS mapping")
 
         polflags = int(getattr(block, "polflags", 0))
-        code = _material_code(polflags)
-        if code not in _RETAIL_MATERIAL_CODES:
-            raise UnsupportedIndexedMaterialError(
-                f"unsupported retail polygon flags 0x{polflags:x} "
-                f"(dispatch code 0x{code:x})")
+        code = validate_retail_polygon_flags(polflags)
 
         # NNN is the retail zero-span path; ATTS color is not consulted.
         if code == _RETAIL_NNN_CODE:
