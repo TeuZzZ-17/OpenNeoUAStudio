@@ -9,6 +9,7 @@ from PySide6.QtGui import (
     QIcon,
     QImage,
     QPainter,
+    QPainterPath,
     QPixmap,
     QPolygonF,
 )
@@ -19,6 +20,7 @@ from PySide6.QtWidgets import (
     QFileDialog,
     QGridLayout,
     QLineEdit,
+    QLabel,
     QListView,
     QListWidget,
     QListWidgetItem,
@@ -263,16 +265,64 @@ def draw_uv_polygon(painter: QPainter, uvs, size: int) -> None:
         painter.drawEllipse(point, 2.0, 2.0)
 
 
+def crop_uv_region(image: QImage, groups) -> QImage:
+    """Show only the selected UV footprint, with transparent pixels outside it."""
+    if image is None or image.isNull():
+        return QImage()
+    path = QPainterPath()
+    path.setFillRule(Qt.FillRule.WindingFill)
+    for uvs in groups:
+        if len(uvs) >= 3:
+            path.addPolygon(QPolygonF([
+                QPointF(u / 256.0 * image.width(), v / 256.0 * image.height())
+                for u, v in uvs]))
+            path.closeSubpath()
+    if path.isEmpty():
+        return QImage()
+    masked = QImage(image.size(), QImage.Format.Format_ARGB32_Premultiplied)
+    masked.fill(Qt.GlobalColor.transparent)
+    painter = QPainter(masked)
+    painter.setClipPath(path)
+    painter.drawImage(0, 0, image)
+    painter.end()
+    bounds = path.boundingRect().toAlignedRect().intersected(image.rect())
+    return masked.copy(bounds) if not bounds.isEmpty() else QImage()
+
+
+def configure_stable_image_preview(label: QLabel, height: int) -> None:
+    """Keep animated preview frames from changing dialog geometry.
+
+    QLabel derives its size hint from the current pixmap.  Animated textures can
+    use frames with different aspect ratios/sizes, so letting that hint feed
+    back into the layout makes the dialog grow/shrink on every frame.  Preview
+    widgets deliberately ignore pixmap width hints and keep one fixed viewport
+    height; frames are then fitted inside that stable viewport.
+    """
+
+    label.setMinimumWidth(0)
+    label.setFixedHeight(max(1, int(height)))
+    label.setSizePolicy(
+        QSizePolicy.Policy.Ignored,
+        QSizePolicy.Policy.Fixed,
+    )
+    label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+
+
 class TexturePickerDialog(QDialog):
     """Searchable texture chooser with incremental thumbnails."""
 
     def __init__(self, names: list[str], current: str, thumbnail_loader,
-                 parent=None) -> None:
+                 parent=None, *, frame_loader=None) -> None:
         super().__init__(parent)
         self.setWindowTitle("Choose Texture")
         self.resize(720, 520)
         self._thumbnail_loader = thumbnail_loader
         self._pending_items: list[QListWidgetItem] = []
+        self._frame_loader = frame_loader
+        self._frames = []
+        self._frame_index = 0
+        self._preview_timer = QTimer(self)
+        self._preview_timer.timeout.connect(self._advance_frame)
 
         layout = QVBoxLayout(self)
         self.search = QLineEdit()
@@ -290,6 +340,10 @@ class TexturePickerDialog(QDialog):
         self.list.setSelectionMode(
             QAbstractItemView.SelectionMode.SingleSelection)
         layout.addWidget(self.list, 1)
+        self.preview = QLabel()
+        configure_stable_image_preview(self.preview, 180)
+        self.preview.setVisible(frame_loader is not None)
+        layout.addWidget(self.preview)
 
         placeholder = QPixmap(96, 96)
         placeholder.fill(QColor(42, 44, 50))
@@ -315,7 +369,35 @@ class TexturePickerDialog(QDialog):
         buttons.rejected.connect(self.reject)
         layout.addWidget(buttons)
         self.list.itemDoubleClicked.connect(lambda _item: self.accept())
+        self.list.currentItemChanged.connect(lambda *_: self._refresh_preview())
+        self._refresh_preview()
         QTimer.singleShot(0, self._load_thumbnail_batch)
+
+    def _refresh_preview(self):
+        self._preview_timer.stop()
+        self._frames = []
+        self._frame_index = 0
+        if self._frame_loader is not None and self.selected_name():
+            self._frames = self._frame_loader(self.selected_name())
+        self._show_frame()
+
+    def _show_frame(self):
+        if not self._frames:
+            self.preview.setText("No compatible UV preview")
+            return
+        image, duration = self._frames[self._frame_index]
+        self.preview.setPixmap(checker_thumbnail(image, 180))
+        if len(self._frames) > 1:
+            self._preview_timer.start(max(1, round(duration)))
+
+    def _advance_frame(self):
+        if self._frames:
+            self._frame_index = (self._frame_index + 1) % len(self._frames)
+            self._show_frame()
+
+    def done(self, result):
+        self._preview_timer.stop()
+        super().done(result)
 
     def _filter_items(self, text: str) -> None:
         needle = text.strip().lower()

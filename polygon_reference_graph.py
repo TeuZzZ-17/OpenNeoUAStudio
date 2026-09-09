@@ -111,10 +111,7 @@ class AmeshPolygonReferenceHandler(PolygonReferenceHandler):
             self, block_index: int, block: AmeshBlock,
             old_to_new: dict[int, int], removed_ids: set[int],
             polygon_count: int) -> AmeshBlock:
-        atts_only = bool(
-            block.texture is not None
-            and block.texture.kind == "bmpanim"
-            and not block.olpl)
+        atts_only = block.uses_atts_only_mapping
         if not atts_only and len(block.atts) != len(block.olpl):
             raise PolygonReferenceError(
                 f"amesh.class at ADES[{block_index}] has ambiguous "

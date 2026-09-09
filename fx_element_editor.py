@@ -1,4 +1,4 @@
-"""Discovery and conservative structural editing of FX1/FX2 elements."""
+"""Discovery and structural editing of FX atlas and animated elements."""
 
 from __future__ import annotations
 
@@ -238,7 +238,7 @@ def build_fx_element_clipboard(
         source = _rendered_fx(block.texture, animation_map)
         if source is None or source.fx_name != element.fx_name:
             raise GeometryClipboardError(
-                "the FX material no longer resolves to FX1/FX2")
+                "the FX material no longer resolves to its source")
         if source_kind is None:
             source_kind = source.source_kind
         elif source_kind != source.source_kind:
@@ -435,72 +435,6 @@ def detach_shared_fx_vertices(
     return len(replacements)
 
 
-def build_new_fx_clipboard(
-        fam_obj: FamilyObject, template: FxElement,
-        animations: Mapping[str, VanmData] | None,
-        size: float, bilateral: bool,
-        orientation: str = "XY") -> FxElementClipboard:
-    """Create a quad preview from one existing, verified FX material."""
-
-    source = build_fx_element_clipboard(fam_obj, template, animations)
-    if not math.isfinite(size) or size <= 0.0:
-        raise GeometryClipboardError("FX size must be a positive finite value")
-    template_polygon = source.polygons[0]
-    if template_polygon.olpl is not None \
-            and len(template_polygon.olpl) != 4:
-        raise GeometryClipboardError(
-            "the chosen direct FX material has no demonstrated quad UV group")
-    if source.animation is not None:
-        _validate_animation_snapshot(source.animation, 4)
-    half = size * 0.5
-    xy_points = (
-        (-half, -half, 0.0),
-        (half, -half, 0.0),
-        (half, half, 0.0),
-        (-half, half, 0.0),
-    )
-    orientation = orientation.upper()
-    if orientation == "XY":
-        points = xy_points
-    elif orientation == "XZ":
-        points = tuple((x, 0.0, y) for x, y, _z in xy_points)
-    elif orientation == "YZ":
-        points = tuple((0.0, x, y) for x, y, _z in xy_points)
-    else:
-        raise GeometryClipboardError(
-            f"unsupported FX orientation {orientation!r}")
-    first = replace(
-        template_polygon,
-        source_poly_id=-1,
-        local_indices=(0, 1, 2, 3))
-    polygons = [first]
-    if bilateral:
-        reversed_olpl = (
-            tuple(reversed(first.olpl)) if first.olpl is not None else None)
-        polygons.append(replace(
-            first,
-            local_indices=(3, 2, 1, 0),
-            uvs=reversed_olpl or (),
-            olpl=reversed_olpl))
-    return replace(
-        source,
-        shared_state="bilateral" if bilateral else "exclusive",
-        bilateral=bilateral,
-        block_indices=tuple(
-            polygon.block_index for polygon in polygons),
-        atts_indices=tuple(-1 for _polygon in polygons),
-        source_poly_ids=tuple(-1 for _polygon in polygons),
-        points=points,
-        local_points=points,
-        pivot=(0.0, 0.0, 0.0),
-        original_to_local=(),
-        polygons=tuple(polygons),
-        material_signature=tuple(
-            (polygon.block_index, polygon.texture)
-            for polygon in polygons),
-    )
-
-
 def validate_fx_element_clipboard(
         fam_obj: FamilyObject, clipboard: FxElementClipboard,
         animations: Mapping[str, VanmData] | None = None,
@@ -509,7 +443,7 @@ def validate_fx_element_clipboard(
 
     model = fam_obj.skeleton
     blocks = fam_obj.base_object.ades
-    if clipboard.fx_name not in ("FX1", "FX2") \
+    if clipboard.fx_name not in ("FX1", "FX2", "FX3", "VANM") \
             or clipboard.source_kind not in ("direct", "VANM"):
         raise GeometryClipboardError("the FX clipboard type is invalid")
     if clipboard.shared_state not in (
@@ -745,14 +679,14 @@ class _FxFace:
 
 
 def normalize_fx_name(name: str | None) -> str | None:
-    """Return ``FX1``/``FX2`` for a matching logical resource name."""
+    """Return the FX atlas identifier for a matching logical resource name."""
 
     if not name:
         return None
     basename = str(name).strip().replace("\\", "/").rsplit("/", 1)[-1]
     stem = basename.rsplit(".", 1)[0] if "." in basename else basename
     logical = stem.upper()
-    return logical if logical in ("FX1", "FX2") else None
+    return logical if logical in ("FX1", "FX2", "FX3") else None
 
 
 def _logical_key(name: str) -> str:
@@ -781,13 +715,13 @@ def _rendered_fx(ref: TextureRef | None,
     if ref.kind == "bmpanim":
         animation = _animation_for_name(animations, ref.name)
         if animation is None:
-            return None
+            return _FxSource("VANM", None, "VANM", _logical_key(ref.name))
         for bitmap_name in animation.bitmap_names:
             fx_name = normalize_fx_name(bitmap_name)
             if fx_name is not None:
                 return _FxSource(
                     fx_name, animation, "VANM", _logical_key(ref.name))
-        return None
+        return _FxSource("VANM", animation, "VANM", _logical_key(ref.name))
     direct = normalize_fx_name(ref.name)
     return (
         _FxSource(direct, None, "direct", direct)
@@ -1017,8 +951,10 @@ def detect_fx_elements(
     for face in faces:
         if not face.valid or len(set(face.vertex_indices)) != len(face.vertex_indices):
             continue
+        # Two sides remain one geometric FX when their UVs are edited
+        # independently. UV coordinates are mutable, not element identity.
         key = (face.fx_name, frozenset(face.vertex_indices),
-               face.source_signature)
+               (face.source_kind, _logical_key(face.material_name)))
         candidates.setdefault(key, []).append(face)
 
     grouped: set[tuple[int, int, int]] = set()

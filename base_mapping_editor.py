@@ -327,9 +327,7 @@ def build_material_block_clipboard(
 
     area_vertex_count = None
     if class_id == "amesh.class":
-        atts_only = bool(
-            getattr(block, "texture", None) is not None
-            and block.texture.kind == "bmpanim" and not block.olpl)
+        atts_only = block.uses_atts_only_mapping
         if not atts_only and len(block.atts) != len(block.olpl):
             raise MappingEditError(
                 f"material block #{block_index} has ambiguous ATTS/OLPL "
@@ -415,6 +413,23 @@ def _plan_material_resource_transfer(
     return additions
 
 
+def transfer_material_resources(family, clipboard: MaterialBlockClipboard):
+    """Validate dependency collisions before importing a material's resources."""
+    additions = _plan_material_resource_transfer(family, clipboard)
+    imported = []
+    for snapshot, mapping_name in additions:
+        getattr(family, mapping_name)[snapshot.logical_name] = copy.deepcopy(
+            snapshot.value)
+        refs_name = (
+            "texture_refs" if snapshot.resource_kind == "texture"
+            else "animation_refs")
+        if snapshot.reference is not None:
+            getattr(family, refs_name)[snapshot.logical_name] = copy.deepcopy(
+                snapshot.reference)
+        imported.append((snapshot.resource_kind, snapshot.logical_name))
+    return tuple(imported)
+
+
 def paste_material_block(
         family, fam_obj, clipboard: MaterialBlockClipboard,
         *, target_poly_id: int | None = None) -> MaterialPasteResult:
@@ -468,18 +483,7 @@ def paste_material_block(
             block.olpl = [copy.deepcopy(block.olpl[0])]
         assigned_poly_id = target_poly_id
 
-    additions = _plan_material_resource_transfer(family, clipboard)
-    imported = []
-    for snapshot, mapping_name in additions:
-        getattr(family, mapping_name)[snapshot.logical_name] = copy.deepcopy(
-            snapshot.value)
-        refs_name = (
-            "texture_refs" if snapshot.resource_kind == "texture"
-            else "animation_refs")
-        if snapshot.reference is not None:
-            getattr(family, refs_name)[snapshot.logical_name] = copy.deepcopy(
-                snapshot.reference)
-        imported.append((snapshot.resource_kind, snapshot.logical_name))
+    imported = transfer_material_resources(family, clipboard)
     block_index = len(blocks)
     blocks.append(block)
     return MaterialPasteResult(
@@ -895,6 +899,12 @@ def _rewrite_structural_objt(state: StructuralBlockState) -> bytes:
         payload = bytearray(ade_chunk.payload(wrapped))
         struct.pack_into(">h", payload, 6, state.ade_poly_id)
         replacements[ade_chunk.offset] = bytes(payload)
+        if state.olpl and block.texture is not None and block.texture.kind != "bmpanim":
+            outlines = [node for node in parsed.tree.iter_all() if node.tag == "OTL2"]
+            if len(state.olpl) != 1 or not outlines:
+                raise MappingEditError("AREA has no unambiguous primary OTL2 outline")
+            replacements[outlines[0].offset] = bytes(
+                value for uv in state.olpl[0] for value in uv)
     elif expected_class == "particle.class":
         # PTCL/ATTS stores emitter parameters; there are no decoded POL2 refs.
         pass
