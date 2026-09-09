@@ -4301,6 +4301,11 @@ class AssetViewport(QWidget):
     def mousePressEvent(self, event: QMouseEvent) -> None:  # noqa: N802
         self._camera_interacting = False
         pos = event.position().toPoint()
+        if event.button() == Qt.MouseButton.RightButton:
+            # A fresh RMB press always starts as a normal contextual click.
+            # If the pointer actually moves while RMB is held, mouseMoveEvent
+            # marks the generated context-menu event for suppression instead.
+            self._suppress_next_context_menu = False
         if event.button() == Qt.MouseButton.MiddleButton:
             # Middle-click is a viewport shortcut for the existing Reset View
             # command.  Keep a single camera-reset implementation and let the
@@ -4739,6 +4744,11 @@ class AssetViewport(QWidget):
         elif event.buttons() & Qt.MouseButton.RightButton:
             if not delta.isNull():
                 self._camera_interacting = True
+                # Qt emits the CustomContextMenu request after the RMB gesture
+                # on Windows.  Camera panning is a drag gesture, not a request
+                # for the contextual menu, so consume that one generated menu
+                # event.  A later plain RMB press clears this flag above.
+                self._suppress_next_context_menu = True
                 self._pan += QPointF(delta.x(), delta.y())
                 self.manualCameraChanged.emit()
             self.update()

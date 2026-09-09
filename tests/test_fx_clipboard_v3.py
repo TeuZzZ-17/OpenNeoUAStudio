@@ -38,7 +38,6 @@ from fx_element_editor import (
     FxElementClipboard,
     append_fx_element_clipboard,
     build_fx_element_clipboard,
-    build_new_fx_clipboard,
     detach_shared_fx_vertices,
     detect_fx_elements,
     validate_fx_element_clipboard,
@@ -120,7 +119,7 @@ def _fx_base_bytes(
         _chunk(
             b"STRC",
             struct.pack(
-                ">hHHBBBB", 1, 0, 0xC8 if tracy_name else 0x88,
+                ">hHHBBBB", 1, 0, 0xC8 if tracy_name else 0x0A,
                 0, 255, 0, 255))
         + texture + tracy_texture,
     )
@@ -420,8 +419,8 @@ class FxClipboardV3Tests(unittest.TestCase):
             window._on_polygon_picked(1)
             selected = window.fx_combo.currentData()
             self.assertEqual(selected.fx_name, "FX2")
-            self.assertEqual(window._selected_polys, {1})
-            self.assertEqual(window.viewport._highlight_polys, {1})
+            self.assertEqual(window._selected_polys, {0, 1})
+            self.assertEqual(window.viewport._highlight_polys, {0, 1})
 
             window.fx_combo.setCurrentIndex(0)
             index = window._fx_combo_index(selected.identity)
@@ -464,7 +463,7 @@ class FxClipboardV3Tests(unittest.TestCase):
         finally:
             animated_dialog.close()
 
-    def test_add_fx_preview_draws_exact_classic_yellow_uvs(self):
+    def test_add_fx_preview_crops_exact_uv_footprint(self):
         interior = [
             (64, 64), (192, 64), (192, 192), (64, 192)]
         image = QImage(256, 256, QImage.Format.Format_ARGB32)
@@ -484,9 +483,8 @@ class FxClipboardV3Tests(unittest.TestCase):
                 frames, info = direct_window._fx_template_preview(direct)
             self.assertEqual(len(frames), 1)
             color = frames[0].pixelColor(64, 64)
-            self.assertGreaterEqual(color.red(), 240)
-            self.assertGreaterEqual(color.green(), 240)
-            self.assertLess(color.blue(), 150)
+            self.assertEqual(frames[0].size().width(), 128)
+            self.assertEqual(color.red(), 32)
             self.assertEqual(len(info), 1)
             self.assertNotIn("materials/textures", info[0])
             self.assertNotIn("clone/edit", info[0])
@@ -510,9 +508,8 @@ class FxClipboardV3Tests(unittest.TestCase):
             self.assertEqual(len(frames), 2)
             for frame in frames:
                 color = frame.pixelColor(64, 64)
-                self.assertGreaterEqual(color.red(), 240)
-                self.assertGreaterEqual(color.green(), 240)
-                self.assertLess(color.blue(), 150)
+                self.assertEqual(frame.width(), 128)
+                self.assertEqual(color.red(), 32)
             self.assertIn("2 frames", info[0])
             self.assertIn("UV VANM", info[0])
         finally:
@@ -594,7 +591,10 @@ class FxClipboardV3Tests(unittest.TestCase):
                 window._set_family(family)
                 window._show_model_editor()
                 window._on_polygon_picked(0)
-                self.assertEqual(window._selected_polys, {0})
+                self.assertEqual(window._selected_polys, {0, 1})
+                # Exercise the segment-scoped writer explicitly. Normal FX
+                # picking now intentionally selects both sides together.
+                window._selected_polys = {0}
                 with patch.object(
                         window, "_choose_model_texture",
                         return_value="FX2.ILBM"):
@@ -767,13 +767,6 @@ class FxClipboardV3Tests(unittest.TestCase):
             clipboard.polygons[1].local_indices,
             tuple(reversed(clipboard.polygons[0].local_indices)))
 
-        new_clipboard = build_new_fx_clipboard(
-            obj, bilateral, family.animations, 2.0, True)
-        self.assertEqual(len(new_clipboard.points), 4)
-        self.assertEqual(len(new_clipboard.polygons), 2)
-        self.assertEqual(
-            new_clipboard.polygons[1].local_indices, (3, 2, 1, 0))
-
         mapping = MappingIndex(obj)
         plan = plan_delete_geometry(
             obj, set(bilateral.poly_ids), mapping)
@@ -928,21 +921,6 @@ class FxClipboardV3Tests(unittest.TestCase):
         finally:
             window.close()
 
-    def test_new_fx_supports_direct_vanm_single_and_bilateral(self):
-        for vanm in (False, True):
-            family, obj = _memory_family("FX1", vanm=vanm)
-            template = detect_fx_elements(obj, family.animations)[0]
-            for bilateral in (False, True):
-                clipboard = build_new_fx_clipboard(
-                    obj, template, family.animations, 3.5, bilateral)
-                validate_fx_element_clipboard(
-                    obj, clipboard, family.animations)
-                self.assertEqual(len(clipboard.points), 4)
-                self.assertEqual(
-                    len(clipboard.polygons), 2 if bilateral else 1)
-                self.assertEqual(
-                    clipboard.source_kind, "VANM" if vanm else "direct")
-
     def test_atts_only_vanm_delete_preserves_material_and_no_olpl_is_invented(self):
         family, obj = _memory_family("FX1", vanm=True, shared=True)
         fx = detect_fx_elements(obj, family.animations)[0]
@@ -989,16 +967,13 @@ class FxClipboardV3Tests(unittest.TestCase):
 
                 window._update_uv_editor(0)
                 self.assertTrue(window.uv_editor._editable)
-                self.assertIn(
-                    "UV source: VANM", window.uv_editor.toolTip())
-                self.assertIn("frame 1/2", window.uv_editor.toolTip())
-                self.assertIn("FX2.ILBM", window.uv_editor.toolTip())
+                self.assertIn("UV phases shown together", window.uv_editor.toolTip())
                 self.assertEqual(window.uv_editor.uvs(), UVS)
                 self.assertFalse(window.uv_editor._image.isNull())
                 window.viewport.step_animation()
                 self.assertEqual(
-                    window.uv_editor.uvs(), list(reversed(UVS)))
-                self.assertIn("frame 2/2", window.uv_editor.toolTip())
+                    window.uv_editor.uvs(), UVS)
+                self.assertEqual(window.uv_editor.loop_count(), 1)
                 animation_uvs = [
                     list(group)
                     for group in family.animations[
@@ -1020,7 +995,7 @@ class FxClipboardV3Tests(unittest.TestCase):
                     window._geometry_clipboard, FxElementClipboard)
                 self.assertTrue(window.viewport.paste_preview_active)
                 self.assertIn(
-                    "Paste FX Preview",
+                    "Copy FX Preview",
                     window.paste_geometry_action.toolTip())
                 self.assertIn(
                     "FX", window.viewport._paste_preview.clipboard.fx_name)
@@ -1257,7 +1232,7 @@ class FxClipboardV3Tests(unittest.TestCase):
         finally:
             window.close()
 
-    def test_ui_cut_delete_and_add_dispatch_complete_fx_elements(self):
+    def test_ui_move_delete_and_add_dispatch_complete_fx_elements(self):
         family, obj = _memory_family("FX1")
         obj.skeleton.points.extend([
             (3.0, 0.0, 0.0),
@@ -1317,15 +1292,16 @@ class FxClipboardV3Tests(unittest.TestCase):
             window.viewport.cancel_paste_preview()
 
             window._on_polygon_picked(0)
-            window._cut_geometry()
-            self.assertIsInstance(
-                window._geometry_clipboard, FxElementClipboard)
-            self.assertEqual(len(obj.skeleton.polygons), 1)
+            before_points = list(obj.skeleton.points)
+            window._move_selected_geometry()
+            self.assertTrue(window.viewport.paste_preview_active)
+            self.assertEqual(len(obj.skeleton.polygons), 2)
+            self.assertEqual(obj.skeleton.points, before_points)
+            window.viewport.cancel_paste_preview()
             self.assertEqual(static.texture.name, "STONE.ILBM")
             self.assertEqual(
                 obj.base_object.ades[0].texture.name, "FX1.ILBM")
-            self.assertEqual(len(window._edit_undo_stack), 1)
-            window._undo_edit()
+            self.assertEqual(len(window._edit_undo_stack), 0)
             self.assertEqual(len(obj.skeleton.polygons), 2)
         finally:
             window.close()
@@ -1437,11 +1413,11 @@ class FxClipboardV3Tests(unittest.TestCase):
             with tempfile.TemporaryDirectory() as temp:
                 root = Path(temp)
                 family, obj = _writable_family(
-                    root, "FX2", vanm=vanm)
+                    root, "FX2", vanm=vanm, bilateral=True)
                 template = detect_fx_elements(
                     obj, family.animations)[0]
-                added = build_new_fx_clipboard(
-                    obj, template, family.animations, 2.5, True)
+                added = build_fx_element_clipboard(
+                    obj, template, family.animations)
                 append_fx_element_clipboard(
                     obj, added, (4.0, 0.0, 0.0),
                     family.animations)

@@ -683,7 +683,7 @@ def append_geometry_clipboard(model: SkltModel, blocks,
 
 def plan_delete_geometry(
         fam_obj: FamilyObject, poly_ids, mapping,
-        unsafe_fx_poly_ids=()) -> GeometryDeletePlan:
+        unsafe_fx_poly_ids=(), *, allow_empty=False) -> GeometryDeletePlan:
     """Validate and build an atomic polygon-delete topology replacement."""
 
     model = getattr(fam_obj, "skeleton", None)
@@ -717,7 +717,7 @@ def plan_delete_geometry(
     if any(poly_id < 0 or poly_id >= len(model.polygons)
            for poly_id in selected):
         raise GeometryClipboardError("the polygon selection contains an invalid ID")
-    if len(selected) == len(model.polygons):
+    if not allow_empty and len(selected) == len(model.polygons):
         raise GeometryClipboardError(
             "deleting the entire model is not supported")
     if mapping.invalid:
@@ -737,7 +737,7 @@ def plan_delete_geometry(
         for old_id, polygon in enumerate(model.polygons)
         if old_id not in selected_set
     ]
-    if not any(len(polygon) >= 2 for _old_id, polygon in survivors):
+    if not allow_empty and not any(len(polygon) >= 2 for _old_id, polygon in survivors):
         raise GeometryClipboardError(
             "deleting all renderable model geometry is not supported")
     old_to_new_polygon = {
@@ -774,10 +774,7 @@ def plan_delete_geometry(
                     f"ADES[{block_index}] has no writable FORM ADE/STRC source")
             continue
         if class_id == "amesh.class":
-            atts_only = bool(
-                block.texture is not None
-                and block.texture.kind == "bmpanim"
-                and not block.olpl)
+            atts_only = block.uses_atts_only_mapping
             if not atts_only and len(block.atts) != len(block.olpl):
                 raise GeometryClipboardError(
                     f"material block #{block_index} has ambiguous ATTS/OLPL counts")
