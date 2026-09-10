@@ -3405,6 +3405,30 @@ class AssetViewport(QWidget):
 
         return float(area) >= 0.0
 
+    def _uses_retail_source_face_culling(self) -> bool:
+        """Whether this viewport uses Retail whole-source-face culling.
+
+        The normal Model Editor/Snapshot path stays exactly Retail-faithful.
+        Runtime-specific views may opt out and perform their visibility test
+        on the clipped fan triangles instead, without introducing a second
+        renderer.
+        """
+
+        return True
+
+    def _render_piece_front_facing(
+            self, camera_vertices, target: QRectF, camera: dict,
+            source_front_facing: bool) -> bool:
+        """Return the front-face decision for one clipped render piece.
+
+        Retail geometry normally culls the complete source polygon before
+        clipping, so every emitted fan piece inherits that decision. Runtime
+        views that use GPU-style post-projection winding can override only this
+        hook while retaining the shared clipping/BSP/indexed renderer.
+        """
+
+        return bool(source_front_facing)
+
     def paintGL_stub(self):  # pragma: no cover - kept for API parity
         pass
 
@@ -3577,13 +3601,15 @@ class AssetViewport(QWidget):
                 self._camera_vertex(vertex, camera)
                 for vertex in face.vertices)
             source_front_facing = retail_source_face_front_facing(cam)
-            if mode == "textured":
-                if not source_front_facing:
+            retail_source_cull = self._uses_retail_source_face_culling()
+            if retail_source_cull:
+                if mode == "textured":
+                    if not source_front_facing:
+                        continue
+                elif self._backface_cull and not source_front_facing:
+                    # Preserve the explicit editor override for BASE/SKLT while
+                    # using the exact same Retail visibility decision by default.
                     continue
-            elif self._backface_cull and not source_front_facing:
-                # Preserve the explicit editor override for BASE/SKLT while
-                # using the exact same Retail visibility decision by default.
-                continue
 
             mat = self._materials[face.material]
             face_uvs = []
@@ -3621,11 +3647,19 @@ class AssetViewport(QWidget):
                 )
                 if clipped is None:
                     continue
+                piece_front_facing = self._render_piece_front_facing(
+                    clipped.vertices, target, camera, source_front_facing)
+                if not retail_source_cull:
+                    if mode == "textured":
+                        if not piece_front_facing:
+                            continue
+                    elif self._backface_cull and not piece_front_facing:
+                        continue
                 triangles.append(CameraPolygon(
                     clipped.vertices,
                     clipped.attributes,
                     _RenderPayload(
-                        face, source_front_facing, uv_mapping_valid,
+                        face, piece_front_facing, uv_mapping_valid,
                         face_order,
                         max(4.0 - point[2] for point in cam)),
                     source_order,

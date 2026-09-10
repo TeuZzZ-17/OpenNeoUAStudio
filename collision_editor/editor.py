@@ -2224,6 +2224,31 @@ class CollisionViewport(AssetViewport):
             return float(area) <= 0.0
         return super()._front_facing_from_screen_area(area)
 
+    def _uses_retail_source_face_culling(self) -> bool:
+        # The normal Collision/Model Editor view remains on the shared Retail
+        # whole-source-face rule. OpenNeoUA cockpit rendering is OpenGL-facing:
+        # culling is determined from each clipped fan triangle after projection.
+        return not self._cockpit_preview_active
+
+    def _render_piece_front_facing(
+            self, camera_vertices, target: QRectF, camera: dict,
+            source_front_facing: bool) -> bool:
+        if not self._cockpit_preview_active:
+            return super()._render_piece_front_facing(
+                camera_vertices, target, camera, source_front_facing)
+        if len(camera_vertices) < 3:
+            return False
+        screen = [
+            self._project(point, target, camera)
+            for point in camera_vertices
+        ]
+        area = sum(
+            screen[index].x() * screen[(index + 1) % len(screen)].y()
+            - screen[(index + 1) % len(screen)].x() * screen[index].y()
+            for index in range(len(screen))
+        )
+        return self._front_facing_from_screen_area(area)
+
     def _project(self, camera_point, target: QRectF | None = None,
                  camera: dict | None = None) -> QPointF:
         if not getattr(self, "_cockpit_preview_active", False):
@@ -3472,7 +3497,7 @@ class ApplyScriptDialog(QDialog):
             initial_id: int | None = None,
     ) -> None:
         super().__init__(parent)
-        self.setWindowTitle("Apply to Existing Script")
+        self.setWindowTitle("Apply to Script")
         self.resize(820, 620)
         self.project = project
         self.updated_text = ""
@@ -3846,15 +3871,16 @@ class CollisionEditorWindow(QMainWindow):
         self.copy_output_action.triggered.connect(self.copy_output)
 
         self.file_export_menu = file_menu.addMenu("Export")
-        for action in (self.export_action, self.copy_output_action):
+        for action in (self.copy_output_action, self.export_action):
             self.file_export_menu.addAction(action)
 
-        self.apply_script_action = QAction(
-            "Apply to Existing Script", self)
-        self.apply_script_action.setIconText("Apply to Existing Script")
+        self.apply_script_action = QAction("Apply to Script...", self)
+        self.apply_script_action.setIconText("Apply to Script...")
         self.apply_script_action.triggered.connect(self.apply_to_script)
-        self.save_loaded_script_action = QAction("Overwrite", self)
-        self.save_loaded_script_action.setIconText("Overwrite")
+        self.save_loaded_script_action = QAction(
+            "Overwrite to Existing Script", self)
+        self.save_loaded_script_action.setIconText(
+            "Overwrite to Existing Script")
         self.save_loaded_script_action.setToolTip(
             "Overwrite the vehicle or weapon definition previously imported "
             "from a script. A backup and preview are still provided.")
@@ -3862,9 +3888,9 @@ class CollisionEditorWindow(QMainWindow):
             self.overwrite_loaded_script)
         self.overwrite_loaded_action = self.save_loaded_script_action
 
-        self.file_script_menu = file_menu.addMenu("Script")
-        self.file_script_menu.addAction(self.apply_script_action)
-        self.file_script_menu.addAction(self.save_loaded_script_action)
+        self.file_export_menu.addSeparator()
+        self.file_export_menu.addAction(self.apply_script_action)
+        self.file_export_menu.addAction(self.save_loaded_script_action)
 
         (self.close_bas_archive_action,
          self.exit_action) = install_standard_file_menu_tail(
@@ -5720,7 +5746,7 @@ class CollisionEditorWindow(QMainWindow):
             QMessageBox.information(
                 self, "No linked script definition",
                 "Import a vehicle or weapon from a script first. For an "
-                "arbitrary target, use Apply to Existing Script.")
+                "arbitrary target, use Apply to Script.")
             return
         expected_category = (
             WEAPON if "weapon" in self._active_script_kind else VEHICLE)
@@ -8601,7 +8627,7 @@ class CollisionEditorWindow(QMainWindow):
         if not self._validate_for_output():
             return
         path, _ = QFileDialog.getOpenFileName(
-            self, "Apply to Existing Script", str(self._last_directory),
+            self, "Apply to Script", str(self._last_directory),
             "OpenNeoUA scripts (*.txt *.scr *.ini *.ldf);;All files (*)")
         if not path:
             return
