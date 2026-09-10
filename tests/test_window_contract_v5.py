@@ -214,6 +214,12 @@ class WindowContractV5Tests(unittest.TestCase):
             self.assertEqual(
                 window.model_save_as_button.text(),
                 "Export Asset Family")
+            self.assertEqual(
+                window.model_onua3d_button.text(),
+                "Export OpenNeoUA 3D...")
+            self.assertEqual(
+                window.setbas_onua3d_button.text(),
+                "Export OpenNeoUA 3D...")
             self.assertEqual(window.material_copy_button.text(),
                              "Copy Material")
             self.assertEqual(window.material_paste_button.text(),
@@ -257,7 +263,7 @@ class WindowContractV5Tests(unittest.TestCase):
                 [
                     "Export Runtime Loose SET", "Export BASE",
                     "Export SKLT", "Export ILBM", "Export Asset Family",
-                    "Overwrite",
+                    "Export OpenNeoUA 3D...", "Overwrite",
                 ],
             )
             self.assertEqual(window.open_base_action.shortcut().toString(), "")
@@ -641,6 +647,7 @@ class WindowContractV5Tests(unittest.TestCase):
                     if not candidate.isSeparator()]
             copied.assert_called_once_with(
                 "Objects/MODEL.BASE", "BASE name copied successfully.")
+            self.assertIn("Export OpenNeoUA 3D...", labels)
             self.assertIn("Show Dependencies", labels)
             self.assertIn("Edit BASE Dependencies", labels)
         finally:

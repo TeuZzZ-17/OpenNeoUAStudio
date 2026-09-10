@@ -917,6 +917,10 @@ class AssemblyWindow(QMainWindow):
             lambda: self._export_setbas_resource_family(item))
         export_family.setEnabled(kind in (
             "base", "sklt.class", "ilbm.class", "bmpanim.class"))
+        export_onua3d = menu.addAction(
+            "Export OpenNeoUA 3D...",
+            lambda: self._export_setbas_base_onua3d(item))
+        export_onua3d.setEnabled(kind == "base" and item is not None)
         if kind == "base" and item is not None:
             base_name = (
                 item.data(0, _BAS_NAME_ROLE) or item.text(0)).strip()
@@ -1093,6 +1097,18 @@ class AssemblyWindow(QMainWindow):
             self._save_model_as()
 
         export_family.triggered.connect(export_current_family)
+        export_onua3d = menu.addAction("Export OpenNeoUA 3D...")
+        export_onua3d.setEnabled(bool(data and data[0] == "base"))
+
+        def export_current_onua3d() -> None:
+            if not data or data[0] != "base":
+                return
+            fam_obj = data[1]
+            if fam_obj is not None:
+                self._selected_owner = fam_obj.owner_path
+            self._export_to_blender()
+
+        export_onua3d.triggered.connect(export_current_onua3d)
         path = self._asset_item_path(item)
         if path is not None:
             menu.addAction("Reveal source file",
@@ -1196,6 +1212,9 @@ class AssemblyWindow(QMainWindow):
         self.save_asset_family_action = QAction("Export Asset Family", self)
         self.save_asset_family_action.setEnabled(False)
         self.save_asset_family_action.triggered.connect(self._save_model_as)
+        self.export_blender_action = QAction("Export OpenNeoUA 3D...", self)
+        self.export_blender_action.setEnabled(False)
+        self.export_blender_action.triggered.connect(self._export_to_blender)
         self.overwrite_action = QAction("Overwrite", self)
         self.overwrite_action.setEnabled(False)
         self.overwrite_action.triggered.connect(self._overwrite_model)
@@ -1205,6 +1224,7 @@ class AssemblyWindow(QMainWindow):
                 self.export_runtime_loose_action, self.save_base_action,
                 self.save_sklt_action, self.save_ilbm_action,
                 self.save_asset_family_action,
+                self.export_blender_action,
                 self.overwrite_action):
             self.file_export_menu.addAction(action)
 
@@ -1581,13 +1601,22 @@ class AssemblyWindow(QMainWindow):
             self._open_last_output_folder)
         self.setbas_open_output_button.setEnabled(False)
         setbas_buttons.addWidget(self.setbas_open_output_button, 1, 1)
+        self.setbas_onua3d_button = QPushButton(
+            "Export OpenNeoUA 3D...")
+        self.setbas_onua3d_button.setToolTip(
+            "Export the selected BASE family as an OpenNeoUA 3D (.onua3d) "
+            "package for compatible 3D tools.")
+        self.setbas_onua3d_button.setEnabled(False)
+        self.setbas_onua3d_button.clicked.connect(
+            self._export_selected_setbas_base_onua3d)
+        setbas_buttons.addWidget(self.setbas_onua3d_button, 2, 0, 1, 2)
         self.setbas_edit_dependencies_button = QPushButton(
             "Edit BASE Dependencies")
         self.setbas_edit_dependencies_button.setEnabled(False)
         self.setbas_edit_dependencies_button.clicked.connect(
             self._edit_selected_setbas_base_dependencies)
         setbas_buttons.addWidget(
-            self.setbas_edit_dependencies_button, 2, 0, 1, 2)
+            self.setbas_edit_dependencies_button, 3, 0, 1, 2)
         setbas_layout.addLayout(setbas_buttons)
 
         # Asset family browser moved to the right so the 3D viewport gets the
@@ -1915,6 +1944,14 @@ class AssemblyWindow(QMainWindow):
             "palette/remaps, manifest and isolated round-trip validation.")
         self.model_save_as_button.clicked.connect(self._save_model_as)
         save_buttons.addWidget(self.model_save_as_button, 0, 1)
+        self.model_onua3d_button = QPushButton(
+            "Export OpenNeoUA 3D...")
+        self.model_onua3d_button.setToolTip(
+            "Export the loaded BASE family as an OpenNeoUA 3D (.onua3d) "
+            "package for compatible 3D tools.")
+        self.model_onua3d_button.setEnabled(False)
+        self.model_onua3d_button.clicked.connect(self._export_to_blender)
+        save_buttons.addWidget(self.model_onua3d_button, 1, 0, 1, 2)
         save_buttons.setColumnStretch(0, 1)
         save_buttons.setColumnStretch(1, 1)
         model_box_layout.addLayout(save_buttons)
@@ -2869,6 +2906,7 @@ class AssemblyWindow(QMainWindow):
         self.setbas_extract_button.setEnabled(False)
         self.setbas_extract_all_button.setEnabled(False)
         self.setbas_runtime_loose_button.setEnabled(False)
+        self.setbas_onua3d_button.setEnabled(False)
         self.setbas_edit_dependencies_button.setEnabled(False)
         self.export_runtime_loose_action.setEnabled(False)
 
@@ -3085,11 +3123,14 @@ class AssemblyWindow(QMainWindow):
             item.data(0, Qt.ItemDataRole.UserRole)
             if item is not None else None)
         self.setbas_extract_button.setEnabled(resource_index is not None)
+        base_selected = self._setbas is not None and kind == "base"
+        onua3d_button = getattr(self, "setbas_onua3d_button", None)
+        if onua3d_button is not None:
+            onua3d_button.setEnabled(base_selected)
         edit_dependencies = getattr(
             self, "setbas_edit_dependencies_button", None)
         if edit_dependencies is not None:
-            edit_dependencies.setEnabled(
-                self._setbas is not None and kind == "base")
+            edit_dependencies.setEnabled(base_selected)
 
     def _raise_setbas_tab(self) -> None:
         """Bring the primary BAS panel to the front after loading it."""
@@ -3532,6 +3573,33 @@ class AssemblyWindow(QMainWindow):
         target = self._activate_setbas_base(base_name)
         if target is not None:
             self._edit_base_dependencies(target.owner_path)
+
+    def _export_setbas_base_onua3d(self, item) -> None:
+        """Export exactly the BASE selected in the BAS Manager as ONUA3D."""
+
+        if self._setbas is None or item is None \
+                or item.data(0, _BAS_KIND_ROLE) != "base":
+            return
+        base_name = str(
+            item.data(0, _BAS_NAME_ROLE) or item.text(0) or "").strip()
+        if not base_name:
+            self._notify("The selected BASE has no usable name.", 6000)
+            return
+        target = self._activate_setbas_base(base_name)
+        if target is None:
+            return
+        self._selected_owner = target.owner_path
+        self._export_to_blender()
+
+    def _export_selected_setbas_base_onua3d(self) -> None:
+        """Button entry point for exporting the selected BAS BASE."""
+
+        item = self.setbas_tree.currentItem()
+        if item is None or item.data(0, _BAS_KIND_ROLE) != "base":
+            self._notify(
+                "Select a BASE entry before exporting OpenNeoUA 3D.", 6000)
+            return
+        self._export_setbas_base_onua3d(item)
 
     def _edit_selected_setbas_base_dependencies(self) -> None:
         """Open the same BASE dependency editor used by the context menu."""
@@ -9557,6 +9625,11 @@ class AssemblyWindow(QMainWindow):
         self.save_sklt_action.setEnabled(sklt_export_enabled)
         self.save_ilbm_action.setEnabled(ilbm_export_enabled)
         self.save_asset_family_action.setEnabled(family_export_enabled)
+        onua3d_enabled = bool(
+            self._blender_export_object() is not None
+            and not self.viewport.paste_preview_active)
+        self.export_blender_action.setEnabled(onua3d_enabled)
+        self.model_onua3d_button.setEnabled(onua3d_enabled)
         self.overwrite_action.setEnabled(overwrite_enabled)
         owner = self._selected_owner
         can_reset = bool(
@@ -10471,6 +10544,52 @@ class AssemblyWindow(QMainWindow):
             labels, 0, False)
         return label_to_owner.get(chosen) if accepted else None
 
+    def _blender_export_object(self):
+        family = self._family
+        if family is None or family.base_asset is None or family.root_object is None:
+            return None
+        if family.base_path and Path(family.base_path).suffix.casefold() == ".bas":
+            # The active archive BASE is already proven by the existing VP
+            # selection path. Never export the entire SET or guess an owner.
+            if len(self._base_entry_names) != 1:
+                return None
+            return self._owner_to_obj.get(next(iter(self._base_entry_names)))
+        return family.root_object
+
+    def _export_to_blender(self) -> None:
+        """Export the loaded BASE root, including KIDS, through bundle staging."""
+        from onua3d_export import write_onua3d
+
+        family = self._family
+        obj = self._blender_export_object()
+        if obj is None or self.viewport.paste_preview_active:
+            self._notify("Load a BASE family before exporting OpenNeoUA 3D.", 5000)
+            return
+        stem = re.sub(r'[^A-Za-z0-9_.-]', "_", obj.base_object.name or "MODEL")
+        stem = Path(stem).stem or "MODEL"
+        output, _ = QFileDialog.getSaveFileName(
+            self, "Export OpenNeoUA 3D", str(self._last_directory / (stem + ".onua3d")),
+            "OpenNeoUA 3D package (*.onua3d)")
+        if not output:
+            return
+        target = Path(output).with_suffix(".onua3d")
+        try:
+            relative = self._bundle_skeleton_relative_path(obj)
+            with tempfile.TemporaryDirectory(prefix="OpenNeoUAStudio_onua3d_") as temp:
+                root = Path(temp)
+                exported = self._write_model_files(
+                    obj.owner_path, family, obj, root / relative,
+                    root / (stem + ".BASE"), ask_replace=False,
+                    staged_consumer=lambda staged, validation: write_onua3d(
+                        staged, target, validation=validation,
+                        source_owner_path=obj.owner_path))
+        except (AssetFamilyPackageError, OSError, ValueError) as exc:
+            QMessageBox.critical(self, "OpenNeoUA 3D export failed", str(exc))
+            return
+        if exported:
+            self._last_directory = target.parent
+            self._notify(f"Exported {target.name} as an OpenNeoUA 3D package.", 12000)
+
     def _save_model_as(self) -> None:
         owner = self._export_owner_for_selection()
         if owner is None:
@@ -10598,7 +10717,7 @@ class AssemblyWindow(QMainWindow):
 
     def _write_model_files(self, owner: str, family: AssetFamily, fam_obj,
                            skeleton_target: Path, base_target: Path,
-                           *, ask_replace: bool) -> bool:
+                           *, ask_replace: bool, staged_consumer=None) -> bool:
         """Export one portable Asset Family package."""
 
         model = fam_obj.skeleton
@@ -10617,6 +10736,9 @@ class AssemblyWindow(QMainWindow):
         for object_index, current_obj in enumerate(family_objects):
             current_model = getattr(current_obj, "skeleton", None)
             if current_model is None:
+                if staged_consumer is not None and not current_obj.base_object.skeleton_name:
+                    # A structural BASE container can legitimately own only KIDS.
+                    continue
                 QMessageBox.critical(
                     self, "Export failed - current files unchanged",
                     f"Skeleton dependency for {current_obj.display_name} is "
@@ -10635,7 +10757,7 @@ class AssemblyWindow(QMainWindow):
             previous = skeleton_targets_by_key.get(key)
             if previous is not None:
                 previous_model, previous_target = previous
-                if previous_model is not current_model:
+                if previous_model != current_model:
                     QMessageBox.critical(
                         self, "Export failed - current files unchanged",
                         f"Two different skeletons resolve to the same output "
@@ -10796,8 +10918,10 @@ class AssemblyWindow(QMainWindow):
                 standalone = export_base_object_bytes(
                     tree.data, fam_obj.base_object)
             uv_edits, texture_edits = self._bundle_base_edits(owner, fam_obj)
-            structural_blocks = self._bundle_topology_states(
-                standalone, fam_obj)
+            structural_blocks = (
+                [] if staged_consumer is not None and model is None
+                and not fam_obj.base_object.ades else
+                self._bundle_topology_states(standalone, fam_obj))
             with tempfile.TemporaryDirectory(
                     prefix="OpenNeoUAStudio_bundle_") as temp_dir:
                 temp_root = Path(temp_dir)
@@ -10980,13 +11104,15 @@ class AssemblyWindow(QMainWindow):
                 reloaded_model = (
                     reloaded_obj.skeleton if reloaded_obj is not None
                     else None)
-                if reloaded_model is None \
-                        or reloaded_model.polygons != model.polygons:
+                if (model is not None and (reloaded_model is None
+                        or reloaded_model.polygons != model.polygons)):
                     raise MappingEditError(
                         "exported BASE/SKLT family failed isolated topology "
                         "reload")
                 roundtrip_issues = [
-                    issue for issue in diagnose_polygon_references(reloaded_obj)
+                    issue for issue in (
+                        diagnose_polygon_references(reloaded_obj)
+                        if reloaded_model is not None else [])
                     if "missing typed handler" not in issue]
                 if roundtrip_issues:
                     raise MappingEditError(
@@ -10996,6 +11122,13 @@ class AssemblyWindow(QMainWindow):
                         != source_archive_digest:
                     raise MappingEditError(
                         "the read-only source BASE/SET.BAS bytes changed")
+
+                # Derived portable containers consume exactly the canonical,
+                # verified staging package. Do not commit loose files or mark
+                # editor changes as saved when exporting a derived payload.
+                if staged_consumer is not None:
+                    staged_consumer(temp_root, package_validation)
+                    return True
 
                 commit_pairs = [
                     *temp_skeletons,
