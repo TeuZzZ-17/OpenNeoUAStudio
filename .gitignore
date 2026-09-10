@@ -1,5 +1,5 @@
 OpenNeoUAStudio_Git_GC-(.Git Resize)
-Build_OpenNeoUAStudio
+Build_OpenNeoUAStudio.bat
 dist/
 build/
 __pycache__/
