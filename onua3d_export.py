@@ -386,7 +386,7 @@ def build_scene(family, *, source_owner_path="root"):
             warnings.append("VANM common period exceeds 120 seconds: bounded preview, phase discontinuity when the whole clip loops")
         if any(timeline.period is None for timeline, _, _ in animated_blocks):
             warnings.append("A non-positive VANM frame duration freezes playback at that frame, matching Studio")
-    warnings.append("GLB bakes static SHADERMP; flat TRACY is a measured source-over approximation of TRACYRMP. Runtime fade, raster interpolation and particle simulation remain UA metadata")
+    warnings.append("GLB bakes static SHADERMP; flat TRACY uses an anchored source-over preview of TRACYRMP with a small dark-FX visibility floor and remains destination-dependent in UA. Runtime fade, raster interpolation and particle simulation remain UA metadata")
     return glb.encode(), pngs, mapping, warnings
 
 

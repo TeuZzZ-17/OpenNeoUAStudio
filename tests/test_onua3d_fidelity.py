@@ -185,6 +185,69 @@ class Onua3dFidelityTests(unittest.TestCase):
         self.assertEqual(tables.shade_index(0, 17), 17)
         self.assertEqual(tables.shade_index(255, 17), 0)
 
+    def test_flat_tracy_preview_preserves_dark_nonzero_fx_against_studio_background(self):
+        palette = tuple((i, i, i) for i in range(256))
+        identity = bytes(range(256)) * 256
+        tracy = bytearray(identity)
+        # Model a destination-dependent FX source which the previous global
+        # source-over fit could collapse toward transparency.  Studio starts
+        # the indexed framebuffer at destination index 0, where this source
+        # is deliberately dark/black.  ONUA3D must preserve that visible
+        # silhouette while keeping numeric source zero clear.
+        for background in range(256):
+            tracy[background * 256 + 7] = background
+        # One destination is actually changed, so this is not a truly
+        # transparent identity column even though background 0 maps to black.
+        tracy[128 * 256 + 7] = 127
+        tables = IndexedTables(palette, identity, bytes(tracy))
+        colors, _errors = tracy_rgba_table(tables)
+        self.assertEqual(colors[0][3], 0)
+        self.assertEqual(colors[7][:3], (0, 0, 0))
+        self.assertGreater(colors[7][3], 0)
+        self.assertLess(colors[7][3], 255)
+
+
+    def test_flat_tracy_preview_is_no_longer_forced_fully_opaque(self):
+        palette = tuple((i, i, i) for i in range(256))
+        identity = bytes(range(256)) * 256
+        tracy = bytearray(identity)
+        for background in range(256):
+            tracy[background * 256 + 19] = max(0, background - 32)
+        tables = IndexedTables(palette, identity, bytes(tracy))
+        colors, _errors = tracy_rgba_table(tables)
+        self.assertGreater(colors[19][3], 0)
+        self.assertLess(colors[19][3], 255)
+
+    def test_flat_tracy_preview_matches_background0_anchor_when_composited(self):
+        palette = tuple((i, i, i) for i in range(256))
+        identity = bytes(range(256)) * 256
+        tracy = bytearray(identity)
+        for background in range(256):
+            tracy[background * 256 + 23] = 64 if background == 0 else min(255, background + 10)
+        tables = IndexedTables(palette, identity, bytes(tracy))
+        colors, _errors = tracy_rgba_table(tables)
+        r, g, b, a = colors[23]
+        # Background 0 is black in the display palette, so source-over reduces
+        # to the premultiplied foreground. The preview should stay anchored to
+        # the exact visible Studio result there, modulo 8-bit quantisation in
+        # the derived PNG table.
+        def linear(channel):
+            c = channel / 255.0
+            return c / 12.92 if c <= 0.04045 else ((c + 0.055) / 1.055) ** 2.4
+        reconstructed = round(255 * (a / 255.0) * linear(r))
+        self.assertAlmostEqual(reconstructed, 64, delta=2)
+        self.assertEqual((g, b), (r, r))
+
+    def test_flat_tracy_true_identity_column_stays_transparent(self):
+        palette = tuple((i, i, i) for i in range(256))
+        identity = bytes(range(256)) * 256
+        tracy = bytearray(identity)
+        for background in range(256):
+            tracy[background * 256 + 7] = background
+        tables = IndexedTables(palette, identity, bytes(tracy))
+        colors, _errors = tracy_rgba_table(tables)
+        self.assertEqual(colors[7][3], 0)
+
     def test_tracy_projection_measures_nonrepresentable_lookup_error(self):
         palette = tuple((i, i, i) for i in range(256))
         identity = bytes(range(256)) * 256
