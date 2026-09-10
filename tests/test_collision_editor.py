@@ -1540,7 +1540,19 @@ class CollisionEditorTests(unittest.TestCase):
         self.assertIn(window.export_action, window.file_export_menu.actions())
         self.assertIn(window.copy_output_action, window.file_export_menu.actions())
         self.assertIn(window.import_action, window.file_import_menu.actions())
-        self.assertIn(window.apply_script_action, window.file_script_menu.actions())
+        self.assertIn(window.apply_script_action, window.file_export_menu.actions())
+        self.assertIn(
+            window.save_loaded_script_action, window.file_export_menu.actions())
+        export_actions = window.file_export_menu.actions()
+        self.assertEqual(export_actions[0], window.copy_output_action)
+        self.assertEqual(export_actions[1], window.export_action)
+        self.assertTrue(export_actions[2].isSeparator())
+        self.assertEqual(export_actions[3], window.apply_script_action)
+        self.assertEqual(export_actions[4], window.save_loaded_script_action)
+        self.assertFalse(hasattr(window, "file_script_menu"))
+        self.assertNotIn(
+            "Script",
+            [action.text().replace("&", "") for action in window.file_menu.actions()])
         self.assertEqual(window.create_suggested_button.text(),
                          "Create Suggested Sphere")
         for action in (
@@ -1555,7 +1567,7 @@ class CollisionEditorTests(unittest.TestCase):
         self.assertNotIn("Export Collision Text", central_button_texts)
         self.assertNotIn("Copy Output to Clipboard", central_button_texts)
         self.assertNotIn("Import Collision Text", central_button_texts)
-        self.assertNotIn("Apply to Existing Script", central_button_texts)
+        self.assertNotIn("Apply to Script...", central_button_texts)
 
     def test_82_ground_simulation_is_hidden_until_source_is_loaded(self):
         viewport = CollisionViewport()
@@ -1775,8 +1787,10 @@ class CollisionEditorTests(unittest.TestCase):
         self.assertEqual(window.import_action.text(), "Import Collision Text")
         self.assertEqual(window.export_action.text(), "Export Collision Text")
         self.assertEqual(
-            window.apply_script_action.text(), "Apply to Existing Script")
-        self.assertEqual(window.save_loaded_script_action.text(), "Overwrite")
+            window.apply_script_action.text(), "Apply to Script...")
+        self.assertEqual(
+            window.save_loaded_script_action.text(),
+            "Overwrite to Existing Script")
 
 
     def test_90da_close_bas_archive_detaches_visual_provider_only(self):
@@ -1896,13 +1910,15 @@ class CollisionEditorTests(unittest.TestCase):
         self.assertEqual(
             window.open_vehicle_script_action.text(),
             "Import Vehicle / Weapon from Script")
-        self.assertEqual(window.save_loaded_script_action.text(), "Overwrite")
+        self.assertEqual(
+            window.save_loaded_script_action.text(),
+            "Overwrite to Existing Script")
         self.assertIn(
             window.open_vehicle_script_action,
             window.file_import_menu.actions())
         self.assertIn(
             window.save_loaded_script_action,
-            window.file_script_menu.actions())
+            window.file_export_menu.actions())
         self.assertFalse(window.save_loaded_script_action.isEnabled())
 
     def test_93_runtime_vp_table_prefers_loose_visproto_base(self):
@@ -2591,9 +2607,11 @@ class CollisionEditorTests(unittest.TestCase):
             (-27.0, -3.0, 46.0),
             (-27.0, -30.0, 10.0),
         )
+        camera_points = [
+            viewport._camera_vertex(point) for point in points
+        ]
         screen = [
-            viewport._project(viewport._camera_vertex(point), target)
-            for point in points
+            viewport._project(point, target) for point in camera_points
         ]
         area = sum(
             screen[index].x() * screen[(index + 1) % 3].y()
@@ -2602,8 +2620,15 @@ class CollisionEditorTests(unittest.TestCase):
         )
         self.assertLess(area, 0.0)
         self.assertTrue(viewport._front_facing_from_screen_area(area))
+        # The shared renderer must not apply the normal Retail whole-face
+        # cull first, otherwise cockpit-only OpenGL winding never gets a chance
+        # to keep this panel.
+        self.assertFalse(viewport._uses_retail_source_face_culling())
+        self.assertTrue(viewport._render_piece_front_facing(
+            camera_points, target, viewport._camera_state(), False))
 
         viewport.set_cockpit_preview_active(False)
+        self.assertTrue(viewport._uses_retail_source_face_culling())
         self.assertFalse(viewport._front_facing_from_screen_area(area))
 
     def test_119c_window_title_reports_script_vehicle_base_and_archive(self):
