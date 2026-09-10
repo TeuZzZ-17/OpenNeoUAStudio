@@ -450,6 +450,8 @@ class AssetDependenciesWorkflowTests(unittest.TestCase):
         asset_end = source.index("    def _selected_texture_names", asset_start)
         self.assertIn(
             '"Export Asset Family"', source[asset_start:asset_end])
+        self.assertIn(
+            '"Export OpenNeoUA 3D..."', source[asset_start:asset_end])
         texture_start = source.index("    def _show_texture_context_menu")
         texture_end = source.index("    def _build_toolbar", texture_start)
         self.assertIn(
