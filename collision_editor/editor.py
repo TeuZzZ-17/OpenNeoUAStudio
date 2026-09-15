@@ -8,12 +8,10 @@ delegated to the existing OpenNeoUAStudio asset-family and viewport code.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from datetime import datetime
 import difflib
 import math
 from pathlib import Path
 import re
-import shutil
 import sys
 
 from PySide6.QtCore import (
@@ -1686,21 +1684,6 @@ def plan_script_update(
         fromfile="current", tofile="Collision Editor preview",
     ))
     return updated, preview, block.name
-
-
-def create_backup(path: str | Path) -> Path:
-    source = Path(path)
-    candidate = source.with_name(source.name + ".bak")
-    if candidate.exists():
-        stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
-        candidate = source.with_name(source.name + f".{stamp}.bak")
-        suffix = 2
-        while candidate.exists():
-            candidate = source.with_name(
-                source.name + f".{stamp}.{suffix}.bak")
-            suffix += 1
-    shutil.copy2(source, candidate)
-    return candidate
 
 
 def read_script_file(path: str | Path) -> tuple[str, str, bool]:
@@ -3510,7 +3493,6 @@ class ApplyScriptDialog(QDialog):
         self.resize(820, 620)
         self.project = project
         self.updated_text = ""
-        self.backup_path: Path | None = None
         self._source_text = ""
         self._source_encoding = "utf-8"
         self._source_bom = False
@@ -3705,7 +3687,6 @@ class ApplyScriptDialog(QDialog):
     def _apply(self):
         path = Path(self.path_edit.text())
         try:
-            self.backup_path = create_backup(path)
             write_script_file(
                 path, self.updated_text,
                 self._source_encoding, self._source_bom)
@@ -3897,7 +3878,7 @@ class CollisionEditorWindow(QMainWindow):
             "Overwrite to Existing Script")
         self.save_loaded_script_action.setToolTip(
             "Overwrite the vehicle or weapon definition previously imported "
-            "from a script. A backup and preview are still provided.")
+            "from a script. A preview is provided before overwrite.")
         self.save_loaded_script_action.triggered.connect(
             self.overwrite_loaded_script)
         self.overwrite_loaded_action = self.save_loaded_script_action
@@ -4389,8 +4370,15 @@ class CollisionEditorWindow(QMainWindow):
             "hidden rows in the list to show them again.")
         self.hide_spheres_button.clicked.connect(
             self._toggle_selected_sphere_visibility)
+        self.isolate_sphere_button = QPushButton("Isolate Sphere")
+        self.isolate_sphere_button.setToolTip(
+            "Show only the selected collision sphere. Use Unisolate Sphere "
+            "to show all spheres again.")
+        self.isolate_sphere_button.clicked.connect(
+            self._toggle_selected_sphere_isolation)
         sphere_selection_buttons.addWidget(self.select_all_spheres_button, 1)
         sphere_selection_buttons.addWidget(self.hide_spheres_button, 1)
+        sphere_selection_buttons.addWidget(self.isolate_sphere_button, 1)
         spheres_layout.addLayout(sphere_selection_buttons)
 
         sphere_modifier_buttons = QHBoxLayout()
@@ -5810,8 +5798,7 @@ class CollisionEditorWindow(QMainWindow):
             self._capture_tab_reset_baseline()
             self._set_modified(False)
             self.statusBar().showMessage(
-                f"Loaded definition overwritten. Backup: "
-                f"{dialog.backup_path}", 7000)
+                "Loaded definition overwritten.", 7000)
 
     def save_loaded_vehicle_script(self):
         """Compatibility alias for the previous vehicle-only action."""
@@ -6311,6 +6298,18 @@ class CollisionEditorWindow(QMainWindow):
         self._context_action(
             menu, visibility_text, self._toggle_selected_sphere_visibility,
             bool(entries))
+        spheres = self.project.spheres()
+        if 0 <= index < len(spheres):
+            isolated = self._sphere_is_isolated(index)
+            isolate_text = "Unisolate Sphere" if isolated else "Isolate Sphere"
+            isolate_callback = (
+                self._unisolate_sphere_visibility
+                if isolated else self._isolate_sphere_visibility
+            )
+            self._context_action(
+                menu, isolate_text,
+                lambda _checked=False, sphere_index=index,
+                callback=isolate_callback: callback(sphere_index))
         change_type_menu = menu.addMenu("Change Sphere Type")
         self._populate_change_type_menu(change_type_menu)
         mirror_menu = menu.addMenu("Mirror Selected Sphere")
@@ -7707,6 +7706,58 @@ class CollisionEditorWindow(QMainWindow):
         self._set_modified()
         self._sync_all()
 
+    def _sphere_is_isolated(self, index: int) -> bool:
+        spheres = self.project.spheres()
+        return (
+            len(spheres) > 1
+            and 0 <= index < len(spheres)
+            and spheres[index].visible
+            and all(
+                not sphere.visible
+                for sphere_index, sphere in enumerate(spheres)
+                if sphere_index != index
+            )
+        )
+
+    def _toggle_selected_sphere_isolation(self):
+        selected = self._selected_sphere_indices()
+        if len(selected) != 1:
+            return
+        index = next(iter(selected))
+        if self._sphere_is_isolated(index):
+            self._unisolate_sphere_visibility(index)
+        else:
+            self._isolate_sphere_visibility(index)
+
+    def _isolate_sphere_visibility(self, index: int):
+        spheres = self.project.spheres()
+        if not (0 <= index < len(spheres)):
+            return
+        changing = [
+            sphere for sphere_index, sphere in enumerate(spheres)
+            if sphere.visible != (sphere_index == index)
+        ]
+        if not changing:
+            return
+        self._push_undo()
+        for sphere_index, sphere in enumerate(spheres):
+            sphere.visible = sphere_index == index
+        self._set_modified()
+        self._sync_all()
+
+    def _unisolate_sphere_visibility(self, index: int):
+        spheres = self.project.spheres()
+        if not (0 <= index < len(spheres)):
+            return
+        changing = [sphere for sphere in spheres if not sphere.visible]
+        if not changing:
+            return
+        self._push_undo()
+        for sphere in changing:
+            sphere.visible = True
+        self._set_modified()
+        self._sync_all()
+
     def _visibility_changed(self, visible: bool):
         if self._syncing:
             return
@@ -8537,6 +8588,16 @@ class CollisionEditorWindow(QMainWindow):
         self.hide_spheres_button.setEnabled(bool(visibility_entries))
         self.hide_spheres_button.setText(
             "Unhide Sphere" if all_hidden else "Hide Sphere")
+        selected_indices = self._selected_sphere_indices()
+        isolate_index = (
+            next(iter(selected_indices)) if len(selected_indices) == 1 else -1)
+        isolate_enabled = (
+            isolate_index >= 0 and len(self.project.spheres()) > 1)
+        self.isolate_sphere_button.setEnabled(isolate_enabled)
+        self.isolate_sphere_button.setText(
+            "Unisolate Sphere"
+            if self._sphere_is_isolated(isolate_index)
+            else "Isolate Sphere")
         self.create_suggested_button.setEnabled(
             self._model_bounds() is not None)
         self.undo_button.setEnabled(bool(self._undo))
@@ -8708,7 +8769,7 @@ class CollisionEditorWindow(QMainWindow):
         if dialog.exec() == QDialog.DialogCode.Accepted:
             self._capture_tab_reset_baseline()
             self.statusBar().showMessage(
-                f"Script updated. Backup: {dialog.backup_path}", 10000)
+                "Script updated.", 10000)
 
     def closeEvent(self, event: QCloseEvent) -> None:  # noqa: N802
         if self._modified:

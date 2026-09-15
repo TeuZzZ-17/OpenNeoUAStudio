@@ -36,7 +36,6 @@ from collision_editor import (
     FIRE_POINT_COLOR,
     GUN_POINT_COLOR,
     VIEW_PRESETS,
-    create_backup,
     effective_runtime_radius,
     export_collision_text,
     fire_point_positions,
@@ -358,14 +357,6 @@ class CollisionEditorTests(unittest.TestCase):
             import_collision_block(
                 bad, find_script_blocks(bad)[0], OPENNEOUA)
 
-    def test_23_backup_is_created_before_script_write(self):
-        with tempfile.TemporaryDirectory() as temp:
-            path = Path(temp) / "Vehicles.txt"
-            path.write_text("original", encoding="utf-8")
-            backup = create_backup(path)
-            path.write_text("changed", encoding="utf-8")
-            self.assertEqual(backup.read_text(encoding="utf-8"), "original")
-
     def test_24_script_encoding_and_bom_are_preserved(self):
         with tempfile.TemporaryDirectory() as temp:
             path = Path(temp) / "Weapons.txt"
@@ -376,7 +367,7 @@ class CollisionEditorTests(unittest.TestCase):
             self.assertTrue(path.read_bytes().startswith(b"\xef\xbb\xbf"))
             self.assertIn(b"\r\n", path.read_bytes())
 
-    def test_25_preview_cancel_does_not_write_or_backup(self):
+    def test_25_preview_cancel_does_not_write(self):
         with tempfile.TemporaryDirectory() as temp:
             path = Path(temp) / "Vehicles.txt"
             original = "modify_vehicle 1\n radius = 2\nend\n"
@@ -388,7 +379,6 @@ class CollisionEditorTests(unittest.TestCase):
             self.assertTrue(dialog.preview.toPlainText())
             dialog.reject()
             self.assertEqual(path.read_text(encoding="utf-8"), original)
-            self.assertFalse(Path(str(path) + ".bak").exists())
 
     def test_25b_apply_dialog_searches_and_writes_when_apply_is_clicked(self):
         with tempfile.TemporaryDirectory() as temp:
@@ -407,7 +397,7 @@ class CollisionEditorTests(unittest.TestCase):
             self.assertTrue(dialog.apply_button.isEnabled())
             dialog.apply_button.click()
             self.assertEqual(dialog.result(), QDialog.DialogCode.Accepted)
-            self.assertTrue(Path(str(path) + ".bak").is_file())
+            self.assertFalse(Path(str(path) + ".bak").exists())
             self.assertIn("coll_num", path.read_text(encoding="utf-8"))
 
     def test_26_validation_reports_missing_name_model_and_bad_radius(self):
@@ -1161,6 +1151,45 @@ class CollisionEditorTests(unittest.TestCase):
         self.assertTrue(window.project.compound[0].visible)
         self.assertTrue(window.project.compound[1].visible)
 
+    def test_53o_isolate_button_toggles_isolate_and_unisolate(self):
+        window = self._window()
+        window.project.compound = [
+            CollisionSphere(OPENNEOUA, radius=10, visible=True),
+            CollisionSphere(OPENNEOUA, radius=20, visible=True),
+            CollisionSphere(OPENNEOUA, radius=30, visible=True),
+        ]
+        window._selected = 1
+        window._selected_spheres = {1}
+        window._sync_all()
+
+        self.assertTrue(window.isolate_sphere_button.isEnabled())
+        self.assertEqual(window.isolate_sphere_button.text(), "Isolate Sphere")
+        window.isolate_sphere_button.click()
+        self.assertEqual(
+            [sphere.visible for sphere in window.project.compound],
+            [False, True, False])
+        self.assertEqual(
+            window.isolate_sphere_button.text(), "Unisolate Sphere")
+
+        window.isolate_sphere_button.click()
+        self.assertEqual(
+            [sphere.visible for sphere in window.project.compound],
+            [True, True, True])
+        self.assertEqual(window.isolate_sphere_button.text(), "Isolate Sphere")
+
+    def test_53oa_isolate_button_requires_single_selected_sphere(self):
+        window = self._window()
+        window.project.compound = [
+            CollisionSphere(OPENNEOUA),
+            CollisionSphere(OPENNEOUA),
+        ]
+        window._selected = 0
+        window._selected_spheres = {0, 1}
+        window._sync_all()
+
+        self.assertFalse(window.isolate_sphere_button.isEnabled())
+        self.assertEqual(window.isolate_sphere_button.text(), "Isolate Sphere")
+
     def test_53o_sphere_context_menu_exposes_hide_and_unhide(self):
         window = self._window()
         window.project.compound = [CollisionSphere(OPENNEOUA, visible=True)]
@@ -1173,6 +1202,59 @@ class CollisionEditorTests(unittest.TestCase):
         window._toggle_selected_sphere_visibility()
         menu = window._create_sphere_context_menu(0)
         self.assertIn("Unhide Sphere", [action.text() for action in menu.actions()])
+
+    def test_53p_context_menu_isolate_sphere_hides_every_other_sphere(self):
+        window = self._window()
+        window.project.compound = [
+            CollisionSphere(OPENNEOUA, radius=10, visible=True),
+            CollisionSphere(OPENNEOUA, radius=20, visible=False),
+            CollisionSphere(OPENNEOUA, radius=30, visible=True),
+        ]
+        window._selected = 1
+        window._selected_spheres = {1}
+        window._sync_all()
+
+        menu = window._create_sphere_context_menu(1)
+        action = next(
+            action for action in menu.actions()
+            if action.text() == "Isolate Sphere")
+        action.trigger()
+
+        self.assertEqual(
+            [sphere.visible for sphere in window.project.compound],
+            [False, True, False])
+
+    def test_53q_context_menu_isolate_sphere_only_appears_on_sphere(self):
+        window = self._window()
+        window.project.compound = [CollisionSphere(OPENNEOUA)]
+        window._selected = -1
+        window._selected_spheres.clear()
+        window._sync_all()
+
+        menu = window._create_sphere_context_menu(-1)
+        self.assertNotIn(
+            "Isolate Sphere", [action.text() for action in menu.actions()])
+
+    def test_53r_context_menu_unisolate_sphere_restores_all_spheres(self):
+        window = self._window()
+        window.project.compound = [
+            CollisionSphere(OPENNEOUA, radius=10, visible=False),
+            CollisionSphere(OPENNEOUA, radius=20, visible=True),
+            CollisionSphere(OPENNEOUA, radius=30, visible=False),
+        ]
+        window._selected = 1
+        window._selected_spheres = {1}
+        window._sync_all()
+
+        menu = window._create_sphere_context_menu(1)
+        action = next(
+            action for action in menu.actions()
+            if action.text() == "Unisolate Sphere")
+        action.trigger()
+
+        self.assertEqual(
+            [sphere.visible for sphere in window.project.compound],
+            [True, True, True])
 
     def test_53p_sphere_table_shows_xyz_and_hidden_state(self):
         window = self._window()
