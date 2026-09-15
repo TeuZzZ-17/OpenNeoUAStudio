@@ -62,11 +62,13 @@ def values(doc, binary, index):
     accessor = doc["accessors"][index]
     view = doc["bufferViews"][accessor["bufferView"]]
     width = {"SCALAR": 1, "VEC2": 2, "VEC3": 3}[accessor["type"]]
-    fmt = {5125: "I", 5126: "f"}[accessor["componentType"]]
-    flat = struct.unpack_from("<" + fmt * accessor["count"] * width,
-                              binary, view.get("byteOffset", 0))
-    return list(flat) if width == 1 else [tuple(flat[i:i + width])
-                                         for i in range(0, len(flat), width)]
+    fmt = {5121: "B", 5123: "H", 5125: "I", 5126: "f"}[accessor["componentType"]]
+    size = struct.calcsize("<" + fmt * width)
+    offset = view.get("byteOffset", 0) + accessor.get("byteOffset", 0)
+    rows = [struct.unpack_from("<" + fmt * width, binary,
+                               offset + i * view.get("byteStride", size))
+            for i in range(accessor["count"])]
+    return [row[0] for row in rows] if width == 1 else rows
 
 
 def source_hashes(root):

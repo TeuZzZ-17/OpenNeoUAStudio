@@ -23,11 +23,15 @@ class VerifiedCommitError(OSError):
 
 def commit_verified_files(
         files: list[tuple[Path, Path]], *,
-        verify: Callable[[], None] | None = None) -> list[str]:
+        verify: Callable[[], None] | None = None,
+        replace_existing: bool = True) -> list[str]:
     """Commit pre-validated files with coordinated rollback.
 
     Sources are copied to staging files beside every destination.  Existing
-    destinations are moved aside only after all staging copies succeed.
+    destinations are moved aside only after all staging copies succeed when
+    ``replace_existing`` is true.  With ``replace_existing=False`` publication
+    uses a same-directory hard link so an existing destination can never be
+    overwritten, including when it appears between preflight and publication.
     Duplicate destination paths are rejected before any write.  An optional
     final verifier runs while rollback copies are still available.
     """
@@ -46,6 +50,10 @@ def commit_verified_files(
         if not source.is_file():
             raise VerifiedCommitError(
                 f"verified staging source is missing: {source}",
+                rollback_complete=True)
+        if not replace_existing and (target.exists() or target.is_symlink()):
+            raise VerifiedCommitError(
+                f"verified destination already exists: {target}",
                 rollback_complete=True)
         if target.exists() and not target.is_file() \
                 and not target.is_symlink():
@@ -82,6 +90,20 @@ def commit_verified_files(
 
         for record in records:
             target = record["target"]
+            if not replace_existing:
+                # os.link is the no-clobber publication primitive.  The
+                # target may have appeared after preflight; in that case the
+                # operation fails atomically and the rollback below removes
+                # any earlier files from this batch.
+                if target.exists() or target.is_symlink():
+                    raise FileExistsError(target)
+                os.link(record["stage"], target)
+                record["committed"] = True
+                # Mark the record committed before unlinking the staging
+                # name so an unlink failure still rolls the published file
+                # back through the normal cleanup path.
+                record["stage"].unlink()
+                continue
             # ``Path.exists`` is false for a broken symlink.  It still needs a
             # rollback record before the staged file replaces the link.
             if target.exists() or target.is_symlink():

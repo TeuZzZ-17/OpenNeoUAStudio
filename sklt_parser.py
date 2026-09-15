@@ -367,9 +367,14 @@ def save_sklt_with_otl2_points(
 
 
 def save_sklt_with_poo2_points(
-    model: SkltModel, points: list[Point3D], output_path: str | Path
+    model: SkltModel, points: list[Point3D], output_path: str | Path,
+    *, update_sensors: bool = True,
 ) -> Path | None:
-    """Save a copy of the original file with only POO2 coordinates changed."""
+    """Update POO2, retaining the existing affine SEN2 update by default.
+
+    Set update_sensors=False for position-only interchange: SEN2 stays byte
+    identical even when all POO2 points undergo a global move or scale.
+    """
 
     if model.poo2_payload_offset is None:
         raise SkltParseError("This file has no POO2 chunk to save.")
@@ -388,7 +393,7 @@ def save_sklt_with_poo2_points(
             raise SkltParseError("POO2 coordinates must be finite float values.")
         struct.pack_into(">fff", edited, payload_offset + index * 12, x, y, z)
 
-    if model.sen2_payload_offset is not None and model.sen2_payload_size > 0:
+    if update_sensors and model.sen2_payload_offset is not None and model.sen2_payload_size > 0:
         sensors = sen2_points_for_poo2(model, points)
         if len(sensors) * 12 != model.sen2_payload_size:
             raise SkltParseError(
