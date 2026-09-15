@@ -450,7 +450,7 @@ class CollisionProject:
     source_model: str = ""
     source_base: str = ""
     target_category: str = VEHICLE
-    # Visual-only preview of OpenNeoUA's vp_scale_x/y/z.  These values never
+    # Visual-only preview of OpenNeoUA's visual_scale_x/y/z. These values never
     # modify the source model and are never emitted as collision parameters.
     model_scale_x: float = 1.0
     model_scale_y: float = 1.0
@@ -705,8 +705,9 @@ def script_model_references(text: str) -> list[VehicleModelReference]:
     behavior. ``modify_vehicle`` and ``modify_weapon`` are deliberately
     excluded because resolving inherited visual prototypes would require the
     full include chain rather than one source file. ``vp_wait`` is retained so
-    Cockpit View can preview the same stationary model used by the runtime;
-    ``vp_scale_x/y/z`` remain visual-only preview values.
+    Cockpit View can preview the same stationary model used by the runtime.
+    OpenNeoUA's ``visual_scale_x/y/z`` drive the preview scale; the older
+    ``vp_scale_x/y/z`` names are accepted only as a compatibility fallback.
     """
 
     lines = text.splitlines()
@@ -718,9 +719,12 @@ def script_model_references(text: str) -> list[VehicleModelReference]:
         values = {
             "vp_normal": None,
             "vp_wait": None,
-            "vp_scale_x": 1.0,
-            "vp_scale_y": 1.0,
-            "vp_scale_z": 1.0,
+            "visual_scale_x": None,
+            "visual_scale_y": None,
+            "visual_scale_z": None,
+            "vp_scale_x": None,
+            "vp_scale_y": None,
+            "vp_scale_z": None,
         }
         for _line, key, raw, _indent in _generic_parameter_rows(lines, block):
             if key not in values:
@@ -755,14 +759,19 @@ def script_model_references(text: str) -> list[VehicleModelReference]:
                 raise CollisionScriptError(
                     f"Invalid vp_wait in {block.kind} "
                     f"{block.object_id}: {raw_wait}")
-        scales = (
-            float(values["vp_scale_x"]),
-            float(values["vp_scale_y"]),
-            float(values["vp_scale_z"]),
+        scales = tuple(
+            float(values[f"visual_scale_{axis}"])
+            if values[f"visual_scale_{axis}"] is not None
+            else (
+                float(values[f"vp_scale_{axis}"])
+                if values[f"vp_scale_{axis}"] is not None
+                else 1.0
+            )
+            for axis in ("x", "y", "z")
         )
         if not all(math.isfinite(value) and value >= 0.0 for value in scales):
             raise CollisionScriptError(
-                f"Invalid vp_scale_x/y/z in {block.kind} "
+                f"Invalid visual_scale_x/y/z in {block.kind} "
                 f"{block.object_id}: {scales}")
         references.append(VehicleModelReference(
             block=block,
@@ -2311,7 +2320,7 @@ class CollisionViewport(AssetViewport):
 
         The base viewport already resolves BASE/SKLT transforms, children and
         textures.  Collision Editor only adds one final global axis scale,
-        matching the visual effect of vp_scale_x/y/z while leaving collision
+        matching the visual effect of visual_scale_x/y/z while leaving collision
         sphere coordinates untouched.
         """
 
@@ -3795,9 +3804,14 @@ class CollisionEditorWindow(QMainWindow):
         self.model_tree.currentItemChanged.connect(self._model_changed)
         self.sphere_tree = SphereTreeWidget()
         self.sphere_tree.setHeaderLabels(
-            ["Sphere", "Radius", "Visible", "Index"])
+            ["Sphere", "Radius", "Visible", "X", "Y", "Z", "Index"])
         self.sphere_tree.setSelectionMode(
             QAbstractItemView.SelectionMode.ExtendedSelection)
+        # Collision rows are flat, not hierarchical. Removing the tree
+        # indentation gives the Sphere label the full first-column width and
+        # keeps the descriptive text anchored to the left edge.
+        self.sphere_tree.setRootIsDecorated(False)
+        self.sphere_tree.setIndentation(0)
         self.sphere_tree.setEditTriggers(
             QAbstractItemView.EditTrigger.NoEditTriggers)
         self.sphere_tree.itemSelectionChanged.connect(
@@ -4091,7 +4105,7 @@ class CollisionEditorWindow(QMainWindow):
             spin.setMinimumWidth(92)
             spin.setMaximumWidth(118)
             spin.setToolTip(
-                f"Visual-only vp_scale_{axis.lower()} preview. "
+                f"OpenNeoUA visual_scale_{axis.lower()} preview. "
                 "The model changes size; collision spheres and exported "
                 "coll_* values are not transformed automatically.")
             spin.valueChanged.connect(self._model_preview_scale_changed)
@@ -4170,7 +4184,9 @@ class CollisionEditorWindow(QMainWindow):
 
         properties = QWidget()
         right = QVBoxLayout(properties)
-        right.setContentsMargins(4, 3, 4, 3)
+        # Leave a small visual gap below the top toolbar so the preview-scale
+        # controls do not look fused with the right-side authoring panel.
+        right.setContentsMargins(4, 7, 4, 3)
         right.setSpacing(1)
         project_box = QGroupBox("Project")
         project_form = QFormLayout(project_box)
@@ -4367,7 +4383,14 @@ class CollisionEditorWindow(QMainWindow):
             "Select every collision sphere in the current Collision tab.")
         self.select_all_spheres_button.clicked.connect(
             self.select_all_spheres)
-        sphere_selection_buttons.addWidget(self.select_all_spheres_button)
+        self.hide_spheres_button = QPushButton("Hide Spheres")
+        self.hide_spheres_button.setToolTip(
+            "Hide the selected collision spheres in the 3D preview. Select "
+            "hidden rows in the list to show them again.")
+        self.hide_spheres_button.clicked.connect(
+            self._toggle_selected_sphere_visibility)
+        sphere_selection_buttons.addWidget(self.select_all_spheres_button, 1)
+        sphere_selection_buttons.addWidget(self.hide_spheres_button, 1)
         spheres_layout.addLayout(sphere_selection_buttons)
 
         sphere_modifier_buttons = QHBoxLayout()
@@ -4420,20 +4443,25 @@ class CollisionEditorWindow(QMainWindow):
         spheres_box.setSizePolicy(
             QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
         sphere_header = self.sphere_tree.header()
+        sphere_header.setMinimumSectionSize(38)
+        # QHeaderView stretches its last section by default.  Since Index is
+        # the last column, that spent most spare width on a tiny numeric value
+        # and clipped the useful Sphere label.  Keep Index compact and let the
+        # descriptive Sphere column own the remaining width instead.
+        sphere_header.setStretchLastSection(False)
         sphere_header.setSectionResizeMode(
             0, QHeaderView.ResizeMode.Stretch)
+        for column in range(1, 6):
+            sphere_header.setSectionResizeMode(
+                column, QHeaderView.ResizeMode.ResizeToContents)
+            self.sphere_tree.headerItem().setTextAlignment(
+                column,
+                Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
         sphere_header.setSectionResizeMode(
-            1, QHeaderView.ResizeMode.ResizeToContents)
-        sphere_header.setSectionResizeMode(
-            2, QHeaderView.ResizeMode.ResizeToContents)
-        sphere_header.setSectionResizeMode(
-            3, QHeaderView.ResizeMode.ResizeToContents)
+            6, QHeaderView.ResizeMode.Fixed)
+        self.sphere_tree.setColumnWidth(6, 44)
         self.sphere_tree.headerItem().setTextAlignment(
-            1, Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
-        self.sphere_tree.headerItem().setTextAlignment(
-            2, Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
-        self.sphere_tree.headerItem().setTextAlignment(
-            3, Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+            6, Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
         spheres_layout.addWidget(self.sphere_tree)
 
         # Radius belongs to the Spheres workspace rather than being another
@@ -5106,14 +5134,18 @@ class CollisionEditorWindow(QMainWindow):
         properties_scroll = QScrollArea()
         properties_scroll.setWidgetResizable(True)
         properties_scroll.setFrameShape(QFrame.Shape.NoFrame)
-        # The authoring column is intentionally dimensioned to fit all four
-        # workspaces without an outer scrollbar. Lists may still scroll inside
-        # themselves when they contain many entries; the workspace itself does
-        # not move or change width when switching tabs.
+        # Keep the authoring column compact and horizontally stable. Lists may
+        # still scroll internally, while the outer pane is allowed to scroll
+        # vertically when the active workspace is taller than the window.
         properties_scroll.setHorizontalScrollBarPolicy(
             Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        # Keep the properties pane vertically scrollable when the current
+        # workspace is taller than the available window.  Do not pin the
+        # scrollbar: Qt also uses it internally to bring focused controls and
+        # tab pages into view, so forcing it back to zero breaks normal tab
+        # interaction and mouse-wheel navigation.
         properties_scroll.setVerticalScrollBarPolicy(
-            Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+            Qt.ScrollBarPolicy.ScrollBarAsNeeded)
         # Keep the authoring column at the user-validated compact width while
         # still leaving room for all four full tab labels and controls.
         # The user can continue widening it manually when desired.
@@ -6267,6 +6299,18 @@ class CollisionEditorWindow(QMainWindow):
         menu.addSeparator()
         menu.addAction(self.duplicate_action)
         menu.addAction(self.delete_action)
+        entries = self._selected_sphere_entries()
+        all_hidden = bool(entries) and all(
+            not sphere.visible for _index, sphere in entries)
+        visibility_text = (
+            "Unhide Spheres" if all_hidden and len(entries) > 1
+            else "Unhide Sphere" if all_hidden
+            else "Hide Spheres" if len(entries) > 1
+            else "Hide Sphere"
+        )
+        self._context_action(
+            menu, visibility_text, self._toggle_selected_sphere_visibility,
+            bool(entries))
         change_type_menu = menu.addMenu("Change Sphere Type")
         self._populate_change_type_menu(change_type_menu)
         mirror_menu = menu.addMenu("Mirror Selected Sphere")
@@ -7643,6 +7687,26 @@ class CollisionEditorWindow(QMainWindow):
         self._set_modified()
         self._sync_all()
 
+    def _toggle_selected_sphere_visibility(self):
+        entries = self._selected_sphere_entries()
+        if not entries:
+            return
+        # Mixed selections collapse to hidden first; once every selected row
+        # is hidden, the same command becomes Unhide and restores them all.
+        target_visible = all(
+            not sphere.visible for _index, sphere in entries)
+        changing = [
+            sphere for _index, sphere in entries
+            if sphere.visible != target_visible
+        ]
+        if not changing:
+            return
+        self._push_undo()
+        for sphere in changing:
+            sphere.visible = target_visible
+        self._set_modified()
+        self._sync_all()
+
     def _visibility_changed(self, visible: bool):
         if self._syncing:
             return
@@ -7737,20 +7801,21 @@ class CollisionEditorWindow(QMainWindow):
                 item = QTreeWidgetItem([
                     TYPE_LABELS[sphere.category],
                     _radius_number(sphere.radius),
-                    "Visible" if sphere.visible else "",
+                    "Visible" if sphere.visible else "Hidden",
+                    _number(sphere.x),
+                    _number(sphere.y),
+                    _number(sphere.z),
                     index_text,
                 ])
                 item.setData(0, _SPHERE_INDEX_ROLE, flat_index)
                 item.setForeground(0, QBrush(TYPE_COLORS[sphere.category]))
                 item.setTextAlignment(
-                    1, Qt.AlignmentFlag.AlignRight
+                    0, Qt.AlignmentFlag.AlignLeft
                     | Qt.AlignmentFlag.AlignVCenter)
-                item.setTextAlignment(
-                    2, Qt.AlignmentFlag.AlignRight
-                    | Qt.AlignmentFlag.AlignVCenter)
-                item.setTextAlignment(
-                    3, Qt.AlignmentFlag.AlignRight
-                    | Qt.AlignmentFlag.AlignVCenter)
+                for column in range(1, 7):
+                    item.setTextAlignment(
+                        column, Qt.AlignmentFlag.AlignRight
+                        | Qt.AlignmentFlag.AlignVCenter)
                 self.sphere_tree.addTopLevelItem(item)
                 if flat_index in selected_indices:
                     selected_items.append(item)
@@ -8466,6 +8531,12 @@ class CollisionEditorWindow(QMainWindow):
             else "Mirror Selected Sphere")
         collisions_present = bool(self.project.spheres())
         self.select_all_spheres_button.setEnabled(collisions_present)
+        visibility_entries = self._selected_sphere_entries()
+        all_hidden = bool(visibility_entries) and all(
+            not sphere.visible for _index, sphere in visibility_entries)
+        self.hide_spheres_button.setEnabled(bool(visibility_entries))
+        self.hide_spheres_button.setText(
+            "Unhide Spheres" if all_hidden else "Hide Spheres")
         self.create_suggested_button.setEnabled(
             self._model_bounds() is not None)
         self.undo_button.setEnabled(bool(self._undo))
