@@ -4383,7 +4383,7 @@ class CollisionEditorWindow(QMainWindow):
             "Select every collision sphere in the current Collision tab.")
         self.select_all_spheres_button.clicked.connect(
             self.select_all_spheres)
-        self.hide_spheres_button = QPushButton("Hide Spheres")
+        self.hide_spheres_button = QPushButton("Hide Sphere")
         self.hide_spheres_button.setToolTip(
             "Hide the selected collision spheres in the 3D preview. Select "
             "hidden rows in the list to show them again.")
@@ -6303,9 +6303,9 @@ class CollisionEditorWindow(QMainWindow):
         all_hidden = bool(entries) and all(
             not sphere.visible for _index, sphere in entries)
         visibility_text = (
-            "Unhide Spheres" if all_hidden and len(entries) > 1
+            "Unhide Sphere" if all_hidden and len(entries) > 1
             else "Unhide Sphere" if all_hidden
-            else "Hide Spheres" if len(entries) > 1
+            else "Hide Sphere" if len(entries) > 1
             else "Hide Sphere"
         )
         self._context_action(
@@ -8536,7 +8536,7 @@ class CollisionEditorWindow(QMainWindow):
             not sphere.visible for _index, sphere in visibility_entries)
         self.hide_spheres_button.setEnabled(bool(visibility_entries))
         self.hide_spheres_button.setText(
-            "Unhide Spheres" if all_hidden else "Hide Spheres")
+            "Unhide Sphere" if all_hidden else "Hide Sphere")
         self.create_suggested_button.setEnabled(
             self._model_bounds() is not None)
         self.undo_button.setEnabled(bool(self._undo))
