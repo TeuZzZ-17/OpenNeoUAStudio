@@ -8,12 +8,10 @@ delegated to the existing OpenNeoUAStudio asset-family and viewport code.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from datetime import datetime
 import difflib
 import math
 from pathlib import Path
 import re
-import shutil
 
 from PySide6.QtCore import (
     QEvent, QPoint, QPointF, QRectF, QSignalBlocker, QSize, Qt, Signal,
@@ -443,21 +441,6 @@ def plan_script_update(
     return updated, preview, block.name
 
 
-def create_backup(path: str | Path) -> Path:
-    source = Path(path)
-    candidate = source.with_name(source.name + ".bak")
-    if candidate.exists():
-        stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
-        candidate = source.with_name(source.name + f".{stamp}.bak")
-        suffix = 2
-        while candidate.exists():
-            candidate = source.with_name(
-                source.name + f".{stamp}.{suffix}.bak")
-            suffix += 1
-    shutil.copy2(source, candidate)
-    return candidate
-
-
 def read_script_file(path: str | Path) -> tuple[str, str, bool]:
     """Read common OpenNeoUA text encodings without silently changing them."""
 
@@ -782,7 +765,6 @@ class ApplyScriptDialog(QDialog):
         self.resize(820, 620)
         self.project = project
         self.updated_text = ""
-        self.backup_path: Path | None = None
         self._source_text = ""
         self._source_encoding = "utf-8"
         self._source_bom = False
@@ -876,7 +858,6 @@ class ApplyScriptDialog(QDialog):
     def _apply(self):
         path = Path(self.path_edit.text())
         try:
-            self.backup_path = create_backup(path)
             write_script_file(
                 path, self.updated_text,
                 self._source_encoding, self._source_bom)
@@ -1737,7 +1718,7 @@ class CollisionEditorWindow(QMainWindow):
         dialog = ApplyScriptDialog(self, self.project)
         if dialog.exec() == QDialog.DialogCode.Accepted:
             self.statusBar().showMessage(
-                f"Script updated. Backup: {dialog.backup_path}", 10000)
+                "Script updated.", 10000)
 
     def closeEvent(self, event: QCloseEvent) -> None:  # noqa: N802
         if self._modified:
