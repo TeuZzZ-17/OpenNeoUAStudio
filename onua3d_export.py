@@ -26,24 +26,10 @@ from indexed_renderer import IndexedSurface
 from onua3d_preview import (
     TICKS_PER_SECOND, preview_duration, surface_image, tracy_rgba_table, vanm_timeline,
 )
+from onua3d_identity import ATTRIBUTE, IDENTITY_CONTRACT, MAX_VERTEX_ID
 
 
-FORMAT = "OpenNeoUA ONUA3D"
-VERSION = 1
-MANIFEST = "onua3d_manifest.json"
-# UA's downward Y becomes glTF's upward Y. Preserve numerical UA units;
-# 1 UA unit is represented by 1 glTF metre, a bridge convention, not metrology.
-AXES = (1.0, -1.0, 1.0)
-UV_DIVISOR = 256.0
-COORDINATES = {
-    "ua_to_gltf": "(x, y, z) -> (x, -y, z)",
-    "meters_per_ua_unit": 1.0,
-    "physical_scale_known": False,
-    "uv": "(u/256, v/256), top-left origin; no image flip",
-    "winding": "UA fan (0,j,j-1), reversed after Y reflection: (0,j-1,j)",
-    "transforms": "Studio independent object placement: T*S*R; identity owner hierarchy",
-}
-
+from onua3d_contract import FORMAT, VERSION, MANIFEST, AXES, UV_DIVISOR, COORDINATES, convert_point
 
 def _json(value):
     return (json.dumps(value, ensure_ascii=False, sort_keys=True,
@@ -52,10 +38,6 @@ def _json(value):
 
 def _hash(data):
     return hashlib.sha256(data).hexdigest()
-
-
-def convert_point(point):
-    return tuple(float(value) * axis for value, axis in zip(point, AXES))
 
 
 def _lookup(values, name):
@@ -122,6 +104,7 @@ def build_scene(family, *, source_owner_path="root"):
     """Return GLB bytes, PNG members and stable node/face/texture mappings."""
     glb = _Glb()
     pngs, textures, mapping, warnings = {}, {}, [], []
+    next_vertex_id = 1
     animated_blocks = []
     tracy_projection = None
     adapter, reason = IndexedFamilyAdapter.try_create(family)
@@ -193,15 +176,18 @@ def build_scene(family, *, source_owner_path="root"):
         row = {"owner_path": owner, "source_owner_path": source_owner,
                "node": node_id, "placement_node": placement_id,
                "geometry_node": mesh_node_id, "source_point_count": len(points),
-               "source_polygon_count": len(polygons), "primitives": []}
+               "source_polygon_count": len(polygons), "primitives": [],
+               "vertex_instances": {}}
         mapping.append(row)
         primitives, covered = [], set()
 
         def primitive(faces, material_id, block_index, *, target_primitives=None,
                       target_node=None, frame_index=None):
+            nonlocal next_vertex_id
             target_primitives = primitives if target_primitives is None else target_primitives
             target_node = mesh_node_id if target_node is None else target_node
             positions, uvs, vertex_ids, indices, face_rows = [], [], [], [], []
+            persistent_ids = []
             for poly_id, uv, shade in faces:
                 if not 0 <= poly_id < len(polygons):
                     raise AssetFamilyPackageError(f"{owner}: invalid polygon {poly_id}")
@@ -219,6 +205,15 @@ def build_scene(family, *, source_owner_path="root"):
                         raise AssetFamilyPackageError(f"{owner}: non-finite vertex {point_id}")
                     positions.append(point)
                     vertex_ids.append(point_id)
+                    if next_vertex_id > MAX_VERTEX_ID:
+                        raise AssetFamilyPackageError("ONUA3D persistent vertex ID limit exceeded")
+                    origin = {"point_id": point_id, "polygon_id": poly_id,
+                              "corner": corner, "block_index": block_index}
+                    if frame_index is not None:
+                        origin["vanm_frame"] = frame_index
+                    row["vertex_instances"][str(next_vertex_id)] = origin
+                    persistent_ids.append(next_vertex_id)
+                    next_vertex_id += 1
                     uvs.append(tuple(v / UV_DIVISOR for v in uv[corner])
                                if corner < len(uv) else (0, 0))
                 face_rows.append({"poly_id": poly_id, "first_index": len(indices),
@@ -232,7 +227,8 @@ def build_scene(family, *, source_owner_path="root"):
                         "point_ids": vertex_ids, "faces": face_rows}
             if frame_index is not None:
                 metadata["vanm_frame"] = frame_index
-            attributes = {"POSITION": glb.accessor(positions, 3, bounds=True)}
+            attributes = {"POSITION": glb.accessor(positions, 3, bounds=True),
+                          ATTRIBUTE: glb.accessor(persistent_ids, 1)}
             if material_id is not None and "baseColorTexture" in glb.doc["materials"][material_id]["pbrMetallicRoughness"]:
                 attributes["TEXCOORD_0"] = glb.accessor(uvs, 2)
             prim = {"attributes": attributes, "indices": glb.accessor(indices, 1, indices=True),
@@ -413,6 +409,7 @@ def write_onua3d(package_root, target, *, validation=None, source_owner_path="ro
                     "family_manifest": "ua_family/" + MANIFEST_NAME,
                     "semantic_sha256": validation.manifest["semantic_sha256"],
                     "coordinates": COORDINATES, "nodes": mapping, "warnings": warnings,
+                    "vertex_identity": IDENTITY_CONTRACT,
                     "files": {name: {"sha256": _hash(data), "size": len(data)}
                               for name, data in sorted(members.items())}}
         members[MANIFEST] = _json(manifest)

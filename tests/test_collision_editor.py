@@ -523,19 +523,19 @@ class CollisionEditorTests(unittest.TestCase):
             window.sphere_tree.topLevelItem(1).text(0),
             "OpenNeoUA Collision")
         self.assertEqual(window.sphere_tree.topLevelItem(1).text(2), "Visible")
-        self.assertEqual(window.sphere_tree.topLevelItem(1).text(3), "0")
+        self.assertEqual(window.sphere_tree.topLevelItem(1).text(6), "0")
         third = window.sphere_tree.topLevelItem(2)
         window.sphere_tree.setCurrentItem(third)
         self.assertEqual(window._selected, 2)
         self.assertEqual(window.type_value.text(), "OpenNeoUA Collision")
         self.assertEqual(third.text(2), "Visible")
-        self.assertEqual(third.text(3), "1")
+        self.assertEqual(third.text(6), "1")
         self.assertEqual(
             float(third.text(1)), window.project.compound[1].radius)
         window.sphere_tree.setCurrentItem(
             window.sphere_tree.topLevelItem(1))
         window.visible_check.setChecked(False)
-        self.assertEqual(window.sphere_tree.topLevelItem(1).text(2), "")
+        self.assertEqual(window.sphere_tree.topLevelItem(1).text(2), "Hidden")
         window.visible_check.setChecked(True)
         self.assertEqual(
             window.sphere_tree.topLevelItem(1).text(2), "Visible")
@@ -797,7 +797,7 @@ class CollisionEditorTests(unittest.TestCase):
         window.duplicate_sphere()
         window.duplicate_sphere()
         indices = [
-            window.sphere_tree.topLevelItem(index).text(3)
+            window.sphere_tree.topLevelItem(index).text(6)
             for index in range(window.sphere_tree.topLevelItemCount())]
         self.assertEqual(indices, ["0", "1", "2"])
         self.assertTrue(all(
@@ -1140,6 +1140,53 @@ class CollisionEditorTests(unittest.TestCase):
         self.assertFalse(window.project.compound[1].visible)
         self.assertTrue(window.project.compound[2].visible)
 
+    def test_53n_hide_button_toggles_complete_multiselection(self):
+        window = self._window()
+        window.project.compound = [
+            CollisionSphere(OPENNEOUA, radius=10, visible=True),
+            CollisionSphere(OPENNEOUA, radius=20, visible=True),
+            CollisionSphere(OPENNEOUA, radius=30, visible=True),
+        ]
+        window._selected = 0
+        window._selected_spheres = {0, 1}
+        window._sync_all()
+
+        self.assertEqual(window.hide_spheres_button.text(), "Hide Spheres")
+        window.hide_spheres_button.click()
+        self.assertFalse(window.project.compound[0].visible)
+        self.assertFalse(window.project.compound[1].visible)
+        self.assertTrue(window.project.compound[2].visible)
+        self.assertEqual(window.hide_spheres_button.text(), "Unhide Spheres")
+        window.hide_spheres_button.click()
+        self.assertTrue(window.project.compound[0].visible)
+        self.assertTrue(window.project.compound[1].visible)
+
+    def test_53o_sphere_context_menu_exposes_hide_and_unhide(self):
+        window = self._window()
+        window.project.compound = [CollisionSphere(OPENNEOUA, visible=True)]
+        window._selected = 0
+        window._selected_spheres = {0}
+        window._sync_all()
+        menu = window._create_sphere_context_menu(0)
+        self.assertIn("Hide Sphere", [action.text() for action in menu.actions()])
+
+        window._toggle_selected_sphere_visibility()
+        menu = window._create_sphere_context_menu(0)
+        self.assertIn("Unhide Sphere", [action.text() for action in menu.actions()])
+
+    def test_53p_sphere_table_shows_xyz_and_hidden_state(self):
+        window = self._window()
+        window.project.compound = [
+            CollisionSphere(OPENNEOUA, 12.5, -3.25, 7.0, 20, False)]
+        window._selected = 0
+        window._selected_spheres = {0}
+        window._sync_all()
+        row = window.sphere_tree.topLevelItem(0)
+        self.assertEqual(
+            [row.text(index) for index in range(2, 7)],
+            ["Hidden", "12.5", "-3.25", "7", "0"],
+        )
+
     def test_54_move_strength_accepts_manual_values(self):
         window = self._window()
         window.add_compound(OPENNEOUA)
@@ -1188,9 +1235,20 @@ class CollisionEditorTests(unittest.TestCase):
         window.add_compound(OPENNEOUA)
         self.assertTrue(window.type_value.isHidden())
         self.assertTrue(window.index_value.isHidden())
-        self.assertEqual(window.sphere_tree.columnCount(), 4)
-        self.assertEqual(window.sphere_tree.headerItem().text(2), "Visible")
-        self.assertEqual(window.sphere_tree.headerItem().text(3), "Index")
+        self.assertEqual(window.sphere_tree.columnCount(), 7)
+        self.assertEqual(
+            [window.sphere_tree.headerItem().text(index) for index in range(7)],
+            ["Sphere", "Radius", "Visible", "X", "Y", "Z", "Index"],
+        )
+        header = window.sphere_tree.header()
+        self.assertFalse(header.stretchLastSection())
+        self.assertEqual(
+            header.sectionResizeMode(0), QHeaderView.ResizeMode.Stretch)
+        self.assertEqual(
+            header.sectionResizeMode(6), QHeaderView.ResizeMode.Fixed)
+        self.assertLessEqual(window.sphere_tree.columnWidth(6), 48)
+        self.assertFalse(window.sphere_tree.rootIsDecorated())
+        self.assertEqual(window.sphere_tree.indentation(), 0)
 
     def test_57_vp_values_are_right_aligned_without_widening_panel(self):
         window = self._window()
@@ -1731,9 +1789,9 @@ class CollisionEditorTests(unittest.TestCase):
             " name = Wasp\n"
             " vp_normal = 42\n"
             " vp_wait = 43\n"
-            " vp_scale_x = 2\n"
-            " vp_scale_y = 1.5\n"
-            " vp_scale_z = 0.75\n"
+            " visual_scale_x = 2\n"
+            " visual_scale_y = 1.5\n"
+            " visual_scale_z = 0.75\n"
             "end\n"
             "modify_vehicle 17\n vp_normal = 99\nend\n"
         )
@@ -1752,8 +1810,8 @@ class CollisionEditorTests(unittest.TestCase):
         text = (
             "new_vehicle 1\n name = Wasp\n vp_normal = 30\nend\n"
             "new_weapon 1\n name = Rocket\n vp_normal = 91\n"
-            " vp_scale_x = 1.25\n vp_scale_y = 0.5\n"
-            " vp_scale_z = 3\nend\n"
+            " visual_scale_x = 1.25\n visual_scale_y = 0.5\n"
+            " visual_scale_z = 3\nend\n"
             "modify_weapon 1\n vp_normal = 999\nend\n"
         )
         references = script_model_references(text)
@@ -1767,6 +1825,24 @@ class CollisionEditorTests(unittest.TestCase):
         self.assertEqual(
             (weapons[0].scale_x, weapons[0].scale_y, weapons[0].scale_z),
             (1.25, 0.5, 3.0),
+        )
+
+    def test_90b2_visual_scale_precedes_legacy_vp_scale(self):
+        text = (
+            "new_vehicle 9\n"
+            " vp_normal = 11\n"
+            " vp_scale_x = 9\n"
+            " vp_scale_y = 9\n"
+            " vp_scale_z = 9\n"
+            " visual_scale_x = 2\n"
+            " visual_scale_y = 3\n"
+            " visual_scale_z = 4\n"
+            "end\n"
+        )
+        reference = vehicle_model_references(text)[0]
+        self.assertEqual(
+            (reference.scale_x, reference.scale_y, reference.scale_z),
+            (2.0, 3.0, 4.0),
         )
 
     def test_90c_tutorial_labels_are_removed(self):
@@ -2323,14 +2399,20 @@ class CollisionEditorTests(unittest.TestCase):
         self.assertLessEqual(window.fire_point_tree.minimumHeight(), 90)
         self.assertLessEqual(window.gun_point_tree.minimumHeight(), 90)
 
-    def test_112_properties_column_is_stable_wide_and_outer_scroll_free(self):
+    def test_112_properties_column_is_stable_wide_and_vertically_scrollable(self):
         window = self._window()
         self.assertEqual(
             window.properties_scroll.horizontalScrollBarPolicy(),
             Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         self.assertEqual(
             window.properties_scroll.verticalScrollBarPolicy(),
-            Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+            Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+        # The outer pane must be free to scroll. Qt uses this same scrollbar
+        # for mouse-wheel navigation and to keep focused tab controls visible.
+        vertical_bar = window.properties_scroll.verticalScrollBar()
+        vertical_bar.setRange(0, 100)
+        vertical_bar.setValue(50)
+        self.assertEqual(vertical_bar.value(), 50)
         self.assertGreaterEqual(window.properties_scroll.minimumWidth(), 420)
         self.assertLessEqual(window.properties_scroll.minimumWidth(), 430)
         bar = window.properties_tabs.tabBar()
@@ -2342,6 +2424,12 @@ class CollisionEditorTests(unittest.TestCase):
             [window.properties_tabs.tabText(index)
              for index in range(window.properties_tabs.count())],
             ["Collision", "Fire Points", "Gun Points", "Cockpit View"])
+        window.properties_tabs.setCurrentIndex(window.fire_points_tab_index)
+        self.assertEqual(
+            window.properties_tabs.currentIndex(), window.fire_points_tab_index)
+        window.properties_tabs.setCurrentIndex(window.gun_points_tab_index)
+        self.assertEqual(
+            window.properties_tabs.currentIndex(), window.gun_points_tab_index)
 
     def test_113_gun_point_type_selector_converts_selected_point_and_output(self):
         window = self._window()

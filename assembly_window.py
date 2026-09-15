@@ -1184,12 +1184,15 @@ class AssemblyWindow(QMainWindow):
         self.open_ilbm_action.triggered.connect(self.open_ilbm_dialog)
         self.open_family_action = QAction("Import Asset Family", self)
         self.open_family_action.triggered.connect(self.open_family_dialog)
+        self.import_onua3d_action = QAction("Import OpenNeoUA 3D...", self)
+        self.import_onua3d_action.triggered.connect(self._import_onua3d)
 
         self.file_import_menu = file_menu.addMenu("Import")
         for action in (
                 self.open_bas_archive_action, self.import_base_action,
                 self.open_sklt_action,
-                self.open_ilbm_action, self.open_family_action):
+                self.open_ilbm_action, self.open_family_action,
+                self.import_onua3d_action):
             self.file_import_menu.addAction(action)
 
         # One shared Runtime Loose action is exposed from both File > Export
@@ -10555,6 +10558,40 @@ class AssemblyWindow(QMainWindow):
                 return None
             return self._owner_to_obj.get(next(iter(self._base_entry_names)))
         return family.root_object
+
+    def _import_onua3d(self) -> None:
+        """Open a validated position-only import as a new Complete Asset Family."""
+        from onua3d_import import prepare_onua3d
+
+        source, _ = QFileDialog.getOpenFileName(
+            self, "Import OpenNeoUA 3D", str(self._last_directory),
+            "OpenNeoUA 3D package (*.onua3d)")
+        if not source:
+            return
+        try:
+            with prepare_onua3d(source) as prepared:
+                if not self._confirm_discard_geometry():
+                    return
+                target = QFileDialog.getExistingDirectory(
+                    self,
+                    "Choose empty Asset Family destination folder",
+                    str(self._last_directory),
+                )
+                if not target:
+                    return
+                result = prepared.materialize(target)
+        except (AssetFamilyPackageError, OSError, ValueError) as exc:
+            QMessageBox.critical(self, "OpenNeoUA 3D import failed", str(exc))
+            return
+        self._overrides = {}
+        self._trial_names = set()
+        self._kept_names = set()
+        self._skipped_names = set()
+        self._last_directory = result.output_root
+        self._set_family(result.family)
+        self._notify(
+            f"Imported {Path(source).name}: {result.changed_points} SKLT point(s) updated. "
+            f"Complete Asset Family saved to {target}.", 15000)
 
     def _export_to_blender(self) -> None:
         """Export the loaded BASE root, including KIDS, through bundle staging."""
