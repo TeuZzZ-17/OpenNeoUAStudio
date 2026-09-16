@@ -7,7 +7,7 @@ delegated to the existing OpenNeoUAStudio asset-family and viewport code.
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 import difflib
 import math
 from pathlib import Path
@@ -488,6 +488,10 @@ class CollisionProject:
     cockpit_camera_offset_z: float = 0.0
     legacy: CollisionSphere | None = None
     compound: list[CollisionSphere] = field(default_factory=list)
+    # Editor-only focus state. It is kept in undo/redo snapshots so adding a
+    # new sphere while isolated does not make the visibility controls forget
+    # that the user is still working in isolation mode.
+    sphere_isolation_active: bool = False
 
     def spheres(self) -> list[CollisionSphere]:
         return ([self.legacy] if self.legacy is not None else []) + list(
@@ -523,6 +527,7 @@ class CollisionProject:
             ) for vehicle_id, limits in sorted(self.turret_limits.items())),
             one(self.legacy),
             tuple(one(sphere) for sphere in self.compound),
+            self.sphere_isolation_active,
         )
 
     def restore(self, state: tuple) -> None:
@@ -539,7 +544,7 @@ class CollisionProject:
          self.cockpit_camera_enabled,
          self.cockpit_camera_offset_x, self.cockpit_camera_offset_y,
          self.cockpit_camera_offset_z, gun_points, turret_limits,
-         legacy, compound) = state
+         legacy, compound, self.sphere_isolation_active) = state
         self.gun_points = [GunPoint(*values) for values in gun_points]
         self.turret_limits = {
             values[0]: TurretLimits(*values) for values in turret_limits
@@ -2277,6 +2282,31 @@ class CollisionViewport(AssetViewport):
             target.center().x() + x * focal_x / depth,
             target.center().y() - y * focal_y / depth,
         )
+
+    def _indexed_view_cache_signature(
+            self, width: int, height: int, camera: dict) -> tuple:
+        signature = super()._indexed_view_cache_signature(
+            width, height, camera)
+        if not self._cockpit_preview_active:
+            return signature + ("collision-editor",)
+        return signature + (
+            "cockpit",
+            tuple(float(value) for value in self._cockpit_offset),
+            float(self._cockpit_runtime_aspect),
+        )
+
+    def _resolve_indexed_surface(
+            self, adapter, face, material, frame_index: int):
+        surface = super()._resolve_indexed_surface(
+            adapter, face, material, frame_index)
+        if (self._cockpit_preview_active
+                and surface.kind == "texture"
+                and surface.map_mode != "depth"):
+            # OpenNeoUA maps both legacy LINEARMAPPED and DEPTHMAPPED faces to
+            # the same GPU textured path. GLSL then perspective-corrects UVs,
+            # which is essential for polygons viewed from inside the vehicle.
+            return replace(surface, map_mode="depth")
+        return surface
 
     def clear(self) -> None:
         super().clear()
@@ -4381,6 +4411,14 @@ class CollisionEditorWindow(QMainWindow):
         sphere_selection_buttons.addWidget(self.isolate_sphere_button, 1)
         spheres_layout.addLayout(sphere_selection_buttons)
 
+        self.hide_all_spheres_button = QPushButton("Hide All Spheres")
+        self.hide_all_spheres_button.setToolTip(
+            "Hide every collision sphere in the 3D preview. When all spheres "
+            "are hidden, the same button becomes Unhide All Spheres.")
+        self.hide_all_spheres_button.clicked.connect(
+            self._toggle_all_sphere_visibility)
+        spheres_layout.addWidget(self.hide_all_spheres_button)
+
         sphere_modifier_buttons = QHBoxLayout()
         sphere_modifier_buttons.setContentsMargins(0, 0, 0, 0)
         sphere_modifier_buttons.setSpacing(5)
@@ -6239,6 +6277,12 @@ class CollisionEditorWindow(QMainWindow):
             sphere for sphere in self.project.compound
             if id(sphere) not in selected_ids
         ]
+        remaining = self.project.spheres()
+        if self.project.sphere_isolation_active and (
+                not remaining
+                or not any(sphere.visible for sphere in remaining)
+                or not any(not sphere.visible for sphere in remaining)):
+            self.project.sphere_isolation_active = False
         count = len(self.project.spheres())
         self._selected = min(anchor, count - 1) if count else -1
         self._selected_spheres = (
@@ -6264,6 +6308,7 @@ class CollisionEditorWindow(QMainWindow):
         self._push_undo()
         self.project.legacy = None
         self.project.compound.clear()
+        self.project.sphere_isolation_active = False
         self._selected = -1
         self._selected_spheres.clear()
         self._selected_fire_point = -1
@@ -6290,26 +6335,31 @@ class CollisionEditorWindow(QMainWindow):
         all_hidden = bool(entries) and all(
             not sphere.visible for _index, sphere in entries)
         visibility_text = (
-            "Unhide Sphere" if all_hidden and len(entries) > 1
+            "Unhide Spheres" if all_hidden and len(entries) > 1
             else "Unhide Sphere" if all_hidden
-            else "Hide Sphere" if len(entries) > 1
-            else "Hide Sphere"
-        )
+            else "Hide Spheres" if len(entries) > 1
+            else "Hide Sphere")
         self._context_action(
             menu, visibility_text, self._toggle_selected_sphere_visibility,
             bool(entries))
         spheres = self.project.spheres()
-        if 0 <= index < len(spheres):
-            isolated = self._sphere_is_isolated(index)
-            isolate_text = "Unisolate Sphere" if isolated else "Isolate Sphere"
-            isolate_callback = (
-                self._unisolate_sphere_visibility
-                if isolated else self._isolate_sphere_visibility
-            )
+        self._context_action(
+            menu, "Hide All Spheres",
+            lambda _checked=False: self._set_all_sphere_visibility(False),
+            any(sphere.visible for sphere in spheres))
+        self._context_action(
+            menu, "Unhide All Spheres",
+            lambda _checked=False: self._set_all_sphere_visibility(True),
+            any(not sphere.visible for sphere in spheres))
+        if self.project.sphere_isolation_active:
             self._context_action(
-                menu, isolate_text,
-                lambda _checked=False, sphere_index=index,
-                callback=isolate_callback: callback(sphere_index))
+                menu, "Unisolate Sphere",
+                self._unisolate_sphere_visibility, bool(spheres))
+        elif 0 <= index < len(spheres):
+            self._context_action(
+                menu, "Isolate Sphere",
+                lambda _checked=False, sphere_index=index:
+                self._isolate_sphere_visibility(sphere_index))
         change_type_menu = menu.addMenu("Change Sphere Type")
         self._populate_change_type_menu(change_type_menu)
         mirror_menu = menu.addMenu("Mirror Selected Sphere")
@@ -7246,6 +7296,7 @@ class CollisionEditorWindow(QMainWindow):
                 project.overeof_enabled, project.overeof,
                 sphere_state(project.legacy),
                 tuple(sphere_state(sphere) for sphere in project.compound),
+                project.sphere_isolation_active,
             )
         if tab_index == 1:  # Fire Points
             return (
@@ -7317,6 +7368,8 @@ class CollisionEditorWindow(QMainWindow):
                 else None)
             self.project.compound = [
                 sphere.clone() for sphere in baseline.compound]
+            self.project.sphere_isolation_active = (
+                baseline.sphere_isolation_active)
             self._selected = min(
                 self._selected, len(self.project.spheres()) - 1)
         elif tab_index == self.fire_points_tab_index:
@@ -7698,36 +7751,61 @@ class CollisionEditorWindow(QMainWindow):
             sphere for _index, sphere in entries
             if sphere.visible != target_visible
         ]
-        if not changing:
+        if not changing and not self.project.sphere_isolation_active:
             return
         self._push_undo()
         for sphere in changing:
             sphere.visible = target_visible
+        # Manual visibility editing supersedes Isolate mode. This prevents an
+        # old isolation session from changing the meaning of the buttons after
+        # the user starts explicitly hiding/showing individual rows.
+        self.project.sphere_isolation_active = False
         self._set_modified()
         self._sync_all()
+
+    def _set_all_sphere_visibility(self, visible: bool) -> None:
+        spheres = self.project.spheres()
+        if not spheres:
+            return
+        target_visible = bool(visible)
+        changing = [
+            sphere for sphere in spheres
+            if sphere.visible != target_visible
+        ]
+        if not changing and not self.project.sphere_isolation_active:
+            return
+        self._push_undo()
+        for sphere in changing:
+            sphere.visible = target_visible
+        self.project.sphere_isolation_active = False
+        self._set_modified()
+        self._sync_all()
+
+    def _toggle_all_sphere_visibility(self) -> None:
+        spheres = self.project.spheres()
+        if not spheres:
+            return
+        all_hidden = all(not sphere.visible for sphere in spheres)
+        self._set_all_sphere_visibility(all_hidden)
 
     def _sphere_is_isolated(self, index: int) -> bool:
         spheres = self.project.spheres()
         return (
-            len(spheres) > 1
+            self.project.sphere_isolation_active
+            and len(spheres) > 1
             and 0 <= index < len(spheres)
             and spheres[index].visible
-            and all(
-                not sphere.visible
-                for sphere_index, sphere in enumerate(spheres)
-                if sphere_index != index
-            )
         )
 
     def _toggle_selected_sphere_isolation(self):
+        if self.project.sphere_isolation_active:
+            self._unisolate_sphere_visibility()
+            return
         selected = self._selected_sphere_indices()
         if len(selected) != 1:
             return
         index = next(iter(selected))
-        if self._sphere_is_isolated(index):
-            self._unisolate_sphere_visibility(index)
-        else:
-            self._isolate_sphere_visibility(index)
+        self._isolate_sphere_visibility(index)
 
     def _isolate_sphere_visibility(self, index: int):
         spheres = self.project.spheres()
@@ -7737,24 +7815,26 @@ class CollisionEditorWindow(QMainWindow):
             sphere for sphere_index, sphere in enumerate(spheres)
             if sphere.visible != (sphere_index == index)
         ]
-        if not changing:
+        if not changing and self.project.sphere_isolation_active:
             return
         self._push_undo()
         for sphere_index, sphere in enumerate(spheres):
             sphere.visible = sphere_index == index
+        self.project.sphere_isolation_active = True
         self._set_modified()
         self._sync_all()
 
-    def _unisolate_sphere_visibility(self, index: int):
+    def _unisolate_sphere_visibility(self, _index: int | None = None):
         spheres = self.project.spheres()
-        if not (0 <= index < len(spheres)):
+        if not spheres:
             return
         changing = [sphere for sphere in spheres if not sphere.visible]
-        if not changing:
+        if not changing and not self.project.sphere_isolation_active:
             return
         self._push_undo()
         for sphere in changing:
             sphere.visible = True
+        self.project.sphere_isolation_active = False
         self._set_modified()
         self._sync_all()
 
@@ -7769,11 +7849,12 @@ class CollisionEditorWindow(QMainWindow):
             sphere for _index, sphere in entries
             if sphere.visible != value
         ]
-        if not changing:
+        if not changing and not self.project.sphere_isolation_active:
             return
         self._push_undo()
         for sphere in changing:
             sphere.visible = value
+        self.project.sphere_isolation_active = False
         self._set_modified()
         self._sync_all()
 
@@ -8586,17 +8667,28 @@ class CollisionEditorWindow(QMainWindow):
         all_hidden = bool(visibility_entries) and all(
             not sphere.visible for _index, sphere in visibility_entries)
         self.hide_spheres_button.setEnabled(bool(visibility_entries))
+        selected_visibility_plural = len(visibility_entries) > 1
         self.hide_spheres_button.setText(
-            "Unhide Sphere" if all_hidden else "Hide Sphere")
+            "Unhide Spheres" if all_hidden and selected_visibility_plural
+            else "Unhide Sphere" if all_hidden
+            else "Hide Spheres" if selected_visibility_plural
+            else "Hide Sphere")
+        all_spheres_hidden = collisions_present and all(
+            not sphere.visible for sphere in self.project.spheres())
+        self.hide_all_spheres_button.setEnabled(collisions_present)
+        self.hide_all_spheres_button.setText(
+            "Unhide All Spheres" if all_spheres_hidden
+            else "Hide All Spheres")
         selected_indices = self._selected_sphere_indices()
         isolate_index = (
             next(iter(selected_indices)) if len(selected_indices) == 1 else -1)
         isolate_enabled = (
-            isolate_index >= 0 and len(self.project.spheres()) > 1)
+            len(self.project.spheres()) > 1
+            and (self.project.sphere_isolation_active or isolate_index >= 0))
         self.isolate_sphere_button.setEnabled(isolate_enabled)
         self.isolate_sphere_button.setText(
             "Unisolate Sphere"
-            if self._sphere_is_isolated(isolate_index)
+            if self.project.sphere_isolation_active
             else "Isolate Sphere")
         self.create_suggested_button.setEnabled(
             self._model_bounds() is not None)

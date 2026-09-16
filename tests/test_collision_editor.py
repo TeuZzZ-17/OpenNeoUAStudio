@@ -17,6 +17,7 @@ from PySide6.QtWidgets import (
 
 from asset_family import AssetFamily, FamilyObject
 from base_parser import BaseObject
+from indexed_renderer import IndexedSurface
 import collision_editor.editor as editor_module
 from collision_editor import (
     ApplyScriptDialog,
@@ -1151,6 +1152,33 @@ class CollisionEditorTests(unittest.TestCase):
         self.assertTrue(window.project.compound[0].visible)
         self.assertTrue(window.project.compound[1].visible)
 
+    def test_53na_hide_all_button_toggles_every_sphere(self):
+        window = self._window()
+        window.project.compound = [
+            CollisionSphere(OPENNEOUA, radius=10, visible=True),
+            CollisionSphere(OPENNEOUA, radius=20, visible=False),
+            CollisionSphere(OPENNEOUA, radius=30, visible=True),
+        ]
+        window._selected = 0
+        window._selected_spheres = {0}
+        window._sync_all()
+
+        self.assertEqual(
+            window.hide_all_spheres_button.text(), "Hide All Spheres")
+        window.hide_all_spheres_button.click()
+        self.assertEqual(
+            [sphere.visible for sphere in window.project.compound],
+            [False, False, False])
+        self.assertEqual(
+            window.hide_all_spheres_button.text(), "Unhide All Spheres")
+
+        window.hide_all_spheres_button.click()
+        self.assertEqual(
+            [sphere.visible for sphere in window.project.compound],
+            [True, True, True])
+        self.assertEqual(
+            window.hide_all_spheres_button.text(), "Hide All Spheres")
+
     def test_53o_isolate_button_toggles_isolate_and_unisolate(self):
         window = self._window()
         window.project.compound = [
@@ -1177,6 +1205,68 @@ class CollisionEditorTests(unittest.TestCase):
             [True, True, True])
         self.assertEqual(window.isolate_sphere_button.text(), "Isolate Sphere")
 
+    def test_53ob_new_sphere_keeps_active_isolation_coherent(self):
+        window = self._window()
+        window.project.compound = [
+            CollisionSphere(OPENNEOUA, radius=10),
+            CollisionSphere(OPENNEOUA, radius=20),
+            CollisionSphere(OPENNEOUA, radius=30),
+        ]
+        window._selected = 1
+        window._selected_spheres = {1}
+        window._sync_all()
+        window.isolate_sphere_button.click()
+
+        self.assertTrue(window.project.sphere_isolation_active)
+        window.add_compound(OPENNEOUA)
+
+        self.assertEqual(
+            [sphere.visible for sphere in window.project.compound],
+            [False, True, False, True])
+        self.assertTrue(window.project.sphere_isolation_active)
+        self.assertTrue(window.isolate_sphere_button.isEnabled())
+        self.assertEqual(
+            window.isolate_sphere_button.text(), "Unisolate Sphere")
+
+        window.isolate_sphere_button.click()
+        self.assertEqual(
+            [sphere.visible for sphere in window.project.compound],
+            [True, True, True, True])
+        self.assertFalse(window.project.sphere_isolation_active)
+
+    def test_53oc_isolation_state_survives_undo_redo(self):
+        window = self._window()
+        window.project.compound = [
+            CollisionSphere(OPENNEOUA, radius=10),
+            CollisionSphere(OPENNEOUA, radius=20),
+            CollisionSphere(OPENNEOUA, radius=30),
+        ]
+        window._selected = 1
+        window._selected_spheres = {1}
+        window._sync_all()
+
+        window.isolate_sphere_button.click()
+        window.add_compound(OPENNEOUA)
+        self.assertTrue(window.project.sphere_isolation_active)
+
+        window.undo()
+        self.assertTrue(window.project.sphere_isolation_active)
+        self.assertEqual(
+            [sphere.visible for sphere in window.project.compound],
+            [False, True, False])
+
+        window.undo()
+        self.assertFalse(window.project.sphere_isolation_active)
+        self.assertEqual(
+            [sphere.visible for sphere in window.project.compound],
+            [True, True, True])
+
+        window.redo()
+        self.assertTrue(window.project.sphere_isolation_active)
+        self.assertEqual(
+            [sphere.visible for sphere in window.project.compound],
+            [False, True, False])
+
     def test_53oa_isolate_button_requires_single_selected_sphere(self):
         window = self._window()
         window.project.compound = [
@@ -1198,6 +1288,10 @@ class CollisionEditorTests(unittest.TestCase):
         window._sync_all()
         menu = window._create_sphere_context_menu(0)
         self.assertIn("Hide Sphere", [action.text() for action in menu.actions()])
+        self.assertIn(
+            "Hide All Spheres", [action.text() for action in menu.actions()])
+        self.assertIn(
+            "Unhide All Spheres", [action.text() for action in menu.actions()])
 
         window._toggle_selected_sphere_visibility()
         menu = window._create_sphere_context_menu(0)
@@ -2759,6 +2853,60 @@ class CollisionEditorTests(unittest.TestCase):
             center.y() - 10.0 * (target.height() * 0.5 * corr_h) / 10.0,
             places=5)
         self.assertNotAlmostEqual(projected_43.y(), projected_1610.y())
+
+    def test_119b1_cockpit_cache_tracks_offset_and_runtime_aspect(self):
+        viewport = CollisionViewport()
+        self.addCleanup(viewport.close)
+        viewport.resize(800, 600)
+
+        normal_camera = viewport._camera_state()
+        normal_signature = viewport._indexed_view_cache_signature(
+            800, 600, normal_camera)
+
+        viewport.set_cockpit_preview_active(True)
+        cockpit_camera = viewport._camera_state()
+        cockpit_signature = viewport._indexed_view_cache_signature(
+            800, 600, cockpit_camera)
+        self.assertNotEqual(normal_signature, cockpit_signature)
+
+        viewport.set_cockpit_camera_offset(3.0, -25.0, 20.0)
+        moved_signature = viewport._indexed_view_cache_signature(
+            800, 600, viewport._camera_state())
+        self.assertNotEqual(cockpit_signature, moved_signature)
+
+        viewport.set_cockpit_runtime_aspect(16.0 / 9.0)
+        widescreen_signature = viewport._indexed_view_cache_signature(
+            800, 600, viewport._camera_state())
+        self.assertNotEqual(moved_signature, widescreen_signature)
+
+    def test_119b1_cockpit_forces_gpu_style_perspective_uv_mapping(self):
+        viewport = CollisionViewport()
+        self.addCleanup(viewport.close)
+        surface = IndexedSurface(
+            name="cockpit.ilbm",
+            kind="texture",
+            indices=bytes([1]),
+            width=1,
+            height=1,
+            solid_index=None,
+            shade_mode="none",
+            shade_value=0,
+            tracy_mode="none",
+            map_mode="linear",
+        )
+        adapter = MagicMock()
+        adapter.resolve_surface.return_value = surface
+        face = MagicMock()
+        material = MagicMock()
+
+        regular_surface = viewport._resolve_indexed_surface(
+            adapter, face, material, 0)
+        self.assertEqual(regular_surface.map_mode, "linear")
+
+        viewport.set_cockpit_preview_active(True)
+        cockpit_surface = viewport._resolve_indexed_surface(
+            adapter, face, material, 0)
+        self.assertEqual(cockpit_surface.map_mode, "depth")
 
     def test_119b2_cockpit_culling_matches_opengl_window_winding(self):
         viewport = CollisionViewport()
