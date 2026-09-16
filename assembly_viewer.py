@@ -3863,7 +3863,8 @@ class AssetViewport(QWidget):
             material = self._materials[face.material]
             frame_index, _direction = self._anim_states.get(
                 face.material, (0, 1))
-            surface = adapter.resolve_surface(face, material, frame_index)
+            surface = self._resolve_indexed_surface(
+                adapter, face, material, frame_index)
             if surface.kind == "texture" and not payload.uv_mapping_valid:
                 raise UnsupportedIndexedMaterialError(
                     f"polygon {face.poly_id} has incomplete source UV mapping")
@@ -3912,6 +3913,13 @@ class AssetViewport(QWidget):
         image = QImage(
             rgba, width, height, width * 4, QImage.Format.Format_RGBA8888)
         return image.copy()
+
+    def _resolve_indexed_surface(
+            self, adapter: IndexedFamilyAdapter, face: ViewFace,
+            material: ViewMaterial, frame_index: int):
+        """Resolve one indexed surface for the active viewport semantics."""
+
+        return adapter.resolve_surface(face, material, frame_index)
 
     def _draw_edit_overlay(
             self, painter: QPainter, target: QRectF,
