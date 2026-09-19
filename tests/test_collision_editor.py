@@ -29,6 +29,7 @@ from collision_editor import (
     GunPoint,
     TurretLimits,
     OpenScriptObjectDialog,
+    OPENNEOUA_SCRIPT_FILE_FILTER,
     LEGACY,
     OPENNEOUA,
     VEHICLE,
@@ -360,7 +361,7 @@ class CollisionEditorTests(unittest.TestCase):
 
     def test_24_script_encoding_and_bom_are_preserved(self):
         with tempfile.TemporaryDirectory() as temp:
-            path = Path(temp) / "Weapons.txt"
+            path = Path(temp) / "Weapons.cfg"
             path.write_bytes(b"\xef\xbb\xbfnew_weapon 1\r\nend\r\n")
             text, encoding, bom = read_script_file(path)
             self.assertTrue(bom)
@@ -2096,6 +2097,11 @@ class CollisionEditorTests(unittest.TestCase):
         self.assertTrue(all(
             dialog.block_combo.itemData(index).block.object_id == 1
             for index in range(dialog.block_combo.count())))
+
+    def test_90e2_cfg_is_in_the_shared_script_file_filter(self):
+        self.assertIn("*.cfg", OPENNEOUA_SCRIPT_FILE_FILTER)
+        self.assertTrue(OPENNEOUA_SCRIPT_FILE_FILTER.startswith(
+            "OpenNeoUA scripts (*.cfg "))
 
     def test_90f_selected_multi_fire_rack_draws_white_halo_on_every_point(self):
         viewport = CollisionViewport()
