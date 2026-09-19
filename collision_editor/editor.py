@@ -184,6 +184,24 @@ SCRIPT_TYPES = (
 OPENNEOUA_SCRIPT_FILE_FILTER = (
     "OpenNeoUA scripts (*.cfg *.scr *.txt *.ini *.ldf);;All files (*)"
 )
+_SCRIPT_TAB_COLLISION = "collision"
+_SCRIPT_TAB_FIRE = "fire"
+_SCRIPT_TAB_GUN = "gun"
+_SCRIPT_TAB_COCKPIT = "cockpit"
+_SCRIPT_TAB_ORDER = (
+    _SCRIPT_TAB_COLLISION, _SCRIPT_TAB_FIRE,
+    _SCRIPT_TAB_GUN, _SCRIPT_TAB_COCKPIT,
+)
+_SCRIPT_TAB_LABELS = {
+    _SCRIPT_TAB_COLLISION: "Collision",
+    _SCRIPT_TAB_FIRE: "Fire Points",
+    _SCRIPT_TAB_GUN: "Gun Points",
+    _SCRIPT_TAB_COCKPIT: "Cockpit View",
+}
+_SCRIPT_TAB_MARKER_RE = re.compile(
+    r"^\s*;\s*\[Tab:\s*(Collision|Fire Points|Gun Points|Cockpit View)\]\s*$",
+    re.IGNORECASE,
+)
 _MODEL_NAME_ROLE = int(Qt.ItemDataRole.UserRole) + 1
 _SPHERE_INDEX_ROLE = int(Qt.ItemDataRole.UserRole) + 2
 _MODEL_VP_ROLE = int(Qt.ItemDataRole.UserRole) + 3
@@ -1041,6 +1059,21 @@ _GUN_POINT_KEYS = {
     "unit_gun_dir_x", "unit_gun_dir_y", "unit_gun_dir_z",
     "unit_gun_type", "unit_gun_name", "unit_gun_icon",
 }
+_SCRIPT_TAB_KEYS = {
+    _SCRIPT_TAB_COLLISION: {
+        "radius", "overeof", "coll_num", "coll_act",
+        "coll_x", "coll_y", "coll_z", "coll_radius",
+    },
+    _SCRIPT_TAB_FIRE: {"fire_x", "fire_y", "fire_z", "num_weapons"},
+    _SCRIPT_TAB_GUN: set(_GUN_POINT_KEYS),
+    _SCRIPT_TAB_COCKPIT: {
+        "cockpit_camera_offset_x", "cockpit_camera_offset_y",
+        "cockpit_camera_offset_z",
+    },
+}
+_TURRET_LIMIT_KEY_SET = {
+    "gun_side_angle", "gun_up_angle", "gun_down_angle",
+}
 
 
 def _top_level_assignment_rows(text: str, block: ScriptBlock):
@@ -1508,6 +1541,331 @@ def _apply_turret_limit_updates(
                 output.append(line)
         updated = newline.join(output) + (newline if had_final_newline else "")
     return updated
+
+
+def _collision_tab_data_lines(project: CollisionProject) -> list[str]:
+    """Render only parameters owned by the Collision tab."""
+
+    lines: list[str] = []
+    if project.legacy is not None:
+        lines.append(f"radius = {_radius_number(project.legacy.radius)}")
+    if project.target_category == VEHICLE and project.overeof_enabled:
+        lines.append(f"overeof = {_number(project.overeof)}")
+    if project.compound:
+        if lines:
+            lines.append("")
+        lines.append(f"coll_num = {len(project.compound)}")
+        for index, sphere in enumerate(project.compound):
+            lines.extend([
+                "",
+                f"coll_act = {index}",
+                f"coll_x = {_number(sphere.x)}",
+                f"coll_y = {_number(sphere.y)}",
+                f"coll_z = {_number(sphere.z)}",
+                f"coll_radius = {_radius_number(sphere.radius)}",
+            ])
+    return lines
+
+
+def _fire_tab_data_lines(project: CollisionProject) -> list[str]:
+    """Render only parameters owned by the Fire Points tab."""
+
+    if project.target_category != VEHICLE or not project.fire_points_enabled:
+        return []
+    return [
+        f"fire_x = {_number(project.fire_x)}",
+        f"fire_y = {_number(project.fire_y)}",
+        f"fire_z = {_number(project.fire_z)}",
+        f"num_weapons = {_num_weapons_text(project)}",
+    ]
+
+
+def _script_tab_data_lines(
+        project: CollisionProject, group: str) -> list[str]:
+    """Return the complete script payload for one Collision Editor tab."""
+
+    if group == _SCRIPT_TAB_COLLISION:
+        return _collision_tab_data_lines(project)
+    if group == _SCRIPT_TAB_FIRE:
+        return _fire_tab_data_lines(project)
+    if group == _SCRIPT_TAB_GUN:
+        if project.target_category != VEHICLE or not project.gun_points_enabled:
+            return []
+        return gun_point_data_lines(project)
+    if group == _SCRIPT_TAB_COCKPIT:
+        return cockpit_camera_data_lines(project)
+    raise CollisionScriptError(f"Gruppo script sconosciuto: {group}")
+
+
+def build_editable_overwrite_preview(
+        kind: str, object_id: int, project: CollisionProject,
+        changed_groups: set[str] | frozenset[str]) -> str:
+    """Build the editable patch shown by Overwrite Loaded Definition.
+
+    Only tabs that differ from the last loaded script state are included. Each
+    tab marker owns the code until the next marker. Removing a whole marked
+    section therefore means "do not apply this tab" without touching the
+    source data already present in the script.
+    """
+
+    groups = [group for group in _SCRIPT_TAB_ORDER if group in changed_groups]
+    if project.target_category != VEHICLE:
+        groups = [group for group in groups if group == _SCRIPT_TAB_COLLISION]
+    if not groups:
+        return ""
+
+    lines = [f"{kind} {int(object_id)}"]
+    for group in groups:
+        if len(lines) > 1 and lines[-1] != "":
+            lines.append("")
+        lines.append(f"    ; [Tab: {_SCRIPT_TAB_LABELS[group]}]")
+        data = _script_tab_data_lines(project, group)
+        lines.extend("    " + line if line else "" for line in data)
+    lines.append("end")
+
+    if _SCRIPT_TAB_GUN in groups:
+        dirty_limits = sorted(
+            (limits for limits in project.turret_limits.values()
+             if limits.dirty),
+            key=lambda limits: limits.vehicle_id,
+        )
+        for limits in dirty_limits:
+            lines.extend(["", f"{limits.source_kind} {limits.vehicle_id}"])
+            lines.extend(
+                "    " + line for line in turret_limit_data_lines(limits))
+            lines.append("end")
+    return "\n".join(lines).rstrip() + "\n"
+
+
+def _script_tab_from_marker(line: str) -> str | None:
+    match = _SCRIPT_TAB_MARKER_RE.match(line)
+    if match is None:
+        return None
+    label = match.group(1).casefold()
+    for group, candidate in _SCRIPT_TAB_LABELS.items():
+        if candidate.casefold() == label:
+            return group
+    return None
+
+
+def _validate_editable_tab_lines(
+        group: str, lines: list[str], kind: str, object_id: int) -> None:
+    """Reject unsupported code before an editable overwrite is applied."""
+
+    allowed = _SCRIPT_TAB_KEYS[group]
+    for line in lines:
+        code = _active_code(line)
+        if not code:
+            continue
+        match = _GENERIC_PARAM_RE.match(line)
+        if match is None:
+            raise CollisionScriptError(
+                f"La sezione {_SCRIPT_TAB_LABELS[group]} contiene codice "
+                f"non supportato: {code}")
+        key = match.group("key").lower()
+        if key not in allowed:
+            raise CollisionScriptError(
+                f"{key} non appartiene alla tab "
+                f"{_SCRIPT_TAB_LABELS[group]}.")
+
+    synthetic = [f"{kind} {int(object_id)}"]
+    synthetic.extend(
+        "    " + line.lstrip() if line.strip() else "" for line in lines)
+    synthetic.append("end")
+    text = "\n".join(synthetic) + "\n"
+    block = find_script_blocks(text)[0]
+    if group == _SCRIPT_TAB_COLLISION:
+        import_collision_block(text, block, OPENNEOUA)
+        if "vehicle" in kind:
+            import_overeof_block(text, block)
+    elif group == _SCRIPT_TAB_FIRE:
+        import_fire_points_block(text, block)
+    elif group == _SCRIPT_TAB_GUN:
+        import_gun_points_block(text, block)
+    elif group == _SCRIPT_TAB_COCKPIT:
+        import_cockpit_camera_block(text, block)
+
+
+def _resolve_patch_target_block(
+        text: str, kind: str, object_id: int, *, turret: bool = False,
+) -> ScriptBlock:
+    matches = [
+        block for block in find_script_blocks(text)
+        if block.kind == kind and block.object_id == object_id
+    ]
+    if not matches:
+        raise CollisionScriptError(f"Target {kind} {object_id} non trovato.")
+    if len(matches) == 1:
+        block = matches[0]
+    elif turret and kind == "modify_vehicle":
+        authored = [
+            candidate for candidate in matches
+            if any(
+                key in _TURRET_LIMIT_KEY_SET
+                for _line, key, _raw, _indent
+                in _top_level_assignment_rows(text, candidate)
+            )
+        ]
+        block = authored[-1] if authored else matches[-1]
+    else:
+        raise CollisionScriptError(
+            f"Target ambiguo: {len(matches)} blocchi {kind} {object_id}.")
+    if not block.complete:
+        raise CollisionScriptError(
+            f"Parsing incompleto: manca end per {kind} {object_id}.")
+    return block
+
+
+def _patch_top_level_keys(
+        text: str, block: ScriptBlock, keys: set[str],
+        replacement_lines: list[str]) -> str:
+    """Replace one managed top-level key family and preserve everything else."""
+
+    newline = _line_ending(text)
+    had_final_newline = text.endswith(("\n", "\r"))
+    source_lines = text.splitlines()
+    rows = [
+        row for row in _top_level_assignment_rows(text, block)
+        if row[1] in keys
+    ]
+    indent = next(
+        (row[3] for row in rows if row[3]),
+        re.match(r"^(\s*)", source_lines[block.start_line]).group(1) + "    ",
+    )
+    rendered = [
+        indent + line.lstrip() if line.strip() else ""
+        for line in replacement_lines
+    ]
+    delete = {row[0] for row in rows}
+    output: list[str] = []
+    for index, line in enumerate(source_lines):
+        if index == block.end_line and rendered:
+            if output and output[-1].strip():
+                output.append("")
+            output.extend(rendered)
+        if index in delete:
+            continue
+        output.append(line)
+    return newline.join(output) + (newline if had_final_newline else "")
+
+
+def apply_editable_overwrite_preview(
+        source_text: str, patch_text: str,
+        expected_kind: str, expected_id: int,
+) -> tuple[str, set[str]]:
+    """Apply the user-edited overwrite patch to the original script text."""
+
+    if not patch_text.strip():
+        return source_text, set()
+
+    patch_blocks = find_script_blocks(patch_text)
+    if not patch_blocks:
+        raise CollisionScriptError(
+            "La preview modificabile non contiene alcun blocco script completo.")
+
+    patch_lines = patch_text.splitlines()
+    main_block: ScriptBlock | None = None
+    main_sections: dict[str, list[str]] = {}
+    for block in patch_blocks:
+        is_expected_target = (
+            block.kind == expected_kind
+            and block.object_id == int(expected_id))
+        has_marker = any(
+            _script_tab_from_marker(patch_lines[index]) is not None
+            for index in range(block.start_line + 1, block.end_line))
+        if not is_expected_target and not has_marker:
+            continue
+
+        sections: dict[str, list[str]] = {}
+        active_group: str | None = None
+        for index in range(block.start_line + 1, block.end_line):
+            line = patch_lines[index]
+            marker_group = _script_tab_from_marker(line)
+            if marker_group is not None:
+                if marker_group in sections:
+                    raise CollisionScriptError(
+                        f"La tab {_SCRIPT_TAB_LABELS[marker_group]} compare più "
+                        "volte nella preview.")
+                sections[marker_group] = []
+                active_group = marker_group
+                continue
+            if active_group is not None:
+                sections[active_group].append(line)
+            elif _active_code(line):
+                # A normal assignment without a tab marker would be ambiguous:
+                # preserving it is safer than guessing which workspace owns it.
+                raise CollisionScriptError(
+                    "Ogni parametro del blocco principale deve stare sotto "
+                    "un marcatore '; [Tab: ...]'.")
+
+        if sections or is_expected_target:
+            if main_block is not None:
+                raise CollisionScriptError(
+                    "La preview contiene più di un blocco principale "
+                    "compatibile con la definizione caricata.")
+            main_block = block
+            main_sections = sections
+
+    selected_groups: set[str] = set()
+    updated = source_text
+    if main_block is not None:
+        if (main_block.kind != expected_kind
+                or main_block.object_id != int(expected_id)):
+            raise CollisionScriptError(
+                "Il blocco principale della preview non corrisponde alla "
+                f"definizione caricata ({expected_kind} {expected_id}).")
+        for group in _SCRIPT_TAB_ORDER:
+            if group not in main_sections:
+                continue
+            if "weapon" in expected_kind and group != _SCRIPT_TAB_COLLISION:
+                raise CollisionScriptError(
+                    f"La tab {_SCRIPT_TAB_LABELS[group]} non è valida per "
+                    "una definizione weapon.")
+            replacement = main_sections[group]
+            _validate_editable_tab_lines(
+                group, replacement, expected_kind, expected_id)
+            target = _resolve_patch_target_block(
+                updated, expected_kind, expected_id)
+            updated = _patch_top_level_keys(
+                updated, target, _SCRIPT_TAB_KEYS[group], replacement)
+            selected_groups.add(group)
+
+    for block in patch_blocks:
+        if main_block is not None and block == main_block:
+            continue
+        # Referenced turret limits belong to the Gun Points tab. Removing the
+        # whole Gun Points section from the editable preview skips these blocks
+        # as well, so the source definitions remain untouched.
+        if _SCRIPT_TAB_GUN not in selected_groups:
+            continue
+        body_rows = list(_top_level_assignment_rows(patch_text, block))
+        unsupported = [
+            row[1] for row in body_rows
+            if row[1] not in _TURRET_LIMIT_KEY_SET
+        ]
+        if unsupported:
+            raise CollisionScriptError(
+                "I blocchi aggiuntivi della preview possono modificare solo "
+                "gun_side_angle, gun_up_angle e gun_down_angle.")
+        if "vehicle" not in block.kind:
+            raise CollisionScriptError(
+                "I blocchi aggiuntivi della preview devono essere vehicle.")
+        replacement = [
+            patch_lines[index]
+            for index in range(block.start_line + 1, block.end_line)
+        ]
+        for _line, key, raw, _indent in body_rows:
+            value = _script_integer(raw, key)
+            if value < 0:
+                raise CollisionScriptError(
+                    f"Valore negativo non valido per {key}: {raw}")
+        target = _resolve_patch_target_block(
+            updated, block.kind, block.object_id, turret=True)
+        updated = _patch_top_level_keys(
+            updated, target, _TURRET_LIMIT_KEY_SET, replacement)
+        selected_groups.add(_SCRIPT_TAB_GUN)
+
+    return updated, selected_groups
 
 
 def plan_script_update(
@@ -3520,6 +3878,7 @@ class ApplyScriptDialog(QDialog):
             initial_path: str | Path | None = None,
             initial_kind: str | None = None,
             initial_id: int | None = None,
+            changed_groups: set[str] | frozenset[str] | None = None,
     ) -> None:
         super().__init__(parent)
         self.setWindowTitle("Apply to Script")
@@ -3530,6 +3889,12 @@ class ApplyScriptDialog(QDialog):
         self._source_encoding = "utf-8"
         self._source_bom = False
         self.replace_all_managed = bool(replace_all_managed)
+        self.changed_groups = (
+            None if changed_groups is None else frozenset(changed_groups))
+        self._editable_overwrite = (
+            self.replace_all_managed and self.changed_groups is not None)
+        self._setting_preview = False
+        self.applied_groups: set[str] = set()
         self._script_blocks: list[ScriptBlock] = []
         layout = QVBoxLayout(self)
         form = QGridLayout()
@@ -3554,14 +3919,13 @@ class ApplyScriptDialog(QDialog):
         if self.replace_all_managed:
             self.setWindowTitle("Overwrite Loaded Definition")
             self.comment_missing.setText(
-                "Replace all active Collision Editor parameters with the "
-                "current values")
+                "Apply only Collision Editor tabs changed since this "
+                "definition was loaded")
             self.comment_missing.setChecked(True)
             self.comment_missing.setEnabled(False)
             self.comment_missing.setToolTip(
-                "The loaded vehicle block is rewritten canonically only for "
-                "parameters managed by Collision Editor. Unrelated script "
-                "data and comments are preserved.")
+                "Only tabs whose script data differs from the last loaded "
+                "state are included. Unrelated script data is preserved.")
         form.addWidget(QLabel("Script"), 0, 0)
         form.addWidget(self.path_edit, 0, 1)
         form.addWidget(browse, 0, 2)
@@ -3577,11 +3941,22 @@ class ApplyScriptDialog(QDialog):
         form.addWidget(self.detected_name, 5, 1, 1, 2)
         form.addWidget(self.comment_missing, 6, 0, 1, 3)
         layout.addLayout(form)
-        layout.addWidget(QLabel(
-            "Preview (only supported spatial/collision parameters may "
-            "change)"))
+        if self._editable_overwrite:
+            preview_label = QLabel(
+                "Editable Preview — only modified tabs are included. Edit "
+                "the code before Apply; remove a whole '; [Tab: ...]' "
+                "section to skip that tab.")
+            preview_label.setWordWrap(True)
+        else:
+            preview_label = QLabel(
+                "Preview (only supported spatial/collision parameters may "
+                "change)")
+        layout.addWidget(preview_label)
         self.preview = QPlainTextEdit()
-        self.preview.setReadOnly(True)
+        self.preview.setReadOnly(not self._editable_overwrite)
+        if self._editable_overwrite:
+            self.preview.setPlaceholderText(
+                "No modified tabs. Edit here manually only if needed.")
         layout.addWidget(self.preview, 1)
         self.error_label = QLabel()
         self.error_label.setStyleSheet("color: #e06060")
@@ -3609,6 +3984,8 @@ class ApplyScriptDialog(QDialog):
             self.comment_missing.toggled,
         ):
             widget_signal.connect(self.refresh_preview)
+        if self._editable_overwrite:
+            self.preview.textChanged.connect(self._editable_preview_changed)
         if initial_path is not None:
             self.path_edit.setText(str(initial_path))
         if initial_kind is not None:
@@ -3690,16 +4067,32 @@ class ApplyScriptDialog(QDialog):
 
     def refresh_preview(self, *_args):
         self.error_label.clear()
-        self.preview.clear()
         self.apply_button.setEnabled(False)
         self._load_script_blocks()
         path = Path(self.path_edit.text())
         if not path.is_file():
             self.detected_name.setText("—")
+            self._setting_preview = True
+            self.preview.clear()
+            self._setting_preview = False
             return
         try:
             (self._source_text, self._source_encoding,
              self._source_bom) = read_script_file(path)
+            if self._editable_overwrite:
+                target = _resolve_patch_target_block(
+                    self._source_text, self.kind_combo.currentText(),
+                    self.id_spin.value())
+                preview = build_editable_overwrite_preview(
+                    self.kind_combo.currentText(), self.id_spin.value(),
+                    self.project, set(self.changed_groups or ()))
+                name = target.name
+                self._setting_preview = True
+                self.preview.setPlainText(preview)
+                self._setting_preview = False
+                self.detected_name.setText(name or "(name not present)")
+                self._editable_preview_changed()
+                return
             updated, preview, name = plan_script_update(
                 self._source_text,
                 self.kind_combo.currentText(),
@@ -3714,10 +4107,34 @@ class ApplyScriptDialog(QDialog):
             return
         self.updated_text = updated
         self.detected_name.setText(name or "(name not present)")
+        self._setting_preview = True
         self.preview.setPlainText(preview or "(No changes)")
+        self._setting_preview = False
         self.apply_button.setEnabled(bool(preview))
 
+    def _editable_preview_changed(self):
+        if self._setting_preview or not self._editable_overwrite:
+            return
+        self.error_label.clear()
+        try:
+            updated, groups = apply_editable_overwrite_preview(
+                self._source_text, self.preview.toPlainText(),
+                self.kind_combo.currentText(), self.id_spin.value())
+        except CollisionScriptError as exc:
+            self.updated_text = self._source_text
+            self.applied_groups = set()
+            self.error_label.setText(str(exc))
+            self.apply_button.setEnabled(False)
+            return
+        self.updated_text = updated
+        self.applied_groups = groups
+        self.apply_button.setEnabled(updated != self._source_text)
+
     def _apply(self):
+        if self._editable_overwrite:
+            self._editable_preview_changed()
+            if not self.apply_button.isEnabled():
+                return
         path = Path(self.path_edit.text())
         try:
             write_script_file(
@@ -5825,6 +6242,7 @@ class CollisionEditorWindow(QMainWindow):
             initial_path=self._active_script_path,
             initial_kind=self._active_script_kind,
             initial_id=self._active_script_id,
+            changed_groups=self._changed_script_tabs(),
         )
         dialog.path_edit.setReadOnly(True)
         dialog.search_edit.setEnabled(False)
@@ -5832,14 +6250,24 @@ class CollisionEditorWindow(QMainWindow):
         dialog.kind_combo.setEnabled(False)
         dialog.id_spin.setEnabled(False)
         if dialog.exec() == QDialog.DialogCode.Accepted:
-            for limits in self.project.turret_limits.values():
-                limits.dirty = False
-            self._capture_loaded_gun_points()
-            self._capture_loaded_cockpit_camera()
-            self._capture_tab_reset_baseline()
-            self._set_modified(False)
-            self.statusBar().showMessage(
-                "Loaded definition overwritten.", 7000)
+            baseline_refreshed = self._refresh_linked_script_baseline()
+            if not baseline_refreshed:
+                self.statusBar().showMessage(
+                    "Definition overwritten, but the source baseline could "
+                    "not be refreshed. Reload the script before the next "
+                    "overwrite.", 9000)
+                return
+            remaining = self._changed_script_tabs()
+            if remaining:
+                names = ", ".join(
+                    _SCRIPT_TAB_LABELS[group]
+                    for group in _SCRIPT_TAB_ORDER if group in remaining)
+                self.statusBar().showMessage(
+                    "Definition overwritten. Still different from the script: "
+                    f"{names}.", 9000)
+            else:
+                self.statusBar().showMessage(
+                    "Loaded definition overwritten.", 7000)
 
     def save_loaded_vehicle_script(self):
         """Compatibility alias for the previous vehicle-only action."""
@@ -7285,6 +7713,145 @@ class CollisionEditorWindow(QMainWindow):
         baseline = CollisionProject()
         baseline.restore(self._tab_reset_baseline)
         return baseline
+
+    @staticmethod
+    def _script_tab_state(project: CollisionProject, group: str) -> tuple:
+        """Return only values that are actually authored by one script tab."""
+
+        if group == _SCRIPT_TAB_COLLISION:
+            legacy = (
+                None if project.legacy is None
+                else float(project.legacy.radius))
+            compound = tuple(
+                (float(sphere.x), float(sphere.y), float(sphere.z),
+                 float(sphere.radius))
+                for sphere in project.compound)
+            return (
+                bool(project.overeof_enabled), float(project.overeof),
+                legacy, compound,
+            )
+        if group == _SCRIPT_TAB_FIRE:
+            return (
+                bool(project.fire_points_enabled),
+                float(project.fire_x), float(project.fire_y),
+                float(project.fire_z), int(project.num_weapons),
+                int(project.num_weapons_max),
+            )
+        if group == _SCRIPT_TAB_GUN:
+            points = tuple((
+                point.scheme, float(point.x), float(point.y), float(point.z),
+                float(point.dir_x), float(point.dir_y), float(point.dir_z),
+                int(point.gun_type), point.name, point.icon,
+            ) for point in project.gun_points)
+            limits = tuple((
+                vehicle_id, bool(limit.enabled), int(limit.side),
+                int(limit.up), int(limit.down), limit.source_kind,
+            ) for vehicle_id, limit in sorted(project.turret_limits.items()))
+            return (
+                bool(project.gun_points_enabled),
+                project.unit_gun_default_icon, points, limits,
+            )
+        if group == _SCRIPT_TAB_COCKPIT:
+            return (
+                bool(project.cockpit_camera_enabled),
+                float(project.cockpit_camera_offset_x),
+                float(project.cockpit_camera_offset_y),
+                float(project.cockpit_camera_offset_z),
+            )
+        raise ValueError(group)
+
+    def _changed_script_tabs(self) -> set[str]:
+        """Return tabs whose script-authored state differs from the source."""
+
+        baseline = self._baseline_project()
+        groups = {_SCRIPT_TAB_COLLISION}
+        if self.project.target_category == VEHICLE:
+            groups.update((
+                _SCRIPT_TAB_FIRE, _SCRIPT_TAB_GUN, _SCRIPT_TAB_COCKPIT))
+        return {
+            group for group in groups
+            if self._script_tab_state(self.project, group)
+            != self._script_tab_state(baseline, group)
+        }
+
+    def _refresh_linked_script_baseline(self) -> bool:
+        """Refresh source baselines after an overwrite without losing edits.
+
+        The editor project is deliberately left untouched. If the editable
+        preview skipped a tab or manually changed it to values different from
+        the current workspace, that tab remains modified and can be applied
+        later.
+        """
+
+        if (self._active_script_path is None
+                or self._active_script_id is None
+                or not self._active_script_kind):
+            return False
+        try:
+            text, _encoding, _bom = read_script_file(self._active_script_path)
+            block = _resolve_patch_target_block(
+                text, self._active_script_kind, self._active_script_id)
+            baseline = self._baseline_project()
+            baseline.legacy, baseline.compound, _warnings = (
+                import_collision_block(text, block, OPENNEOUA))
+            if baseline.target_category == VEHICLE:
+                baseline.overeof_enabled, baseline.overeof = (
+                    import_overeof_block(text, block))
+                (baseline.fire_points_enabled, baseline.fire_x, baseline.fire_y,
+                 baseline.fire_z, baseline.num_weapons,
+                 baseline.num_weapons_max) = import_fire_points_block(
+                    text, block)
+                (baseline.gun_points_enabled, baseline.gun_points,
+                 baseline.unit_gun_default_icon) = import_gun_points_block(
+                    text, block)
+                baseline.turret_limits = import_turret_limits(text)
+                (baseline.cockpit_camera_enabled,
+                 baseline.cockpit_camera_offset_x,
+                 baseline.cockpit_camera_offset_y,
+                 baseline.cockpit_camera_offset_z) = (
+                    import_cockpit_camera_block(text, block))
+
+            imported_schemes = gun_point_families_in_block(text, block)
+            if len(imported_schemes) == 1:
+                baseline_scheme = next(iter(imported_schemes))
+            elif "unit" in imported_schemes:
+                baseline_scheme = "unit"
+            else:
+                baseline_scheme = self._tab_reset_gun_point_scheme
+
+            self._tab_reset_baseline = baseline.snapshot()
+            self._tab_reset_gun_point_scheme = baseline_scheme
+            self._loaded_gun_points_enabled = baseline.gun_points_enabled
+            self._loaded_gun_points = [
+                point.clone() for point in baseline.gun_points]
+            self._loaded_unit_gun_default_icon = (
+                baseline.unit_gun_default_icon)
+            self._loaded_gun_point_scheme = baseline_scheme
+            self._loaded_turret_limits = {
+                vehicle_id: limits.clone()
+                for vehicle_id, limits in baseline.turret_limits.items()
+            }
+            self._loaded_cockpit_camera_enabled = (
+                baseline.cockpit_camera_enabled)
+            self._loaded_cockpit_camera_offset = (
+                baseline.cockpit_camera_offset_x,
+                baseline.cockpit_camera_offset_y,
+                baseline.cockpit_camera_offset_z,
+            )
+
+            baseline_limits = baseline.turret_limits
+            for vehicle_id, limits in self.project.turret_limits.items():
+                source = baseline_limits.get(vehicle_id)
+                limits.dirty = (
+                    source is None
+                    or (limits.enabled, limits.side, limits.up, limits.down,
+                        limits.source_kind)
+                    != (source.enabled, source.side, source.up, source.down,
+                        source.source_kind))
+            self._set_modified(bool(self._changed_script_tabs()))
+            return True
+        except (OSError, UnicodeError, CollisionScriptError):
+            return False
 
     @staticmethod
     def _workspace_state(project: CollisionProject, tab_index: int) -> tuple:
