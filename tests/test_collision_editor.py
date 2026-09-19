@@ -38,6 +38,8 @@ from collision_editor import (
     FIRE_POINT_COLOR,
     GUN_POINT_COLOR,
     VIEW_PRESETS,
+    apply_editable_overwrite_preview,
+    build_editable_overwrite_preview,
     effective_runtime_radius,
     export_collision_text,
     fire_point_positions,
@@ -3574,6 +3576,119 @@ class CollisionEditorTests(unittest.TestCase):
         self.assertEqual(updated.count("gun_side_angle = 1400"), 1)
         self.assertEqual(updated.count("gun_side_angle = 500"), 1)
         self.assertNotIn("gun_side_angle = 2000", updated)
+
+    def test_139_editable_overwrite_preview_contains_only_changed_tabs(self):
+        project = CollisionProject(
+            name="Leonid", source_model="leonid.sklt",
+            target_category=VEHICLE,
+            legacy=CollisionSphere(LEGACY, radius=30),
+            compound=[CollisionSphere(OPENNEOUA, 1, 2, 3, 40)],
+            fire_points_enabled=True, fire_x=10, fire_y=20, fire_z=30,
+            num_weapons=2,
+        )
+        preview = build_editable_overwrite_preview(
+            "new_vehicle", 37, project, {"collision"})
+        self.assertIn("; [Tab: Collision]", preview)
+        self.assertIn("radius = 30", preview)
+        self.assertIn("coll_radius = 40", preview)
+        self.assertNotIn("; [Tab: Fire Points]", preview)
+        self.assertNotIn("fire_x =", preview)
+
+    def test_140_editable_overwrite_applies_manual_code_and_preserves_other_tabs(self):
+        source = (
+            "new_vehicle 37\n"
+            "    name = Leonid\n"
+            "    mass = 999\n"
+            "    radius = 20\n"
+            "    fire_x = 10\n"
+            "    fire_y = 20\n"
+            "    fire_z = 30\n"
+            "    num_weapons = 2\n"
+            "    coll_num = 1\n"
+            "    coll_act = 0\n"
+            "    coll_x = 1\n"
+            "    coll_y = 2\n"
+            "    coll_z = 3\n"
+            "    coll_radius = 4\n"
+            "end\n"
+        )
+        patch = (
+            "new_vehicle 37\n"
+            "    ; [Tab: Collision]\n"
+            "    radius = 31\n"
+            "    coll_num = 1\n"
+            "    coll_act = 0\n"
+            "    coll_x = 11\n"
+            "    coll_y = 12\n"
+            "    coll_z = 13\n"
+            "    coll_radius = 44\n"
+            "end\n"
+        )
+        updated, groups = apply_editable_overwrite_preview(
+            source, patch, "new_vehicle", 37)
+        self.assertEqual(groups, {"collision"})
+        self.assertIn("radius = 31", updated)
+        self.assertIn("coll_radius = 44", updated)
+        self.assertIn("fire_x = 10", updated)
+        self.assertIn("num_weapons = 2", updated)
+        self.assertIn("mass = 999", updated)
+        self.assertNotIn("radius = 20", updated)
+
+    def test_141_deleting_a_tab_section_skips_that_tab(self):
+        source = (
+            "new_vehicle 37\n"
+            "    radius = 20\n"
+            "    fire_x = 10\n"
+            "    fire_y = 20\n"
+            "    fire_z = 30\n"
+            "    num_weapons = 2\n"
+            "end\n"
+        )
+        patch = (
+            "new_vehicle 37\n"
+            "    ; [Tab: Collision]\n"
+            "    radius = 35\n"
+            "end\n"
+        )
+        updated, groups = apply_editable_overwrite_preview(
+            source, patch, "new_vehicle", 37)
+        self.assertEqual(groups, {"collision"})
+        self.assertIn("radius = 35", updated)
+        self.assertIn("fire_x = 10", updated)
+        self.assertIn("fire_y = 20", updated)
+        self.assertIn("fire_z = 30", updated)
+        self.assertIn("num_weapons = 2", updated)
+
+    def test_142_empty_editable_main_block_makes_no_changes(self):
+        source = "new_vehicle 37\n    radius = 20\nend\n"
+        patch = "new_vehicle 37\nend\n"
+        updated, groups = apply_editable_overwrite_preview(
+            source, patch, "new_vehicle", 37)
+        self.assertEqual(updated, source)
+        self.assertFalse(groups)
+
+    def test_143_removing_gun_tab_also_skips_referenced_turret_blocks(self):
+        source = (
+            "new_vehicle 56\n"
+            "    unit_num_guns = 1\n"
+            "    unit_act_gun = 0\n"
+            "    unit_gun_type = 90\n"
+            "end\n"
+            "new_vehicle 90\n"
+            "    gun_side_angle = 1000\n"
+            "end\n"
+        )
+        patch = (
+            "new_vehicle 56\n"
+            "end\n"
+            "new_vehicle 90\n"
+            "    gun_side_angle = 1300\n"
+            "end\n"
+        )
+        updated, groups = apply_editable_overwrite_preview(
+            source, patch, "new_vehicle", 56)
+        self.assertEqual(updated, source)
+        self.assertFalse(groups)
 
 
 if __name__ == "__main__":
