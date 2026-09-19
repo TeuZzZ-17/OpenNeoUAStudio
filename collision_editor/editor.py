@@ -181,6 +181,9 @@ def _type_button_stylesheet(category: str) -> str:
 SCRIPT_TYPES = (
     "new_vehicle", "modify_vehicle", "new_weapon", "modify_weapon",
 )
+OPENNEOUA_SCRIPT_FILE_FILTER = (
+    "OpenNeoUA scripts (*.cfg *.scr *.txt *.ini *.ldf);;All files (*)"
+)
 _MODEL_NAME_ROLE = int(Qt.ItemDataRole.UserRole) + 1
 _SPHERE_INDEX_ROLE = int(Qt.ItemDataRole.UserRole) + 2
 _MODEL_VP_ROLE = int(Qt.ItemDataRole.UserRole) + 3
@@ -3618,7 +3621,7 @@ class ApplyScriptDialog(QDialog):
     def _browse(self):
         path, _ = QFileDialog.getOpenFileName(
             self, "Select OpenNeoUA script", "",
-            "OpenNeoUA scripts (*.scr *.txt *.ini *.ldf);;All files (*)")
+            OPENNEOUA_SCRIPT_FILE_FILTER)
         if path:
             self.path_edit.setText(path)
 
@@ -5508,7 +5511,7 @@ class CollisionEditorWindow(QMainWindow):
         path, _ = QFileDialog.getOpenFileName(
             self, "Import vehicle / weapon definition",
             str(self._last_directory),
-            "OpenNeoUA scripts (*.txt *.scr *.ini *.ldf);;All files (*)")
+            OPENNEOUA_SCRIPT_FILE_FILTER)
         if path:
             self.open_vehicle_script(path)
 
@@ -8755,7 +8758,7 @@ class CollisionEditorWindow(QMainWindow):
         path, _ = QFileDialog.getOpenFileName(
             self, "Import collisions from script",
             str(self._last_directory),
-            "OpenNeoUA scripts (*.scr *.txt *.ini *.ldf);;All files (*)")
+            OPENNEOUA_SCRIPT_FILE_FILTER)
         if not path:
             return
         try:
@@ -8852,7 +8855,7 @@ class CollisionEditorWindow(QMainWindow):
             return
         path, _ = QFileDialog.getOpenFileName(
             self, "Apply to Script", str(self._last_directory),
-            "OpenNeoUA scripts (*.txt *.scr *.ini *.ldf);;All files (*)")
+            OPENNEOUA_SCRIPT_FILE_FILTER)
         if not path:
             return
         self._last_directory = Path(path).parent
