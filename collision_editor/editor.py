@@ -81,6 +81,11 @@ from editor_widgets import (
     create_import_bas_archive_action,
     install_standard_file_menu_tail,
 )
+from collision_editor.sphere_generator import (
+    ACCURACY_PRESETS,
+    UNIT_COLL_MAX_COUNT,
+    generate_collision_spheres,
+)
 from model_space_gizmo import ModelSpaceGizmo
 from vp_manager import (
     EmbeddedVPSet,
@@ -1076,6 +1081,58 @@ _TURRET_LIMIT_KEY_SET = {
 }
 
 
+@dataclass(frozen=True)
+class _ManagedScriptFamily:
+    """One logical group that must be replaced as a unit in a script block."""
+
+    name: str
+    keys: frozenset[str]
+    old_disabled_labels: frozenset[str] = frozenset()
+
+
+_MANAGED_SCRIPT_FAMILIES = (
+    _ManagedScriptFamily(
+        "legacy radius", frozenset({"radius"}),
+        frozenset({"legacy radius"})),
+    _ManagedScriptFamily(
+        "ground alignment", frozenset({"overeof"}),
+        frozenset({"overeof", "ground alignment"})),
+    _ManagedScriptFamily(
+        "OpenNeoUA collision",
+        frozenset({
+            "coll_num", "coll_act", "coll_x", "coll_y", "coll_z",
+            "coll_radius",
+        }),
+        frozenset({"compound collisions", "openneoua collision"})),
+    _ManagedScriptFamily(
+        "fire points",
+        frozenset({"fire_x", "fire_y", "fire_z", "num_weapons"}),
+        frozenset({"fire points"})),
+    _ManagedScriptFamily(
+        "gun points", frozenset(_GUN_POINT_KEYS),
+        frozenset({"gun points"})),
+    _ManagedScriptFamily(
+        "cockpit view",
+        frozenset({
+            "cockpit_camera_offset_x", "cockpit_camera_offset_y",
+            "cockpit_camera_offset_z",
+        }),
+        frozenset({"cockpit camera offset", "cockpit view"})),
+    _ManagedScriptFamily(
+        "turret limits", frozenset(_TURRET_LIMIT_KEY_SET),
+        frozenset({"turret limits"})),
+)
+
+_OLD_DISABLED_HEADER_RE = re.compile(
+    r"^\s*;\s*Collision Editor disabled:\s*(?P<label>.+?)\s*$",
+    re.IGNORECASE,
+)
+_COMMENTED_ASSIGNMENT_RE = re.compile(
+    r"^\s*;\s*(?P<key>[A-Za-z_][A-Za-z0-9_]*)\s*=",
+    re.IGNORECASE,
+)
+
+
 def _top_level_assignment_rows(text: str, block: ScriptBlock):
     """Yield active top-level assignments with their complete RHS text.
 
@@ -1493,53 +1550,10 @@ def _apply_turret_limit_updates(
                 f"Parsing incompleto: manca end per {block.kind} "
                 f"{block.object_id}.")
 
-        newline = _line_ending(updated)
-        had_final_newline = updated.endswith(("\n", "\r"))
-        lines = updated.splitlines()
-        rows = [
-            row for row in _top_level_assignment_rows(updated, block)
-            if row[1] in _TURRET_LIMIT_KEYS
-        ]
-        indent = next(
-            (row[3] for row in rows if row[3]),
-            re.match(r"^(\s*)", lines[block.start_line]).group(1) + "    ",
-        )
-        rendered = [
-            indent + line for line in turret_limit_data_lines(limits)
-        ]
-        replace: dict[int, list[str]] = {}
-        delete: set[int] = set()
-        insert_before_end: list[str] = []
-        if rendered:
-            if rows:
-                replace[rows[0][0]] = rendered
-                delete.update(row[0] for row in rows[1:])
-            else:
-                insert_before_end = rendered
-        elif rows and comment_missing:
-            first = rows[0][0]
-            replace[first] = [
-                indent + "; Collision Editor disabled: turret limits",
-                indent + "; " + lines[first].lstrip(),
-            ]
-            for row in rows[1:]:
-                replace[row[0]] = [indent + "; " + lines[row[0]].lstrip()]
-        elif rows:
-            delete.update(row[0] for row in rows)
-
-        output: list[str] = []
-        for index, line in enumerate(lines):
-            if index == block.end_line and insert_before_end:
-                if output and output[-1].strip():
-                    output.append("")
-                output.extend(insert_before_end)
-            if index in delete:
-                continue
-            if index in replace:
-                output.extend(replace[index])
-            else:
-                output.append(line)
-        updated = newline.join(output) + (newline if had_final_newline else "")
+        updated = _patch_top_level_keys(
+            updated, block, _TURRET_LIMIT_KEY_SET,
+            turret_limit_data_lines(limits),
+            comment_missing=comment_missing, turret=True)
     return updated
 
 
@@ -1716,37 +1730,199 @@ def _resolve_patch_target_block(
     return block
 
 
-def _patch_top_level_keys(
-        text: str, block: ScriptBlock, keys: set[str],
-        replacement_lines: list[str]) -> str:
-    """Replace one managed top-level key family and preserve everything else."""
+def _managed_families_for_keys(keys: set[str]) -> list[_ManagedScriptFamily]:
+    """Return the known logical families covered by one editor tab."""
+
+    requested = set(keys)
+    families = [
+        family for family in _MANAGED_SCRIPT_FAMILIES
+        if family.keys & requested
+    ]
+    covered = set().union(*(family.keys for family in families)) \
+        if families else set()
+    remaining = requested - covered
+    if remaining:
+        families.append(_ManagedScriptFamily(
+            "managed data", frozenset(remaining)))
+    return families
+
+
+def _replacement_lines_for_family(
+        replacement_lines: list[str], keys: frozenset[str]) -> list[str]:
+    """Keep one family's assignments and its internal separator lines."""
+
+    selected: list[int] = []
+    for index, line in enumerate(replacement_lines):
+        match = _GENERIC_PARAM_RE.match(line)
+        if match is not None and match.group("key").lower() in keys:
+            selected.append(index)
+    if not selected:
+        return []
+
+    first, last = selected[0], selected[-1]
+    result: list[str] = []
+    for line in replacement_lines[first:last + 1]:
+        if not line.strip():
+            result.append("")
+            continue
+        match = _GENERIC_PARAM_RE.match(line)
+        if match is not None and match.group("key").lower() in keys:
+            result.append(line)
+    return result
+
+
+def _old_generated_family_lines(
+        lines: list[str], block: ScriptBlock,
+        family: _ManagedScriptFamily) -> set[int]:
+    """Find only comments emitted by the old Collision Editor writer."""
+
+    labels = {label.casefold() for label in family.old_disabled_labels}
+    if not labels:
+        return set()
+    found: set[int] = set()
+    index = block.start_line + 1
+    while index < block.end_line:
+        match = _OLD_DISABLED_HEADER_RE.match(lines[index])
+        if match is None or match.group("label").strip().casefold() not in labels:
+            index += 1
+            continue
+        found.add(index)
+        cursor = index + 1
+        while cursor < block.end_line:
+            line = lines[cursor]
+            if not line.strip():
+                found.add(cursor)
+                cursor += 1
+                continue
+            commented = _COMMENTED_ASSIGNMENT_RE.match(line)
+            if (commented is None
+                    or commented.group("key").lower() not in family.keys):
+                break
+            found.add(cursor)
+            cursor += 1
+        index = cursor
+    return found
+
+
+def _fill_internal_family_blanks(
+        lines: list[str], indices: set[int]) -> set[int]:
+    """Include blank separators lying only between managed family rows."""
+
+    expanded = set(indices)
+    ordered = sorted(indices)
+    for left, right in zip(ordered, ordered[1:]):
+        if right <= left + 1:
+            continue
+        between = range(left + 1, right)
+        if all(not lines[index].strip() for index in between):
+            expanded.update(between)
+    return expanded
+
+
+def _deletion_ranges(indices: set[int]) -> list[tuple[int, int]]:
+    if not indices:
+        return []
+    ordered = sorted(indices)
+    ranges: list[tuple[int, int]] = []
+    start = end = ordered[0]
+    for index in ordered[1:]:
+        if index == end + 1:
+            end = index
+            continue
+        ranges.append((start, end))
+        start = end = index
+    ranges.append((start, end))
+    return ranges
+
+
+def _replace_top_level_family(
+        text: str, block: ScriptBlock, family: _ManagedScriptFamily,
+        replacement_lines: list[str], *,
+        comment_missing: bool = False) -> str:
+    """Replace one family at its first anchor and remove all duplicates."""
 
     newline = _line_ending(text)
     had_final_newline = text.endswith(("\n", "\r"))
     source_lines = text.splitlines()
     rows = [
         row for row in _top_level_assignment_rows(text, block)
-        if row[1] in keys
+        if row[1] in family.keys
     ]
+    generated = _old_generated_family_lines(source_lines, block, family)
+    content_indices = {row[0] for row in rows} | generated
+    delete = _fill_internal_family_blanks(source_lines, content_indices)
+    anchor = min(content_indices) if content_indices else None
+    block_indent = next((
+        row[3] for row in _top_level_assignment_rows(text, block) if row[3]
+    ), re.match(
+        r"^(\s*)", source_lines[block.start_line]).group(1) + "    ")
     indent = next(
         (row[3] for row in rows if row[3]),
-        re.match(r"^(\s*)", source_lines[block.start_line]).group(1) + "    ",
+        next((
+            re.match(r"^(\s*)", source_lines[index]).group(1)
+            for index in sorted(generated)
+            if re.match(r"^(\s*)", source_lines[index]).group(1)
+        ), block_indent),
     )
     rendered = [
         indent + line.lstrip() if line.strip() else ""
         for line in replacement_lines
     ]
-    delete = {row[0] for row in rows}
+    if not rendered and comment_missing and rows:
+        rendered = [indent + f"; Collision Editor disabled: {family.name}"]
+        rendered.extend(
+            indent + "; " + source_lines[row[0]].lstrip()
+            for row in rows
+        )
+
+    # Removing a later duplicate can join two existing separator lines. Drop
+    # only the right-hand blank created by that removal; unrelated spacing is
+    # otherwise preserved byte-for-byte.
+    for start, end in _deletion_ranges(delete):
+        inserts_here = bool(rendered) and anchor is not None \
+            and start <= anchor <= end
+        left = start - 1
+        right = end + 1
+        if (not inserts_here and left > block.start_line
+                and right < block.end_line
+                and left not in delete and right not in delete
+                and not source_lines[left].strip()
+                and not source_lines[right].strip()):
+            delete.add(right)
+
     output: list[str] = []
+    inserted = False
     for index, line in enumerate(source_lines):
-        if index == block.end_line and rendered:
+        if anchor is not None and index == anchor and rendered:
+            output.extend(rendered)
+            inserted = True
+        if index in delete:
+            continue
+        if index == block.end_line and rendered and not inserted:
             if output and output[-1].strip():
                 output.append("")
             output.extend(rendered)
-        if index in delete:
-            continue
+            inserted = True
         output.append(line)
     return newline.join(output) + (newline if had_final_newline else "")
+
+
+def _patch_top_level_keys(
+        text: str, block: ScriptBlock, keys: set[str],
+        replacement_lines: list[str], *,
+        comment_missing: bool = False, turret: bool = False) -> str:
+    """Replace each logical family without moving existing family anchors."""
+
+    updated = text
+    for family in _managed_families_for_keys(keys):
+        target = _resolve_patch_target_block(
+            updated, block.kind, block.object_id, turret=turret)
+        replacement = _replacement_lines_for_family(
+            replacement_lines, family.keys)
+        updated = _replace_top_level_family(
+            updated, target, family, replacement,
+            comment_missing=comment_missing)
+    return updated
 
 
 def apply_editable_overwrite_preview(
@@ -1767,6 +1943,10 @@ def apply_editable_overwrite_preview(
     main_block: ScriptBlock | None = None
     main_sections: dict[str, list[str]] = {}
     for block in patch_blocks:
+        if not block.complete:
+            raise CollisionScriptError(
+                "Parsing incompleto nella preview: manca end per "
+                f"{block.kind} {block.object_id}.")
         is_expected_target = (
             block.kind == expected_kind
             and block.object_id == int(expected_id))
@@ -1920,44 +2100,29 @@ def plan_script_update(
     insert_before_end: list[str] = []
 
     if replace_all_managed:
-        # The loaded-script workflow treats the editor state as the canonical
-        # source for every parameter it manages.  Remove all active managed
-        # assignments from the selected block, then insert one clean block.
-        # Commented historical lines stay untouched because the game ignores
-        # them and deleting user notes silently would be destructive.
-        #
+        # The loaded-script workflow treats each editor family as canonical,
+        # but each family keeps its own original position in the target block.
         # num_weapons is not exclusively a Fire Point parameter. If the source
-        # contains num_weapons but no explicit fire_x/y/z, keep that standalone
-        # gameplay value while the Fire Point workspace remains disabled.
+        # contains no fire offsets, preserve that standalone gameplay value
+        # while the Fire Point workspace remains disabled.
         source_has_fire_offsets = any(
             row[1] in {"fire_x", "fire_y", "fire_z"} for row in fire_rows)
         preserve_standalone_num_weapons = (
             "vehicle" in kind and not project.fire_points_enabled
             and not source_has_fire_offsets)
-        delete.update(
-            row[0] for row in rows
-            if not (preserve_standalone_num_weapons
-                    and row[1] == "num_weapons"))
-        canonical = collision_data_lines(project)
-        insert_before_end.extend(
-            indent + line if line else "" for line in canonical)
-
-        output: list[str] = []
-        for index, line in enumerate(lines):
-            if index == block.end_line and insert_before_end:
-                while output and not output[-1].strip():
-                    output.pop()
-                if output and output[-1].strip():
-                    output.append("")
-                output.extend(insert_before_end)
-                if output and output[-1].strip():
-                    output.append("")
-            if index in delete:
+        updated = text
+        for group in _SCRIPT_TAB_ORDER:
+            if "weapon" in kind and group != _SCRIPT_TAB_COLLISION:
                 continue
-            output.append(line)
-        updated = newline.join(output) + (newline if had_final_newline else "")
+            group_keys = set(_SCRIPT_TAB_KEYS[group])
+            if group == _SCRIPT_TAB_FIRE and preserve_standalone_num_weapons:
+                group_keys.discard("num_weapons")
+            target = _resolve_patch_target_block(updated, kind, object_id)
+            updated = _patch_top_level_keys(
+                updated, target, group_keys,
+                _script_tab_data_lines(project, group))
         updated = _apply_turret_limit_updates(
-            updated, project, comment_missing=comment_missing)
+            updated, project, comment_missing=False)
         preview = "".join(difflib.unified_diff(
             text.splitlines(keepends=True),
             updated.splitlines(keepends=True),
@@ -2716,6 +2881,23 @@ class CollisionViewport(AssetViewport):
         ]
         self._model_preview_base_owner_bounds = dict(self._owner_bounds)
 
+    def local_owner_triangles(self, owner: str | None):
+        """Return selected-owner triangles before preview scale and overeof."""
+
+        triangles = []
+        for face, vertices in zip(
+                self._faces, self._model_preview_base_faces):
+            if owner is not None and face.owner != owner:
+                continue
+            if len(vertices) < 3:
+                continue
+            first = vertices[0]
+            triangles.extend(
+                (first, vertices[index], vertices[index + 1])
+                for index in range(1, len(vertices) - 1)
+            )
+        return triangles
+
     @staticmethod
     def _scaled_point(point, scale):
         return (
@@ -2736,7 +2918,7 @@ class CollisionViewport(AssetViewport):
         """Return scaled model-space bounds without the visual ground offset.
 
         Collision coordinates are authored relative to the actor origin.
-        Suggested spheres and validation must therefore ignore the temporary
+        Generated spheres and validation must therefore ignore the temporary
         world placement produced by ``overeof``.
         """
 
@@ -4340,11 +4522,6 @@ class CollisionEditorWindow(QMainWindow):
         (self.close_bas_archive_action,
          self.exit_action) = install_standard_file_menu_tail(
             file_menu, self, close_archive_callback=self.close_current_archive)
-        self.create_suggested_action = QAction(
-            "Create Suggested Sphere", self)
-        self.create_suggested_action.triggered.connect(
-            self.create_suggested)
-
         edit_menu = self.menuBar().addMenu("&Edit")
         self.undo_action = QAction("Undo", self)
         self.undo_action.setIconText("< Undo")
@@ -4386,6 +4563,13 @@ class CollisionEditorWindow(QMainWindow):
             lambda: self.mirror_selected_sphere("y"))
         self.mirror_z_action.triggered.connect(
             lambda: self.mirror_selected_sphere("z"))
+        self.generate_collision_sphere_actions = {}
+        for preset in ACCURACY_PRESETS:
+            action = QAction(preset.label, self)
+            action.triggered.connect(
+                lambda _checked=False, key=preset.key:
+                self.generate_collision_spheres(key))
+            self.generate_collision_sphere_actions[preset.key] = action
         # Sphere-specific editing controls live inside the Collision tab.
         # Edit keeps only the standard history commands, avoiding a second,
         # generic home for controls that are meaningful only for collisions.
@@ -4395,6 +4579,10 @@ class CollisionEditorWindow(QMainWindow):
         self.add_menu = self.menuBar().addMenu("&Add")
         self.add_menu.addAction(self.add_legacy_action)
         self.add_menu.addAction(self.add_openneoua_action)
+        self.generate_collision_spheres_menu = self.add_menu.addMenu(
+            "Generate Collision Spheres")
+        self._populate_generate_collision_spheres_menu(
+            self.generate_collision_spheres_menu)
 
         self.viewpoint_menu = self.menuBar().addMenu("Viewpoint")
         self.viewpoint_actions = {}
@@ -4790,20 +4978,40 @@ class CollisionEditorWindow(QMainWindow):
         sphere_buttons_top.addWidget(self.add_openneoua_collision_button)
         spheres_layout.addLayout(sphere_buttons_top)
 
+        self.collision_sphere_count_label = QLabel(
+            f"OpenNeoUA Spheres: 0 / {UNIT_COLL_MAX_COUNT}")
+        self.collision_sphere_count_label.setAlignment(
+            Qt.AlignmentFlag.AlignHCenter | Qt.AlignmentFlag.AlignVCenter)
+        self.collision_sphere_count_label.setToolTip(
+            "Current OpenNeoUA compound collision spheres and the maximum "
+            "supported by the runtime parser.")
+        spheres_layout.addWidget(self.collision_sphere_count_label)
+
         sphere_edit_buttons = QHBoxLayout()
         sphere_edit_buttons.setContentsMargins(0, 0, 0, 0)
         sphere_edit_buttons.setSpacing(5)
         self.duplicate_sphere_button = QPushButton("Duplicate Sphere")
         self.delete_sphere_button = QPushButton("Delete Sphere")
-        self.create_suggested_button = QPushButton("Create Suggested Sphere")
         self.duplicate_sphere_button.clicked.connect(
             self.duplicate_action.trigger)
         self.delete_sphere_button.clicked.connect(self.delete_action.trigger)
-        self.create_suggested_button.clicked.connect(
-            self.create_suggested_action.trigger)
-        sphere_edit_buttons.addWidget(self.duplicate_sphere_button)
-        sphere_edit_buttons.addWidget(self.delete_sphere_button)
-        sphere_edit_buttons.addWidget(self.create_suggested_button)
+        self.generate_collision_spheres_button = QToolButton()
+        self.generate_collision_spheres_button.setText(
+            "Generate Collision Spheres")
+        self.generate_collision_spheres_button.setToolTip(
+            "Approximate the selected model with editable OpenNeoUA collision "
+            "spheres at the chosen geometric accuracy.")
+        self.generate_collision_spheres_button.setPopupMode(
+            QToolButton.ToolButtonPopupMode.InstantPopup)
+        generate_menu = QMenu(self.generate_collision_spheres_button)
+        self._populate_generate_collision_spheres_menu(generate_menu)
+        self.generate_collision_spheres_button.setMenu(generate_menu)
+        self.generate_collision_spheres_button.setSizePolicy(
+            QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        sphere_edit_buttons.addWidget(self.duplicate_sphere_button, 1)
+        sphere_edit_buttons.addWidget(self.delete_sphere_button, 1)
+        sphere_edit_buttons.addWidget(
+            self.generate_collision_spheres_button, 1)
         spheres_layout.addLayout(sphere_edit_buttons)
 
         sphere_selection_buttons = QHBoxLayout()
@@ -4834,7 +5042,7 @@ class CollisionEditorWindow(QMainWindow):
         self.hide_all_spheres_button = QPushButton("Hide All Spheres")
         self.hide_all_spheres_button.setToolTip(
             "Hide every collision sphere in the 3D preview. When all spheres "
-            "are hidden, the same button becomes Unhide All Spheres.")
+            "are hidden, the same button becomes Show All Spheres.")
         self.hide_all_spheres_button.clicked.connect(
             self._toggle_all_sphere_visibility)
         spheres_layout.addWidget(self.hide_all_spheres_button)
@@ -6517,7 +6725,23 @@ class CollisionEditorWindow(QMainWindow):
         self.properties_tabs.setCurrentIndex(self.collision_tab_index)
         self._sync_all()
 
+    def _ensure_compound_capacity(
+            self, additional: int, operation: str) -> bool:
+        """Keep authored compound collisions within the runtime safety cap."""
+
+        available = max(0, UNIT_COLL_MAX_COUNT - len(self.project.compound))
+        if additional <= available:
+            return True
+        self.statusBar().showMessage(
+            f"{operation} would exceed the OpenNeoUA collision sphere limit "
+            f"({len(self.project.compound)} / {UNIT_COLL_MAX_COUNT}; "
+            f"{available} slot{'s' if available != 1 else ''} available).",
+            6500)
+        return False
+
     def add_compound(self, category: str):
+        if not self._ensure_compound_capacity(1, "Add sphere"):
+            return
         self._push_undo()
         self.project.compound.append(self._default_sphere(category))
         self._selected = len(self.project.spheres()) - 1
@@ -6528,12 +6752,73 @@ class CollisionEditorWindow(QMainWindow):
         self.properties_tabs.setCurrentIndex(self.collision_tab_index)
         self._sync_all()
 
-    def create_suggested(self):
-        if self._model_bounds() is None:
+    def generate_collision_spheres(self, preset_key: str):
+        """Replace compound spheres with one adaptive mesh approximation."""
+
+        preset = next((
+            candidate for candidate in ACCURACY_PRESETS
+            if candidate.key == preset_key
+        ), None)
+        if preset is None:
+            raise ValueError(
+                f"Unsupported collision-sphere accuracy: {preset_key}")
+        triangles = self.viewport.local_owner_triangles(self._current_owner)
+        if not triangles:
             QMessageBox.warning(
-                self, "No model", "Load and select a model first.")
+                self, "No model geometry",
+                "Load and select a model with usable surface geometry first.")
             return
-        self.add_compound(OPENNEOUA)
+
+        if self.project.compound and not self._confirm_generated_replacement():
+            return
+
+        self.statusBar().showMessage(
+            f"Generating collision spheres — {preset.label}...")
+        QApplication.processEvents()
+        QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
+        try:
+            result = generate_collision_spheres(
+                triangles, preset.key, max_spheres=UNIT_COLL_MAX_COUNT)
+        except ValueError as exc:
+            QMessageBox.warning(
+                self, "Collision sphere generation failed", str(exc))
+            return
+        finally:
+            QApplication.restoreOverrideCursor()
+
+        self._push_undo()
+        self.project.compound = [
+            CollisionSphere(
+                OPENNEOUA, sphere.x, sphere.y, sphere.z, sphere.radius)
+            for sphere in result.spheres
+        ]
+        self.project.sphere_isolation_active = False
+        self._selected = 1 if self.project.legacy is not None else 0
+        self._selected_spheres = {self._selected}
+        self._selected_fire_point = -1
+        self._selected_gun_point = -1
+        self._set_modified()
+        self.properties_tabs.setCurrentIndex(self.collision_tab_index)
+        self._sync_all()
+        cap_note = " — safety cap reached" if result.hit_safety_cap else ""
+        self.statusBar().showMessage(
+            f"Generated {len(result.spheres)} collision spheres — "
+            f"{preset.label}{cap_note}", 8000)
+
+    def _confirm_generated_replacement(self) -> bool:
+        confirmation = QMessageBox(self)
+        confirmation.setIcon(QMessageBox.Icon.Warning)
+        confirmation.setWindowTitle("Replace OpenNeoUA Collision Spheres")
+        confirmation.setText(
+            "Existing OpenNeoUA collision spheres will be replaced.\n"
+            "The Legacy Radius will be preserved.\n\nContinue?")
+        generate_button = confirmation.addButton(
+            "Generate", QMessageBox.ButtonRole.AcceptRole)
+        cancel_button = confirmation.addButton(
+            "Cancel", QMessageBox.ButtonRole.RejectRole)
+        confirmation.setDefaultButton(cancel_button)
+        confirmation.exec()
+        return confirmation.clickedButton() is generate_button
 
     def duplicate_sphere(self):
         entries = self._selected_sphere_entries()
@@ -6547,6 +6832,9 @@ class CollisionEditorWindow(QMainWindow):
             QMessageBox.information(
                 self, "Single legacy radius",
                 "A project can contain only one Legacy Radius.")
+            return
+        if not self._ensure_compound_capacity(
+                len(selected_compound), "Duplicate selection"):
             return
 
         self._push_undo()
@@ -6574,6 +6862,10 @@ class CollisionEditorWindow(QMainWindow):
     def _populate_change_type_menu(self, menu: QMenu) -> None:
         menu.addAction(self.change_to_legacy_action)
         menu.addAction(self.change_to_openneoua_action)
+
+    def _populate_generate_collision_spheres_menu(self, menu: QMenu) -> None:
+        for preset in ACCURACY_PRESETS:
+            menu.addAction(self.generate_collision_sphere_actions[preset.key])
 
     def change_sphere_type(self, target_category: str):
         """Convert the complete current sphere selection when valid."""
@@ -6622,11 +6914,14 @@ class CollisionEditorWindow(QMainWindow):
             ]
             if not changing:
                 return
-            self._push_undo()
             legacy = self.project.legacy
             converted_legacy = (
                 legacy is not None
                 and any(candidate is legacy for candidate in changing))
+            if converted_legacy and not self._ensure_compound_capacity(
+                    1, "Convert Legacy Radius"):
+                return
+            self._push_undo()
             if converted_legacy:
                 self.project.legacy = None
                 legacy.category = target_category
@@ -6666,6 +6961,9 @@ class CollisionEditorWindow(QMainWindow):
             self.statusBar().showMessage(
                 "Legacy Radius is fixed at the origin and cannot be mirrored.",
                 5000)
+            return
+        if not self._ensure_compound_capacity(
+                len(selected_compound), "Mirror selection"):
             return
 
         self._push_undo()
@@ -6779,7 +7077,7 @@ class CollisionEditorWindow(QMainWindow):
             lambda _checked=False: self._set_all_sphere_visibility(False),
             any(sphere.visible for sphere in spheres))
         self._context_action(
-            menu, "Unhide All Spheres",
+            menu, "Show All Spheres",
             lambda _checked=False: self._set_all_sphere_visibility(True),
             any(not sphere.visible for sphere in spheres))
         if self.project.sphere_isolation_active:
@@ -9189,8 +9487,12 @@ class CollisionEditorWindow(QMainWindow):
             and self._active_script_id is not None)
         self.add_legacy_action.setEnabled(self.project.legacy is None)
         self.add_legacy_button.setEnabled(self.project.legacy is None)
-        self.add_openneoua_collision_button.setEnabled(
-            self.add_openneoua_action.isEnabled())
+        compound_count = len(self.project.compound)
+        compound_has_capacity = compound_count < UNIT_COLL_MAX_COUNT
+        self.add_openneoua_action.setEnabled(compound_has_capacity)
+        self.add_openneoua_collision_button.setEnabled(compound_has_capacity)
+        self.collision_sphere_count_label.setText(
+            f"OpenNeoUA Spheres: {compound_count} / {UNIT_COLL_MAX_COUNT}")
         selected_spheres = [
             sphere for _index, sphere in selected_sphere_entries
         ]
@@ -9247,7 +9549,7 @@ class CollisionEditorWindow(QMainWindow):
             not sphere.visible for sphere in self.project.spheres())
         self.hide_all_spheres_button.setEnabled(collisions_present)
         self.hide_all_spheres_button.setText(
-            "Unhide All Spheres" if all_spheres_hidden
+            "Show All Spheres" if all_spheres_hidden
             else "Hide All Spheres")
         selected_indices = self._selected_sphere_indices()
         isolate_index = (
@@ -9260,8 +9562,11 @@ class CollisionEditorWindow(QMainWindow):
             "Unisolate Sphere"
             if self.project.sphere_isolation_active
             else "Isolate Sphere")
-        self.create_suggested_button.setEnabled(
-            self._model_bounds() is not None)
+        generation_enabled = bool(
+            self.viewport.local_owner_triangles(self._current_owner))
+        self.generate_collision_spheres_button.setEnabled(generation_enabled)
+        for action in self.generate_collision_sphere_actions.values():
+            action.setEnabled(generation_enabled)
         self.undo_button.setEnabled(bool(self._undo))
         self.redo_button.setEnabled(bool(self._redo))
         self.toolbar_undo_button.setEnabled(bool(self._undo))

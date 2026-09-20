@@ -456,6 +456,14 @@ class CollisionEditorTests(unittest.TestCase):
         ], [
             "Add Legacy Radius",
             "Add OpenNeoUA Collision",
+            "Generate Collision Spheres",
+        ])
+        self.assertEqual([
+            action.text()
+            for action in window.generate_collision_spheres_menu.actions()
+        ], [
+            "Low Accuracy", "Medium Accuracy",
+            "High Accuracy", "Ultra Accuracy",
         ])
         self.assertTrue(all(
             action.isCheckable()
@@ -1173,7 +1181,7 @@ class CollisionEditorTests(unittest.TestCase):
             [sphere.visible for sphere in window.project.compound],
             [False, False, False])
         self.assertEqual(
-            window.hide_all_spheres_button.text(), "Unhide All Spheres")
+            window.hide_all_spheres_button.text(), "Show All Spheres")
 
         window.hide_all_spheres_button.click()
         self.assertEqual(
@@ -1294,7 +1302,7 @@ class CollisionEditorTests(unittest.TestCase):
         self.assertIn(
             "Hide All Spheres", [action.text() for action in menu.actions()])
         self.assertIn(
-            "Unhide All Spheres", [action.text() for action in menu.actions()])
+            "Show All Spheres", [action.text() for action in menu.actions()])
 
         window._toggle_selected_sphere_visibility()
         menu = window._create_sphere_context_menu(0)
@@ -1478,18 +1486,19 @@ class CollisionEditorTests(unittest.TestCase):
         bounds = window._model_bounds()
         self.assertEqual(bounds, (-4.0, -1.5, -0.5, 4.0, 3.0, 0.5))
 
-    def test_61_suggested_sphere_uses_scaled_model_bounds(self):
+    def test_61_generator_geometry_ignores_model_preview_scale(self):
         family = _family()
         window = self._window()
         with patch("collision_editor.load_asset_family", return_value=family):
             window.open_base("sample.base")
+        triangles_before = window.viewport.local_owner_triangles(
+            window._current_owner)
         window.model_scale_x_spin.setValue(3.0)
         window.model_scale_y_spin.setValue(1.0)
         window.model_scale_z_spin.setValue(1.0)
-        window.create_suggested()
-        sphere = window.project.compound[0]
-        self.assertEqual(sphere.center, (0.0, 0.5, 0.0))
-        self.assertEqual(sphere.radius, 6.0)
+        triangles_after = window.viewport.local_owner_triangles(
+            window._current_owner)
+        self.assertEqual(triangles_after, triangles_before)
 
     def test_62_model_preview_scale_is_undoable_and_resettable(self):
         window = self._window()
@@ -1790,17 +1799,18 @@ class CollisionEditorTests(unittest.TestCase):
         self.assertNotIn(
             "Script",
             [action.text().replace("&", "") for action in window.file_menu.actions()])
-        self.assertEqual(window.create_suggested_button.text(),
-                         "Create Suggested Sphere")
+        self.assertEqual(window.generate_collision_spheres_button.text(),
+                         "Generate Collision Spheres")
         for action in (
                 window.export_action, window.copy_output_action,
                 window.import_action, window.apply_script_action):
             self.assertNotIn(
                 action, window.model_preview_scale_toolbar.actions())
         central_button_texts = {
-            button.text() for button in
-            window.centralWidget().findChildren(QPushButton)}
-        self.assertIn("Create Suggested Sphere", central_button_texts)
+            button.text() for button in (
+                window.centralWidget().findChildren(QPushButton)
+                + window.centralWidget().findChildren(QToolButton))}
+        self.assertIn("Generate Collision Spheres", central_button_texts)
         self.assertNotIn("Export Collision Text", central_button_texts)
         self.assertNotIn("Copy Output to Clipboard", central_button_texts)
         self.assertNotIn("Import Collision Text", central_button_texts)
@@ -3341,7 +3351,7 @@ class CollisionEditorTests(unittest.TestCase):
         for label in (
                 "Add Legacy Radius", "Add OpenNeoUA Collision",
                 "Duplicate Sphere", "Delete Sphere",
-                "Create Suggested Sphere", "Select All Spheres",
+                "Generate Collision Spheres", "Select All Spheres",
                 "Change Sphere Type",
                 "Mirror Selected Sphere", "Undo", "Redo"):
             self.assertIn(label, labels)
@@ -3436,8 +3446,8 @@ class CollisionEditorTests(unittest.TestCase):
         self.assertIn("gun_up_angle = 1500", flak_text)
         self.assertIn("gun_down_angle = 1000", flak_text)
         self.assertNotIn("gun_side_angle = 2550", updated)
-        self.assertIn("new_vehicle 90", preview)
-        self.assertIn("gun_side_angle = 500", preview)
+        self.assertIn("-    gun_side_angle = 2550", preview)
+        self.assertIn("+    gun_side_angle = 500", preview)
 
     def test_136_export_round_trip_preserves_unmanaged_data_and_updates_all_workspaces(self):
         text = (

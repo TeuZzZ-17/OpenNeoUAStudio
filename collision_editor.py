@@ -1127,9 +1127,6 @@ class CollisionEditorWindow(QMainWindow):
         right.addWidget(spheres_box)
         right.addWidget(selected_box)
 
-        suggested = QPushButton("Create Suggested Sphere")
-        suggested.clicked.connect(self.create_suggested)
-        right.addWidget(suggested)
         output_row = QGridLayout()
         for position, (text, slot) in enumerate((
             ("Export Collision Text", self.export_text),
@@ -1356,13 +1353,6 @@ class CollisionEditorWindow(QMainWindow):
         self._selected = len(self.project.spheres()) - 1
         self._set_modified()
         self._sync_all()
-
-    def create_suggested(self):
-        if self._model_bounds() is None:
-            QMessageBox.warning(
-                self, "No model", "Load and select a model first.")
-            return
-        self.add_compound(OPENNEOUA)
 
     def duplicate_sphere(self):
         sphere = self._selected_sphere()
