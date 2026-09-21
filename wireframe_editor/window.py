@@ -9,11 +9,12 @@ from __future__ import annotations
 from pathlib import Path
 import sys
 
-from PySide6.QtCore import QEvent, Qt
-from PySide6.QtGui import QAction, QKeySequence
+from PySide6.QtCore import QEvent, QPointF, Qt
+from PySide6.QtGui import QAction, QColor, QKeySequence, QPainter, QPen
 from PySide6.QtWidgets import (
     QApplication,
     QAbstractSpinBox,
+    QCheckBox,
     QComboBox,
     QHBoxLayout,
     QLineEdit,
@@ -53,6 +54,172 @@ from sklt_parser import (
 APP_TITLE = "OpenNeoUA Studio - Wireframe Editor"
 
 
+MirrorGuide = tuple[tuple[float, float], tuple[float, float], bool]
+
+
+def _match_mirror_vertices(
+    points: list[tuple[float, float]], scale: float
+) -> tuple[dict[int, int], set[int]]:
+    """Match existing vertices around the Z=0 mirror axis.
+
+    Pairing is intentionally conservative: only vertices already reasonably
+    close to a mirrored counterpart are linked. This prevents Mirror Symmetry
+    from grabbing unrelated geometry in an asymmetric model.
+    """
+    safe_scale = max(abs(float(scale)), 1.0e-9)
+    axis_tolerance = 6.0 / safe_scale
+    pair_tolerance = 50.0 / safe_scale
+
+    center_indices = {
+        index for index, (_x_value, z_value) in enumerate(points)
+        if abs(z_value) <= axis_tolerance
+    }
+    lower_indices = [
+        index for index, (_x_value, z_value) in enumerate(points)
+        if z_value < -axis_tolerance
+    ]
+    upper_indices = [
+        index for index, (_x_value, z_value) in enumerate(points)
+        if z_value > axis_tolerance
+    ]
+
+    candidates: list[tuple[float, int, int]] = []
+    for lower in lower_indices:
+        lower_x, lower_z = points[lower]
+        target_z = -lower_z
+        for upper in upper_indices:
+            upper_x, upper_z = points[upper]
+            distance = ((upper_x - lower_x) ** 2 + (upper_z - target_z) ** 2) ** 0.5
+            if distance <= pair_tolerance:
+                candidates.append((distance, lower, upper))
+
+    pairs: dict[int, int] = {}
+    used_lower: set[int] = set()
+    used_upper: set[int] = set()
+    for _distance, lower, upper in sorted(candidates):
+        if lower in used_lower or upper in used_upper:
+            continue
+        used_lower.add(lower)
+        used_upper.add(upper)
+        pairs[lower] = upper
+        pairs[upper] = lower
+
+    return pairs, center_indices
+
+
+def _apply_mirror_positions(
+    source_positions: dict[int, tuple[float, float]],
+    pair_map: dict[int, int],
+    center_indices: set[int],
+    drag_start_points: dict[int, tuple[float, float]],
+) -> tuple[dict[int, tuple[float, float]], list[MirrorGuide]]:
+    """Return one symmetric move, including counterpart vertices and guides."""
+    positions = dict(source_positions)
+    guides: list[MirrorGuide] = []
+    source_indices = set(source_positions)
+    processed_pairs: set[tuple[int, int]] = set()
+
+    for index in sorted(source_indices):
+        point = source_positions[index]
+        if index in center_indices:
+            positions[index] = (point[0], 0.0)
+            continue
+
+        partner = pair_map.get(index)
+        if partner is None:
+            mirror_target = (point[0], -point[1])
+            guides.append((positions[index], mirror_target, False))
+            continue
+
+        pair_key = (min(index, partner), max(index, partner))
+        if pair_key in processed_pairs:
+            continue
+        processed_pairs.add(pair_key)
+
+        if partner in source_indices:
+            partner_point = source_positions[partner]
+            shared_x = (point[0] + partner_point[0]) * 0.5
+            radius = (abs(point[1]) + abs(partner_point[1])) * 0.5
+            index_started_lower = (
+                drag_start_points.get(index, point)[1]
+                <= drag_start_points.get(partner, partner_point)[1]
+            )
+            if index_started_lower:
+                positions[index] = (shared_x, -radius)
+                positions[partner] = (shared_x, radius)
+            else:
+                positions[index] = (shared_x, radius)
+                positions[partner] = (shared_x, -radius)
+            guides.append((positions[index], positions[partner], True))
+            continue
+
+        mirror_target = (positions[index][0], -positions[index][1])
+        positions[partner] = mirror_target
+        guides.append((positions[index], mirror_target, True))
+
+    return positions, guides
+
+
+class MirrorGuideOverlay(QWidget):
+    """Lightweight visual helper drawn above the existing wireframe canvas."""
+
+    def __init__(self, canvas: QWidget) -> None:
+        super().__init__(canvas)
+        self._canvas = canvas
+        self._guides: list[MirrorGuide] = []
+        self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
+        self.setAttribute(Qt.WidgetAttribute.WA_NoSystemBackground, True)
+        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
+        self.setGeometry(canvas.rect())
+        canvas.installEventFilter(self)
+        self.hide()
+
+    def eventFilter(self, watched, event) -> bool:
+        if watched is self._canvas and event.type() in (
+            QEvent.Type.Resize,
+            QEvent.Type.Show,
+        ):
+            self.setGeometry(self._canvas.rect())
+        return False
+
+    def set_guides(self, guides: list[MirrorGuide]) -> None:
+        self._guides = list(guides)
+        self.setVisible(bool(self._guides))
+        if self._guides:
+            self.raise_()
+        self.update()
+
+    def clear_guides(self) -> None:
+        self.set_guides([])
+
+    def paintEvent(self, event) -> None:  # noqa: N802 - Qt override
+        if not self._guides:
+            return
+
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        transform = self._canvas._make_transform()
+
+        axis = self._canvas._to_screen((0.0, 0.0), transform)
+        painter.setPen(QPen(QColor(218, 160, 255, 52), 1.0, Qt.PenStyle.DashLine))
+        painter.drawLine(
+            QPointF(0.0, axis.y()),
+            QPointF(float(self.width()), axis.y()),
+        )
+
+        for source, target, matched in self._guides:
+            source_screen = self._canvas._to_screen(source, transform)
+            target_screen = self._canvas._to_screen(target, transform)
+            alpha = 105 if matched else 70
+            style = Qt.PenStyle.DashLine if matched else Qt.PenStyle.DotLine
+            painter.setPen(QPen(QColor(218, 160, 255, alpha), 1.0, style))
+            painter.setBrush(Qt.BrushStyle.NoBrush)
+            painter.drawLine(source_screen, target_screen)
+            painter.drawEllipse(target_screen, 4.0, 4.0)
+
+        painter.end()
+
+
 class WireframeEditorWindow(QMainWindow):
     def __init__(self) -> None:
         super().__init__()
@@ -63,6 +230,23 @@ class WireframeEditorWindow(QMainWindow):
         self._current_file_path: Path | None = None
 
         self.outline_editor = OutlineEditor()
+        self._mirror_pair_map: dict[int, int] = {}
+        self._mirror_center_indices: set[int] = set()
+        self._mirror_drag_start_points: dict[int, tuple[float, float]] = {}
+        self._mirror_guide_overlay = MirrorGuideOverlay(self.outline_editor.canvas)
+        self.mirror_symmetry_check = QCheckBox("Mirror Symmetry")
+        self.mirror_symmetry_check.setChecked(True)
+        self.mirror_symmetry_check.setToolTip(
+            "Move mode: keep existing mirrored vertices symmetric around Z=0. "
+            "Thin guide lines show the mirrored target while dragging."
+        )
+        self.mirror_symmetry_check.toggled.connect(self._mirror_symmetry_toggled)
+        self.outline_editor.canvas.pointsMoved.disconnect(
+            self.outline_editor.move_projected_points
+        )
+        self.outline_editor.canvas.pointsMoved.connect(self._move_points_with_mirror)
+        self.outline_editor.canvas.selectionDragStarted.connect(self._prepare_mirror_drag)
+        self.outline_editor.canvas.selectionDragFinished.connect(self._finish_mirror_drag)
         self.outline_editor.show_indices_check.setChecked(True)
         self.outline_editor.dirtyChanged.connect(self._outline_dirty_changed)
         self.outline_editor.geometryChanged.connect(self._outline_geometry_changed)
@@ -113,6 +297,8 @@ class WireframeEditorWindow(QMainWindow):
         self._start_new_session(mark_dirty=False)
 
     def eventFilter(self, watched, event) -> bool:
+        if event.type() == QEvent.Type.KeyPress and event.key() == Qt.Key.Key_Escape:
+            self._finish_mirror_drag()
         if event.type() == QEvent.Type.ShortcutOverride:
             widget = QApplication.focusWidget()
             editable = False
@@ -397,7 +583,116 @@ class WireframeEditorWindow(QMainWindow):
         self.edit_toolbar.addWidget(self.outline_editor.show_indices_check)
         self.edit_toolbar.addSeparator()
         self.edit_toolbar.addWidget(self.outline_editor.auto_align_check)
+        self.edit_toolbar.addWidget(self.mirror_symmetry_check)
         self.addToolBar(Qt.ToolBarArea.TopToolBarArea, self.edit_toolbar)
+
+    def _mirror_symmetry_toggled(self, enabled: bool) -> None:
+        if not enabled:
+            self._finish_mirror_drag()
+
+    def _prepare_mirror_drag(self) -> None:
+        self._mirror_pair_map.clear()
+        self._mirror_center_indices.clear()
+        self._mirror_drag_start_points.clear()
+        self._mirror_guide_overlay.clear_guides()
+        if (
+            not self.mirror_symmetry_check.isChecked()
+            or self.outline_editor.save_mode != "poo2"
+            or self.outline_editor.canvas.transform_mode != "move"
+        ):
+            return
+
+        points = self.outline_editor._projected_points()
+        transform = self.outline_editor.canvas._make_transform()
+        scale = max(abs(transform[1]), 1.0e-9)
+        self._mirror_pair_map, self._mirror_center_indices = _match_mirror_vertices(
+            points, scale
+        )
+        self._mirror_drag_start_points = {
+            index: point for index, point in enumerate(points)
+        }
+
+    def _finish_mirror_drag(self) -> None:
+        self._mirror_pair_map.clear()
+        self._mirror_center_indices.clear()
+        self._mirror_drag_start_points.clear()
+        self._mirror_guide_overlay.clear_guides()
+
+    def _move_points_with_mirror(self, point_positions: object, commit_undo: bool) -> None:
+        editor = self.outline_editor
+        if (
+            not self.mirror_symmetry_check.isChecked()
+            or editor.save_mode != "poo2"
+            or editor.canvas.transform_mode != "move"
+            or not isinstance(point_positions, dict)
+        ):
+            self._mirror_guide_overlay.clear_guides()
+            editor.move_projected_points(point_positions, commit_undo)
+            return
+
+        source_positions: dict[int, tuple[float, float]] = {}
+        for index, value in point_positions.items():
+            if (
+                isinstance(index, int)
+                and isinstance(value, (tuple, list))
+                and len(value) == 2
+            ):
+                source_positions[index] = (float(value[0]), float(value[1]))
+        if not source_positions:
+            return
+
+        if not self._mirror_drag_start_points:
+            self._prepare_mirror_drag()
+
+        # Preserve the editor's existing Auto Align behavior before mirror
+        # counterparts are added. Otherwise the extra mirrored vertices would
+        # make a single-vertex drag look like a multi-selection to Auto Align.
+        auto_align_message = ""
+        if editor.auto_align_check.isChecked():
+            if len(source_positions) == 1:
+                index, point = next(iter(source_positions.items()))
+                source_positions[index] = editor._auto_align_projected_vertex(
+                    index, point[0], point[1]
+                )
+            else:
+                source_positions = editor._snap_moved_group_center_to_origin(
+                    source_positions
+                )
+            auto_align_message = editor._last_auto_align_message
+
+        mirrored_positions, guides = _apply_mirror_positions(
+            source_positions,
+            self._mirror_pair_map,
+            self._mirror_center_indices,
+            self._mirror_drag_start_points,
+        )
+
+        # Auto Align was already applied to the user's side above. Temporarily
+        # leave Move mode so the normal move handler does not snap a second
+        # time after the mirrored counterparts have been appended.
+        transform_mode = editor.canvas.transform_mode
+        editor.canvas.transform_mode = "mirror_move"
+        try:
+            editor.move_projected_points(mirrored_positions, commit_undo)
+        finally:
+            editor.canvas.transform_mode = transform_mode
+
+        if auto_align_message:
+            editor._last_auto_align_message = auto_align_message
+            editor._update_controls()
+
+        if commit_undo:
+            self._mirror_guide_overlay.clear_guides()
+        else:
+            # Keep the normal Auto Align preview alive while Mirror Symmetry
+            # adds its own lighter overlay above the canvas.
+            projected = editor._projected_points()
+            editor.canvas._update_snap_preview({
+                index: projected[index]
+                for index in source_positions
+                if 0 <= index < len(projected)
+            })
+            self._mirror_guide_overlay.set_guides(guides)
 
     def _maybe_save_dirty(self) -> bool:
         if not self.outline_editor.is_dirty:
@@ -704,6 +999,9 @@ class WireframeEditorWindow(QMainWindow):
         if self.redo_action:
             self.redo_action.setEnabled(self.outline_editor.can_redo)
         can_edit_structure = self.outline_editor.save_mode == "poo2"
+        self.mirror_symmetry_check.setEnabled(can_edit_structure)
+        if not can_edit_structure:
+            self._finish_mirror_drag()
         has_single_selection = self.outline_editor.selected_index >= 0 and self.outline_editor.selected_vertex_count == 1
         has_any_selection = self.outline_editor.has_vertex_selection or self.outline_editor.has_selected_link
         if self.copy_action:
