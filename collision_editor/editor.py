@@ -246,6 +246,15 @@ def _number(value: float) -> str:
     return f"{value:.6f}".rstrip("0").rstrip(".")
 
 
+def _sphere_coordinate_number(value: float) -> str:
+    """Compact one-decimal coordinate used only by the sphere list UI."""
+
+    rounded = round(value, 1)
+    if abs(rounded) < 0.05:
+        rounded = 0.0
+    return f"{rounded:.1f}"
+
+
 def _radius_number(value: float) -> str:
     """Engine-safe whole-number radius used by lists and text output."""
 
@@ -5105,15 +5114,22 @@ class CollisionEditorWindow(QMainWindow):
         sphere_header.setStretchLastSection(False)
         sphere_header.setSectionResizeMode(
             0, QHeaderView.ResizeMode.Stretch)
-        for column in range(1, 6):
+        self.sphere_tree.setColumnWidth(0, 96)
+
+        # Keep numeric/status columns compact so the descriptive Sphere column
+        # has room to breathe. Coordinates are display-only one-decimal values;
+        # the project still keeps and writes their full internal precision.
+        compact_widths = {1: 52, 2: 56, 3: 46, 4: 46, 5: 46}
+        for column, width in compact_widths.items():
             sphere_header.setSectionResizeMode(
-                column, QHeaderView.ResizeMode.ResizeToContents)
+                column, QHeaderView.ResizeMode.Fixed)
+            self.sphere_tree.setColumnWidth(column, width)
             self.sphere_tree.headerItem().setTextAlignment(
                 column,
                 Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
         sphere_header.setSectionResizeMode(
             6, QHeaderView.ResizeMode.Fixed)
-        self.sphere_tree.setColumnWidth(6, 44)
+        self.sphere_tree.setColumnWidth(6, 42)
         self.sphere_tree.headerItem().setTextAlignment(
             6, Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
         spheres_layout.addWidget(self.sphere_tree)
@@ -8802,9 +8818,9 @@ class CollisionEditorWindow(QMainWindow):
                     TYPE_LABELS[sphere.category],
                     _radius_number(sphere.radius),
                     "Visible" if sphere.visible else "Hidden",
-                    _number(sphere.x),
-                    _number(sphere.y),
-                    _number(sphere.z),
+                    _sphere_coordinate_number(sphere.x),
+                    _sphere_coordinate_number(sphere.y),
+                    _sphere_coordinate_number(sphere.z),
                     index_text,
                 ])
                 item.setData(0, _SPHERE_INDEX_ROLE, flat_index)
