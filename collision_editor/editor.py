@@ -7110,16 +7110,23 @@ class CollisionEditorWindow(QMainWindow):
             any(not sphere.visible for sphere in spheres))
         if self.project.sphere_isolation_active:
             self._context_action(
-                menu, "Unisolate Sphere",
+                menu, "Unisolate Spheres" if len(
+                    self._selected_sphere_indices()) > 1
+                else "Unisolate Sphere",
                 self._unisolate_sphere_visibility, bool(spheres))
         elif 0 <= index < len(spheres):
+            selected = self._selected_sphere_indices()
             self._context_action(
-                menu, "Isolate Sphere",
-                lambda _checked=False, sphere_index=index:
-                self._isolate_sphere_visibility(sphere_index))
-        change_type_menu = menu.addMenu("Change Sphere Type")
+                menu, "Isolate Spheres" if len(selected) > 1
+                else "Isolate Sphere",
+                self._toggle_selected_sphere_isolation)
+        change_type_menu = menu.addMenu(
+            "Change Sphere Types" if len(entries) > 1
+            else "Change Sphere Type")
         self._populate_change_type_menu(change_type_menu)
-        mirror_menu = menu.addMenu("Mirror Selected Sphere")
+        mirror_menu = menu.addMenu(
+            "Mirror Selected Spheres" if len(entries) > 1
+            else "Mirror Selected Sphere")
         mirror_menu.addAction(self.mirror_x_action)
         mirror_menu.addAction(self.mirror_y_action)
         mirror_menu.addAction(self.mirror_z_action)
@@ -7336,6 +7343,15 @@ class CollisionEditorWindow(QMainWindow):
             for index in sorted(self._selected_sphere_indices())
             if 0 <= index < len(spheres)
         ]
+
+    def _selected_spheres_with_common_radius(self) -> list[CollisionSphere]:
+        """Return the selection only when every authored radius matches."""
+
+        spheres = [sphere for _index, sphere in self._selected_sphere_entries()]
+        if spheres and all(sphere.radius == spheres[0].radius
+                           for sphere in spheres):
+            return spheres
+        return []
 
     def _select_sphere_objects(self, spheres) -> None:
         """Restore a selection by object identity after list mutations."""
@@ -8698,24 +8714,24 @@ class CollisionEditorWindow(QMainWindow):
             self._unisolate_sphere_visibility()
             return
         selected = self._selected_sphere_indices()
-        if len(selected) != 1:
+        if not selected:
             return
-        index = next(iter(selected))
-        self._isolate_sphere_visibility(index)
+        self._isolate_sphere_visibility(selected)
 
-    def _isolate_sphere_visibility(self, index: int):
+    def _isolate_sphere_visibility(self, selected: set[int]):
         spheres = self.project.spheres()
-        if not (0 <= index < len(spheres)):
+        if not selected or any(index < 0 or index >= len(spheres)
+                               for index in selected):
             return
         changing = [
             sphere for sphere_index, sphere in enumerate(spheres)
-            if sphere.visible != (sphere_index == index)
+            if sphere.visible != (sphere_index in selected)
         ]
         if not changing and self.project.sphere_isolation_active:
             return
         self._push_undo()
         for sphere_index, sphere in enumerate(spheres):
-            sphere.visible = sphere_index == index
+            sphere.visible = sphere_index in selected
         self.project.sphere_isolation_active = True
         self._set_modified()
         self._sync_all()
@@ -8755,8 +8771,7 @@ class CollisionEditorWindow(QMainWindow):
         self._sync_all()
 
     def _begin_radius_slider(self):
-        sphere = self._selected_sphere()
-        if sphere is None:
+        if not self._selected_spheres_with_common_radius():
             return
         self._radius_spin_active = False
         self._push_undo()
@@ -8765,12 +8780,14 @@ class CollisionEditorWindow(QMainWindow):
     def _radius_slider_changed(self, value: int):
         if self._syncing:
             return
-        sphere = self._selected_sphere()
-        if sphere is None:
+        spheres = self._selected_spheres_with_common_radius()
+        if not spheres:
             return
         if not self._radius_slider_active:
             self._push_undo()
-        sphere.radius = max(1.0, round(self._slider_to_radius(value)))
+        radius = max(1.0, round(self._slider_to_radius(value)))
+        for sphere in spheres:
+            sphere.radius = radius
         self._set_modified()
         self._sync_all()
 
@@ -8780,15 +8797,18 @@ class CollisionEditorWindow(QMainWindow):
     def _radius_spin_changed(self, value: float):
         if self._syncing:
             return
-        sphere = self._selected_sphere()
-        if sphere is None:
+        spheres = self._selected_spheres_with_common_radius()
+        if not spheres:
             return
-        if abs(value - sphere.radius) < 1e-9:
+        if abs(value - spheres[0].radius) < 1e-9:
             return
         if not self._radius_spin_active:
             self._push_undo()
             self._radius_spin_active = True
-        sphere.radius = round(value, 0 if sphere.category == LEGACY else 3)
+        radius = round(value, 0 if any(
+            sphere.category == LEGACY for sphere in spheres) else 3)
+        for sphere in spheres:
+            sphere.radius = radius
         self._set_modified()
         self._sync_all()
 
@@ -9355,7 +9375,7 @@ class CollisionEditorWindow(QMainWindow):
             < len(fire_point_positions(self.project)))
         gun_selected = gun is not None
         enabled = sphere is not None
-        radius_enabled = selected_sphere_count == 1
+        radius_enabled = bool(self._selected_spheres_with_common_radius())
         self.radius_slider.setEnabled(radius_enabled)
         self.radius_spin.setEnabled(radius_enabled)
         self.visible_check.setEnabled(enabled)
@@ -9363,8 +9383,10 @@ class CollisionEditorWindow(QMainWindow):
         self.visible_check.setTristate(selected_sphere_count > 1)
         if selected_sphere_count > 1:
             radius_tip = (
-                "Multiple spheres selected. Select one sphere to edit its "
-                "Radius with the controls below the list.")
+                "Selected spheres have different radii. Select spheres with "
+                "the same radius to edit them together."
+                if not radius_enabled else
+                "Edit the radius of all selected spheres together.")
             self.radius_slider.setToolTip(radius_tip)
             self.radius_spin.setToolTip(radius_tip)
         else:
@@ -9404,7 +9426,9 @@ class CollisionEditorWindow(QMainWindow):
             elif active_tab == self.fire_points_tab_index:
                 self.transform_box.setTitle("Move Fire Point")
             else:
-                self.transform_box.setTitle("Move Collision Sphere")
+                self.transform_box.setTitle(
+                    "Move Collision Spheres" if selected_sphere_count > 1
+                    else "Move Collision Sphere")
         if sphere is None:
             if gun_selected:
                 self.type_value.setText("Gun Point")
@@ -9451,7 +9475,9 @@ class CollisionEditorWindow(QMainWindow):
                         str(compound_index)
                         if compound_index is not None else "None")
                 self.index_value.setText(index_text)
-            self.radius_spin.setDecimals(0 if sphere.category == LEGACY else 3)
+            self.radius_spin.setDecimals(0 if any(
+                candidate.category == LEGACY
+                for _index, candidate in selected_sphere_entries) else 3)
             self.radius_spin.setValue(sphere.radius)
             self.radius_slider.setValue(
                 self._radius_to_slider(sphere.radius))
@@ -9548,6 +9574,11 @@ class CollisionEditorWindow(QMainWindow):
         self.change_type_button.setEnabled(bool(selected_spheres))
         self.change_type_button.setText(
             "Change Sphere Types" if multi_selected else "Change Sphere Type")
+        self.change_type_button.setToolTip(
+            "Choose which collision category the selected spheres should "
+            "become." if multi_selected else
+            "Choose exactly which collision category the selected sphere "
+            "should become.")
         self.change_to_legacy_action.setEnabled(
             selected_sphere_count == 1
             and selected_spheres[0].category != LEGACY
@@ -9566,6 +9597,11 @@ class CollisionEditorWindow(QMainWindow):
         self.mirror_sphere_button.setText(
             "Mirror Selected Spheres" if multi_selected
             else "Mirror Selected Sphere")
+        self.mirror_sphere_button.setToolTip(
+            "Duplicate the selected compound spheres on the opposite side "
+            "of the chosen model axis." if multi_selected else
+            "Duplicate the selected compound sphere on the opposite side "
+            "of the chosen model axis.")
         collisions_present = bool(self.project.spheres())
         self.select_all_spheres_button.setEnabled(collisions_present)
         visibility_entries = self._selected_sphere_entries()
@@ -9585,16 +9621,21 @@ class CollisionEditorWindow(QMainWindow):
             "Show All Spheres" if all_spheres_hidden
             else "Hide All Spheres")
         selected_indices = self._selected_sphere_indices()
-        isolate_index = (
-            next(iter(selected_indices)) if len(selected_indices) == 1 else -1)
         isolate_enabled = (
             len(self.project.spheres()) > 1
-            and (self.project.sphere_isolation_active or isolate_index >= 0))
+            and (self.project.sphere_isolation_active or bool(selected_indices)))
         self.isolate_sphere_button.setEnabled(isolate_enabled)
         self.isolate_sphere_button.setText(
-            "Unisolate Sphere"
-            if self.project.sphere_isolation_active
-            else "Isolate Sphere")
+            ("Unisolate Spheres" if len(selected_indices) > 1
+             else "Unisolate Sphere")
+            if self.project.sphere_isolation_active else
+            ("Isolate Spheres" if len(selected_indices) > 1
+             else "Isolate Sphere"))
+        self.isolate_sphere_button.setToolTip(
+            "Show only the selected collision spheres. Use Unisolate Spheres "
+            "to show all spheres again." if len(selected_indices) > 1 else
+            "Show only the selected collision sphere. Use Unisolate Sphere "
+            "to show all spheres again.")
         generation_enabled = bool(
             self.viewport.local_owner_triangles(self._current_owner))
         self.generate_collision_spheres_button.setEnabled(generation_enabled)
