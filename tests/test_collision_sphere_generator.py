@@ -58,15 +58,20 @@ class CollisionSphereGeneratorTests(unittest.TestCase):
             window._set_modified(False), window.close()))
         return window
 
-    def test_generation_is_deterministic_and_covers_mesh_vertices(self):
+    def test_generation_is_deterministic_and_covers_body_without_corner_balloons(self):
         triangles = _box(-12, -3, -4, 12, 3, 4)
         first = generate_collision_spheres(triangles, "high")
         second = generate_collision_spheres(triangles, "high")
         self.assertEqual(first, second)
         self.assertTrue(first.spheres)
-        for point in {point for triangle in triangles for point in triangle}:
+        for point in [(-9, 0, 0), (0, 0, 0), (9, 0, 0)]:
             self.assertTrue(any(_inside(point, sphere)
                                 for sphere in first.spheres))
+        for point in [(0, 9, 0), (0, 0, 10), (18, 0, 0)]:
+            self.assertFalse(any(_inside(point, sphere)
+                                 for sphere in first.spheres))
+        self.assertEqual(first, generate_collision_spheres(
+            list(reversed(triangles)), "high"))
 
     def test_accuracy_presets_tighten_geometry_without_sphere_targets(self):
         triangles = _box(-25, -2, -3, 25, 2, 3)
@@ -93,25 +98,96 @@ class CollisionSphereGeneratorTests(unittest.TestCase):
                 preset.tolerance_fraction
                 + preset.minimum_gain_fraction + 1e-9)
 
-    def test_open_non_watertight_surface_uses_surface_fallback(self):
+    def test_compact_body_gets_more_than_one_medial_peak_sphere(self):
+        cube = _box(-1, -1, -1, 1, 1, 1)
+        results = [generate_collision_spheres(cube, p.key)
+                   for p in ACCURACY_PRESETS]
+        self.assertGreater(len(results[0].spheres), 1)
+        self.assertEqual([r.measured_error for r in results],
+                         sorted((r.measured_error for r in results), reverse=True))
+        self.assertLess(results[2].measured_error, .08)
+        for result in results:
+            self.assertFalse(any(_inside((0, 1.8, 0), sphere)
+                                 for sphere in result.spheres))
+
+    def test_flat_visual_surface_cannot_create_a_collision_volume(self):
         triangles = [
             ((-5.0, 0.0, -2.0), (5.0, 0.0, -2.0), (5.0, 0.0, 2.0)),
             ((-5.0, 0.0, -2.0), (5.0, 0.0, 2.0), (-5.0, 0.0, 2.0)),
             ((0.0, 0.0, 0.0), (0.0, 0.0, 0.0), (0.0, 0.0, 0.0)),
         ]
-        result = generate_collision_spheres(triangles, "medium")
-        self.assertGreater(len(result.spheres), 1)
-        self.assertLessEqual(len(result.spheres), UNIT_COLL_MAX_COUNT)
-        self.assertTrue(all(sphere.radius > 0 for sphere in result.spheres))
+        for preset in ACCURACY_PRESETS:
+            with self.assertRaisesRegex(ValueError, "physical body"):
+                generate_collision_spheres(triangles, preset.key)
 
     def test_asymmetric_protrusion_receives_collision_coverage(self):
         body = _box(-8, -3, -4, 8, 3, 4)
-        protrusion = _box(8, -1, -1, 18, 1, 1)
+        protrusion = _box(8, -2, -2, 18, 2, 2)
         result = generate_collision_spheres(body + protrusion, "high")
-        protrusion_tip = (18, 1, 1)
+        protrusion_tip = (16, 0, 0)
         self.assertTrue(any(_inside(protrusion_tip, sphere)
                             for sphere in result.spheres))
         self.assertTrue(any(sphere.x > 8 for sphere in result.spheres))
+        self.assertFalse(result.symmetry_detected)
+        self.assertFalse(any(_inside((-16, 0, 0), sphere)
+                             for sphere in result.spheres))
+
+    def test_rotor_and_thin_gun_do_not_expand_any_preset(self):
+        body = _box(-8, -4, -15, 8, 4, 15)
+        rotor = [((-30, -9, -30), (30, -9, -30), (30, -9, 30)),
+                 ((-30, -9, -30), (30, -9, 30), (-30, -9, 30))]
+        gun = _box(-.3, -8, 10, .3, -7.4, 40)
+        for preset in ACCURACY_PRESETS:
+            result = generate_collision_spheres(body + rotor + gun, preset.key)
+            for point in [(25, -9, 0), (-25, -9, 0), (0, -7.7, 32)]:
+                self.assertFalse(any(_inside(point, s) for s in result.spheres))
+            self.assertGreater(result.excluded_triangle_count, 0)
+
+    def test_apparent_symmetry_produces_exact_pairs_with_equal_radii(self):
+        triangles = _box(-12, -3, -20, 12.3, 3, 20)
+        for preset in ACCURACY_PRESETS:
+            result = generate_collision_spheres(triangles, preset.key)
+            self.assertTrue(result.symmetry_detected)
+            values = {(s.x, s.y, s.z, s.radius) for s in result.spheres}
+            for s in result.spheres:
+                self.assertIn((-s.x, s.y, s.z, s.radius), values)
+                for value in (*s.center, s.radius):
+                    self.assertEqual(value, round(value, 3))
+
+    def test_safety_cap_keeps_mirrored_pairs_atomic(self):
+        result = generate_collision_spheres(
+            _box(-20, -4, -15, 20, 4, 15), "ultra", max_spheres=3)
+        values = {(s.x, s.y, s.z, s.radius) for s in result.spheres}
+        self.assertLessEqual(len(values), 3)
+        self.assertTrue(result.hit_safety_cap)
+        for s in result.spheres:
+            self.assertIn((-s.x, s.y, s.z, s.radius), values)
+
+    def test_structural_wing_survives_but_animated_sheet_does_not(self):
+        body = _box(-8, -4, -15, 8, 4, 15)
+        wing = [((7, 0, -5), (24, 0, -5), (24, 0, 5)),
+                ((7, 0, -5), (24, 0, 5), (7, 0, 5))]
+        solid_wing = generate_collision_spheres(body + wing, "high")
+        animated = generate_collision_spheres(
+            body + wing, "high", animated_triangles=range(len(body), len(body)+2))
+        self.assertGreater(solid_wing.structural_sheet_count, 0)
+        self.assertTrue(any(_inside((18, 0, 0), s) for s in solid_wing.spheres))
+        self.assertFalse(any(_inside((18, 0, 0), s) for s in animated.spheres))
+
+    def test_solid_animated_tracks_are_not_filtered(self):
+        mesh = _box(-8, -4, -15, 8, 4, 15)
+        self.assertEqual(generate_collision_spheres(mesh, "high"),
+                         generate_collision_spheres(mesh, "high",
+                                                    animated_triangles=range(len(mesh))))
+
+    def test_narrow_structural_core_is_not_lost_between_volume_samples(self):
+        mesh = (_box(-30, -12, -40, 30, 12, 40)
+                + _box(-2, -20, -5, 2, -14, 45))
+        for preset in ("high", "ultra"):
+            result = generate_collision_spheres(mesh, preset)
+            covered = sum(any(_inside((0, -17, z), s) for s in result.spheres)
+                          for z in range(0, 41))
+            self.assertGreaterEqual(covered / 41, .95)
 
     def test_runtime_count_is_only_a_safety_cap(self):
         triangles = _box(-30, -2, -2, 30, 2, 2)
