@@ -2586,7 +2586,12 @@ class CompactScaleSpinBox(QDoubleSpinBox):
 
 
 class CollisionViewport(AssetViewport):
-    """Existing AssetViewport plus the exact F10 three-ring overlay."""
+    """Existing AssetViewport plus the exact F10 three-ring overlay.
+
+    Right-drag pans the camera exactly like the Model Viewer.  The contextual
+    menu is therefore deferred to release and only opens when the pointer
+    stayed still, so a real drag never pops the menu.
+    """
 
     spherePicked = Signal(int)
     sphereToggleRequested = Signal(int)
@@ -2609,6 +2614,9 @@ class CollisionViewport(AssetViewport):
         self._sphere_press_pos: QPointF | None = None
         self._sphere_box_start: QPointF | None = None
         self._sphere_box_rect: QRectF | None = None
+        # Screen position of the last right-button press, kept so release can
+        # tell a plain context-click from a camera pan.
+        self._context_press_pos: QPointF | None = None
         self._collision_show = {
             LEGACY: True, VEHICLE: True, WEAPON: True,
         }
@@ -2860,6 +2868,7 @@ class CollisionViewport(AssetViewport):
         self._sphere_press_pos = None
         self._sphere_box_start = None
         self._sphere_box_rect = None
+        self._context_press_pos = None
         self._model_preview_base_faces = []
         self._model_preview_base_sen_boxes = []
         self._model_preview_base_owner_bounds = {}
@@ -3759,6 +3768,20 @@ class CollisionViewport(AssetViewport):
         super().mouseMoveEvent(event)
 
     def mouseReleaseEvent(self, event: QMouseEvent) -> None:  # noqa: N802
+        if event.button() == Qt.MouseButton.RightButton:
+            press_pos = self._context_press_pos
+            self._context_press_pos = None
+            # Let the base viewport finish the camera gesture first, then ask
+            # for the contextual menu only when the pointer barely moved.  The
+            # 4 px tolerance matches the click/drag split used by the rest of
+            # the viewport.
+            super().mouseReleaseEvent(event)
+            if press_pos is not None:
+                delta = event.position() - press_pos
+                if abs(delta.x()) <= 4.0 and abs(delta.y()) <= 4.0:
+                    self._request_context_menu(
+                        event.position(), event.globalPosition().toPoint())
+            return
         if event.button() == Qt.MouseButton.LeftButton \
                 and self._sphere_press_pos is not None:
             if self._sphere_box_start is not None \
@@ -3844,43 +3867,12 @@ class CollisionViewport(AssetViewport):
                 event.accept()
                 return
         if event.button() == Qt.MouseButton.RightButton:
-            gun_index = self._hit_gun_point(event.position())
-            if gun_index >= 0:
-                self._gun_point_selected = gun_index
-                self._fire_point_selected = -1
-                self._collision_selected = -1
-                self.gunPointPicked.emit(gun_index)
-                self.update()
-                self.sphereContextMenuRequested.emit(
-                    -1, event.globalPosition().toPoint())
-                event.accept()
-                return
-            fire_index = self._hit_fire_point(event.position())
-            if fire_index >= 0:
-                self._fire_point_selected = fire_index
-                self._gun_point_selected = -1
-                self._collision_selected = -1
-                self.firePointPicked.emit(fire_index)
-                self.update()
-                self.sphereContextMenuRequested.emit(
-                    -1, event.globalPosition().toPoint())
-                event.accept()
-                return
-            index = self._hit_sphere(event.position(), cycle=False)
-            if index >= 0:
-                self._fire_point_selected = -1
-                self._gun_point_selected = -1
-                if index not in self._collision_selected_indices:
-                    # Standard editor behavior: context-clicking an unselected
-                    # sphere makes it the sole selection. Context-clicking any
-                    # member of an existing multiselection must preserve the
-                    # whole group so Delete/Duplicate/Mirror act on it.
-                    self._collision_selected = index
-                    self.spherePicked.emit(index)
-                self.update()
-            self.sphereContextMenuRequested.emit(
-                index, event.globalPosition().toPoint())
-            event.accept()
+            # Right-drag pans the camera exactly like the Model Viewer.  The
+            # press only records where the gesture started; the base viewport
+            # keeps the pan bookkeeping and the contextual menu is decided on
+            # release.
+            self._context_press_pos = QPointF(event.position())
+            super().mousePressEvent(event)
             return
         super().mousePressEvent(event)
 
@@ -3912,6 +3904,46 @@ class CollisionViewport(AssetViewport):
             event.accept()
             return
         super().mouseDoubleClickEvent(event)
+
+    def _request_context_menu(
+            self, position: QPointF, global_pos: QPoint) -> None:
+        """Select the element under a still right-click, then open its menu.
+
+        The order matters: the selection signals below run first so the menu
+        actions already see the clicked element.
+        """
+
+        gun_index = self._hit_gun_point(position)
+        if gun_index >= 0:
+            self._gun_point_selected = gun_index
+            self._fire_point_selected = -1
+            self._collision_selected = -1
+            self.gunPointPicked.emit(gun_index)
+            self.update()
+            self.sphereContextMenuRequested.emit(-1, global_pos)
+            return
+        fire_index = self._hit_fire_point(position)
+        if fire_index >= 0:
+            self._fire_point_selected = fire_index
+            self._gun_point_selected = -1
+            self._collision_selected = -1
+            self.firePointPicked.emit(fire_index)
+            self.update()
+            self.sphereContextMenuRequested.emit(-1, global_pos)
+            return
+        index = self._hit_sphere(position, cycle=False)
+        if index >= 0:
+            self._fire_point_selected = -1
+            self._gun_point_selected = -1
+            if index not in self._collision_selected_indices:
+                # Standard editor behavior: context-clicking an unselected
+                # sphere makes it the sole selection. Context-clicking any
+                # member of an existing multiselection must preserve the
+                # whole group so Delete/Duplicate/Mirror act on it.
+                self._collision_selected = index
+                self.spherePicked.emit(index)
+            self.update()
+        self.sphereContextMenuRequested.emit(index, global_pos)
 
 
 class ImportCollisionDialog(QDialog):
