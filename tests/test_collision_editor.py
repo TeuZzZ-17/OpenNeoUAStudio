@@ -1525,7 +1525,7 @@ class CollisionEditorTests(unittest.TestCase):
         header = window.sphere_tree.header()
         self.assertFalse(header.stretchLastSection())
         self.assertEqual(
-            header.sectionResizeMode(0), QHeaderView.ResizeMode.Stretch)
+            header.sectionResizeMode(0), QHeaderView.ResizeMode.Interactive)
         self.assertEqual(
             header.sectionResizeMode(6), QHeaderView.ResizeMode.Fixed)
         self.assertLessEqual(window.sphere_tree.columnWidth(6), 48)
@@ -2663,11 +2663,36 @@ class CollisionEditorTests(unittest.TestCase):
         self.assertTrue(window.radius_title.isHidden())
         self.assertIs(window.radius_slider.parentWidget(), window.spheres_box)
         self.assertIs(window.radius_spin.parentWidget(), window.spheres_box)
-        self.assertLessEqual(window.radius_spin.maximumWidth(), 86)
+        window.radius_spin.setDecimals(3)
+        self.assertGreaterEqual(
+            window.radius_spin.width(),
+            window.radius_spin.sizeHint().width())
         self.assertGreaterEqual(window.sphere_tree.minimumHeight(), 80)
         self.assertEqual(
             window.spheres_box.sizePolicy().verticalPolicy(),
             QSizePolicy.Policy.Expanding)
+
+    def test_110a_compact_sphere_panel_keeps_type_and_radius_readable(self):
+        window = self._window()
+        window.resize(1365, 820)
+        window.show()
+        self.app.processEvents()
+
+        type_label = "OpenNeoUA Collision"
+        self.assertGreaterEqual(
+            window.sphere_tree.header().sectionSize(0),
+            window.sphere_tree.fontMetrics().horizontalAdvance(type_label)
+            + 16)
+        self.assertGreater(
+            window.sphere_tree.horizontalScrollBar().maximum(), 0)
+
+        spin = window.radius_spin
+        spin.setDecimals(3)
+        spin.setValue(spin.maximum())
+        self.app.processEvents()
+        self.assertGreaterEqual(
+            spin.lineEdit().width(),
+            spin.lineEdit().fontMetrics().horizontalAdvance(spin.text()))
 
     def test_111_right_properties_are_split_into_domain_tabs(self):
         window = self._window()

@@ -5112,14 +5112,17 @@ class CollisionEditorWindow(QMainWindow):
             QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
         sphere_header = self.sphere_tree.header()
         sphere_header.setMinimumSectionSize(38)
-        # QHeaderView stretches its last section by default.  Since Index is
-        # the last column, that spent most spare width on a tiny numeric value
-        # and clipped the useful Sphere label.  Keep Index compact and let the
-        # descriptive Sphere column own the remaining width instead.
+        # Keep the complete type name readable at the compact pane width.
+        # The remaining columns stay available through horizontal scrolling.
         sphere_header.setStretchLastSection(False)
         sphere_header.setSectionResizeMode(
-            0, QHeaderView.ResizeMode.Stretch)
-        self.sphere_tree.setColumnWidth(0, 96)
+            0, QHeaderView.ResizeMode.Interactive)
+        type_width = max(
+            self.sphere_tree.fontMetrics().horizontalAdvance(label)
+            for label in TYPE_LABELS.values()) + 16
+        self.sphere_tree.setColumnWidth(0, type_width)
+        self.sphere_tree.setHorizontalScrollBarPolicy(
+            Qt.ScrollBarPolicy.ScrollBarAsNeeded)
 
         # Show up to three decimals here while keeping finer imported values
         # in the project and script writer.
@@ -5162,15 +5165,16 @@ class CollisionEditorWindow(QMainWindow):
         radius_layout.addWidget(self.radius_slider, 1)
         self.radius_spin = self._coordinate_spin()
         self.radius_spin.setMinimum(1.0)
-        self.radius_spin.setDecimals(0)
+        self.radius_spin.setDecimals(3)
         self.radius_spin.setSingleStep(1.0)
         self.radius_spin.setKeyboardTracking(True)
         self.radius_spin.valueChanged.connect(
             self._radius_spin_changed)
         self.radius_spin.editingFinished.connect(
             self._finish_radius_spin_edit)
-        self.radius_spin.setMinimumWidth(72)
-        self.radius_spin.setMaximumWidth(86)
+        # Reserve enough room for the largest three-decimal radius and the
+        # spin arrows; the slider uses the remaining space.
+        self.radius_spin.setFixedWidth(self.radius_spin.sizeHint().width())
         radius_layout.addWidget(self.radius_spin)
         spheres_layout.addLayout(radius_layout)
 
