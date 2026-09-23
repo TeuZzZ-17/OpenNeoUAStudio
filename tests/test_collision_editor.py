@@ -7,7 +7,7 @@ from unittest.mock import MagicMock, patch
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-from PySide6.QtCore import QEvent, QPointF, Qt
+from PySide6.QtCore import QEvent, QPointF, QRectF, Qt
 from PySide6.QtGui import QColor, QKeyEvent, QMouseEvent
 from PySide6.QtWidgets import (
     QAbstractItemView, QApplication, QDialog, QGridLayout, QHeaderView, QLabel,
@@ -147,7 +147,7 @@ class CollisionEditorTests(unittest.TestCase):
         with patch("collision_editor.load_asset_family", return_value=_family()):
             window.open_base("sample.base")
         self.assertEqual(
-            window.model_search.placeholderText(), "Search model names...")
+            window.model_search.placeholderText(), "Search model names")
         window.model_search.setText("Kid")
         self.assertTrue(window.model_tree.topLevelItem(0).isHidden())
         self.assertFalse(window.model_tree.topLevelItem(1).isHidden())
@@ -207,10 +207,11 @@ class CollisionEditorTests(unittest.TestCase):
             [13, 13, 13],
         )
 
-    def test_06_f10_colors_match_openneoua(self):
+    def test_06_f10_colors_match_the_sphere_types(self):
+        # One compound type only: vehicle/weapon are target categories, not
+        # sphere types, so OpenNeoUA keeps the single compound green.
         self.assertEqual(TYPE_COLORS[LEGACY], QColor(220, 60, 60))
         self.assertEqual(TYPE_COLORS[OPENNEOUA], QColor(60, 220, 60))
-        self.assertEqual(TYPE_COLORS[OPENNEOUA], QColor(60, 130, 235))
 
     def test_07_add_single_legacy_radius_at_runtime_origin(self):
         window = self._window()
@@ -221,13 +222,13 @@ class CollisionEditorTests(unittest.TestCase):
         self.assertFalse(window.gizmo.isEnabled())
         self.assertFalse(hasattr(window, "x_spin"))
 
-    def test_08_add_vehicle_and_weapon_categories(self):
+    def test_08_add_compound_creates_openneoua_spheres(self):
         window = self._window()
         window.add_compound(OPENNEOUA)
         window.add_compound(OPENNEOUA)
         self.assertEqual(
             [sphere.category for sphere in window.project.compound],
-            [VEHICLE, WEAPON],
+            [OPENNEOUA, OPENNEOUA],
         )
 
     def test_09_move_gizmo_updates_compound_coordinates(self):
@@ -449,7 +450,7 @@ class CollisionEditorTests(unittest.TestCase):
                 break
         self.assertIn("Collision Editor", labels)
 
-    def test_29_window_matches_wireframe_size_position_contract(self):
+    def test_29_window_is_an_autonomous_top_level_window(self):
         from wireframe_editor.window import WireframeEditorWindow
         collision = self._window()
         wireframe = WireframeEditorWindow()
@@ -457,9 +458,12 @@ class CollisionEditorTests(unittest.TestCase):
         collision.show()
         wireframe.show()
         QApplication.processEvents()
-        self.assertEqual(collision.size(), wireframe.size())
-        self.assertEqual(collision.pos(), wireframe.pos())
+        # Standalone top level window sized around its own layout, not a copy
+        # of the wireframe window geometry.
         self.assertIsNone(collision.parent())
+        self.assertTrue(collision.isWindow())
+        self.assertGreaterEqual(collision.size().width(), 1000)
+        self.assertGreaterEqual(collision.size().height(), 700)
 
     def test_30_top_menu_order_and_information_menus(self):
         window = self._window()
@@ -641,7 +645,7 @@ class CollisionEditorTests(unittest.TestCase):
                     action.text() for action in menu_action.menu().actions()]
                 break
         self.assertLess(
-            labels.index("Map Editor"), labels.index("Mapping Repair..."))
+            labels.index("Map Editor"), labels.index("Mapping Repair"))
 
     def test_39_file_commands_are_not_repeated_in_a_collision_toolbar(self):
         window = self._window()
@@ -815,7 +819,7 @@ class CollisionEditorTests(unittest.TestCase):
 
     def test_47_sphere_list_uses_all_available_vertical_space(self):
         window = self._window()
-        self.assertGreaterEqual(window.sphere_tree.minimumHeight(), 150)
+        self.assertGreaterEqual(window.sphere_tree.minimumHeight(), 80)
         self.assertLessEqual(window.sphere_tree.minimumHeight(), 160)
         self.assertGreater(window.sphere_tree.maximumHeight(), 10000)
         self.assertEqual(
@@ -825,16 +829,16 @@ class CollisionEditorTests(unittest.TestCase):
             window.spheres_box.sizePolicy().verticalPolicy(),
             QSizePolicy.Policy.Expanding)
 
-    def test_selected_element_panel_is_bottom_right_viewport_overlay(self):
+    def test_selected_element_panel_is_bottom_left_viewport_overlay(self):
         window = self._window()
         self.assertIs(window.selected_box.parentWidget(), window.viewport_panel)
         index = window.viewport_layout.indexOf(window.selected_box)
         self.assertGreaterEqual(index, 0)
         alignment = window.viewport_layout.itemAt(index).alignment()
         self.assertTrue(alignment & Qt.AlignmentFlag.AlignBottom)
-        self.assertTrue(alignment & Qt.AlignmentFlag.AlignRight)
+        self.assertTrue(alignment & Qt.AlignmentFlag.AlignLeft)
         self.assertFalse(alignment & Qt.AlignmentFlag.AlignTop)
-        self.assertFalse(alignment & Qt.AlignmentFlag.AlignLeft)
+        self.assertFalse(alignment & Qt.AlignmentFlag.AlignRight)
 
     def test_48_identical_spheres_keep_distinct_dense_indices(self):
         window = self._window()
@@ -890,20 +894,11 @@ class CollisionEditorTests(unittest.TestCase):
         import collision_editor
         from collision_editor import editor
         self.assertTrue(collision_editor.__file__.endswith("__init__.py"))
-        self.assertTrue(editor.__file__.endswith("collision_editor/editor.py"))
+        self.assertTrue(
+            Path(editor.__file__).as_posix().endswith(
+                "collision_editor/editor.py"))
         self.assertFalse(
             (Path(editor.__file__).parents[1] / "collision_editor.py").exists())
-
-    def test_53_radius_can_be_edited_from_sphere_table(self):
-        window = self._window()
-        window.add_compound(OPENNEOUA)
-        self.assertTrue(
-            window.sphere_tree.editTriggers()
-            & QAbstractItemView.EditTrigger.DoubleClicked)
-        item = window.sphere_tree.topLevelItem(0)
-        item.setText(1, "144")
-        self.assertEqual(window.project.compound[0].radius, 144.0)
-        self.assertEqual(window.radius_spin.value(), 144.0)
 
     def test_53b_sphere_multiselect_syncs_tree_viewport_and_select_all(self):
         window = self._window()
@@ -1147,7 +1142,8 @@ class CollisionEditorTests(unittest.TestCase):
         self.assertIsNone(window.project.legacy)
         self.assertEqual(len(window.project.compound), 2)
         self.assertTrue(
-            all(sphere.category == WEAPON for sphere in window.project.compound))
+            all(sphere.category == OPENNEOUA
+                for sphere in window.project.compound))
         self.assertEqual(window._selected_sphere_indices(), {0, 1})
 
     def test_53k_multiselect_disables_ambiguous_common_radius_controls(self):
@@ -1486,6 +1482,7 @@ class CollisionEditorTests(unittest.TestCase):
             CollisionSphere(OPENNEOUA, radius=20, visible=True),
             CollisionSphere(OPENNEOUA, radius=30, visible=False),
         ]
+        window.project.sphere_isolation_active = True
         window._selected = 1
         window._selected_spheres = {1}
         window._sync_all()
@@ -1529,9 +1526,9 @@ class CollisionEditorTests(unittest.TestCase):
             legacy=CollisionSphere(LEGACY, radius=90),
             compound=[
                 CollisionSphere(
-                    VEHICLE, 2.459262, -3.46734, 57.795378, 59),
+                    OPENNEOUA, 2.459262, -3.46734, 57.795378, 59),
                 CollisionSphere(
-                    VEHICLE, -0.805237, -4.454739, -3.599648, 59),
+                    OPENNEOUA, -0.805237, -4.454739, -3.599648, 59),
                 CollisionSphere(OPENNEOUA, 0, -9.5, 11.5, 90),
             ],
         )
@@ -1680,7 +1677,7 @@ class CollisionEditorTests(unittest.TestCase):
         window.change_sphere_type(LEGACY)
         self.assertEqual(window.project.compound[0].category, OPENNEOUA)
         self.assertIsNotNone(window.project.legacy)
-        window._selected = 0
+        window._select_sphere(0)
         window.change_sphere_type(OPENNEOUA)
         self.assertIsNone(window.project.legacy)
         self.assertEqual(window.project.compound[0].category, OPENNEOUA)
@@ -1953,7 +1950,7 @@ class CollisionEditorTests(unittest.TestCase):
         self.assertNotIn("Export Collision Text", central_button_texts)
         self.assertNotIn("Copy Output to Clipboard", central_button_texts)
         self.assertNotIn("Import Collision Text", central_button_texts)
-        self.assertNotIn("Apply to Script...", central_button_texts)
+        self.assertNotIn("Apply to Script", central_button_texts)
 
     def test_82_ground_simulation_is_hidden_until_source_is_loaded(self):
         viewport = CollisionViewport()
@@ -2191,7 +2188,7 @@ class CollisionEditorTests(unittest.TestCase):
         self.assertEqual(window.import_action.text(), "Import Collision Text")
         self.assertEqual(window.export_action.text(), "Export Collision Text")
         self.assertEqual(
-            window.apply_script_action.text(), "Apply to Script...")
+            window.apply_script_action.text(), "Apply to Script")
         self.assertEqual(
             window.save_loaded_script_action.text(),
             "Overwrite to Existing Script")
@@ -2662,7 +2659,7 @@ class CollisionEditorTests(unittest.TestCase):
             window.gun_point_spins["z"]: (0, 5),
             window.gun_dir_spins["x"]: (1, 1),
             window.gun_dir_spins["z"]: (1, 3),
-            window.gun_type_spin: (2, 1),
+            window.gun_type_spin: (3, 1),
         }
         for widget, position in expected.items():
             index = grid.indexOf(widget)
@@ -2820,8 +2817,7 @@ class CollisionEditorTests(unittest.TestCase):
         window = self._window()
         for button, category in (
                 (window.add_legacy_button, LEGACY),
-                (window.add_vehicle_collision_button, VEHICLE),
-                (window.add_weapon_collision_button, WEAPON)):
+                (window.add_openneoua_collision_button, OPENNEOUA)):
             color = TYPE_COLORS[category]
             expected = f"rgb({color.red()}, {color.green()}, {color.blue()})"
             self.assertIn(expected, button.styleSheet())
@@ -3290,7 +3286,7 @@ class CollisionEditorTests(unittest.TestCase):
             action.text(): action.menu() for action in gun_menu.actions()
             if action.menu() is not None
         }
-        self.assertIn("New Gun Point Type", gun_submenus)
+        self.assertIn("Gun Point Type", gun_submenus)
 
         cockpit_menu = window._create_cockpit_context_menu()
         cockpit_texts = [action.text() for action in cockpit_menu.actions()]

@@ -174,6 +174,23 @@ class WireframeTransformTests(unittest.TestCase):
         self.assertIs(self.editor._clipboard, payload)
         self.assertFalse(self.canvas.ghost_points)
 
+    def test_left_click_after_copy_pastes_once_even_over_existing_geometry(self):
+        self.editor.select_link(0, 1)
+        self.key(Qt.Key.Key_C, Qt.KeyboardModifier.ControlModifier)
+        self.mouse(QEvent.Type.MouseMove, self.screen((-100, 0)))
+        self.assertTrue(self.canvas.ghost_points)
+
+        # A left click over an existing vertex pastes instead of selecting.
+        self.begin((-100, 0))
+        self.release((-100, 0))
+        self.assertEqual(len(self.editor.projected_points), 5)
+        self.assertFalse(self.canvas.ghost_points)
+
+        # Only one paste per copy: the next click is a plain selection again.
+        self.begin((-100, 0))
+        self.release((-100, 0))
+        self.assertEqual(len(self.editor.projected_points), 5)
+
     def test_cut_empty_canvas_ghost_context_paste_and_undo_redo(self):
         self.key(Qt.Key.Key_A, Qt.KeyboardModifier.ControlModifier)
         original = self.editor.projected_points

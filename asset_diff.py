@@ -709,7 +709,7 @@ def diff_family(family: AssetFamily, rgb: bool = True,
     archive = family.setbas_archive
     if archive is None:
         diff.warnings.append(
-            "No SET.BAS provider attached; open one with 'Open SET.BAS...' "
+            "No SET.BAS provider attached; open one with 'Open SET.BAS' "
             "to compare sources."
         )
         diff.entries.extend(mapping_entries(family))

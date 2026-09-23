@@ -326,7 +326,7 @@ class TexturePickerDialog(QDialog):
 
         layout = QVBoxLayout(self)
         self.search = QLineEdit()
-        self.search.setPlaceholderText("Filter textures...")
+        self.search.setPlaceholderText("Filter textures")
         self.search.textChanged.connect(self._filter_items)
         layout.addWidget(self.search)
 

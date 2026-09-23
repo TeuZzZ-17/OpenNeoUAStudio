@@ -112,7 +112,7 @@ class Onua3dTests(unittest.TestCase):
     def test_menu_root_export_deterministic_validated_and_read_only(self):
         window = self.window()
         self.assertIn(window.export_blender_action, window.file_export_menu.actions())
-        self.assertEqual(window.export_blender_action.text(), "Export OpenNeoUA 3D...")
+        self.assertEqual(window.export_blender_action.text(), "Export OpenNeoUA 3D")
         self.assertTrue(window.export_blender_action.isEnabled())
         before = source_hashes(self.source)
         targets = [self.root / "a.onua3d", self.root / "b.onua3d"]

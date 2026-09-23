@@ -1883,6 +1883,28 @@ class AssetViewport(QWidget):
         session.selection.difference_update(self._edit_read_only_vertices)
         return bool(session.selection)
 
+    def select_edit_vertices(self, indices) -> None:
+        """Select only the given POO2 indices in the active Edit Mode."""
+
+        session = self._edit_session
+        if session is None:
+            self.statusMessage.emit("Edit Mode: no editable model is active.")
+            return
+        requested = [
+            index for index in indices
+            if index not in self._edit_read_only_vertices
+        ]
+        try:
+            session.set_selection(requested)
+        except ValueError as exc:
+            self.statusMessage.emit(f"Edit Mode: {exc}")
+            return
+        self._active_edit_vertex = min(session.selection, default=None)
+        # Only real vertex gestures replace the explicit polygon pick intent,
+        # so this programmatic source keeps the polygon selection alive.
+        self._emit_selection_hint("programmatic")
+        self.update()
+
     def select_no_edit_vertices(self) -> None:
         session = self._edit_session
         if session is not None:

@@ -300,12 +300,12 @@ class AddFxElementDialog(QDialog):
         self.current_source_button.clicked.connect(
             lambda _checked=False: self._restore_current_source())
         source_row.addWidget(self.current_source_button)
-        self.other_model_source_button = QPushButton("From Another Model...")
+        self.other_model_source_button = QPushButton("From Another Model")
         self.other_model_source_button.setEnabled(source_loader is not None)
         self.other_model_source_button.clicked.connect(
             lambda _checked=False: self._load_source("model"))
         source_row.addWidget(self.other_model_source_button)
-        self.bas_source_button = QPushButton("From BAS Archive...")
+        self.bas_source_button = QPushButton("From BAS Archive")
         self.bas_source_button.setEnabled(source_loader is not None)
         self.bas_source_button.clicked.connect(
             lambda _checked=False: self._load_source("bas"))
@@ -675,7 +675,7 @@ class AssemblyWindow(QMainWindow):
             self._show_asset_context_menu)
         from PySide6.QtWidgets import QLineEdit
         self.tree_search = QLineEdit()
-        self.tree_search.setPlaceholderText("Filter objects/textures...")
+        self.tree_search.setPlaceholderText("Filter objects/textures")
         self.tree_search.textChanged.connect(self._filter_asset_tree)
         self.texture_list = QListWidget()
         self.texture_list.setIconSize(QPixmap(96, 96).size())
@@ -720,16 +720,20 @@ class AssemblyWindow(QMainWindow):
             self._show_setbas_context_menu)
         setbas_header = self.setbas_tree.header()
         setbas_header.setSectionsMovable(False)
-        setbas_header.setStretchLastSection(False)
+        # The last column absorbs the remaining width, so the header never
+        # leaves an empty trailing section.
+        setbas_header.setStretchLastSection(True)
         setbas_header.setMinimumSectionSize(40)
         setbas_header.setDefaultAlignment(
             Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
         for column in range(3):
             setbas_header.setSectionResizeMode(
                 column, QHeaderView.ResizeMode.Interactive)
-        self.setbas_tree.setColumnWidth(0, 285)
-        self.setbas_tree.setColumnWidth(1, 105)
-        self.setbas_tree.setColumnWidth(2, 55)
+        # Resource and Payload fit their widest text; VP absorbs every pixel
+        # left over, so long ID lists stay readable and no space stays empty.
+        self.setbas_tree.setColumnWidth(0, 260)
+        self.setbas_tree.setColumnWidth(1, 120)
+        self.setbas_tree.setColumnWidth(2, 130)
         self.setbas_tree.setHorizontalScrollBarPolicy(
             Qt.ScrollBarPolicy.ScrollBarAsNeeded)
         self.setbas_label = QLabel("No SET.BAS loaded.")
@@ -901,8 +905,8 @@ class AssemblyWindow(QMainWindow):
             "base", "sklt.class", "ilbm.class", "bmpanim.class"))
         menu.addSeparator()
         extract = menu.addAction(
-            f"Extract selected... ({len(resources)})" if len(resources) > 1
-            else "Extract selected...")
+            f"Extract selected ({len(resources)})" if len(resources) > 1
+            else "Extract selected")
         extract.setEnabled(bool(resources))
         extract.triggered.connect(self._extract_setbas_selected)
         menu.addAction("Extract archive",
@@ -918,7 +922,7 @@ class AssemblyWindow(QMainWindow):
         export_family.setEnabled(kind in (
             "base", "sklt.class", "ilbm.class", "bmpanim.class"))
         export_onua3d = menu.addAction(
-            "Export OpenNeoUA 3D...",
+            "Export OpenNeoUA 3D",
             lambda: self._export_setbas_base_onua3d(item))
         export_onua3d.setEnabled(kind == "base" and item is not None)
         if kind == "base" and item is not None:
@@ -1040,7 +1044,7 @@ class AssemblyWindow(QMainWindow):
                 preview.triggered.connect(
                     lambda: self._open_visual_texture(
                         payload, show_preview=True, switch_tabs=False))
-                export = menu.addAction("Export texture as PNG...")
+                export = menu.addAction("Export texture as PNG")
                 export.setEnabled(self._visual_texture_available(payload))
                 export.triggered.connect(
                     lambda: self._export_family_textures_png([payload]))
@@ -1063,7 +1067,7 @@ class AssemblyWindow(QMainWindow):
             logical_name, candidate = dependency_target
             menu.addSeparator()
             select_resource = menu.addAction(
-                "Select Resource...", self._select_dependency_resource)
+                "Select Resource", self._select_dependency_resource)
             select_resource.setEnabled(bool(logical_name))
             use = menu.addAction(
                 "Use Selected Source", self._use_selected_candidate)
@@ -1097,7 +1101,7 @@ class AssemblyWindow(QMainWindow):
             self._save_model_as()
 
         export_family.triggered.connect(export_current_family)
-        export_onua3d = menu.addAction("Export OpenNeoUA 3D...")
+        export_onua3d = menu.addAction("Export OpenNeoUA 3D")
         export_onua3d.setEnabled(bool(data and data[0] == "base"))
 
         def export_current_onua3d() -> None:
@@ -1137,8 +1141,8 @@ class AssemblyWindow(QMainWindow):
         preview.triggered.connect(
             lambda: self._preview_family_texture(names[0]) if names else None)
         export = menu.addAction(
-            f"Export selected as PNG... ({len(names)})" if len(names) > 1
-            else "Export selected as PNG...")
+            f"Export selected as PNG ({len(names)})" if len(names) > 1
+            else "Export selected as PNG")
         export.setEnabled(bool(names))
         export.triggered.connect(
             lambda: self._export_family_textures_png(names))
@@ -1184,7 +1188,7 @@ class AssemblyWindow(QMainWindow):
         self.open_ilbm_action.triggered.connect(self.open_ilbm_dialog)
         self.open_family_action = QAction("Import Asset Family", self)
         self.open_family_action.triggered.connect(self.open_family_dialog)
-        self.import_onua3d_action = QAction("Import OpenNeoUA 3D...", self)
+        self.import_onua3d_action = QAction("Import OpenNeoUA 3D", self)
         self.import_onua3d_action.triggered.connect(self._import_onua3d)
 
         self.file_import_menu = file_menu.addMenu("Import")
@@ -1215,7 +1219,7 @@ class AssemblyWindow(QMainWindow):
         self.save_asset_family_action = QAction("Export Asset Family", self)
         self.save_asset_family_action.setEnabled(False)
         self.save_asset_family_action.triggered.connect(self._save_model_as)
-        self.export_blender_action = QAction("Export OpenNeoUA 3D...", self)
+        self.export_blender_action = QAction("Export OpenNeoUA 3D", self)
         self.export_blender_action.setEnabled(False)
         self.export_blender_action.triggered.connect(self._export_to_blender)
         self.overwrite_action = QAction("Overwrite", self)
@@ -1269,6 +1273,13 @@ class AssemblyWindow(QMainWindow):
         self.edit_select_all_action.triggered.connect(
             self.viewport.select_all_edit_vertices)
         edit_menu.addAction(self.edit_select_all_action)
+        self.select_all_fx_action = QAction("Select All FX", self)
+        self.select_all_fx_action.setStatusTip(
+            "Select every FX element of the current model and no other "
+            "geometry.")
+        self.select_all_fx_action.triggered.connect(
+            self._select_all_fx_elements)
+        edit_menu.addAction(self.select_all_fx_action)
         self.edit_select_none_action = QAction("Deselect All Vertices", self)
         self.edit_select_none_action.triggered.connect(
             self.viewport.select_no_edit_vertices)
@@ -1292,6 +1303,16 @@ class AssemblyWindow(QMainWindow):
         self.paste_geometry_action.triggered.connect(self._paste_geometry)
         self.viewport.addAction(self.paste_geometry_action)
         edit_menu.addAction(self.paste_geometry_action)
+        self.cut_geometry_action = QAction("Cut", self.viewport)
+        self.cut_geometry_action.setShortcut(QKeySequence.StandardKey.Cut)
+        self.cut_geometry_action.setShortcutContext(
+            Qt.ShortcutContext.WidgetShortcut)
+        self.cut_geometry_action.setStatusTip(
+            "Cut the selected polygons: copy them and remove them in one "
+            "undoable step.")
+        self.cut_geometry_action.triggered.connect(self._cut_geometry)
+        self.viewport.addAction(self.cut_geometry_action)
+        edit_menu.addAction(self.cut_geometry_action)
         self.delete_geometry_action = QAction("Delete", self.viewport)
         self.delete_geometry_action.setShortcut(
             QKeySequence(Qt.Key.Key_Delete))
@@ -1302,7 +1323,7 @@ class AssemblyWindow(QMainWindow):
         self.delete_geometry_action.triggered.connect(self._delete_geometry)
         self.viewport.addAction(self.delete_geometry_action)
         edit_menu.addAction(self.delete_geometry_action)
-        self.add_fx_action = QAction("Add FX...", self)
+        self.add_fx_action = QAction("Add FX", self)
         self.add_fx_action.setEnabled(False)
         self.add_fx_action.setStatusTip(
             "Add an FX from this model or another model.")
@@ -1311,7 +1332,7 @@ class AssemblyWindow(QMainWindow):
         self.clone_fx_action = QAction("Clone FX Element", self)
         self.clone_fx_action.triggered.connect(self._copy_geometry)
         edit_menu.addAction(self.clone_fx_action)
-        self.rename_fx_action = QAction("Rename FX...", self)
+        self.rename_fx_action = QAction("Rename FX", self)
         self.rename_fx_action.triggered.connect(self._rename_selected_fx)
         edit_menu.addAction(self.rename_fx_action)
         self.edit_move_action = QAction("Move", self)
@@ -1320,10 +1341,10 @@ class AssemblyWindow(QMainWindow):
             "click or Enter confirms, Esc cancels.")
         self.edit_move_action.triggered.connect(self._move_selected_geometry)
         edit_menu.addAction(self.edit_move_action)
-        self.edit_scale_action = QAction("Scale...", self)
+        self.edit_scale_action = QAction("Scale", self)
         self.edit_scale_action.triggered.connect(self._scale_selected_geometry)
         edit_menu.addAction(self.edit_scale_action)
-        self.edit_rotate_action = QAction("Rotate...", self)
+        self.edit_rotate_action = QAction("Rotate", self)
         self.edit_rotate_action.triggered.connect(
             self._rotate_selected_geometry)
         edit_menu.addAction(self.edit_rotate_action)
@@ -1379,7 +1400,7 @@ class AssemblyWindow(QMainWindow):
         extract_setbas_action.triggered.connect(self._extract_setbas_archive)
         setbas_tools_menu.addAction(extract_setbas_action)
         setbas_tools_menu.addAction(self.export_runtime_loose_action)
-        metadata_action = QAction("Export scene metadata...", self)
+        metadata_action = QAction("Export scene metadata", self)
         metadata_action.triggered.connect(self._export_setbas_metadata)
         setbas_tools_menu.addAction(metadata_action)
         open_output = QAction("Open last output folder", self)
@@ -1387,14 +1408,14 @@ class AssemblyWindow(QMainWindow):
         setbas_tools_menu.addAction(open_output)
 
         conversion_menu = tools_menu.addMenu("Texture conversion")
-        conv_to_png = QAction("ILBM/VBMP to PNG...", self)
+        conv_to_png = QAction("ILBM/VBMP to PNG", self)
         conv_to_png.triggered.connect(self._convert_ilbm_to_png_dialog)
         conversion_menu.addAction(conv_to_png)
-        conv_vbmp_to_ilbm = QAction("VBMP to standalone ILBM...", self)
+        conv_vbmp_to_ilbm = QAction("VBMP to standalone ILBM", self)
         conv_vbmp_to_ilbm.triggered.connect(
             self._convert_vbmp_to_ilbm_dialog)
         conversion_menu.addAction(conv_vbmp_to_ilbm)
-        conv_to_ilbm = QAction("PNG to ILBM (matching templates)...", self)
+        conv_to_ilbm = QAction("PNG to ILBM (matching templates)", self)
         conv_to_ilbm.triggered.connect(self._convert_png_to_ilbm_dialog)
         conversion_menu.addAction(conv_to_ilbm)
 
@@ -1410,7 +1431,7 @@ class AssemblyWindow(QMainWindow):
         self.map_editor_action = QAction("Map Editor", self)
         self.map_editor_action.triggered.connect(self._open_map_editor)
         tools_menu.addAction(self.map_editor_action)
-        self.mapping_repair_action = QAction("Mapping Repair...", self)
+        self.mapping_repair_action = QAction("Mapping Repair", self)
         self.mapping_repair_action.triggered.connect(
             self._show_mapping_repair)
         tools_menu.addAction(self.mapping_repair_action)
@@ -1558,7 +1579,7 @@ class AssemblyWindow(QMainWindow):
         from PySide6.QtWidgets import QLineEdit
         self.setbas_search = QLineEdit()
         self.setbas_search.setPlaceholderText(
-            "Search embedded resources (name or class)...")
+            "Search embedded resources (name or class)")
         self.setbas_search.textChanged.connect(self._filter_setbas_tree)
         setbas_layout.addWidget(self.setbas_search)
         setbas_layout.addWidget(self.setbas_tree, 1)
@@ -1589,7 +1610,7 @@ class AssemblyWindow(QMainWindow):
             self._export_runtime_loose_set)
         self.setbas_runtime_loose_button.setEnabled(False)
         setbas_buttons.addWidget(self.setbas_runtime_loose_button, 0, 0)
-        self.setbas_extract_button = QPushButton("Extract selected...")
+        self.setbas_extract_button = QPushButton("Extract selected")
         self.setbas_extract_button.clicked.connect(
             self._extract_setbas_selected)
         self.setbas_extract_button.setEnabled(False)
@@ -1605,7 +1626,7 @@ class AssemblyWindow(QMainWindow):
         self.setbas_open_output_button.setEnabled(False)
         setbas_buttons.addWidget(self.setbas_open_output_button, 1, 1)
         self.setbas_onua3d_button = QPushButton(
-            "Export OpenNeoUA 3D...")
+            "Export OpenNeoUA 3D")
         self.setbas_onua3d_button.setToolTip(
             "Export the selected BASE family as an OpenNeoUA 3D (.onua3d) "
             "package for compatible 3D tools.")
@@ -1641,7 +1662,7 @@ class AssemblyWindow(QMainWindow):
         textures_layout.setContentsMargins(5, 5, 5, 5)
         textures_layout.setSpacing(4)
         textures_layout.addWidget(self.texture_list, 1)
-        self.texture_export_button = QPushButton("Export selected as PNG...")
+        self.texture_export_button = QPushButton("Export selected as PNG")
         self.texture_export_button.clicked.connect(self._export_texture_png)
         textures_layout.addWidget(self.texture_export_button)
 
@@ -1845,14 +1866,22 @@ class AssemblyWindow(QMainWindow):
         self.fx_combo.customContextMenuRequested.connect(
             self._show_fx_combo_context_menu)
         fx_buttons = QHBoxLayout()
-        self.add_fx_button = QPushButton("Add FX...")
+        self.select_all_fx_button = QPushButton("Select All FX")
+        self.select_all_fx_button.setEnabled(False)
+        self.select_all_fx_button.setToolTip(
+            "Select every FX element of the current model and no other "
+            "geometry.")
+        self.select_all_fx_button.clicked.connect(
+            self.select_all_fx_action.trigger)
+        fx_buttons.addWidget(self.select_all_fx_button)
+        self.add_fx_button = QPushButton("Add FX")
         self.add_fx_button.setEnabled(False)
         self.add_fx_button.setToolTip(
             "Add an FX from the current model, another model, or a VP-defined "
             "model in a BAS archive.")
         self.add_fx_button.clicked.connect(self.add_fx_action.trigger)
         fx_buttons.addWidget(self.add_fx_button)
-        self.clone_fx_button = QPushButton("Clone FX...")
+        self.clone_fx_button = QPushButton("Clone FX")
         self.clone_fx_button.setEnabled(False)
         self.clone_fx_button.clicked.connect(self.clone_fx_action.trigger)
         fx_buttons.addWidget(self.clone_fx_button)
@@ -1865,13 +1894,13 @@ class AssemblyWindow(QMainWindow):
             self._delete_selected_fx_element)
         fx_buttons.addWidget(self.delete_fx_button)
 
-        self.rename_fx_button = QPushButton("Rename FX...")
+        self.rename_fx_button = QPushButton("Rename FX")
         self.rename_fx_button.clicked.connect(self.rename_fx_action.trigger)
         # Rename occupies the former Replace FX Texture slot, directly below the
         # FX selection.  Replace FX Texture moves to Rename's former lower slot.
         model_box_layout.addWidget(self.rename_fx_button)
         model_box_layout.addLayout(fx_buttons)
-        self.load_texture_button = QPushButton("Replace FX Texture...")
+        self.load_texture_button = QPushButton("Replace FX Texture")
         self.load_texture_button.setEnabled(False)
         self.load_texture_button.setToolTip(
             "Replace the texture only on the selected polygon segments. "
@@ -1948,7 +1977,7 @@ class AssemblyWindow(QMainWindow):
         self.model_save_as_button.clicked.connect(self._save_model_as)
         save_buttons.addWidget(self.model_save_as_button, 0, 1)
         self.model_onua3d_button = QPushButton(
-            "Export OpenNeoUA 3D...")
+            "Export OpenNeoUA 3D")
         self.model_onua3d_button.setToolTip(
             "Export the loaded BASE family as an OpenNeoUA 3D (.onua3d) "
             "package for compatible 3D tools.")
@@ -2161,10 +2190,10 @@ class AssemblyWindow(QMainWindow):
         self.snapshot_quality_spin.setValue(95)
         self.snapshot_quality_spin.setEnabled(False)
         export_layout.addWidget(self.snapshot_quality_spin, 2, 1)
-        self.snapshot_export_button = QPushButton("Export Image As...")
+        self.snapshot_export_button = QPushButton("Export Image As")
         self.snapshot_export_button.clicked.connect(self._export_snapshot)
         export_layout.addWidget(self.snapshot_export_button, 3, 0, 1, 2)
-        self.snapshot_figurine_button = QPushButton("Export VP Set...")
+        self.snapshot_figurine_button = QPushButton("Export VP Set")
         self.snapshot_figurine_button.setToolTip(
             "Export the current model as PNG from every canonical angle. "
             "Uses the selected background color/opacity, or transparent "
@@ -4043,7 +4072,7 @@ class AssemblyWindow(QMainWindow):
         if not out_dir:
             return
         from setbas_export import extract_archive
-        self._notify("Extracting archive...", 0)
+        self._notify("Extracting archive", 0)
         try:
             summary = extract_archive(
                 self._setbas, out_dir,
@@ -4102,9 +4131,9 @@ class AssemblyWindow(QMainWindow):
 
         target_row = QHBoxLayout()
         target_edit = QLineEdit(str(initial_target))
-        target_edit.setPlaceholderText(".../Data/SetN or .../Data/Sets/SetN")
+        target_edit.setPlaceholderText("Data/SetN or Data/Sets/SetN")
         target_edit.setMinimumWidth(500)
-        browse_button = QPushButton("Browse...")
+        browse_button = QPushButton("Browse")
         browse_button.setMinimumWidth(100)
 
         def browse_target() -> None:
@@ -4131,7 +4160,7 @@ class AssemblyWindow(QMainWindow):
         try:
             loose_root, _set_id = resolve_runtime_loose_root(
                 target_edit.text().strip())
-            self._notify("Exporting Runtime Loose SET...", 0)
+            self._notify("Exporting Runtime Loose SET", 0)
             QApplication.processEvents()
             summary = export_runtime_loose(
                 self._setbas, loose_root,
@@ -5273,7 +5302,7 @@ class AssemblyWindow(QMainWindow):
             return
         logical_name, _candidate = target
         candidates = self._dependency_candidate_paths(logical_name)
-        browse_label = "Browse for a compatible file..."
+        browse_label = "Browse for a compatible file"
         choices = [label for label, _path in candidates]
         choices.append(browse_label)
         selected, accepted = QInputDialog.getItem(
@@ -6264,6 +6293,18 @@ class AssemblyWindow(QMainWindow):
             for vertex in element.vertex_indices
         }
         self.viewport.set_edit_read_only_vertices(read_only_vertices)
+        # The FX list drives the FX commands, so realign labels and enabled
+        # states every time the list is rebuilt.
+        self._sync_fx_combo_label()
+        self._sync_edit_action_states()
+
+    def _sync_fx_combo_label(self) -> None:
+        """Name the neutral FX entry after the real multi-element selection."""
+
+        label = ("Multiple FX selected"
+                 if len(self._active_fx_elements()) > 1
+                 else "No FX element selected")
+        self.fx_combo.setItemText(0, label)
 
     def _fx_combo_index(self, identity) -> int:
         for index in range(1, self.fx_combo.count()):
@@ -6460,6 +6501,11 @@ class AssemblyWindow(QMainWindow):
             return
         element = self._selected_fx_element()
         if element is None:
+            # A multi-element selection lives in the geometry, not in the list:
+            # Delete Selected FX then removes every selected FX at once.
+            if self._active_fx_elements():
+                self._delete_geometry()
+                return
             self._notify("Select an FX element from the list first.", 5000)
             return
         if element.shared_state == "invalid":
@@ -6507,13 +6553,14 @@ class AssemblyWindow(QMainWindow):
 
     def _show_fx_combo_context_menu(self, position) -> None:
         menu = QMenu(self.fx_combo)
+        menu.addAction(self.select_all_fx_action)
         add_action = menu.addAction(
-            "Add FX...", self._add_fx_element)
+            "Add FX", self._add_fx_element)
         add_action.setEnabled(self._can_add_fx_element())
         menu.addAction(self.clone_fx_action)
         menu.addAction(self.rename_fx_action)
         delete_action = menu.addAction(
-            "Delete Selected FX Element...",
+            "Delete Selected FX Element",
             self._delete_selected_fx_element)
         delete_action.setEnabled(self._can_delete_selected_fx_element())
         menu.exec(self.fx_combo.mapToGlobal(position))
@@ -6753,6 +6800,59 @@ class AssemblyWindow(QMainWindow):
             "FX Preview. Paste/LMB/Enter confirms; RMB/Esc cancels. "
             "Scale and orientation are unchanged.",
             12000)
+
+    def _select_all_fx_elements(self) -> None:
+        """Select every FX element of the current model and nothing else."""
+
+        if self.viewport.paste_preview_active:
+            self._notify(
+                "Selection unchanged: finish or cancel the active placement "
+                "preview first.", 6000)
+            return
+        elements = tuple(self._fx_elements)
+        if not elements:
+            self.statusBar().showMessage(
+                "Select All FX: the current model has no FX element.", 6000)
+            return
+        owner = elements[0].owner_path
+        if self._selected_owner != owner:
+            self._select_owner(owner)
+            elements = tuple(
+                element for element in self._fx_elements
+                if element.owner_path == owner)
+            if not elements:
+                return
+        fx_polys = self._complete_fx_polygon_selection(
+            poly_id for element in elements for poly_id in element.poly_ids)
+        # Mirror expansion is intentionally skipped: every FX is already in the
+        # selection and mirroring could pull plain model polygons into it.
+        self._mirror_select_source_polys = set(fx_polys)
+        self._selected_poly = min(fx_polys, default=None)
+        self._selected_polys = set(fx_polys)
+        self.viewport.set_selected_polygon(self._selected_poly)
+        self.viewport.set_highlight_polys(self._selected_polys)
+        # In Edit Mode select exactly the FX POO2 vertices, so the transforms
+        # never touch the regular model geometry.
+        session = self.viewport.edit_session
+        if session is not None and self.viewport.edit_owner == owner:
+            self.viewport.select_edit_vertices(sorted(
+                {index for element in elements
+                 for index in element.vertex_indices}))
+        self._sync_poly_id_control()
+        self._fill_polygon_inspector(self._selected_poly)
+        self._update_repair_buttons()
+        if len(elements) > 1:
+            # The list cannot name a single element for this selection.
+            self.fx_combo.blockSignals(True)
+            self.fx_combo.setCurrentIndex(0)
+            self.fx_combo.blockSignals(False)
+        self._sync_fx_combo_label()
+        self._sync_edit_action_states()
+        self.statusBar().showMessage(
+            f"Selected {len(elements)} FX element(s): "
+            + ", ".join(element.fx_name for element in elements)
+            + " | polyIDs "
+            + ",".join(str(poly_id) for poly_id in sorted(fx_polys)))
 
     def _select_highlight_fx(self) -> None:
         element = self._selected_fx_element()
@@ -8211,18 +8311,27 @@ class AssemblyWindow(QMainWindow):
         self.viewport.set_selected_polygon(self._selected_poly)
         self.viewport.set_highlight_polys(resolved)
         if source == "vertex":
-            element = next(
-                (candidate for candidate in self._fx_elements
-                 if candidate.owner_path == self.viewport.edit_owner
-                 and set(candidate.poly_ids).issubset(resolved)),
-                None)
-            self.fx_combo.blockSignals(True)
-            self.fx_combo.setCurrentIndex(
-                self._fx_combo_index(element.identity) if element else 0)
-            self.fx_combo.blockSignals(False)
+            active_elements = self._active_fx_elements()
+            if len(active_elements) > 1:
+                # More than one complete FX is selected: the list cannot name a
+                # single one, so it stays on the neutral multi entry.
+                self.fx_combo.blockSignals(True)
+                self.fx_combo.setCurrentIndex(0)
+                self.fx_combo.blockSignals(False)
+            else:
+                element = active_elements[0] if active_elements else next(
+                    (candidate for candidate in self._fx_elements
+                     if candidate.owner_path == self.viewport.edit_owner
+                     and set(candidate.poly_ids).issubset(resolved)),
+                    None)
+                self.fx_combo.blockSignals(True)
+                self.fx_combo.setCurrentIndex(
+                    self._fx_combo_index(element.identity) if element else 0)
+                self.fx_combo.blockSignals(False)
         if self._mapping_index is not None:
             self._fill_polygon_inspector(self._selected_poly)
         self._update_repair_buttons()
+        self._sync_fx_combo_label()
         self._sync_edit_action_states()
 
     def _copy_geometry_reason(self) -> str:
@@ -9075,7 +9184,7 @@ class AssemblyWindow(QMainWindow):
             return
         count = len(plan.deleted_polygon_indices)
         question = (
-            f"Delete {len(fx_elements)} complete mirrored FX elements "
+            f"Delete {len(fx_elements)} complete FX elements "
             f"({count} polygon(s))?\n"
             if len(fx_elements) > 1 else
             f"Delete the complete {element.fx_name} "
@@ -9100,7 +9209,7 @@ class AssemblyWindow(QMainWindow):
             deleted = self._apply_delete_plan(
                 owner, fam_obj, plan,
                 label=(
-                    "Delete mirrored FX elements"
+                    "Delete FX elements"
                     if len(fx_elements) > 1 else
                     f"Delete {element.fx_name} FX"
                     if element is not None else "Delete Geometry"))
@@ -9108,13 +9217,52 @@ class AssemblyWindow(QMainWindow):
             self._notify(f"Delete refused: {exc}.", 8000)
             return
         deleted_message = (
-            f"Deleted {len(fx_elements)} complete mirrored FX elements. "
+            f"Deleted {len(fx_elements)} complete FX elements. "
             if len(fx_elements) > 1 else
             f"Deleted complete {element.fx_name} FX element. "
             if element is not None else
             f"Deleted {deleted} selected polygon(s). "
         ) + "This operation can be undone."
         self._notify(deleted_message, 8000)
+
+    def _cut_geometry(self) -> None:
+        """Cut the selection: clipboard copy plus one undoable removal."""
+
+        if not self._require_editing("Cut Geometry"):
+            return
+        if self.viewport.paste_preview_active:
+            self.viewport.cancel_paste_preview()
+        reason = self._copy_geometry_reason()
+        if reason:
+            self._notify(f"Cut refused: {reason}.", 7000)
+            return
+        try:
+            plan = self._delete_geometry_plan()
+        except GeometryClipboardError as exc:
+            self._notify(f"Cut refused: {exc}.", 9000)
+            return
+        try:
+            clipboard, descriptor = self._build_geometry_placement_clipboard()
+        except GeometryClipboardError as exc:
+            self._notify(f"Cut refused: {exc}.", 9000)
+            return
+        owner = self.viewport.edit_owner
+        fam_obj = self._owner_to_obj.get(owner) if owner else None
+        if fam_obj is None:
+            self._notify(
+                "Cut refused: the editable model is unavailable.", 7000)
+            return
+        try:
+            self._apply_delete_plan(owner, fam_obj, plan, label="Cut Geometry")
+        except GeometryClipboardError as exc:
+            self._notify(f"Cut refused: {exc}.", 9000)
+            return
+        # Store the clipboard only after the removal succeeded: a failed cut
+        # keeps the previous clipboard and leaves the geometry untouched.
+        self._geometry_clipboard = clipboard
+        self._sync_edit_action_states()
+        self._notify(
+            f"Cut {descriptor}. The copy is ready for Paste.", 8000)
 
     def _move_selected_geometry(self) -> None:
         if not self._require_editing("Move"):
@@ -9281,6 +9429,7 @@ class AssemblyWindow(QMainWindow):
         select_all = menu.addAction(
             "Select All Vertices", self.viewport.select_all_edit_vertices)
         select_all.setEnabled(active)
+        menu.addAction(self.select_all_fx_action)
         select_none = menu.addAction(
             "Deselect All Vertices", self.viewport.select_no_edit_vertices)
         select_none.setEnabled(active)
@@ -9303,12 +9452,13 @@ class AssemblyWindow(QMainWindow):
             menu.addAction(self.copy_geometry_action)
             if not isinstance(self._geometry_clipboard, FxElementClipboard):
                 menu.addAction(self.paste_geometry_action)
+            menu.addAction(self.cut_geometry_action)
         if active_fx is not None:
             active_fx_elements = self._active_fx_elements()
             delete_geometry = menu.addAction(
-                "Delete Mirrored FX Elements..."
+                "Delete FX Elements"
                 if len(active_fx_elements) > 1 else
-                "Delete FX Element...",
+                "Delete FX Element",
                 self._delete_geometry
                 if len(active_fx_elements) > 1 else
                 self._delete_selected_fx_element)
@@ -9321,10 +9471,10 @@ class AssemblyWindow(QMainWindow):
             menu.addAction(self.rename_fx_action)
         menu.addAction(self.edit_move_action)
         scale = menu.addAction(
-            "Scale...", self._scale_selected_geometry)
+            "Scale", self._scale_selected_geometry)
         scale.setEnabled(editing and self._family is not None)
         rotate = menu.addAction(
-            "Rotate...", self._rotate_selected_geometry)
+            "Rotate", self._rotate_selected_geometry)
         rotate.setEnabled(editing and self._family is not None)
         menu.addSeparator()
         reset_camera = menu.addAction(
@@ -9519,6 +9669,16 @@ class AssemblyWindow(QMainWindow):
                 "Copy the selected geometry and start Copy Preview.")
             self.copy_geometry_action.setToolTip(copy_tip)
             self.copy_geometry_action.setStatusTip(copy_tip)
+        if hasattr(self, "cut_geometry_action"):
+            can_cut = editing and can_copy and can_delete
+            self.cut_geometry_action.setEnabled(can_cut)
+            cut_tip = (
+                "Cut the selected geometry: copy it and remove it in one "
+                "undoable step."
+                if can_cut else
+                f"Cut unavailable: {copy_reason or delete_reason}.")
+            self.cut_geometry_action.setToolTip(cut_tip)
+            self.cut_geometry_action.setStatusTip(cut_tip)
         if hasattr(self, "paste_geometry_action"):
             has_clipboard = self._geometry_clipboard is not None
             self.paste_geometry_action.setEnabled(
@@ -9548,6 +9708,11 @@ class AssemblyWindow(QMainWindow):
                 "Delete selected geometry and compact unused vertices.")
             self.delete_geometry_action.setToolTip(delete_tip)
             self.delete_geometry_action.setStatusTip(delete_tip)
+        can_select_all_fx = bool(self._fx_elements) and not paste_preview
+        if hasattr(self, "select_all_fx_action"):
+            self.select_all_fx_action.setEnabled(can_select_all_fx)
+        if hasattr(self, "select_all_fx_button"):
+            self.select_all_fx_button.setEnabled(can_select_all_fx)
         can_add_fx = editing and self._can_add_fx_element()
         if hasattr(self, "add_fx_action"):
             self.add_fx_action.setEnabled(can_add_fx)
@@ -9561,15 +9726,21 @@ class AssemblyWindow(QMainWindow):
             self.rename_fx_action.setEnabled(can_rename)
             self.rename_fx_button.setEnabled(can_rename)
         if hasattr(self, "delete_fx_button"):
+            element = self._selected_fx_element()
+            multi_fx = self._active_fx_elements()
             can_delete_fx = (
                 editing
-                and self._selected_fx_element() is not None
-                and self._selected_fx_element().shared_state != "invalid"
-                and can_delete)
+                and can_delete
+                and ((element is not None
+                      and element.shared_state != "invalid")
+                     or bool(multi_fx)))
             self.delete_fx_button.setEnabled(can_delete_fx)
-            element = self._selected_fx_element()
             if element is None:
-                delete_fx_tip = "Select an FX element from the list first."
+                delete_fx_tip = (
+                    f"Delete the {len(multi_fx)} selected FX elements. "
+                    "The operation can be undone."
+                    if multi_fx else
+                    "Select an FX element from the list first.")
             elif element.shared_state == "invalid":
                 delete_fx_tip = (
                     f"{element.fx_name} is structurally invalid and "
@@ -11767,7 +11938,7 @@ class AssemblyWindow(QMainWindow):
             if skipped and skipped[0][1] == "unmapped":
                 message = (
                     "This polygon has no UV mapping. Open Tools > "
-                    "Mapping Repair... first.")
+                    "Mapping Repair first.")
             else:
                 reason = skipped[0][1] if skipped else "UV data unavailable"
                 message = f"This polygon is not editable: {reason}."

@@ -4547,8 +4547,8 @@ class CollisionEditorWindow(QMainWindow):
         for action in (self.copy_output_action, self.export_action):
             self.file_export_menu.addAction(action)
 
-        self.apply_script_action = QAction("Apply to Script...", self)
-        self.apply_script_action.setIconText("Apply to Script...")
+        self.apply_script_action = QAction("Apply to Script", self)
+        self.apply_script_action.setIconText("Apply to Script")
         self.apply_script_action.triggered.connect(self.apply_to_script)
         self.save_loaded_script_action = QAction(
             "Overwrite to Existing Script", self)
@@ -4798,7 +4798,7 @@ class CollisionEditorWindow(QMainWindow):
         source_layout = QVBoxLayout(source_panel)
         source_layout.addWidget(QLabel("Resources in archive"))
         self.model_search = QLineEdit()
-        self.model_search.setPlaceholderText("Search model names...")
+        self.model_search.setPlaceholderText("Search model names")
         self.model_search.setClearButtonEnabled(True)
         self.model_search.setToolTip(
             "Filter models by name, internal path or owner path.")
@@ -6831,7 +6831,7 @@ class CollisionEditorWindow(QMainWindow):
             return
 
         self.statusBar().showMessage(
-            f"Generating collision spheres — {preset.label}...")
+            f"Generating collision spheres — {preset.label}")
         QApplication.processEvents()
         QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
         try:
@@ -7739,11 +7739,10 @@ class CollisionEditorWindow(QMainWindow):
                 and self.project.target_category == VEHICLE)
 
     def _is_cockpit_tab_active(self) -> bool:
-        # The Cockpit tab itself is harmless. Runtime-style preview and gizmo
-        # editing start only after the explicit Enable button is pressed (or
-        # when an imported script already contains cockpit offsets).
-        return (self._is_cockpit_tab_selected()
-                and self.project.cockpit_camera_enabled)
+        # Entering the Cockpit tab is a pure viewport switch: the runtime-style
+        # preview shows right away and the orbit camera state is never touched,
+        # so leaving the tab restores the exact previous editor view.
+        return self._is_cockpit_tab_selected()
 
     def _properties_tab_changed(self, _index: int) -> None:
         # Changing workspace must never modify authored data. It only switches
@@ -7819,6 +7818,9 @@ class CollisionEditorWindow(QMainWindow):
         step = float(self.move_strength_spin.value())
         self._vehicle_preview_active_edits.clear()
         self._push_undo()
+        # Moving the cockpit camera is the explicit request for the offset:
+        # enable its output so the edit is not silently discarded on export.
+        self.project.cockpit_camera_enabled = True
         self.project.cockpit_camera_offset_x += float(direction[0]) * step
         self.project.cockpit_camera_offset_y += float(direction[1]) * step
         self.project.cockpit_camera_offset_z += float(direction[2]) * step
@@ -9140,9 +9142,14 @@ class CollisionEditorWindow(QMainWindow):
             else 0.0
         )
         previews = []
+        compound_active = bool(self.project.compound)
         for sphere in self.project.spheres():
             preview = sphere.clone()
             preview.y += offset_y
+            if compound_active and sphere.category == LEGACY:
+                # Compound spheres drive the runtime extent, so the legacy ring
+                # would only add a misleading outline around the model.
+                preview.visible = False
             previews.append(preview)
         return previews
 
@@ -9528,6 +9535,14 @@ class CollisionEditorWindow(QMainWindow):
                 self.visible_check.setChecked(sphere.visible)
             self.runtime_radius_value.clear()
             self.runtime_radius_value.hide()
+            if sphere.category == LEGACY:
+                # Compound spheres own the runtime extent: the explicit legacy
+                # radius stays in the script but is not used at runtime.
+                self.runtime_radius_value.setText(
+                    "Runtime Radius: disabled by OpenNeoUA Collision"
+                    if self.project.compound else
+                    f"Runtime Radius: {_radius_number(sphere.radius)}")
+                self.runtime_radius_value.show()
             if selected_sphere_count == 1:
                 self.radius_spin.setToolTip(
                     "Explicit radius remains active alongside OpenNeoUA "

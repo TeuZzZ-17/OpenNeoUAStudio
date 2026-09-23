@@ -117,7 +117,7 @@ class AssetDependenciesWorkflowTests(unittest.TestCase):
             family.dependencies[0].candidates = []
             with patch(
                     "assembly_window.QInputDialog.getItem",
-                    return_value=("Browse for a compatible file...", True)), \
+                    return_value=("Browse for a compatible file", True)), \
                     patch.object(window, "_assign_manual_file") as browse:
                 window._select_dependency_resource()
             browse.assert_called_once_with()
@@ -451,7 +451,7 @@ class AssetDependenciesWorkflowTests(unittest.TestCase):
         self.assertIn(
             '"Export Asset Family"', source[asset_start:asset_end])
         self.assertIn(
-            '"Export OpenNeoUA 3D..."', source[asset_start:asset_end])
+            '"Export OpenNeoUA 3D"', source[asset_start:asset_end])
         texture_start = source.index("    def _show_texture_context_menu")
         texture_end = source.index("    def _build_toolbar", texture_start)
         self.assertIn(

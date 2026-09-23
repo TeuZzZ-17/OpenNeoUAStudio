@@ -155,9 +155,9 @@ class VPSnapshotBatchPanel(QGroupBox):
         output_row.setSpacing(4)
         output_row.addWidget(QLabel("Output:"))
         self.output_edit = QLineEdit()
-        self.output_edit.setPlaceholderText("Choose an output folder...")
+        self.output_edit.setPlaceholderText("Choose an output folder")
         output_row.addWidget(self.output_edit, 1)
-        self.output_button = QPushButton("...")
+        self.output_button = QPushButton("Browse")
         self.output_button.setFixedWidth(34)
         self.output_button.setToolTip("Choose the corpus output folder")
         self.output_button.clicked.connect(self._choose_output)
@@ -297,7 +297,7 @@ class VPSnapshotBatchPanel(QGroupBox):
             return
         self._cancel_requested = True
         self.cancel_button.setEnabled(False)
-        self.status_label.setText("Cancelling...")
+        self.status_label.setText("Cancelling")
 
     def start(self) -> None:
         if self._running:
@@ -339,7 +339,7 @@ class VPSnapshotBatchPanel(QGroupBox):
         self._renderer_mode = "textured"
 
         self._set_running(True)
-        self.status_label.setText("Scanning SET.BAS...")
+        self.status_label.setText("Scanning SET.BAS")
         QApplication.processEvents()
 
         try:
@@ -419,7 +419,7 @@ class VPSnapshotBatchPanel(QGroupBox):
         self.window.statusBar().showMessage(
             f"Complete model batch started: {len(renderable)} models × "
             f"{len(views)} views.")
-        self.status_label.setText("Starting...")
+        self.status_label.setText("Starting")
         QTimer.singleShot(0, self._step)
 
     def _build_sources(self, vp_entries, archive, family) -> list[SnapshotSource]:
@@ -914,7 +914,7 @@ class VPSnapshotBatchPanel(QGroupBox):
         self._write_manifests(cancelled)
         zip_path = None
         if not cancelled and self.zip_check.isChecked():
-            self.status_label.setText("Creating ZIP...")
+            self.status_label.setText("Creating ZIP")
             QApplication.processEvents()
             zip_path = self._create_zip()
             cancelled = self._cancel_requested

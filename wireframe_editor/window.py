@@ -467,7 +467,7 @@ class WireframeEditorWindow(QMainWindow):
         self.save_action.triggered.connect(self.save_current_file)
         self.export_action = self.save_action
 
-        self.save_as_action = QAction("Export &As...", self)
+        self.save_as_action = QAction("Export &As", self)
         self.save_as_action.setShortcut(QKeySequence.StandardKey.SaveAs)
         self.save_as_action.triggered.connect(self.save_outline_as)
         self.export_as_action = self.save_as_action

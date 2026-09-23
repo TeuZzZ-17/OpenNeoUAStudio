@@ -287,9 +287,9 @@ class FxAuthoringTests(unittest.TestCase):
                 menu = window._create_viewport_context_menu()
                 labels = [a.text() for a in menu.actions()]
                 self.assertIn('Clone FX Element', labels)
-                self.assertIn('Rename FX...', labels)
+                self.assertIn('Rename FX', labels)
                 self.assertNotIn('Copy FX Element', labels)
-                self.assertNotIn('Replace FX Element...', labels)
+                self.assertNotIn('Replace FX Element', labels)
             finally:
                 window.close()
 
