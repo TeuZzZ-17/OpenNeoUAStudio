@@ -1117,10 +1117,40 @@ class CollisionEditorTests(unittest.TestCase):
         window._sync_all()
         self.assertFalse(window.radius_spin.isEnabled())
         self.assertFalse(window.radius_slider.isEnabled())
-        self.assertIn("controls below", window.radius_spin.toolTip())
+        self.assertIn("different radii", window.radius_spin.toolTip())
         self.assertEqual(
             window.selected_element_label.text(),
             "2 Collision Spheres Selected")
+
+    def test_53ka_equal_radius_multiselect_edits_every_selected_sphere(self):
+        window = self._window()
+        window.project.compound = [
+            CollisionSphere(OPENNEOUA, radius=10),
+            CollisionSphere(OPENNEOUA, radius=10),
+            CollisionSphere(OPENNEOUA, radius=30),
+        ]
+        window._selected = 0
+        window._selected_spheres = {0, 1}
+        window._sync_all()
+        self.assertTrue(window.radius_spin.isEnabled())
+        self.assertTrue(window.radius_slider.isEnabled())
+
+        window.radius_spin.setValue(12.5)
+        window._finish_radius_spin_edit()
+        self.assertEqual(
+            [sphere.radius for sphere in window.project.compound],
+            [12.5, 12.5, 30])
+        window.undo()
+        self.assertEqual(
+            [sphere.radius for sphere in window.project.compound],
+            [10, 10, 30])
+
+        window._begin_radius_slider()
+        window.radius_slider.setValue(window._radius_to_slider(18))
+        window._finish_radius_slider()
+        self.assertEqual(window.project.compound[0].radius,
+                         window.project.compound[1].radius)
+        self.assertEqual(window.project.compound[2].radius, 30)
 
     def test_53l_tree_right_click_selected_row_keeps_multiselection(self):
         window = self._window()
@@ -1305,9 +1335,10 @@ class CollisionEditorTests(unittest.TestCase):
             [sphere.visible for sphere in window.project.compound],
             [False, True, False])
 
-    def test_53oa_isolate_button_requires_single_selected_sphere(self):
+    def test_53oa_isolate_button_supports_multiselection(self):
         window = self._window()
         window.project.compound = [
+            CollisionSphere(OPENNEOUA),
             CollisionSphere(OPENNEOUA),
             CollisionSphere(OPENNEOUA),
         ]
@@ -1315,8 +1346,45 @@ class CollisionEditorTests(unittest.TestCase):
         window._selected_spheres = {0, 1}
         window._sync_all()
 
-        self.assertFalse(window.isolate_sphere_button.isEnabled())
-        self.assertEqual(window.isolate_sphere_button.text(), "Isolate Sphere")
+        self.assertTrue(window.isolate_sphere_button.isEnabled())
+        self.assertEqual(window.isolate_sphere_button.text(), "Isolate Spheres")
+        window.isolate_sphere_button.click()
+        self.assertEqual(
+            [sphere.visible for sphere in window.project.compound],
+            [True, True, False])
+        window.undo()
+        self.assertEqual(
+            [sphere.visible for sphere in window.project.compound],
+            [True, True, True])
+
+    def test_53oab_context_menu_isolates_complete_multiselection(self):
+        window = self._window()
+        window.project.compound = [
+            CollisionSphere(OPENNEOUA),
+            CollisionSphere(OPENNEOUA),
+            CollisionSphere(OPENNEOUA),
+        ]
+        window._selected = 0
+        window._selected_spheres = {0, 1}
+        window._sync_all()
+
+        menu = window._create_sphere_context_menu(0)
+        self.assertIn("Change Sphere Types",
+                      [action.text() for action in menu.actions()])
+        self.assertIn("Mirror Selected Spheres",
+                      [action.text() for action in menu.actions()])
+        self.assertEqual(window.change_type_button.text(),
+                         "Change Sphere Types")
+        self.assertEqual(window.mirror_sphere_button.text(),
+                         "Mirror Selected Spheres")
+        self.assertEqual(window.transform_box.title(),
+                         "Move Collision Spheres")
+        action = next(action for action in menu.actions()
+                      if action.text() == "Isolate Spheres")
+        action.trigger()
+        self.assertEqual(
+            [sphere.visible for sphere in window.project.compound],
+            [True, True, False])
 
     def test_53o_sphere_context_menu_exposes_hide_and_unhide(self):
         window = self._window()
