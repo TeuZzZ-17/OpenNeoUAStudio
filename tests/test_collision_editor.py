@@ -101,6 +101,22 @@ def _mixed_project():
     )
 
 
+def _right_click(viewport, pos, hit_index):
+    """Send one still right-click, stubbing the sphere hit test."""
+
+    press = QMouseEvent(
+        QEvent.Type.MouseButtonPress, pos, pos, pos,
+        Qt.MouseButton.RightButton, Qt.MouseButton.RightButton,
+        Qt.KeyboardModifier.NoModifier)
+    release = QMouseEvent(
+        QEvent.Type.MouseButtonRelease, pos, pos, pos,
+        Qt.MouseButton.RightButton, Qt.MouseButton.NoButton,
+        Qt.KeyboardModifier.NoModifier)
+    with patch.object(viewport, "_hit_sphere", return_value=hit_index):
+        viewport.mousePressEvent(press)
+        viewport.mouseReleaseEvent(release)
+
+
 class CollisionEditorTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
@@ -1010,23 +1026,51 @@ class CollisionEditorTests(unittest.TestCase):
             lambda index, pos: context.append(index))
         pos = QPointF(40, 40)
 
-        with patch.object(viewport, "_hit_sphere", return_value=1):
-            event = QMouseEvent(
-                QEvent.Type.MouseButtonPress, pos, pos, pos,
-                Qt.MouseButton.RightButton, Qt.MouseButton.RightButton,
-                Qt.KeyboardModifier.NoModifier)
-            viewport.mousePressEvent(event)
+        _right_click(viewport, pos, 1)
         self.assertEqual(picked, [])
         self.assertEqual(context, [1])
         self.assertEqual(viewport._collision_selected_indices, {0, 1})
 
-        with patch.object(viewport, "_hit_sphere", return_value=2):
-            event = QMouseEvent(
-                QEvent.Type.MouseButtonPress, pos, pos, pos,
-                Qt.MouseButton.RightButton, Qt.MouseButton.RightButton,
-                Qt.KeyboardModifier.NoModifier)
-            viewport.mousePressEvent(event)
+        _right_click(viewport, pos, 2)
         self.assertEqual(picked, [2])
+        self.assertEqual(context, [1, 2])
+
+        _right_click(viewport, pos, -1)
+        self.assertEqual(picked, [2])
+        self.assertEqual(context, [1, 2, -1])
+
+    def test_53fa_right_drag_pans_camera_and_skips_context_menu(self):
+        viewport = CollisionViewport()
+        self.addCleanup(viewport.close)
+        viewport.resize(500, 350)
+        viewport.set_collision_spheres(
+            [CollisionSphere(OPENNEOUA, radius=10)], selected=-1)
+        context = []
+        viewport.sphereContextMenuRequested.connect(
+            lambda index, pos: context.append(index))
+        start = QPointF(40, 40)
+        end = QPointF(90, 70)
+        pan_before = QPointF(viewport._pan)
+
+        press = QMouseEvent(
+            QEvent.Type.MouseButtonPress, start, start, start,
+            Qt.MouseButton.RightButton, Qt.MouseButton.RightButton,
+            Qt.KeyboardModifier.NoModifier)
+        viewport.mousePressEvent(press)
+        move = QMouseEvent(
+            QEvent.Type.MouseMove, end, end, end,
+            Qt.MouseButton.NoButton, Qt.MouseButton.RightButton,
+            Qt.KeyboardModifier.NoModifier)
+        viewport.mouseMoveEvent(move)
+        release = QMouseEvent(
+            QEvent.Type.MouseButtonRelease, end, end, end,
+            Qt.MouseButton.RightButton, Qt.MouseButton.NoButton,
+            Qt.KeyboardModifier.NoModifier)
+        viewport.mouseReleaseEvent(release)
+
+        self.assertEqual(context, [])
+        self.assertEqual(viewport._pan, pan_before + QPointF(50.0, 30.0))
+        self.assertFalse(viewport._camera_interacting)
 
     def test_53g_duplicate_sphere_duplicates_entire_multiselection(self):
         window = self._window()
