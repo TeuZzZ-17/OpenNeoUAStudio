@@ -641,7 +641,7 @@ class CollisionEditorTests(unittest.TestCase):
         self.assertEqual(window.toolbar_undo_button.text(), "< Undo")
         self.assertEqual(window.toolbar_redo_button.text(), "Redo >")
 
-    def test_40_radius_list_and_export_are_whole_numbers(self):
+    def test_40_legacy_radius_stays_whole_compound_radius_keeps_precision(self):
         project = CollisionProject(
             name="Rounded", source_model="rounded.sklt",
             legacy=CollisionSphere(LEGACY, radius=89.1251),
@@ -650,16 +650,43 @@ class CollisionEditorTests(unittest.TestCase):
             ])
         output = export_collision_text(project)
         self.assertIn("radius = 89", output)
-        self.assertIn("coll_radius = 78", output)
+        self.assertIn("coll_radius = 78.379051", output)
         self.assertNotIn("89.1251", output)
-        self.assertNotIn("78.379051", output)
+        self.assertNotIn("78.3790510", output)
         window = self._window()
         window.project = project
         window._selected = 1
         window._sync_all()
         self.assertEqual(window.sphere_tree.topLevelItem(0).text(1), "89")
-        self.assertEqual(window.sphere_tree.topLevelItem(1).text(1), "78")
-        self.assertEqual(window.radius_spin.decimals(), 0)
+        self.assertEqual(window.sphere_tree.topLevelItem(1).text(1), "78.379")
+        self.assertEqual(window.radius_spin.decimals(), 3)
+        self.assertAlmostEqual(window.radius_spin.value(), 78.379, places=3)
+        window.radius_spin.setValue(78.125)
+        self.assertEqual(project.compound[0].radius, 78.125)
+
+    def test_40b_manual_compound_precision_round_trips_through_helpers(self):
+        project = CollisionProject(
+            name="Fractional", source_model="fractional.sklt",
+            legacy=CollisionSphere(LEGACY, radius=89.1251),
+            compound=[CollisionSphere(
+                OPENNEOUA, 1.23456, -0.0004, -2.34567, 78.379051)])
+        data = editor_module.collision_data_lines(project)
+        self.assertIn("radius = 89", data)
+        self.assertIn("coll_x = 1.23456", data)
+        self.assertIn("coll_y = -0.0004", data)
+        self.assertIn("coll_z = -2.34567", data)
+        self.assertIn("coll_radius = 78.379051", data)
+        script = "new_vehicle 7\n" + "\n".join(data) + "\nend\n"
+        block = find_script_blocks(script)[0]
+        legacy, compound, warnings = import_collision_block(
+            script, block, OPENNEOUA)
+        self.assertEqual(warnings, [])
+        self.assertEqual(legacy.radius, 89.0)
+        self.assertEqual(
+            (compound[0].x, compound[0].y, compound[0].z,
+             compound[0].radius),
+            (1.23456, -0.0004, -2.34567, 78.379051),
+        )
 
     def test_41_delete_all_collisions_is_undoable_and_not_in_edit_menu(self):
         window = self._window()

@@ -246,13 +246,15 @@ def _number(value: float) -> str:
     return f"{value:.6f}".rstrip("0").rstrip(".")
 
 
-def _sphere_coordinate_number(value: float) -> str:
-    """Compact one-decimal coordinate used only by the sphere list UI."""
+def _sphere_number(value: float) -> str:
+    """Compact compound-sphere number with at most three decimals."""
 
-    rounded = round(value, 1)
-    if abs(rounded) < 0.05:
+    if not math.isfinite(value):
+        return str(value)
+    rounded = round(value, 3)
+    if rounded == 0.0:
         rounded = 0.0
-    return f"{rounded:.1f}"
+    return f"{rounded:.3f}".rstrip("0").rstrip(".")
 
 
 def _radius_number(value: float) -> str:
@@ -1473,7 +1475,7 @@ def collision_data_lines(project: CollisionProject) -> list[str]:
                 f"coll_x = {_number(sphere.x)}",
                 f"coll_y = {_number(sphere.y)}",
                 f"coll_z = {_number(sphere.z)}",
-                f"coll_radius = {_radius_number(sphere.radius)}",
+                f"coll_radius = {_number(sphere.radius)}",
             ])
     return lines
 
@@ -1585,7 +1587,7 @@ def _collision_tab_data_lines(project: CollisionProject) -> list[str]:
                 f"coll_x = {_number(sphere.x)}",
                 f"coll_y = {_number(sphere.y)}",
                 f"coll_z = {_number(sphere.z)}",
-                f"coll_radius = {_radius_number(sphere.radius)}",
+                f"coll_radius = {_number(sphere.radius)}",
             ])
     return lines
 
@@ -2171,7 +2173,7 @@ def plan_script_update(
                 f"coll_x = {_number(sphere.x)}",
                 f"coll_y = {_number(sphere.y)}",
                 f"coll_z = {_number(sphere.z)}",
-                f"coll_radius = {_radius_number(sphere.radius)}",
+                f"coll_radius = {_number(sphere.radius)}",
             ])
     replace_group(radius_rows, legacy_lines, "legacy radius")
     # Overeof is a separate vanilla ground-alignment parameter, not a
@@ -2890,7 +2892,7 @@ class CollisionViewport(AssetViewport):
         ]
         self._model_preview_base_owner_bounds = dict(self._owner_bounds)
 
-    def local_owner_triangles(self, owner: str | None):
+    def local_owner_triangles(self, owner: str | None, *, animated_indices=None):
         """Return selected-owner triangles before preview scale and overeof."""
 
         triangles = []
@@ -2901,6 +2903,9 @@ class CollisionViewport(AssetViewport):
             if len(vertices) < 3:
                 continue
             first = vertices[0]
+            if animated_indices is not None and face.animated:
+                animated_indices.extend(range(
+                    len(triangles), len(triangles) + len(vertices) - 2))
             triangles.extend(
                 (first, vertices[index], vertices[index + 1])
                 for index in range(1, len(vertices) - 1)
@@ -5116,10 +5121,9 @@ class CollisionEditorWindow(QMainWindow):
             0, QHeaderView.ResizeMode.Stretch)
         self.sphere_tree.setColumnWidth(0, 96)
 
-        # Keep numeric/status columns compact so the descriptive Sphere column
-        # has room to breathe. Coordinates are display-only one-decimal values;
-        # the project still keeps and writes their full internal precision.
-        compact_widths = {1: 52, 2: 56, 3: 46, 4: 46, 5: 46}
+        # Show up to three decimals here while keeping finer imported values
+        # in the project and script writer.
+        compact_widths = {1: 62, 2: 56, 3: 60, 4: 60, 5: 60}
         for column, width in compact_widths.items():
             sphere_header.setSectionResizeMode(
                 column, QHeaderView.ResizeMode.Fixed)
@@ -6769,7 +6773,7 @@ class CollisionEditorWindow(QMainWindow):
         self._sync_all()
 
     def generate_collision_spheres(self, preset_key: str):
-        """Replace compound spheres with one adaptive mesh approximation."""
+        """Replace compound spheres with a classified physical-core approximation."""
 
         preset = next((
             candidate for candidate in ACCURACY_PRESETS
@@ -6778,7 +6782,9 @@ class CollisionEditorWindow(QMainWindow):
         if preset is None:
             raise ValueError(
                 f"Unsupported collision-sphere accuracy: {preset_key}")
-        triangles = self.viewport.local_owner_triangles(self._current_owner)
+        animated_indices = []
+        triangles = self.viewport.local_owner_triangles(
+            self._current_owner, animated_indices=animated_indices)
         if not triangles:
             QMessageBox.warning(
                 self, "No model geometry",
@@ -6794,7 +6800,8 @@ class CollisionEditorWindow(QMainWindow):
         QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
         try:
             result = generate_collision_spheres(
-                triangles, preset.key, max_spheres=UNIT_COLL_MAX_COUNT)
+                triangles, preset.key, max_spheres=UNIT_COLL_MAX_COUNT,
+                animated_triangles=animated_indices)
         except ValueError as exc:
             QMessageBox.warning(
                 self, "Collision sphere generation failed", str(exc))
@@ -6817,9 +6824,14 @@ class CollisionEditorWindow(QMainWindow):
         self.properties_tabs.setCurrentIndex(self.collision_tab_index)
         self._sync_all()
         cap_note = " — safety cap reached" if result.hit_safety_cap else ""
+        symmetry_note = " — mirrored pairs" if result.symmetry_detected else ""
+        coverage_note = (
+            " — coverage target not reached"
+            if result.measured_error > result.tolerance + 1e-6
+            and not result.hit_safety_cap else "")
         self.statusBar().showMessage(
             f"Generated {len(result.spheres)} collision spheres — "
-            f"{preset.label}{cap_note}", 8000)
+            f"{preset.label}{symmetry_note}{cap_note}{coverage_note}", 8000)
 
     def _confirm_generated_replacement(self) -> bool:
         confirmation = QMessageBox(self)
@@ -8776,7 +8788,7 @@ class CollisionEditorWindow(QMainWindow):
         if not self._radius_spin_active:
             self._push_undo()
             self._radius_spin_active = True
-        sphere.radius = round(value)
+        sphere.radius = round(value, 0 if sphere.category == LEGACY else 3)
         self._set_modified()
         self._sync_all()
 
@@ -8814,13 +8826,17 @@ class CollisionEditorWindow(QMainWindow):
                     "Legacy" if sphere.category == LEGACY
                     else str(current_compound)
                 )
+                radius_text = (
+                    _radius_number(sphere.radius)
+                    if sphere.category == LEGACY
+                    else _sphere_number(sphere.radius))
                 item = QTreeWidgetItem([
                     TYPE_LABELS[sphere.category],
-                    _radius_number(sphere.radius),
+                    radius_text,
                     "Visible" if sphere.visible else "Hidden",
-                    _sphere_coordinate_number(sphere.x),
-                    _sphere_coordinate_number(sphere.y),
-                    _sphere_coordinate_number(sphere.z),
+                    _sphere_number(sphere.x),
+                    _sphere_number(sphere.y),
+                    _sphere_number(sphere.z),
                     index_text,
                 ])
                 item.setData(0, _SPHERE_INDEX_ROLE, flat_index)
@@ -9435,6 +9451,7 @@ class CollisionEditorWindow(QMainWindow):
                         str(compound_index)
                         if compound_index is not None else "None")
                 self.index_value.setText(index_text)
+            self.radius_spin.setDecimals(0 if sphere.category == LEGACY else 3)
             self.radius_spin.setValue(sphere.radius)
             self.radius_slider.setValue(
                 self._radius_to_slider(sphere.radius))
