@@ -5,6 +5,7 @@ import os
 from pathlib import Path
 import struct
 import tempfile
+from types import SimpleNamespace
 import unittest
 from unittest.mock import patch
 
@@ -260,8 +261,16 @@ class CompleteAssetFamilyPackageTests(unittest.TestCase):
                         output / "TEST.BASE", ask_replace=False)
                 self.assertTrue(exported)
                 critical.assert_not_called()
-                validation = validate_family_package(output)
-                self.assertTrue(validation.valid, validation.errors)
+                # The manifest is a staging/verification aid only and is never
+                # left inside an exported asset family folder.
+                self.assertFalse((output / MANIFEST_NAME).exists())
+                committed = load_asset_family(
+                    output / "TEST.BASE", isolated_root=output)
+                self.assertIsNotNone(committed.root_object)
+                self.assertEqual(
+                    [dep.status for dep in committed.dependencies
+                     if dep.status in ("missing", "ambiguous", "failed_load")],
+                    [])
                 self.assertEqual(
                     (source / "TEST.BASE").read_bytes(), source_bytes)
             finally:
@@ -288,10 +297,12 @@ class CompleteAssetFamilyPackageTests(unittest.TestCase):
                         output / "TEST.BASE", ask_replace=False)
                 self.assertTrue(exported)
                 critical.assert_not_called()
-                validation = validate_family_package(output)
-                self.assertTrue(validation.valid, validation.errors)
+                self.assertFalse((output / MANIFEST_NAME).exists())
+                committed = load_asset_family(
+                    output / "TEST.BASE", isolated_root=output)
+                self.assertIsNotNone(committed.root_object)
                 self.assertAlmostEqual(
-                    validation.family.root_object.skeleton.points[0][0],
+                    committed.root_object.skeleton.points[0][0],
                     0.123456789, places=6)
             finally:
                 window.close()
@@ -307,15 +318,14 @@ class CompleteAssetFamilyPackageTests(unittest.TestCase):
             output.mkdir()
             previous_base = output / "TEST.BASE"
             previous_base.write_bytes(b"previous user BASE")
-            real_validate = validate_family_package
+            real_load = load_asset_family
 
-            def fail_destination(root, **kwargs):
-                validation = real_validate(root, **kwargs)
-                if Path(root).resolve() == output.resolve():
-                    validation.valid = False
-                    validation.errors.append(
-                        "simulated final destination failure")
-                return validation
+            def fail_destination(base_target, **kwargs):
+                # Simulate a final destination whose committed family cannot be
+                # reopened: the exporter must roll back every written file.
+                if Path(base_target).resolve() == previous_base.resolve():
+                    return SimpleNamespace(root_object=None, dependencies=())
+                return real_load(base_target, **kwargs)
 
             window = AssemblyWindow()
             try:
@@ -323,7 +333,7 @@ class CompleteAssetFamilyPackageTests(unittest.TestCase):
                 with patch.object(window, "_notify"), patch(
                         "assembly_window.QMessageBox.critical") as critical, \
                         patch(
-                            "assembly_window.validate_family_package",
+                            "assembly_window.load_asset_family",
                             side_effect=fail_destination):
                     exported = window._write_model_files(
                         "root", family, family.root_object,

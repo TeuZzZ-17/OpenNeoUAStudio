@@ -4,11 +4,12 @@ import tempfile
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
+from unittest.mock import patch
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 from PySide6.QtCore import Qt
-from PySide6.QtWidgets import QApplication
+from PySide6.QtWidgets import QApplication, QMessageBox
 
 from assembly_window import AssemblyWindow
 from asset_family import AssetFamily, FamilyObject, rebuild_materials
@@ -428,8 +429,70 @@ class AreaFxStructuralTests(unittest.TestCase):
                 labels = [action.text() for action in menu.actions()]
                 self.assertIn("Clone FX Element", labels)
                 self.assertIn("Move", labels)
-                self.assertIn("Delete FX Element...", labels)
-                self.assertIn("Add FX...", labels)
+                self.assertIn("Delete FX Element", labels)
+                self.assertIn("Add FX", labels)
+            finally:
+                window.close()
+
+    def test_select_all_fx_selects_every_fx_element_and_no_other_polygon(self):
+        with tempfile.TemporaryDirectory() as temp:
+            family, obj, _original = _family(Path(temp))
+            window = AssemblyWindow()
+            try:
+                window._family = family
+                window._owner_to_obj = {"root": obj}
+                window._selected_owner = "root"
+                window._workbench_obj = obj
+                window.viewport.load_family(family, primary_owner="root")
+                window.viewport.set_selected_owner("root")
+                window.viewport.enter_edit_mode("root")
+                window._rebuild_workbench(family, "root")
+                window._refresh_fx_elements()
+                fx_polys = {
+                    poly_id
+                    for element in window._fx_elements
+                    for poly_id in element.poly_ids}
+                self.assertTrue(fx_polys)
+                self.assertTrue(window.select_all_fx_action.isEnabled())
+                self.assertTrue(window.select_all_fx_button.isEnabled())
+                self.assertIn(
+                    "Select All FX",
+                    [action.text() for action in window.edit_menu.actions()])
+                self.assertIn(
+                    "Select All FX",
+                    [action.text()
+                     for action in
+                     window._create_viewport_context_menu().actions()])
+
+                window._select_all_fx_elements()
+                self.assertEqual(window._selected_polys, fx_polys)
+                # Every plain polygon of the model stays out of the selection.
+                self.assertLess(
+                    window._selected_polys,
+                    set(range(len(obj.skeleton.polygons))))
+                fx_vertices = {
+                    vertex
+                    for element in window._fx_elements
+                    for vertex in element.vertex_indices}
+                self.assertEqual(
+                    set(window.viewport.edit_session.selection), fx_vertices)
+
+                # The neutral entry names the real multi selection and Delete
+                # Selected FX is available for it.
+                self.assertGreater(len(window._fx_elements), 1)
+                self.assertEqual(
+                    window.fx_combo.itemText(0), "Multiple FX selected")
+                self.assertEqual(
+                    window.fx_combo.currentText(), "Multiple FX selected")
+                self.assertTrue(window.delete_fx_button.isEnabled())
+
+                # One click removes every selected FX element at once.
+                fx_count = len(window._fx_elements)
+                with patch.object(
+                        QMessageBox, "question",
+                        return_value=QMessageBox.StandardButton.Yes):
+                    window.delete_fx_button.click()
+                self.assertLess(len(window._fx_elements), fx_count)
             finally:
                 window.close()
 

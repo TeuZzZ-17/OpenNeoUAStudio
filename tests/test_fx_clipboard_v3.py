@@ -1207,11 +1207,11 @@ class FxClipboardV3Tests(unittest.TestCase):
 
             menu = window._create_viewport_context_menu()
             labels = [action.text() for action in menu.actions()]
-            self.assertIn("Scale...", labels)
-            self.assertIn("Rotate...", labels)
+            self.assertIn("Scale", labels)
+            self.assertIn("Rotate", labels)
             self.assertNotIn("Frame Selected Model", labels)
-            self.assertEqual(window.edit_scale_action.text(), "Scale...")
-            self.assertEqual(window.edit_rotate_action.text(), "Rotate...")
+            self.assertEqual(window.edit_scale_action.text(), "Scale")
+            self.assertEqual(window.edit_rotate_action.text(), "Rotate")
             self.assertFalse(hasattr(window, "edit_frame_action"))
 
             before = list(obj.skeleton.points)

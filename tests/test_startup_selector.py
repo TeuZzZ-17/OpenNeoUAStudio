@@ -5,9 +5,9 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 from PySide6.QtCore import Qt
 from PySide6.QtTest import QTest
-from PySide6.QtWidgets import QApplication
+from PySide6.QtWidgets import QApplication, QAbstractScrollArea, QSizePolicy
 
-from startup_selector import TOOL_OPTIONS, StartupToolSelector
+from startup_selector import TOOL_OPTIONS, StartupToolSelector, _ToolCard
 
 
 class StartupToolSelectorTests(unittest.TestCase):
@@ -44,9 +44,9 @@ class StartupToolSelectorTests(unittest.TestCase):
         dialog = StartupToolSelector()
         self.addCleanup(dialog.close)
 
-        dialog.tool_list.setCurrentRow(3)
+        dialog.tool_list.set_current_row(3)
         self.assertEqual(dialog.selected_tool(), "collision_editor")
-        dialog.tool_list.setCurrentRow(4)
+        dialog.tool_list.set_current_row(4)
         self.assertEqual(dialog.selected_tool(), "wireframe_editor")
 
     def test_tool_card_is_clickable(self):
@@ -55,9 +55,9 @@ class StartupToolSelectorTests(unittest.TestCase):
         dialog.show()
         self.app.processEvents()
 
-        item = dialog.tool_list.item(1)
-        card = dialog.tool_list.itemWidget(item)
-        QTest.mouseClick(card, Qt.MouseButton.LeftButton)
+        cards = dialog.tool_list.findChildren(_ToolCard)
+        self.assertEqual(len(cards), 5)
+        QTest.mouseClick(cards[1], Qt.MouseButton.LeftButton)
         self.assertEqual(dialog.selected_tool(), "snapshot_studio")
 
     def test_all_workspace_cards_fit_without_vertical_scrolling(self):
@@ -66,26 +66,25 @@ class StartupToolSelectorTests(unittest.TestCase):
         dialog.show()
         self.app.processEvents()
 
-        self.assertEqual(dialog.tool_list.verticalScrollBar().maximum(), 0)
+        panel = dialog.tool_list
+        cards = panel.findChildren(_ToolCard)
+        # The panel height is fixed around its cards, so every workspace is
+        # visible at once and can never overflow the available space.
         self.assertEqual(
-            dialog.tool_list.verticalScrollBarPolicy(),
-            Qt.ScrollBarPolicy.ScrollBarAlwaysOff,
-        )
+            panel.sizePolicy().verticalPolicy(), QSizePolicy.Policy.Fixed)
+        self.assertGreaterEqual(
+            panel.height(), sum(card.height() for card in cards))
 
     def test_workspace_list_ignores_wheel_scrolling(self):
         dialog = StartupToolSelector()
         self.addCleanup(dialog.close)
 
-        class FakeWheelEvent:
-            def __init__(self):
-                self.accepted = False
-
-            def accept(self):
-                self.accepted = True
-
-        event = FakeWheelEvent()
-        dialog.tool_list.wheelEvent(event)
-        self.assertTrue(event.accepted)
+        # The panel has no scrolling machinery at all: no scroll area and no
+        # scrollbar, so the wheel can never move the workspace cards.
+        self.assertNotIsInstance(dialog.tool_list, QAbstractScrollArea)
+        self.assertEqual(
+            dialog.tool_list.sizePolicy().verticalPolicy(),
+            QSizePolicy.Policy.Fixed)
 
 
 if __name__ == "__main__":

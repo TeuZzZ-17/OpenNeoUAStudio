@@ -109,11 +109,11 @@ class EXPORT_SCENE_OT_onua3d(bpy.types.Operator, ExportHelper):
 
 
 def _import_menu(self, context):
-    self.layout.operator(IMPORT_SCENE_OT_onua3d.bl_idname, text='Open OpenNeoUA 3D...')
+    self.layout.operator(IMPORT_SCENE_OT_onua3d.bl_idname, text='Open OpenNeoUA 3D')
 
 
 def _export_menu(self, context):
-    self.layout.operator(EXPORT_SCENE_OT_onua3d.bl_idname, text='Export OpenNeoUA 3D...')
+    self.layout.operator(EXPORT_SCENE_OT_onua3d.bl_idname, text='Export OpenNeoUA 3D')
 
 
 _CLASSES = (ONUA3DSource, IMPORT_SCENE_OT_onua3d, EXPORT_SCENE_OT_onua3d)

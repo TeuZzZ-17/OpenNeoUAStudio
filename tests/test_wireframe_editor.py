@@ -1,12 +1,13 @@
 import os
 from pathlib import Path
 import unittest
+from unittest.mock import patch
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-from PySide6.QtCore import QEvent, QPointF, Qt
+from PySide6.QtCore import QEvent, QPoint, QPointF, Qt
 from PySide6.QtGui import QColor, QImage, QMouseEvent, QPainter, QWheelEvent
-from PySide6.QtWidgets import QApplication
+from PySide6.QtWidgets import QApplication, QMenu
 
 from editor_widgets import MODEL_EDIT_SELECTION_RED
 from outline_editor import OutlineCanvas, OutlineEditor
@@ -34,7 +35,7 @@ class WireframeEditorUiTests(unittest.TestCase):
             if not action.isSeparator()
         ]
         self.assertEqual(
-            labels, ["New", "Import", "Export / Overwrite", "Export As...", "Exit"])
+            labels, ["New", "Import", "Export / Overwrite", "Export As", "Exit"])
         self.assertIs(window.export_action, window.save_action)
         self.assertIs(window.export_as_action, window.save_as_action)
 
@@ -307,7 +308,7 @@ class WireframeEditorUiTests(unittest.TestCase):
         self.assertEqual(editor.projected_points[0], editor.projected_points[1])
         self.assertEqual(editor.polygons, [[0, 1]])
 
-    def test_generic_delete_of_selected_link_deletes_visually_selected_endpoints_too(self):
+    def test_delete_on_link_only_selection_keeps_the_endpoints(self):
         editor = self._poo2_editor(
             [(0.0, 0.0, 0.0), (100.0, 0.0, 0.0)],
             [[0, 1]],
@@ -316,8 +317,73 @@ class WireframeEditorUiTests(unittest.TestCase):
 
         editor.delete_selection()
 
-        self.assertEqual(editor.projected_points, [])
+        # Canc on a link-only selection is an unlink: only the link goes away.
+        self.assertEqual(len(editor.projected_points), 2)
         self.assertEqual(editor.polygons, [])
+
+    def test_cancel_on_link_only_selection_keeps_shared_endpoints(self):
+        editor = self._poo2_editor(
+            [(0.0, 0.0, 0.0), (100.0, 0.0, 0.0), (200.0, 0.0, 0.0)],
+            [[0, 1], [1, 2]],
+        )
+        editor.select_link(0, 1)
+
+        editor.delete_selection()
+
+        # Canc is an unlink here as well: shared endpoint 1 and its link 1-2
+        # survive untouched and no orphan vertex is destroyed.
+        self.assertEqual(len(editor.projected_points), 3)
+        self.assertEqual(editor.polygons, [[1, 2]])
+
+    def test_unlink_removes_only_the_selected_link_and_keeps_vertices(self):
+        editor = self._poo2_editor(
+            [(0.0, 0.0, 0.0), (100.0, 0.0, 0.0), (200.0, 0.0, 0.0)],
+            [[0, 1], [1, 2]],
+        )
+        editor.select_link(0, 1)
+
+        editor.delete_selected_link()
+
+        self.assertEqual(len(editor.projected_points), 3)
+        self.assertEqual(editor.polygons, [[1, 2]])
+        self.assertFalse(editor.has_selected_link)
+
+    def _captured_menu(self, handler, *args):
+        captured = {}
+
+        class CapturingMenu(QMenu):
+            def exec(self, _position):
+                captured["menu"] = self
+                return None
+
+        with patch("outline_editor.QMenu", CapturingMenu):
+            handler(*args)
+        return captured["menu"]
+
+    def test_menu_entries_follow_the_selected_element_kind(self):
+        editor = self._poo2_editor(
+            [(0.0, 0.0, 0.0), (100.0, 0.0, 0.0), (200.0, 0.0, 0.0)],
+            [[0, 1], [1, 2]],
+        )
+        editor.select_link(0, 1)
+        link_menu = self._captured_menu(
+            editor._show_link_context_menu, 0, 1, 0.0, 0.0, QPoint())
+        labels = [action.text() for action in link_menu.actions()]
+        self.assertIn("Unlink", labels)
+        # Links are unlinked, never deleted: Delete is hidden for them.
+        self.assertNotIn("Delete", labels)
+        selection_menu = self._captured_menu(
+            editor._show_selection_context_menu, 0.0, 0.0, QPoint())
+        labels = [action.text() for action in selection_menu.actions()]
+        self.assertIn("Unlink", labels)
+        self.assertNotIn("Delete", labels)
+
+        editor.select_point(2)
+        selection_menu = self._captured_menu(
+            editor._show_selection_context_menu, 0.0, 0.0, QPoint())
+        labels = [action.text() for action in selection_menu.actions()]
+        self.assertNotIn("Unlink", labels)
+        self.assertIn("Delete", labels)
 
     def test_generic_delete_of_mixed_selection_removes_vertices_and_incident_links(self):
         editor = self._poo2_editor(
@@ -333,11 +399,13 @@ class WireframeEditorUiTests(unittest.TestCase):
 
         editor.delete_selection()
 
-        # Selected edge endpoints 0/1 plus explicitly selected vertex 3 are
-        # deleted.  Vertex 2 survives, and no incident link can remain.
-        self.assertEqual(len(editor.projected_points), 1)
-        self.assertEqual(editor.projected_points[0], (200.0, 0.0, 0.0))
-        self.assertEqual(editor.polygons, [])
+        # Explicitly selected vertex 3 is deleted with its incident link 2-3.
+        # The selected link 0-1 goes away too and only its orphan endpoint 0
+        # follows: vertex 1 survives because link 1-2 still needs it.
+        self.assertEqual(len(editor.projected_points), 2)
+        self.assertEqual(editor.projected_points[0], (100.0, 0.0, 0.0))
+        self.assertEqual(editor.projected_points[1], (200.0, 0.0, 0.0))
+        self.assertEqual(editor.polygons, [[0, 1]])
 
     def test_linking_new_vertices_preserves_both_vertices(self):
         editor = self._poo2_editor([(0.0, 0.0, 0.0)], [])

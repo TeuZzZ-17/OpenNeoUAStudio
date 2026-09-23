@@ -118,19 +118,27 @@ class WindowContractV5Tests(unittest.TestCase):
             self.assertEqual(
                 window._resources_tabs.tabText(1), "Asset Dependencies")
             self.assertFalse(hasattr(window, "global_edit_button"))
-            toolbar_widgets = [
+            toolbar_buttons = [
+                action.defaultWidget()
+                for bar in window.findChildren(assembly_window_module.QToolBar)
+                for action in bar.actions()]
+            # Undo/redo sit at the head of the workbench toolbar, before the
+            # view tools; the animation toolbar keeps play/step/speed only.
+            self.assertIn(window.global_undo_button, toolbar_buttons)
+            self.assertIn(window.global_redo_button, toolbar_buttons)
+            self.assertLess(
+                toolbar_buttons.index(window.global_undo_button),
+                toolbar_buttons.index(window.speed_spin))
+            anim_widgets = [
                 action.defaultWidget()
                 for action in window.animation_toolbar.actions()]
-            speed_index = toolbar_widgets.index(window.speed_spin)
-            self.assertEqual(
-                toolbar_widgets[speed_index + 1:speed_index + 3],
-                [window.global_undo_button, window.global_redo_button])
+            self.assertEqual(anim_widgets[-1], window.speed_spin)
             self.assertEqual(
                 [window._editor_tabs.tabText(index)
                  for index in range(window._editor_tabs.count())],
                 ["Model and Texture Editor"])
             self.assertEqual(window.mapping_repair_action.text(),
-                             "Mapping Repair...")
+                             "Mapping Repair")
             self.assertNotIn(
                 "Add",
                 [action.text().replace("&", "")
@@ -151,7 +159,7 @@ class WindowContractV5Tests(unittest.TestCase):
                 tool_labels.extend(
                     child.text() for child in menu.actions()
                     if not child.isSeparator())
-            self.assertNotIn("Go to polyID...", tool_labels)
+            self.assertNotIn("Go to polyID", tool_labels)
             self.assertEqual(window.global_undo_button.styleSheet(), "")
             self.assertEqual(window.global_redo_button.styleSheet(), "")
             self.assertFalse(hasattr(window, "mirror_x_check"))
@@ -216,10 +224,10 @@ class WindowContractV5Tests(unittest.TestCase):
                 "Export Asset Family")
             self.assertEqual(
                 window.model_onua3d_button.text(),
-                "Export OpenNeoUA 3D...")
+                "Export OpenNeoUA 3D")
             self.assertEqual(
                 window.setbas_onua3d_button.text(),
-                "Export OpenNeoUA 3D...")
+                "Export OpenNeoUA 3D")
             self.assertEqual(window.material_copy_button.text(),
                              "Copy Material")
             self.assertEqual(window.material_paste_button.text(),
@@ -241,7 +249,7 @@ class WindowContractV5Tests(unittest.TestCase):
         finally:
             window.close()
 
-    def test_file_menu_contains_only_the_asset_workbench_actions(self):
+    def test_file_menu_contains_the_expected_workbench_actions(self):
         window = AssemblyWindow()
         try:
             labels = [
@@ -256,6 +264,7 @@ class WindowContractV5Tests(unittest.TestCase):
                     "Import BAS Archive", "Import BASE", "Import SKLT",
                     "Import ILBM",
                     "Import Asset Family",
+                    "Import OpenNeoUA 3D",
                 ],
             )
             self.assertEqual(
@@ -263,7 +272,7 @@ class WindowContractV5Tests(unittest.TestCase):
                 [
                     "Export Runtime Loose SET", "Export BASE",
                     "Export SKLT", "Export ILBM", "Export Asset Family",
-                    "Export OpenNeoUA 3D...", "Overwrite",
+                    "Export OpenNeoUA 3D", "Overwrite",
                 ],
             )
             self.assertEqual(window.open_base_action.shortcut().toString(), "")
@@ -422,14 +431,12 @@ class WindowContractV5Tests(unittest.TestCase):
                     tree.horizontalScrollBarPolicy(),
                     Qt.ScrollBarPolicy.ScrollBarAsNeeded)
             self.assertGreater(
-                window.setbas_tree.columnWidth(0),
-                window.setbas_tree.columnWidth(2))
-            self.assertGreater(
                 window.asset_tree.columnWidth(0),
                 window.asset_tree.columnWidth(1))
-            self.assertEqual(window.setbas_tree.columnWidth(0), 285)
-            self.assertEqual(window.setbas_tree.columnWidth(1), 105)
-            self.assertEqual(window.setbas_tree.columnWidth(2), 55)
+            self.assertEqual(window.setbas_tree.columnWidth(0), 260)
+            self.assertEqual(window.setbas_tree.columnWidth(1), 120)
+            self.assertGreaterEqual(window.setbas_tree.columnWidth(2), 130)
+            self.assertTrue(window.setbas_tree.header().stretchLastSection())
             self.assertEqual(window.asset_tree.columnWidth(0), 300)
             self.assertEqual(window.asset_tree.columnWidth(1), 105)
             self.assertEqual(window.asset_tree.columnWidth(2), 190)
@@ -647,7 +654,7 @@ class WindowContractV5Tests(unittest.TestCase):
                     if not candidate.isSeparator()]
             copied.assert_called_once_with(
                 "Objects/MODEL.BASE", "BASE name copied successfully.")
-            self.assertIn("Export OpenNeoUA 3D...", labels)
+            self.assertIn("Export OpenNeoUA 3D", labels)
             self.assertIn("Show Dependencies", labels)
             self.assertIn("Edit BASE Dependencies", labels)
         finally:
@@ -870,7 +877,7 @@ class WindowContractV5Tests(unittest.TestCase):
                 action.text() for action in fake_menu.actions()
                 if not action.isSeparator()]
             self.assertIn("Preview texture", captured)
-            self.assertIn("Select Resource...", captured)
+            self.assertIn("Select Resource", captured)
             self.assertIn("Copy info", captured)
             self.assertNotIn("Copy item", captured)
             self.assertNotIn("Expand all", captured)

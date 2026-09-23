@@ -74,6 +74,7 @@ class OutlineCanvas(QWidget):
     lineContextMenuRequested = Signal(int, int, float, float, QPoint)
     emptyContextMenuRequested = Signal(float, float, QPoint)
     selectionContextMenuRequested = Signal(float, float, QPoint)
+    pasteClickRequested = Signal()
     selectionDragStarted = Signal()
     selectionDragFinished = Signal()
     pointerMoved = Signal(object)
@@ -312,11 +313,9 @@ class OutlineCanvas(QWidget):
                 self._to_screen(self._points[second], transform),
             )
 
-        edge_endpoint_indices: set[int] = set()
-        for first, second in self._selected_edges:
-            edge_endpoint_indices.add(first)
-            edge_endpoint_indices.add(second)
-        visual_selected_indices = self._selected_indices | edge_endpoint_indices
+        # A selected connection is selected on its own: its endpoints keep the
+        # neutral vertex look, so the highlight matches what the actions do.
+        visual_selected_indices = set(self._selected_indices)
 
         painter.setPen(Qt.PenStyle.NoPen)
         painter.setBrush(QColor(210, 215, 220))
@@ -460,6 +459,13 @@ class OutlineCanvas(QWidget):
         self.last_pointer = event.position()
         self.pointerMoved.emit(event.position())
         if event.button() == Qt.MouseButton.LeftButton:
+            # A visible clipboard preview swallows every left click: the click
+            # drops the copied geometry at the ghost, even over existing
+            # vertices or links, and only one paste per copy is performed.
+            if self.ghost_points:
+                self.pasteClickRequested.emit()
+                event.accept()
+                return
             toggle = bool(event.modifiers() & Qt.KeyboardModifier.ControlModifier)
             index = self._nearest_point(event.position(), 24.0 if self._link_mode_active else 12.0)
             if self._link_mode_active:
@@ -1074,6 +1080,7 @@ class OutlineEditor(QWidget):
         self.canvas.lineContextMenuRequested.connect(self._show_link_context_menu)
         self.canvas.emptyContextMenuRequested.connect(self._show_empty_context_menu)
         self.canvas.selectionContextMenuRequested.connect(self._show_selection_context_menu)
+        self.canvas.pasteClickRequested.connect(self._paste_from_left_click)
         self.canvas.selectionDragStarted.connect(self.prepare_selection_drag)
         self.canvas.selectionDragFinished.connect(self.finish_selection_drag)
 
@@ -1768,19 +1775,27 @@ class OutlineEditor(QWidget):
             return
         edges = set(self._selected_edges)
         vertices = set(self._selected_indices)
-        # A selected connection visually selects its two endpoints as well.
-        # Keep Delete semantics identical to what the user sees: deleting a
-        # selected link therefore deletes the selected endpoint vertices too,
-        # together with every incident connection that cannot survive them.
-        for first, second in edges:
-            vertices.add(first)
-            vertices.add(second)
         if not vertices and not edges:
+            return
+        if not vertices:
+            # Canc on a link-only selection behaves exactly like Unlink:
+            # connections are unlinked, never deleted as geometry.
+            self.delete_selected_link()
             return
 
         # No safety dialog here: Undo is available and faster for editing workflows.
         before = self._snapshot()
         self._link_start_index = -1
+        self._delete_edges(edges)
+        # Vertices picked explicitly are deleted with every incident link.  The
+        # endpoints of a deleted connection survive unless no remaining
+        # connection needs them, so unrelated geometry is never destroyed.
+        used_vertices = {
+            index for group in self._groups for index in group}
+        for first, second in edges:
+            for index in (first, second):
+                if index not in used_vertices:
+                    vertices.add(index)
         self._delete_vertices(vertices)
         self._last_auto_align_message = "Deleted selection"
         self._selected_indices.clear()
@@ -2183,6 +2198,11 @@ class OutlineEditor(QWidget):
         else:
             self.paste_clipboard_at_projected(x_value, z_value)
 
+    def _paste_from_left_click(self) -> None:
+        # Left click is the fast paste while a clipboard preview is visible.
+        if self._ghost_target is not None:
+            self.paste_clipboard()
+
     def paste_clipboard(self) -> None:
         target_x, target_z = self._ghost_target or self.canvas.view_center_world()
         self.paste_clipboard_at_projected(target_x, target_z)
@@ -2230,6 +2250,16 @@ class OutlineEditor(QWidget):
             if 0 <= second < len(self._points_3d):
                 vertices.add(second)
         return sorted(vertices)
+
+    def _add_unlink_action_to_menu(self, menu: QMenu):
+        """Offer Unlink only while a connection is actually selected."""
+
+        return menu.addAction("Unlink") if self._selected_edges else None
+
+    def _add_delete_action_to_menu(self, menu: QMenu):
+        """Offer Delete only for vertex picks: links are removed by Unlink."""
+
+        return menu.addAction("Delete") if self._selected_indices else None
 
     def _add_add_actions_to_menu(self, menu: QMenu) -> tuple[object, object, object, object, object]:
         add_menu = menu.addMenu("Add")
@@ -2289,9 +2319,9 @@ class OutlineEditor(QWidget):
         menu.addSeparator()
         link_action = menu.addAction("Link")
         link_action.setEnabled(len(self._selected_indices) == 1)
+        unlink_action = self._add_unlink_action_to_menu(menu)
         menu.addSeparator()
-        delete_action = menu.addAction("Delete")
-        delete_action.setEnabled(self.has_any_selection)
+        delete_action = self._add_delete_action_to_menu(menu)
         add_actions = self._add_add_actions_to_menu(menu)
         menu.addSeparator()
         cancel_action = menu.addAction("Cancel")
@@ -2309,7 +2339,9 @@ class OutlineEditor(QWidget):
             self._paste_from_context(x_value, z_value)
         elif chosen == link_action:
             self.start_link()
-        elif chosen == delete_action:
+        elif unlink_action is not None and chosen == unlink_action:
+            self.delete_selected_link()
+        elif delete_action is not None and chosen == delete_action:
             self.delete_selection()
         elif self._handle_add_menu_action(chosen, add_actions, x_value, z_value):
             return
@@ -2340,7 +2372,8 @@ class OutlineEditor(QWidget):
         paste_action = menu.addAction("Paste")
         paste_action.setEnabled(self.has_clipboard)
         menu.addSeparator()
-        delete_link_action = menu.addAction("Delete")
+        unlink_action = self._add_unlink_action_to_menu(menu)
+        delete_link_action = self._add_delete_action_to_menu(menu)
         menu.addSeparator()
         cancel_action = menu.addAction("Cancel")
 
@@ -2355,7 +2388,9 @@ class OutlineEditor(QWidget):
             self.cut_selection()
         elif chosen == paste_action:
             self._paste_from_context(x_value, z_value)
-        elif chosen == delete_link_action:
+        elif unlink_action is not None and chosen == unlink_action:
+            self.delete_selected_link()
+        elif delete_link_action is not None and chosen == delete_link_action:
             self.delete_selection()
         elif chosen == cancel_action:
             self.cancel_operation()
@@ -2386,7 +2421,8 @@ class OutlineEditor(QWidget):
         menu.addSeparator()
         link_action = menu.addAction("Link")
         link_action.setEnabled(len(self._selected_indices) == 1)
-        delete_action = menu.addAction("Delete")
+        unlink_action = self._add_unlink_action_to_menu(menu)
+        delete_action = self._add_delete_action_to_menu(menu)
         add_actions = self._add_add_actions_to_menu(menu)
         menu.addSeparator()
         align_h_action = menu.addAction("Align Horizontally")
@@ -2409,7 +2445,9 @@ class OutlineEditor(QWidget):
             self._paste_from_context(x_value, z_value)
         elif chosen == link_action:
             self.start_link()
-        elif chosen == delete_action:
+        elif unlink_action is not None and chosen == unlink_action:
+            self.delete_selected_link()
+        elif delete_action is not None and chosen == delete_action:
             self.delete_selected_point()
         elif self._handle_add_menu_action(chosen, add_actions, x_value, z_value):
             return
