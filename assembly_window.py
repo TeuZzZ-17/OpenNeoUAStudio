@@ -2193,7 +2193,7 @@ class AssemblyWindow(QMainWindow):
         self.snapshot_export_button = QPushButton("Export Image As")
         self.snapshot_export_button.clicked.connect(self._export_snapshot)
         export_layout.addWidget(self.snapshot_export_button, 3, 0, 1, 2)
-        self.snapshot_figurine_button = QPushButton("Export VP Set")
+        self.snapshot_figurine_button = QPushButton("Export Image Set")
         self.snapshot_figurine_button.setToolTip(
             "Export the current model as PNG from every canonical angle. "
             "Uses the selected background color/opacity, or transparent "
@@ -5157,10 +5157,10 @@ class AssemblyWindow(QMainWindow):
         if not self.viewport.has_model:
             QMessageBox.information(
                 self, "No model loaded",
-                "Load a model before exporting a VP Set.")
+                "Load a model before exporting an Image Set.")
             return
         output = QFileDialog.getExistingDirectory(
-            self, "Choose VP Set destination folder",
+            self, "Choose Image Set destination folder",
             str(self._last_directory))
         if not output:
             return
@@ -5175,7 +5175,7 @@ class AssemblyWindow(QMainWindow):
         existing = [path for _view, path in targets if path.exists()]
         if existing:
             answer = QMessageBox.question(
-                self, "Replace existing VP Set images?",
+                self, "Replace existing Image Set images?",
                 f"{len(existing)} destination image(s) already exist. "
                 "Replace them?",
                 QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
@@ -5203,7 +5203,7 @@ class AssemblyWindow(QMainWindow):
                 written.append(path)
         except (OSError, RuntimeError) as exc:
             QMessageBox.warning(
-                self, "VP Set export failed",
+                self, "Image Set export failed",
                 f"{exc}\n\n{len(written)} image(s) were written before "
                 "the failure.")
             return
@@ -5226,7 +5226,7 @@ class AssemblyWindow(QMainWindow):
             else f"background {background.name()} at "
                  f"{self.snapshot_opacity_spin.value()}% opacity")
         self.statusBar().showMessage(
-            f"VP Set exported: {len(written)} PNG, "
+            f"Image Set exported: {len(written)} PNG, "
             f"{background_label}.", 10000)
 
     # -- texture resolution (session-only overrides) -----------------------------

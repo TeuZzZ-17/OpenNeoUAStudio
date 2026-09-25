@@ -5209,15 +5209,15 @@ class CollisionEditorWindow(QMainWindow):
         radius_layout.addWidget(self.radius_slider, 1)
         self.radius_spin = self._coordinate_spin()
         self.radius_spin.setMinimum(1.0)
-        self.radius_spin.setDecimals(3)
+        self.radius_spin.setDecimals(1)
         self.radius_spin.setSingleStep(1.0)
         self.radius_spin.setKeyboardTracking(True)
         self.radius_spin.valueChanged.connect(
             self._radius_spin_changed)
         self.radius_spin.editingFinished.connect(
             self._finish_radius_spin_edit)
-        # Reserve enough room for the largest three-decimal radius and the
-        # spin arrows; the slider uses the remaining space.
+        # Reserve enough room for the largest displayed radius and spin
+        # arrows; the slider uses the remaining space.
         self.radius_spin.setFixedWidth(self.radius_spin.sizeHint().width())
         radius_layout.addWidget(self.radius_spin)
         spheres_layout.addLayout(radius_layout)
@@ -9673,7 +9673,7 @@ class CollisionEditorWindow(QMainWindow):
                 self.index_value.setText(index_text)
             self.radius_spin.setDecimals(0 if any(
                 candidate.category == LEGACY
-                for _index, candidate in selected_sphere_entries) else 3)
+                for _index, candidate in selected_sphere_entries) else 1)
             self.radius_spin.setValue(sphere.radius)
             self.radius_slider.setValue(
                 self._radius_to_slider(sphere.radius))

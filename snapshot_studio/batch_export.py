@@ -22,7 +22,6 @@ from PySide6.QtWidgets import (
     QApplication,
     QCheckBox,
     QFileDialog,
-    QGridLayout,
     QGroupBox,
     QHBoxLayout,
     QLabel,
@@ -120,6 +119,8 @@ class VPSnapshotBatchPanel(QGroupBox):
         self.window = window
         self.setSizePolicy(
             QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        self.setToolTip(
+            "All models in SET.BAS • transparent PNG • selected size/zoom.")
 
         self._running = False
         self._cancel_requested = False
@@ -143,29 +144,24 @@ class VPSnapshotBatchPanel(QGroupBox):
         self._active_source_key: tuple[str, int] | None = None
 
         layout = QVBoxLayout(self)
-        layout.setContentsMargins(6, 5, 6, 6)
-        layout.setSpacing(4)
-
-        self.summary_label = QLabel(
-            "Load a SET.BAS archive to enable complete model export.")
-        self.summary_label.setWordWrap(True)
-        layout.addWidget(self.summary_label)
+        layout.setContentsMargins(8, 8, 8, 8)
+        layout.setSpacing(7)
 
         output_row = QHBoxLayout()
-        output_row.setSpacing(4)
-        output_row.addWidget(QLabel("Output:"))
+        output_row.setSpacing(5)
         self.output_edit = QLineEdit()
-        self.output_edit.setPlaceholderText("Choose an output folder")
+        self.output_edit.setPlaceholderText("Output folder")
+        self.output_edit.setAccessibleName("Output folder")
         output_row.addWidget(self.output_edit, 1)
-        self.output_button = QPushButton("Browse")
+        self.output_button = QPushButton("...")
         self.output_button.setFixedWidth(34)
-        self.output_button.setToolTip("Choose the corpus output folder")
+        self.output_button.setToolTip("Choose the output folder")
         self.output_button.clicked.connect(self._choose_output)
         output_row.addWidget(self.output_button)
         layout.addLayout(output_row)
 
         options_row = QHBoxLayout()
-        options_row.setSpacing(10)
+        options_row.setSpacing(18)
         self.skip_existing_check = QCheckBox("Skip existing")
         self.skip_existing_check.setChecked(True)
         self.skip_existing_check.setToolTip(
@@ -174,35 +170,30 @@ class VPSnapshotBatchPanel(QGroupBox):
         self.zip_check = QCheckBox("Create ZIP")
         self.zip_check.setChecked(True)
         options_row.addWidget(self.zip_check)
-        self.transparent_label = QLabel(
-            "Transparent PNG • all canonical views • Photo Studio size/zoom")
-        self.transparent_label.setStyleSheet("color: #9fb3bd;")
-        options_row.addWidget(self.transparent_label, 1)
+        options_row.addStretch(1)
         layout.addLayout(options_row)
 
         buttons_row = QHBoxLayout()
-        buttons_row.setSpacing(4)
+        buttons_row.setSpacing(5)
         self.export_button = QPushButton("Export All VP")
         self.export_button.clicked.connect(self.start)
         buttons_row.addWidget(self.export_button, 1)
         self.cancel_button = QPushButton("Cancel")
         self.cancel_button.setEnabled(False)
+        self.cancel_button.hide()
         self.cancel_button.clicked.connect(self.request_cancel)
         buttons_row.addWidget(self.cancel_button)
         layout.addLayout(buttons_row)
 
-        progress_row = QGridLayout()
-        progress_row.setContentsMargins(0, 0, 0, 0)
-        progress_row.setHorizontalSpacing(5)
         self.progress = QProgressBar()
         self.progress.setRange(0, 1)
         self.progress.setValue(0)
-        progress_row.addWidget(self.progress, 0, 0)
+        self.progress.hide()
+        layout.addWidget(self.progress)
         self.status_label = QLabel("Ready.")
-        self.status_label.setMinimumWidth(155)
-        progress_row.addWidget(self.status_label, 0, 1)
-        progress_row.setColumnStretch(0, 1)
-        layout.addLayout(progress_row)
+        self.status_label.setWordWrap(True)
+        self.status_label.hide()
+        layout.addWidget(self.status_label)
 
         self.refresh()
 
@@ -229,9 +220,8 @@ class VPSnapshotBatchPanel(QGroupBox):
         )
 
         if archive is None or not sklt_resources:
-            self.summary_label.setText(
-                "Load a SET.BAS archive to enable complete model export.")
             self.export_button.setEnabled(False)
+            self.export_button.setToolTip("Load SET.BAS in BAS Manager first.")
             return
 
         embedded_entries = tuple(getattr(
@@ -248,11 +238,10 @@ class VPSnapshotBatchPanel(QGroupBox):
         potential_sources = len(entries) + extra_count
         views = len(VIEW_PRESET_ANGLES)
 
-        self.summary_label.setText(
-            f"VP slots: {len(entries)}  •  Extra SKLT models: {extra_count}  •  "
-            f"Sources: {potential_sources}  •  Up to {potential_sources * views:,} PNG"
-        )
         self.export_button.setEnabled(bool(entries or extra_count))
+        self.export_button.setToolTip(
+            f"Export {potential_sources} models, up to "
+            f"{potential_sources * views:,} transparent PNGs.")
 
         archive_path = str(Path(archive.path).resolve())
         if archive_path != self._last_setbas_path:
@@ -278,12 +267,15 @@ class VPSnapshotBatchPanel(QGroupBox):
 
     def _set_running(self, running: bool) -> None:
         self._running = running
+        self.progress.setVisible(running)
+        self.status_label.setVisible(running)
         self.export_button.setEnabled(not running)
         self.output_edit.setEnabled(not running)
         self.output_button.setEnabled(not running)
         self.skip_existing_check.setEnabled(not running)
         self.zip_check.setEnabled(not running)
         self.cancel_button.setEnabled(running)
+        self.cancel_button.setVisible(running)
 
         bas_panel = getattr(self.window, "_bas_panel", None)
         if bas_panel is not None:
@@ -401,11 +393,6 @@ class VPSnapshotBatchPanel(QGroupBox):
             self.status_label.setText("Nothing renderable.")
             return
 
-        self.summary_label.setText(
-            f"Renderable models: {len(renderable)}  •  "
-            f"Images: {len(self._queue):,}  •  "
-            f"Non-mesh/empty skipped: {len(skipped)}"
-        )
         self.progress.setRange(0, len(self._queue))
         self.progress.setValue(0)
 
