@@ -1,5 +1,5 @@
-"""Integrated Map Editor for OpenNeoUAStudio."""
+"""Map Editor status notice for OpenNeoUA Studio."""
 
-from .editor import MapEditor, main, run_map_editor
+from .editor import main, show_map_editor_notice
 
-__all__ = ["MapEditor", "main", "run_map_editor"]
+__all__ = ["main", "show_map_editor_notice"]

@@ -46,8 +46,7 @@ TOOL_OPTIONS = (
     ToolOption(
         "map_editor",
         "Map Editor",
-        "Create and edit LDF maps, terrain sectors, buildings, vehicles, "
-        "and level layouts.",
+        "View the status of the standalone Map Editor.",
     ),
     ToolOption(
         "collision_editor",

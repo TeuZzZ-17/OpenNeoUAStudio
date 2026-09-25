@@ -2,7 +2,7 @@
 
 The main window assembles BASE + skeleton + texture + animation families,
 provides the former BASet extraction/conversion workflows, and launches the
-integrated Wireframe Editor and Map Editor. Geometry writes are explicit,
+integrated Wireframe Editor and Map Editor status notice. Geometry writes are explicit,
 verified, and backed up before an original loose skeleton is overwritten.
 """
 
@@ -2623,24 +2623,11 @@ class AssemblyWindow(QMainWindow):
         window.activateWindow()
 
     def _open_map_editor(self) -> None:
-        """Launch the integrated Map Editor in a separate process.
+        """Show the status of the retired integrated Map Editor."""
 
-        Map Editor uses Tk while the main workbench uses Qt. Keeping their
-        event loops in separate processes preserves the original editor
-        behavior and avoids toolkit conflicts.
-        """
+        from map_editor import show_map_editor_notice
 
-        try:
-            from main import launch_map_editor_process
-
-            launch_map_editor_process()
-        except OSError as exc:
-            QMessageBox.critical(
-                self,
-                "Map Editor unavailable",
-                "The integrated Map Editor could not be launched.\n\n"
-                f"{exc}",
-            )
+        show_map_editor_notice(self)
 
     def open_bas_archive_dialog(self) -> None:
         """Import a read-only SET.BAS resource archive."""
