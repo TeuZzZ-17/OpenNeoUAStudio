@@ -7,7 +7,7 @@ from unittest.mock import MagicMock, patch
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-from PySide6.QtCore import QEvent, QPointF, QRectF, Qt
+from PySide6.QtCore import QEvent, QPoint, QPointF, QRectF, Qt
 from PySide6.QtGui import QColor, QKeyEvent, QMouseEvent
 from PySide6.QtWidgets import (
     QAbstractItemView, QApplication, QDialog, QGridLayout, QHeaderView, QLabel,
@@ -1255,7 +1255,7 @@ class CollisionEditorTests(unittest.TestCase):
         self.assertFalse(window.project.compound[0].visible)
         self.assertFalse(window.project.compound[1].visible)
         self.assertTrue(window.project.compound[2].visible)
-        self.assertEqual(window.hide_spheres_button.text(), "Unhide Spheres")
+        self.assertEqual(window.hide_spheres_button.text(), "Show Spheres")
         window.hide_spheres_button.click()
         self.assertTrue(window.project.compound[0].visible)
         self.assertTrue(window.project.compound[1].visible)
@@ -1426,7 +1426,7 @@ class CollisionEditorTests(unittest.TestCase):
             [sphere.visible for sphere in window.project.compound],
             [True, True, False])
 
-    def test_53o_sphere_context_menu_exposes_hide_and_unhide(self):
+    def test_53o_sphere_context_menu_exposes_hide_and_show(self):
         window = self._window()
         window.project.compound = [CollisionSphere(OPENNEOUA, visible=True)]
         window._selected = 0
@@ -1441,7 +1441,7 @@ class CollisionEditorTests(unittest.TestCase):
 
         window._toggle_selected_sphere_visibility()
         menu = window._create_sphere_context_menu(0)
-        self.assertIn("Unhide Sphere", [action.text() for action in menu.actions()])
+        self.assertIn("Show Sphere", [action.text() for action in menu.actions()])
 
     def test_53p_context_menu_isolate_sphere_hides_every_other_sphere(self):
         window = self._window()
@@ -3859,6 +3859,187 @@ class CollisionEditorTests(unittest.TestCase):
             source, patch, "new_vehicle", 56)
         self.assertEqual(updated, source)
         self.assertFalse(groups)
+
+    _SCRIPT_UNIT_TEXT = (
+        "new_vehicle 1\n name = Wasp\n vp_normal = 0\n radius = 10\nend\n"
+        "new_vehicle 2\n name = Firefly\n vp_normal = 1\n radius = 20\nend\n"
+        "new_weapon 7\n name = Rocket\n vp_normal = 1\n radius = 5\nend\n"
+    )
+
+    def _script_unit_window(
+            self, *, object_id, object_kind, script_text=None):
+        """Import one definition on a fake SET.BAS exposing two VP models."""
+
+        from vp_manager import EmbeddedVPEntry, EmbeddedVPSet, VPEntry, VPTable
+
+        window = self._window()
+        family = _family()
+        window.family = family
+        temp = tempfile.TemporaryDirectory()
+        self.addCleanup(temp.cleanup)
+        root = Path(temp.name)
+        set_bas = root / "SET.BAS"
+        set_bas.write_bytes(b"placeholder")
+        script = root / "Vehicles.cfg"
+        script.write_text(
+            self._SCRIPT_UNIT_TEXT if script_text is None else script_text,
+            encoding="utf-8")
+        window._vp_embedded = EmbeddedVPSet(
+            source_path=set_bas,
+            container_source_offset=0,
+            entries=(
+                EmbeddedVPEntry(0, "Root.base", "models/root.sklt"),
+                EmbeddedVPEntry(1, "Kid.base", "models/kid.sklt"),
+            ))
+        window._vp_table = VPTable((
+            VPEntry(0, "Root.base"), VPEntry(1, "Kid.base")))
+        window._vp_table_source = "embedded test"
+        window._fill_models(family)
+        self.assertTrue(window.open_vehicle_script(
+            script, object_id=object_id, object_kind=object_kind))
+        return window, script
+
+    def test_144_script_import_lists_source_units_and_filters_by_name(self):
+        window, _script = self._script_unit_window(
+            object_id=2, object_kind="new_vehicle")
+
+        self.assertEqual(window.model_tree.topLevelItemCount(), 3)
+        self.assertEqual(
+            [window.model_tree.topLevelItem(index).text(0)
+             for index in range(3)],
+            ["Wasp", "Firefly", "Rocket"])
+        self.assertEqual(
+            [window.model_tree.topLevelItem(index).text(1)
+             for index in range(3)],
+            ["0", "1", "1"])
+        self.assertEqual(
+            [window.model_tree.headerItem().text(index) for index in range(2)],
+            ["Unit", "VP"])
+        self.assertTrue(window.model_tree.isEnabled())
+        self.assertTrue(window.model_search.isEnabled())
+        self.assertEqual(
+            window.model_search.placeholderText(),
+            "Search vehicle / weapon names")
+        self.assertEqual(window.project.name, "Firefly")
+        self.assertEqual(window._active_script_kind, "new_vehicle")
+        self.assertEqual(window._active_script_id, 2)
+        self.assertEqual(window._active_model_reference.vp_normal, 1)
+        self.assertFalse(window._modified)
+
+        window.model_search.setText("wasp")
+        self.assertFalse(window.model_tree.topLevelItem(0).isHidden())
+        self.assertTrue(window.model_tree.topLevelItem(1).isHidden())
+        self.assertTrue(window.model_tree.topLevelItem(2).isHidden())
+        window.model_search.setText("rocket")
+        self.assertTrue(window.model_tree.topLevelItem(0).isHidden())
+        self.assertFalse(window.model_tree.topLevelItem(2).isHidden())
+        window.model_search.setText("new_weapon")
+        self.assertTrue(window.model_tree.topLevelItem(0).isHidden())
+        self.assertTrue(window.model_tree.topLevelItem(1).isHidden())
+        self.assertFalse(window.model_tree.topLevelItem(2).isHidden())
+        window.model_search.clear()
+        self.assertEqual(
+            [window.model_tree.topLevelItem(index).isHidden()
+             for index in range(3)],
+            [False, False, False])
+
+    def test_145_script_unit_list_scrolls_with_the_mouse_wheel(self):
+        from PySide6.QtGui import QWheelEvent
+
+        window = self._window()
+        text = "".join(
+            f"new_vehicle {index}\n name = Unit {index}\n vp_normal = 0\nend\n"
+            for index in range(1, 41))
+        window._fill_script_units(script_model_references(text))
+        window._set_script_unit_mode(True)
+        window.model_tree.resize(220, 120)
+        bar = window.model_tree.verticalScrollBar()
+        self.assertGreater(bar.maximum(), 0)
+        start = bar.value()
+        wheel = QWheelEvent(
+            QPointF(40, 40), QPointF(40, 40),
+            QPoint(0, 0), QPoint(0, -120),
+            Qt.MouseButton.NoButton, Qt.KeyboardModifier.NoModifier,
+            Qt.ScrollPhase.NoScrollPhase, False)
+        QApplication.sendEvent(window.model_tree.viewport(), wheel)
+        self.assertGreater(bar.value(), start)
+
+    def test_146_script_unit_click_loads_another_unit_after_unsaved_guard(self):
+        window, _script = self._script_unit_window(
+            object_id=2, object_kind="new_vehicle")
+        self.assertEqual(window.project.legacy.radius, 20)
+
+        # Unexported work: the guard refuses and keeps the loaded unit.
+        window._set_modified(True)
+        with patch("collision_editor.editor.QMessageBox.question",
+                   return_value=QMessageBox.StandardButton.No):
+            window.model_tree.setCurrentItem(window.model_tree.topLevelItem(0))
+            QApplication.processEvents()
+        self.assertEqual(window.project.name, "Firefly")
+        self.assertEqual(window.model_tree.currentItem().text(0), "Firefly")
+
+        # Accepted: the clicked unit loads with its own collision data.
+        with patch("collision_editor.editor.QMessageBox.question",
+                   return_value=QMessageBox.StandardButton.Yes):
+            window.model_tree.setCurrentItem(window.model_tree.topLevelItem(0))
+            QApplication.processEvents()
+        self.assertEqual(window.project.name, "Wasp")
+        self.assertEqual(window.project.legacy.radius, 10)
+        self.assertEqual(window._active_script_id, 1)
+        self.assertEqual(window._active_model_reference.vp_normal, 0)
+        self.assertEqual(window.model_tree.currentItem().text(0), "Wasp")
+        self.assertFalse(window._modified)
+
+        # Weapons are listed too and switch the target category.
+        window.model_tree.setCurrentItem(window.model_tree.topLevelItem(2))
+        QApplication.processEvents()
+        self.assertEqual(window.project.name, "Rocket")
+        self.assertEqual(window.project.target_category, WEAPON)
+        self.assertEqual(window._active_script_kind, "new_weapon")
+
+    def test_147_mouse_click_keeps_list_scroll_position_and_selection(self):
+        text = "".join(
+            f"new_vehicle {index}\n name = Unit {index:02d}\n"
+            f" vp_normal = {index % 2}\nend\n"
+            for index in range(1, 41))
+        window, _script = self._script_unit_window(
+            object_id=10, object_kind="new_vehicle", script_text=text)
+        tree = window.model_tree
+        tree.resize(220, 300)
+        tree.show()
+        QApplication.processEvents()
+
+        # Scroll deep into the list, then click a row near the top of the
+        # viewport: the real click on a lower unit of a long list.
+        tree.scrollTo(tree.indexFromItem(tree.topLevelItem(35)))
+        QApplication.processEvents()
+        bar = tree.verticalScrollBar()
+        bar.setValue(bar.maximum())
+        QApplication.processEvents()
+        scrolled = bar.value()
+        self.assertGreater(scrolled, 0)
+        clicked_item = tree.topLevelItem(20)
+        rect = tree.visualItemRect(clicked_item)
+        pos = rect.center()
+        press = QMouseEvent(
+            QEvent.Type.MouseButtonPress, QPointF(pos),
+            QPointF(tree.mapToGlobal(pos)),
+            Qt.MouseButton.LeftButton, Qt.MouseButton.LeftButton,
+            Qt.KeyboardModifier.NoModifier)
+        QApplication.sendEvent(tree.viewport(), press)
+        QApplication.processEvents()
+
+        # The list must not jump and the clicked unit must stay selected,
+        # exactly like a real click on a lower row of a long list. The
+        # clicked row object must also survive: rebuilding the rows under
+        # the running click is what scrambles scroll and selection.
+        self.assertEqual(window.project.name, "Unit 21")
+        self.assertEqual(bar.value(), scrolled)
+        self.assertEqual(tree.currentItem().text(0), "Unit 21")
+        self.assertEqual(
+            [tree.indexOfTopLevelItem(item) for item in tree.selectedItems()],
+            [20])
+        self.assertIs(tree.topLevelItem(20), clicked_item)
 
 
 if __name__ == "__main__":
