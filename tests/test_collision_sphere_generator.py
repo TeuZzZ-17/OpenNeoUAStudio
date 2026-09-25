@@ -103,12 +103,31 @@ class CollisionSphereGeneratorTests(unittest.TestCase):
         results = [generate_collision_spheres(cube, p.key)
                    for p in ACCURACY_PRESETS]
         self.assertGreater(len(results[0].spheres), 1)
+        self.assertLessEqual(len(results[2].spheres), 16)
+        self.assertGreater(len(results[3].spheres), len(results[2].spheres))
         self.assertEqual([r.measured_error for r in results],
                          sorted((r.measured_error for r in results), reverse=True))
-        self.assertLess(results[2].measured_error, .08)
+        self.assertLess(results[3].measured_error, results[2].measured_error)
+        self.assertLess(results[2].measured_error, .15)
         for result in results:
             self.assertFalse(any(_inside((0, 1.8, 0), sphere)
                                  for sphere in result.spheres))
+
+    def test_nested_compact_solids_do_not_create_a_surface_sphere_layer(self):
+        outer = _box(-15, -23, -15, 15, 8, 15)
+        inner = _box(-13, -21, -13, 13, 6, 13)
+        result = generate_collision_spheres(
+            outer + inner, "high", animated_triangles=range(len(outer)))
+        ultra = generate_collision_spheres(
+            outer + inner, "ultra", animated_triangles=range(len(outer)))
+        self.assertTrue(result.symmetry_detected)
+        self.assertLessEqual(len(result.spheres), 20)
+        self.assertLess(ultra.measured_error, result.measured_error)
+        self.assertGreater(len(ultra.spheres), len(result.spheres))
+        self.assertTrue(any(_inside((0, -7.5, 0), sphere)
+                            for sphere in result.spheres))
+        self.assertFalse(any(_inside((25, -7.5, 0), sphere)
+                             for sphere in result.spheres))
 
     def test_flat_visual_surface_cannot_create_a_collision_volume(self):
         triangles = [
@@ -173,6 +192,23 @@ class CollisionSphereGeneratorTests(unittest.TestCase):
         self.assertGreater(solid_wing.structural_sheet_count, 0)
         self.assertTrue(any(_inside((18, 0, 0), s) for s in solid_wing.spheres))
         self.assertFalse(any(_inside((18, 0, 0), s) for s in animated.spheres))
+
+    def test_broad_open_wings_attached_to_a_solid_keep_their_tips(self):
+        body = _box(-8, -4, -15, 8, 4, 15)
+        wings = [
+            ((8, 4, 15), (35, 10, 4), (35, 10, 12)),
+            ((-8, 4, 15), (-35, 10, 4), (-35, 10, 12)),
+        ]
+        result = generate_collision_spheres(body + wings, "high")
+        self.assertTrue(result.symmetry_detected)
+        for x in (-32, 32):
+            self.assertTrue(any(_inside((x, 10, 8), sphere)
+                                for sphere in result.spheres))
+        animated = generate_collision_spheres(
+            body + wings, "high",
+            animated_triangles=range(len(body), len(body) + len(wings)))
+        self.assertFalse(any(_inside((32, 10, 8), sphere)
+                             for sphere in animated.spheres))
 
     def test_solid_animated_tracks_are_not_filtered(self):
         mesh = _box(-8, -4, -15, 8, 4, 15)

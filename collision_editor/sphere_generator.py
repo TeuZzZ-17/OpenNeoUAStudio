@@ -6,6 +6,7 @@ No reference spheres, unit names or model-specific polygon IDs enter generation.
 """
 
 from __future__ import annotations
+from collections import Counter
 from dataclasses import dataclass
 from typing import Iterable
 import numpy as np
@@ -206,6 +207,57 @@ def scan(tris, axes):
     return votes >= 2
 
 
+def _promote_open_wing_cores(tris, animated, solids, axes, mask, importance):
+    """Give broad attached wing tips a rounded core when a volume scan thins them."""
+    sections = mask.sum(axis=(1, 2))
+    broad = axes[0][sections >= sections.max() * 0.5]
+    origin_x = axes[0][len(axes[0]) // 2]
+    half_width = max(abs(broad[0] - origin_x), abs(broad[-1] - origin_x))
+    if half_width <= 0:
+        return
+
+    edges = Counter()
+    for tri in tris:
+        for a, b in ((0, 1), (1, 2), (2, 0)):
+            edges[tuple(sorted((tuple(tri[a]), tuple(tri[b]))))] += 1
+
+    for index in np.concatenate(solids):
+        tri = tris[index]
+        if animated[index]:
+            continue
+        boundary = [
+            (float(np.linalg.norm(tri[a] - tri[b])), a, b)
+            for a, b in ((0, 1), (1, 2), (2, 0))
+            if edges[tuple(sorted((tuple(tri[a]), tuple(tri[b]))))] == 1
+        ]
+        if (len(boundary) < 2 or np.ptp(tri[:, 0]) < half_width
+                or max(abs(tri[:, 0] - origin_x)) < 2.5 * half_width):
+            continue
+        length, a, b = min(boundary)
+        radius = length * 0.375
+        if radius < 0.25 * half_width:
+            continue
+        start = tri[next(i for i in range(3) if i not in (a, b))]
+        finish = (tri[a] + tri[b]) * 0.5
+        lo, hi = tri.min(0) - radius, tri.max(0) + radius
+        slices = tuple(
+            slice(np.searchsorted(axis, lo[i]),
+                  np.searchsorted(axis, hi[i], side="right"))
+            for i, axis in enumerate(axes)
+        )
+        coords = np.stack(
+            np.meshgrid(*(axis[s] for axis, s in zip(axes, slices)),
+                        indexing="ij"), axis=-1)
+        edge = finish - start
+        fraction = np.clip(np.sum((coords - start) * edge, axis=-1)
+                           / np.sum(edge * edge), 0, 1)
+        nearest = start + fraction[..., None] * edge
+        core = np.sum((coords - nearest) ** 2, axis=-1) <= radius ** 2
+        mask[slices] |= core
+        importance[slices] = np.maximum(
+            importance[slices], core / np.sqrt(max(1, core.sum())))
+
+
 def _build_body(tris, animated):
     solids, sheets = [], []
     for ids in components(tris):
@@ -333,6 +385,7 @@ def _build_body(tris, animated):
             mask[slices] |= triangle_distance(coords, tri) <= radius
     if not mask.any():
         raise ValueError("The mesh has no resolvable physical volume.")
+    _promote_open_wing_cores(tris, animated, solids, axes, mask, importance)
     reflected = mask[::-1]
     score = float((mask & reflected).sum() / max(1, (mask | reflected).sum()))
     symmetric = score > 0.82
@@ -358,6 +411,17 @@ def _build_body(tris, animated):
 def _fit_body(mask, axes, h, symmetric, config, importance, cap):
     dist = _distance_field(mask) * h
     coords = np.stack(np.meshgrid(*axes, indexing="ij"), axis=-1)
+    occupied_span = [
+        np.ptp(axis[np.any(mask, axis=tuple(j for j in range(3) if j != i))])
+        for i, axis in enumerate(axes)
+    ]
+    compact = max(occupied_span) <= 1.35 * min(occupied_span)
+    # Compact bodies need broad spheres, not a layer of tiny surface spheres.
+    if compact:
+        gain_floor = 0.002 if config.key == "ultra" else 0.005
+        minimum_gain = max(config.minimum_gain_fraction, gain_floor)
+    else:
+        minimum_gain = config.minimum_gain_fraction
     # Medial candidates plus lower-clearance candidates near silhouette corners.
     cand = mask & (dist >= h * 1.5)
     plane = float(axes[0][len(axes[0]) // 2])
@@ -365,7 +429,7 @@ def _fit_body(mask, axes, h, symmetric, config, importance, cap):
     if symmetric:
         ridge &= coords[..., 0] >= plane - h * 0.1
     pts = coords[ridge]
-    radii = dist[ridge] * 1.22
+    radii = dist[ridge] * (1.12 if compact else 1.22)
     if not len(pts):
         raise ValueError("Physical features are below the sampling resolution.")
     # Bound every candidate's exterior with deterministic volume samples.
@@ -400,10 +464,9 @@ def _fit_body(mask, axes, h, symmetric, config, importance, cap):
     sample_indices = np.union1d(volume_indices[::stride], np.flatnonzero(medial))
     targets = coords.reshape(-1, 3)[sample_indices]
     target_clearance = dist.ravel()[sample_indices]
-    weights = (
-        importance.ravel()[sample_indices]
-        / np.maximum(dist.ravel()[sample_indices], h * 2) ** 1.5
-    )
+    weights = importance.ravel()[sample_indices].copy()
+    if not compact:
+        weights /= np.maximum(dist.ravel()[sample_indices], h * 2) ** 1.5
     covered = np.zeros(len(targets), bool)
     spheres = []
     bestprev = np.full(len(pts), np.inf)
@@ -433,7 +496,7 @@ def _fit_body(mask, axes, h, symmetric, config, importance, cap):
             if gain > bestgain:
                 best = (i, hits, pair, p, r)
                 bestgain = gain
-        if best is None or bestgain / total_weight < config.minimum_gain_fraction:
+        if best is None or bestgain / total_weight < minimum_gain:
             # Broad, nearly isotropic bodies may have only one medial peak.
             # Try uncovered interior points before declaring them fully fitted.
             remaining = np.flatnonzero(~covered)
@@ -455,7 +518,7 @@ def _fit_body(mask, axes, h, symmetric, config, importance, cap):
                 if gain > bestgain:
                     best = (-1, hits, pair, p, r)
                     bestgain = gain
-        if best is None or bestgain / total_weight < config.minimum_gain_fraction:
+        if best is None or bestgain / total_weight < minimum_gain:
             break
         i, hits, pair, p, r = best
         spheres.append([*p, r])
