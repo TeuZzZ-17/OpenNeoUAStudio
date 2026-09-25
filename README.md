@@ -27,8 +27,11 @@ Run from source:
 python main.py
 ```
 
-On normal startup, OpenNeoUA Studio first shows a tool selector for the Main
-Suite, Map Editor, Collision Editor, or Wireframe Editor.
+On normal startup, OpenNeoUA Studio first shows a tool selector for the Model
+Editor, Snapshot Studio, Map Editor, Collision Editor, or Wireframe Editor.
+
+The Map Editor has been moved out of OpenNeoUA Studio and is currently being
+rebuilt as a standalone companion tool. Its selector entry shows a status notice.
 
 A precompiled Windows executable may also be included in the repository for convenience.
 
@@ -51,40 +54,6 @@ OpenNeoUA Studio is an unofficial, fan-made project.
 It is not affiliated with, endorsed by, sponsored by, or approved by Microsoft, Xbox Game Studios, TerraTools, or any other original publisher, developer, or rights holder connected with Urban Assault.
 
 Microsoft Urban Assault, its name, trademarks, logos, artwork, game data, audiovisual material, and other proprietary content remain the property of their respective owners.
-
-### Sector preview images
-
-The Map Editor includes visual preview images representing Urban Assault terrain sectors.
-
-These previews are not retail game data files distributed in their original form, nor are they original textures, models, SET.BAS archives, or other source assets extracted directly from the game.
-
-They were rendered from the sector graphics using a visualization utility and were subsequently cropped, processed, upscaled, organized, and adapted for use as functional map-editing references.
-
-The visualization utility used to generate the original previews is not included or distributed with OpenNeoUA Studio.
-
-The previews are included solely to identify terrain sectors and display the editable map grid.
-
-They are not intended to replace the original game, reproduce its underlying data, or provide access to its source assets.
-
-The underlying Urban Assault designs and visual content remain the property of their respective rights holders.
-
-Only the original processing, organization, tool integration, source code, and other independently created OpenNeoUA Studio components are claimed by the project author.
-
-The presence of these preview images in this repository:
-
-- does not transfer ownership;
-- does not grant additional rights to copy, sell, sublicense, or redistribute them;
-- does not imply endorsement by the original rights holders;
-- does not convert proprietary game content into free or open-source material;
-- does not place third-party visual content under the GNU GPL.
-
-Users are responsible for obtaining and using game data lawfully and for complying with applicable copyright, trademark, and other laws in their jurisdiction.
-
-This notice is intended to clarify ownership and project scope.
-
-It is not legal authorization to redistribute third-party material and does not replace permission from the relevant rights holders.
-
-A rights holder who believes that material has been included improperly may contact the repository owner through the GitHub repository so the material can be reviewed.
 
 ## Safety and data handling
 
