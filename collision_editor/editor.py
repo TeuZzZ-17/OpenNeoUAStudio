@@ -23,6 +23,7 @@ from PySide6.QtCore import (
     QSignalBlocker,
     QSize,
     Qt,
+    QTimer,
     Signal,
 )
 from PySide6.QtGui import (
@@ -212,6 +213,8 @@ _SPHERE_INDEX_ROLE = int(Qt.ItemDataRole.UserRole) + 2
 _MODEL_VP_ROLE = int(Qt.ItemDataRole.UserRole) + 3
 _FIRE_POINT_INDEX_ROLE = int(Qt.ItemDataRole.UserRole) + 4
 _GUN_POINT_INDEX_ROLE = int(Qt.ItemDataRole.UserRole) + 5
+# Left-list row carrying the script unit it can load (VehicleModelReference).
+_SCRIPT_REFERENCE_ROLE = int(Qt.ItemDataRole.UserRole) + 6
 _RADIUS_SLIDER_STEPS = 10000
 _RADIUS_LOG_MIN = -3.0
 _RADIUS_LOG_MAX = 6.0
@@ -4388,6 +4391,9 @@ class CollisionEditorWindow(QMainWindow):
         self._vp_embedded: EmbeddedVPSet | None = None
         self._vp_table: VPTable | None = None
         self._vp_table_source: str = ""
+        # vp_id -> (owner path, display name), resolved while filling the
+        # model list. Script imports bind their unit to one VP through it.
+        self._model_info_by_vp: dict[int, tuple[str, str]] = {}
         self._active_script_path: Path | None = None
         self._active_script_kind: str = ""
         self._active_script_id: int | None = None
@@ -4438,6 +4444,12 @@ class CollisionEditorWindow(QMainWindow):
         # an imported script definition.  It becomes interactive only in the
         # normal archive/SKLT browsing workflow.
         self._model_browser_enabled = False
+        # Left list content: archive models normally, or the unit browser of
+        # the last imported script (see _set_script_unit_mode).
+        self._script_unit_mode = False
+        # Units currently displayed in that browser. Switching unit must not
+        # rebuild identical rows, or the click doing the switch gets corrupted.
+        self._script_unit_references: list[VehicleModelReference] = []
 
         configure_operation_status_bar(self)
 
@@ -6120,16 +6132,55 @@ class CollisionEditorWindow(QMainWindow):
         """Enable model browsing only for the normal archive/SKLT workflow."""
 
         self._model_browser_enabled = bool(enabled)
+        self._apply_model_browser_state()
+
+    def _set_script_unit_mode(self, active: bool) -> None:
+        """Switch the left list between archive models and script units.
+
+        Script mode starts only after a script import and lists every loadable
+        definition of the source script, so moving to another vehicle or
+        weapon never needs a second import.
+        """
+
+        self._script_unit_mode = bool(active)
         if hasattr(self, "model_tree"):
-            self.model_tree.setEnabled(self._model_browser_enabled)
-            self.model_tree.setToolTip(
-                "Browse models from the imported BAS/SKLT resource."
-                if self._model_browser_enabled else
+            self.model_tree.setHeaderLabels(
+                ["Unit", "VP"] if self._script_unit_mode
+                else ["Internal path", "VP"])
+            self.model_tree.headerItem().setTextAlignment(
+                1, Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+        if hasattr(self, "model_search"):
+            self.model_search.setPlaceholderText(
+                "Search vehicle / weapon names" if self._script_unit_mode
+                else "Search model names")
+            self.model_search.setToolTip(
+                "Filter the source script units by vehicle/weapon name."
+                if self._script_unit_mode else
+                "Filter models by name, internal path or owner path.")
+        self._apply_model_browser_state()
+
+    def _apply_model_browser_state(self) -> None:
+        """One place for the left list's enabled state and its help text."""
+
+        if self._script_unit_mode:
+            enabled = True
+            tree_tooltip = (
+                "Select a vehicle or weapon to load its collision data from "
+                "the source script.")
+        elif self._model_browser_enabled:
+            enabled = True
+            tree_tooltip = "Browse models from the imported BAS/SKLT resource."
+        else:
+            enabled = False
+            tree_tooltip = (
                 "Model selection is locked while a script-imported vehicle "
                 "or weapon is active. Import a BAS archive or SKLT normally "
                 "to browse this list.")
+        if hasattr(self, "model_tree"):
+            self.model_tree.setEnabled(enabled)
+            self.model_tree.setToolTip(tree_tooltip)
         if hasattr(self, "model_search"):
-            self.model_search.setEnabled(self._model_browser_enabled)
+            self.model_search.setEnabled(enabled)
 
     def _current_visual_resource_is_open(self) -> bool:
         return bool(self.family is not None or self._active_base_path is not None)
@@ -6160,6 +6211,9 @@ class CollisionEditorWindow(QMainWindow):
         self._current_owner = None
         self._current_owner_base_bounds = None
         self.model_tree.clear()
+        self._model_info_by_vp = {}
+        self._script_unit_references = []
+        self._set_script_unit_mode(False)
         self.source_label.setText("No source loaded.")
         self._set_model_browser_enabled(False)
         self._sync_animation_controls()
@@ -6270,7 +6324,8 @@ class CollisionEditorWindow(QMainWindow):
                 f"vp_normal {reference.vp_normal} is outside the SET.BAS "
                 f"database (0..{len(self._vp_table.entries) - 1}).")
             return False
-        if not self._select_model_by_vp(reference.vp_normal):
+        model_info = self._model_info_by_vp.get(reference.vp_normal)
+        if model_info is None:
             entry = self._vp_table.entry(reference.vp_normal)
             QMessageBox.critical(
                 self, "VP model unavailable",
@@ -6279,6 +6334,7 @@ class CollisionEditorWindow(QMainWindow):
                 "from the loaded SET.BAS family. The active VP table may "
                 "reference a loose BASE that is not embedded in this SET.")
             return False
+        _owner_path, source_model = model_info
 
         block = reference.block
         target_category = (
@@ -6307,10 +6363,6 @@ class CollisionEditorWindow(QMainWindow):
                 self, "Script parameter import failed", str(exc))
             return False
 
-        current_item = self.model_tree.currentItem()
-        source_model = (
-            current_item.data(0, _MODEL_NAME_ROLE)
-            if current_item is not None else "")
         fallback_name = (
             "Weapon" if target_category == WEAPON else "Vehicle")
         self.project = CollisionProject(
@@ -6368,18 +6420,17 @@ class CollisionEditorWindow(QMainWindow):
         self._undo.clear()
         self._redo.clear()
         self._last_directory = script_path.parent
+        # The left list becomes the unit browser of this script: every other
+        # loadable definition is one click away, without importing again.
+        self._set_script_unit_mode(True)
+        self._fill_script_units(references)
+        self._show_model_item(self._select_script_unit_item(reference))
         self._set_modified(False)
         self.source_label.setText(
             f"{chosen_set.name}\nVP {reference.vp_normal}: "
             f"{source_model or '<model>'}\n"
             f"VP source: {self._vp_table_source}\n"
             f"Script: {script_path.name} — {block.kind} {block.object_id}")
-        # Script import binds authored data to one exact VP.  Scrolling or
-        # clicking another entry in the archive list would desynchronize the
-        # preview from that definition, so keep the populated browser visible
-        # but deliberately greyed out until a normal BAS/SKLT import starts a
-        # free-browsing session again.
-        self._set_model_browser_enabled(False)
         self._sync_all()
         message = (
             f"Loaded {block.kind} {block.object_id} through VP "
@@ -6391,24 +6442,6 @@ class CollisionEditorWindow(QMainWindow):
             message += " " + " ".join(warnings)
         self.statusBar().showMessage(message, 7000)
         return True
-
-    def _select_model_by_vp(self, vp_id: int) -> bool:
-        item = self._model_item_by_vp(vp_id)
-        if item is None:
-            return False
-        self.model_tree.setCurrentItem(item)
-        return True
-
-    def _model_item_by_vp(self, vp_id: int):
-        matches = []
-        for index in range(self.model_tree.topLevelItemCount()):
-            item = self.model_tree.topLevelItem(index)
-            vp_ids = item.data(0, _MODEL_VP_ROLE) or ()
-            if int(vp_id) in vp_ids:
-                matches.append(item)
-        if not matches:
-            return None
-        return matches[0]
 
     def _cockpit_requested_vp(self) -> tuple[int | None, str]:
         reference = self._active_model_reference
@@ -6434,13 +6467,13 @@ class CollisionEditorWindow(QMainWindow):
         info = ""
         if cockpit_active and self._active_model_reference is not None:
             vp_id, state_name = self._cockpit_requested_vp()
-            item = self._model_item_by_vp(vp_id) if vp_id is not None else None
-            if item is None and state_name == "vp_wait":
+            owner = self._owner_for_vp(vp_id) if vp_id is not None else None
+            if owner is None and state_name == "vp_wait":
                 vp_id = self._active_model_reference.vp_normal
                 state_name = "vp_normal fallback"
-                item = self._model_item_by_vp(vp_id)
-            if item is not None:
-                desired_owner = item.data(0, Qt.ItemDataRole.UserRole)
+                owner = self._owner_for_vp(vp_id)
+            if owner is not None:
+                desired_owner = owner
                 base_name = ""
                 if (self._vp_table is not None and vp_id is not None
                         and 0 <= vp_id < len(self._vp_table.entries)):
@@ -6625,7 +6658,10 @@ class CollisionEditorWindow(QMainWindow):
         self._sync_close_archive_action()
 
     def _fill_models(self, family: AssetFamily):
+        self._set_script_unit_mode(False)
         self.model_tree.clear()
+        self._model_info_by_vp = {}
+        self._script_unit_references = []
         model_index = 0
         vp_ids_by_offset: dict[int, list[int]] = {}
         vp_ids_by_skeleton: dict[str, list[int]] = {}
@@ -6674,6 +6710,12 @@ class CollisionEditorWindow(QMainWindow):
                 vp_ids = [model_index]
             vp_ids = sorted(set(vp_ids))
             exact_vp = bool(vp_ids)
+            if exact_vp:
+                # First family object wins a VP, matching the first-match
+                # lookup previously used to resolve script imports.
+                for vp_id in vp_ids:
+                    self._model_info_by_vp.setdefault(
+                        vp_id, (obj.owner_path, obj.display_name))
             vp_text = ", ".join(map(str, vp_ids)) if vp_ids else "—"
             item = QTreeWidgetItem([
                 obj.base_object.skeleton_name or obj.owner_path,
@@ -6709,12 +6751,122 @@ class CollisionEditorWindow(QMainWindow):
     def _model_item_search_metadata(item) -> str:
         display_name = item.data(0, _MODEL_NAME_ROLE) or ""
         owner_path = item.data(0, Qt.ItemDataRole.UserRole) or ""
-        return f"{display_name} {owner_path}"
+        reference = item.data(0, _SCRIPT_REFERENCE_ROLE)
+        unit_label = reference.label if reference is not None else ""
+        return f"{display_name} {owner_path} {unit_label}"
+
+    def _fill_script_units(
+            self, references: list[VehicleModelReference]) -> None:
+        """List the loadable units of the source script in the left panel.
+
+        Rows are rebuilt only when the content really changes: rebuilding the
+        same list while Qt is still handling the click that selected a unit
+        would reset the scroll position and leave the selection on an
+        unrelated row. Signals stay blocked during a rebuild so filling the
+        list can never trigger a unit load on its own.
+        """
+
+        if references == self._script_unit_references:
+            return
+        self._script_unit_references = list(references)
+        with QSignalBlocker(self.model_tree):
+            self.model_tree.clear()
+            for reference in references:
+                block = reference.block
+                owner_path, display_name = self._model_info_by_vp.get(
+                    reference.vp_normal, ("", ""))
+                item = QTreeWidgetItem([
+                    block.name or f"{block.kind} {block.object_id}",
+                    str(reference.vp_normal),
+                ])
+                item.setData(0, Qt.ItemDataRole.UserRole, owner_path)
+                item.setData(0, _MODEL_NAME_ROLE, display_name)
+                item.setData(0, _MODEL_VP_ROLE, (reference.vp_normal,))
+                item.setData(0, _SCRIPT_REFERENCE_ROLE, reference)
+                item.setToolTip(0, reference.label)
+                item.setToolTip(1, f"VP {reference.vp_normal}")
+                item.setTextAlignment(
+                    1,
+                    Qt.AlignmentFlag.AlignRight
+                    | Qt.AlignmentFlag.AlignVCenter)
+                self.model_tree.addTopLevelItem(item)
+            self.model_tree.resizeColumnToContents(1)
+        self._filter_models(self.model_search.text())
+
+    def _select_script_unit_item(self, reference: VehicleModelReference):
+        """Select one unit row without re-entering its load path."""
+
+        for index in range(self.model_tree.topLevelItemCount()):
+            item = self.model_tree.topLevelItem(index)
+            if item.data(0, _SCRIPT_REFERENCE_ROLE) == reference:
+                with QSignalBlocker(self.model_tree):
+                    self.model_tree.setCurrentItem(item)
+                    item.setSelected(True)
+                return item
+        return self.model_tree.currentItem()
+
+    def _restore_script_unit_item(self) -> None:
+        """Return the selection to the loaded unit after a cancelled switch."""
+
+        if self._active_model_reference is not None:
+            self._select_script_unit_item(self._active_model_reference)
+
+    def _confirm_script_unit_switch(self) -> bool:
+        """Ask before replacing unexported work with another script unit."""
+
+        answer = QMessageBox.question(
+            self, "Unexported Collision Editor project",
+            "The collision project has unexported changes. Load another "
+            "unit anyway?",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No)
+        return answer == QMessageBox.StandardButton.Yes
+
+    def _owner_for_vp(self, vp_id: int) -> str | None:
+        """Owner path of the model a VP resolves to, in any list mode."""
+
+        info = self._model_info_by_vp.get(int(vp_id))
+        return info[0] if info is not None else None
 
     def _model_changed(self, current, _previous):
         if current is None or self.family is None:
             return
-        owner = current.data(0, Qt.ItemDataRole.UserRole)
+        reference = current.data(0, _SCRIPT_REFERENCE_ROLE)
+        if reference is not None:
+            if reference != self._active_model_reference:
+                # Qt is still handling the click or key press that changed
+                # this row. Loading here would rebuild the list in the middle
+                # of that interaction: the scroll position resets and the
+                # selection lands on an unrelated row. Load after it ends.
+                QTimer.singleShot(
+                    0, lambda: self._load_script_unit(reference))
+                return
+            # The loaded unit reselected: refresh the preview state only.
+            self._show_model_item(current)
+            self._sync_all()
+            return
+        self._show_model_item(current)
+        self._set_modified()
+        self._sync_all()
+
+    def _load_script_unit(self, reference: VehicleModelReference) -> None:
+        """Load one listed unit once the selection interaction has ended."""
+
+        if reference == self._active_model_reference:
+            return
+        if self._modified and not self._confirm_script_unit_switch():
+            self._restore_script_unit_item()
+            return
+        if not self.open_vehicle_script(
+                self._active_script_path,
+                object_id=reference.block.object_id,
+                object_kind=reference.block.kind):
+            self._restore_script_unit_item()
+
+    def _show_model_item(self, item) -> None:
+        """Present one left-list model or script unit in the viewport."""
+
+        owner = item.data(0, Qt.ItemDataRole.UserRole)
         self._current_owner = owner
         self.viewport.load_family(
             self.family, {owner}, primary_owner=owner)
@@ -6725,14 +6877,12 @@ class CollisionEditorWindow(QMainWindow):
         # Same contract as Model Editor: Reset View restores the exact camera
         # first presented for this selected model, not a later re-fit.
         self.viewport.capture_reset_view()
-        self.project.source_model = current.data(0, _MODEL_NAME_ROLE)
+        self.project.source_model = item.data(0, _MODEL_NAME_ROLE)
         with QSignalBlocker(self.toolbar_view_preset_combo):
             self.toolbar_view_preset_combo.setCurrentText("Current View")
         self._sync_animation_controls()
         self._sync_gizmo_camera()
         self._update_reset_view_controls()
-        self._set_modified()
-        self._sync_all()
 
     def _model_bounds(self):
         # Cockpit View may temporarily render vp_wait while collision data
@@ -7128,8 +7278,8 @@ class CollisionEditorWindow(QMainWindow):
         all_hidden = bool(entries) and all(
             not sphere.visible for _index, sphere in entries)
         visibility_text = (
-            "Unhide Spheres" if all_hidden and len(entries) > 1
-            else "Unhide Sphere" if all_hidden
+            "Show Spheres" if all_hidden and len(entries) > 1
+            else "Show Sphere" if all_hidden
             else "Hide Spheres" if len(entries) > 1
             else "Hide Sphere")
         self._context_action(
@@ -8694,7 +8844,7 @@ class CollisionEditorWindow(QMainWindow):
         if not entries:
             return
         # Mixed selections collapse to hidden first; once every selected row
-        # is hidden, the same command becomes Unhide and restores them all.
+        # is hidden, the same command becomes Show and restores them all.
         target_visible = all(
             not sphere.visible for _index, sphere in entries)
         changing = [
@@ -9120,7 +9270,10 @@ class CollisionEditorWindow(QMainWindow):
                 self.properties_tabs.currentIndex())
         animation = "available" if self.viewport.has_animation else "none"
         dirty = "yes" if self._modified else "no"
-        browser = "enabled" if self._model_browser_enabled else "locked"
+        browser = (
+            "script units" if self._script_unit_mode
+            else "enabled" if self._model_browser_enabled
+            else "locked")
         self.source_detail_label.setText(
             f"Selected VP: {vp_text}\n"
             f"Script link: {script_text}\n"
@@ -9661,8 +9814,8 @@ class CollisionEditorWindow(QMainWindow):
         self.hide_spheres_button.setEnabled(bool(visibility_entries))
         selected_visibility_plural = len(visibility_entries) > 1
         self.hide_spheres_button.setText(
-            "Unhide Spheres" if all_hidden and selected_visibility_plural
-            else "Unhide Sphere" if all_hidden
+            "Show Spheres" if all_hidden and selected_visibility_plural
+            else "Show Sphere" if all_hidden
             else "Hide Spheres" if selected_visibility_plural
             else "Hide Sphere")
         all_spheres_hidden = collisions_present and all(
