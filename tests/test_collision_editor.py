@@ -679,10 +679,11 @@ class CollisionEditorTests(unittest.TestCase):
         window._sync_all()
         self.assertEqual(window.sphere_tree.topLevelItem(0).text(1), "89")
         self.assertEqual(window.sphere_tree.topLevelItem(1).text(1), "78.379")
-        self.assertEqual(window.radius_spin.decimals(), 3)
-        self.assertAlmostEqual(window.radius_spin.value(), 78.379, places=3)
-        window.radius_spin.setValue(78.125)
-        self.assertEqual(project.compound[0].radius, 78.125)
+        self.assertEqual(window.radius_spin.decimals(), 1)
+        self.assertAlmostEqual(window.radius_spin.value(), 78.4, places=1)
+        self.assertEqual(project.compound[0].radius, 78.379051)
+        window.radius_spin.setValue(78.1)
+        self.assertEqual(project.compound[0].radius, 78.1)
 
     def test_40b_manual_compound_precision_round_trips_through_helpers(self):
         project = CollisionProject(
@@ -2704,7 +2705,7 @@ class CollisionEditorTests(unittest.TestCase):
         self.assertTrue(window.radius_title.isHidden())
         self.assertIs(window.radius_slider.parentWidget(), window.spheres_box)
         self.assertIs(window.radius_spin.parentWidget(), window.spheres_box)
-        window.radius_spin.setDecimals(3)
+        self.assertEqual(window.radius_spin.decimals(), 1)
         self.assertGreaterEqual(
             window.radius_spin.width(),
             window.radius_spin.sizeHint().width())
@@ -2728,7 +2729,7 @@ class CollisionEditorTests(unittest.TestCase):
             window.sphere_tree.horizontalScrollBar().maximum(), 0)
 
         spin = window.radius_spin
-        spin.setDecimals(3)
+        self.assertEqual(spin.decimals(), 1)
         spin.setValue(spin.maximum())
         self.app.processEvents()
         self.assertGreaterEqual(
