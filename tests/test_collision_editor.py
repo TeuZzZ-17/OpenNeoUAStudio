@@ -324,7 +324,7 @@ class CollisionEditorTests(unittest.TestCase):
 
     def test_18_nested_begin_end_does_not_truncate_target(self):
         text = (
-            "modify_vehicle 3\n begin_chain_fx hit\n"
+            "modify_vehicle 3\n begin_fx hit\n"
             "  radius = 999\n end\n radius = 7\nend\n")
         blocks = find_script_blocks(text)
         self.assertEqual(len(blocks), 1)
@@ -3641,7 +3641,7 @@ class CollisionEditorTests(unittest.TestCase):
             "    coll_y = 2\r\n"
             "    coll_z = 3\r\n"
             "    coll_radius = 100\r\n"
-            "    begin_chain_fx\r\n"
+            "    begin_fx\r\n"
             "        offset_x = 999\r\n"
             "    end\r\n"
             "end\r\n"
@@ -3678,7 +3678,7 @@ class CollisionEditorTests(unittest.TestCase):
 
         self.assertIn("\r\n", updated)
         self.assertIn("mass = 10000", updated)
-        self.assertIn("begin_chain_fx\r\n        offset_x = 999\r\n    end", updated)
+        self.assertIn("begin_fx\r\n        offset_x = 999\r\n    end", updated)
         for expected in (
                 "radius = 222", "overeof = 175", "fire_x = 40",
                 "fire_y = 50", "fire_z = 60", "num_weapons = 3_5",
