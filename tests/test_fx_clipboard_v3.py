@@ -866,15 +866,16 @@ class FxClipboardV3Tests(unittest.TestCase):
             self.assertTrue(window.copy_geometry_action.isEnabled())
             self.assertTrue(window.delete_fx_button.isEnabled())
             window.viewport.select_all_edit_vertices()
+            # Mass selection covers the whole model, protected FX included.
             self.assertEqual(
-                window.viewport.edit_session.selection, {4, 5})
+                window.viewport.edit_session.selection, {0, 1, 2, 3, 4, 5})
             self.assertTrue(
                 set(range(4)).issubset(
                     window.viewport._edit_read_only_vertices))
             window.viewport.edit_session.selection = {0, 4}
             window.viewport._begin_modal("grab")
             self.assertEqual(
-                window.viewport.edit_session.selection, {4})
+                window.viewport.edit_session.selection, {0, 4})
             window.viewport._cancel_modal()
             window._on_polygon_picked(0)
             self.assertIsNone(window._selected_polygon_vertices())

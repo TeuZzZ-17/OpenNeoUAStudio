@@ -893,19 +893,18 @@ class AssetViewport(QWidget):
         self.update()
 
     def set_edit_read_only_vertices(self, indices) -> None:
-        """Exclude unsafe shared FX vertices from every edit selection path."""
+        """Mark unsafe shared FX vertices.
+
+        Only single-vertex picking and the FX commands stay clear of them: the
+        mass selections (select all, selection box) include them on purpose, so
+        the whole model shape can be selected and transformed as one piece.
+        """
 
         protected = {
             int(index) for index in indices
             if isinstance(index, int) and index >= 0
         }
         self._edit_read_only_vertices = protected
-        session = self._edit_session
-        if session is not None:
-            previous = set(session.selection)
-            session.selection.difference_update(protected)
-            if session.selection != previous:
-                self._emit_selection_hint()
         self.update()
 
     @property
@@ -1867,20 +1866,23 @@ class AssetViewport(QWidget):
         if session is None:
             self.statusMessage.emit("Edit Mode: no editable model is active.")
             return
-        self._select_all_editable_vertices()
+        self._select_all_model_vertices()
         self._selected_owner = self._edit_owner
         self._active_edit_vertex = min(session.selection, default=None)
         self._emit_selection_hint("vertex")
         self.update()
 
-    def _select_all_editable_vertices(self) -> bool:
-        """Select every safe POO2 index, excluding protected FX vertices."""
+    def _select_all_model_vertices(self) -> bool:
+        """Select every POO2 index, protected FX vertices included.
+
+        Mass selections cover the whole model shape on purpose: transforms can
+        then move the model as one piece instead of leaving the FX behind.
+        """
 
         session = self._edit_session
         if session is None:
             return False
         session.select_all()
-        session.selection.difference_update(self._edit_read_only_vertices)
         return bool(session.selection)
 
     def select_edit_vertices(self, indices) -> None:
@@ -2208,7 +2210,7 @@ class AssetViewport(QWidget):
             return False
         selected_all = False
         if not session.selection and select_all_if_empty:
-            selected_all = self._select_all_editable_vertices()
+            selected_all = self._select_all_model_vertices()
         if not session.selection or not session.begin_modal():
             self.statusMessage.emit("Scale: no vertices selected.")
             return False
@@ -2229,7 +2231,7 @@ class AssetViewport(QWidget):
         if session is None:
             return False
         if not session.selection and select_all_if_empty:
-            self._select_all_editable_vertices()
+            self._select_all_model_vertices()
             self._emit_selection_hint()
         return bool(session.selection and session.begin_modal())
 
@@ -2246,7 +2248,7 @@ class AssetViewport(QWidget):
         if session is None:
             return False
         if not session.selection and select_all_if_empty:
-            self._select_all_editable_vertices()
+            self._select_all_model_vertices()
             self._emit_selection_hint()
         return bool(session.selection and session.begin_modal())
 
@@ -2429,7 +2431,9 @@ class AssetViewport(QWidget):
             self.update()
             return
         screen_points = self._edit_screen_points()
-        available = set(range(len(screen_points))) - self._edit_read_only_vertices
+        # Mass selection covers the whole shape: protected FX vertices belong
+        # to it, so the covered model can be transformed as one piece.
+        available = set(range(len(screen_points)))
         hits = {
             index for index, screen in enumerate(screen_points)
             if index in available
@@ -2470,10 +2474,8 @@ class AssetViewport(QWidget):
         session = self._edit_session
         if session is None:
             return
-        previous_selection = set(session.selection)
-        session.selection.difference_update(self._edit_read_only_vertices)
-        if session.selection != previous_selection:
-            self._emit_selection_hint()
+        # Transforms move exactly what is selected.  Mass selections include
+        # protected FX vertices on purpose, so nothing is stripped here.
         if not session.selection:
             self.statusMessage.emit(
                 "Edit Mode: select at least one vertex first "
@@ -3984,10 +3986,12 @@ class AssetViewport(QWidget):
         for index in sorted(
                 self._edit_read_only_vertices
                 & self._edit_visible_vertices):
-            if index < len(screen):
-                point = screen[index]
-                painter.drawRect(QRectF(
-                    point.x() - 3.0, point.y() - 3.0, 6.0, 6.0))
+            # A selected handle is drawn like any other selection below.
+            if index in session.selection or index >= len(screen):
+                continue
+            point = screen[index]
+            painter.drawRect(QRectF(
+                point.x() - 3.0, point.y() - 3.0, 6.0, 6.0))
         mode_color = {
             "move": MODEL_EDIT_SELECTION_RED,
             "rotate": QColor(70, 130, 255),

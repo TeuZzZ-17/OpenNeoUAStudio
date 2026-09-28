@@ -1269,7 +1269,9 @@ class AssemblyWindow(QMainWindow):
         self.edit_reset_action.triggered.connect(self._reset_model)
         edit_menu.addAction(self.edit_reset_action)
         edit_menu.addSeparator()
-        self.edit_select_all_action = QAction("Select All Vertices", self)
+        self.edit_select_all_action = QAction("Select All Geometry", self)
+        self.edit_select_all_action.setStatusTip(
+            "Select the whole model shape, protected FX vertices included.")
         self.edit_select_all_action.triggered.connect(
             self.viewport.select_all_edit_vertices)
         edit_menu.addAction(self.edit_select_all_action)
@@ -1280,7 +1282,9 @@ class AssemblyWindow(QMainWindow):
         self.select_all_fx_action.triggered.connect(
             self._select_all_fx_elements)
         edit_menu.addAction(self.select_all_fx_action)
-        self.edit_select_none_action = QAction("Deselect All Vertices", self)
+        self.edit_select_none_action = QAction("Deselect All Geometry", self)
+        self.edit_select_none_action.setStatusTip(
+            "Clear the model geometry selection.")
         self.edit_select_none_action.triggered.connect(
             self.viewport.select_no_edit_vertices)
         edit_menu.addAction(self.edit_select_none_action)
@@ -9414,11 +9418,11 @@ class AssemblyWindow(QMainWindow):
                          and self.edit_reset_action.isEnabled())
         menu.addSeparator()
         select_all = menu.addAction(
-            "Select All Vertices", self.viewport.select_all_edit_vertices)
+            "Select All Geometry", self.viewport.select_all_edit_vertices)
         select_all.setEnabled(active)
         menu.addAction(self.select_all_fx_action)
         select_none = menu.addAction(
-            "Deselect All Vertices", self.viewport.select_no_edit_vertices)
+            "Deselect All Geometry", self.viewport.select_no_edit_vertices)
         select_none.setEnabled(active)
         deselect = menu.addAction(
             "Deselect",

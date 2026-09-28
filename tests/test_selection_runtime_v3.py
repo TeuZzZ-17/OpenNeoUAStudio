@@ -5,7 +5,7 @@ from unittest.mock import patch
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-from PySide6.QtCore import QPoint, QPointF, Qt
+from PySide6.QtCore import QPoint, QPointF, QRect, Qt
 from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication, QMessageBox
 
@@ -278,12 +278,41 @@ class SelectionRuntimeV3Tests(unittest.TestCase):
             window.viewport.set_edit_read_only_vertices({3})
             window.poly_select_all_button.click()
             self.assertEqual(
-                window.viewport.edit_session.selection, {0, 1, 2})
+                window.viewport.edit_session.selection, {0, 1, 2, 3})
             window.poly_deselect_all_button.click()
             self.assertEqual(window.viewport.edit_session.selection, set())
             window._right_tabs.setCurrentWidget(window._resources_tabs)
             window._show_model_editor()
             self.assertEqual(window.viewport.edit_session.selection, set())
+        finally:
+            window.close()
+
+    def test_select_all_geometry_covers_the_whole_model_shape(self):
+        window, _obj, _model = _prepare_window()
+        try:
+            self.assertEqual(
+                window.edit_select_all_action.text(), "Select All Geometry")
+            self.assertEqual(
+                window.edit_select_none_action.text(), "Deselect All Geometry")
+
+            # Protected FX vertices are part of the mass selection, so the
+            # whole shape is highlighted instead of only the free vertices.
+            window.viewport.set_edit_read_only_vertices({3})
+            window.viewport.select_all_edit_vertices()
+            self.assertEqual(
+                window.viewport.edit_session.selection, {0, 1, 2, 3})
+            self.assertEqual(window.viewport._highlight_polys, {0, 1})
+
+            window.viewport.select_no_edit_vertices()
+            screen_points = [QPointF(10, 10), QPointF(90, 10),
+                             QPointF(10, 90), QPointF(90, 90)]
+            window.viewport._box_rect = QRect(0, 0, 120, 120)
+            with patch.object(
+                    window.viewport, "_edit_screen_points",
+                    return_value=screen_points):
+                window.viewport._apply_box_select(False)
+            self.assertEqual(
+                window.viewport.edit_session.selection, {0, 1, 2, 3})
         finally:
             window.close()
 
