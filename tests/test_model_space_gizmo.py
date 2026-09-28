@@ -168,17 +168,17 @@ class ModelSpaceGizmoTests(unittest.TestCase):
         self.assertEqual(clicked, [(0, 1, 1)])
         self.assertEqual(finished, [True])
 
-    def test_implicit_scale_rotate_select_all_excludes_protected_fx(self):
+    def test_implicit_scale_rotate_select_all_includes_protected_fx(self):
         viewport, _model = _editable_viewport()
         viewport.edit_session.selection.clear()
         viewport.set_edit_read_only_vertices({1})
         self.assertTrue(viewport.begin_scale_preview())
-        self.assertEqual(viewport.edit_session.selection, {0, 2})
+        self.assertEqual(viewport.edit_session.selection, {0, 1, 2})
         viewport.finish_scale_preview(False)
 
         viewport.edit_session.selection.clear()
         self.assertTrue(viewport.begin_rotate_preview())
-        self.assertEqual(viewport.edit_session.selection, {0, 2})
+        self.assertEqual(viewport.edit_session.selection, {0, 1, 2})
         viewport.finish_rotate_preview(False)
 
     def test_outward_drag_keeps_discrete_click_hold_behavior(self):
