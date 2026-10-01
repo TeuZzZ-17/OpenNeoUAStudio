@@ -2,7 +2,7 @@
 
 The main window assembles BASE + skeleton + texture + animation families,
 provides the former BASet extraction/conversion workflows, and launches the
-integrated Wireframe Editor and Map Editor status notice. Geometry writes are explicit,
+integrated Wireframe Editor and Map Editor. Geometry writes are explicit,
 verified, and backed up before an original loose skeleton is overwritten.
 """
 
@@ -502,6 +502,7 @@ class AssemblyWindow(QMainWindow):
         self._extra_roots: list[Path] = []
         self._wireframe_windows: list[QMainWindow] = []
         self._collision_windows: list[QMainWindow] = []
+        self._map_editor_windows: list[QMainWindow] = []
         self._preview_windows: list[QDialog] = []
         # session-only manual texture/animation bindings: logical name -> path
         self._overrides: dict[str, str] = {}
@@ -2627,11 +2628,29 @@ class AssemblyWindow(QMainWindow):
         window.activateWindow()
 
     def _open_map_editor(self) -> None:
-        """Show the status of the retired integrated Map Editor."""
+        """Open the integrated Map Editor in this Qt application."""
 
-        from map_editor import show_map_editor_notice
+        try:
+            from map_editor.editor import create_window
+            window = create_window(parent=self)
+        except Exception as exc:
+            QMessageBox.critical(
+                self, "Map Editor unavailable",
+                f"The integrated editor could not be loaded.\n\n{exc}")
+            return
+        if window is None:
+            return
+        window.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose, True)
+        self._map_editor_windows.append(window)
 
-        show_map_editor_notice(self)
+        def forget(*_args) -> None:
+            if window in self._map_editor_windows:
+                self._map_editor_windows.remove(window)
+
+        window.destroyed.connect(forget)
+        window.show()
+        window.raise_()
+        window.activateWindow()
 
     def open_bas_archive_dialog(self) -> None:
         """Import a read-only SET.BAS resource archive."""

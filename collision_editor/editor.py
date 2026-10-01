@@ -3667,9 +3667,8 @@ class CollisionViewport(AssetViewport):
             TURRET_DOWN_COLOR, QPointF(7.0, 15.0))
 
 
-    def paintEvent(self, event) -> None:  # noqa: N802
+    def _paint_viewport(self, painter: QPainter) -> None:
         if self._cockpit_preview_active:
-            painter = QPainter(self)
             painter.fillRect(self.rect(), QColor(24, 26, 32))
             target = self._cockpit_render_rect()
             painter.save()
@@ -3684,13 +3683,13 @@ class CollisionViewport(AssetViewport):
                 painter.drawText(
                     target, Qt.AlignmentFlag.AlignCenter, "Model hidden")
             painter.restore()
-            painter.end()
             return
 
         if self._collision_show_model:
-            super().paintEvent(event)
+            painter.save()
+            super()._paint_viewport(painter)
+            painter.restore()
         else:
-            painter = QPainter(self)
             painter.fillRect(self.rect(), QColor(24, 26, 32))
             if self._show_grid:
                 self._draw_grid(
@@ -3700,9 +3699,7 @@ class CollisionViewport(AssetViewport):
                 QRectF(self.rect()), Qt.AlignmentFlag.AlignCenter,
                 "Model hidden",
             )
-            painter.end()
 
-        painter = QPainter(self)
         self._draw_ground_alignment_overlay(painter)
         # OpenNeoUA F10 uses unfilled, aliased one-pixel lines and 12 segments.
         painter.setRenderHint(QPainter.RenderHint.Antialiasing, False)
@@ -3743,7 +3740,6 @@ class CollisionViewport(AssetViewport):
                 QColor(90, 230, 255), 1.0, Qt.PenStyle.DashLine))
             painter.setBrush(QColor(90, 230, 255, 40))
             painter.drawRect(self._sphere_box_rect.normalized())
-        painter.end()
 
     def mouseMoveEvent(self, event: QMouseEvent) -> None:  # noqa: N802
         if self._cockpit_preview_active:
