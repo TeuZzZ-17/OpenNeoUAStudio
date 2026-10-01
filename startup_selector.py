@@ -46,7 +46,7 @@ TOOL_OPTIONS = (
     ToolOption(
         "map_editor",
         "Map Editor",
-        "View the status of the standalone Map Editor.",
+        "Create and edit Urban Assault maps with the GPU terrain viewport.",
     ),
     ToolOption(
         "collision_editor",

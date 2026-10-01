@@ -11,7 +11,8 @@ from typing import Hashable, Iterable
 
 from PySide6.QtCore import QPoint, QPointF, QRectF, Qt, Signal
 from PySide6.QtGui import QColor, QImage, QPainter, QPen, QPolygonF
-from PySide6.QtWidgets import QWidget
+
+from gpu_widget import AcceleratedWidget
 
 HANDLE_RADIUS = 6.0
 SNAP_DISTANCE_PX = 8.0
@@ -27,7 +28,7 @@ class UVLoop:
     editable: bool = True
 
 
-class UVEditorWidget(QWidget):
+class UVEditorWidget(AcceleratedWidget):
     # Legacy single-loop signal/API remains available to existing callers.
     uvChanged = Signal(list)
     loopsChanged = Signal(object)
@@ -634,8 +635,7 @@ class UVEditorWidget(QWidget):
         self._snap_guides = tuple(guides)
         return du, dv
 
-    def paintEvent(self, event) -> None:  # noqa: N802
-        painter = QPainter(self)
+    def _paint_viewport(self, painter: QPainter) -> None:
         painter.fillRect(self.rect(), QColor(30, 32, 38))
         ox, oy, size = self._canvas_rect()
         cell = size / 16
@@ -697,8 +697,6 @@ class UVEditorWidget(QWidget):
             painter.drawText(self.rect().adjusted(6, 4, -6, -4),
                              Qt.AlignmentFlag.AlignTop
                              | Qt.AlignmentFlag.AlignRight, "[READ-ONLY]")
-        painter.end()
-
     def _hit_point(self, pos: QPointF):
         hits = []
         visible = self._visible_loops()

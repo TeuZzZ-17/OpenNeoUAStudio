@@ -2,7 +2,7 @@
 
 The normal startup path shows a lightweight tool selector first. The chosen
 editor is imported only after the user selects it, while the explicit
-``--map-editor`` command remains available for the Map Editor status notice.
+``--map-editor`` command opens the integrated Map Editor directly.
 
 Usage:
     python main.py [path/to/asset.base | path/to/SET.BAS]
@@ -100,12 +100,12 @@ def _show_qt_tool(app, tool: str, startup_path: str | None) -> int:
     return app.exec()
 
 
-def _launch_selected_map_editor() -> int:
-    """Show the Map Editor notice after the selector has closed."""
+def _launch_selected_map_editor(startup_path: str | None = None) -> int:
+    """Open the integrated Map Editor after the selector has closed."""
 
     from map_editor.editor import main as map_editor_main
 
-    return map_editor_main()
+    return map_editor_main([startup_path] if startup_path else [])
 
 
 def main() -> int:
@@ -131,7 +131,7 @@ def main() -> int:
         return 0
     startup_path = _startup_path(args)
     if tool == MAP_EDITOR_TOOL:
-        return _launch_selected_map_editor()
+        return _launch_selected_map_editor(startup_path)
 
     return _show_qt_tool(app, tool, startup_path)
 

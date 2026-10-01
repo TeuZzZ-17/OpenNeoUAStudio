@@ -30,8 +30,19 @@ python main.py
 On normal startup, OpenNeoUA Studio first shows a tool selector for the Model
 Editor, Snapshot Studio, Map Editor, Collision Editor, or Wireframe Editor.
 
-The Map Editor has been moved out of OpenNeoUA Studio and is currently being
-rebuilt as a standalone companion tool. Its selector entry shows a status notice.
+The Map Editor is integrated in the same application. Choose Map Editor at
+startup, or run `python main.py --map-editor path/to/level.LDF`. Choose the local
+game installation when prompted; game resources remain external and are loaded
+from the selected original Urban Assault or OpenNeoUA data folders.
+
+Install source dependencies with `python -m pip install -r requirements.txt`.
+The map uses persistent OpenGL 3.3 geometry. The Model, Snapshot, Collision and
+Wireframe and UV viewports use GPU painting; textured 3D previews share the map's
+indexed texture, SHADERMP and TRACYRMP framebuffer. Retail source-face culling,
+clipping, BSP ordering and editing tools remain shared. Exact diagnostic and
+snapshot exports retain the software reference rasterizer. Systems without a
+usable OpenGL context automatically use software; `NME_RENDERER=software`
+forces that backend for troubleshooting.
 
 A precompiled Windows executable may also be included in the repository for convenience.
 

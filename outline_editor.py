@@ -28,6 +28,7 @@ from PySide6.QtWidgets import (
 from editor_widgets import MODEL_EDIT_SELECTION_RED
 from screen_label_layout import choose_screen_label_rect
 from sklt_parser import OutlineGroup, Point2D, Point3D, Polygon, SkltModel
+from gpu_widget import AcceleratedWidget
 
 
 ProjectedPoint = tuple[float, float]
@@ -61,7 +62,7 @@ class HistoryEdit:
     after: EditorState
 
 
-class OutlineCanvas(QWidget):
+class OutlineCanvas(AcceleratedWidget):
     pointSelected = Signal(int)
     pointMoved = Signal(int, float, float, bool)
     lineSelected = Signal(int, int)
@@ -272,8 +273,7 @@ class OutlineCanvas(QWidget):
             return (0.0, 0.0)
         return self._from_screen(QPointF(self.width() * 0.5, self.height() * 0.5))
 
-    def paintEvent(self, event) -> None:  # noqa: N802 - Qt override
-        painter = QPainter(self)
+    def _paint_viewport(self, painter: QPainter) -> None:
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
         painter.fillRect(self.rect(), QColor(24, 26, 31))
 
@@ -288,7 +288,6 @@ class OutlineCanvas(QWidget):
             if self._message:
                 painter.setPen(QColor(180, 185, 192))
                 painter.drawText(self.rect(), Qt.AlignmentFlag.AlignCenter, self._message)
-            painter.end()
             return
 
         normal_pen = QPen(QColor(100, 210, 255), 1.5)
@@ -407,8 +406,6 @@ class OutlineCanvas(QWidget):
                 left, top, right, bottom = rect
                 occupied_labels.append(rect)
                 painter.drawText(QPointF(left, top + ascent), text)
-
-        painter.end()
 
     def selection_pivot(self) -> ProjectedPoint | None:
         points = list(self._drag_start_points.values()) if self._drag_start_points else [

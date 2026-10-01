@@ -1,10 +1,11 @@
-"""Software-rendered 3D preview widget for assembled Urban Assault assets.
+"""GPU-accelerated 3D preview widget for assembled Urban Assault assets.
 
 Renders the polygons of an :class:`asset_family.AssetFamily` with QPainter and
 the shared Retail geometry pipeline.  All view modes use the same source-face
 visibility test, runtime fan triangulation, near-plane clipping and exact
 camera-space BSP ordering.  Textured mode then adds the Retail-indexed
-SHADERMP/TRACYRMP framebuffer pass.
+SHADERMP/TRACYRMP framebuffer pass shared with the Map Editor. Software remains
+the fallback and the exact diagnostic/export reference.
 
 View modes:
   - wireframe        SKLT-style outline using Retail-visible polygons
@@ -47,7 +48,6 @@ from PySide6.QtGui import (
     QPolygonF,
     QWheelEvent,
 )
-from PySide6.QtWidgets import QWidget
 from PySide6.QtWidgets import QApplication
 
 from asset_family import AssetFamily, FamilyObject
@@ -74,6 +74,7 @@ from indexed_renderer import (
     IndexedRasterizer,
     retail_source_face_front_facing,
 )
+from gpu_widget import AcceleratedWidget
 
 MATERIAL_COLORS = [
     QColor(96, 170, 255), QColor(255, 170, 80), QColor(120, 220, 120),
@@ -412,7 +413,7 @@ def _image_from_effect_png(path) -> QImage | None:
     return image.convertToFormat(QImage.Format.Format_ARGB32)
 
 
-class AssetViewport(QWidget):
+class AssetViewport(AcceleratedWidget):
     """3D preview of an asset family with polygon picking."""
 
     RESET_YAW = -35.0
@@ -3456,8 +3457,7 @@ class AssetViewport(QWidget):
     def paintGL_stub(self):  # pragma: no cover - kept for API parity
         pass
 
-    def paintEvent(self, event) -> None:  # noqa: N802 - Qt override
-        painter = QPainter(self)
+    def _paint_viewport(self, painter: QPainter) -> None:
         background = self._snapshot_background
         if self._snapshot_active and background is None:
             background = QColor(24, 26, 32)
@@ -3465,7 +3465,6 @@ class AssetViewport(QWidget):
                            clean=(self._snapshot_active
                                   and not self._snapshot_show_guides),
                            camera=self._camera_state())
-        painter.end()
 
     def _render_scene(self, painter: QPainter, target: QRectF,
                       background: QColor | None, clean: bool,
@@ -3713,7 +3712,10 @@ class AssetViewport(QWidget):
                         target_width, target_height, camera)
                     if use_view_cache else None
                 )
-                if (use_view_cache
+                gpu_rendered = self._draw_gpu_indexed(painter, target, ordered, camera)
+                if gpu_rendered:
+                    indexed_image = None
+                elif (use_view_cache
                         and cache_key == self._indexed_view_cache_key
                         and not self._indexed_view_cache_image.isNull()):
                     indexed_image = QImage(self._indexed_view_cache_image)
@@ -3742,11 +3744,12 @@ class AssetViewport(QWidget):
                     self.statusMessage.emit(
                         f"Textured renderer failed closed: {exc}")
             else:
-                painter.drawImage(target, indexed_image)
+                if indexed_image is not None:
+                    painter.drawImage(target, indexed_image)
                 self._indexed_runtime_error = ""
                 self._last_render_error = ""
                 self._last_effective_renderer = (
-                    "retail_indexed_reconstructed")
+                    "retail_indexed_gpu" if gpu_rendered else "retail_indexed_reconstructed")
 
         for piece in ordered:
             payload = piece.payload
@@ -3862,6 +3865,22 @@ class AssetViewport(QWidget):
         """Render BSP pieces through the sole palette-index textured backend."""
 
         adapter = self._indexed_adapter
+        indexed_pieces = self._indexed_pieces(target, ordered, camera)
+        width = max(1, int(round(target.width())))
+        height = max(1, int(round(target.height())))
+        result = IndexedRasterizer.render(
+            width, height, indexed_pieces, adapter.tables, background_index=0,
+            collect_diagnostics=collect_diagnostics,
+            track_polygon_owner=False)
+        self._last_indexed_stats = dict(result.stats)
+        rgba = result.to_rgba(adapter.tables, transparent_background=True)
+        image = QImage(
+            rgba, width, height, width * 4, QImage.Format.Format_RGBA8888)
+        return image.copy()
+
+    def _indexed_pieces(self, target, ordered, camera):
+        """Keep CPU and GPU backends on identical Retail material/UV semantics."""
+        adapter = self._indexed_adapter
         if adapter is None:
             raise RuntimeError(self._indexed_unavailable_reason)
         unmapped = [face for face in self._faces if not face.mapped]
@@ -3928,15 +3947,52 @@ class AssetViewport(QWidget):
                              else VANILLA_FADE_LENGTH),
                 vertex_distances=vertex_distances,
             ))
-        result = IndexedRasterizer.render(
-            width, height, indexed_pieces, adapter.tables, background_index=0,
-            collect_diagnostics=collect_diagnostics,
-            track_polygon_owner=False)
-        self._last_indexed_stats = dict(result.stats)
-        rgba = result.to_rgba(adapter.tables, transparent_background=True)
-        image = QImage(
-            rgba, width, height, width * 4, QImage.Format.Format_RGBA8888)
-        return image.copy()
+        return indexed_pieces
+
+    def _draw_gpu_indexed(self, painter, target, ordered, camera):
+        canvas = getattr(self, '_gpu_canvas', None)
+        if (canvas is None or painter.device() is not canvas
+                or self._retail_distance_fade_enabled
+                or getattr(self, '_gpu_indexed_unavailable', False)):
+            return False
+        # Cockpit subrect rendering keeps its existing clip and exact raster path.
+        if target != QRectF(self.rect()):
+            return False
+        pieces = self._indexed_pieces(target, ordered, camera)
+        from gpu_indexed_backend import StudioGpuRenderer
+        from OpenGL import GL as gl
+        painter.beginNativePainting()
+        unpack_alignment = int(gl.glGetIntegerv(gl.GL_UNPACK_ALIGNMENT))
+        gl.glPixelStorei(gl.GL_UNPACK_ALIGNMENT, 1)
+        try:
+            if getattr(self, '_gpu_indexed', None) is None:
+                self._gpu_indexed = StudioGpuRenderer()
+            ratio = canvas.devicePixelRatioF()
+            if ratio != 1:
+                from dataclasses import replace
+                pieces = [replace(p, screen=tuple((x*ratio,y*ratio) for x,y in p.screen))
+                          for p in pieces]
+            self._last_indexed_stats = self._gpu_indexed.render_pieces(
+                pieces, self._indexed_adapter.tables,
+                round(target.width()*ratio), round(target.height()*ratio),
+                canvas.defaultFramebufferObject())
+        except Exception as exc:
+            self._cleanup_gpu()
+            self._gpu_indexed_unavailable = True
+            self.statusMessage.emit(f"GPU textured rendering unavailable: {exc}. Using software rendering.")
+            return False
+        finally:
+            gl.glPixelStorei(gl.GL_UNPACK_ALIGNMENT, unpack_alignment)
+            gl.glBindFramebuffer(gl.GL_FRAMEBUFFER, canvas.defaultFramebufferObject())
+            gl.glActiveTexture(gl.GL_TEXTURE0)
+            painter.endNativePainting()
+        return True
+
+    def _cleanup_gpu(self):
+        backend = getattr(self, '_gpu_indexed', None)
+        if backend is not None:
+            backend.delete()
+            self._gpu_indexed = None
 
     def _resolve_indexed_surface(
             self, adapter: IndexedFamilyAdapter, face: ViewFace,
