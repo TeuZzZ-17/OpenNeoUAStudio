@@ -47,7 +47,7 @@ void main(){
         }
         world.xz+=instance.xy;
         if(mode.z<0) mode.z=-float(id+1);
-    }else world.y+=all(equal(heightRefs,vec4(heightRefs.x)))
+    }else if(heightRefs.x>=0.0) world.y+=all(equal(heightRefs,vec4(heightRefs.x)))
         ? texelFetch(heights,int(heightRefs.x)).r
         : (texelFetch(heights,int(heightRefs.x)).r+texelFetch(heights,int(heightRefs.y)).r+
            texelFetch(heights,int(heightRefs.z)).r+texelFetch(heights,int(heightRefs.w)).r)*0.25;
@@ -117,14 +117,22 @@ uniform sampler2D edgeMap;
 uniform usampler2D states;
 uniform sampler2D palette;
 uniform sampler2D sky;
+uniform samplerBuffer unitStyles;
+uniform int unitCount;
 uniform vec3 ownerColors[8];
 uniform ivec2 mapSize;
 uniform int hoverCell;
+uniform int previewStart;
+uniform vec3 cursorColor;
 uniform bool showGrid;
 uniform bool showSky;
 uniform bool showOverlays;
 uniform bool transparentBackground;
 uniform float pixelScale;
+vec4 unitStyle(int code){
+    int index=-code-mapSize.x*mapSize.y-1;
+    return index>=0 && index<unitCount ? texelFetch(unitStyles,index) : vec4(0);
+}
 uvec4 stateAt(ivec2 p){
     if(any(lessThan(p,ivec2(0))) || any(greaterThanEqual(p,mapSize))) return uvec4(0);
     return texelFetch(states,p,0);
@@ -139,6 +147,35 @@ void main(){
         return;
     }
     color=texelFetch(palette,ivec2(int(index),0),0);
+    if(showOverlays && abs(code)<=mapSize.x*mapSize.y && code!=0){
+        int id=abs(code)-1;
+        if(stateAt(ivec2(id%mapSize.x,id/mapSize.x)).a==2u){
+            float grey=dot(color.rgb,vec3(0.299,0.587,0.114));
+            color.rgb=mix(vec3(grey),vec3(0.62),0.28);
+        }
+    }
+    if(previewStart>0 && code<=-previewStart){
+        float grey=dot(color.rgb,vec3(0.299,0.587,0.114));
+        color.rgb=mix(vec3(grey),vec3(0.62),0.28);
+    }
+    if(showOverlays && unitCount>0){
+        vec4 own=unitStyle(code);
+        for(int d=1;d<=3;d++){
+            int step=max(1,int(float(d)*pixelScale));
+            for(int axis=0;axis<4;axis++){
+                ivec2 offset=axis==0 ? ivec2(step,0) : axis==1 ? ivec2(-step,0) : axis==2 ? ivec2(0,step) : ivec2(0,-step);
+                ivec2 q=clamp(p+offset,ivec2(0),textureSize(cells,0)-1);
+                int other=texelFetch(cells,q,0).r;
+                vec4 neighbour=unitStyle(other);
+                if(own.a>0.0 && other!=code && d<=(own.a>1.0 ? 2 : 1)){
+                    color.rgb=own.rgb; return;
+                }
+                if(own.a==0.0 && neighbour.a>1.0 && d<=2){
+                    color.rgb=vec3(1.0,0.98,0.82); return;
+                }
+            }
+        }
+    }
     if(code<=0 || !showOverlays) return;
     ivec2 cell=ivec2((code-1)%mapSize.x,(code-1)/mapSize.x);
     uvec4 state=stateAt(cell);
@@ -155,13 +192,13 @@ void main(){
         if(stateAt(cell+ivec2(0,-1)).g==0u) boundary=min(boundary,e.z);
         if(stateAt(cell+ivec2(0,1)).g==0u) boundary=min(boundary,e.w);
         if(boundary>3.0 && boundary<4.3 && mod((gl_FragCoord.x+gl_FragCoord.y)/pixelScale,10.0)<6.0)
-            color.rgb=vec3(0.94);
+            color.rgb=cursorColor;
     }
     if(state.b!=0u || code==hoverCell){
         float x=min(e.x,e.y), z=min(e.z,e.w);
         bool bracket=(x>6.0 && x<7.7 && z>6.0 && z<20.0) ||
                      (z>6.0 && z<7.7 && x>6.0 && x<20.0);
-        if(bracket) color.rgb=vec3(state.b!=0u ? 1.0 : 0.82);
+        if(bracket) color.rgb=state.b!=0u ? mix(cursorColor,vec3(1),0.35) : cursorColor;
     }
 }
 '''
@@ -171,6 +208,16 @@ def camera_matrix(cam, map_size):
     cy, sy, cp, sp = cam._trig()
     rotation = np.array(((cy, 0, sy), (sp*sy, -cp, -sp*cy),
                          (-cp*sy, -sp, cp*cy)), dtype=np.float64)
+    if cam.perspective:
+        focal = 1 / math.tan(math.radians(cam.fov)/2)
+        near, far = 20.0, max(30000.0, sum(map_size)*SECTOR_SIZE*2)
+        view = np.eye(4)
+        view[:3, :3] = rotation
+        view[:3, 3] = -rotation @ np.asarray(cam.center)
+        projection = np.array(((focal*cam.height/cam.width,0,0,0),(0,focal,0,0),
+                              (0,0,-(far+near)/(far-near),-2*far*near/(far-near)),
+                              (0,0,-1,0)))
+        return np.asarray(projection @ view, np.float32)
     scale = np.array((2*cam.zoom/cam.width, 2*cam.zoom/cam.height,
                       -1/max(10000, sum(map_size)*SECTOR_SIZE+10000)))
     result = np.eye(4, dtype=np.float32)
@@ -221,11 +268,15 @@ class GpuRenderer:
         self.opaque_program, self.flat_program, self.screen_program = programs
         self.screen_vao = int(gl.glGenVertexArrays(1))
         self._locations = {}
-        self.textures = [int(x) for x in gl.glGenTextures(12)]
+        self.textures = [int(x) for x in gl.glGenTextures(13)]
         (self.atlas, self.shades, self.tracy, self.palette, self.sky,
-         self.states, self.indices, self.ids, self.edges, self.depth, self.backdrop, self.heights) = self.textures
+         self.states, self.indices, self.ids, self.edges, self.depth, self.backdrop, self.heights, self.unit_styles) = self.textures
         self.fbo = int(gl.glGenFramebuffers(1))
         self.height_buffer = int(gl.glGenBuffers(1))
+        self.unit_buffer = int(gl.glGenBuffers(1))
+        self._unit_key = None
+        self.unit_count = 0
+        self.set_unit_styles([])
         self.size = (0, 0)
         self.capacity = (0, 0)
         self.map_size = (1, 1)
@@ -407,6 +458,19 @@ class GpuRenderer:
             self._bind(tex, unit, target)
             gl.glUniform1i(self.uniform(program, name), unit)
 
+    def set_unit_styles(self, styles):
+        data = np.asarray(styles,np.float32).reshape(-1,4)
+        key = data.tobytes()
+        if key == self._unit_key:
+            return
+        self._unit_key, self.unit_count = key,len(data)
+        if not len(data):
+            data = np.zeros((1,4),np.float32)
+        gl.glBindBuffer(gl.GL_TEXTURE_BUFFER,self.unit_buffer)
+        gl.glBufferData(gl.GL_TEXTURE_BUFFER,data.nbytes,data,gl.GL_DYNAMIC_DRAW)
+        gl.glBindTexture(gl.GL_TEXTURE_BUFFER,self.unit_styles)
+        gl.glTexBuffer(gl.GL_TEXTURE_BUFFER,gl.GL_RGBA32F,self.unit_buffer)
+
     @staticmethod
     def _transparency_batches(faces, width, height):
         """Keep every overlapping pair in painter order; batch disjoint bounds."""
@@ -421,7 +485,8 @@ class GpuRenderer:
         return batches.values()
 
     def render(self, camera, width, height, target, *, owner_colors, grid=True, sky=True,
-               hover=0, pixel_scale=1.0, overlays=True, transparent_background=False):
+               hover=0, pixel_scale=1.0, overlays=True, transparent_background=False,
+               cursor_color=(210, 210, 210), preview_start=0):
         self._begin(width, height)
         matrix = camera_matrix(camera, self.map_size)
         self._geometry_program(self.opaque_program, matrix)
@@ -447,8 +512,11 @@ class GpuRenderer:
                 if not geometry.flat_faces:
                     continue
                 vertices = geometry.flat[:, :3].copy()
-                vertices[:, 1] += self.height_data[geometry.flat[:, 12:16].astype(np.int32)].mean(axis=1)
-                projected = vertices @ matrix[:3, :3].T + matrix[:3, 3]
+                refs = geometry.flat[:, 12:16].astype(np.int32)
+                attached = refs[:, 0] >= 0
+                vertices[attached, 1] += self.height_data[refs[attached]].mean(axis=1)
+                clip = vertices @ matrix[:, :3].T + matrix[:, 3]
+                projected = clip[:, :3] / np.maximum(clip[:, 3:4], 1e-6)
                 projected[:, 0] = (projected[:, 0]+1)*width*.5
                 projected[:, 1] = (projected[:, 1]+1)*height*.5
                 starts = np.fromiter((f[0] for f in geometry.flat_faces), np.int32)
@@ -458,6 +526,9 @@ class GpuRenderer:
                 front = np.logical_or.reduceat(a[:, 0]*b[:, 1]-a[:, 1]*b[:, 0]>0, starts//3)
                 lo = np.maximum(0, np.floor(np.minimum.reduceat(projected[:, :2], starts))).astype(int)
                 hi = np.minimum((width,height), np.ceil(np.maximum.reduceat(projected[:, :2], starts))).astype(int)
+                if camera.perspective:
+                    crossing = np.logical_or.reduceat(clip[:, 3] < 20, starts)
+                    lo[crossing], hi[crossing] = (0,0), (width,height)
                 depths = -np.add.reduceat(projected[:, 2], starts)/counts
                 visible = np.flatnonzero(front & np.all(hi>lo,axis=1))
                 transparent.extend((float(depths[i]), key, int(starts[i])+self.flat_offsets[key], int(counts[i]),
@@ -488,7 +559,8 @@ class GpuRenderer:
                 self.draw_calls += 1
         self._present(target, width, height, owner_colors=owner_colors, grid=grid,
                       sky=sky, hover=hover, pixel_scale=pixel_scale, overlays=overlays,
-                      transparent_background=transparent_background)
+                      transparent_background=transparent_background,
+                      cursor_color=cursor_color, preview_start=preview_start)
 
     def _begin(self, width, height):
         self._resize(width, height)
@@ -509,7 +581,7 @@ class GpuRenderer:
 
     def _present(self, target, width, height, *, owner_colors, grid=True, sky=True,
                  hover=0, pixel_scale=1.0, overlays=True, transparent_background=False,
-                 blend=False):
+                 blend=False, cursor_color=(210, 210, 210), preview_start=0):
         gl.glDepthMask(True)
         gl.glBindFramebuffer(gl.GL_FRAMEBUFFER, target)
         gl.glViewport(0, 0, width, height)
@@ -522,6 +594,9 @@ class GpuRenderer:
             self._bind(tex, unit)
             gl.glUniform1i(self.uniform(program, name), unit)
         gl.glUniform2i(self.uniform(program, 'mapSize'), *self.map_size)
+        self._bind(self.unit_styles,6,gl.GL_TEXTURE_BUFFER)
+        gl.glUniform1i(self.uniform(program,'unitStyles'),6)
+        gl.glUniform1i(self.uniform(program,'unitCount'),self.unit_count)
         colors = np.asarray([owner_colors.get(i, (0, 0, 0)) for i in range(8)], np.float32)/255
         if not overlays:
             colors[:] = 0
@@ -531,6 +606,8 @@ class GpuRenderer:
         gl.glUniform1i(self.uniform(program, 'showOverlays'), overlays)
         gl.glUniform1i(self.uniform(program, 'transparentBackground'), transparent_background)
         gl.glUniform1i(self.uniform(program, 'hoverCell'), hover if overlays else 0)
+        gl.glUniform1i(self.uniform(program, 'previewStart'), preview_start)
+        gl.glUniform3f(self.uniform(program, 'cursorColor'), *(v / 255 for v in cursor_color))
         gl.glUniform1f(self.uniform(program, 'pixelScale'), pixel_scale)
         if blend:
             gl.glEnable(gl.GL_BLEND)
@@ -584,6 +661,7 @@ class GpuRenderer:
         gl.glDeleteTextures(self.textures)
         gl.glDeleteFramebuffers(1, [self.fbo])
         gl.glDeleteBuffers(1, [self.height_buffer])
+        gl.glDeleteBuffers(1, [self.unit_buffer])
         gl.glDeleteVertexArrays(1, [self.screen_vao])
         if self.owns_programs:
             for program in (self.opaque_program, self.flat_program, self.screen_program):

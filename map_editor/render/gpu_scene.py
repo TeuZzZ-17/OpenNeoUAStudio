@@ -3,6 +3,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 import numpy as np
+from .squad_scene import squad_members
 
 CHUNK_SIZE = 8
 STRIDE = 16
@@ -36,6 +37,7 @@ class WorldScene:
         self.changed_templates = set()
         self.rebuilt_cells = 0
         self._size = None
+        self._squad_key = None
 
     def set_library(self, lib):
         if lib is self.lib:
@@ -54,6 +56,7 @@ class WorldScene:
         self.chunks.clear()
         self.instances.clear()
         self._size = None
+        self._squad_key = None
 
     def preview(self, typ, building_id=None):
         key = (typ, building_id)
@@ -235,4 +238,31 @@ class WorldScene:
             else:
                 self.instances.pop(key, None)
         self.changed_templates = changed_templates
+        # Squad geometry uses exact world positions rather than cell instances.
+        squad_key = (repr(doc.squads), terrain.cells.tobytes(),
+                     repr(doc.grids['type'])) if doc.squads else ()
+        if squad_key != self._squad_key:
+            key = (-1, -1)
+            if doc.squads or key in self.chunks:
+                self.chunks[key] = self._squads(doc, terrain)
+                chunks.add(key)
+            self._squad_key = squad_key
         return chunks
+
+    def _squads(self, doc, terrain):
+        opaque, flat, ranges = [], [], []
+        flat_offset = 0
+        for member in squad_members(doc, terrain, self.lib):
+            template = self._template(('vehicle', member.vehicle), self.lib.vehicle_mesh(member.vehicle))
+            for source, arrays in ((template.opaque, opaque), (template.flat, flat)):
+                if not len(source):
+                    continue
+                data = source.copy()
+                data[:, :3] += member.position
+                data[:, 11] = -(doc.mw * doc.mh + member.squad + 1)
+                data[:, 12:16] = -1
+                arrays.append(data)
+            ranges.extend((start + flat_offset, count) for start, count in template.flat_faces)
+            flat_offset += len(template.flat)
+        return Geometry(np.concatenate(opaque) if opaque else EMPTY,
+                        np.concatenate(flat) if flat else EMPTY, ranges)

@@ -3,7 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from PySide6.QtCore import QObject, QRunnable, QSize, Qt, QThreadPool, QTimer, Signal
-from PySide6.QtGui import QIcon, QPixmap
+from PySide6.QtGui import QIcon, QImage, QPixmap
 from PySide6.QtWidgets import (QCheckBox, QComboBox, QDialog, QDialogButtonBox,
                                QFileDialog, QFormLayout, QHBoxLayout, QLabel,
                                QLineEdit, QListWidget, QListWidgetItem, QMessageBox, QPushButton, QSpinBox,
@@ -15,6 +15,7 @@ from ..core.game_installation import (FOLDERS, GameInstallation,
                                       forget_remembered, load_remembered,
                                       save_remembered)
 from ..core.resource_catalog import ResourceCatalog, preview_image
+from .thumbnail_delegate import ThumbnailDelegate
 
 MIN_SIZE, MAX_SIZE = 5, 255
 
@@ -199,34 +200,50 @@ class _PreviewJob(QRunnable):
         self.signals.finished.emit(self.key, image)
 
 
-class LevelInfoDialog(QDialog):
+class LevelInfoPanel(QWidget):
+    valuesChanged = Signal(dict)
+    generateArtRequested = Signal()
+    previewReady = Signal(str, QImage)
     musicChanged = Signal(str)
 
     def __init__(self, doc: LdfDocument, parent=None):
         super().__init__(parent)
-        self.setWindowTitle("Level Info")
-        self.resize(630, 760)
+        self.setMinimumWidth(280)
         self.catalog = ResourceCatalog(bootstrap.installation() or
                                        GameInstallation.suggest(bootstrap.game_data_dir()),
                                        doc.set_number)
         self.sky_value = str(doc.lvl_info.get("sky", ""))
+        self._preview_pool = QThreadPool(self)
+        self._preview_pool.setMaxThreadCount(2)
         self._preview_jobs = {}
+        self._preview_sources = {}
+        self._image_cache = {}
         self._art_requests = {}
+        self._disposed = False
+
         layout = QVBoxLayout(self)
+        layout.setContentsMargins(10, 10, 10, 10)
+        layout.setSpacing(8)
+
         title_form = QFormLayout()
         self.title_edit = QLineEdit(str(doc.lvl_info.get("title", "")))
         title_form.addRow("Level title", self.title_edit)
         layout.addLayout(title_form)
+        self.title_edit.editingFinished.connect(self._emit_values_changed)
 
-        art_form = QFormLayout()
         self.art_boxes = {}
         self.art_previews = {}
         self.art_status = {}
         self._original_art = {}
         self._original_art_labels = {}
         art_row = QHBoxLayout()
+        art_row.setSpacing(8)
+        self._art_row = art_row
         for key, label, prefix in (("mbmap", "Briefing art (MB)", "mb"),
                                    ("dbmap", "Debriefing art (DB)", "db")):
+            column = QVBoxLayout()
+            column.setSpacing(4)
+            column.addWidget(QLabel(label))
             box = QComboBox()
             box.setEditable(True)
             box.addItem("None")
@@ -238,23 +255,29 @@ class LevelInfoDialog(QDialog):
             self._original_art[key] = original
             self._original_art_labels[key] = original_label
             self.art_boxes[key] = box
-            art_form.addRow(label, box)
+            column.addWidget(box)
+
             preview = QLabel("No preview")
             preview.setAlignment(Qt.AlignmentFlag.AlignCenter)
-            preview.setFixedSize(205, 165)
+            preview.setFixedSize(140, 110)
             preview.setStyleSheet("background:#171717; border:1px solid #454545")
             self.art_previews[key] = preview
-            column = QVBoxLayout()
-            column.addWidget(preview)
+            column.addWidget(preview, alignment=Qt.AlignmentFlag.AlignHCenter)
             status = QLabel()
             status.setWordWrap(True)
-            status.setFixedWidth(205)
+            status.setMaximumWidth(140)
             self.art_status[key] = status
             column.addWidget(status)
-            art_row.addLayout(column)
+            art_row.addLayout(column, 1)
+
             box.currentTextChanged.connect(lambda _text, k=key, p=prefix: self._update_art(k, p))
-        layout.addLayout(art_form)
+            box.activated.connect(lambda _index, k=key: self._emit_values_changed())
+            box.lineEdit().editingFinished.connect(self._emit_values_changed)
         layout.addLayout(art_row)
+        self.generate_art_button = QPushButton('Generate MB / DB…')
+        self.generate_art_button.setToolTip('Create matching briefing and debriefing images from the current map')
+        self.generate_art_button.clicked.connect(self.generateArtRequested.emit)
+        layout.addWidget(self.generate_art_button)
         layout.addWidget(QLabel("Artwork is read from your selected game folders."))
 
         layout.addWidget(QLabel("Select sky"))
@@ -263,28 +286,28 @@ class LevelInfoDialog(QDialog):
         self.sky_list.setFlow(QListWidget.Flow.LeftToRight)
         self.sky_list.setWrapping(True)
         self.sky_list.setUniformItemSizes(True)
-        self.sky_list.setSpacing(6)
+        self.sky_list.setSpacing(4)
         self.sky_list.setVerticalScrollMode(QListWidget.ScrollMode.ScrollPerPixel)
-        self.sky_list.setIconSize(QSize(150, 82))
-        self.sky_list.setGridSize(QSize(174, 118))
+        self.sky_list.setItemDelegate(ThumbnailDelegate(self.sky_list))
         self.sky_list.setResizeMode(QListWidget.ResizeMode.Adjust)
         self.sky_list.setMovement(QListWidget.Movement.Static)
-        self.sky_list.setMinimumHeight(245)
+        self.sky_list.setMinimumHeight(118)
+        self.sky_list.setMaximumHeight(198)
         self.sky_items = {}
         self._failed_skies = set()
         current_name = Path(self.sky_value.replace("\\", "/")).stem.casefold()
         for name, source in self.catalog.skies.items():
             item = QListWidgetItem(source.name)
             item.setData(Qt.ItemDataRole.UserRole, name)
-            item.setTextAlignment(Qt.AlignmentFlag.AlignHCenter | Qt.AlignmentFlag.AlignVCenter)
             self.sky_list.addItem(item)
             self.sky_items[name] = item
             if name == current_name:
                 self.sky_list.setCurrentItem(item)
         self.sky_list.currentItemChanged.connect(self._select_sky)
         layout.addWidget(self.sky_list)
-        if not self.catalog.skies:
-            layout.addWidget(QLabel("No sky archives found in the selected Skies folder."))
+        self.no_skies_label = QLabel("No sky archives found in the selected Skies folder.")
+        self.no_skies_label.setVisible(not self.catalog.skies)
+        layout.addWidget(self.no_skies_label)
 
         media_form = QFormLayout()
         self.music_box = QComboBox()
@@ -293,26 +316,26 @@ class LevelInfoDialog(QDialog):
         for filename in self.catalog.music:
             self.music_box.addItem(filename, Path(filename).stem)
         self._set_media(self.music_box, str(doc.lvl_info.get("music", "None")))
-        self.music_box.currentTextChanged.connect(
-            lambda _text: self.musicChanged.emit(self.music_value()))
+        self.music_box.currentTextChanged.connect(self._music_value_changed)
+        self.music_box.activated.connect(lambda _index: self._emit_values_changed())
+        self.music_box.lineEdit().editingFinished.connect(self._music_editing_finished)
         media_form.addRow("Ambience track", self.music_box)
         self.movie_box = QComboBox()
         self.movie_box.setEditable(True)
         self.movie_box.addItem("None")
         self.movie_box.addItems(self.catalog.movies)
         self.movie_box.setCurrentText(movie_filename(doc.lvl_info.get("movie")) or "None")
+        self.movie_box.activated.connect(lambda _index: self._emit_values_changed())
+        self.movie_box.lineEdit().editingFinished.connect(self._emit_values_changed)
         media_form.addRow("Intro movie", self.movie_box)
         layout.addLayout(media_form)
         layout.addWidget(QLabel("Choose from the installation or type a custom value."))
-        self.buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok |
-                                        QDialogButtonBox.StandardButton.Cancel)
-        self.buttons.accepted.connect(self.accept)
-        self.buttons.rejected.connect(self.reject)
-        layout.addWidget(self.buttons)
+
         for key, prefix in (("mbmap", "mb"), ("dbmap", "db")):
             self._update_art(key, prefix)
-        QTimer.singleShot(0, self._load_visible_skies)
-        self.sky_list.verticalScrollBar().valueChanged.connect(lambda _value: self._load_visible_skies())
+        self.sky_list.verticalScrollBar().valueChanged.connect(
+            lambda _value: self._schedule_visible_sky_load())
+        self._schedule_sky_grid_layout()
 
     @staticmethod
     def _set_media(box: QComboBox, value: str):
@@ -321,6 +344,18 @@ class LevelInfoDialog(QDialog):
             box.setCurrentIndex(index)
         else:
             box.setCurrentText(value)
+
+    def _emit_values_changed(self):
+        if not self._disposed:
+            self.valuesChanged.emit(self.values())
+
+    def _music_value_changed(self, _text: str):
+        if self._disposed:
+            return
+        self.musicChanged.emit(self.music_value())
+
+    def _music_editing_finished(self):
+        self._emit_values_changed()
 
     def _update_art(self, key: str, prefix: str):
         path = self.catalog.briefing(prefix, self.art_boxes[key].currentText())
@@ -339,25 +374,44 @@ class LevelInfoDialog(QDialog):
             self._request_preview(('art', key, path), path)
 
     def _request_preview(self, key, source):
-        if key in self._preview_jobs:
+        if self._disposed or key in self._preview_jobs:
+            return
+        cached = self._image_cache.get(source)
+        if cached is not None:
+            self._preview_sources[key] = source
+            self._preview_finished(key, QImage(cached))
             return
         job = _PreviewJob(key, source, self.catalog.palette)
         self._preview_jobs[key] = job
-        job.signals.finished.connect(self._preview_finished)
-        QThreadPool.globalInstance().start(job)
+        self._preview_sources[key] = source
+        job.signals.finished.connect(self._preview_finished, Qt.ConnectionType.QueuedConnection)
+        self._preview_pool.start(job)
 
     def _preview_finished(self, key, image):
-        self._preview_jobs.pop(key, None)
+        job = self._preview_jobs.pop(key, None)
+        source = self._preview_sources.pop(key, None)
+        if self._disposed:
+            return
+        if source is None and job is not None:
+            source = job.source
+        if image is not None and not image.isNull() and source is not None:
+            image = QImage(image)
+            self._image_cache[source] = image
         if key[0] == 'sky':
-            item = self.sky_items[key[1]]
+            item = self.sky_items.get(key[1])
+            if item is None:
+                return
             if image is None or image.isNull():
                 self._failed_skies.add(key[1])
             else:
                 item.setIcon(QIcon(QPixmap.fromImage(image).scaled(
                     self.sky_list.iconSize(), Qt.AspectRatioMode.KeepAspectRatio,
                     Qt.TransformationMode.SmoothTransformation)))
+                selected_name = Path(self.sky_value.replace("\\", "/")).stem.casefold()
+                if selected_name == key[1]:
+                    self.previewReady.emit(self.sky_value, QImage(image))
             if self.isVisible():
-                self._load_visible_skies()
+                self._schedule_visible_sky_load()
             return
         if self._art_requests.get(key[1]) != key[2]:
             return
@@ -372,27 +426,88 @@ class LevelInfoDialog(QDialog):
                 Qt.TransformationMode.SmoothTransformation))
 
     def _select_sky(self, item, _previous=None):
-        if item is not None:
-            self.sky_value = f"objects/{self.catalog.skies[item.data(Qt.ItemDataRole.UserRole)].name}.bas"
-            self._load_visible_skies()
+        if item is None or self._disposed:
+            return
+        name = item.data(Qt.ItemDataRole.UserRole)
+        source = self.catalog.skies.get(name)
+        if source is None:
+            return
+        new_value = f"objects/{source.name}.bas"
+        if new_value != self.sky_value:
+            self.sky_value = new_value
+            self._emit_values_changed()
+        image = self._image_cache.get(source)
+        if image is not None:
+            self.previewReady.emit(self.sky_value, QImage(image))
+        self._schedule_visible_sky_load()
+
+    def _schedule_visible_sky_load(self):
+        if not self._disposed:
+            QTimer.singleShot(0, self._load_visible_skies)
+
+    def _schedule_sky_grid_layout(self):
+        if not self._disposed:
+            QTimer.singleShot(0, self._layout_sky_grid)
+
+    def _layout_sky_grid(self):
+        if self._disposed or self.sky_list.viewport().width() <= 0:
+            return
+        self._layout_artwork()
+        width = self.sky_list.viewport().width()
+        columns = 2 if width >= 285 else 1
+        cell_width = max(120, (width - 2 * self.sky_list.spacing() * columns) // columns)
+        self.sky_list.setGridSize(QSize(cell_width, 118))
+        self.sky_list.setIconSize(QSize(max(92, cell_width - 18), 76))
+        self._schedule_visible_sky_load()
+
+    def _layout_artwork(self):
+        available_width = self.width() - 20
+        direction = (QHBoxLayout.Direction.LeftToRight if available_width >= 288
+                     else QHBoxLayout.Direction.TopToBottom)
+        if self._art_row.direction() != direction:
+            self._art_row.setDirection(direction)
 
     def _load_visible_skies(self):
-        if any(key[0] == 'sky' for key in self._preview_jobs):
+        if self._disposed or not self.isVisible():
             return
         rect = self.sky_list.viewport().rect()
         for name, item in self.sky_items.items():
+            source = self.catalog.skies[name]
             if (name not in self._failed_skies and item.icon().isNull() and
+                    source not in self._image_cache and
                     self.sky_list.visualItemRect(item).intersects(rect)):
-                self._request_preview(('sky', name), self.catalog.skies[name])
-                break
+                self._request_preview(('sky', name), source)
+
+    def showEvent(self, event):
+        super().showEvent(event)
+        self._schedule_sky_grid_layout()
+        self._schedule_visible_sky_load()
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        self._schedule_sky_grid_layout()
 
     def selected_sky_image(self):
         name = Path(self.sky_value.replace("\\", "/")).stem.casefold()
         source = self.catalog.skies.get(name)
-        try:
-            return preview_image(source, self.catalog.palette) if source else None
-        except Exception:
+        image = self._image_cache.get(source) if source is not None else None
+        return QImage(image) if image is not None else None
+
+    def request_selected_sky(self):
+        name = Path(self.sky_value.replace("\\", "/")).stem.casefold()
+        source = self.catalog.skies.get(name)
+        if self._disposed:
             return None
+        if source is None:
+            self.previewReady.emit(self.sky_value, QImage())
+            return None
+        image = self._image_cache.get(source)
+        if image is not None and not image.isNull():
+            ready = QImage(image)
+            self.previewReady.emit(self.sky_value, ready)
+            return ready
+        self._request_preview(('sky', name), source)
+        return None
 
     def _art_value(self, key: str) -> str:
         box = self.art_boxes[key]
@@ -417,3 +532,71 @@ class LevelInfoDialog(QDialog):
                 "dbmap": self._art_value("dbmap"),
                 "music": self.music_value(),
                 "movie": movie_filename(self.movie_box.currentText()) or "None"}
+
+    def dispose(self):
+        if self._disposed:
+            return
+        self._disposed = True
+        self._preview_pool.waitForDone()
+        self._preview_jobs.clear()
+        self._preview_sources.clear()
+
+    def closeEvent(self, event):
+        self.dispose()
+        super().closeEvent(event)
+
+
+class LevelInfoDialog(QDialog):
+    musicChanged = Signal(str)
+
+    def __init__(self, doc: LdfDocument, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Level Info")
+        self.setFixedWidth(350)
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        self.panel = LevelInfoPanel(doc, self)
+        self.panel.generate_art_button.hide()
+        self.catalog = self.panel.catalog
+        self.panel.musicChanged.connect(self.musicChanged.emit)
+        layout.addWidget(self.panel)
+        self.buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok |
+                                        QDialogButtonBox.StandardButton.Cancel)
+        self.buttons.accepted.connect(self.accept)
+        self.buttons.rejected.connect(self.reject)
+        layout.addWidget(self.buttons)
+
+    @property
+    def sky_value(self):
+        return self.panel.sky_value
+
+    def values(self) -> dict:
+        return self.panel.values()
+
+    def __getattr__(self, name):
+        panel = self.__dict__.get("panel")
+        if panel is not None:
+            try:
+                return getattr(panel, name)
+            except AttributeError:
+                pass
+        raise AttributeError(f"{type(self).__name__!s} object has no attribute {name!r}")
+
+    def selected_sky_image(self):
+        image = self.panel.selected_sky_image()
+        if image is not None and not image.isNull():
+            return image
+        name = Path(self.panel.sky_value.replace("\\", "/")).stem.casefold()
+        source = self.catalog.skies.get(name)
+        try:
+            return preview_image(source, self.catalog.palette) if source else None
+        except Exception:
+            return None
+
+    def done(self, result):
+        self.panel.dispose()
+        super().done(result)
+
+    def closeEvent(self, event):
+        self.panel.dispose()
+        super().closeEvent(event)

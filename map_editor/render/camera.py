@@ -25,10 +25,12 @@ class IsoCamera:
     width: int = 800
     height: int = 600
     k: float = CAMERA_K
+    perspective: bool = False
+    fov: float = 70.0
 
     def copy(self) -> "IsoCamera":
         return IsoCamera(self.yaw, self.pitch, self.zoom, self.pan,
-                         self.center, self.width, self.height, self.k)
+                         self.center, self.width, self.height, self.k, self.perspective, self.fov)
 
     def _trig(self):
         return _angle_trig(self.yaw, self.pitch)
@@ -42,12 +44,14 @@ class IsoCamera:
         z = (point[2] - cz) * self.k
         xz_x = x * cyaw + z * syaw
         xz_z = -x * syaw + z * cyaw
-        return (xz_x, y * cp - xz_z * sp, y * sp + xz_z * cp)
+        return (xz_x, y * cp - xz_z * sp, y * sp + xz_z * cp + (4 if self.perspective else 0))
 
     def to_screen(self, cam_point, origin=None):
         ox, oy = origin if origin is not None else (
             self.width / 2 + self.pan[0], self.height / 2 + self.pan[1])
         f = self.zoom / self.k
+        if self.perspective:
+            f = self.height / (2 * math.tan(math.radians(self.fov) / 2)) / max(1e-9, 4 - cam_point[2])
         return (ox + cam_point[0] * f, oy - cam_point[1] * f)
 
     def world_to_screen(self, point):
@@ -57,6 +61,19 @@ class IsoCamera:
     def screen_to_ground(self, sx: float, sy: float, ground_y: float = 0.0):
         """Raggio schermo -> punto sul piano y=ground_y (ortografico)."""
         cyaw, syaw, cp, sp = self._trig()
+        if self.perspective:
+            focal = self.height / (2 * math.tan(math.radians(self.fov) / 2))
+            xc, yc = (sx-self.width/2)/focal, -(sy-self.height/2)/focal
+            # Inverse rotation of the view ray (camera looks along negative Z).
+            direction = (cyaw*xc + sp*syaw*yc + cp*syaw,
+                         -cp*yc + sp, syaw*xc - sp*cyaw*yc - cp*cyaw)
+            if abs(direction[1]) < 1e-9:
+                return None
+            distance = (ground_y-self.center[1])/direction[1]
+            if distance <= 0:
+                return None
+            return (self.center[0]+distance*direction[0], ground_y,
+                    self.center[2]+distance*direction[2])
         f = self.zoom / self.k
         xc = (sx - self.width / 2 - self.pan[0]) / f
         yc = -(sy - self.height / 2 - self.pan[1]) / f

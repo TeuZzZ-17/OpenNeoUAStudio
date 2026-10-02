@@ -3466,6 +3466,17 @@ class AssetViewport(AcceleratedWidget):
                                   and not self._snapshot_show_guides),
                            camera=self._camera_state())
 
+    @property
+    def renderer_name(self):
+        effective = self._last_effective_renderer
+        if effective == 'retail_indexed_gpu':
+            return 'OpenGL indexed renderer'
+        if effective == 'retail_indexed_reconstructed':
+            return f'Software indexed rasterizer; presentation: {super().renderer_name}'
+        if effective == 'retail_indexed_error':
+            return f'Software renderer error: {self._indexed_runtime_error}'
+        return super().renderer_name
+
     def _render_scene(self, painter: QPainter, target: QRectF,
                       background: QColor | None, clean: bool,
                       camera: dict,

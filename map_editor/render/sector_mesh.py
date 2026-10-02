@@ -61,11 +61,31 @@ class SectorMeshLibrary:
                           if path else [obj.base_object.name for obj in
                                         assets.family.root_object.kids[0].kids])
         self._gun_meshes = {}
+        self._vehicle_meshes = {}
+        self._collision_skeletons = {}
         self._material_adapters = {}
 
     @property
     def tables(self):
         return self.adapter.tables
+
+    def collision_skeleton(self, name):
+        """Read the SDF collision SKLT, independent of the visible BASE faces."""
+        key = name.casefold()
+        if key not in self._collision_skeletons:
+            from sklt_parser import parse_sklt_bytes
+            skeleton = None
+            path = self.assets.set_dir
+            for part in name.replace('\\', '/').split('/'):
+                path = bootstrap.find_ci(path, part) if path is not None else None
+            if path is not None and path.is_file():
+                skeleton = parse_sklt_bytes(path.read_bytes(), str(path))
+            elif self.assets.archive is not None:
+                matches = self.assets.archive.find(name, 'sklt.class')
+                if matches:
+                    skeleton = parse_sklt_bytes(self.assets.archive.payload_bytes(matches[0]), name)
+            self._collision_skeletons[key] = skeleton
+        return self._collision_skeletons[key]
 
     def _base_faces(self, base_name: str) -> list | None:
         key = base_name.lower()
@@ -126,10 +146,22 @@ class SectorMeshLibrary:
         mesh = SectorMesh(-1)
         definition = self.buildings.get(building_id)
         for mount in definition.guns if definition else ():
-            visual = self.vehicles.get(mount.vehicle)
-            if visual is None:
-                mesh.missing.append(f'vehicle {mount.vehicle}')
-                continue
+            actor = self.vehicle_mesh(mount.vehicle)
+            mesh.missing.extend(actor.missing)
+            rotation = gun_rotation(mount.direction)
+            for face, ox, oz in actor.faces:
+                vertices = (np.asarray(face.vertices) + (ox, 0, oz)) @ rotation.T + mount.pos
+                mesh.faces.append((replace(face, vertices=[tuple(v) for v in vertices]), 0, 0))
+        self._gun_meshes[building_id] = mesh
+        return mesh
+
+    def vehicle_mesh(self, vehicle_id: int) -> SectorMesh:
+        """Use the same visual and material loader for guns and squad members."""
+        if vehicle_id in self._vehicle_meshes:
+            return self._vehicle_meshes[vehicle_id]
+        mesh = SectorMesh(-1)
+        visual = self.vehicles.get(vehicle_id)
+        if visual is not None:
             base = visual.base_normal
             if base:
                 base = base.replace('\\', '/')
@@ -155,11 +187,11 @@ class SectorMeshLibrary:
             if faces is None:
                 mesh.missing.append(base or f'VP {visual.vp_normal}')
             else:
-                rotation = gun_rotation(mount.direction)
                 for face in faces:
-                    vertices = np.asarray(face.vertices) @ rotation.T + mount.pos
-                    mesh.faces.append((replace(face, vertices=[tuple(v) for v in vertices]), 0, 0))
-        self._gun_meshes[building_id] = mesh
+                    mesh.faces.append((face, 0, 0))
+        else:
+            mesh.missing.append(f'vehicle {vehicle_id}')
+        self._vehicle_meshes[vehicle_id] = mesh
         return mesh
 
     def _family_faces(self, root, family):

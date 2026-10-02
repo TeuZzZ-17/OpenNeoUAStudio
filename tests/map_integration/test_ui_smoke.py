@@ -4,6 +4,7 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 import pytest
 import time
 import numpy as np
+from types import SimpleNamespace
 
 pytest.importorskip("PySide6")
 from PySide6.QtCore import QObject, QPoint, Qt, Signal
@@ -64,7 +65,7 @@ def _wait_frame(app, view):
     pytest.fail(f'Render did not finish: {errors}; job={view._job}; frame={view._frame_key}; current={view._render_key()}')
 
 
-def test_palette_owner_click_hold_undo_and_save(app, tmp_path):
+def test_palette_selection_click_apply_hold_undo_and_save(app, tmp_path):
     from map_editor.ui.main_window import MainWindow
     win = MainWindow()
     win._new_doc(LdfDocument(mw=7, mh=7), None)
@@ -73,26 +74,23 @@ def test_palette_owner_click_hold_undo_and_save(app, tmp_path):
     win.show()
     _wait_frame(app, win.view)
     assert [win.palette_tabs.tabText(i) for i in range(win.palette_tabs.count())] == [
-        "Sectors", "Buildings", "Factions", "Terrain"]
+        "Sectors", "Buildings", "Factions", "Terrain", "Squad", "Script", "Level Info"]
     assert not win.findChildren(QToolBar)
     assert not hasattr(win.view, 'overlay')
     assert not hasattr(win.view, 'mode_isometric_lock')
 
     point, _ = win.view.camera.world_to_screen(win.view.terrain.cell_center(3, 3))
     position = QPoint(round(point[0]), round(point[1]))
-    win.palette_tabs.setCurrentIndex(2)
-    owner = win.owner_list.item(6)
-    QTest.mouseClick(win.owner_list.viewport(), Qt.MouseButton.LeftButton,
-                    pos=win.owner_list.visualItemRect(owner).center())
-    assert win.tool == 'owner' and win.sel_owner == 6
-    frame = win.view._frame
+    win.palette_tabs.setCurrentIndex(0)
+    win.set_tool('sector')
+    win.sel_typ = 5
     QTest.mouseClick(win.view, Qt.MouseButton.LeftButton, pos=position)
-    assert win.doc.grids['own'][3][3] == 6
-    assert win.view._frame is frame
+    assert win.view.selection == {(3, 3)}
+    assert win.doc.grids['type'][3][3] == '05'
     win.undo()
-    assert win.doc.grids['own'][3][3] == 0
+    assert win.doc.grids['type'][3][3] == '00'
     win.redo()
-    assert win.doc.grids['own'][3][3] == 6
+    assert win.doc.grids['type'][3][3] == '05'
     _wait_frame(app, win.view)
 
     win.palette_tabs.setCurrentIndex(3)
@@ -113,6 +111,7 @@ def test_palette_owner_click_hold_undo_and_save(app, tmp_path):
     win.file_save()
     saved = load_ldf(target)
     assert saved.grids == win.doc.grids
+    assert saved.grids['type'][3][3] == '05'
     assert not win.dirty
 
     win.history.push(win.doc)
@@ -129,6 +128,101 @@ def test_palette_owner_click_hold_undo_and_save(app, tmp_path):
     win.doc.grids['hgt'][3][3] = HGT_MAX
     win._hovered(3, 3)
     assert 'maximum height' in win.info.text()
+    win.dirty = False
+    win.close()
+    win.view._pool.waitForDone(10000)
+
+
+def test_palette_single_click_applies_sector_building_owner_once(app, tmp_path):
+    from map_editor.ui.main_window import MainWindow
+    win = MainWindow()
+    win._new_doc(LdfDocument(mw=7, mh=7), None)
+    win._icons.stop()
+    win.resize(1100, 800)
+    win.show()
+    _wait_frame(app, win.view)
+    win.buildings = {1: SimpleNamespace(id=1, sec_type=7, name='Test Building')}
+    win.sel_building = 1
+
+    actions = (
+        ('sector', (3, 3), lambda: setattr(win, 'sel_typ', 5),
+         lambda: win.doc.grids['type'][3][3] == '05'),
+        ('building', (4, 3), lambda: None,
+         lambda: win.doc.grids['type'][3][4] == '07' and win.doc.grids['blg'][3][4] == '01'),
+        ('owner', (3, 4), lambda: setattr(win, 'sel_owner', 6),
+         lambda: win.doc.grids['own'][4][3] == 6),
+    )
+    for tool, cell, configure, changed in actions:
+        configure()
+        win.set_tool(tool)
+        before = win.doc.snapshot()
+        history_length = len(win.history._undo)
+        point, _ = win.view.camera.world_to_screen(win.view.terrain.cell_center(*cell))
+        pos = QPoint(round(point[0]), round(point[1]))
+        QTest.mouseClick(win.view, Qt.MouseButton.LeftButton, pos=pos)
+        assert win.view.selection == {cell}
+        assert changed()
+        assert len(win.history._undo) == history_length + 1
+        after = win.doc.snapshot()
+        win.undo()
+        assert win.doc.snapshot() == before
+        win.redo()
+        assert win.doc.snapshot() == after
+        _wait_frame(app, win.view)
+
+    target = tmp_path / 'palette-clicks.LDF'
+    win.path = str(target)
+    win.file_save()
+    saved = load_ldf(target)
+    assert saved.grids['type'][3][3] == '05'
+    assert saved.grids['type'][3][4] == '07' and saved.grids['blg'][3][4] == '01'
+    assert saved.grids['own'][4][3] == 6
+    win.dirty = False
+    win.close()
+    win.view._pool.waitForDone(10000)
+
+
+def test_palette_ctrl_click_and_shift_sweep_only_select_without_applying(app):
+    from map_editor.ui.main_window import MainWindow
+    win = MainWindow()
+    win._new_doc(LdfDocument(mw=7, mh=7), None)
+    win._icons.stop()
+    win.resize(1100, 800)
+    win.show()
+    _wait_frame(app, win.view)
+    win.set_tool('sector')
+    win.sel_typ = 5
+    before = win.doc.snapshot()
+    history_length = len(win.history._undo)
+
+    cell = (3, 3)
+    point, _ = win.view.camera.world_to_screen(win.view.terrain.cell_center(*cell))
+    QTest.mouseClick(win.view, Qt.MouseButton.LeftButton,
+                     Qt.KeyboardModifier.ControlModifier,
+                     QPoint(round(point[0]), round(point[1])))
+    assert win.view.selection == {cell}
+    assert win.doc.snapshot() == before and len(win.history._undo) == history_length
+
+    box_cells = ((1, 1), (2, 1))
+    points = [win.view.camera.world_to_screen(win.view.terrain.cell_center(*target))[0]
+              for target in box_cells]
+    start = QPoint(round(min(point[0] for point in points) - 3),
+                   round(min(point[1] for point in points) - 3))
+    end = QPoint(round(max(point[0] for point in points) + 3),
+                 round(max(point[1] for point in points) + 3))
+    QTest.mousePress(win.view, Qt.MouseButton.LeftButton, Qt.KeyboardModifier.ShiftModifier, pos=start)
+    QTest.mouseMove(win.view, end, 10)
+    QTest.mouseRelease(win.view, Qt.MouseButton.LeftButton, Qt.KeyboardModifier.ShiftModifier, pos=end)
+    assert all(target in win.view.selection for target in box_cells)
+    assert win.doc.snapshot() == before and len(win.history._undo) == history_length
+
+    win.set_tool('select')
+    select_cell = (5, 5)
+    point, _ = win.view.camera.world_to_screen(win.view.terrain.cell_center(*select_cell))
+    QTest.mouseClick(win.view, Qt.MouseButton.LeftButton,
+                     pos=QPoint(round(point[0]), round(point[1])))
+    assert win.view.selection == {select_cell}
+    assert win.doc.snapshot() == before and len(win.history._undo) == history_length
     win.dirty = False
     win.close()
     win.view._pool.waitForDone(10000)
@@ -226,17 +320,10 @@ def test_map_dialogs_commit_and_stop_a_held_terrain_stroke(app, monkeypatch):
     win._pressed(3, 3, Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier)
     win.map_resize()
 
-    class InfoDialog:
-        def __init__(self, *args):
-            stopped(2)
-            self.musicChanged = type('SignalStub', (), {'connect': lambda self, slot: None})()
-
-        def exec(self):
-            return False
-
-    monkeypatch.setattr(module, 'LevelInfoDialog', InfoDialog)
     win._pressed(3, 3, Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier)
     win.map_level_info()
+    stopped(2)
+    assert win.palette_tabs.currentIndex() == win.level_tab_index
     win.dirty = False
     win.close()
 
@@ -264,7 +351,8 @@ def test_view_presets_top_picking_and_view_menu_toggle_only(app):
     assert names == ['Current View', 'Top', 'Isometric Front Right', 'Isometric Front Left',
                      'Isometric Back Right', 'Isometric Back Left']
     assert win.palette_menu.title() == '&View'
-    assert all(action.isCheckable() for action in win.palette_menu.actions())
+    assert win.reset_camera_action in win.palette_menu.actions()
+    assert all(action.isCheckable() for action in win.palette_menu.actions() if action is not win.reset_camera_action)
     center, zoom = win.view.camera.center, win.view.camera.zoom
     index = win.view_preset.findText('Top')
     win.view_preset.setCurrentIndex(index)
@@ -282,24 +370,36 @@ def test_view_presets_top_picking_and_view_menu_toggle_only(app):
 
 def test_brush_controls_update_shape_axes_and_preview(app):
     from map_editor.ui.main_window import MainWindow
+    from map_editor.tools.brush import BrushShape
     win = MainWindow()
     win._icons.stop()
     win.set_tool('terrain')
     win.view.hover = (6, 6)
     win.radius_x_slider.setValue(8)
+    assert (win.brush.radius_x, win.brush.radius_z) == (4, 4)
+    win.link_radii.setChecked(False)
     win.radius_z_slider.setValue(6)
-    assert win.radius_slider.value() == 8
-    assert win.radius_slider_label.text() == 'X 4 · Z 3'
-    assert 'Rectangle' in win.brush_label.text()
+    assert (win.brush.radius_x, win.brush.radius_z) == (4, 3)
+    assert win.radius_x_label.text() == '4' and win.radius_z_label.text() == '3'
+    assert 'Square · X 4 · Z 3' in win.brush_label.text()
     assert 'Force' in win.brush_label.text()
     assert len(win.view.brush_cells) == 35 and (9, 8) in win.view.brush_cells
-    win.shape_combo.setCurrentIndex(1)
+    win.shape_combo.setCurrentIndex(win.shape_combo.findData(BrushShape.ROUND))
     assert 'Ellipse' in win.brush_label.text()
-    assert len(win.view.brush_cells) == 31 and (9, 8) not in win.view.brush_cells
+    assert len(win.view.brush_cells) == 23 and (9, 8) not in win.view.brush_cells
     assert (win.brush.radius_x, win.brush.radius_z) == (4, 3)
-    win.radius_slider.setValue(10)
+
+    for shape, included, excluded in (
+        (BrushShape.DIAMOND, (8, 7), (8, 8)),
+        (BrushShape.CROSS, (7, 7), (8, 8)),
+        (BrushShape.RING, (8, 6), (7, 6)),
+    ):
+        win.shape_combo.setCurrentIndex(win.shape_combo.findData(shape))
+        assert included in win.view.brush_cells and excluded not in win.view.brush_cells
+
+    win.link_radii.setChecked(True)
+    win.radius_x_slider.setValue(10)
     assert (win.brush.radius_x, win.brush.radius_z) == (5, 5)
-    assert win.radius_slider_label.text() == '5'
     assert win.radius_x_label.text() == '5' and win.radius_z_label.text() == '5'
     win.close()
 
@@ -356,20 +456,17 @@ def test_music_preview_toggle_and_cancel_restores_level_track(app, monkeypatch):
     assert not win.music_preview.enabled
     win.music_action.setChecked(True)
 
-    class PreviewDialog(QObject):
-        musicChanged = Signal(str)
-
-        def __init__(self, *_args):
-            super().__init__()
-
-        def exec(self):
-            self.musicChanged.emit('3')
-            assert win.music_preview._path.name == '3.ogg'
-            return False
-
-    monkeypatch.setattr(module, 'LevelInfoDialog', PreviewDialog)
     win.map_level_info()
+    box = win.level_panel.music_box
+    box.setCurrentText('3')
+    box.activated.emit(box.currentIndex())
+    box.lineEdit().editingFinished.emit()
+    assert win.doc.lvl_info['music'] == '3'
+    assert win.music_preview._path.name == '3.ogg'
+    win.undo()
+    assert win.doc.lvl_info['music'] == '2'
     assert win.music_preview._path.name == '2.ogg'
+    win.dirty = False
     win.close()
 
 

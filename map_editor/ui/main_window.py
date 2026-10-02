@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 import time
+import copy
 
 from PySide6.QtCore import QEvent, QObject, QRunnable, QSize, Qt, QThreadPool, QTimer, Signal
 from PySide6.QtGui import (QAction, QActionGroup, QColor, QIcon, QImage, QKeySequence,
@@ -10,7 +11,8 @@ from PySide6.QtWidgets import (QApplication, QAbstractItemView, QComboBox, QDock
                                QFormLayout, QHBoxLayout, QLabel, QLineEdit, QListView, QListWidget,
                                QListWidgetItem, QMainWindow, QMessageBox, QPushButton,
                                QSlider, QTabWidget, QVBoxLayout,
-                               QWidget)
+                               QWidget, QToolButton, QGroupBox, QSpinBox,
+                               QPlainTextEdit, QScrollArea, QDialog, QDialogButtonBox, QMenu)
 
 from ..core.asset_bridge import SetAssets
 from ..core.building_defs import load_building_files
@@ -18,22 +20,26 @@ from ..core.game_installation import GameInstallation, load_remembered
 from ..core.factions import load_owner_colors
 from ..core.history import History
 from ..core.ldf_model import (DEFAULT_HGT, FACTIONS, HGT_MIN, HGT_MAX,
-                              LdfDocument, load_ldf, save_ldf)
-from ..core.resource_catalog import ResourceCatalog, preview_image
+                              LdfDocument, load_ldf, save_ldf, grid_to_world, world_to_grid, decode_ldf_bytes, SECTOR_SIZE)
 from ..render.map_viewport import create_viewport
 from ..render.terrain_mesh import HEIGHT_UNIT
 from ..render.sector_mesh import SectorMeshLibrary
 from ..render.sector_sprite import rasterize_sprite, sprite_input
 from ..tools.brush import BrushMode, BrushShape, TerrainBrush
 from ..tools.paint import paint_cells
-from .dialogs import GameInstallationDialog, LevelInfoDialog, NewMapDialog, ResizeDialog
+from .dialogs import GameInstallationDialog, LevelInfoPanel, NewMapDialog, ResizeDialog
 from .music_preview import MusicPreview
 from .building_overlay import BuildingOverlay, CapabilityPreview
+from .thumbnail_delegate import ThumbnailDelegate
+from .squad_panel import SquadPanel
+from .squad_overlay import SquadOverlay
+from .colored_tabs import ColoredTabBar, TAB_COLORS
+from ..render.squad_scene import squad_xz, centered_squad_position, MAX_PREVIEW_MEMBERS
 from .. import bootstrap
 from assembly_viewer import VIEW_PRESET_ANGLES
 
 TOOLS = (("select", "Select"), ("sector", "Sector"), ("building", "Building"),
-         ("owner", "Faction"), ("terrain", "Terrain"))
+         ("owner", "Faction"), ("terrain", "Terrain"), ("squad", "Squad"))
 SECTOR_PREVIEW_SCALES = (0.7, 1.1, 1.8)
 SECTOR_PREVIEW_COLUMNS = (3, 2, 1)
 BUILDING_PREVIEW_PIXELS = (96, 128, 176)
@@ -93,6 +99,8 @@ class MainWindow(QMainWindow):
         self.path: str | None = None
         self.dirty = False
         self.history = History()
+        self._briefing_pool = QThreadPool(self)
+        self._briefing_pool.setMaxThreadCount(1)
         self.libs: dict[int, SectorMeshLibrary] = {}
         self.brush = TerrainBrush()
         self.tool = "sector"
@@ -120,6 +128,19 @@ class MainWindow(QMainWindow):
         self._bicon_cache = {}
         self._asset_epoch = 0
         self._sky_state = None
+        self.level_panel = None
+        self._draft_squads = []
+        self._clipboard = None
+        self._draft_grid = None
+        self._draft_grid_cell = None
+        self._draft_origin = []
+        self._draft_previous_selection = set()
+        self._live_pending = False
+        self._drag_original = {}
+        self._drag_cell = None
+        self._drag_changed = False
+        self._sampling_height = False
+        self._script_pending = False
         self._icon_pool = QThreadPool(self)
         self._icon_pool.setMaxThreadCount(1)
 
@@ -128,6 +149,18 @@ class MainWindow(QMainWindow):
         self.view.owner_colors = load_owner_colors()
         self.setCentralWidget(self.view)
         self.building_overlay = BuildingOverlay(self.view, self._overlay_state)
+        self.squad_overlay = SquadOverlay(self.view)
+        self.view.squadPressed.connect(self._select_squad)
+        self.view.squadDragStarted.connect(self._begin_squad_drag)
+        self.view.squadDragged.connect(self._move_squad_drag)
+        self.view.squadDragFinished.connect(self._finish_squad_drag)
+        self.view.cellSelected.connect(self._select_cell)
+        self.view.cellSwept.connect(self._sweep_cell)
+        self.view.selectionCleared.connect(self._clear_selection)
+        self.view.contextRequested.connect(self._map_context_menu)
+        self.view.placementConfirmed.connect(self._confirm_placement)
+        self.view.operationCancelled.connect(self._cancel_operation)
+        self.view.terrain_brush = self.brush
         self.view.cellPressed.connect(self._pressed)
         self.view.cellDragged.connect(self._dragged)
         self.view.cellReleased.connect(self._released)
@@ -138,16 +171,18 @@ class MainWindow(QMainWindow):
         self._repeat.timeout.connect(self._repeat_terrain)
         self._icons = QTimer(self, singleShot=True, interval=1)
         self._icons.timeout.connect(self._make_icon)
+        self._script_timer = QTimer(self, singleShot=True, interval=600)
+        self._script_timer.timeout.connect(self._finish_script)
+        self._live_timer = QTimer(self, singleShot=True, interval=500)
+        self._live_timer.timeout.connect(self._finish_live)
 
         self._build_actions()
         self._build_palette()
         self.info = QLabel("")
         self.statusBar().addPermanentWidget(self.info)
-        self.renderer_badge = QLabel()
-        self.statusBar().addPermanentWidget(self.renderer_badge)
-        self.view.backendChanged.connect(self._renderer_changed)
-        self._renderer_changed(self.view.renderer_name)
-        self.statusBar().showMessage("Click: edit · right drag: rotate · middle drag: pan · wheel: zoom", 8000)
+        from render_status import add_renderer_badge
+        self.renderer_badge = add_renderer_badge(self, self.view)
+        self.statusBar().showMessage("Left drag: paint / move squad · Shift: select sectors · Ctrl+click: multi-select · right: menu / drag rotate · middle: pan", 8000)
         self._new_doc(doc if doc is not None else LdfDocument(mw=15, mh=15), path)
 
     def _overlay_state(self):
@@ -156,10 +191,6 @@ class MainWindow(QMainWindow):
             "lib": self._lib(),
             "buildings": self.buildings,
         }
-
-    def _renderer_changed(self, name):
-        self.renderer_badge.setText('GPU' if name.startswith('OpenGL') else 'Software')
-        self.renderer_badge.setToolTip(name)
 
     def _build_actions(self):
         bar = self.menuBar()
@@ -185,7 +216,12 @@ class MainWindow(QMainWindow):
         self.undo_action = act(edit_menu, "Undo", self.undo, QKeySequence.StandardKey.Undo)
         self.redo_action = act(edit_menu, "Redo", self.redo, QKeySequence.StandardKey.Redo)
         act(map_menu, "Resize...", self.map_resize)
-        act(map_menu, "Level Info...", self.map_level_info)
+        self.reset_action = act(map_menu, "Reset...", self.map_reset)
+        self.reset_camera_action = act(view_menu, 'Reset Camera', self.view.reset_camera, 'Home')
+        self.copy_action = act(edit_menu, 'Copy', self._copy_elements, 'Ctrl+C')
+        self.paste_action = act(edit_menu, 'Paste', self._paste_elements, 'Ctrl+V')
+        act(map_menu, "Fill...", self.map_fill)
+        act(map_menu, "Level Info", self.map_level_info)
         tools_menu = edit_menu.addMenu("Tool")
         group = QActionGroup(self)
         self.tool_actions = {}
@@ -214,9 +250,28 @@ class MainWindow(QMainWindow):
         dock.setAllowedAreas(Qt.DockWidgetArea.LeftDockWidgetArea
                              | Qt.DockWidgetArea.RightDockWidgetArea)
         tabs = QTabWidget()
+        tabs.setTabBar(ColoredTabBar())
         self.palette_tabs = tabs
         panel = QWidget()
         panel_layout = QVBoxLayout(panel)
+        history_row = QHBoxLayout()
+        history_row.addStretch()
+        self.undo_button = QToolButton()
+        self.undo_button.setDefaultAction(self.undo_action)
+        self.undo_action.setText("< Undo")
+        self.redo_button = QToolButton()
+        self.redo_button.setDefaultAction(self.redo_action)
+        self.redo_action.setText("Redo >")
+        self.reset_button = QToolButton()
+        self.reset_button.setDefaultAction(self.reset_action)
+        self.reset_action.setText('Reset Map')
+        self.reset_camera_button = QToolButton()
+        self.reset_camera_button.setDefaultAction(self.reset_camera_action)
+        for button in (self.undo_button, self.reset_button, self.reset_camera_button, self.redo_button):
+            button.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextOnly)
+            history_row.addWidget(button)
+        history_row.addStretch()
+        panel_layout.addLayout(history_row)
         preset_form = QFormLayout()
         self.view_preset = QComboBox()
         self.view_preset.addItem('Current View', None)
@@ -229,6 +284,7 @@ class MainWindow(QMainWindow):
         panel_layout.addLayout(preset_form)
         panel_layout.addWidget(tabs)
         self.sector_list = self._make_list(True)
+        self.sector_list.setItemDelegate(ThumbnailDelegate(self.sector_list))
         self.sector_list.viewport().installEventFilter(self)
         self.sector_list.verticalScrollBar().valueChanged.connect(lambda _: self._icons.start())
         self.sector_list.currentItemChanged.connect(self._sector_selected)
@@ -311,9 +367,19 @@ class MainWindow(QMainWindow):
                             (BrushMode.FLATTEN, "Flatten (Ctrl)"),
                             (BrushMode.SMOOTH, "Smooth (Alt / double-click)")):
             self.mode_combo.addItem(label, mode)
+        self.mode_combo.hide()
+        mode_row = QHBoxLayout()
+        self.terrain_buttons = {}
+        for index, text in enumerate(("Raise", "Lower", "Flatten", "Smooth")):
+            button = QPushButton(text, checkable=True)
+            button.clicked.connect(lambda _checked, i=index: self.mode_combo.setCurrentIndex(i))
+            mode_row.addWidget(button)
+            self.terrain_buttons[index] = button
+        self.mode_combo.currentIndexChanged.connect(self._terrain_tool_changed)
+        self._terrain_tool_changed(0)
         self.shape_combo = QComboBox()
-        self.shape_combo.addItem('Square', BrushShape.SQUARE)
-        self.shape_combo.addItem('Round', BrushShape.ROUND)
+        for shape in BrushShape:
+            self.shape_combo.addItem(shape.value.title(), shape)
         self.radius_x_slider = QSlider(Qt.Orientation.Horizontal, minimum=1, maximum=24, value=4)
         self.radius_x_slider.setToolTip("West–east brush radius in sectors")
         self.radius_x_slider.valueChanged.connect(self._radius_x_changed)
@@ -330,14 +396,9 @@ class MainWindow(QMainWindow):
         radius_z_row = QHBoxLayout()
         radius_z_row.addWidget(self.radius_z_slider)
         radius_z_row.addWidget(self.radius_z_label)
-        self.radius_slider = QSlider(Qt.Orientation.Horizontal, minimum=1, maximum=24, value=4)
-        self.radius_slider.setToolTip("Set both X and Z radii; use the sliders below for independent values")
-        self.radius_slider.valueChanged.connect(self._radius_slider_changed)
-        self.radius_slider_label = QLabel("2.0")
-        self.radius_slider_label.setMinimumWidth(44)
-        radius_row = QHBoxLayout()
-        radius_row.addWidget(self.radius_slider)
-        radius_row.addWidget(self.radius_slider_label)
+        self.link_radii = QPushButton('Link X / Z', checkable=True, checked=True)
+        self.link_radii.setToolTip('When linked, changing either radius moves both sliders')
+        self.link_radii.toggled.connect(self._link_radii_changed)
         self.strength = QSlider(Qt.Orientation.Horizontal, minimum=1, maximum=30, value=6)
         self.strength.setToolTip("Terrain force in height steps per second")
         self.strength.valueChanged.connect(self._brush_params)
@@ -348,20 +409,67 @@ class MainWindow(QMainWindow):
         force_row.addWidget(self.force_label)
         self.shape_combo.currentIndexChanged.connect(self._brush_params)
         self.brush_label = QLabel()
-        form.addRow("Mode", self.mode_combo)
+        form.addRow(mode_row)
         form.addRow('Shape', self.shape_combo)
-        form.addRow('Radius', radius_row)
         form.addRow('Radius X', radius_x_row)
         form.addRow('Radius Z', radius_z_row)
+        form.addRow(self.link_radii)
         form.addRow("Force", force_row)
+        self.flatten_height = QSpinBox(minimum=0, maximum=60, value=30)
+        self.flatten_height.setToolTip("Height 0–60; 30 is the original ground level")
+        self.flatten_height.valueChanged.connect(self._brush_params)
+        self.sample_height = QPushButton("Sample from map", checkable=True)
+        self.sample_height.toggled.connect(self._sample_toggled)
+        self.sample_height.setToolTip("Click a sector to set the flatten height without changing the map")
+        target_row = QHBoxLayout()
+        target_row.addWidget(self.flatten_height)
+        target_row.addWidget(self.sample_height)
+        form.addRow("Target height", target_row)
         form.addRow(self.brush_label)
+        hint = QLabel("Drag to sculpt · Shift: lower · Alt: smooth · Ctrl: select")
+        hint.setWordWrap(True)
+        form.addRow(hint)
         tabs.addTab(terrain, "Terrain")
+        self.level_scroll = QScrollArea()
+        self.level_scroll.setWidgetResizable(True)
+        self.script_page = QWidget()
+        script_layout = QVBoxLayout(self.script_page)
+        script_row = QHBoxLayout()
+        for text, slot in (("Load script…", self._load_script), ("Save script…", self._save_script)):
+            button = QPushButton(text)
+            button.clicked.connect(slot)
+            script_row.addWidget(button)
+        script_layout.addLayout(script_row)
+        self.script_edit = QPlainTextEdit()
+        self.script_edit.setPlaceholderText("Custom LDF commands and includes")
+        self.script_edit.setUndoRedoEnabled(False)
+        self.script_edit.installEventFilter(self)
+        self.script_edit.textChanged.connect(self._script_changed)
+        script_layout.addWidget(self.script_edit)
+        self.squad_panel = SquadPanel()
+        self.squad_panel.selected.connect(self._squad_selected)
+        self.squad_panel.list.itemClicked.connect(lambda item: self._center_squad(self.squad_panel.list.row(item)))
+        self.squad_panel.addRequested.connect(self._add_squad)
+        self.squad_panel.valuesChanged.connect(self._live_squad_changed)
+        self.squad_panel.removeRequested.connect(self._delete_squads)
+        squad_scroll = QScrollArea()
+        squad_scroll.setWidgetResizable(True)
+        squad_scroll.setWidget(self.squad_panel)
+        self.squad_tab_index = tabs.addTab(squad_scroll, "Squad")
+        self.script_tab_index = tabs.addTab(self.script_page, "Script")
+        self.level_tab_index = tabs.addTab(self.level_scroll, "Level Info")
         self._brush_params()
         dock.setWidget(panel)
         self.addDockWidget(Qt.DockWidgetArea.LeftDockWidgetArea, dock)
         dock.setMinimumWidth(400)
+        tabs.setUsesScrollButtons(True)
+        tabs.setElideMode(Qt.TextElideMode.ElideNone)
         self.palette_menu.addAction(dock.toggleViewAction())
         tabs.currentChanged.connect(self._palette_changed)
+        for widget in (self.sector_list,self.building_list,self.owner_list,terrain,
+                       self.squad_panel.list,self.script_edit,self.level_scroll):
+            widget.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+            widget.customContextMenuRequested.connect(lambda pos, w=widget: self._panel_context_menu(w,pos))
         dock.visibilityChanged.connect(lambda visible: self._icons.start()
                                        if visible and (self._icon_queue or self._bicon_queue) else self._icons.stop())
 
@@ -389,6 +497,13 @@ class MainWindow(QMainWindow):
         self._icons.start()
 
     def eventFilter(self, obj, event):
+        if event.type() == QEvent.Type.KeyPress and obj is self.script_edit:
+            if event.matches(QKeySequence.StandardKey.Undo):
+                self.undo()
+                return True
+            if event.matches(QKeySequence.StandardKey.Redo):
+                self.redo()
+                return True
         if obj is self.sector_list.viewport() and event.type() == QEvent.Type.Resize:
             QTimer.singleShot(0, self._layout_sector_icons)
         return super().eventFilter(obj, event)
@@ -403,7 +518,7 @@ class MainWindow(QMainWindow):
         spacing = self.sector_list.spacing()
         cell_width = max(60, (available - spacing * (columns - 1)) // columns)
         icon_width = max(32, min(round(96 * self._icon_scale), cell_width - 12))
-        icon_height = round(80 * self._icon_scale)
+        icon_height = round(icon_width * 80 / 96)
         self.sector_list.setIconSize(QSize(icon_width, icon_height))
         self.sector_list.setGridSize(QSize(cell_width, icon_height + 42))
 
@@ -422,17 +537,26 @@ class MainWindow(QMainWindow):
         if lib is not None:
             self._fill_palettes(lib)
 
-    def _radius_slider_changed(self, value: int):
-        for slider in (self.radius_x_slider, self.radius_z_slider):
-            slider.blockSignals(True)
-            slider.setValue(value)
-            slider.blockSignals(False)
+    def _link_radii_changed(self, checked):
+        if checked:
+            self.radius_z_slider.blockSignals(True)
+            self.radius_z_slider.setValue(self.radius_x_slider.value())
+            self.radius_z_slider.blockSignals(False)
+        self.link_radii.setText('Linked X / Z' if checked else 'Independent X / Z')
         self._brush_params()
 
     def _radius_x_changed(self, value: int):
+        if self.link_radii.isChecked():
+            self.radius_z_slider.blockSignals(True)
+            self.radius_z_slider.setValue(value)
+            self.radius_z_slider.blockSignals(False)
         self._brush_params()
 
     def _radius_z_changed(self, value: int):
+        if self.link_radii.isChecked():
+            self.radius_x_slider.blockSignals(True)
+            self.radius_x_slider.setValue(value)
+            self.radius_x_slider.blockSignals(False)
         self._brush_params()
 
     def _brush_params(self):
@@ -442,17 +566,14 @@ class MainWindow(QMainWindow):
         self.brush.radius_z = radius_z
         self.radius_x_label.setText(f"{radius_x:g}")
         self.radius_z_label.setText(f"{radius_z:g}")
-        self.radius_slider.blockSignals(True)
-        self.radius_slider.setValue(round(max(radius_x, radius_z) * 2))
-        self.radius_slider.blockSignals(False)
-        self.radius_slider_label.setText(
-            f"{radius_x:g}" if radius_x == radius_z
-            else f"X {radius_x:g} · Z {radius_z:g}")
         self.brush.shape = self.shape_combo.currentData()
         self.brush.strength = float(self.strength.value())
+        self.brush.target_height = HGT_MIN + self.flatten_height.value()
         self.force_label.setText(f"{self.brush.strength:.0f}")
         equal = radius_x == radius_z
-        shape = ('Square' if equal else 'Rectangle') if self.brush.shape == BrushShape.SQUARE else ('Circle' if equal else 'Ellipse')
+        shape = self.shape_combo.currentText()
+        if self.brush.shape == BrushShape.ROUND:
+            shape = 'Circle' if equal else 'Ellipse'
         self.brush_label.setText(f'{shape} · X {radius_x:g} · Z {radius_z:g} · Force {self.brush.strength:.0f} steps/s')
         self.brush_label.setToolTip('Radii in sectors. One step = 100 game units. Height 0–60, initial ground 30.')
         if self.doc is not None and self.view.hover is not None:
@@ -463,6 +584,687 @@ class MainWindow(QMainWindow):
         if angles is not None:
             self.view.set_camera_angles(*angles)
             self.view_preset.setCurrentIndex(index)
+
+    def _terrain_tool_changed(self, index):
+        for key, button in self.terrain_buttons.items():
+            button.setChecked(key == index)
+        self._update_cursor()
+
+    def _update_cursor(self, modifiers=Qt.KeyboardModifier.NoModifier):
+        colors = {BrushMode.RAISE: (80, 235, 130), BrushMode.LOWER: (255, 105, 95),
+                  BrushMode.FLATTEN: (70, 190, 255), BrushMode.SMOOTH: (215, 130, 255)}
+        self.view.cursor_color = (colors[self._terrain_mode(modifiers)] if self.tool == 'terrain'
+                                  else TAB_COLORS[self.palette_tabs.currentIndex() % len(TAB_COLORS)])
+        self.view.sample_active = self._sampling_height
+        self.view.update()
+
+    def _sample_toggled(self, checked):
+        self._sampling_height = checked
+        self.flatten_height.setStyleSheet('QSpinBox { background: #64531a; border: 2px solid #ffe055; }' if checked else '')
+        self._update_cursor()
+
+    def _sample_map_height(self, col, row):
+        self.flatten_height.setValue(self.doc.grids['hgt'][row][col] - HGT_MIN)
+        self.sample_height.setChecked(False)
+        self.view.sample_flash_until = time.monotonic() + 1.2
+        self.flatten_height.setStyleSheet('QSpinBox { background: #64531a; border: 2px solid #ffe055; }')
+        QTimer.singleShot(1300, self._end_sample_flash)
+        self.view.update()
+
+    def _end_sample_flash(self):
+        if not self._sampling_height and time.monotonic() >= self.view.sample_flash_until:
+            self.flatten_height.setStyleSheet('')
+            self.view.update()
+
+    def _rebuild_level_panel(self):
+        if self.level_panel is not None:
+            self.level_panel.dispose()
+            self.level_scroll.takeWidget().deleteLater()
+        self.level_panel = LevelInfoPanel(self.doc)
+        self._level_values = dict(self.doc.lvl_info)
+        self.level_panel.valuesChanged.connect(self._level_changed)
+        self.level_panel.generateArtRequested.connect(self._generate_briefing_art)
+        self.level_panel.musicChanged.connect(self._play_music)
+        self.level_panel.previewReady.connect(self._sky_ready)
+        self.level_scroll.setWidget(self.level_panel)
+
+    def _generate_briefing_art(self):
+        self._released(-1, -1, Qt.KeyboardModifier.NoModifier)
+        lib = self._lib()
+        if lib is None:
+            return
+        from .briefing_dialog import BriefingArtDialog
+        directory = self.level_panel.catalog.installation.folder('briefings')
+        preferred = os.path.splitext(os.path.basename(self.path))[0] if self.path else 'Untitled'
+        dialog = BriefingArtDialog(self.doc, lib, directory, preferred, self._briefing_pool, self)
+        if dialog.exec() and dialog.paths:
+            mb, db = dialog.paths
+            self._level_changed({'mbmap': mb.name, 'dbmap': db.name})
+            self._rebuild_level_panel()
+            self.statusBar().showMessage(f'Created {mb.name} and {db.name}', 6000)
+        if dialog.finished_rendering:
+            dialog.deleteLater()
+
+    def _level_changed(self, values):
+        if all(self.doc.lvl_info.get(key) == value for key, value in values.items()):
+            return
+        self._released(-1, -1, Qt.KeyboardModifier.NoModifier)
+        self.history.push(self.doc)
+        self.doc.lvl_info.update(values)
+        self._level_values = dict(self.doc.lvl_info)
+        self.dirty = True
+        self._refresh_sky()
+        self._refresh_music()
+        self._refresh_title()
+
+    def _sky_ready(self, path, image):
+        if self.doc is not None and path.casefold() == str(self.doc.lvl_info.get('sky', '')).casefold():
+            self.view.set_sky_image(image)
+
+    def _sync_side_panels(self):
+        self.script_edit.blockSignals(True)
+        self.script_edit.setPlainText(self.doc.script_content)
+        self.script_edit.blockSignals(False)
+        self._refresh_squads()
+        if self._level_values != self.doc.lvl_info:
+            self._rebuild_level_panel()
+            self._sky_state = None
+            self._refresh_sky()
+
+    def _script_changed(self):
+        if self.doc is None:
+            return
+        text = self.script_edit.toPlainText()
+        if text == self.doc.script_content:
+            return
+        if not self._script_pending:
+            self._released(-1, -1, Qt.KeyboardModifier.NoModifier)
+            self.history.begin(self.doc)
+            self._script_before = self.doc.script_content
+            self._script_pending = True
+        self.doc.script_content = text
+        self.dirty = True
+        self._script_timer.start()
+        self._refresh_title()
+
+    def _finish_script(self):
+        if not self._script_pending:
+            return
+        self._script_timer.stop()
+        self._script_pending = False
+        changed = self._script_before != self.doc.script_content
+        self.history.commit(self.doc, changed)
+        self._refresh_title()
+
+    def _load_script(self):
+        path, _ = QFileDialog.getOpenFileName(self, 'Load custom script', '', 'Scripts (*.scr *.ldf *.cfg *.txt);;All files (*)')
+        if path:
+            try:
+                with open(path, 'rb') as stream:
+                    text, _encoding = decode_ldf_bytes(stream.read())
+            except (OSError, UnicodeError) as exc:
+                QMessageBox.warning(self, 'Script', str(exc))
+                return
+            self._finish_script()
+            self.script_edit.setPlainText(text)
+            self._finish_script()
+
+    def _save_script(self):
+        self._finish_script()
+        path, _ = QFileDialog.getSaveFileName(self, 'Save custom script', '', 'Scripts (*.scr);;Text (*.txt)')
+        if path:
+            try:
+                with open(path, 'w', encoding='utf-8', newline='') as stream:
+                    stream.write(self.doc.script_content)
+            except OSError as exc:
+                QMessageBox.warning(self, 'Script', str(exc))
+
+    def map_reset(self):
+        self._released(-1, -1, Qt.KeyboardModifier.NoModifier)
+        answer = QMessageBox.question(self, 'Reset map',
+            'Create an empty map with the current size and set?\n'
+            'This removes buildings, factions, terrain edits, squads, hosts, special objects and custom script.\n'
+            'You can undo this reset.', QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No)
+        if answer != QMessageBox.StandardButton.Yes:
+            return
+        self.history.push(self.doc)
+        self.doc.reset_map()
+        self._cancel_operation(clear=False)
+        self._after_history()
+
+    def map_fill(self):
+        self._show_fill_dialog()
+
+    def fill_selected(self):
+        cells = set(self.view.selection)
+        if cells:
+            self._show_fill_dialog(cells)
+
+    def _show_fill_dialog(self, cells=None):
+        self._released(-1, -1, Qt.KeyboardModifier.NoModifier)
+        if self._lib() is None:
+            return
+        dialog = QDialog(self)
+        selected = cells is not None
+        dialog.setWindowTitle('Fill selected sectors' if selected else 'Fill map with sector')
+        layout = QVBoxLayout(dialog)
+        choice = QComboBox()
+        for i in range(self.sector_list.count()):
+            item = self.sector_list.item(i)
+            choice.addItem(item.icon(), item.text(), item.data(Qt.ItemDataRole.UserRole))
+        choice.setCurrentIndex(choice.findData(self.sel_typ))
+        layout.addWidget(choice)
+        if selected:
+            count = sum(1 for c, r in cells
+                        if 1 <= c < self.doc.mw - 1 and 1 <= r < self.doc.mh - 1)
+            layout.addWidget(QLabel(
+                f'Fills the {count} selected interior sector(s). Buildings in those cells are removed.'))
+        else:
+            layout.addWidget(QLabel('Fills all interior sectors. The outer border is preserved.'))
+        buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
+        buttons.accepted.connect(dialog.accept)
+        buttons.rejected.connect(dialog.reject)
+        layout.addWidget(buttons)
+        if dialog.exec() and choice.currentData() is not None:
+            self._fill_sectors(choice.currentData(), cells)
+
+    def _fill_sectors(self, typ, cells=None):
+        self.history.begin(self.doc)
+        if cells is None:
+            target_cells = [(c, r) for r in range(1, self.doc.mh - 1)
+                            for c in range(1, self.doc.mw - 1)]
+        else:
+            target_cells = [(c, r) for c, r in cells
+                            if 1 <= c < self.doc.mw - 1 and 1 <= r < self.doc.mh - 1]
+        changed = paint_cells(self.doc, target_cells, 'type', f'{typ:02x}')
+        changed = paint_cells(self.doc, target_cells, 'blg', '00') or changed
+        if self.history.commit(self.doc, changed):
+            self._after_history()
+
+    def _squad_selected(self, indices):
+        self._finish_live()
+        self.squad_overlay.selected = set(indices)
+        self._update_squad_status(indices)
+        self.view.update()
+
+    def _center_squad(self, index):
+        members = [m for m in self.squad_overlay._members(self.view.terrain) if m.squad == index]
+        if not members:
+            return
+        if self.view.camera.perspective:
+            self.view.reset_camera()
+        self.view.camera.center = tuple(sum(m.position[axis] for m in members)/len(members) for axis in range(3))
+        self.view.camera.pan = (0,0)
+        self.view.cameraChanged.emit()
+        self.view.update()
+
+    def _update_squad_status(self, indices):
+        if self.doc is not None:
+            squads = [self.squad_panel.doc.squads[i] for i in indices]
+            messages = [f'{len(indices)} selected · Changes apply immediately'] if indices else []
+            if any(not any(h['owner'] == s['owner'] for h in self.doc.host_stations) for s in squads):
+                messages.append('A selected faction has no matching host station; the game needs it to spawn the squad.')
+            if any(s['num'] > MAX_PREVIEW_MEMBERS for s in squads):
+                messages.append(f'Preview: first {MAX_PREVIEW_MEMBERS} members per squad. The complete count is saved.')
+            if self._draft_squads:
+                messages.append('Preview only · Left/right click to insert · Esc to cancel')
+            self.squad_panel.status.setText('\n'.join(messages))
+
+    def _select_squad(self, index, modifiers=Qt.KeyboardModifier.NoModifier):
+        self._released(-1, -1, Qt.KeyboardModifier.NoModifier)
+        self.set_tool('squad')
+        selected = self.squad_panel.selected_indices()
+        if modifiers & Qt.KeyboardModifier.ControlModifier:
+            selected ^= {index}
+        elif index not in selected:
+            selected = {index}
+        self.squad_panel.set_selection(selected)
+
+    def _refresh_squads(self, selected=None, fields=True):
+        render_doc = self.doc
+        if self._draft_squads:
+            render_doc = copy.copy(self.doc)
+            render_doc.squads = self.doc.squads + self._draft_squads
+            render_doc._preview_start = len(self.doc.squads)
+        self.view.preview_cells = set()
+        if self._draft_grid is not None:
+            from ..tools.map_clipboard import grid_paste_targets
+            targets = grid_paste_targets(self.doc, self._draft_grid, self._draft_grid_cell, interior=True)
+            if targets is not None:
+                render_doc = copy.copy(render_doc)
+                render_doc.grids = {key:[row[:] for row in grid] for key,grid in render_doc.grids.items()}
+                for c,r,values in targets:
+                    for layer,value in zip(self._draft_grid.layers,values):
+                        render_doc.grids[layer][r][c] = value
+                    self.view.preview_cells.add((c,r))
+        self.view.doc = render_doc
+        self.view.draft_active = bool(self._draft_squads) or self._draft_grid is not None
+        self.view.scene_changed()
+        self.squad_overlay.invalidate()
+        if fields:
+            self.squad_panel.refresh(render_doc, self._lib().vehicles if self._lib() else {}, selected,
+                                     self.view.owner_colors)
+        else:
+            self.squad_panel.doc = render_doc
+            self.squad_panel.update_rows()
+            self._update_squad_status(self.squad_panel.selected_indices())
+        self._refresh_title()
+
+    def _add_squad(self):
+        self._released(-1, -1, Qt.KeyboardModifier.NoModifier)
+        self._cancel_operation(clear=False)
+        selected = self.squad_panel.selected_indices()
+        self._draft_previous_selection = selected.copy()
+        col, row = self.view.hover or (self.doc.mw // 2, self.doc.mh // 2)
+        vehicles = self._lib().vehicles if self._lib() else {}
+        vehicle = next((key for key, v in sorted(vehicles.items()) if v.model not in ('robo', 'gun')), 1)
+        self._draft_squads = ([dict(self.doc.squads[i], _preview=True) for i in sorted(selected)] if selected else
+            [dict(owner=1, veh=vehicle, num=1, hidden=False, useable=False,
+                  custom_name=None, x=col, y=row, _preview=True)])
+        first = self._draft_squads[0]
+        dx, dz = centered_squad_position(first, col, row)
+        old_x, old_z = squad_xz(first)
+        for squad in self._draft_squads:
+            x, z = squad_xz(squad)
+            squad['pos_x'], squad['pos_z'] = x + dx - old_x, z + dz - old_z
+            squad['x'], squad['y'] = world_to_grid(squad['pos_x'], squad['pos_z'])
+        self._draft_origin = copy.deepcopy(self._draft_squads)
+        self.set_tool('squad')
+        self._refresh_squads(set(range(len(self.doc.squads), len(self.doc.squads) + len(self._draft_squads))))
+
+    def _move_draft(self, cell):
+        if not self._draft_squads or cell is None:
+            return
+        col, row = cell
+        first = self._draft_origin[0]
+        x, z = centered_squad_position(first, col, row)
+        ox, oz = squad_xz(first)
+        for i, original in enumerate(self._draft_origin):
+            px, pz = squad_xz(original)
+            squad = self._draft_squads[i]
+            squad['pos_x'], squad['pos_z'] = px + x - ox, pz + z - oz
+            squad['x'], squad['y'] = world_to_grid(squad['pos_x'], squad['pos_z'])
+        self._refresh_squads(fields=False)
+
+    def _confirm_add(self, cell):
+        if not self._draft_squads or cell is None:
+            return
+        self._move_draft(cell)
+        if any(not (1 <= s['x'] < self.doc.mw - 1 and 1 <= s['y'] < self.doc.mh - 1)
+               for s in self._draft_squads):
+            self.squad_panel.status.setText('Place the complete selection inside the map border.')
+            return
+        self._released(-1, -1, Qt.KeyboardModifier.NoModifier)
+        self.history.push(self.doc)
+        start = len(self.doc.squads)
+        for squad in self._draft_squads:
+            squad.pop('_preview', None)
+            self.doc.squads.append(squad)
+        self._draft_squads = []
+        self.dirty = True
+        self._refresh_squads(set(range(start, len(self.doc.squads))))
+
+    def _delete_squads(self, indices):
+        if self._draft_squads:
+            self._cancel_operation()
+            return
+        indices = set(indices)
+        if not indices:
+            return
+        self._released(-1, -1, Qt.KeyboardModifier.NoModifier)
+        self.history.push(self.doc)
+        self.doc.squads = [s for i, s in enumerate(self.doc.squads) if i not in indices]
+        self.dirty = True
+        self._refresh_squads(set())
+
+    def _live_squad_changed(self, indices, field, value):
+        render_doc = self.squad_panel.doc
+        updates = {}
+        for index in indices:
+            squad = dict(render_doc.squads[index])
+            if squad.get(field) == value:
+                continue
+            squad[field] = value
+            if field in ('pos_x', 'pos_z'):
+                x, z = squad_xz(squad)
+                col, row = world_to_grid(x, z)
+                if x <= 0 or z >= 0 or not (1 <= col < self.doc.mw - 1 and 1 <= row < self.doc.mh - 1):
+                    self.squad_panel.status.setText('World coordinates must be inside the map border; Z is negative.')
+                    return
+                squad['x'], squad['y'] = col, row
+            updates[index] = squad
+        if not updates:
+            return
+        if self._draft_squads:
+            for index, squad in updates.items():
+                if index >= len(self.doc.squads):
+                    self._draft_squads[index - len(self.doc.squads)] = squad
+            self._draft_origin = copy.deepcopy(self._draft_squads)
+            self._refresh_squads(fields=False)
+            return
+        if not self._live_pending:
+            self._released(-1, -1, Qt.KeyboardModifier.NoModifier)
+            self.history.begin(self.doc)
+            self._live_pending = True
+        for index, squad in updates.items():
+            self.doc.squads[index] = squad
+        self.dirty = True
+        self._refresh_squads(fields=False)
+        self._live_timer.start()
+
+    def _finish_live(self):
+        if self._live_pending:
+            self._live_timer.stop()
+            self._live_pending = False
+            self.history.commit(self.doc)
+            self._refresh_title()
+
+    def _begin_squad_drag(self, cell):
+        self._released(-1, -1, Qt.KeyboardModifier.NoModifier)
+        self._drag_cell = cell
+        self._drag_original = {i: dict(self.doc.squads[i]) for i in self.squad_panel.selected_indices()
+                               if i < len(self.doc.squads)}
+        self._drag_changed = False
+        if self._drag_original and cell is not None:
+            self.history.begin(self.doc)
+
+    def _move_squad_drag(self, cell):
+        if cell is None or self._drag_cell is None or not self._drag_original:
+            return
+        dc, dr = cell[0] - self._drag_cell[0], cell[1] - self._drag_cell[1]
+        if any(not (1 <= s['x'] + dc < self.doc.mw - 1 and 1 <= s['y'] + dr < self.doc.mh - 1)
+               for s in self._drag_original.values()):
+            return
+        for index, original in self._drag_original.items():
+            x, z = squad_xz(original)
+            self.doc.squads[index] = dict(original, x=original['x'] + dc, y=original['y'] + dr,
+                                           pos_x=x + dc * SECTOR_SIZE, pos_z=z - dr * SECTOR_SIZE)
+        self._drag_changed = any(self.doc.squads[i] != s for i, s in self._drag_original.items())
+        self._refresh_squads(fields=False)
+
+    def _finish_squad_drag(self):
+        self.view.unsetCursor()
+        if self._drag_original:
+            self.history.commit(self.doc, self._drag_changed)
+            self.dirty |= self._drag_changed
+            self._drag_original = {}
+            self._drag_cell = None
+            self._refresh_squads()
+
+    def _cancel_operation(self, clear=True):
+        if self._draft_grid is not None:
+            self._draft_grid = None
+            self._draft_grid_cell = None
+            self._refresh_squads()
+            self.view.unsetCursor()
+            return
+        if self._drag_original:
+            self.view.unsetCursor()
+            for index, original in self._drag_original.items():
+                self.doc.squads[index] = original
+            self.history.commit(self.doc, False)
+            self._drag_original = {}
+            self._drag_cell = None
+            self._refresh_squads()
+        elif self._draft_squads:
+            self._draft_squads = []
+            self._refresh_squads(self._draft_previous_selection)
+        elif clear:
+            self._clear_selection()
+
+    def _clear_selection(self):
+        self._released(-1, -1, Qt.KeyboardModifier.NoModifier)
+        self.view.selection.clear()
+        self.squad_panel.set_selection(set())
+        self.view.update()
+
+    def _sweep_cell(self, cell):
+        if cell is not None and not self.view.draft_active:
+            self.view.selection.add(cell)
+            self.view.update()
+
+    def _copy_elements(self):
+        index = self.palette_tabs.currentIndex()
+        if index == self.script_tab_index:
+            text = self.script_edit.textCursor().selectedText().replace('\u2029','\n') or self.script_edit.toPlainText()
+            QApplication.clipboard().setText(text)
+            return
+        if index == self.level_tab_index:
+            self._clipboard = ('info',copy.deepcopy(self.doc.lvl_info))
+        elif index == self.squad_tab_index:
+            squads = [copy.deepcopy(self.squad_panel.doc.squads[i]) for i in sorted(self.squad_panel.selected_indices())]
+            if not squads:
+                return
+            self._clipboard = ('squad',squads)
+        else:
+            from ..tools.map_clipboard import copy_grid_cells
+            tool = {0:'sector',1:'building',2:'owner',3:'terrain'}.get(index)
+            layers = {'sector':('type','blg'),'building':('type','blg'),'owner':('own',),'terrain':('hgt',)}[tool]
+            cells = self.view.selection or ({self.view.hover} if self.view.hover is not None else set())
+            clipboard = copy_grid_cells(self.doc,cells,tool,layers)
+            if clipboard is None:
+                return
+            self._clipboard = ('grid',clipboard)
+        if self._clipboard[0] in ('grid','squad'):
+            self._paste_elements()
+        else:
+            self.statusBar().showMessage('Copied level settings · Paste applies them',4000)
+
+    def _paste_elements(self):
+        if self.palette_tabs.currentIndex() == self.script_tab_index:
+            self.script_edit.paste()
+            return
+        if self._clipboard is None:
+            return
+        if self.view.camera.perspective:
+            self.view.reset_camera()
+        kind,payload = self._clipboard
+        self._released(-1,-1,Qt.KeyboardModifier.NoModifier)
+        self._cancel_operation(clear=False)
+        if kind == 'info':
+            self._level_changed(copy.deepcopy(payload))
+            self._rebuild_level_panel()
+            self.palette_tabs.setCurrentIndex(self.level_tab_index)
+            return
+        if kind == 'squad':
+            self.set_tool('squad')
+            self._draft_previous_selection = self.squad_panel.selected_indices().copy()
+            self._draft_squads = [dict(s,_preview=True) for s in copy.deepcopy(payload)]
+            self._draft_origin = copy.deepcopy(self._draft_squads)
+            self._refresh_squads(set(range(len(self.doc.squads),len(self.doc.squads)+len(self._draft_squads))))
+            self._move_draft(self.view.hover or (self.doc.mw//2,self.doc.mh//2))
+            self._refresh_squads(set(range(len(self.doc.squads),len(self.doc.squads)+len(self._draft_squads))))
+        else:
+            self.set_tool(payload.tool)
+            self._draft_grid = payload
+            self._draft_grid_cell = self.view.hover or (self.doc.mw//2,self.doc.mh//2)
+            self._refresh_squads(fields=False)
+        self.view.setCursor(Qt.CursorShape.CrossCursor)
+        self.statusBar().showMessage('Paste preview · Left/right click: place · Esc: cancel',6000)
+
+    def _confirm_placement(self, cell):
+        if self._draft_grid is None:
+            return self._confirm_add(cell)
+        from ..tools.map_clipboard import grid_paste_targets
+        targets = grid_paste_targets(self.doc,self._draft_grid,cell,interior=True)
+        if targets is None:
+            self.statusBar().showMessage('Place the entire selection inside the map border',4000)
+            return
+        self.history.begin(self.doc)
+        changed = False
+        for c,r,values in targets:
+            for layer,value in zip(self._draft_grid.layers,values):
+                changed |= paint_cells(self.doc,[(c,r)],layer,value)
+        if 'hgt' in self._draft_grid.layers:
+            changed |= bool(self.doc.normalize_border_heights())
+        self.history.commit(self.doc,changed)
+        self.dirty |= changed
+        self._draft_grid = None
+        self._draft_grid_cell = None
+        self.view.selection = {(c,r) for c,r,_ in targets}
+        self._after_history()
+
+    def _squad_pov(self, index, position=None):
+        self._cancel_operation(clear=False)
+        members = [m for m in self.squad_overlay._members(self.view.terrain) if m.squad == index]
+        member = min(members,key=lambda m: sum((a-b)**2 for a,b in zip(
+            self.view.camera.world_to_screen(m.position)[0],(position.x(),position.y())))) if members and position is not None else next(iter(members),None)
+        if member is not None:
+            self.view.enter_pov(member)
+
+    def _gun_pov(self, cell, index):
+        col,row = cell
+        definition = self.buildings.get(int(self.doc.grids['blg'][row][col],16))
+        if definition is None or not 0 <= index < len(definition.guns):
+            return
+        from ..render.sector_mesh import gun_rotation
+        mount = definition.guns[index]
+        actor = self.view.lib.vehicle_mesh(mount.vehicle)
+        rotation = gun_rotation(mount.direction)
+        offset = rotation @ (0,actor.bounds[1]-30,0)
+        origin = self.view.terrain.cell_center(col,row)
+        eye = tuple(origin[axis]+mount.pos[axis]+offset[axis] for axis in range(3))
+        self._cancel_operation(clear=False)
+        self.view.enter_pov_at(eye,tuple(rotation[:,2]))
+
+    def _panel_context_menu(self, widget, position):
+        menu = QMenu(self)
+        menu.addAction(self.undo_action)
+        menu.addAction(self.redo_action)
+        menu.addSeparator()
+        menu.addAction(self.copy_action)
+        menu.addAction(self.paste_action)
+        if widget is self.script_edit:
+            menu.addAction('Select all',self.script_edit.selectAll)
+        if widget is self.squad_panel.list:
+            item = widget.itemAt(position)
+            if item is not None and not item.isSelected():
+                self.squad_panel.set_selection({widget.row(item)})
+            menu.addAction('Add preview',self._add_squad)
+            menu.addAction('Delete selected squads',lambda: self._delete_squads(self.squad_panel.selected_indices()))
+            index = widget.currentRow()
+            action = menu.addAction('Squad POV',lambda: self._squad_pov(index))
+            action.setEnabled(0 <= index < len(self.doc.squads))
+        menu.popup(widget.mapToGlobal(position))
+        self._context_menu = menu
+
+    def _select_cell(self, cell, modifiers):
+        self._released(-1, -1, Qt.KeyboardModifier.NoModifier)
+        additive = bool(modifiers & Qt.KeyboardModifier.ControlModifier)
+        if not additive:
+            self.view.selection.clear()
+            self.squad_panel.set_selection(set())
+        if cell is not None:
+            if additive:
+                self.view.selection ^= {cell}
+            else:
+                self.view.selection.add(cell)
+                if self.tool in ('sector', 'building', 'owner'):
+                    self._apply_selection()
+        self.view.update()
+
+    def _apply_selection(self, field=None, value=None):
+        cells = set(self.view.selection)
+        if not cells:
+            return
+        self._released(-1, -1, Qt.KeyboardModifier.NoModifier)
+        self.history.begin(self.doc)
+        if field is not None:
+            changed = bool(paint_cells(self.doc, cells, field, value))
+            if field == 'hgt':
+                changed |= bool(self.doc.normalize_border_heights())
+        else:
+            changed = False
+            previous_tool = self.tool
+            if self.tool == 'select':
+                self.tool = {0: 'sector', 1: 'building', 2: 'owner', 3: 'terrain'}.get(
+                    self.palette_tabs.currentIndex(), 'select')
+            for col, row in cells:
+                self._stroke_changed = False
+                self._apply(col, row)
+                changed |= self._stroke_changed
+            self.tool = previous_tool
+        if self.history.commit(self.doc, changed):
+            self._after_history()
+
+    def _map_context_menu(self, position, global_position):
+        if self.view.camera.perspective:
+            menu = QMenu(self)
+            menu.addAction('Exit POV',self.view.reset_camera)
+            menu.popup(global_position)
+            self._context_menu = menu
+            return
+        self._released(-1, -1, Qt.KeyboardModifier.NoModifier)
+        squad = self.view.pick_squad(position.x(), position.y())
+        if squad is not None:
+            if squad not in self.squad_panel.selected_indices():
+                self._select_squad(squad)
+            else:
+                self.set_tool('squad')
+        cell = self.view.ground_cell(position.x(), position.y())
+        if cell is not None and cell not in self.view.selection and self.tool != 'squad':
+            self.view.selection = {cell}
+        menu = QMenu(self)
+        menu.addAction(self.undo_action)
+        menu.addAction(self.redo_action)
+        menu.addAction(self.copy_action)
+        menu.addAction(self.paste_action)
+        menu.addSeparator()
+        context_tool = ({0: 'sector', 1: 'building', 2: 'owner', 3: 'terrain'}.get(
+            self.palette_tabs.currentIndex(), self.tool) if self.tool == 'select' else self.tool)
+        if context_tool == 'squad':
+            index = squad if squad is not None else min(self.squad_panel.selected_indices(),default=-1)
+            action = menu.addAction('Squad POV',lambda: self._squad_pov(index,position))
+            action.setEnabled(0 <= index < len(self.doc.squads))
+            menu.addAction('Add preview', self._add_squad)
+            action = menu.addAction('Delete selected squads', lambda: self._delete_squads(self.squad_panel.selected_indices()))
+            action.setEnabled(bool(self.squad_panel.selected_indices()))
+            menu.addAction('Select all squads', lambda: self.squad_panel.set_selection(set(range(len(self.doc.squads)))))
+        elif self.palette_tabs.currentIndex() == self.script_tab_index:
+            menu.addAction('Load script…', self._load_script)
+            menu.addAction('Save script…', self._save_script)
+            menu.addAction('Select script text', self.script_edit.selectAll)
+        elif context_tool in ('sector', 'building', 'owner'):
+            action = menu.addAction('Apply', lambda: self._apply_selection())
+            action.setEnabled(bool(self.view.selection))
+            if context_tool == 'sector':
+                selected_fill = menu.addAction('Fill selected sectors…', self.fill_selected)
+                selected_fill.setEnabled(bool(self.view.selection))
+                if cell is not None:
+                    menu.addAction('Pick this sector', lambda: self.sector_list.setCurrentItem(
+                        self._icon_items.get(int(self.doc.grids['type'][cell[1]][cell[0]], 16))))
+            if context_tool == 'building':
+                menu.addAction('Remove selected buildings', lambda: self._apply_selection('blg', '00'))
+            menu.addAction('Fill map…', self.map_fill)
+        elif context_tool == 'terrain':
+            for i, name in enumerate(('Raise', 'Lower', 'Flatten', 'Smooth')):
+                menu.addAction(name, lambda checked=False, index=i: self._activate_terrain(index))
+            if cell is not None:
+                menu.addAction('Sample this height', lambda: self._sample_map_height(*cell))
+        if cell is not None:
+            definition = self.buildings.get(int(self.doc.grids['blg'][cell[1]][cell[0]],16))
+            if definition is not None and definition.guns:
+                menu.addSeparator()
+                if len(definition.guns)==1:
+                    menu.addAction('Gun POV',lambda: self._gun_pov(cell,0))
+                else:
+                    guns = menu.addMenu('Gun POV')
+                    for index,mount in enumerate(definition.guns):
+                        name = self.view.lib.vehicles.get(mount.vehicle)
+                        label = f'Gun {index+1} · {name.name if name and name.name else mount.vehicle}'
+                        guns.addAction(label,lambda checked=False,i=index: self._gun_pov(cell,i))
+        menu.addSeparator()
+        menu.addAction('Selection tool', lambda: self.set_tool('select'))
+        menu.addAction('Clear selection', self._clear_selection)
+        menu.addAction('Reset map…', self.map_reset)
+        menu.addAction(self.reset_camera_action)
+        menu.popup(global_position)
+        self._context_menu = menu
+
+    def _activate_terrain(self, index):
+        self.set_tool('terrain')
+        self.mode_combo.setCurrentIndex(index)
 
     def _fill_palettes(self, lib: SectorMeshLibrary):
         if self._palette_set == lib.assets.set_number:
@@ -556,10 +1358,8 @@ class MainWindow(QMainWindow):
         if scale != self._icon_scale or epoch != self._asset_epoch:
             self._icons.start()
             return
-        # Sector icons share one fixed isometric canvas on purpose: every
-        # preview keeps the same size and baseline so the grid stays aligned.
         if sprite is not None:
-            icon = QIcon(QPixmap.fromImage(sprite.image))
+            icon = QIcon(QPixmap.fromImage(crop_transparent(sprite.image)))
         else:
             icon = QIcon()
         self._icon_cache[(number, typ, scale)] = icon
@@ -808,6 +1608,8 @@ class MainWindow(QMainWindow):
         self.view.owner_colors = load_owner_colors()
         self._refresh_owner_palette()
         self._ensure_lib()
+        self._rebuild_level_panel()
+        self._sync_side_panels()
         self._refresh_sky()
         self._refresh_music()
         self.building_overlay.update()
@@ -826,10 +1628,16 @@ class MainWindow(QMainWindow):
             item.setIcon(QIcon(pix))
 
     def _new_doc(self, doc: LdfDocument, path: str | None):
+        self._draft_grid = None
+        self._draft_grid_cell = None
+        self._finish_script()
         self._released(-1, -1, Qt.KeyboardModifier.NoModifier)
         self.doc, self.path, self.dirty = doc, path, False
         self.history.clear()
+        self._draft_squads = []
         self._ensure_lib()
+        self._rebuild_level_panel()
+        self._sync_side_panels()
         self._refresh_sky()
         self._refresh_music()
         self.view.set_document(doc)
@@ -839,7 +1647,7 @@ class MainWindow(QMainWindow):
     def _refresh_title(self):
         name = os.path.basename(self.path) if self.path else "untitled"
         self.setWindowTitle(f"{'*' if self.dirty else ''}{name} - OpenNeoUA Studio · Map Editor")
-        self.undo_action.setEnabled(self.history.can_undo)
+        self.undo_action.setEnabled(self.history.can_undo or self._script_pending or self._live_pending)
         self.redo_action.setEnabled(self.history.can_redo)
 
     def _confirm_discard(self) -> bool:
@@ -857,6 +1665,10 @@ class MainWindow(QMainWindow):
             self._icon_queue.clear()
             self._bicon_queue.clear()
             self._icon_pool.waitForDone(10000)
+            self._briefing_pool.waitForDone()
+            self.view.stop_rendering()
+            if self.level_panel is not None:
+                self.level_panel.dispose()
             event.accept()
         else:
             event.ignore()
@@ -884,7 +1696,8 @@ class MainWindow(QMainWindow):
     def file_open(self):
         if not self._confirm_discard():
             return
-        path, _ = QFileDialog.getOpenFileName(self, "Open LDF", self._level_dir(), "Levels (*.ldf *.LDF)",
+        path, _ = QFileDialog.getOpenFileName(self, "Open map", self._level_dir(),
+                                             "Levels (*.ldf *.LDF);;Text maps (*.txt);;All files (*)",
                                              options=QFileDialog.Option.DontUseNativeDialog)
         if not path:
             return
@@ -914,23 +1727,29 @@ class MainWindow(QMainWindow):
 
     def file_save_as(self):
         self._released(-1, -1, Qt.KeyboardModifier.NoModifier)
-        path, _ = QFileDialog.getSaveFileName(self, "Save LDF", self.path or self._level_dir(), "Levels (*.LDF)",
+        path, selected_filter = QFileDialog.getSaveFileName(self, "Save map", self.path or self._level_dir(),
+                                             "Levels (*.LDF);;Text maps (*.txt)",
                                              options=QFileDialog.Option.DontUseNativeDialog)
         if path:
+            if not os.path.splitext(path)[1]:
+                path += '.txt' if selected_filter == 'Text maps (*.txt)' else '.LDF'
             self._save_to(path)
 
     def undo(self):
+        self._cancel_operation(clear=False)
         self._released(-1, -1, Qt.KeyboardModifier.NoModifier)
         if self.history.undo(self.doc):
             self._after_history()
 
     def redo(self):
+        self._cancel_operation(clear=False)
         self._released(-1, -1, Qt.KeyboardModifier.NoModifier)
         if self.history.redo(self.doc):
             self._after_history()
 
     def _after_history(self):
         self.dirty = True
+        self._draft_squads = []
         if (self.doc.mw, self.doc.mh) != (self.view.terrain.width, self.view.terrain.height):
             self.view.set_document(self.doc)
         else:
@@ -944,6 +1763,7 @@ class MainWindow(QMainWindow):
         self._refresh_sky()
         self._refresh_music()
         self._refresh_title()
+        self._sync_side_panels()
 
     def map_resize(self):
         if not self.doc:
@@ -962,26 +1782,13 @@ class MainWindow(QMainWindow):
             return
         self.dirty = True
         self.view.set_document(self.doc)
+        self._draft_squads = []
+        self._sync_side_panels()
         self._refresh_title()
 
     def map_level_info(self):
-        if not self.doc:
-            return
         self._released(-1, -1, Qt.KeyboardModifier.NoModifier)
-        dialog = LevelInfoDialog(self.doc, self)
-        dialog.musicChanged.connect(lambda value: self._play_music(value))
-        if dialog.exec():
-            values = dialog.values()
-            if all(self.doc.lvl_info.get(key) == value for key, value in values.items()):
-                return
-            self.history.push(self.doc)
-            self.doc.lvl_info.update(values)
-            self.view.set_sky_image(dialog.selected_sky_image())
-            self._refresh_music()
-            self.dirty = True
-            self._refresh_title()
-        else:
-            self._refresh_music()
+        self.palette_tabs.setCurrentIndex(self.level_tab_index)
 
     def _play_music(self, value: str):
         install = bootstrap.installation() or GameInstallation.suggest(bootstrap.game_data_dir())
@@ -1002,29 +1809,29 @@ class MainWindow(QMainWindow):
         if state == self._sky_state:
             return
         self._sky_state = state
-        catalog = ResourceCatalog(install, self.doc.set_number)
-        name = os.path.splitext(os.path.basename(
-            str(self.doc.lvl_info.get("sky", "")).replace("\\", "/")))[0].casefold()
-        source = catalog.skies.get(name)
-        try:
-            image = preview_image(source, catalog.palette) if source else None
-        except Exception as exc:
-            image = None
-            self.statusBar().showMessage(f"Unable to preview sky: {exc}", 4000)
-        self.view.set_sky_image(image)
+        self.view.set_sky_image(None)
+        if self.level_panel is not None:
+            self.level_panel.request_selected_sky()
 
     def set_tool(self, key: str):
         if self._stroke_active:
             self._released(-1, -1, Qt.KeyboardModifier.NoModifier)
         self.tool = key
+        if key != 'squad':
+            self._cancel_operation(clear=False)
+        self.view.active_tool = key
         self.tool_actions[key].setChecked(True)
         if key != "select":
-            self.palette_tabs.setCurrentIndex({"sector": 0, "building": 1, "owner": 2, "terrain": 3}[key])
+            self.palette_tabs.setCurrentIndex({"sector": 0, "building": 1, "owner": 2, "terrain": 3,
+                                               "squad": self.squad_tab_index}[key])
         self.view.brush_cells = set()
+        self._update_cursor()
         self.view.update()
 
     def _palette_changed(self, index):
-        self.set_tool(("sector", "building", "owner", "terrain")[index])
+        self._finish_script()
+        self.set_tool({0: "sector", 1: "building", 2: "owner", 3: "terrain",
+                       self.squad_tab_index: "squad"}.get(index, "select"))
         if index == 0 and self._icon_queue:
             self._icons.start()
         if index == 1 and self._bicon_queue:
@@ -1047,6 +1854,12 @@ class MainWindow(QMainWindow):
             self.view.update()
             return
         g = self.doc.grids
+        self._update_cursor(QApplication.keyboardModifiers())
+        if self._draft_squads:
+            self._move_draft((col, row))
+        if self._draft_grid is not None:
+            self._draft_grid_cell = (col,row)
+            self._refresh_squads(fields=False)
         hgt = g['hgt'][row][col]
         limit = " · maximum height" if hgt >= HGT_MAX else " · minimum height" if hgt <= HGT_MIN else ""
         try:
@@ -1059,20 +1872,23 @@ class MainWindow(QMainWindow):
             f"({col},{row}) · Sector {g['type'][row][col]} · {FACTIONS.get(g['own'][row][col], '?')} · "
             f"Height {hgt - HGT_MIN}/60 · {(hgt - DEFAULT_HGT) * HEIGHT_UNIT:+.0f} units{limit}{extra}")
         if self.tool == "terrain":
-            self.view.brush_cells = {(c, r) for c, r, _w in
-                                     self.brush.footprint(self.doc, col, row)}
+            self.view.brush_cells = {(c, r) for c, r, _w in self.brush.footprint(self.doc, col, row)}
         self.view.update()
 
     def _terrain_mode(self, modifiers) -> BrushMode:
         if modifiers & Qt.KeyboardModifier.AltModifier:
             return BrushMode.SMOOTH
-        if modifiers & Qt.KeyboardModifier.ControlModifier:
-            return BrushMode.FLATTEN
         if modifiers & Qt.KeyboardModifier.ShiftModifier:
             return BrushMode.LOWER
         return self.mode_combo.currentData()
 
     def _pressed(self, col, row, _button, modifiers):
+        self._finish_script()
+        if self.tool == 'terrain' and self._sampling_height:
+            self._sample_map_height(col, row)
+            return
+        if self.tool == 'squad':
+            return
         self.view.selection = {(col, row)}
         if self.tool == "select":
             self.view.update()
@@ -1104,6 +1920,10 @@ class MainWindow(QMainWindow):
             self._apply(*self._last_cell)
 
     def _released(self, _col, _row, _modifiers):
+        self._finish_script()
+        self._finish_live()
+        if self._drag_original:
+            self._finish_squad_drag()
         self._repeat.stop()
         self.view.set_editing(False)
         if self._stroke_active:
