@@ -595,6 +595,8 @@ class AssemblyWindow(QMainWindow):
         self._texture_qimage_cache: dict[tuple, QImage] = {}
 
         self.viewport = AssetViewport()
+        from render_status import add_renderer_badge
+        self.renderer_badge = add_renderer_badge(self, self.viewport)
         self.viewport.statusMessage.connect(
             lambda text: self._notify(text, 4500)
         )

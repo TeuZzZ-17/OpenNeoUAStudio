@@ -3,10 +3,18 @@ from __future__ import annotations
 from ..core.ldf_model import LdfDocument
 
 
+def cells_between(start, end):
+    """Include le celle intermedie anche quando il mouse si muove velocemente."""
+    dx, dy = end[0]-start[0], end[1]-start[1]
+    steps = max(abs(dx), abs(dy), 1)
+    return list(dict.fromkeys((round(start[0]+dx*i/steps), round(start[1]+dy*i/steps))
+                             for i in range(steps+1)))
+
+
 def paint_cells(doc: LdfDocument, cells, layer: str, value) -> bool:
-    """Scrive typ/blg/own sulle celle interne; i bordi restano f8-fd."""
+    """Scrive i layer della mappa; i bordi type restano f8-fd."""
     changed = False
-    grid = doc.grids[{'type': 'type', 'own': 'own', 'blg': 'blg'}[layer]]
+    grid = doc.grids[layer]
     for c, r in cells:
         if not (0 <= c < doc.mw and 0 <= r < doc.mh):
             continue

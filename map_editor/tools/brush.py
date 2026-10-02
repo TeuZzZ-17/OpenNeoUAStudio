@@ -16,23 +16,113 @@ class BrushMode(str, Enum):
 class BrushShape(str, Enum):
     SQUARE = "square"
     ROUND = "round"
+    DIAMOND = "diamond"
+    CROSS = "cross"
+    RING = "ring"
+
+
+_ROUND_OUTLINE_SEGMENTS = 64
+_CROSS_ARM_FRACTION = 0.35
+_RING_INNER_RADIUS = 0.45
+
+
+def _brush_shape(shape: BrushShape | str) -> BrushShape:
+    try:
+        return BrushShape(shape)
+    except (TypeError, ValueError):
+        return BrushShape.SQUARE
+
+
+def _ellipse_loop(radius_x: float, radius_z: float,
+                  scale: float = 1.0) -> list[tuple[float, float]]:
+    return [
+        (radius_x * scale * math.cos(2 * math.pi * index / _ROUND_OUTLINE_SEGMENTS),
+         radius_z * scale * math.sin(2 * math.pi * index / _ROUND_OUTLINE_SEGMENTS))
+        for index in range(_ROUND_OUTLINE_SEGMENTS)
+    ]
+
+
+def brush_outlines(shape: BrushShape | str, radius_x: float,
+                   radius_z: float) -> list[list[tuple[float, float]]]:
+    """Restituisce i contorni del pennello in unità di settore, centrati in (0, 0)."""
+    shape = _brush_shape(shape)
+    radius_x = max(0.0, float(radius_x))
+    radius_z = max(0.0, float(radius_z))
+
+    if shape == BrushShape.SQUARE:
+        return [[(-radius_x, -radius_z), (radius_x, -radius_z),
+                 (radius_x, radius_z), (-radius_x, radius_z)]]
+    if shape == BrushShape.ROUND:
+        return [_ellipse_loop(radius_x, radius_z)]
+    if shape == BrushShape.DIAMOND:
+        return [[(-radius_x, 0.0), (0.0, -radius_z),
+                 (radius_x, 0.0), (0.0, radius_z)]]
+    if shape == BrushShape.CROSS:
+        half_x = radius_x * _CROSS_ARM_FRACTION
+        half_z = radius_z * _CROSS_ARM_FRACTION
+        return [[(-half_x, -radius_z), (half_x, -radius_z),
+                 (half_x, -half_z), (radius_x, -half_z),
+                 (radius_x, half_z), (half_x, half_z),
+                 (half_x, radius_z), (-half_x, radius_z),
+                 (-half_x, half_z), (-radius_x, half_z),
+                 (-radius_x, -half_z), (-half_x, -half_z)]]
+    return [_ellipse_loop(radius_x, radius_z),
+            _ellipse_loop(radius_x, radius_z, _RING_INNER_RADIUS)]
 
 
 def brush_footprint(doc: LdfDocument, col: int, row: int, radius: float,
-                    radius_z: float | None = None, shape: BrushShape = BrushShape.SQUARE):
+                    radius_z: float | None = None,
+                    shape: BrushShape | str = BrushShape.SQUARE):
     """Celle interne (bordo escluso); il peso serve a Flatten e Smooth."""
     cells = []
-    radius_z = radius if radius_z is None else radius_z
+    radius_x = max(0.0, float(radius))
+    radius_z = radius_x if radius_z is None else max(0.0, float(radius_z))
+    shape = _brush_shape(shape)
+    small_ring = shape == BrushShape.RING and max(radius_x, radius_z) <= 1.0
     for r in range(row - math.ceil(radius_z), row + math.ceil(radius_z) + 1):
-        for c in range(col - math.ceil(radius), col + math.ceil(radius) + 1):
+        for c in range(col - math.ceil(radius_x), col + math.ceil(radius_x) + 1):
             if not (1 <= c < doc.mw - 1 and 1 <= r < doc.mh - 1):
                 continue
-            dx = abs(c - col) / max(radius, 1e-9)
-            dz = abs(r - row) / max(radius_z, 1e-9)
-            dist = math.hypot(dx, dz) if shape == BrushShape.ROUND else max(dx, dz)
-            if dist >= 1:
-                continue
-            weight = 0.5 * (1 + math.cos(math.pi * dist))
+            offset_x, offset_z = abs(c - col), abs(r - row)
+            dx = offset_x / max(radius_x, 1e-9)
+            dz = offset_z / max(radius_z, 1e-9)
+
+            if small_ring:
+                if offset_x or offset_z:
+                    continue
+                useful_distance = 0.0
+            elif shape == BrushShape.ROUND:
+                if offset_x == 0 and offset_z == 0:
+                    useful_distance = 0.0
+                else:
+                    # Il test è conservativo: la cella intera deve ricadere nell'ellisse.
+                    useful_distance = math.hypot(
+                        (offset_x + 0.5) / max(radius_x, 1e-9),
+                        (offset_z + 0.5) / max(radius_z, 1e-9),
+                    )
+                    if useful_distance > 1.0:
+                        continue
+            elif shape == BrushShape.DIAMOND:
+                useful_distance = dx + dz
+                if useful_distance >= 1.0:
+                    continue
+            elif shape == BrushShape.CROSS:
+                useful_distance = max(dx, dz)
+                if (useful_distance >= 1.0 or
+                        (dx > _CROSS_ARM_FRACTION and dz > _CROSS_ARM_FRACTION)):
+                    continue
+            elif shape == BrushShape.RING:
+                radial_distance = math.hypot(dx, dz)
+                if radial_distance < _RING_INNER_RADIUS or radial_distance >= 1.0:
+                    continue
+                useful_distance = ((radial_distance - _RING_INNER_RADIUS) /
+                                   (1.0 - _RING_INNER_RADIUS))
+            else:
+                useful_distance = max(dx, dz)
+                if useful_distance >= 1.0:
+                    continue
+
+            weight = 0.5 * (1 + math.cos(math.pi * useful_distance))
             if weight > 1e-9:
                 cells.append((c, r, weight))
     return cells
@@ -48,6 +138,7 @@ class TerrainBrush:
         self._acc: dict[tuple[int, int], float] = {}
         self._target: int | None = None
         self._mode: BrushMode | None = None
+        self.target_height: int | None = None
 
     @property
     def radius(self):
@@ -64,7 +155,8 @@ class TerrainBrush:
         self._acc.clear()
         self._mode = None
         inside = 0 <= col < doc.mw and 0 <= row < doc.mh
-        self._target = doc.grids['hgt'][row][col] if inside else None
+        self._target = (self.target_height if self.target_height is not None
+                        else doc.grids['hgt'][row][col] if inside else None)
 
     def apply(self, doc: LdfDocument, col: int, row: int,
               mode: BrushMode, dt: float = 1.0) -> list[tuple[int, int]]:
@@ -77,7 +169,8 @@ class TerrainBrush:
             self._target = hgt[row][col]
         touched: list[tuple[int, int]] = []
         snapshot = [line[:] for line in hgt] if mode == BrushMode.SMOOTH else None
-        for c, r, weight in self.footprint(doc, col, row):
+        cells = self.footprint(doc, col, row)
+        for c, r, weight in cells:
             current = hgt[r][c]
             if mode == BrushMode.RAISE:
                 delta = strength

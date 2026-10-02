@@ -440,6 +440,8 @@ class WireframeEditorWindow(QMainWindow):
         self.warning_status_label.setStyleSheet("color: #efb86c;")
         self.statusBar().addPermanentWidget(self.warning_status_label, 1)
         self.warning_status_label.hide()
+        from render_status import add_renderer_badge
+        self.renderer_badge = add_renderer_badge(self, self.outline_editor.canvas)
 
         splitter = QSplitter(Qt.Orientation.Horizontal)
         splitter.addWidget(self.outline_editor)

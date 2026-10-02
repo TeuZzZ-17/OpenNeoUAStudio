@@ -4450,6 +4450,8 @@ class CollisionEditorWindow(QMainWindow):
         configure_operation_status_bar(self)
 
         self.viewport = CollisionViewport()
+        from render_status import add_renderer_badge
+        self.renderer_badge = add_renderer_badge(self, self.viewport)
         self.viewport.spherePicked.connect(self._select_sphere)
         self.viewport.sphereToggleRequested.connect(self._toggle_sphere)
         self.viewport.sphereBoxSelectionRequested.connect(

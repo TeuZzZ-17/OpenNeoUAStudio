@@ -12,6 +12,8 @@ from .building_defs import BUILDING_SUFFIXES, _decode
 class VehicleVisual:
     vp_normal: int = 0
     base_normal: str = ""
+    name: str = ""
+    model: str = ""
 
 
 def parse_vehicle_text(text: str, result=None):
@@ -44,6 +46,8 @@ def parse_vehicle_text(text: str, result=None):
                         pass
                 elif name.lower() == 'base_normal':
                     active.base_normal = value
+                elif name.lower() in ('name', 'model'):
+                    setattr(active, name.lower(), value.strip('"'))
     return result
 
 

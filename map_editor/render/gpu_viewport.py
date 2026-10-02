@@ -87,6 +87,10 @@ class Canvas(QOpenGLWidget):
                     GL.glActiveTexture(GL.GL_TEXTURE0)
                     painter.endNativePainting()
                 overlay = getattr(self.owner, 'building_overlay', None)
+                if overlay is not None and not self.owner.camera.perspective:
+                    overlay.draw(painter)
+                self.owner.draw_interaction_overlay(painter)
+                overlay = getattr(self.owner, 'squad_overlay', None)
                 if overlay is not None:
                     overlay.draw(painter)
             except Exception as exc:
@@ -186,6 +190,8 @@ class GpuMapViewport(SoftwareMapViewport):
         if self.doc is not None:
             self.terrain.rebuild(self.doc.grids['hgt'])
         self._heights_dirty = True
+        if self.doc.squads:
+            self._geometry_dirty = True
         self._scene_revision += 1
         self.update()
 
@@ -215,11 +221,16 @@ class GpuMapViewport(SoftwareMapViewport):
             renderer.set_heights(-(self.terrain.cells-DEFAULT_HGT)*HEIGHT_UNIT)
             self._heights_dirty = False
         state_key = (self._owner_revision, self.doc.mw, self.doc.mh,
-                     frozenset(self.brush_cells), frozenset(self.selection))
+                     frozenset(self.brush_cells), frozenset(self.selection), frozenset(self.preview_cells))
         if state_key != self._states_key:
             states = np.zeros((self.doc.mh, self.doc.mw, 4), np.uint8)
             states[:, :, 0] = self.doc.grids['own']
+            for c,r in self.preview_cells:
+                states[r,c,3] = 2
+                states[r,c,0] = 0
             for channel, cells in ((1, self.brush_cells), (2, self.selection)):
+                if channel == 1 and self.active_tool == 'terrain':
+                    continue
                 for c, r in cells:
                     if 0 <= c < self.doc.mw and 0 <= r < self.doc.mh:
                         states[r, c, channel] = 1
@@ -236,19 +247,28 @@ class GpuMapViewport(SoftwareMapViewport):
                     self.render_icon(self.lib, typ, 1.1, current=True)
             self._previews_primed = True
         ratio = self._canvas.devicePixelRatioF()
+        selected = getattr(self,'squad_overlay',None)
+        styles = [(*((.6,.6,.6) if s.get('_preview') else tuple(v/255 for v in self.owner_colors.get(s['owner'],(150,150,150)))),
+                   2 if selected is not None and i in selected.selected and not s.get('_preview') else 1)
+                  for i,s in enumerate(self.doc.squads)]
+        renderer.set_unit_styles(styles)
         hover = self.hover[1]*self.doc.mw+self.hover[0]+1 if self.hover else 0
         renderer.render(self.camera, round(self.width()*ratio), round(self.height()*ratio),
                         self._canvas.defaultFramebufferObject(), owner_colors=self.owner_colors,
-                        grid=self.show_grid, sky=self.show_sky, hover=hover, pixel_scale=ratio)
+                        grid=self.show_grid, sky=self.show_sky, hover=hover, pixel_scale=ratio,
+                        overlays=not self.camera.perspective,
+                        cursor_color=self.current_cursor_color(),
+                        preview_start=(self.doc.mw * self.doc.mh + self.doc._preview_start + 1
+                                       if hasattr(self.doc, '_preview_start') else 0))
         self._gpu_camera_key = (self._camera_key(), ratio)
         self._frame_key = self._render_key()
         self.frame_ms.append((time.perf_counter()-start)*1000)
 
-    def pick_cell(self, x, y):
+    def _pick_code(self, x, y):
         if self._software_fallback:
-            return super().pick_cell(x, y)
+            return 0
         if self.renderer is None or self.doc is None:
-            return None
+            return 0
         self._canvas.makeCurrent()
         try:
             ratio = self._canvas.devicePixelRatioF()
@@ -257,10 +277,27 @@ class GpuMapViewport(SoftwareMapViewport):
             code = self.renderer.pick(int(x*ratio), int(y*ratio))
         finally:
             self._canvas.doneCurrent()
-        if code == 0:
+        return code
+
+    def pick_cell(self, x, y):
+        if self._software_fallback:
+            return super().pick_cell(x, y)
+        code = self._pick_code(x, y)
+        if code == 0 or abs(code) > self.doc.mw * self.doc.mh:
             return None
         cell = abs(code)-1
         return cell % self.doc.mw, cell // self.doc.mw
+
+    def pick_squad(self, x, y):
+        if self._software_fallback:
+            return super().pick_squad(x, y)
+        if self.doc is None:
+            return None
+        code = abs(self._pick_code(x, y)) - self.doc.mw * self.doc.mh - 1
+        if 0 <= code < len(self.doc.squads):
+            return code
+        overlay = getattr(self, 'squad_overlay', None)
+        return overlay.pick(x, y) if overlay is not None else None
 
     def render_icon(self, lib, typ, scale, *, current=False, building_id=None, max_dimension=512):
         """Small GPU readback only for cached palette icons, never map frames."""

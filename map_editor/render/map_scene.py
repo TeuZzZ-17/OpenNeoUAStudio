@@ -8,11 +8,12 @@ from PySide6.QtGui import QImage
 
 from .sector_mesh import SectorMeshLibrary
 
-from depth_renderer import CameraPolygon, order_camera_polygons, order_camera_polygons_fast
+from depth_renderer import CameraPolygon, order_camera_polygons, order_camera_polygons_fast, clip_camera_polygon_near
 from indexed_renderer import IndexedPiece, IndexedRasterizer, retail_source_face_front_facing
 
 from ..core.ldf_model import DEFAULT_HGT, SECTOR_SIZE
 from .terrain_mesh import HEIGHT_UNIT
+from .squad_scene import squad_members
 
 
 def _clip(vertices, uvs, axis, bound, positive):
@@ -106,7 +107,7 @@ def scene_polygons(lib, doc, terrain, cam):
     projected = [cam.screen_to_ground(x, y, height) for height in (low_y, high_y)
                  for x in (0, cam.width) for y in (0, cam.height)]
     projected = [p for p in projected if p is not None]
-    if projected:
+    if projected and not cam.perspective:
         c0 = max(0, math.floor((min(p[0] for p in projected) - padding) / SECTOR_SIZE))
         c1 = min(doc.mw, math.ceil((max(p[0] for p in projected) + padding) / SECTOR_SIZE))
         r0 = max(0, math.floor((-max(p[2] for p in projected) - padding) / SECTOR_SIZE))
@@ -114,23 +115,23 @@ def scene_polygons(lib, doc, terrain, cam):
     else:
         c0, c1, r0, r1 = 0, doc.mw, 0, doc.mh
 
-    def append_mesh(mesh, col, row, *, filler=False):
+    def append_mesh(mesh, col, row, *, filler=False, position=None, actor_code=None):
         nonlocal order
-        wx, wy, wz = terrain.cell_center(col, row)
+        wx, wy, wz = position if position is not None else terrain.cell_center(col, row)
         if filler:
             wy = 0.0
         for face, ox, oz in mesh.faces:
             source = order
-            ground = filler or all(abs(v[1]) < 1e-6 for v in face.vertices)
-            if (col in (0, doc.mw - 1) or row in (0, doc.mh - 1)) and not ground:
+            ground = actor_code is None and (filler or all(abs(v[1]) < 1e-6 for v in face.vertices))
+            if actor_code is None and (col in (0, doc.mw - 1) or row in (0, doc.mh - 1)) and not ground:
                 continue
             vertices = [(v[0] + ox + wx, v[1] + wy, v[2] + oz + wz) for v in face.vertices]
             source_camera = tuple(cam.to_camera(v) for v in vertices)
             screen = [cam.to_screen(v) for v in source_camera]
-            if (max(p[0] for p in screen) < 0 or min(p[0] for p in screen) >= cam.width
+            if not cam.perspective and (max(p[0] for p in screen) < 0 or min(p[0] for p in screen) >= cam.width
                     or max(p[1] for p in screen) < 0 or min(p[1] for p in screen) >= cam.height):
                 continue
-            if not retail_source_face_front_facing(source_camera, camera_distance=1e9):
+            if not retail_source_face_front_facing(source_camera, camera_distance=4 if cam.perspective else 1e9):
                 continue
             uvs = lib.face_uvs(face)
             if len(uvs) != len(vertices):
@@ -138,7 +139,7 @@ def scene_polygons(lib, doc, terrain, cam):
             # Una camera ortografica richiede UV lineari, senza correzione prospettica.
             surface = lib.surface_for(face)
             if id(surface) not in surfaces:
-                surfaces[id(surface)] = replace(surface, map_mode="linear")
+                surfaces[id(surface)] = replace(surface, map_mode="depth" if cam.perspective else "linear")
             surface = surfaces[id(surface)]
             # Le tessere e i raccordi rettangolari restano un unico poligono:
             # il raster condiviso esegue già il fan, dopo il taglio fra celle.
@@ -158,10 +159,14 @@ def scene_polygons(lib, doc, terrain, cam):
                     (col, row, points, attrs),)
                 for c, r, world, coordinates in regions:
                     camera = tuple(cam.to_camera(v) for v in world)
-                    code = (r * doc.mw + c + 1) * (1 if ground else -1)
-                    polygons.append(CameraPolygon(
+                    code = actor_code if actor_code is not None else (r * doc.mw + c + 1) * (1 if ground else -1)
+                    polygon = CameraPolygon(
                         camera, tuple(coordinates),
-                        (surface, code, source), order))
+                        (surface, code, source), order)
+                    if cam.perspective:
+                        polygon = clip_camera_polygon_near(polygon, minimum_distance=20*cam.k)
+                    if polygon is not None:
+                        polygons.append(polygon)
                     order += 1
 
     def surface_type(col, row):
@@ -182,12 +187,17 @@ def scene_polygons(lib, doc, terrain, cam):
                 filler = lib.filler_mesh(surface_type(c, r), surface_type(col, row),
                                          vertical, terrain.filler_heights(col, row, vertical))
                 append_mesh(filler, col, row, filler=True)
+    if doc.squads:
+        for member in squad_members(doc, terrain, lib):
+            code = -(doc.mw * doc.mh + member.squad + 1)
+            append_mesh(lib.vehicle_mesh(member.vehicle), 0, 0,
+                        position=member.position, actor_code=code)
     return polygons
 
 
-def render_scene(polygons, cam, tables, fast=False):
+def render_scene(polygons, cam, tables, fast=False, preview_start=0):
     ordered = (order_camera_polygons_fast(polygons) if fast else
-               order_camera_polygons(polygons, eye=(0.0, 0.0, 1e9)))
+               order_camera_polygons(polygons, eye=(0.0, 0.0, 4 if cam.perspective else 1e9)))
     pieces = []
     for poly in ordered:
         surface, code, source = poly.payload
@@ -205,4 +215,8 @@ def render_scene(polygons, cam, tables, fast=False):
     # Il raster condiviso usa -1 per lo sfondo; qui zero significa nessuna cella.
     cells = result.polygon_owner.copy()
     cells[~result.coverage] = 0
+    if preview_start:
+        mask = cells <= -preview_start
+        grey = rgba[mask, :3] @ np.array((.299, .587, .114))
+        rgba[mask, :3] = np.round(grey[:, None] * .72 + 255 * .62 * .28).astype(np.uint8)
     return SceneFrame(rgba, cells)

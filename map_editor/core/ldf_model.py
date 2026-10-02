@@ -708,9 +708,13 @@ def loads_ldf(raw_text: str, encoding: str = DEFAULT_LDF_ENCODING) -> LdfDocumen
                     if get_val().lower() == 'unknown':
                         cur_squad['hidden'] = True
                 elif t == 'pos_x':
-                    cur_squad['x'] = world_x(int(get_val()))
+                    value = float(get_val())
+                    cur_squad['pos_x'] = int(value) if value.is_integer() else value
+                    cur_squad['x'] = world_x(cur_squad['pos_x'])
                 elif t == 'pos_z':
-                    cur_squad['y'] = world_y(int(get_val()))
+                    value = float(get_val())
+                    cur_squad['pos_z'] = int(value) if value.is_integer() else value
+                    cur_squad['y'] = world_y(cur_squad['pos_z'])
             elif cur_host:
                 if t == 'owner':
                     cur_host['owner'] = int(get_val())
@@ -939,8 +943,8 @@ def dumps_ldf(doc: LdfDocument, defs: dict | None = None) -> str:
         if s['hidden']:
             w("   mb_status = unknown")
         fx, fz = grid_to_world(s['x'], s['y'])
-        w(f"   pos_x = {fx}")
-        w(f"   pos_z = {fz}")
+        w(f"   pos_x = {s.get('pos_x', fx):.17g}")
+        w(f"   pos_z = {s.get('pos_z', fz):.17g}")
         w("end")
     w(sep)
     for i in TECH_FACTIONS:

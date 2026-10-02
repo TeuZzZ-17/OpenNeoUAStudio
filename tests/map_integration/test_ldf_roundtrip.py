@@ -59,6 +59,11 @@ def test_byte_identical_with_sektor2():
                    not in ("", ".iff") for key in ("mbmap", "dbmap")):
                 # Sektor2 forces IFF even when the game level names a modern image.
                 continue
+            # The old editor snaps squads to cell centres. Compare its remaining
+            # output contract separately from our exact-coordinate round trip.
+            for squad in doc.squads:
+                squad.pop('pos_x', None)
+                squad.pop('pos_z', None)
             mine = lm.dumps_ldf(doc).encode(doc.encoding)
             with open(dst, "rb") as fh:
                 assert mine == fh.read(), path

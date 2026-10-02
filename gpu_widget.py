@@ -5,7 +5,7 @@ from __future__ import annotations
 import os
 import weakref
 
-from PySide6.QtCore import Qt
+from PySide6.QtCore import Qt, Signal
 from PySide6.QtGui import (
     QGuiApplication,
     QOffscreenSurface,
@@ -116,6 +116,7 @@ class Canvas(QOpenGLWidget):
             owner._paint_viewport(painter)
         finally:
             painter.end()
+        owner._report_backend()
 
     def _cleanup_owner_gpu(self) -> None:
         owner = self.owner
@@ -134,13 +135,27 @@ class Canvas(QOpenGLWidget):
 class AcceleratedWidget(QWidget):
     """Route widget painting through Qt's OpenGL paint engine on desktop."""
 
+    backendChanged = Signal(str)
+
     def __init__(self, parent=None) -> None:
         self._gpu_canvas = None
+        self._reported_backend = None
         super().__init__(parent)
         if _use_opengl_canvas():
             self._gpu_canvas = Canvas(self)
             self._gpu_canvas.setGeometry(self.rect())
             self._gpu_canvas.show()
+
+    @property
+    def renderer_name(self):
+        canvas = self._gpu_canvas
+        return 'OpenGL painter' if canvas is not None and canvas.isValid() else 'Software painter'
+
+    def _report_backend(self):
+        name = self.renderer_name
+        if name != self._reported_backend:
+            self._reported_backend = name
+            self.backendChanged.emit(name)
 
     def update(self, *args) -> None:  # noqa: N802 - preserve QWidget overloads
         canvas = getattr(self, "_gpu_canvas", None)
@@ -164,6 +179,7 @@ class AcceleratedWidget(QWidget):
             self._paint_viewport(painter)
         finally:
             painter.end()
+        self._report_backend()
 
     def _paint_viewport(self, painter: QPainter) -> None:
         """Draw the widget contents using the painter supplied by the surface."""
