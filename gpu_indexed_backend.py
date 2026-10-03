@@ -33,7 +33,8 @@ STUDIO_FRAGMENT = FRAGMENT.replace(
     'layout(location=1) out int cellOut;\n#ifndef FLAT_PASS\nlayout(location=2) out vec4 edgesOut;\n#endif')
 STUDIO_FRAGMENT = STUDIO_FRAGMENT.replace(
     'indexOut=texelFetch(tracy,ivec2(int(source),int(background)),0).r;',
-    'indexOut=texelFetch(tracy,ivec2(int(source),int(background)),0).r; cellOut=-1;')
+    'indexOut=texelFetch(tracy,ivec2(int(source),int(background)),0).r; '
+    'if(indexOut==background) discard; cellOut=-1;')
 
 
 def piece_geometry(pieces, width, height):

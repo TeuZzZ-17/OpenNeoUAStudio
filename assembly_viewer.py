@@ -3197,6 +3197,27 @@ class AssetViewport(AcceleratedWidget):
                 "Retail indexed export failed closed: " + (reason or "unknown reason"))
         return image
 
+    def capture_wireframe_geometry(self, target_size, camera: dict):
+        """Capture the current pose through the shared Retail geometry pass."""
+
+        image = QImage(target_size, QImage.Format.Format_ARGB32_Premultiplied)
+        image.fill(Qt.GlobalColor.transparent)
+        painter = QPainter(image)
+        pieces = []
+        previous = (self._last_effective_renderer, self._last_render_error,
+                    dict(self._last_indexed_stats))
+        try:
+            self._render_scene(
+                painter, QRectF(0, 0, target_size.width(), target_size.height()),
+                None, clean=True, camera=camera,
+                allow_transparent_background=True, force_textured=True,
+                geometry_capture=pieces)
+        finally:
+            painter.end()
+            (self._last_effective_renderer, self._last_render_error,
+             self._last_indexed_stats) = previous
+        return pieces
+
     def reset_view(self) -> None:
         if self._home_camera_state is not None:
             self._set_camera_state(self._home_camera_state)
@@ -3481,7 +3502,8 @@ class AssetViewport(AcceleratedWidget):
                       background: QColor | None, clean: bool,
                       camera: dict,
                       allow_transparent_background: bool = False,
-                      force_textured: bool = False) -> None:
+                      force_textured: bool = False,
+                      geometry_capture: list | None = None) -> None:
         """Shared QWidget/QImage renderer; ``clean`` draws model pixels only."""
 
         # While the camera is actively moving, favor response time over
@@ -3704,6 +3726,9 @@ class AssetViewport(AcceleratedWidget):
         # fork-derived Retail BSP path is now the single geometry truth for all
         # three public preview modes.
         ordered = order_camera_polygons(triangles)
+        if geometry_capture is not None:
+            geometry_capture.extend(ordered)
+            return
         if mode == "textured":
             previous_error = self._indexed_runtime_error
             try:
