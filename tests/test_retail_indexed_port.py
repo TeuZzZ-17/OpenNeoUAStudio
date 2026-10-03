@@ -272,6 +272,81 @@ class IndexedRendererPortTests(unittest.TestCase):
             "TRACYRMP[background][raw_source]",
         )
 
+    def test_seeded_flat_tracy_uses_destination_and_preserves_coverage(self):
+        width = height = 4
+        background = bytes(
+            10 if (x + y) % 2 == 0 else 20
+            for y in range(height) for x in range(width))
+        tables = _simple_tables({(10, 7): 30, (5, 7): 40})
+        flat = IndexedPiece(
+            source_face_id="flat",
+            polygon_id=1,
+            screen=((0.0, 0.0), (3.0, 0.0),
+                    (3.0, 3.0), (0.0, 3.0)),
+            uvs=(),
+            camera_vertices=((0.0, 0.0, 0.0),) * 4,
+            surface=_surface(7, "flat"),
+        )
+        underlay = IndexedPiece(
+            source_face_id="opaque-underlay",
+            polygon_id=2,
+            screen=((0.0, 0.0), (3.0, 0.0),
+                    (3.0, 3.0), (0.0, 3.0)),
+            uvs=(),
+            camera_vertices=((0.0, 0.0, 0.0),) * 4,
+            surface=_surface(5),
+        )
+        accelerated = IndexedRasterizer.render(
+            width, height, (flat,), tables, background_indices=background)
+        with patch.object(indexed_renderer, "_np", None):
+            portable = IndexedRasterizer.render(
+                width, height, (flat,), tables, background_indices=background)
+
+        self.assertEqual(
+            bytes(accelerated.indices.reshape(-1).tolist()),
+            bytes(value for row in portable.indices for value in row),
+        )
+        self.assertEqual(
+            bytes(accelerated.coverage.reshape(-1).astype("uint8").tolist()),
+            bytes(int(value) for row in portable.coverage for value in row),
+        )
+        rgba = accelerated.to_rgba(tables, transparent_background=True)
+
+        # A changed destination becomes covered; a TRACY no-op leaves the
+        # seeded viewport pixel visible through the transparent export.
+        self.assertEqual(int(accelerated.indices[0][0]), 30)
+        self.assertTrue(bool(accelerated.coverage[0][0]))
+        self.assertEqual(tuple(rgba[0:4]), (*_palette()[30], 255))
+        self.assertEqual(int(accelerated.indices[0][1]), 20)
+        self.assertFalse(bool(accelerated.coverage[0][1]))
+        self.assertEqual(tuple(rgba[4:8]), (*_palette()[20], 0))
+
+        # The opaque face runs before flat TRACY, so the effect resolves over
+        # its actual index rather than the original seeded backdrop.
+        composite = IndexedRasterizer.render(
+            width, height, (underlay, flat), tables,
+            background_indices=background)
+        composite_rgba = composite.to_rgba(
+            tables, transparent_background=True)
+        underlay_offset = 0
+        self.assertEqual(int(composite.indices[0][0]), 40)
+        self.assertTrue(bool(composite.coverage[0][0]))
+        self.assertEqual(
+            tuple(composite_rgba[underlay_offset:underlay_offset + 4]),
+            (*_palette()[40], 255))
+
+        # The far corner is outside the model: its nonzero destination index
+        # remains in the index buffer without claiming transparent coverage.
+        self.assertEqual(int(accelerated.indices[3][3]), background[15])
+        self.assertFalse(bool(accelerated.coverage[3][3]))
+        self.assertEqual(tuple(rgba[(3 * width + 3) * 4:(3 * width + 4) * 4]),
+                         (*_palette()[background[15]], 0))
+
+    def test_seeded_background_must_match_framebuffer_size(self):
+        with self.assertRaises(ValueError):
+            IndexedRasterizer.render(
+                2, 2, (), _simple_tables(), background_indices=b"\x01\x02\x03")
+
     def test_flat_tracy_source_face_is_composed_once_per_pixel(self):
         tables = _simple_tables({(20, 31): 44, (44, 31): 55})
         opaque = _piece(_surface(20), "opaque", order=0)
