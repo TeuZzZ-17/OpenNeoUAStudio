@@ -3,7 +3,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 import numpy as np
-from .squad_scene import squad_members
+from .squad_scene import squad_members, host_members
 
 CHUNK_SIZE = 8
 STRIDE = 16
@@ -58,10 +58,11 @@ class WorldScene:
         self._size = None
         self._squad_key = None
 
-    def preview(self, typ, building_id=None):
-        key = (typ, building_id)
+    def preview(self, typ, building_id=None, vehicle_id=None):
+        key = (typ, building_id, vehicle_id)
         if key not in self._previews:
-            mesh = (self.lib.building_preview(building_id) if building_id is not None
+            mesh = (self.lib.actor_mesh(vehicle_id) if vehicle_id is not None else
+                    self.lib.building_preview(building_id) if building_id is not None
                     else self.lib.mesh(typ))
             t = self._template(('preview', *key), mesh)
             opaque, flat = t.opaque.copy(), t.flat.copy()
@@ -239,11 +240,11 @@ class WorldScene:
                 self.instances.pop(key, None)
         self.changed_templates = changed_templates
         # Squad geometry uses exact world positions rather than cell instances.
-        squad_key = (repr(doc.squads), terrain.cells.tobytes(),
-                     repr(doc.grids['type'])) if doc.squads else ()
+        squad_key = (repr(doc.squads), repr(doc.host_stations), terrain.cells.tobytes(),
+                     repr(doc.grids['type'])) if doc.squads or doc.host_stations else ()
         if squad_key != self._squad_key:
             key = (-1, -1)
-            if doc.squads or key in self.chunks:
+            if doc.squads or doc.host_stations or key in self.chunks:
                 self.chunks[key] = self._squads(doc, terrain)
                 chunks.add(key)
             self._squad_key = squad_key
@@ -252,8 +253,9 @@ class WorldScene:
     def _squads(self, doc, terrain):
         opaque, flat, ranges = [], [], []
         flat_offset = 0
-        for member in squad_members(doc, terrain, self.lib):
-            template = self._template(('vehicle', member.vehicle), self.lib.vehicle_mesh(member.vehicle))
+        from itertools import chain
+        for member in chain(squad_members(doc, terrain, self.lib), host_members(doc)):
+            template = self._template(('vehicle', member.vehicle), self.lib.actor_mesh(member.vehicle))
             for source, arrays in ((template.opaque, opaque), (template.flat, flat)):
                 if not len(source):
                     continue

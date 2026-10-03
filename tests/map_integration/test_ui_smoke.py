@@ -74,7 +74,7 @@ def test_palette_selection_click_apply_hold_undo_and_save(app, tmp_path):
     win.show()
     _wait_frame(app, win.view)
     assert [win.palette_tabs.tabText(i) for i in range(win.palette_tabs.count())] == [
-        "Sectors", "Buildings", "Factions", "Terrain", "Squad", "Script", "Level Info"]
+        "Sectors", "Buildings", "Factions", "Terrain", "Squad", "Hosts", "Tech", "Script", "Level Info"]
     assert not win.findChildren(QToolBar)
     assert not hasattr(win.view, 'overlay')
     assert not hasattr(win.view, 'mode_isometric_lock')
@@ -141,7 +141,7 @@ def test_palette_single_click_applies_sector_building_owner_once(app, tmp_path):
     win.resize(1100, 800)
     win.show()
     _wait_frame(app, win.view)
-    win.buildings = {1: SimpleNamespace(id=1, sec_type=7, name='Test Building')}
+    win.buildings = {1: SimpleNamespace(id=1, sec_type=7, name='Test Building', enabled_factions=set())}
     win.sel_building = 1
 
     actions = (

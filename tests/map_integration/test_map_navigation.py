@@ -109,7 +109,7 @@ def test_comment_and_camera_reset_are_live_without_map_mutation(win,app):
     win._refresh_squads({0})
     win.squad_panel.advanced.setChecked(True)
     QTest.keyClicks(win.squad_panel.name,'test comment')
-    assert 'test comment' in win.squad_panel.list.item(0).text()
+    assert 'test comment' in win.squad_panel.list.item(0).toolTip()
     before=win.doc.snapshot()
     win._squad_pov(0)
     assert win.view.camera.perspective
@@ -190,7 +190,7 @@ def test_terrain_preset_ignores_previous_selection(win,shape):
     win.undo()
     assert win.doc.snapshot()==before
 
-def test_script_is_penultimate_and_list_click_centers_only_camera(win,app):
+def test_script_is_penultimate_and_list_focus_moves_only_camera(win,app):
     assert win.palette_tabs.tabText(win.palette_tabs.count()-2)=='Script'
     assert win.palette_tabs.tabText(win.palette_tabs.count()-1)=='Level Info'
     win.doc.squads=[dict(owner=1,veh=1,num=2,x=3,y=3,hidden=False,useable=False,custom_name=None)]
@@ -204,6 +204,8 @@ def test_script_is_penultimate_and_list_click_centers_only_camera(win,app):
     item=win.squad_panel.list.item(0)
     QTest.mouseClick(win.squad_panel.list.viewport(),Qt.MouseButton.LeftButton,
                     pos=win.squad_panel.list.visualItemRect(item).center())
+    assert win.view.camera.center==cam.center
+    win._center_squad(0)
     assert win.view.camera.center!=cam.center
     assert (win.view.camera.zoom,win.view.camera.yaw,win.view.camera.pitch)==(cam.zoom,cam.yaw,cam.pitch)
     assert win.doc.snapshot()==before

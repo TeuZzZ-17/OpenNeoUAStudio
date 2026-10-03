@@ -223,7 +223,7 @@ class LevelInfoPanel(QWidget):
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(10, 10, 10, 10)
-        layout.setSpacing(8)
+        layout.setSpacing(6)
 
         title_form = QFormLayout()
         self.title_edit = QLineEdit(str(doc.lvl_info.get("title", "")))
@@ -278,9 +278,10 @@ class LevelInfoPanel(QWidget):
         self.generate_art_button.setToolTip('Create matching briefing and debriefing images from the current map')
         self.generate_art_button.clicked.connect(self.generateArtRequested.emit)
         layout.addWidget(self.generate_art_button)
-        layout.addWidget(QLabel("Artwork is read from your selected game folders."))
 
-        layout.addWidget(QLabel("Select sky"))
+        sky_label = QLabel("Select Sky:")
+        sky_label.setAlignment(Qt.AlignmentFlag.AlignHCenter)
+        layout.addWidget(sky_label)
         self.sky_list = QListWidget()
         self.sky_list.setViewMode(QListWidget.ViewMode.IconMode)
         self.sky_list.setFlow(QListWidget.Flow.LeftToRight)
@@ -329,7 +330,6 @@ class LevelInfoPanel(QWidget):
         self.movie_box.lineEdit().editingFinished.connect(self._emit_values_changed)
         media_form.addRow("Intro movie", self.movie_box)
         layout.addLayout(media_form)
-        layout.addWidget(QLabel("Choose from the installation or type a custom value."))
 
         for key, prefix in (("mbmap", "mb"), ("dbmap", "db")):
             self._update_art(key, prefix)

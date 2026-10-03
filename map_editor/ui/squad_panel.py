@@ -1,11 +1,11 @@
 """Compact editing of the fields actually supported by begin_squad."""
-from PySide6.QtCore import Signal, QEvent
-from PySide6.QtGui import QColor
+from PySide6.QtCore import Signal, QEvent, Qt
 from PySide6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QFormLayout,
-                              QListWidget, QComboBox, QSpinBox, QDoubleSpinBox, QLineEdit,
+                              QComboBox, QSpinBox, QDoubleSpinBox, QLineEdit,
                               QCheckBox, QPushButton, QLabel, QGroupBox, QAbstractItemView)
 from ..core.ldf_model import FACTIONS
 from ..render.squad_scene import squad_xz
+from .preview_cards import PreviewList, set_card, faction_style, DETAIL_ROLE, form_vehicle
 
 
 class WorldCoordinateSpinBox(QDoubleSpinBox):
@@ -29,7 +29,19 @@ class SquadPanel(QWidget):
         self.colors = {}
         self.vehicles = {}
         layout = QVBoxLayout(self)
-        self.list = QListWidget()
+        filters = QHBoxLayout()
+        self.search = QLineEdit(placeholderText='Filter squads...')
+        self.faction_filter = QComboBox()
+        self.faction_filter.addItem('All factions', None)
+        for key, name in FACTIONS.items():
+            self.faction_filter.addItem(name, key)
+        filters.addWidget(self.search, 1)
+        filters.addWidget(self.faction_filter)
+        layout.addLayout(filters)
+        self.list = PreviewList()
+        layout.addLayout(self.list.preview_controls())
+        self.search.textChanged.connect(self._filter)
+        self.faction_filter.currentIndexChanged.connect(self._filter)
         self.list.setMinimumHeight(170)
         self.list.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
         self.list.itemSelectionChanged.connect(self._selected)
@@ -37,7 +49,8 @@ class SquadPanel(QWidget):
         layout.addWidget(self.list, 1)
         row = QHBoxLayout()
         for text, slot in (("Add", self.addRequested.emit),
-                           ("Delete", lambda: self.removeRequested.emit(self.selected_indices()))):
+                           ("Delete", lambda: self.removeRequested.emit(self.selected_indices())),
+                           ("Deselect", lambda: self.set_selection(set()))):
             button = QPushButton(text)
             button.clicked.connect(slot)
             row.addWidget(button)
@@ -55,6 +68,8 @@ class SquadPanel(QWidget):
         self.vehicle = QComboBox()
         self.vehicle.setEditable(True)
         self.vehicle.setInsertPolicy(QComboBox.InsertPolicy.NoInsert)
+        self.vehicle.completer().setFilterMode(Qt.MatchFlag.MatchContains)
+        self.vehicle.completer().setCaseSensitivity(Qt.CaseSensitivity.CaseInsensitive)
         self.vehicle.setToolTip("Search by name or enter the vehicle ID")
         self.count = QSpinBox(minimum=1, maximum=2147483647, value=1)
         self.name = QLineEdit()
@@ -125,10 +140,12 @@ class SquadPanel(QWidget):
             self.list.addItem('')
         self.list.blockSignals(False)
         self.vehicle.blockSignals(True)
+        current_vehicle = self.vehicle.currentData()
         self.vehicle.clear()
         for key, visual in sorted(vehicles.items()):
             self.vehicle.addItem(f"{key} · {visual.name or visual.model or 'Vehicle'}", key)
         self.vehicle.blockSignals(False)
+        self.vehicle.setCurrentIndex(max(0, self.vehicle.findData(current_vehicle)))
         self.update_rows()
         self._loading = False
         self.set_selection({i for i in old if 0 <= i < len(doc.squads)})
@@ -141,13 +158,26 @@ class SquadPanel(QWidget):
             flags = (' · Briefing hidden' if squad.get('hidden') else '') + (' · Host AI' if squad.get('useable') else '')
             preview = 'PREVIEW · ' if squad.get('_preview') else ''
             item = self.list.item(i)
-            item.setText(f"{preview}{i + 1}. {name} ×{squad['num']} · {FACTIONS.get(squad['owner'], '?')}\n"
-                         f"Sector ({squad['x']}, {squad['y']}) · ID {squad['veh']}{flags}"
-                         + (f"\n{squad['custom_name']}" if squad.get('custom_name') else ''))
-            item.setForeground(QColor(*((150, 150, 150) if squad.get('_preview')
-                                       else self.colors.get(squad['owner'], (180, 180, 180)))))
-            item.setToolTip(squad.get('custom_name') or item.text())
+            set_card(item, f"{preview}{i + 1}. {name} ×{squad['num']}",
+                     f"{FACTIONS.get(squad['owner'], '?')} · ID {squad['veh']}\n"
+                     f"Sector ({squad['x']}, {squad['y']}){flags}"
+                     + (f"\n{squad['custom_name']}" if squad.get('custom_name') else ''),
+                     (150, 150, 150) if squad.get('_preview') else
+                     self.colors.get(squad['owner'], (180, 180, 180)), ('veh', squad['veh']))
         self.list.blockSignals(signals_blocked)
+        self._filter()
+        self.list.previewsRequested.emit()
+
+    def _filter(self, *_args):
+        if self.doc is None:
+            return
+        faction = self.faction_filter.currentData()
+        text = self.search.text().casefold()
+        for i, squad in enumerate(self.doc.squads):
+            item = self.list.item(i)
+            item.setHidden((faction is not None and squad['owner'] != faction) or
+                           text not in f'{item.text()} {item.data(DETAIL_ROLE)}'.casefold())
+        self.list.previewsRequested.emit()
 
     def _selected(self):
         if self._loading:
@@ -155,7 +185,7 @@ class SquadPanel(QWidget):
         indices = self.selected_indices()
         index = self.list.currentRow() if self.list.currentRow() in indices else min(indices, default=-1)
         valid = self.doc is not None and 0 <= index < len(self.doc.squads)
-        self.form_widget.setEnabled(valid)
+        self.form_widget.setEnabled(True)
         self.multiple_notice.setVisible(len(indices) > 1)
         self.status.setText("Add a squad, then click the map to insert it." if not valid else
                            f'{len(indices)} selected · Changes apply immediately')
@@ -163,6 +193,7 @@ class SquadPanel(QWidget):
             self._loading = True
             squad = self.doc.squads[index]
             self.owner.setCurrentIndex(self.owner.findData(squad['owner']))
+            faction_style(self.owner, self.colors)
             i = self.vehicle.findData(squad['veh'])
             self.vehicle.setCurrentIndex(i)
             if i < 0:
@@ -177,19 +208,23 @@ class SquadPanel(QWidget):
             self.x.setEnabled(len(indices) == 1)
             self.z.setEnabled(len(indices) == 1)
             self._loading = False
+        else:
+            self.x.setEnabled(True)
+            self.z.setEnabled(True)
+            faction_style(self.owner, self.colors)
         self.selected.emit(indices)
 
     def _change(self, field, value):
+        if field == 'owner':
+            faction_style(self.owner, self.colors)
         if not self._loading and self.doc is not None and self.selected_indices():
             self.valuesChanged.emit(self.selected_indices(), field, value)
 
     def _vehicle_changed(self, *_args):
         if self._loading:
             return
-        i = self.vehicle.currentIndex()
         try:
-            vehicle = (self.vehicle.itemData(i) if i >= 0 and self.vehicle.currentText() == self.vehicle.itemText(i)
-                       else int(self.vehicle.currentText().strip()))
+            vehicle = form_vehicle(self.vehicle)
         except ValueError:
             self.status.setText("Choose a vehicle or enter its numeric ID.")
             return
@@ -197,3 +232,8 @@ class SquadPanel(QWidget):
             self.status.setText("Vehicle ID must be positive.")
             return
         self._change('veh', vehicle)
+
+    def placement_values(self):
+        return dict(owner=self.owner.currentData(), veh=form_vehicle(self.vehicle),
+                    num=self.count.value(), hidden=self.hidden.isChecked(),
+                    useable=self.useable.isChecked(), custom_name=self.name.text().strip() or None)
