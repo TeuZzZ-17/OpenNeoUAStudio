@@ -3748,7 +3748,19 @@ class AssetViewport(AcceleratedWidget):
                         target_width, target_height, camera)
                     if use_view_cache else None
                 )
-                gpu_rendered = self._draw_gpu_indexed(painter, target, ordered, camera)
+                # Flat TRACY reads the actual scene destination, including the grid.
+                backdrop = None
+                if (self._indexed_adapter is not None
+                        and any(mat.tracy_mode == "flat" for mat in self._materials)
+                        and (background is not None or not allow_transparent_background)):
+                    backdrop = self._indexed_scene_background(
+                        target, camera, background, clean, camera_preview)
+                if cache_key is not None:
+                    cache_key += (background.rgba() if background is not None else None,
+                                  self._show_grid, self._show_axes, camera_preview,
+                                  allow_transparent_background)
+                gpu_rendered = self._draw_gpu_indexed(
+                    painter, target, ordered, camera, backdrop=backdrop)
                 if gpu_rendered:
                     indexed_image = None
                 elif (use_view_cache
@@ -3758,7 +3770,8 @@ class AssetViewport(AcceleratedWidget):
                 else:
                     indexed_image = self._render_indexed_model(
                         render_target, ordered, camera,
-                        collect_diagnostics=clean)
+                        collect_diagnostics=clean,
+                        background_indices=self._indexed_background_bytes(backdrop))
                     self._last_indexed_stats.update({
                         "viewport_target_width": target_width,
                         "viewport_target_height": target_height,
@@ -3895,9 +3908,40 @@ class AssetViewport(AcceleratedWidget):
         elif not clean and not self._snapshot_active:
             self._draw_mode_label(painter, target, False)
 
+    def _indexed_scene_background(self, target, camera, background, clean,
+                                  camera_preview=False):
+        """Draw the viewport destination using the same grid and axes as the scene."""
+        width, height = max(1, round(target.width())), max(1, round(target.height()))
+        image = QImage(width, height, QImage.Format.Format_RGB32)
+        image.fill(background if background is not None else QColor(24, 26, 32))
+        painter = QPainter(image)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing, not camera_preview)
+        painter.translate(-target.x(), -target.y())
+        if self._show_grid and not clean:
+            self._draw_grid(painter, target, camera)
+        if self._show_axes and not clean:
+            self._draw_axes(painter, target, camera)
+        painter.end()
+        return image
+
+    def _indexed_background_bytes(self, image):
+        """Map the viewport background to SET palette indices for TRACY lookup."""
+        if image is None:
+            return None
+        colors = [QColor(*rgb).rgb()
+                  for rgb in self._indexed_adapter.tables.display_palette]
+        indexed = image.convertToFormat(
+            QImage.Format.Format_Indexed8, colors,
+            Qt.ImageConversionFlag.AvoidDither)
+        data = bytes(indexed.constBits())
+        width, stride = indexed.width(), indexed.bytesPerLine()
+        return b"".join(data[y * stride:y * stride + width]
+                        for y in range(indexed.height()))
+
     def _render_indexed_model(
             self, target: QRectF, ordered, camera: dict, *,
-            collect_diagnostics: bool = True) -> QImage:
+            collect_diagnostics: bool = True,
+            background_indices: bytes | None = None) -> QImage:
         """Render BSP pieces through the sole palette-index textured backend."""
 
         adapter = self._indexed_adapter
@@ -3907,7 +3951,7 @@ class AssetViewport(AcceleratedWidget):
         result = IndexedRasterizer.render(
             width, height, indexed_pieces, adapter.tables, background_index=0,
             collect_diagnostics=collect_diagnostics,
-            track_polygon_owner=False)
+            track_polygon_owner=False, background_indices=background_indices)
         self._last_indexed_stats = dict(result.stats)
         rgba = result.to_rgba(adapter.tables, transparent_background=True)
         image = QImage(
@@ -3985,7 +4029,7 @@ class AssetViewport(AcceleratedWidget):
             ))
         return indexed_pieces
 
-    def _draw_gpu_indexed(self, painter, target, ordered, camera):
+    def _draw_gpu_indexed(self, painter, target, ordered, camera, *, backdrop=None):
         canvas = getattr(self, '_gpu_canvas', None)
         if (canvas is None or painter.device() is not canvas
                 or self._retail_distance_fade_enabled
@@ -4008,10 +4052,14 @@ class AssetViewport(AcceleratedWidget):
                 from dataclasses import replace
                 pieces = [replace(p, screen=tuple((x*ratio,y*ratio) for x,y in p.screen))
                           for p in pieces]
+                if backdrop is not None:
+                    backdrop = backdrop.scaled(round(target.width()*ratio),
+                                               round(target.height()*ratio))
             self._last_indexed_stats = self._gpu_indexed.render_pieces(
                 pieces, self._indexed_adapter.tables,
                 round(target.width()*ratio), round(target.height()*ratio),
-                canvas.defaultFramebufferObject())
+                canvas.defaultFramebufferObject(),
+                background_indices=self._indexed_background_bytes(backdrop))
         except Exception as exc:
             self._cleanup_gpu()
             self._gpu_indexed_unavailable = True
