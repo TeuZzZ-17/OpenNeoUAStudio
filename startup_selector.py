@@ -9,7 +9,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from PySide6.QtCore import Qt, Signal
+from PySide6.QtCore import QEvent, Qt, Signal
+from PySide6.QtGui import QKeySequence, QShortcut
 from PySide6.QtWidgets import (
     QDialog,
     QFrame,
@@ -163,6 +164,12 @@ class _StaticToolPanel(QFrame):
             panel_layout.addWidget(card)
             self._cards.append(card)
 
+        # Keep this panel static, but let the wheel move the selection instead
+        # of trying to scroll content that is already fully visible.
+        self.installEventFilter(self)
+        for card in self._cards:
+            card.installEventFilter(self)
+
         card_height = 72
         spacing = panel_layout.spacing() * max(0, len(self._cards) - 1)
         margins = (
@@ -205,6 +212,17 @@ class _StaticToolPanel(QFrame):
         self.set_current_key(key)
         self.double_activated.emit(key)
 
+    def eventFilter(self, watched, event) -> bool:  # noqa: N802 - Qt override
+        if (watched is self or watched in self._cards) and \
+                event.type() == QEvent.Type.Wheel:
+            delta = event.angleDelta().y() or event.pixelDelta().y()
+            if delta:
+                self.set_current_row(
+                    self._current_index + (1 if delta < 0 else -1))
+                event.accept()
+                return True
+        return super().eventFilter(watched, event)
+
 
 class StartupToolSelector(QDialog):
     """Ask which OpenNeoUA Studio workspace should be opened."""
@@ -240,6 +258,18 @@ class StartupToolSelector(QDialog):
         self.tool_list.double_activated.connect(
             lambda _key: self.accept())
         layout.addWidget(self.tool_list)
+
+        # WidgetWithChildrenShortcut keeps navigation available when focus is
+        # on either a workspace card or one of the dialog's buttons.
+        self._selection_shortcuts = []
+        for key, step in (
+                (Qt.Key.Key_W, -1), (Qt.Key.Key_S, 1),
+                (Qt.Key.Key_Up, -1), (Qt.Key.Key_Down, 1)):
+            shortcut = QShortcut(QKeySequence(key), self)
+            shortcut.setContext(Qt.ShortcutContext.WidgetWithChildrenShortcut)
+            shortcut.activated.connect(
+                lambda direction=step: self._move_tool_selection(direction))
+            self._selection_shortcuts.append(shortcut)
 
         note = QLabel(
             "Each workspace shares the same OpenNeoUA Studio asset pipeline."
@@ -329,3 +359,8 @@ class StartupToolSelector(QDialog):
         """Return the selected tool key, if a card is selected."""
 
         return self.tool_list.current_key()
+
+    def _move_tool_selection(self, step: int) -> None:
+        current = self.tool_list.current_row()
+        last = self.tool_list.count() - 1
+        self.tool_list.set_current_row(max(0, min(last, current + step)))

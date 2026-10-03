@@ -13,7 +13,7 @@ from pathlib import Path
 
 BUILDING_SUFFIXES = {".cfg", ".scr", ".ini"}
 
-_BEGIN = re.compile(r"(?im)^\s*new_building\s+(\d+)\b")
+_BEGIN = re.compile(r"(?im)^\s*(new|modify)_building\s+(\d+)\b")
 _ASSIGN = re.compile(r"(?im)^\s*([A-Za-z_0-9]+)\s*=\s*([^\n;]+)")
 
 
@@ -37,6 +37,7 @@ class BuildingDef:
     source: str = ""
     debug_note: str = ""
     guns: list[GunMount] = field(default_factory=list)
+    enabled_factions: set = field(default_factory=set)
 
     @property
     def is_radar(self) -> bool:
@@ -102,10 +103,11 @@ def _number(raw: str, default: int = 0) -> int:
         return default
 
 
-def parse_building_text(text: str, source: str = "") -> dict[int, BuildingDef]:
-    result: dict[int, BuildingDef] = {}
+def parse_building_text(text: str, source: str = "", result=None) -> dict[int, BuildingDef]:
+    result = {} if result is None else result
     for match in _BEGIN.finditer(text):
-        bid = int(match.group(1))
+        bid = int(match.group(2))
+        previous = result.get(bid) if match.group(1).casefold() == 'modify' else None
         tail = text[match.end():]
         lines = []
         depth = 0
@@ -151,9 +153,11 @@ def parse_building_text(text: str, source: str = "") -> dict[int, BuildingDef]:
             entry = guns.setdefault(slot, {})
             entry[key[6:]] = raw
         mounts: list[GunMount] = []
-        for slot in range(max(guns, default=-1) + 1):
+        inherited = previous.guns if previous is not None else []
+        for slot in range(max(max(guns, default=-1), len(inherited) - 1) + 1):
             entry = guns.get(slot, {})
-            vehicle = _number(str(entry.get("vehicle", "0")))
+            old = inherited[slot] if slot < len(inherited) else GunMount(0)
+            vehicle = _number(str(entry.get("vehicle", old.vehicle)))
             if vehicle <= 0:
                 break
 
@@ -166,10 +170,10 @@ def parse_building_text(text: str, source: str = "") -> dict[int, BuildingDef]:
                     return fallback
 
             mounts.append(GunMount(
-                vehicle, triplet("pos", (0.0, 0.0, 0.0)),
-                triplet("dir", (0.0, 0.0, 1.0))))
+                vehicle, triplet("pos", old.pos),
+                triplet("dir", old.direction)))
         values.pop("_act", None)
-        result[bid] = BuildingDef(
+        definition = BuildingDef(
             id=bid,
             name=values.get("name", f"Building {bid}"),
             model=values.get("model", ""),
@@ -182,34 +186,28 @@ def parse_building_text(text: str, source: str = "") -> dict[int, BuildingDef]:
             debug_note=debug_note.strip(),
             guns=mounts,
         )
+        if previous is not None:
+            for key in ('name', 'model', 'sec_type', 'power', 'energy', 'production_cost', 'type_icon'):
+                if key not in values:
+                    setattr(definition, key, getattr(previous, key))
+            if not guns:
+                definition.guns = previous.guns
+            definition.enabled_factions = set(previous.enabled_factions)
+        for key, raw in _ASSIGN.findall(body):
+            if key.casefold() == 'enable':
+                definition.enabled_factions.add(_number(raw))
+            elif key.casefold() == 'disable':
+                definition.enabled_factions.discard(_number(raw))
+        result[bid] = definition
     return result
 
 
-def load_building_files(scripts_dir: Path) -> dict[int, BuildingDef]:
-    """Merge every script file containing new_building blocks."""
+def load_building_files(scripts_dir: Path, extra: str = '') -> dict[int, BuildingDef]:
+    """Merge prototypes in the installation's manifest/include order."""
+    from .script_catalog import script_texts
     merged: dict[int, BuildingDef] = {}
-    if not scripts_dir.is_dir():
-        return merged
-    candidates: list[Path] = []
-    for path in sorted(scripts_dir.rglob("*"), key=lambda p: p.name.casefold()):
-        if path.is_file() and path.suffix.casefold() in BUILDING_SUFFIXES:
-            candidates.append(path)
-    # The canonical Buildings file wins so multiplayer variants cannot
-    # silently override the main-game stats shown in the editor.
-    candidates.sort(key=lambda p: (p.name.casefold() == "buildings.cfg", str(p).casefold()))
-    for path in candidates:
-        try:
-            text = _decode(path.read_bytes())
-        except OSError:
-            continue
-        if "new_building" not in text.lower():
-            continue
-        try:
-            label = str(path.relative_to(scripts_dir))
-        except ValueError:
-            label = path.name
-        for bid, definition in parse_building_text(text, label).items():
-            merged[bid] = definition
+    for text, source in script_texts(scripts_dir, extra, with_source=True):
+        parse_building_text(text, source, merged)
     return merged
 
 
