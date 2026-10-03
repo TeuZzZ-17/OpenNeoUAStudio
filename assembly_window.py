@@ -928,6 +928,7 @@ class AssemblyWindow(QMainWindow):
             "Export OpenNeoUA 3D",
             lambda: self._export_setbas_base_onua3d(item))
         export_onua3d.setEnabled(kind == "base" and item is not None)
+        self._add_model_generator_context_actions(menu, item)
         if kind == "base" and item is not None:
             base_name = (
                 item.data(0, _BAS_NAME_ROLE) or item.text(0)).strip()
@@ -960,6 +961,9 @@ class AssemblyWindow(QMainWindow):
             menu.exec(self.setbas_tree.viewport().mapToGlobal(position))
         finally:
             self._setbas_context_item = None
+
+    def _add_model_generator_context_actions(self, menu, item) -> None:
+        """Allow the Model Editor to extend the shared resource menu."""
 
     def _asset_item_path(self, item) -> Path | None:
         if item is None or self._family is None:
@@ -3789,9 +3793,9 @@ class AssemblyWindow(QMainWindow):
             image, f"Palette: {palette_source}")
 
     def _preview_setbas_skeleton(
-            self, resource=None, *, confirm_discard: bool = True) -> None:
+            self, resource=None, *, confirm_discard: bool = True) -> bool:
         if self._setbas is None:
-            return
+            return False
         if resource is None:
             item = self.setbas_tree.currentItem()
             index = item.data(0, Qt.ItemDataRole.UserRole) if item else None
@@ -3800,7 +3804,7 @@ class AssemblyWindow(QMainWindow):
                     self, "No resource selected",
                     "Select a sklt.class resource in the SET.BAS tree first.",
                 )
-                return
+                return False
             resource = self._setbas.resources[index]
         if resource.class_id.lower() != "sklt.class":
             QMessageBox.information(
@@ -3809,12 +3813,12 @@ class AssemblyWindow(QMainWindow):
                 "Preview supports only SKLT skeletons and ILBM/VBMP "
                 "textures.",
             )
-            return
+            return False
         if confirm_discard and not self._confirm_discard_geometry():
-            return
+            return False
         if self._preview_setbas_textured(resource):
             self._raise_setbas_tab()
-            return
+            return True
         try:
             family = load_manual_family(None, [], [], setbas=self._setbas)
             from asset_family import FamilyObject
@@ -3836,13 +3840,14 @@ class AssemblyWindow(QMainWindow):
                 self, "Preview failed",
                 f"No file was modified.\n\n{exc}",
             )
-            return
+            return False
         self._set_family(family)
         self._raise_setbas_tab()
         self.statusBar().showMessage(
             f"{resource.resource_name}: geometry-only (this archive has no "
             "base.class mapping for it, textures live only in loose .base "
             "files)", 10000)
+        return True
 
     def _preview_setbas_textured(self, resource) -> bool:
         """Textured preview of an embedded skeleton via the archive's own
@@ -8634,6 +8639,10 @@ class AssemblyWindow(QMainWindow):
             refs = mapping.refs.get(poly, [])
             if len(refs) == 1:
                 ref = refs[0]
+                # A new animated material takes its UVs from VANM, so an old
+                # fixed OLPL edit no longer belongs to the current mapping.
+                if ref.atts_index >= len(ref.block.olpl):
+                    continue
                 self._uv_original[(owner, ref.block_index, ref.atts_index)] = copy.deepcopy(original)
 
     def _capture_topology_state(self, owner: str) -> dict | None:
