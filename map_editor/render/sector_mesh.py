@@ -4,6 +4,7 @@ from dataclasses import dataclass, field, replace
 from functools import cached_property
 from pathlib import Path
 import math
+import struct
 import numpy as np
 
 from ..core.asset_bridge import SetAssets
@@ -54,6 +55,8 @@ class SectorMeshLibrary:
                    if bootstrap.installation() else bootstrap.game_data_dir() / 'Scripts')
         self.buildings = load_building_files(scripts)
         self.vehicles = load_vehicle_files(scripts)
+        self.scripts = scripts
+        self._external_surfaces = {}
         from vp_manager import parse_visproto
         directory = bootstrap.find_ci(assets.set_dir, 'scripts')
         path = bootstrap.find_ci(directory, 'visproto.lst') if directory else None
@@ -61,6 +64,7 @@ class SectorMeshLibrary:
                           if path else [obj.base_object.name for obj in
                                         assets.family.root_object.kids[0].kids])
         self._gun_meshes = {}
+        self._host_meshes = {}
         self._vehicle_meshes = {}
         self._collision_skeletons = {}
         self._material_adapters = {}
@@ -111,12 +115,16 @@ class SectorMeshLibrary:
         return faces
 
     def surface_for(self, face):
+        if face.material < 0:
+            return self._external_surfaces[face.material]
         loader = self._loader
         material = loader._materials[face.material]
         adapter = self._material_adapters.get(face.material, self.adapter)
         return adapter.resolve_surface(face, material, 0)
 
     def face_uvs(self, face):
+        if face.material < 0:
+            return face.uvs
         loader = self._loader
         return loader._face_uvs(face, loader._materials[face.material])
 
@@ -139,21 +147,47 @@ class SectorMeshLibrary:
         self._meshes[key] = mesh
         return mesh
 
-    def building_mesh(self, building_id: int) -> SectorMesh:
-        """Mounted actors only: blg IDs refer to scripts, not SDF sub-buildings."""
-        if building_id in self._gun_meshes:
-            return self._gun_meshes[building_id]
+    def _mounted_faces(self, mounts) -> SectorMesh:
+        """Render local gun actors with the shared engine-aligned transform."""
         mesh = SectorMesh(-1)
-        definition = self.buildings.get(building_id)
-        for mount in definition.guns if definition else ():
+        for mount in mounts:
+            if mount.vehicle <= 0:
+                continue
             actor = self.vehicle_mesh(mount.vehicle)
             mesh.missing.extend(actor.missing)
             rotation = gun_rotation(mount.direction)
             for face, ox, oz in actor.faces:
                 vertices = (np.asarray(face.vertices) + (ox, 0, oz)) @ rotation.T + mount.pos
                 mesh.faces.append((replace(face, vertices=[tuple(v) for v in vertices]), 0, 0))
+        return mesh
+
+    def building_mesh(self, building_id: int) -> SectorMesh:
+        """Mounted actors only: blg IDs refer to scripts, not SDF sub-buildings."""
+        if building_id in self._gun_meshes:
+            return self._gun_meshes[building_id]
+        definition = self.buildings.get(building_id)
+        mesh = self._mounted_faces(definition.guns if definition else ())
         self._gun_meshes[building_id] = mesh
         return mesh
+
+    def host_mesh(self, vehicle_id: int) -> SectorMesh:
+        """Host model plus its script-defined Robo gun actors."""
+        if vehicle_id in self._host_meshes:
+            return self._host_meshes[vehicle_id]
+        body = self.vehicle_mesh(vehicle_id)
+        definition = self.vehicles.get(vehicle_id)
+        guns = self._mounted_faces(definition.guns if definition else ())
+        mesh = SectorMesh(-1, faces=body.faces + guns.faces,
+                          missing=body.missing + guns.missing)
+        self._host_meshes[vehicle_id] = mesh
+        return mesh
+
+    def actor_mesh(self, vehicle_id: int) -> SectorMesh:
+        """Return a vehicle body, composing mounted guns for Host Stations."""
+        visual = self.vehicles.get(vehicle_id)
+        if visual is not None and visual.model.casefold() == 'robo':
+            return self.host_mesh(vehicle_id)
+        return self.vehicle_mesh(vehicle_id)
 
     def vehicle_mesh(self, vehicle_id: int) -> SectorMesh:
         """Use the same visual and material loader for guns and squad members."""
@@ -162,13 +196,20 @@ class SectorMeshLibrary:
         mesh = SectorMesh(-1)
         visual = self.vehicles.get(vehicle_id)
         if visual is not None:
+            if visual.three_ds_normal:
+                path = self._visual_path(visual.three_ds_normal)
+                if path is not None:
+                    try:
+                        mesh.faces = [(face, 0, 0) for face in self._three_ds_faces(path)]
+                    except (OSError, ValueError, struct.error):
+                        mesh.faces = []
+                    if mesh.faces:
+                        self._vehicle_meshes[vehicle_id] = mesh
+                        return mesh
             base = visual.base_normal
             if base:
-                base = base.replace('\\', '/')
-                data = bootstrap.game_data_dir()
-                relative = base[5:] if base.lower().startswith('data/') else base
-                path = data / relative
-                if path.is_file():
+                path = self._visual_path(base)
+                if path is not None:
                     # Exact paths win over same-named files elsewhere in a set.
                     from asset_family import load_asset_family
                     obj = load_asset_family(path, [self.assets.set_dir], {}, self.assets.archive)
@@ -193,6 +234,73 @@ class SectorMeshLibrary:
             mesh.missing.append(f'vehicle {vehicle_id}')
         self._vehicle_meshes[vehicle_id] = mesh
         return mesh
+
+    def reload_definitions(self, extra=''):
+        self.vehicles = load_vehicle_files(self.scripts, extra)
+        self.buildings = load_building_files(self.scripts, extra)
+        self._vehicle_meshes.clear()
+        self._gun_meshes.clear()
+        self._host_meshes.clear()
+        self._external_surfaces.clear()
+
+    def _visual_path(self, value):
+        value = value.strip().strip('"').replace('\\', '/')
+        if value.casefold().startswith(('data/', 'data:')):
+            value = value[5:]
+        path = bootstrap.game_data_dir()
+        for part in value.split('/'):
+            path = bootstrap.find_ci(path, part) if path is not None else None
+        return path if path is not None and path.is_file() else None
+
+    def _three_ds_faces(self, path):
+        from PIL import Image, ImageChops
+        from assembly_viewer import ViewFace
+        from indexed_renderer import IndexedSurface
+        from ..core.three_ds import read_3ds, Material3DS
+        meshes, materials = read_3ds(path)
+        palette = np.asarray(self.tables.palette, dtype=np.int32)
+        pal = Image.new('P', (1, 1))
+        pal.putpalette(palette.astype(np.uint8).ravel().tolist())
+        surfaces = {}
+        for mesh in meshes:
+            for index, polygon in enumerate(mesh.faces):
+                material = materials.get(mesh.materials.get(index), Material3DS())
+                label = (material.name, bool(mesh.uvs))
+                if label not in surfaces:
+                    surface = None
+                    name = material.texture.replace('\\', '/')
+                    texture = None
+                    if name and not (name.startswith('/') or ':' in name):
+                        texture = path.parent
+                        for part in name.split('/'):
+                            texture = bootstrap.find_ci(texture, part) if texture is not None else None
+                    # Match the engine's fallback for legacy exporter paths.
+                    if name and (texture is None or not texture.is_file()):
+                        texture = bootstrap.find_ci(path.parent, name.rsplit('/', 1)[-1].rsplit(':', 1)[-1])
+                    if name and (texture is None or not texture.is_file()):
+                        authored = Path(name)
+                        texture = authored if authored.is_file() else self._visual_path(name)
+                    if mesh.uvs and material.texture and texture is not None and texture.is_file():
+                        with Image.open(texture) as source:
+                            rgba = source.convert('RGBA')
+                            rgb = ImageChops.multiply(rgba.convert('RGB'), Image.new('RGB', rgba.size, material.diffuse))
+                            pixels = np.asarray(rgb.quantize(palette=pal, dither=Image.Dither.NONE)).copy()
+                            # Index zero is the shared renderer's transparent texel.
+                            pixels[(pixels == 0) & (np.asarray(rgba)[:, :, 3] >= 128)] = 1
+                            pixels[np.asarray(rgba)[:, :, 3] < 128] = 0
+                            surface = IndexedSurface(str(texture), 'texture', pixels.tobytes(),
+                                                     rgba.width, rgba.height, None, 'none', 0,
+                                                     'clear' if np.any(pixels == 0) else 'none', 'depth')
+                    if surface is None:
+                        color = int(np.argmin(((palette[1:] - material.diffuse) ** 2).sum(axis=1))) + 1
+                        surface = IndexedSurface(material.name, 'solid', None, 0, 0, color,
+                                                 'none', 0, 'none', 'depth')
+                    key = -len(self._external_surfaces) - 1
+                    self._external_surfaces[key] = surface
+                    surfaces[label] = key
+                key = surfaces[label]
+                uvs = [mesh.uvs[i] for i in polygon] if mesh.uvs else [(0, 0)] * 3
+                yield ViewFace([mesh.vertices[i] for i in polygon], uvs, key, poly_id=index)
 
     def _family_faces(self, root, family):
         if root is None:

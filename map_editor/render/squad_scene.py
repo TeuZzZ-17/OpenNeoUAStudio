@@ -125,3 +125,12 @@ def squad_members(doc, terrain, lib=None):
                 continue
             yield SquadMember(index, member, squad['veh'], squad['owner'],
                               (member_x, surface_y - ground_offset, member_z))
+
+
+def host_members(doc):
+    """Host positions share the actor IDs used by both map renderers."""
+    for index, host in enumerate(doc.host_stations):
+        if doc.cell_is_valid(host):
+            x, z = squad_xz(host)
+            yield SquadMember(len(doc.squads) + index, 0, host['veh'], host['owner'],
+                              (x + .3, host['pos_y'] + .3, z + .3))

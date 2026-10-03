@@ -13,7 +13,7 @@ from indexed_renderer import IndexedPiece, IndexedRasterizer, retail_source_face
 
 from ..core.ldf_model import DEFAULT_HGT, SECTOR_SIZE
 from .terrain_mesh import HEIGHT_UNIT
-from .squad_scene import squad_members
+from .squad_scene import squad_members, host_members
 
 
 def _clip(vertices, uvs, axis, bound, positive):
@@ -187,15 +187,16 @@ def scene_polygons(lib, doc, terrain, cam):
                 filler = lib.filler_mesh(surface_type(c, r), surface_type(col, row),
                                          vertical, terrain.filler_heights(col, row, vertical))
                 append_mesh(filler, col, row, filler=True)
-    if doc.squads:
-        for member in squad_members(doc, terrain, lib):
+    if doc.squads or doc.host_stations:
+        from itertools import chain
+        for member in chain(squad_members(doc, terrain, lib), host_members(doc)):
             code = -(doc.mw * doc.mh + member.squad + 1)
-            append_mesh(lib.vehicle_mesh(member.vehicle), 0, 0,
+            append_mesh(lib.actor_mesh(member.vehicle), 0, 0,
                         position=member.position, actor_code=code)
     return polygons
 
 
-def render_scene(polygons, cam, tables, fast=False, preview_start=0):
+def render_scene(polygons, cam, tables, fast=False, preview_codes=()):
     ordered = (order_camera_polygons_fast(polygons) if fast else
                order_camera_polygons(polygons, eye=(0.0, 0.0, 4 if cam.perspective else 1e9)))
     pieces = []
@@ -215,8 +216,8 @@ def render_scene(polygons, cam, tables, fast=False, preview_start=0):
     # Il raster condiviso usa -1 per lo sfondo; qui zero significa nessuna cella.
     cells = result.polygon_owner.copy()
     cells[~result.coverage] = 0
-    if preview_start:
-        mask = cells <= -preview_start
+    if preview_codes:
+        mask = np.isin(cells, preview_codes)
         grey = rgba[mask, :3] @ np.array((.299, .587, .114))
         rgba[mask, :3] = np.round(grey[:, None] * .72 + 255 * .62 * .28).astype(np.uint8)
     return SceneFrame(rgba, cells)

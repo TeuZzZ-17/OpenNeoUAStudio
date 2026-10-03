@@ -23,17 +23,18 @@ class _RenderSignals(QObject):
 
 
 class _RenderJob(QRunnable):
-    def __init__(self, polygons, camera, tables, key, generation, terrain, preview_start=0, preview_cells=()):
+    def __init__(self, polygons, camera, tables, key, generation, terrain, preview_cells=(), preview_codes=()):
         super().__init__()
         self.signals = _RenderSignals()
         self.polygons, self.camera, self.tables = polygons, camera, tables
         self.key, self.generation, self.terrain = key, generation, terrain
-        self.preview_start = preview_start
+        self.preview_codes = preview_codes
         self.preview_cells = preview_cells
 
     def run(self):
         try:
-            frame = render_scene(self.polygons, self.camera, self.tables, fast=self.key[-1], preview_start=self.preview_start)
+            frame = render_scene(self.polygons, self.camera, self.tables, fast=self.key[-1],
+                                 preview_codes=self.preview_codes)
             if self.preview_cells:
                 ids = [r*self.terrain.width+c+1 for c,r in self.preview_cells]
                 mask = np.isin(np.abs(frame.cell_ids),ids)
@@ -52,9 +53,10 @@ class MapViewport(QWidget):
     cellReleased = Signal(int, int, object)
     cellDoubleClicked = Signal(int, int, object)
     squadPressed = Signal(int, object)
-    squadDragStarted = Signal(object)
-    squadDragged = Signal(object)
-    squadDragFinished = Signal()
+    hostPressed = Signal(int)
+    actorDragStarted = Signal(str, object)
+    actorDragged = Signal(object)
+    actorDragFinished = Signal()
     cellSelected = Signal(object, object)
     cellSwept = Signal(object)
     selectionCleared = Signal()
@@ -244,9 +246,10 @@ class MapViewport(QWidget):
             self._frame_key = key
             self.statusMessage.emit(f"Unable to update the view: {exc}")
             return
-        preview_start = (self.doc.mw * self.doc.mh + self.doc._preview_start + 1
-                         if hasattr(self.doc, '_preview_start') else 0)
-        self._job = _RenderJob(polygons, cam, self.lib.tables, key, self._generation, terrain, preview_start, tuple(self.preview_cells))
+        previews = tuple(-(self.doc.mw * self.doc.mh + i + 1) for i, actor in
+                         enumerate(self.doc.squads + self.doc.host_stations) if actor.get('_preview'))
+        self._job = _RenderJob(polygons, cam, self.lib.tables, key, self._generation, terrain,
+                              tuple(self.preview_cells), previews)
         self._job.signals.finished.connect(self._render_finished)
         self._pool.start(self._job)
         self.update()
@@ -478,6 +481,17 @@ class MapViewport(QWidget):
         overlay = getattr(self, 'squad_overlay', None)
         return overlay.pick(x, y) if overlay is not None else None
 
+    def pick_host(self, x, y):
+        if (self._frame is None or self._frame_key[1] != self._camera_key()
+                or self._frame_key[0] != self._scene_revision):
+            return None
+        ix, iy = int(x), int(y)
+        if 0 <= ix < self.width() and 0 <= iy < self.height():
+            code = abs(int(self._frame.cell_ids[iy, ix])) - self.doc.mw * self.doc.mh - len(self.doc.squads) - 1
+            if 0 <= code < len(self.doc.host_stations):
+                return code
+        return None
+
     def _begin_interaction(self):
         self._interacting = True
         self._settle.start()
@@ -509,12 +523,18 @@ class MapViewport(QWidget):
                 self._sweep_gesture = True
                 self._sweep_over(self.ground_cell(event.position().x(), event.position().y()))
                 return
+            host = self.pick_host(event.position().x(), event.position().y())
+            if host is not None:
+                self.hostPressed.emit(host)
+                self._drag_actor = True
+                self.actorDragStarted.emit('host', self.ground_cell(event.position().x(), event.position().y()))
+                return
             squad = self.pick_squad(event.position().x(), event.position().y())
             if squad is not None:
                 self.squadPressed.emit(squad, event.modifiers())
                 self._drag_actor = not bool(event.modifiers() & Qt.KeyboardModifier.ControlModifier)
                 if self._drag_actor:
-                    self.squadDragStarted.emit(self.ground_cell(event.position().x(), event.position().y()))
+                    self.actorDragStarted.emit('squad', self.ground_cell(event.position().x(), event.position().y()))
                 else:
                     self._drag_button = None
                 return
@@ -566,11 +586,11 @@ class MapViewport(QWidget):
         self._sweep_last = None
         if self.sample_active:
             self.setCursor(Qt.CursorShape.PointingHandCursor)
-        elif self.draft_active and not self.preview_cells and not hasattr(self.doc,'_preview_start'):
+        elif self.draft_active and not self.preview_cells and not any(a.get('_preview') for a in self.doc.squads + self.doc.host_stations):
             self.setCursor(Qt.CursorShape.ForbiddenCursor)
-        elif self.draft_active or self.active_tool in ('terrain','select') or event.modifiers() & Qt.KeyboardModifier.ControlModifier:
+        elif self.draft_active or self.active_tool == 'terrain' or event.modifiers() & Qt.KeyboardModifier.ControlModifier:
             self.setCursor(Qt.CursorShape.CrossCursor)
-        elif self.pick_squad(pos.x(), pos.y()) is not None:
+        elif self.pick_squad(pos.x(), pos.y()) is not None or self.pick_host(pos.x(), pos.y()) is not None:
             self.setCursor(Qt.CursorShape.OpenHandCursor)
         else:
             self.setCursor(Qt.CursorShape.PointingHandCursor)
@@ -578,7 +598,7 @@ class MapViewport(QWidget):
             if self._drag_actor:
                 if self._moved:
                     self.setCursor(Qt.CursorShape.ClosedHandCursor)
-                    self.squadDragged.emit(cell)
+                    self.actorDragged.emit(cell)
             elif self._paint_gesture:
                 if cell and not self._paint_started:
                     self._paint_started = True
@@ -606,7 +626,7 @@ class MapViewport(QWidget):
             return
         if event.button() == Qt.MouseButton.LeftButton:
             if self._drag_actor:
-                self.squadDragFinished.emit()
+                self.actorDragFinished.emit()
                 self.unsetCursor()
             elif self._paint_gesture:
                 self.cellReleased.emit(*(cell if cell else (-1, -1)), event.modifiers())

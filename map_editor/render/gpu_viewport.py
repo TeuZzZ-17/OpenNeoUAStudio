@@ -249,17 +249,18 @@ class GpuMapViewport(SoftwareMapViewport):
         ratio = self._canvas.devicePixelRatioF()
         selected = getattr(self,'squad_overlay',None)
         styles = [(*((.6,.6,.6) if s.get('_preview') else tuple(v/255 for v in self.owner_colors.get(s['owner'],(150,150,150)))),
-                   2 if selected is not None and i in selected.selected and not s.get('_preview') else 1)
+                   3 if s.get('_preview') else 2 if selected is not None and i in selected.selected else 1)
                   for i,s in enumerate(self.doc.squads)]
+        styles.extend((*((.6,.6,.6) if h.get('_preview') else tuple(v/255 for v in self.owner_colors.get(h['owner'], (150,150,150)))),
+                       3 if h.get('_preview') else 2 if i == getattr(self, 'selected_host', -1) else 1)
+                      for i, h in enumerate(self.doc.host_stations))
         renderer.set_unit_styles(styles)
         hover = self.hover[1]*self.doc.mw+self.hover[0]+1 if self.hover else 0
         renderer.render(self.camera, round(self.width()*ratio), round(self.height()*ratio),
                         self._canvas.defaultFramebufferObject(), owner_colors=self.owner_colors,
                         grid=self.show_grid, sky=self.show_sky, hover=hover, pixel_scale=ratio,
                         overlays=not self.camera.perspective,
-                        cursor_color=self.current_cursor_color(),
-                        preview_start=(self.doc.mw * self.doc.mh + self.doc._preview_start + 1
-                                       if hasattr(self.doc, '_preview_start') else 0))
+                        cursor_color=self.current_cursor_color())
         self._gpu_camera_key = (self._camera_key(), ratio)
         self._frame_key = self._render_key()
         self.frame_ms.append((time.perf_counter()-start)*1000)
@@ -299,7 +300,15 @@ class GpuMapViewport(SoftwareMapViewport):
         overlay = getattr(self, 'squad_overlay', None)
         return overlay.pick(x, y) if overlay is not None else None
 
-    def render_icon(self, lib, typ, scale, *, current=False, building_id=None, max_dimension=512):
+    def pick_host(self, x, y):
+        if self._software_fallback:
+            return super().pick_host(x, y)
+        if self.doc is None:
+            return None
+        code = abs(self._pick_code(x, y)) - self.doc.mw * self.doc.mh - len(self.doc.squads) - 1
+        return code if 0 <= code < len(self.doc.host_stations) else None
+
+    def render_icon(self, lib, typ, scale, *, current=False, building_id=None, vehicle_id=None, max_dimension=512):
         """Small GPU readback only for cached palette icons, never map frames."""
         if self.renderer is None or self._software_fallback:
             return None
@@ -318,7 +327,7 @@ class GpuMapViewport(SoftwareMapViewport):
                 self._preview_scene = WorldScene()
                 self._preview_scene.set_library(lib)
             scene = self._preview_scene
-            changed = scene.preview(typ, building_id)
+            changed = scene.preview(typ, building_id, vehicle_id)
             renderer = self._preview_renderer
             renderer.set_scene(scene, changed)
             geometry = scene.chunks[0, 0]
@@ -331,7 +340,9 @@ class GpuMapViewport(SoftwareMapViewport):
             projection = np.asarray(((cy, 0, sy), (-sp*sy, cp, sp*cy)))
             points = (vertices-np.asarray(camera.center)) @ projection.T * camera.zoom
             lo, hi = points.min(axis=0), points.max(axis=0)
-            factor = min(1.0, (max_dimension-4)/max(1.0, float(max(hi-lo))))
+            factor = (max_dimension-4)/max(1.0, float(max(hi-lo)))
+            if vehicle_id is None:
+                factor = min(1.0, factor)
             camera.zoom *= factor
             lo *= factor; hi *= factor
             camera.width, camera.height = np.ceil(hi-lo+4).astype(int)

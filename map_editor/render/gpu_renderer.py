@@ -122,7 +122,6 @@ uniform int unitCount;
 uniform vec3 ownerColors[8];
 uniform ivec2 mapSize;
 uniform int hoverCell;
-uniform int previewStart;
 uniform vec3 cursorColor;
 uniform bool showGrid;
 uniform bool showSky;
@@ -154,7 +153,7 @@ void main(){
             color.rgb=mix(vec3(grey),vec3(0.62),0.28);
         }
     }
-    if(previewStart>0 && code<=-previewStart){
+    if(unitStyle(code).a==3.0){
         float grey=dot(color.rgb,vec3(0.299,0.587,0.114));
         color.rgb=mix(vec3(grey),vec3(0.62),0.28);
     }
@@ -167,10 +166,10 @@ void main(){
                 ivec2 q=clamp(p+offset,ivec2(0),textureSize(cells,0)-1);
                 int other=texelFetch(cells,q,0).r;
                 vec4 neighbour=unitStyle(other);
-                if(own.a>0.0 && other!=code && d<=(own.a>1.0 ? 2 : 1)){
+                if(own.a>0.0 && other!=code && d<=(own.a==2.0 ? 2 : 1)){
                     color.rgb=own.rgb; return;
                 }
-                if(own.a==0.0 && neighbour.a>1.0 && d<=2){
+                if(own.a==0.0 && neighbour.a==2.0 && d<=2){
                     color.rgb=vec3(1.0,0.98,0.82); return;
                 }
             }
@@ -486,7 +485,7 @@ class GpuRenderer:
 
     def render(self, camera, width, height, target, *, owner_colors, grid=True, sky=True,
                hover=0, pixel_scale=1.0, overlays=True, transparent_background=False,
-               cursor_color=(210, 210, 210), preview_start=0):
+               cursor_color=(210, 210, 210)):
         self._begin(width, height)
         matrix = camera_matrix(camera, self.map_size)
         self._geometry_program(self.opaque_program, matrix)
@@ -560,7 +559,7 @@ class GpuRenderer:
         self._present(target, width, height, owner_colors=owner_colors, grid=grid,
                       sky=sky, hover=hover, pixel_scale=pixel_scale, overlays=overlays,
                       transparent_background=transparent_background,
-                      cursor_color=cursor_color, preview_start=preview_start)
+                      cursor_color=cursor_color)
 
     def _begin(self, width, height):
         self._resize(width, height)
@@ -581,7 +580,7 @@ class GpuRenderer:
 
     def _present(self, target, width, height, *, owner_colors, grid=True, sky=True,
                  hover=0, pixel_scale=1.0, overlays=True, transparent_background=False,
-                 blend=False, cursor_color=(210, 210, 210), preview_start=0):
+                 blend=False, cursor_color=(210, 210, 210)):
         gl.glDepthMask(True)
         gl.glBindFramebuffer(gl.GL_FRAMEBUFFER, target)
         gl.glViewport(0, 0, width, height)
@@ -606,7 +605,6 @@ class GpuRenderer:
         gl.glUniform1i(self.uniform(program, 'showOverlays'), overlays)
         gl.glUniform1i(self.uniform(program, 'transparentBackground'), transparent_background)
         gl.glUniform1i(self.uniform(program, 'hoverCell'), hover if overlays else 0)
-        gl.glUniform1i(self.uniform(program, 'previewStart'), preview_start)
         gl.glUniform3f(self.uniform(program, 'cursorColor'), *(v / 255 for v in cursor_color))
         gl.glUniform1f(self.uniform(program, 'pixelScale'), pixel_scale)
         if blend:

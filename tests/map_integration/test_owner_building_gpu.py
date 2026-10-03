@@ -18,7 +18,8 @@ def app():
     return QApplication.instance() or QApplication([])
 
 
-def test_owner_color_remains_on_visible_building_sector_edges(app):
+@pytest.mark.parametrize('actor_preview', [None, 'squad', 'host'])
+def test_owner_color_and_actor_draft_grayscale_are_independent(app, actor_preview):
     surface = QOffscreenSurface()
     surface.setFormat(gl_format())
     surface.create()
@@ -63,6 +64,13 @@ def test_owner_color_remains_on_visible_building_sector_edges(app):
         indices = np.ones((height, width), dtype=np.uint8)
         cells = np.ones((height, width), dtype=np.int32)
         cells[:, width // 2:] = -1
+        if actor_preview is not None:
+            # Actor IDs follow the terrain IDs. Only the actual draft is gray,
+            # even when adding a squad changes the existing host's ID.
+            cells[:, :width // 2] = -2
+            cells[:, width // 2:] = -3
+            flags = (3, 1) if actor_preview == 'squad' else (1, 3)
+            renderer.set_unit_styles([(1, 0, 0, flag) for flag in flags])
         edges = np.ones((height, width, 4), dtype=np.float32)
 
         gl.glBindTexture(gl.GL_TEXTURE_2D, renderer.indices)
@@ -89,14 +97,20 @@ def test_owner_color_remains_on_visible_building_sector_edges(app):
         gl.glDisable(gl.GL_FRAMEBUFFER_SRGB)
         renderer._present(
             target, width, height, owner_colors={6: owner_color}, grid=False,
-            sky=False, hover=0, overlays=True)
+            sky=False, hover=0, overlays=actor_preview is None)
         gl.glReadBuffer(gl.GL_COLOR_ATTACHMENT0)
         pixels = np.empty((height, width, 4), dtype=np.uint8)
         gl.glReadPixels(0, 0, width, height, gl.GL_RGBA,
                         gl.GL_UNSIGNED_BYTE, pixels)
 
-        assert tuple(pixels[1, 1, :3]) == owner_color
-        assert tuple(pixels[1, width - 2, :3]) == palette_color
+        if actor_preview is None:
+            assert tuple(pixels[1, 1, :3]) == owner_color
+            assert tuple(pixels[1, width - 2, :3]) == palette_color
+        else:
+            draft_x, existing_x = (1, width-2) if actor_preview == 'squad' else (width-2, 1)
+            draft = pixels[1, draft_x, :3]
+            assert max(draft) == min(draft)
+            assert tuple(pixels[1, existing_x, :3]) == palette_color
     finally:
         if renderer is not None:
             renderer.delete()

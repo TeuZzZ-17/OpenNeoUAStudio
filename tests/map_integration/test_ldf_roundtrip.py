@@ -64,6 +64,12 @@ def test_byte_identical_with_sektor2():
             for squad in doc.squads:
                 squad.pop('pos_x', None)
                 squad.pop('pos_z', None)
+            for host in doc.host_stations:
+                host.pop('pos_x', None)
+                host.pop('pos_z', None)
+            # Sektor2 drops empty allowlists. Compare its other formatting here;
+            # the new explicit-empty contract is covered by dedicated tests.
+            doc.tech_explicit.clear()
             mine = lm.dumps_ldf(doc).encode(doc.encoding)
             with open(dst, "rb") as fh:
                 assert mine == fh.read(), path

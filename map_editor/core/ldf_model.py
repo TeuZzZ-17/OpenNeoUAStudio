@@ -6,6 +6,7 @@ import os
 import re
 import tempfile
 from dataclasses import dataclass, field
+from .host_ai_presets import HOST_AI_PRESETS, CUSTOM_AI_PRESETS
 
 SECTOR_STEP = 1200
 SECTOR_OFFSET = 700
@@ -55,12 +56,7 @@ HOST_AI_FIELDS = (
     "saf_budget", "saf_delay", "cpl_budget", "cpl_delay",
 )
 DEFAULT_HOST_AI_PRESET = "Balanced"
-_BALANCED = {
-    "con_budget": 70, "con_delay": 0, "def_budget": 70, "def_delay": 0,
-    "rec_budget": 70, "rec_delay": 0, "rob_budget": 70, "rob_delay": 0,
-    "pow_budget": 40, "pow_delay": 0, "rad_budget": 10, "rad_delay": 0,
-    "saf_budget": 40, "saf_delay": 0, "cpl_budget": 20, "cpl_delay": 0,
-}
+_BALANCED = {key: HOST_AI_PRESETS[DEFAULT_HOST_AI_PRESET][key] for key in HOST_AI_FIELDS}
 
 
 def grid_to_world(col: int, row: int) -> tuple[int, int]:
@@ -73,8 +69,11 @@ def world_to_grid(wx: float, wz: float) -> tuple[int, int]:
 
 
 def make_host_ai(preset: str = DEFAULT_HOST_AI_PRESET) -> dict:
-    ai = dict(_BALANCED)
-    ai["preset"] = DEFAULT_HOST_AI_PRESET
+    if preset in CUSTOM_AI_PRESETS:
+        return dict(CUSTOM_AI_PRESETS[preset])
+    preset = preset if preset in HOST_AI_PRESETS else DEFAULT_HOST_AI_PRESET
+    ai = {key: HOST_AI_PRESETS[preset][key] for key in HOST_AI_FIELDS}
+    ai["preset"] = preset
     return ai
 
 
@@ -97,10 +96,13 @@ def normalize_host_ai(ai=None) -> dict:
     if not any(f in ai for f in HOST_AI_FIELDS) and preset != "Custom":
         return make_host_ai(preset)
     values = clean_host_ai_values(ai)
-    if preset == "Custom" or any(values[f] != _BALANCED[f] for f in HOST_AI_FIELDS):
+    expected = make_host_ai(preset)
+    if preset not in HOST_AI_PRESETS and preset != 'Custom':
+        values['preset'] = preset
+    elif preset == "Custom" or any(values[f] != expected[f] for f in HOST_AI_FIELDS):
         values["preset"] = "Custom"
     else:
-        values["preset"] = DEFAULT_HOST_AI_PRESET
+        values["preset"] = expected['preset']
     return values
 
 
@@ -297,6 +299,8 @@ class LdfDocument:
     host_stations: list = field(default_factory=list)
     player_owner: int = 1
     tech: dict = field(default_factory=new_tech)
+    # Empty begin_enable blocks carry a reset that cannot be inferred from lists.
+    tech_explicit: set = field(default_factory=set)
     custom_tech_names: dict = field(default_factory=dict)
     lvl_info: dict = field(default_factory=new_lvl_info)
     script_content: str = DEFAULT_SCRIPT_CONTENT
@@ -331,6 +335,9 @@ class LdfDocument:
         self.script_content = DEFAULT_SCRIPT_CONTENT
         self.visible_gate_slots = self.visible_item_slots = self.visible_gem_slots = 0
         self.squads, self.host_stations, self.player_owner = [], [], 1
+        self.tech_explicit.clear()
+        self.tech = new_tech()
+        self.custom_tech_names.clear()
 
     def snapshot(self) -> dict:
         return self._copy_state(self.__dict__)
@@ -486,6 +493,8 @@ def loads_ldf(raw_text: str, encoding: str = DEFAULT_LDF_ENCODING) -> LdfDocumen
     raw_title = _level_line_value(parse_text, 'title_default')
     squad_names = _block_vehicle_comment_names(parse_text, 'begin_squad')
     host_names = _block_vehicle_comment_names(parse_text, 'begin_robo')
+    host_ai_labels = [re.search(r'(?im)^\s*;\s*Studio AI preset:\s*(.+)$', block)
+                      for block in re.findall(r'(?ims)^\s*begin_robo\b(.*?)^\s*end\s*$', parse_text)]
     tech_names = _tech_comment_names(parse_text)
     tokens = _parse_tokens(parse_text)
 
@@ -586,6 +595,7 @@ def loads_ldf(raw_text: str, encoding: str = DEFAULT_LDF_ENCODING) -> LdfDocumen
                              'useable': False, 'custom_name': name, 'x': -1, 'y': -1}
             elif t == 'begin_robo':
                 name = host_names[host_idx] if host_idx < len(host_names) else None
+                ai_label = host_ai_labels[host_idx] if host_idx < len(host_ai_labels) else None
                 host_idx += 1
                 cur_host = {'owner': 1, 'veh': 56, 'energy': 500000,
                             'pos_y': DEFAULT_HOST_POS_Y,
@@ -593,6 +603,8 @@ def loads_ldf(raw_text: str, encoding: str = DEFAULT_LDF_ENCODING) -> LdfDocumen
                             'viewangle': DEFAULT_HOST_VIEWANGLE,
                             'custom_name': name, 'x': -1, 'y': -1,
                             'hidden': False, 'ai': make_host_ai()}
+                if ai_label:
+                    cur_host['ai']['preset'] = ai_label[1].strip()
             elif t == 'begin_level':
                 reading_level = True
             elif t == 'begin_mbmap':
@@ -626,16 +638,21 @@ def loads_ldf(raw_text: str, encoding: str = DEFAULT_LDF_ENCODING) -> LdfDocumen
                 try:
                     fid = int(next_token())
                     cur_enable = fid if fid in doc.tech else None
+                    if cur_enable is not None:
+                        doc.tech_explicit.add(fid)
+                        doc.tech[fid] = {'veh': [], 'blg': []}
                 except Exception:
                     cur_enable = None
             elif cur_enable is not None:
                 if t == 'end':
                     cur_enable = None
                 elif t == 'vehicle':
+                    doc.tech_explicit.discard(cur_enable)
                     v = int(get_val())
                     if v not in doc.tech[cur_enable]['veh']:
                         doc.tech[cur_enable]['veh'].append(v)
                 elif t == 'building':
+                    doc.tech_explicit.discard(cur_enable)
                     b = int(get_val())
                     if b not in doc.tech[cur_enable]['blg']:
                         doc.tech[cur_enable]['blg'].append(b)
@@ -723,7 +740,7 @@ def loads_ldf(raw_text: str, encoding: str = DEFAULT_LDF_ENCODING) -> LdfDocumen
                 elif t == 'energy':
                     cur_host['energy'] = int(get_val())
                 elif t == 'pos_y':
-                    cur_host['pos_y'] = int(get_val())
+                    cur_host['pos_y'] = float(get_val())
                 elif t == 'reload_const':
                     cur_host['reload_const'] = int(get_val())
                 elif t == 'viewangle':
@@ -734,9 +751,11 @@ def loads_ldf(raw_text: str, encoding: str = DEFAULT_LDF_ENCODING) -> LdfDocumen
                     if get_val().lower() == 'unknown':
                         cur_host['hidden'] = True
                 elif t == 'pos_x':
-                    cur_host['x'] = world_x(int(get_val()))
+                    cur_host['pos_x'] = float(get_val())
+                    cur_host['x'] = world_x(cur_host['pos_x'])
                 elif t == 'pos_z':
-                    cur_host['y'] = world_y(int(get_val()))
+                    cur_host['pos_z'] = float(get_val())
+                    cur_host['y'] = world_y(cur_host['pos_z'])
             elif cur_gate:
                 if t == 'sec_x':
                     cur_gate['x'] = int(get_val())
@@ -917,9 +936,9 @@ def dumps_ldf(doc: LdfDocument, defs: dict | None = None) -> str:
         label = h['custom_name'] or host_names.get(h['veh'], '')
         w(f"   vehicle = {h['veh']} ; {label}")
         fx, fz = grid_to_world(h['x'], h['y'])
-        w(f"   pos_x = {fx}")
-        w(f"   pos_y = {h['pos_y']}")
-        w(f"   pos_z = {fz}")
+        w(f"   pos_x = {h.get('pos_x', fx):.17g}")
+        w(f"   pos_y = {h['pos_y']:.17g}")
+        w(f"   pos_z = {h.get('pos_z', fz):.17g}")
         w(f"   energy = {h['energy']}")
         if h.get('hidden'):
             w("   mb_status = unknown")
@@ -927,6 +946,8 @@ def dumps_ldf(doc: LdfDocument, defs: dict | None = None) -> str:
         w(f"   viewangle = {h.get('viewangle', DEFAULT_HOST_VIEWANGLE)}")
         if idx > 0:
             ai = h['ai']
+            if ai['preset'] not in HOST_AI_PRESETS and ai['preset'] != 'Custom':
+                w('   ; Studio AI preset: ' + ai['preset'].replace('\n', ' ').replace('\r', ' '))
             for name in HOST_AI_FIELDS:
                 w(f"   {name} = {ai[name]}")
         w("end")
@@ -949,7 +970,7 @@ def dumps_ldf(doc: LdfDocument, defs: dict | None = None) -> str:
     w(sep)
     for i in TECH_FACTIONS:
         d = doc.tech[i]
-        if d['veh'] or d['blg']:
+        if d['veh'] or d['blg'] or i in doc.tech_explicit:
             w(f"begin_enable {i}")
             for v in d['veh']:
                 w(f"   vehicle = {v:<4} ; {doc.custom_tech_names.get(v, veh_names.get(v, ''))}")

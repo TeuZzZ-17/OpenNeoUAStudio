@@ -59,11 +59,12 @@ class SquadOverlay:
                 padded = np.pad(mask,1)
                 return (mask | padded[:-2,1:-1] | padded[2:,1:-1]
                         | padded[1:-1,:-2] | padded[1:-1,2:])
-            for index,squad in enumerate(view.doc.squads):
+            for index,squad in enumerate(view.doc.squads + view.doc.host_stations):
                 mask = ids == -(view.doc.mw*view.doc.mh+index+1)
                 if not mask.any():
                     continue
-                selected = index in self.selected and not squad.get('_preview')
+                selected = ((index < len(view.doc.squads) and index in self.selected) or
+                            (index - len(view.doc.squads) == getattr(view, 'selected_host', -1))) and not squad.get('_preview')
                 edge = mask & expand(~mask)
                 if selected:
                     pixels[expand(expand(mask)) & ~mask] = (255,250,210,255)

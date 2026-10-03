@@ -1,5 +1,5 @@
 """Fitted thumbnails and selection cards shared by map resource palettes."""
-from PySide6.QtCore import QRect, QSize, Qt
+from PySide6.QtCore import QRect, Qt
 from PySide6.QtGui import QColor
 from PySide6.QtWidgets import QStyledItemDelegate, QStyle
 
@@ -10,7 +10,10 @@ class ThumbnailDelegate(QStyledItemDelegate):
 
     def paint(self, painter, option, index):
         view = self.parent()
-        card = option.rect.adjusted(3, 3, -3, -3)
+        rect = option.rect
+        if view.gridSize().width() * 2 > view.viewport().width():
+            rect = QRect(0, rect.top(), view.viewport().width(), rect.height())
+        card = rect.adjusted(3, 3, -3, -3)
         painter.save()
         if option.state & QStyle.StateFlag.State_Selected:
             painter.setPen(Qt.PenStyle.NoPen)
