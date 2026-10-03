@@ -73,12 +73,16 @@ class StudioGpuRenderer(GpuRenderer):
         programs = (_program(STUDIO_VERTEX,STUDIO_FRAGMENT),
                     _program(STUDIO_VERTEX,STUDIO_FRAGMENT.replace(
                         '#version 330 core','#version 330 core\n#define FLAT_PASS')),
-                    _program(SCREEN_VERTEX,SCREEN_FRAGMENT))
+                    _program(SCREEN_VERTEX,SCREEN_FRAGMENT.replace(
+                        'if(code==0 && index==0u)', 'if(code==0)')))
         super().__init__(programs)
         self.owns_programs = True
         self._tables = None
 
-    def render_pieces(self, pieces, tables, width, height, target, *, blend=True):
+    def render_pieces(self, pieces, tables, width, height, target, *, blend=True,
+                      background_indices=None):
+        if background_indices is not None and len(background_indices) != width * height:
+            raise ValueError('Background indices must match render dimensions')
         if any(piece.distance_fade for piece in pieces):
             raise ValueError('Distance-fade diagnostics require the exact software rasterizer')
         data, materials, ranges = piece_geometry(pieces,width,height)
@@ -97,6 +101,13 @@ class StudioGpuRenderer(GpuRenderer):
             self._materials_signature = signature
         self.set_scene(scene,{(0,0)})
         self._begin(width,height)
+        if background_indices is not None:
+            # Seed TRACY with the scene behind the model; untouched pixels stay clear.
+            backdrop = np.frombuffer(background_indices, np.uint8).reshape(height,width)
+            self._bind(self.indices,0)
+            gl.glTexSubImage2D(gl.GL_TEXTURE_2D,0,0,0,width,height,
+                              gl.GL_RED_INTEGER,gl.GL_UNSIGNED_BYTE,
+                              np.ascontiguousarray(backdrop[::-1]))
         gl.glDisable(gl.GL_DEPTH_TEST)
         gl.glDisable(gl.GL_CULL_FACE)
         for start,count,mode in ranges:

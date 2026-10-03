@@ -385,7 +385,8 @@ class IndexedRasterizer:
                tables: IndexedTables, background_index: int = 0,
                flat_tracy_destination_override: int | None = None, *,
                collect_diagnostics: bool = True,
-               track_polygon_owner: bool = True) -> IndexedRenderResult:
+               track_polygon_owner: bool = True,
+               background_indices: bytes | None = None) -> IndexedRenderResult:
         if isinstance(width, bool) or isinstance(height, bool):
             raise TypeError("render dimensions must be integers")
         width, height = operator.index(width), operator.index(height)
@@ -398,6 +399,11 @@ class IndexedRasterizer:
         if not isinstance(tables, IndexedTables):
             raise TypeError("tables must be IndexedTables")
         background = _u8(background_index, "background index")
+        if background_indices is not None:
+            if not isinstance(background_indices, bytes):
+                raise TypeError("background indices must be bytes")
+            if len(background_indices) != width * height:
+                raise ValueError("background indices must match render dimensions")
         forced = (None if flat_tracy_destination_override is None else
                   _u8(flat_tracy_destination_override, "forced TRACY destination"))
         ordered = tuple(pieces)
@@ -409,6 +415,9 @@ class IndexedRasterizer:
             piece.surface.tracy_mode != "none" for piece in ordered)
         if _np is not None:
             framebuffer = _np.full((height, width), background, dtype=_np.uint8)
+            if background_indices is not None:
+                framebuffer = _np.frombuffer(
+                    background_indices, dtype=_np.uint8).reshape(height, width).copy()
             coverage = _np.zeros((height, width), dtype=bool)
             owner = (
                 _np.full((height, width), -1, dtype=_np.int32)
@@ -452,6 +461,9 @@ class IndexedRasterizer:
                 tables.tracy_pixels, dtype=_np.uint8).reshape(256, 256)
         else:
             framebuffer = [[background] * width for _ in range(height)]
+            if background_indices is not None:
+                framebuffer = [list(background_indices[y * width:(y + 1) * width])
+                               for y in range(height)]
             coverage = [[False] * width for _ in range(height)]
             owner = (
                 [[-1] * width for _ in range(height)]

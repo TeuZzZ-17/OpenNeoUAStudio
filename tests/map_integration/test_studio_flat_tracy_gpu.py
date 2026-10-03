@@ -20,7 +20,7 @@ def app():
     return QApplication.instance() or QApplication([])
 
 
-def test_flat_tracy_matches_cpu_for_noop_and_changed_pixels(app):
+def test_flat_tracy_matches_cpu_with_seeded_destination_and_transparent_border(app):
     surface = QOffscreenSurface()
     surface.setFormat(gl_format())
     surface.create()
@@ -70,35 +70,47 @@ def test_flat_tracy_matches_cpu_for_noop_and_changed_pixels(app):
             ((0, 0, 0),) * 4, piece_surface)
         identity = bytes(range(256)) * 256
         palette = tuple((index, index // 2, 255 - index) for index in range(256))
+        background_array = np.fromfunction(
+            lambda y, x: np.where((x + y) % 2 == 0, 10, 20),
+            (height, width), dtype=int).astype(np.uint8)
+        background_indices = background_array.tobytes()
+        tracy = bytearray(identity)
+        # The same raw flat source is a no-op over destination 10 and changes
+        # destination 20 to 40, exercising both TRACY outcomes in one frame.
+        tracy[10 * 256 + 7] = 10
+        tracy[20 * 256 + 7] = 40
+        tables = IndexedTables(palette, identity, bytes(tracy))
 
-        for changed in (False, True):
-            tracy = bytearray(identity)
-            for background in range(256):
-                tracy[background * 256 + 7] = background
-            if changed:
-                tracy[7] = 19
-            tables = IndexedTables(palette, identity, bytes(tracy))
+        cpu = IndexedRasterizer.render(
+            width, height, [piece], tables,
+            background_indices=background_indices,
+        ).to_rgba(tables, transparent_background=True)
+        renderer.render_pieces(
+            [piece], tables, width, height, target, blend=False,
+            background_indices=background_indices,
+        )
+        gl.glBindFramebuffer(gl.GL_READ_FRAMEBUFFER, target)
+        gl.glReadBuffer(gl.GL_COLOR_ATTACHMENT0)
+        gl.glPixelStorei(gl.GL_PACK_ALIGNMENT, 1)
+        gpu = np.empty((height, width, 4), dtype=np.uint8)
+        gl.glReadPixels(0, 0, width, height, gl.GL_RGBA,
+                        gl.GL_UNSIGNED_BYTE, gpu)
+        gpu = gpu[::-1]
+        cpu = np.frombuffer(cpu, dtype=np.uint8).reshape(
+            height, width, 4).copy()
 
-            cpu = IndexedRasterizer.render(
-                width, height, [piece], tables, background_index=0
-            ).to_rgba(tables, transparent_background=True)
-            renderer.render_pieces([piece], tables, width, height, target,
-                                   blend=False)
-            gl.glBindFramebuffer(gl.GL_READ_FRAMEBUFFER, target)
-            gl.glReadBuffer(gl.GL_COLOR_ATTACHMENT0)
-            gl.glPixelStorei(gl.GL_PACK_ALIGNMENT, 1)
-            gpu = np.empty((height, width, 4), dtype=np.uint8)
-            gl.glReadPixels(0, 0, width, height, gl.GL_RGBA,
-                            gl.GL_UNSIGNED_BYTE, gpu)
-            gpu = gpu[::-1]
-            cpu = np.frombuffer(cpu, dtype=np.uint8).reshape(height, width, 4)
-
-            assert tuple(gpu[3, 3]) == tuple(cpu[3, 3])
-            assert tuple(gpu[0, 0]) == tuple(cpu[0, 0])
-            if changed:
-                assert tuple(gpu[3, 3]) == (*palette[19], 255)
-            else:
-                assert tuple(gpu[3, 3]) == (0, 0, 0, 0)
+        assert np.array_equal(gpu[:, :, 3], cpu[:, :, 3])
+        covered = cpu[:, :, 3] != 0
+        assert np.array_equal(gpu[:, :, :3][covered], cpu[:, :, :3][covered])
+        # Transparent RGB is not observable; the CPU conversion preserves its
+        # palette value while the GPU screen pass emits zero RGB.
+        cpu[:, :, :3][~covered] = 0
+        assert np.array_equal(gpu, cpu)
+        # (3, 3) is inside the flat face and remains an uncovered no-op;
+        # (4, 3) changes; (0, 0) is outside and remains transparent.
+        assert tuple(gpu[3, 3]) == (0, 0, 0, 0)
+        assert tuple(gpu[3, 4]) == (*palette[40], 255)
+        assert tuple(gpu[0, 0]) == (0, 0, 0, 0)
     finally:
         if renderer is not None:
             renderer.delete()
