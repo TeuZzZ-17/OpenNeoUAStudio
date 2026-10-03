@@ -4,7 +4,11 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from assembly_window import AssemblyWindow
+from PySide6.QtGui import QAction
+from PySide6.QtCore import Qt
+from PySide6.QtWidgets import QHBoxLayout, QPushButton, QMessageBox
+
+from assembly_window import AssemblyWindow, _BAS_KIND_ROLE, _BAS_NAME_ROLE
 
 
 WINDOW_TITLE = "OpenNeoUA Studio - Model Editor"
@@ -63,6 +67,30 @@ class ModelEditorWindow(AssemblyWindow):
                 self.map_editor_action):
             action.setVisible(False)
 
+        self.generate_wireframe_action = QAction(
+            "Generate Wireframe", self)
+        self.generate_wireframe_action.setEnabled(False)
+        self.generate_wireframe_action.triggered.connect(
+            self._open_wireframe_generator)
+        self.file_menu.insertAction(
+            self.exit_action, self.generate_wireframe_action)
+
+        self.generate_genesis_action = QAction("Generate Genesis", self)
+        self.generate_genesis_action.triggered.connect(self._generate_genesis)
+        self.file_menu.insertAction(self.exit_action, self.generate_genesis_action)
+        self.file_menu.aboutToShow.connect(self._sync_generator_actions)
+        row = QHBoxLayout()
+        self.generate_wireframe_button = QPushButton("Generate Wireframe")
+        self.generate_genesis_button = QPushButton("Generate Genesis")
+        for button, action in (
+                (self.generate_wireframe_button, self.generate_wireframe_action),
+                (self.generate_genesis_button, self.generate_genesis_action)):
+            button.clicked.connect(action.trigger)
+            row.addWidget(button)
+        layout = self.model_texture_label.parentWidget().layout()
+        layout.insertLayout(layout.indexOf(self.model_texture_label), row)
+        self._sync_generator_actions()
+
         # Keep the detached container alive because the shared AssemblyWindow
         # still owns the Snapshot controls and their signal connections.
         self._detached_visuals_tabs = visuals_tabs
@@ -79,6 +107,122 @@ class ModelEditorWindow(AssemblyWindow):
                 self._asset_textures_panel)
         super()._open_visual_texture(
             name, show_preview=show_preview, switch_tabs=False)
+
+    def _sync_wireframe_generator_action(self) -> None:
+        self.generate_wireframe_action.setEnabled(self.viewport.has_model)
+
+    def _sync_edit_action_states(self) -> None:
+        super()._sync_edit_action_states()
+        if hasattr(self, "generate_genesis_action"):
+            self._sync_generator_actions()
+
+    def _sync_generator_actions(self) -> None:
+        self._sync_wireframe_generator_action()
+        self.generate_wireframe_button.setEnabled(self.viewport.has_model)
+        reason = self._material_structure_reason()
+        obj = self._workbench_obj
+        if not reason and (self._family.base_asset is None
+                           or self._family.base_asset.tree is None):
+            reason = "load a complete BASE asset family first"
+        enabled = not reason and obj is not None and bool(obj.skeleton.polygons)
+        self.generate_genesis_action.setEnabled(enabled)
+        self.generate_genesis_button.setEnabled(enabled)
+        tip = ("Transform the current model into a Genesis. Undo restores it."
+               if enabled else "Generate Genesis: " + (reason or "load a model first"))
+        self.generate_genesis_action.setToolTip(tip)
+        self.generate_genesis_button.setToolTip(tip)
+
+    def _add_model_generator_context_actions(self, menu, item) -> None:
+        kind = item.data(0, _BAS_KIND_ROLE) if item is not None else None
+        menu.addSeparator()
+        for text, genesis in (("Generate Wireframe", False),
+                              ("Generate Genesis", True)):
+            action = menu.addAction(text)
+            action.setEnabled(kind in ("base", "sklt.class"))
+            action.triggered.connect(
+                lambda _checked=False, g=genesis:
+                self._generate_from_setbas_item(item, genesis=g))
+
+    def _create_viewport_context_menu(self, position=None):
+        menu = super()._create_viewport_context_menu(position)
+        self._sync_generator_actions()
+        reset_camera = menu.actions()[-1]
+        menu.insertAction(reset_camera, self.generate_wireframe_action)
+        menu.insertAction(reset_camera, self.generate_genesis_action)
+        menu.insertSeparator(reset_camera)
+        return menu
+
+    def _generate_from_setbas_item(self, item, *, genesis: bool) -> None:
+        if self._setbas is None or item is None:
+            return
+        kind = item.data(0, _BAS_KIND_ROLE)
+        if kind not in ("base", "sklt.class"):
+            return
+        if kind == "base":
+            name = item.data(0, _BAS_NAME_ROLE) or item.text(0)
+            _family, target, _offset = self._resolve_setbas_base(str(name))
+            if target is None:
+                return
+            if target is not self._owner_to_obj.get(self._selected_owner) \
+                    and not self._confirm_discard_geometry():
+                return
+            if self._activate_setbas_base(str(name)) is None:
+                return
+        else:
+            index = item.data(0, Qt.ItemDataRole.UserRole)
+            if index is None:
+                return
+            resource = self._setbas.resources[index]
+            obj = self._owner_to_obj.get(self._selected_owner)
+            same_model = (obj is not None and self._family is not None
+                          and self._family.setbas_archive is self._setbas
+                          and obj.base_object.skeleton_name.replace("\\", "/").casefold()
+                          == resource.resource_name.replace("\\", "/").casefold())
+            if not same_model:
+                if not self._confirm_discard_geometry():
+                    return
+                if not self._preview_setbas_skeleton(
+                        resource, confirm_discard=False):
+                    return
+        if genesis:
+            self._right_tabs.setCurrentWidget(self._editor_tabs)
+            self._editor_tabs.setCurrentWidget(self._model_editor_panel)
+            self._sync_tab_edit_mode()
+            self._generate_genesis()
+        else:
+            self._open_wireframe_generator()
+
+    def _generate_genesis(self) -> None:
+        if not self._require_editing("Generate Genesis"):
+            return
+        if self._family is None or self._family.base_asset is None:
+            self._notify("Generate Genesis requires a complete BASE asset family.", 6000)
+            return
+        from .genesis_generator import generate_genesis
+        try:
+            self._apply_material_structure(
+                "Generate Genesis",
+                lambda: generate_genesis(self._family, self._workbench_obj))
+        except Exception as exc:
+            QMessageBox.warning(self, "Generate Genesis failed", str(exc))
+            return
+        self._notify("Genesis generated. Undo restores the original model; "
+                     "Export Asset Family saves the result.", 7000)
+
+    def _open_wireframe_generator(self) -> None:
+        if not self.viewport.has_model:
+            return
+
+        from .wireframe_dialog import WireframeGeneratorDialog
+
+        animation_was_active = self.viewport._anim_timer.isActive()
+        if animation_was_active:
+            self.viewport._anim_timer.stop()
+        try:
+            WireframeGeneratorDialog(self.viewport, self).exec()
+        finally:
+            if animation_was_active:
+                self.viewport._anim_timer.start()
 
     def _set_document_title(self, path: str | Path | None) -> None:
         if path is None:
