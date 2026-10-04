@@ -48,7 +48,7 @@ class SectorMeshLibrary:
         if self.adapter is None:
             raise RuntimeError(self._loader._indexed_unavailable_reason)
         self._material_index: dict = {}
-        self._base_cache: dict[str, list] = {}
+        self._base_cache: dict[tuple[str, bool], list] = {}
         self._meshes: dict[tuple[int, int], SectorMesh] = {}
         self._filler_templates: dict[tuple, tuple] = {}
         scripts = (bootstrap.installation().folder('scripts')
@@ -91,15 +91,15 @@ class SectorMeshLibrary:
             self._collision_skeletons[key] = skeleton
         return self._collision_skeletons[key]
 
-    def _base_faces(self, base_name: str) -> list | None:
-        key = base_name.lower()
+    def _base_faces(self, base_name: str, *, set_only: bool = False) -> list | None:
+        key = (base_name.lower(), set_only)
         if key in self._base_cache:
             return self._base_cache[key]
-        obj = self.assets.base_object(base_name)
+        obj = self.assets.base_object(base_name, set_only=set_only)
         faces = None
         if obj is not None:
             family = self.assets._loose_families.get(self.assets._key(base_name))
-            if family is not None:
+            if family is not None and obj is family.root_object:
                 faces = self._family_faces(obj, family)
                 self._base_cache[key] = faces
                 return faces
@@ -219,12 +219,12 @@ class SectorMeshLibrary:
             else:
                 base = (self._vp_names[visual.vp_normal]
                         if 0 <= visual.vp_normal < len(self._vp_names) else '')
-                faces = self._base_faces(base) if base else None
+                faces = self._base_faces(base, set_only=True) if base else None
             if faces is None:
                 # The engine falls back to the positional VP when an external BASE fails.
                 fallback = (self._vp_names[visual.vp_normal]
                             if 0 <= visual.vp_normal < len(self._vp_names) else '')
-                faces = self._base_faces(fallback) if fallback else None
+                faces = self._base_faces(fallback, set_only=True) if fallback else None
             if faces is None:
                 mesh.missing.append(base or f'VP {visual.vp_normal}')
             else:

@@ -73,8 +73,14 @@ class SetAssets:
             self._loose_index = index
         return self._loose_index
 
-    def base_object(self, base_name: str) -> FamilyObject | None:
+    def base_object(self, base_name: str, *, set_only: bool = False) -> FamilyObject | None:
         key = self._key(base_name)
+        if set_only:
+            path = self._index_loose().get(key)
+            # Positional VPs belong to the set. Unreferenced Models/Base files
+            # can share a name with another visual state, such as Genesis.
+            if path is None or not path.is_relative_to(self.set_dir):
+                return self._by_name.get(key)
         if key not in self._loose:
             found = None
             path = self._index_loose().get(key)

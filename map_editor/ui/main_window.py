@@ -39,7 +39,7 @@ from .preview_cards import RESOURCE_ROLE
 from ..core.ldf_model import ensure_host_defaults, make_host_ai
 from .squad_overlay import SquadOverlay
 from .colored_tabs import PaletteTabs, TAB_COLORS
-from ..render.squad_scene import squad_xz, centered_squad_position, MAX_PREVIEW_MEMBERS
+from ..render.squad_scene import squad_xz, centered_squad_position, host_position, MAX_PREVIEW_MEMBERS
 from .. import bootstrap
 from assembly_viewer import VIEW_PRESET_ANGLES
 
@@ -864,10 +864,9 @@ class MainWindow(QMainWindow):
         if not 0 <= index < len(hosts) or not self.doc.cell_is_valid(hosts[index]):
             return
         host = hosts[index]
-        x, z = squad_xz(host)
         if self.view.camera.perspective:
             self.view.reset_camera()
-        self.view.camera.center = (x, host['pos_y'], z)
+        self.view.camera.center = host_position(host, self.doc, self.view.terrain, self._lib())
         self.view.camera.pan = (0, 0)
         self.view.cameraChanged.emit()
         self.view.update()
@@ -877,10 +876,11 @@ class MainWindow(QMainWindow):
             return
         self._cancel_operation(clear=False)
         host = self.doc.host_stations[index]
-        x, z = squad_xz(host)
-        visual = self._lib().vehicles.get(host['veh'])
+        lib = self._lib()
+        position = host_position(host, self.doc, self.view.terrain, lib)
+        visual = lib.vehicles.get(host['veh'])
         offset = visual.viewer if visual is not None else (0, 0, 0)
-        eye = (x + .3 + offset[0], host['pos_y'] + .3 + offset[1], z + .3 + offset[2])
+        eye = tuple(value + delta for value, delta in zip(position, offset))
         angle = math.radians(host['viewangle'])
         self.view.enter_pov_at(eye, (-math.sin(angle), 0, math.cos(angle)))
 

@@ -189,7 +189,7 @@ def scene_polygons(lib, doc, terrain, cam):
                 append_mesh(filler, col, row, filler=True)
     if doc.squads or doc.host_stations:
         from itertools import chain
-        for member in chain(squad_members(doc, terrain, lib), host_members(doc)):
+        for member in chain(squad_members(doc, terrain, lib), host_members(doc, terrain, lib)):
             code = -(doc.mw * doc.mh + member.squad + 1)
             append_mesh(lib.actor_mesh(member.vehicle), 0, 0,
                         position=member.position, actor_code=code)
