@@ -4043,5 +4043,66 @@ class CollisionEditorTests(unittest.TestCase):
         self.assertIs(tree.topLevelItem(20), clicked_item)
 
 
+    def test_148_unit_switch_frames_current_scale_and_ground_offset(self):
+        cases = [(vp, kind, cockpit)
+                 for vp, kind in ((1, "new_vehicle"), (0, "new_vehicle"),
+                                  (1, "new_weapon"))
+                 for cockpit in (False, True)]
+        for next_vp, next_kind, cockpit in cases:
+            with self.subTest(vp=next_vp, kind=next_kind, cockpit=cockpit):
+                text = (
+                    "new_vehicle 1\n name = First\n vp_normal = 0\n"
+                    " visual_scale_x = 4\n visual_scale_y = 2\n"
+                    " visual_scale_z = 3\n overeof = 100\nend\n"
+                    f"{next_kind} 2\n name = Next\n vp_normal = {next_vp}\n"
+                    " visual_scale_x = 0.5\n visual_scale_y = 1.5\n"
+                    " visual_scale_z = 2\n overeof = 7\nend\n")
+                window, _script = self._script_unit_window(
+                    object_id=1, object_kind="new_vehicle", script_text=text)
+                viewport = window.viewport
+                viewport._yaw = 120.0
+                viewport._pitch = -40.0
+                viewport._zoom = 3.0
+                viewport._pan = QPointF(80.0, -30.0)
+                if cockpit:
+                    window.properties_tabs.setCurrentIndex(
+                        window.cockpit_tab_index)
+                window.model_tree.setCurrentItem(
+                    window.model_tree.topLevelItem(1))
+                QApplication.processEvents()
+
+                self.assertEqual(window.project.name, "Next")
+                self.assertEqual(viewport.cockpit_preview_active,
+                                 cockpit and next_kind == "new_vehicle")
+                window.properties_tabs.setCurrentIndex(
+                    window.collision_tab_index)
+                x0, y0, z0, x1, y1, z1 = viewport._owner_bounds[
+                    window._current_owner]
+                expected_center = ((x0 + x1) / 2, (y0 + y1) / 2,
+                                   (z0 + z1) / 2)
+                expected_scale = 2.0 / max(x1 - x0, y1 - y0, z1 - z0)
+                self.assertEqual(viewport._center, expected_center)
+                self.assertAlmostEqual(viewport._scale, expected_scale)
+                self.assertEqual(viewport._yaw, viewport.RESET_YAW)
+                self.assertEqual(viewport._pitch, viewport.RESET_PITCH)
+                self.assertEqual(viewport._pan, QPointF())
+                self.assertEqual(viewport._zoom, 1.0)
+                self.assertTrue(viewport.camera_is_reset)
+                self.assertFalse(window.toolbar_reset_view_button.isEnabled())
+                home = viewport._camera_state()
+
+                # Ordinary property refreshes preserve the user's camera;
+                # Reset View must still restore this unit's initial framing.
+                viewport._yaw = 65.0
+                viewport._zoom = 2.0
+                viewport._pan = QPointF(20.0, 10.0)
+                moved = viewport._camera_state()
+                window._sync_all()
+                self.assertEqual(viewport._camera_state(), moved)
+                self.assertTrue(window.toolbar_reset_view_button.isEnabled())
+                window._reset_view()
+                self.assertEqual(viewport._camera_state(), home)
+
+
 if __name__ == "__main__":
     unittest.main()
