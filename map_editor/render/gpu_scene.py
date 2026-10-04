@@ -254,7 +254,7 @@ class WorldScene:
         opaque, flat, ranges = [], [], []
         flat_offset = 0
         from itertools import chain
-        for member in chain(squad_members(doc, terrain, self.lib), host_members(doc)):
+        for member in chain(squad_members(doc, terrain, self.lib), host_members(doc, terrain, self.lib)):
             template = self._template(('vehicle', member.vehicle), self.lib.actor_mesh(member.vehicle))
             for source, arrays in ((template.opaque, opaque), (template.flat, flat)):
                 if not len(source):

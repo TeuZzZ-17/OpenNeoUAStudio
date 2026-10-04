@@ -288,7 +288,7 @@ def test_hosts_render_and_have_distinct_pick_ids_on_both_paths(app):
     scene.set_library(lib)
     scene.update(doc, terrain)
     assert np.any(scene.chunks[-1, -1].opaque[:, 11] == code)
-    position = next(host_members(doc)).position
+    position = next(host_members(doc, terrain, lib)).position
     camera = IsoCamera(center=position, zoom=.18, width=400, height=320)
     frame = render_scene(scene_polygons(lib, doc, terrain, camera), camera, lib.tables)
     assert np.any(frame.cell_ids == code)

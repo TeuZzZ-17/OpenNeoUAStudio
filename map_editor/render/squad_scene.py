@@ -127,10 +127,17 @@ def squad_members(doc, terrain, lib=None):
                               (member_x, surface_y - ground_offset, member_z))
 
 
-def host_members(doc):
+def host_position(host, doc, terrain, lib=None):
+    """LDF host height is an offset from the collision surface, as in LoadRobos."""
+    x, z = squad_xz(host)
+    x, z = x + .3, z + .3
+    surface = ground_height(doc, terrain, lib, x, z)
+    return x, host['pos_y'] + .3 + (surface if surface is not None else 0), z
+
+
+def host_members(doc, terrain, lib=None):
     """Host positions share the actor IDs used by both map renderers."""
     for index, host in enumerate(doc.host_stations):
         if doc.cell_is_valid(host):
-            x, z = squad_xz(host)
             yield SquadMember(len(doc.squads) + index, 0, host['veh'], host['owner'],
-                              (x + .3, host['pos_y'] + .3, z + .3))
+                              host_position(host, doc, terrain, lib))
