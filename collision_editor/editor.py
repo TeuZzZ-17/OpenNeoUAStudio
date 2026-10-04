@@ -6866,11 +6866,21 @@ class CollisionEditorWindow(QMainWindow):
 
         owner = item.data(0, Qt.ItemDataRole.UserRole)
         self._current_owner = owner
+        # Capture the new unit's orbit view; _sync_all restores the active tab.
+        self.viewport.set_cockpit_preview_active(False)
         self.viewport.load_family(
             self.family, {owner}, primary_owner=owner)
         self._current_owner_base_bounds = (
             self.viewport._model_preview_base_owner_bounds.get(owner))
         self._viewport_owner = owner
+        # Frame and capture Reset View using this unit's preview settings,
+        # before _sync_all updates the remaining controls and overlays.
+        self.viewport.set_model_preview_scale(
+            self.project.model_scale_x, self.project.model_scale_y,
+            self.project.model_scale_z)
+        self.viewport.set_ground_alignment(
+            self.project.target_category == VEHICLE,
+            self.project.overeof_enabled, self.project.overeof)
         self.viewport.frame_owner(owner)
         # Same contract as Model Editor: Reset View restores the exact camera
         # first presented for this selected model, not a later re-fit.
