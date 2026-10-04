@@ -53,6 +53,7 @@ class HostPanel(QWidget):
         self.energy = QSpinBox(minimum=0, maximum=2147483647, value=500000)
         self.height = WorldCoordinateSpinBox()
         self.height.setValue(DEFAULT_HOST_POS_Y)
+        self.height.setToolTip('Height offset from the ground; negative values are above the surface.')
         self.hidden = QCheckBox('Hidden in briefing')
         self.player = QPushButton('Use this faction as player')
         self.player.clicked.connect(lambda: self.playerRequested.emit(self.list.currentRow()))

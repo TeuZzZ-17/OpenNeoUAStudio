@@ -212,6 +212,23 @@ def test_host_pov_uses_script_viewer_and_view_angle(win):
     assert win.view.camera.to_camera((x-1000, y, z))[2] < 4 < win.view.camera.to_camera((x+1000, y, z))[2]
 
 
+def test_host_focus_and_pov_follow_raised_terrain(win):
+    from map_editor.core.ldf_model import DEFAULT_HGT
+    from map_editor.render.squad_scene import host_position
+    win.doc.grids['hgt'] = [[DEFAULT_HGT+20] * win.doc.mw for _ in range(win.doc.mh)]
+    win.view.terrain_changed()
+    win.doc.host_stations = [host()]
+    win._refresh_squads()
+    win._refresh_hosts(0)
+    position = host_position(win.doc.host_stations[0], win.doc, win.view.terrain, win._lib())
+    assert position[1] < -2000
+    win._center_host(0)
+    assert win.view.camera.center == position
+    win._host_pov(0)
+    assert win.view.camera.center[1] == position[1] + win._lib().vehicles[56].viewer[1]
+    assert win.doc.host_stations[0]['pos_y'] == -700
+
+
 @pytest.mark.parametrize('kind', ['host', 'squad'])
 def test_actor_mouse_drag_cursors_and_ground_deselection(win, app, monkeypatch, kind):
     win.doc.host_stations = [host()] if kind == 'host' else []
