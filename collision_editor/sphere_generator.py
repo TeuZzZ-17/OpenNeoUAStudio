@@ -13,7 +13,7 @@ import numpy as np
 
 Point3 = tuple[float, float, float]
 Triangle3 = tuple[Point3, Point3, Point3]
-UNIT_COLL_MAX_COUNT = 512
+UNIT_COLL_MAX_COUNT = 256
 
 
 @dataclass(frozen=True)

@@ -9,13 +9,17 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field, replace
 import difflib
+import json
 import math
 from pathlib import Path
 import re
 import sys
+import tempfile
 
 from PySide6.QtCore import (
     QEvent,
+    QProcess,
+    QProcessEnvironment,
     QItemSelectionModel,
     QPoint,
     QPointF,
@@ -69,15 +73,24 @@ from PySide6.QtWidgets import (
     QVBoxLayout,
     QWidget,
     QPlainTextEdit,
+    QProgressBar,
     QScrollArea,
     QSizePolicy,
 )
 
 from assembly_viewer import AssetViewport, VIEW_PRESETS
-from asset_family import AssetFamily, load_asset_family, load_manual_family
+from asset_family import (
+    AssetFamily,
+    FamilyObject,
+    MaterialGroup,
+    load_asset_family,
+    load_manual_family,
+)
+from base_parser import BaseObject
+from map_editor.core.three_ds import read_3ds
+from sklt_parser import SkltModel
 from asset_tree_filter import filter_tree as filter_asset_tree
 from editor_widgets import (
-    choose_bas_archive,
     configure_operation_status_bar,
     create_import_bas_archive_action,
     install_standard_file_menu_tail,
@@ -86,6 +99,17 @@ from collision_editor.sphere_generator import (
     ACCURACY_PRESETS,
     UNIT_COLL_MAX_COUNT,
     generate_collision_spheres,
+)
+from collision_editor.shape import (
+    CollisionHull,
+    CollisionShape,
+    collision_shape_text,
+    geometry_fingerprint,
+    parse_collision_shape,
+    read_collision_shape,
+    sampled_surface_metrics,
+    visual_transform_point,
+    write_collision_shape,
 )
 from model_space_gizmo import ModelSpaceGizmo
 from vp_manager import (
@@ -237,7 +261,7 @@ _PARAM_RE = re.compile(
     re.IGNORECASE,
 )
 _GENERIC_PARAM_RE = re.compile(
-    r"^(?P<indent>\s*)(?P<key>[A-Za-z_][A-Za-z0-9_]*)\s*=\s*"
+    r"^(?P<indent>\s*)(?P<key>[A-Za-z0-9_][A-Za-z0-9_]*)\s*=\s*"
     r"(?P<value>[^;#\r\n]+)",
     re.IGNORECASE,
 )
@@ -247,6 +271,76 @@ def _number(value: float) -> str:
     if math.isfinite(value) and abs(value - round(value)) < 1e-9:
         return str(int(round(value)))
     return f"{value:.6f}".rstrip("0").rstrip(".")
+
+
+def _data_root_for_path(*paths: str | Path | None) -> Path | None:
+    """Find the nearest explicit game ``Data`` folder beside a source path."""
+
+    for value in paths:
+        if not value:
+            continue
+        path = Path(value).expanduser().resolve(strict=False)
+        candidates = (path, *path.parents)
+        for candidate in candidates:
+            if candidate.name.casefold() == "data" and candidate.is_dir():
+                return candidate
+    return None
+
+
+def _resolve_data_asset_path(
+        value: str, *source_paths: str | Path | None) -> Path | None:
+    """Resolve a script visual/collision reference without doubling Data/."""
+
+    raw = value.strip().replace("\\", "/")
+    if not raw or raw.casefold() == "0":
+        return None
+    candidates: list[Path] = []
+    if raw.casefold().startswith("data/"):
+        for source in source_paths:
+            data_root = _data_root_for_path(source)
+            if data_root is not None:
+                candidates.append(data_root.parent / Path(raw))
+        relative = Path(*raw.split("/")[1:])
+        for source in source_paths:
+            if source:
+                root = _data_root_for_path(source)
+                if root is not None:
+                    candidates.append(root / relative)
+    else:
+        relative = Path(raw)
+        for source in source_paths:
+            if source:
+                path = Path(source).expanduser().resolve(strict=False)
+                anchor = path if path.is_dir() else path.parent
+                candidates.extend((anchor / relative,))
+                data_root = _data_root_for_path(path)
+                if data_root is not None:
+                    candidates.append(data_root / relative)
+    for candidate in candidates:
+        if candidate.is_file():
+            return candidate.resolve(strict=False)
+    return None
+
+
+def _collision_shape_export_filename(project: "CollisionProject") -> str:
+    """Return a safe, readable Windows filename for one unit's shape."""
+
+    display_name = project.name.strip()
+    if display_name.casefold() in {"", "model", "unknown"}:
+        model_path = (project.source_model or project.source_base).replace(
+            "\\", "/")
+        display_name = Path(model_path).stem
+    candidate = re.sub(r'[<>:"/\\|?*\x00-\x1f\s]+', "_", display_name)
+    candidate = candidate.strip(" ._")
+    if not candidate:
+        candidate = "Model"
+    if candidate.upper() in {
+            "CON", "PRN", "AUX", "NUL",
+            *(f"COM{index}" for index in range(1, 10)),
+            *(f"LPT{index}" for index in range(1, 10)),
+    }:
+        candidate += "_"
+    return f"{candidate}.collision"
 
 
 def _sphere_number(value: float) -> str:
@@ -493,6 +587,9 @@ class CollisionProject:
     model_scale_x: float = 1.0
     model_scale_y: float = 1.0
     model_scale_z: float = 1.0
+    model_rotation_x: float = 0.0
+    model_rotation_y: float = 0.0
+    model_rotation_z: float = 0.0
     # Vehicle-only ground alignment.  When enabled, the preview follows the
     # engine placement rule ``actor_y = ground_y - overeof`` and the value is
     # included in text export/application.
@@ -528,6 +625,12 @@ class CollisionProject:
     cockpit_camera_offset_z: float = 0.0
     legacy: CollisionSphere | None = None
     compound: list[CollisionSphere] = field(default_factory=list)
+    collision_shape: CollisionShape | None = None
+    collision_shape_path: str = ""
+    collision_shape_file_path: str = ""
+    collision_shape_owners: tuple[str, ...] | None = None
+    collision_shape_components: tuple[str, ...] | None = None
+    collision_shape_warnings: tuple[str, ...] = ()
     # Editor-only focus state. It is kept in undo/redo snapshots so adding a
     # new sphere while isolated does not make the visibility controls forget
     # that the user is still working in isolation mode.
@@ -547,6 +650,8 @@ class CollisionProject:
             self.name, self.source_model, self.source_base,
             self.target_category,
             self.model_scale_x, self.model_scale_y, self.model_scale_z,
+            self.model_rotation_x, self.model_rotation_y,
+            self.model_rotation_z,
             self.overeof_enabled, self.overeof,
             self.fire_points_enabled,
             self.fire_x, self.fire_y, self.fire_z,
@@ -567,6 +672,10 @@ class CollisionProject:
             ) for vehicle_id, limits in sorted(self.turret_limits.items())),
             one(self.legacy),
             tuple(one(sphere) for sphere in self.compound),
+            self.collision_shape, self.collision_shape_path,
+            self.collision_shape_file_path, self.collision_shape_owners,
+            self.collision_shape_components,
+            self.collision_shape_warnings,
             self.sphere_isolation_active,
         )
 
@@ -576,6 +685,8 @@ class CollisionProject:
         (self.name, self.source_model, self.source_base,
          self.target_category,
          self.model_scale_x, self.model_scale_y, self.model_scale_z,
+         self.model_rotation_x, self.model_rotation_y,
+         self.model_rotation_z,
          self.overeof_enabled, self.overeof,
          self.fire_points_enabled,
          self.fire_x, self.fire_y, self.fire_z,
@@ -584,7 +695,12 @@ class CollisionProject:
          self.cockpit_camera_enabled,
          self.cockpit_camera_offset_x, self.cockpit_camera_offset_y,
          self.cockpit_camera_offset_z, gun_points, turret_limits,
-         legacy, compound, self.sphere_isolation_active) = state
+         legacy, compound, self.collision_shape,
+         self.collision_shape_path, self.collision_shape_file_path,
+         self.collision_shape_owners,
+         self.collision_shape_components,
+         self.collision_shape_warnings,
+         self.sphere_isolation_active) = state
         self.gun_points = [GunPoint(*values) for values in gun_points]
         self.turret_limits = {
             values[0]: TurretLimits(*values) for values in turret_limits
@@ -613,11 +729,17 @@ class VehicleModelReference:
     """One script definition that can resolve a visual prototype."""
 
     block: ScriptBlock
-    vp_normal: int
+    vp_normal: int | None
     vp_wait: int | None = None
     scale_x: float = 1.0
     scale_y: float = 1.0
     scale_z: float = 1.0
+    rotation_x: float = 0.0
+    rotation_y: float = 0.0
+    rotation_z: float = 0.0
+    base_normal: str = ""
+    three_ds_normal: str = ""
+    collision_shape_path: str = ""
 
     @property
     def label(self) -> str:
@@ -625,9 +747,16 @@ class VehicleModelReference:
         wait = (
             f", vp_wait {self.vp_wait}"
             if self.vp_wait is not None else "")
+        visual = (
+            f"3ds_normal {self.three_ds_normal}"
+            if self.three_ds_normal else
+            f"base_normal {self.base_normal}"
+            if self.base_normal else
+            f"vp_normal {self.vp_normal}"
+        )
         return (
             f"{self.block.kind} {self.block.object_id}{suffix}  "
-            f"[vp_normal {self.vp_normal}{wait}]"
+            f"[{visual}{wait}]"
         )
 
 
@@ -735,7 +864,8 @@ def _generic_parameter_rows(lines: list[str], block: ScriptBlock):
         rows.append((
             index,
             match.group("key").lower(),
-            match.group("value").strip().split()[0],
+            match.group("value").strip().strip('"').split(maxsplit=1)[0]
+            if match.group("value").strip().strip('"') else "",
             match.group("indent"),
         ))
     return rows
@@ -768,25 +898,36 @@ def script_model_references(text: str) -> list[VehicleModelReference]:
             "vp_scale_x": None,
             "vp_scale_y": None,
             "vp_scale_z": None,
+            "visual_rotation_x": None,
+            "visual_rotation_y": None,
+            "visual_rotation_z": None,
+        }
+        visual_paths = {
+            "base_normal": "",
+            "3ds_normal": "",
+            "collision_shape": "",
         }
         for _line, key, raw, _indent in _generic_parameter_rows(lines, block):
-            if key not in values:
-                continue
-            try:
-                values[key] = float(raw)
-            except ValueError as exc:
-                raise CollisionScriptError(
-                    f"Non-numeric {key} in {block.kind} "
-                    f"{block.object_id}: {raw}") from exc
+            if key in visual_paths:
+                visual_paths[key] = raw
+            elif key in values:
+                try:
+                    values[key] = float(raw)
+                except ValueError as exc:
+                    raise CollisionScriptError(
+                        f"Non-numeric {key} in {block.kind} "
+                        f"{block.object_id}: {raw}") from exc
         raw_vp = values["vp_normal"]
-        if raw_vp is None:
+        if (raw_vp is None and not visual_paths["base_normal"]
+                and not visual_paths["3ds_normal"]):
             continue
-        if not math.isfinite(raw_vp):
+        if raw_vp is not None and not math.isfinite(raw_vp):
             raise CollisionScriptError(
                 f"Non-finite vp_normal in {block.kind} "
                 f"{block.object_id}: {raw_vp}")
-        vp_id = int(raw_vp)
-        if abs(raw_vp - vp_id) > 1e-9 or vp_id < 0:
+        vp_id = int(raw_vp) if raw_vp is not None else None
+        if (raw_vp is not None
+                and (abs(raw_vp - vp_id) > 1e-9 or vp_id < 0)):
             raise CollisionScriptError(
                 f"Invalid vp_normal in {block.kind} "
                 f"{block.object_id}: {raw_vp}")
@@ -816,6 +957,18 @@ def script_model_references(text: str) -> list[VehicleModelReference]:
             raise CollisionScriptError(
                 f"Invalid visual_scale_x/y/z in {block.kind} "
                 f"{block.object_id}: {scales}")
+        rotations = tuple(
+            float(values[f"visual_rotation_{axis}"])
+            if values[f"visual_rotation_{axis}"] is not None else 0.0
+            for axis in ("x", "y", "z")
+        )
+        if not all(math.isfinite(value) for value in rotations):
+            raise CollisionScriptError(
+                f"Invalid visual_rotation_x/y/z in {block.kind} "
+                f"{block.object_id}: {rotations}")
+        shape_path = visual_paths["collision_shape"].strip()
+        if shape_path.casefold() == "0":
+            shape_path = ""
         references.append(VehicleModelReference(
             block=block,
             vp_normal=vp_id,
@@ -823,6 +976,12 @@ def script_model_references(text: str) -> list[VehicleModelReference]:
             scale_x=scales[0],
             scale_y=scales[1],
             scale_z=scales[2],
+            rotation_x=rotations[0],
+            rotation_y=rotations[1],
+            rotation_z=rotations[2],
+            base_normal=visual_paths["base_normal"],
+            three_ds_normal=visual_paths["3ds_normal"],
+            collision_shape_path=shape_path,
         ))
     return references
 
@@ -942,6 +1101,326 @@ def import_collision_block(
             f"coll_num={expected}, ma sono stati letti "
             f"{len(compounds)} blocchi coll_act.")
     return legacy, compounds, warnings
+
+
+def import_collision_shape_reference(
+        text: str, block: ScriptBlock) -> str:
+    """Read the final active collision_shape path from one script block."""
+
+    value = ""
+    for _line, key, raw, _indent in _generic_parameter_rows(
+            text.splitlines(), block):
+        if key == "collision_shape":
+            value = raw.strip()
+    return "" if value.casefold() in {"", "0"} else value
+
+
+def _load_3ds_family(path: str | Path) -> AssetFamily:
+    """Wrap existing 3DS meshes as a geometry-only AssetFamily."""
+
+    source = Path(path)
+    meshes, _materials = read_3ds(source)
+    family = AssetFamily(
+        base_path=source,
+        search_root=str(source.parent),
+        search_roots=[str(source.parent)],
+    )
+    root = FamilyObject(
+        base_object=BaseObject(name=source.stem), owner_path="root")
+    for index, mesh in enumerate(meshes):
+        name = f"{source.stem}_{index + 1}"
+        skeleton = SkltModel(
+            source_name=f"{source.name}:{index + 1}",
+            points=[tuple(point) for point in mesh.vertices],
+            polygons=[list(face) for face in mesh.faces],
+            parsed_polygon_count=len(mesh.faces),
+        )
+        child = FamilyObject(
+            base_object=BaseObject(name=name, skeleton_name=name),
+            skeleton=skeleton,
+            owner_path=f"root/kid[{index}]",
+        )
+        root.kids.append(child)
+    family.root_object = root
+    family.warnings.append(
+        "3DS geometry loaded through the shared AssetViewport; textures and "
+        "per-object animation are not represented in this geometry-only view.")
+    return family
+
+
+def _resolve_script_visual_source(
+        reference: VehicleModelReference, script_path: str | Path,
+        chosen_set: str | Path | None, current_set: str | Path | None,
+        family_loader=None):
+    """Resolve runtime visual priority: 3DS, BASE, then SET VP.
+
+    A failed higher-priority override is returned as a warning while the next
+    source is tried. Asset probing stays read-only and never opens a modal UI.
+    """
+
+    loader = family_loader or _public_dependency(
+        "load_asset_family", load_asset_family)
+    failures = []
+    candidates = (
+        ("3ds_normal", reference.three_ds_normal),
+        ("base_normal", reference.base_normal),
+    )
+    for label, value in candidates:
+        if not value or value.strip().casefold() in {"", "0"}:
+            continue
+        path = _resolve_data_asset_path(
+            value, script_path, chosen_set, current_set)
+        if path is None:
+            failures.append(
+                f"{label} ignored because {value} could not be resolved")
+            continue
+        try:
+            family = (_load_3ds_family(path)
+                      if path.suffix.casefold() == ".3ds"
+                      else loader(path))
+            if not any(
+                    obj.skeleton is not None
+                    and getattr(obj.skeleton, "polygons", None)
+                    for obj in family.all_objects()):
+                raise ValueError("asset has no polygon geometry")
+        except Exception as exc:
+            failures.append(f"{label} ignored: {exc}")
+            continue
+        return label, path, value, tuple(failures)
+    if reference.vp_normal is not None:
+        return "vp_normal", None, "", tuple(failures)
+    return "unavailable", None, "", tuple(failures)
+
+
+def _reference_for_visual_source(
+        reference: VehicleModelReference,
+        visual_source: str) -> VehicleModelReference:
+    """Keep script data intact while describing the visual that loaded."""
+
+    if visual_source == "base_normal" and reference.three_ds_normal:
+        return replace(reference, three_ds_normal="")
+    if (visual_source == "vp_normal"
+            and (reference.three_ds_normal or reference.base_normal)):
+        return replace(reference, three_ds_normal="", base_normal="")
+    return reference
+
+
+_GEOMETRY_COMPONENT_ROLE = int(Qt.ItemDataRole.UserRole) + 1
+
+
+class GeometryPartSelectionWidget(QWidget):
+    """Keep a model's collision geometry selection visible in its tab."""
+
+    selectionChanged = Signal()
+
+    def __init__(self, parent=None, on_component_highlight=None) -> None:
+        super().__init__(parent)
+        self._components = ()
+        self._components_by_key = {}
+        self._triangles_by_owner = {}
+        self._source_key = None
+        self._on_component_highlight = on_component_highlight
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(3)
+        self.summary_label = QLabel("Load a model to select collision geometry.")
+        layout.addWidget(self.summary_label)
+        self.tree = QTreeWidget()
+        self.tree.setHeaderLabels(["Geometry / component", "Triangles", "Topology"])
+        self.tree.header().setSectionResizeMode(
+            0, QHeaderView.ResizeMode.Stretch)
+        self.tree.header().setSectionResizeMode(
+            1, QHeaderView.ResizeMode.ResizeToContents)
+        self.tree.header().setSectionResizeMode(
+            2, QHeaderView.ResizeMode.ResizeToContents)
+        layout.addWidget(self.tree, 1)
+        self.tree.currentItemChanged.connect(
+            self._update_component_highlight)
+        self.tree.itemChanged.connect(self._selection_changed)
+
+    def set_geometry(self, family, root_owner, components,
+                     owner_triangles, source_key) -> None:
+        preserve = source_key == self._source_key and source_key is not None
+        selected_keys = set(self.selected_component_keys()) if preserve else set()
+        self._source_key = source_key
+        self._components = tuple(components)
+        self._components_by_key = {
+            _geometry_component_key(component): component
+            for component in self._components
+        }
+        self._triangles_by_owner = dict(owner_triangles)
+
+        blocker = QSignalBlocker(self.tree)
+        self.tree.clear()
+        by_path = {}
+        objects = []
+        if family is not None:
+            for obj in family.all_objects():
+                if obj.skeleton is None:
+                    continue
+                owner = obj.owner_path
+                if root_owner and not (
+                        owner == root_owner
+                        or owner.startswith(root_owner.rstrip("/") + "/")):
+                    continue
+                objects.append(obj)
+                parent_item = by_path.get(owner.rpartition("/")[0])
+                item = QTreeWidgetItem(parent_item or self.tree)
+                item.setText(0, obj.display_name or owner)
+                item.setText(
+                    1, str(len(self._triangles_by_owner.get(owner, ()))))
+                item.setData(0, Qt.ItemDataRole.UserRole, owner)
+                item.setFlags(
+                    item.flags() | Qt.ItemFlag.ItemIsUserCheckable
+                    | Qt.ItemFlag.ItemIsAutoTristate)
+                by_path[owner] = item
+
+        components_by_owner = {}
+        for component in self._components:
+            components_by_owner.setdefault(component.owner, []).append(
+                component)
+        for owner, owner_components in components_by_owner.items():
+            owner_item = by_path.get(owner)
+            if owner_item is None:
+                continue
+            owner_item.setText(
+                1, str(sum(len(component.triangles)
+                           for component in owner_components)))
+            for index, component in enumerate(owner_components, 1):
+                key = _geometry_component_key(component)
+                child = QTreeWidgetItem(owner_item)
+                child.setText(0, f"Component {index}")
+                child.setText(1, str(len(component.triangles)))
+                diagnostic = _geometry_component_diagnostic(component)
+                child.setText(2, diagnostic)
+                child.setData(0, _GEOMETRY_COMPONENT_ROLE, key)
+                points = [
+                    point for triangle in component.triangles
+                    for point in triangle
+                ]
+                if points:
+                    axes = ("X", "Y", "Z")
+                    bounds = "\n".join(
+                        f"{axes[axis]}: "
+                        f"{min(point[axis] for point in points):.3f} … "
+                        f"{max(point[axis] for point in points):.3f}"
+                        for axis in range(3))
+                    child.setToolTip(
+                        0, "Model-local bounds before visual scale and "
+                        f"rotation:\n{bounds}")
+                child.setToolTip(2, diagnostic)
+                child.setFlags(
+                    child.flags() | Qt.ItemFlag.ItemIsUserCheckable)
+                child.setCheckState(
+                    0, Qt.CheckState.Checked if (
+                        not preserve or key in selected_keys)
+                    else Qt.CheckState.Unchecked)
+
+        if not self._components:
+            for owner, item in by_path.items():
+                item.setCheckState(
+                    0, Qt.CheckState.Checked if not preserve
+                    else item.data(0, Qt.ItemDataRole.UserRole)
+                    in selected_keys)
+        self.tree.expandAll()
+        first = self.tree.topLevelItem(0)
+        if first is not None:
+            self.tree.setCurrentItem(first)
+        del blocker
+        self.summary_label.setText(
+            "No collision triangles in the selected model." if not objects
+            else f"{len(objects)} geometry parts; "
+            f"{len(self.selected_components())} components selected.")
+        self._update_component_highlight(self.tree.currentItem(), None)
+        self.selectionChanged.emit()
+
+    def selected_components(self):
+        selected = []
+        stack = [self.tree.topLevelItem(index)
+                 for index in range(self.tree.topLevelItemCount())]
+        while stack:
+            item = stack.pop()
+            key = item.data(0, _GEOMETRY_COMPONENT_ROLE)
+            component = self._components_by_key.get(key)
+            if (component is not None
+                    and item.checkState(0) == Qt.CheckState.Checked):
+                selected.append(component)
+            stack.extend(
+                item.child(index) for index in range(item.childCount()))
+        return tuple(sorted(
+            selected, key=lambda value: _geometry_component_key(value)))
+
+    def selected_component_keys(self) -> tuple[str, ...]:
+        return tuple(
+            _geometry_component_key(component)
+            for component in self.selected_components())
+
+    def selected_owners(self) -> tuple[str, ...]:
+        components = self.selected_components()
+        if components:
+            return tuple(sorted({component.owner for component in components}))
+        selected = []
+        stack = [self.tree.topLevelItem(index)
+                 for index in range(self.tree.topLevelItemCount())]
+        while stack:
+            item = stack.pop()
+            owner = item.data(0, Qt.ItemDataRole.UserRole)
+            if owner and item.checkState(0) == Qt.CheckState.Checked:
+                selected.append(str(owner))
+            stack.extend(
+                item.child(index) for index in range(item.childCount()))
+        return tuple(sorted(selected))
+
+    def _selection_changed(self, _item, _column) -> None:
+        self.summary_label.setText(
+            f"{len(self._triangles_by_owner)} geometry parts; "
+            f"{len(self.selected_components())} components selected.")
+        self._update_component_highlight(self.tree.currentItem(), None)
+        self.selectionChanged.emit()
+
+    def _update_component_highlight(self, item, _previous) -> None:
+        if self._on_component_highlight is None:
+            return
+        if item is None:
+            self._on_component_highlight(None)
+            return
+        key = item.data(0, _GEOMETRY_COMPONENT_ROLE)
+        component = self._components_by_key.get(key)
+        if component is not None:
+            self._on_component_highlight(component.triangles)
+            return
+        owner = item.data(0, Qt.ItemDataRole.UserRole)
+        if owner:
+            prefix = str(owner).rstrip("/")
+            triangles = tuple(
+                triangle
+                for path, owner_triangles in self._triangles_by_owner.items()
+                if path == prefix or path.startswith(prefix + "/")
+                for triangle in owner_triangles)
+            self._on_component_highlight(triangles or None)
+        else:
+            self._on_component_highlight(None)
+
+
+def _geometry_component_key(component) -> str:
+    return f"{component.owner}#component:{component.component_id}"
+
+
+def _geometry_component_diagnostic(component) -> str:
+    details = []
+    if component.boundary_edges:
+        details.append(f"open {component.boundary_edges}")
+    if component.non_manifold_edges:
+        details.append(f"non-manifold {component.non_manifold_edges}")
+    if component.planar:
+        details.append("planar, no volume")
+    elif component.boundary_edges or component.non_manifold_edges:
+        details.append("3D surface")
+    elif component.has_volume:
+        details.append("closed volume")
+    else:
+        details.append("no volume")
+    return ", ".join(details) if details else "closed volume"
 
 
 def import_overeof_block(
@@ -1080,7 +1559,7 @@ _GUN_POINT_KEYS = {
 }
 _SCRIPT_TAB_KEYS = {
     _SCRIPT_TAB_COLLISION: {
-        "radius", "overeof", "coll_num", "coll_act",
+        "radius", "overeof", "coll_num", "coll_act", "collision_shape",
         "coll_x", "coll_y", "coll_z", "coll_radius",
     },
     _SCRIPT_TAB_FIRE: {"fire_x", "fire_y", "fire_z", "num_weapons"},
@@ -1115,7 +1594,7 @@ _MANAGED_SCRIPT_FAMILIES = (
         "OpenNeoUA collision",
         frozenset({
             "coll_num", "coll_act", "coll_x", "coll_y", "coll_z",
-            "coll_radius",
+            "coll_radius", "collision_shape",
         }),
         frozenset({"compound collisions", "openneoua collision"})),
     _ManagedScriptFamily(
@@ -1142,7 +1621,7 @@ _OLD_DISABLED_HEADER_RE = re.compile(
     re.IGNORECASE,
 )
 _COMMENTED_ASSIGNMENT_RE = re.compile(
-    r"^\s*;\s*(?P<key>[A-Za-z_][A-Za-z0-9_]*)\s*=",
+    r"^\s*;\s*(?P<key>[A-Za-z0-9_][A-Za-z0-9_]*)\s*=",
     re.IGNORECASE,
 )
 
@@ -1575,6 +2054,10 @@ def _collision_tab_data_lines(project: CollisionProject) -> list[str]:
     """Render only parameters owned by the Collision tab."""
 
     lines: list[str] = []
+    if len(project.compound) > UNIT_COLL_MAX_COUNT:
+        raise CollisionScriptError(
+            f"OpenNeoUA collision spheres exceed the runtime limit "
+            f"of {UNIT_COLL_MAX_COUNT}; imported data was kept unchanged.")
     if project.legacy is not None:
         lines.append(f"radius = {_radius_number(project.legacy.radius)}")
     if project.target_category == VEHICLE and project.overeof_enabled:
@@ -1592,6 +2075,17 @@ def _collision_tab_data_lines(project: CollisionProject) -> list[str]:
                 f"coll_z = {_number(sphere.z)}",
                 f"coll_radius = {_number(sphere.radius)}",
             ])
+    if project.collision_shape_path:
+        path = project.collision_shape_path.replace("\\", "/").strip()
+        if (not path.casefold().startswith("data/")
+                or not path.casefold().endswith(".collision")
+                or ".." in path.split("/")
+                or any(character.isspace() for character in path)):
+            raise CollisionScriptError(
+                "Collision Shape path must be a space-free Data/... .collision path.")
+        if lines:
+            lines.append("")
+        lines.append(f"collision_shape = {path}")
     return lines
 
 
@@ -1704,6 +2198,7 @@ def _validate_editable_tab_lines(
     block = find_script_blocks(text)[0]
     if group == _SCRIPT_TAB_COLLISION:
         import_collision_block(text, block, OPENNEOUA)
+        import_collision_shape_reference(text, block)
         if "vehicle" in kind:
             import_overeof_block(text, block)
     elif group == _SCRIPT_TAB_FIRE:
@@ -2105,6 +2600,7 @@ def plan_script_update(
     ]
     gun_rows = [row for row in rows if row[1] in _GUN_POINT_KEYS]
     coll_rows = [row for row in rows if row[1].startswith("coll_")]
+    shape_rows = [row for row in rows if row[1] == "collision_shape"]
     indent = next(
         (row[3] for row in rows if row[3]),
         re.match(r"^(\s*)", lines[block.start_line]).group(1) + "    ",
@@ -2168,6 +2664,10 @@ def plan_script_update(
         if project.legacy is not None else [])
     compound_lines = []
     if project.compound:
+        if len(project.compound) > UNIT_COLL_MAX_COUNT:
+            raise CollisionScriptError(
+                f"OpenNeoUA collision spheres exceed the runtime limit "
+                f"of {UNIT_COLL_MAX_COUNT}; imported data was kept unchanged.")
         compound_lines = [f"coll_num = {len(project.compound)}"]
         for index, sphere in enumerate(project.compound):
             compound_lines.extend([
@@ -2207,6 +2707,12 @@ def plan_script_update(
         replace_group(
             gun_rows, gun_point_data_lines(project), "gun points")
     replace_group(coll_rows, compound_lines, "compound collisions")
+    shape_lines = _collision_tab_data_lines(project)
+    shape_lines = [
+        line for line in shape_lines
+        if line.startswith("collision_shape = ")
+    ]
+    replace_group(shape_rows, shape_lines, "collision shape")
 
     output: list[str] = []
     for index, line in enumerate(lines):
@@ -2628,6 +3134,10 @@ class CollisionViewport(AssetViewport):
         self._pick_cycle_candidates: tuple[int, ...] = ()
         self._pick_cycle_offset = -1
         self._model_preview_scale = (1.0, 1.0, 1.0)
+        self._model_preview_rotation = (0.0, 0.0, 0.0)
+        self._collision_shape: CollisionShape | None = None
+        self._collision_shape_overlay_visible = False
+        self._geometry_component_preview: tuple | None = None
         self._ground_alignment_available = True
         self._ground_alignment_authored = False
         self._ground_alignment_source_loaded = False
@@ -2875,6 +3385,7 @@ class CollisionViewport(AssetViewport):
         self._model_preview_base_faces = []
         self._model_preview_base_sen_boxes = []
         self._model_preview_base_owner_bounds = {}
+        self._collision_shape = None
 
     def load_family(self, family, visible_owners=None, keep_camera=False,
                     primary_owner=None) -> None:
@@ -2904,13 +3415,14 @@ class CollisionViewport(AssetViewport):
         ]
         self._model_preview_base_owner_bounds = dict(self._owner_bounds)
 
-    def local_owner_triangles(self, owner: str | None, *, animated_indices=None):
+    def local_owner_triangles(self, owner: str | set[str] | None, *, animated_indices=None):
         """Return selected-owner triangles before preview scale and overeof."""
 
         triangles = []
+        owners = ({owner} if isinstance(owner, str) else owner)
         for face, vertices in zip(
                 self._faces, self._model_preview_base_faces):
-            if owner is not None and face.owner != owner:
+            if owners is not None and face.owner not in owners:
                 continue
             if len(vertices) < 3:
                 continue
@@ -2933,11 +3445,12 @@ class CollisionViewport(AssetViewport):
         )
 
     def _preview_point(self, point):
-        scaled = self._scaled_point(point, self._model_preview_scale)
+        transformed = visual_transform_point(
+            point, self._model_preview_scale, self._model_preview_rotation)
         return (
-            scaled[0],
-            scaled[1] + self.overeof_preview_offset,
-            scaled[2],
+            transformed[0],
+            transformed[1] + self.overeof_preview_offset,
+            transformed[2],
         )
 
     def local_scaled_owner_bounds(self, owner: str | None):
@@ -2952,12 +3465,18 @@ class CollisionViewport(AssetViewport):
         if bounds is None:
             return None
         x0, y0, z0, x1, y1, z1 = bounds
-        scale = self._model_preview_scale
-        a = self._scaled_point((x0, y0, z0), scale)
-        b = self._scaled_point((x1, y1, z1), scale)
+        corners = [
+            visual_transform_point((x, y, z), self._model_preview_scale,
+                                   self._model_preview_rotation)
+            for x in (x0, x1) for y in (y0, y1) for z in (z0, z1)
+        ]
         return (
-            min(a[0], b[0]), min(a[1], b[1]), min(a[2], b[2]),
-            max(a[0], b[0]), max(a[1], b[1]), max(a[2], b[2]),
+            min(point[0] for point in corners),
+            min(point[1] for point in corners),
+            min(point[2] for point in corners),
+            max(point[0] for point in corners),
+            max(point[1] for point in corners),
+            max(point[2] for point in corners),
         )
 
     def _apply_model_preview_scale(self) -> None:
@@ -2993,6 +3512,30 @@ class CollisionViewport(AssetViewport):
             return
         self._model_preview_scale = values
         self._apply_model_preview_scale()
+
+    def set_model_preview_rotation(
+            self, x: float, y: float, z: float) -> None:
+        values = tuple(float(value) for value in (x, y, z))
+        if not all(math.isfinite(value) for value in values):
+            return
+        self._model_preview_rotation = values
+        self._apply_model_preview_scale()
+
+    def set_collision_shape(self, shape: CollisionShape | None) -> None:
+        self._collision_shape = shape
+        self.set_empty_hint_suppressed(shape is not None)
+        self.update()
+
+    def set_collision_shape_overlay_visible(self, visible: bool) -> None:
+        self._collision_shape_overlay_visible = bool(visible)
+        self.update()
+
+    def set_geometry_component_preview(self, triangles) -> None:
+        self._geometry_component_preview = (
+            tuple(tuple(tuple(point) for point in triangle)
+                  for triangle in triangles)
+            if triangles else None)
+        self.update()
 
     def set_ground_alignment(
             self, available: bool, authored: bool, overeof: float) -> None:
@@ -3667,6 +4210,54 @@ class CollisionViewport(AssetViewport):
             TURRET_DOWN_COLOR, QPointF(7.0, 15.0))
 
 
+    def _draw_collision_shape_overlay(self, painter: QPainter) -> None:
+        if self._collision_shape is None:
+            return
+        painter.save()
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing, False)
+        pen = QPen(QColor(70, 230, 225), 1.8)
+        painter.setPen(pen)
+        for hull in self._collision_shape.hulls:
+            edges = set()
+            for a, b, c in hull.faces:
+                edges.update((
+                    (min(a, b), max(a, b)),
+                    (min(b, c), max(b, c)),
+                    (min(c, a), max(c, a)),
+                ))
+            for start, end in sorted(edges):
+                first_local = hull.vertices[start]
+                second_local = hull.vertices[end]
+                first = self._project_visible_world((
+                    first_local[0],
+                    first_local[1] + self.overeof_preview_offset,
+                    first_local[2]))
+                second = self._project_visible_world((
+                    second_local[0],
+                    second_local[1] + self.overeof_preview_offset,
+                    second_local[2]))
+                if first is not None and second is not None:
+                    painter.drawLine(first, second)
+        painter.restore()
+
+    def _draw_geometry_component_preview(self, painter: QPainter) -> None:
+        if not self._geometry_component_preview:
+            return
+        painter.save()
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing, False)
+        painter.setPen(QPen(QColor(255, 190, 64, 245), 2.4))
+        for triangle in self._geometry_component_preview:
+            projected = [
+                self._project_visible_world(self._preview_point(point))
+                for point in triangle
+            ]
+            for index in range(3):
+                first = projected[index]
+                second = projected[(index + 1) % 3]
+                if first is not None and second is not None:
+                    painter.drawLine(first, second)
+        painter.restore()
+
     def _paint_viewport(self, painter: QPainter) -> None:
         if self._cockpit_preview_active:
             painter.fillRect(self.rect(), QColor(24, 26, 32))
@@ -3701,6 +4292,9 @@ class CollisionViewport(AssetViewport):
             )
 
         self._draw_ground_alignment_overlay(painter)
+        if self._collision_shape_overlay_visible:
+            self._draw_collision_shape_overlay(painter)
+            self._draw_geometry_component_preview(painter)
         # OpenNeoUA F10 uses unfilled, aliased one-pixel lines and 12 segments.
         painter.setRenderHint(QPainter.RenderHint.Antialiasing, False)
         selected_pairs = []
@@ -4071,9 +4665,22 @@ class OpenScriptObjectDialog(QDialog):
 
     def _sync_reference(self, *_args):
         reference = self.block_combo.currentData()
-        self.vp_label.setText(
-            f"vp_normal = {reference.vp_normal}"
-            if reference is not None else "No matching definition")
+        if reference is None:
+            label = "No matching definition"
+        elif reference.vp_normal is None:
+            label = reference.label
+        else:
+            label = f"vp_normal = {reference.vp_normal}"
+        self.vp_label.setText(label)
+        visual_override = bool(
+            reference is not None
+            and (reference.three_ds_normal or reference.base_normal))
+        self.set_path_edit.setEnabled(
+            reference is None or (reference.vp_normal is not None
+                                  and not visual_override))
+        self.set_path_edit.setToolTip(
+            "Optional when base_normal or 3ds_normal supplies the visual."
+            if visual_override else "Select the SET.BAS VP database.")
         self.open_button.setEnabled(reference is not None)
 
     def _accept_if_valid(self):
@@ -4082,16 +4689,21 @@ class OpenScriptObjectDialog(QDialog):
                 self, "Definition required",
                 "Choose a vehicle or weapon definition first.")
             return
-        path = Path(self.set_path_edit.text())
-        if not path.is_file():
+        reference = self.block_combo.currentData()
+        needs_set = (
+            reference.vp_normal is not None
+            and not (reference.three_ds_normal or reference.base_normal))
+        path_text = self.set_path_edit.text().strip()
+        if needs_set and not Path(path_text).is_file():
             QMessageBox.warning(
                 self, "SET.BAS required",
                 "Select the SET.BAS archive that defines the selected VP.")
             return
         self.accept()
 
-    def selected(self) -> tuple[VehicleModelReference, Path]:
-        return self.block_combo.currentData(), Path(self.set_path_edit.text())
+    def selected(self) -> tuple[VehicleModelReference, Path | None]:
+        value = self.set_path_edit.text().strip()
+        return self.block_combo.currentData(), Path(value) if value else None
 
 
 # Compatibility alias for integrations importing the previous class name.
@@ -4394,6 +5006,7 @@ class CollisionEditorWindow(QMainWindow):
         self._active_script_kind: str = ""
         self._active_script_id: int | None = None
         self._active_model_reference: VehicleModelReference | None = None
+        self._active_visual_reference: VehicleModelReference | None = None
         self._active_base_path: Path | None = None
         self._current_owner: str | None = None
         self._current_owner_base_bounds: tuple[float, float, float, float, float, float] | None = None
@@ -4440,12 +5053,23 @@ class CollisionEditorWindow(QMainWindow):
         # an imported script definition.  It becomes interactive only in the
         # normal archive/SKLT browsing workflow.
         self._model_browser_enabled = False
+        self._collision_bake_process: QProcess | None = None
+        self._collision_bake_cancelled = False
+        self._collision_bake_context: dict = {}
+        self._collision_bake_tempdir = None
+        self._collision_geometry_cache_key = None
+        self._collision_geometry_components = ()
+        self._collision_geometry_triangles_by_owner = {}
+        self._collision_geometry_owners = ()
+        self._collision_geometry_fingerprints = {}
+        self._collision_geometry_preview = None
         # Left list content: archive models normally, or the unit browser of
         # the last imported script (see _set_script_unit_mode).
         self._script_unit_mode = False
         # Units currently displayed in that browser. Switching unit must not
         # rebuild identical rows, or the click doing the switch gets corrupted.
         self._script_unit_references: list[VehicleModelReference] = []
+        self._script_unit_visual_reference: VehicleModelReference | None = None
 
         configure_operation_status_bar(self)
 
@@ -4529,6 +5153,8 @@ class CollisionEditorWindow(QMainWindow):
         self.file_menu = file_menu
         self.open_base_action = create_import_bas_archive_action(
             self, self.open_base_dialog, shortcut=True)
+        self.open_base_action.setToolTip(
+            "Import a BASE/SET archive or an external 3DS visual model.")
         self.open_sklt_action = QAction("Import SKLT", self)
         self.open_sklt_action.triggered.connect(self.open_sklt_dialog)
         self.open_vehicle_script_action = QAction(
@@ -4861,7 +5487,9 @@ class CollisionEditorWindow(QMainWindow):
         right = QVBoxLayout(properties)
         # Leave a small visual gap below the top toolbar so the preview-scale
         # controls do not look fused with the right-side authoring panel.
-        right.setContentsMargins(4, 7, 4, 3)
+        self._properties_layout = right
+        self._properties_layout_margins = (4, 7, 4, 3)
+        right.setContentsMargins(*self._properties_layout_margins)
         right.setSpacing(1)
         project_box = QGroupBox("Project")
         project_form = QFormLayout(project_box)
@@ -4906,7 +5534,7 @@ class CollisionEditorWindow(QMainWindow):
         tab_bar = self.properties_tabs.tabBar()
         tab_bar.setExpanding(True)
         tab_bar.setElideMode(Qt.TextElideMode.ElideNone)
-        tab_bar.setUsesScrollButtons(False)
+        tab_bar.setUsesScrollButtons(True)
         tab_bar.setMovable(False)
         # Match OpenNeoUAStudio's established red primary-workspace tabs.
         tab_bar.setStyleSheet("""
@@ -4926,17 +5554,49 @@ class CollisionEditorWindow(QMainWindow):
             QTabBar::tab:hover:!selected {
                 background: #7b3742;
             }
+            QTabBar::scroller {
+                width: 54px;
+            }
+            QTabBar QToolButton {
+                background: #f5c518;
+                color: #1c1a10;
+                border: 1px solid #b8930d;
+                width: 24px;
+                min-width: 24px;
+                max-width: 24px;
+                height: 24px;
+                min-height: 24px;
+                max-height: 24px;
+                padding: 0px;
+            }
+            QTabBar QToolButton:hover {
+                background: #ffd84d;
+                border-color: #d6b122;
+            }
+            QTabBar QToolButton:pressed {
+                background: #d9a90f;
+                border-color: #b8930d;
+            }
+            QTabBar QToolButton:disabled {
+                background: #6b5c22;
+                color: #a99b62;
+                border-color: #8a762d;
+            }
         """)
         self.collision_tab = QWidget()
+        self.collision_shape_tab = QWidget()
         self.fire_points_tab = QWidget()
         self.gun_points_tab = QWidget()
         self.cockpit_tab = QWidget()
         self.collision_tab_layout = QVBoxLayout(self.collision_tab)
+        self.collision_shape_tab_layout = QVBoxLayout(
+            self.collision_shape_tab)
         self.fire_points_tab_layout = QVBoxLayout(self.fire_points_tab)
         self.gun_points_tab_layout = QVBoxLayout(self.gun_points_tab)
         self.cockpit_tab_layout = QVBoxLayout(self.cockpit_tab)
         for tab, layout in (
                 (self.collision_tab, self.collision_tab_layout),
+                (self.collision_shape_tab, self.collision_shape_tab_layout),
                 (self.fire_points_tab, self.fire_points_tab_layout),
                 (self.gun_points_tab, self.gun_points_tab_layout),
                 (self.cockpit_tab, self.cockpit_tab_layout)):
@@ -4946,7 +5606,9 @@ class CollisionEditorWindow(QMainWindow):
             tab.setSizePolicy(
                 QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
         self.collision_tab_index = self.properties_tabs.addTab(
-            self.collision_tab, "Collision")
+            self.collision_tab, "Collision Spheres")
+        self.collision_shape_tab_index = self.properties_tabs.addTab(
+            self.collision_shape_tab, "Collision Shape")
         self.fire_points_tab_index = self.properties_tabs.addTab(
             self.fire_points_tab, "Fire Points")
         self.gun_points_tab_index = self.properties_tabs.addTab(
@@ -5009,6 +5671,57 @@ class CollisionEditorWindow(QMainWindow):
         self.ground_alignment_notice.hide()
         self.collision_tab_layout.addWidget(self.vanilla_collision_notice)
         self.collision_tab_layout.addWidget(self.ground_alignment_box)
+
+        shape_box = QGroupBox("Convex Collision Shape")
+        shape_layout = QVBoxLayout(shape_box)
+        shape_layout.setContentsMargins(6, 4, 6, 4)
+        shape_layout.setSpacing(4)
+        self.collision_shape_quality = QComboBox()
+        self.collision_shape_quality.addItem("Low quality", "low")
+        self.collision_shape_quality.addItem("Normal quality", "normal")
+        self.collision_shape_quality.addItem("High quality", "high")
+        self.collision_shape_quality.setCurrentIndex(1)
+        self.generate_collision_shape_button = QPushButton(
+            "Generate OpenNeoUA Collision Shape")
+        self.generate_collision_shape_button.clicked.connect(
+            self.generate_collision_shape)
+        self.import_collision_shape_button = QPushButton("Import")
+        self.import_collision_shape_button.clicked.connect(
+            self.import_collision_shape)
+        self.export_collision_shape_button = QPushButton("Export")
+        self.export_collision_shape_button.clicked.connect(
+            self.export_collision_shape)
+        self.cancel_collision_shape_button = QPushButton("Cancel Generation")
+        self.cancel_collision_shape_button.clicked.connect(
+            self.cancel_collision_shape_bake)
+        self.cancel_collision_shape_button.setEnabled(False)
+        shape_buttons = QHBoxLayout()
+        shape_buttons.addWidget(self.generate_collision_shape_button, 1)
+        shape_buttons.addWidget(self.collision_shape_quality)
+        shape_layout.addLayout(shape_buttons)
+        shape_io = QHBoxLayout()
+        shape_io.addWidget(self.import_collision_shape_button)
+        shape_io.addWidget(self.export_collision_shape_button)
+        shape_io.addWidget(self.cancel_collision_shape_button)
+        shape_layout.addLayout(shape_io)
+        self.collision_shape_status = QLabel("No convex shape loaded.")
+        self.collision_shape_status.setWordWrap(True)
+        self.collision_shape_progress = QProgressBar()
+        self.collision_shape_progress.setRange(0, 0)
+        self.collision_shape_progress.setTextVisible(False)
+        self.collision_shape_progress.setFixedHeight(10)
+        self.collision_shape_progress.hide()
+        shape_layout.addWidget(self.collision_shape_progress)
+        shape_layout.addWidget(self.collision_shape_status)
+        self.collision_shape_tab_layout.addWidget(shape_box)
+        self.collision_shape_box = shape_box
+
+        self.collision_geometry_widget = GeometryPartSelectionWidget(
+            self, on_component_highlight=self._set_collision_geometry_preview)
+        self.collision_geometry_widget.selectionChanged.connect(
+            self._sync_collision_generation_controls)
+        self.collision_shape_tab_layout.addWidget(
+            self.collision_geometry_widget, 1)
 
         spheres_box = QGroupBox("Spheres (Vanilla/OpenNeoUA)")
         spheres_layout = QVBoxLayout(spheres_box)
@@ -5878,6 +6591,11 @@ class CollisionEditorWindow(QMainWindow):
         properties_scroll.setWidget(properties)
         self.properties_scroll = properties_scroll
         splitter.addWidget(properties_scroll)
+        properties_scroll.verticalScrollBar().rangeChanged.connect(
+            self._sync_properties_scroll_gutter)
+        self._sync_properties_scroll_gutter(
+            properties_scroll.verticalScrollBar().minimum(),
+            properties_scroll.verticalScrollBar().maximum())
         splitter.setStretchFactor(0, 0)
         splitter.setStretchFactor(1, 1)
         splitter.setStretchFactor(2, 0)
@@ -5885,6 +6603,15 @@ class CollisionEditorWindow(QMainWindow):
         # wide enough for full resource names, while the properties column is
         # compact and the viewport remains the flexible central workspace.
         splitter.setSizes([230, 850, 430])
+
+    def _sync_properties_scroll_gutter(
+            self, minimum: int, maximum: int) -> None:
+        """Keep the right content width stable while its scrollbar is hidden."""
+
+        left, top, right, bottom = self._properties_layout_margins
+        if maximum <= minimum:
+            right += self.properties_scroll.verticalScrollBar().sizeHint().width()
+        self._properties_layout.setContentsMargins(left, top, right, bottom)
 
     def eventFilter(self, watched, event):
         if (hasattr(self, "gun_point_tree")
@@ -5955,10 +6682,26 @@ class CollisionEditorWindow(QMainWindow):
 
     def _push_undo(self):
         state = self.project.snapshot()
-        if not self._undo or self._undo[-1] != state:
-            self._undo.append(state)
-            self._undo = self._undo[-100:]
+        if not self._undo or self._undo[-1][0] != state:
+            self._undo.append((state, self._sphere_selection_state()))
+            if len(self._undo) > 100:
+                del self._undo[0]
         self._redo.clear()
+
+    def _sphere_selection_state(self) -> tuple[int, tuple[int, ...]]:
+        return self._selected, tuple(sorted(self._selected_sphere_indices()))
+
+    def _restore_sphere_selection_state(self, state) -> None:
+        selected, indices = state
+        count = len(self.project.spheres())
+        valid = {
+            int(index) for index in indices
+            if isinstance(index, int) and 0 <= index < count
+        }
+        self._selected_spheres = valid
+        self._selected = (
+            int(selected) if selected in valid
+            else min(valid, default=-1))
 
     def _active_internal_base_name(self) -> str:
         """Return the BASE backing the primary vehicle/model when known."""
@@ -6014,12 +6757,16 @@ class CollisionEditorWindow(QMainWindow):
         self._radius_spin_active = False
         self._vehicle_preview_active_edits.clear()
         self._turret_slider_active_edits.clear()
-        self._redo.append(self.project.snapshot())
-        self.project.restore(self._undo.pop())
+        self._redo.append((
+            self.project.snapshot(), self._sphere_selection_state()))
+        state, selection_state = self._undo.pop()
+        self.project.restore(state)
+        self._restore_sphere_selection_state(selection_state)
         self._selected = min(
             self._selected, len(self.project.spheres()) - 1)
         self._selected_gun_point = min(
             self._selected_gun_point, len(self.project.gun_points) - 1)
+        self._shape_preview_settings()
         self._set_modified()
         self._sync_all()
 
@@ -6029,12 +6776,16 @@ class CollisionEditorWindow(QMainWindow):
         self._radius_spin_active = False
         self._vehicle_preview_active_edits.clear()
         self._turret_slider_active_edits.clear()
-        self._undo.append(self.project.snapshot())
-        self.project.restore(self._redo.pop())
+        self._undo.append((
+            self.project.snapshot(), self._sphere_selection_state()))
+        state, selection_state = self._redo.pop()
+        self.project.restore(state)
+        self._restore_sphere_selection_state(selection_state)
         self._selected = min(
             self._selected, len(self.project.spheres()) - 1)
         self._selected_gun_point = min(
             self._selected_gun_point, len(self.project.gun_points) - 1)
+        self._shape_preview_settings()
         self._set_modified()
         self._sync_all()
 
@@ -6122,9 +6873,13 @@ class CollisionEditorWindow(QMainWindow):
         self.viewport.play_animation(self.play_button.isChecked())
 
     def open_base_dialog(self):
-        path = choose_bas_archive(self, self._last_directory)
+        path, _ = QFileDialog.getOpenFileName(
+            self, "Import BASE / SET.BAS / 3DS", str(self._last_directory),
+            "Urban Assault assets (*.base *.bas *.BASE *.BAS *.3ds *.3DS);;"
+            "All files (*)")
         if path:
-            self.open_base(path)
+            selected = Path(path)
+            self.open_base(selected)
 
     def _set_model_browser_enabled(self, enabled: bool) -> None:
         """Enable model browsing only for the normal archive/SKLT workflow."""
@@ -6208,9 +6963,11 @@ class CollisionEditorWindow(QMainWindow):
         self._active_base_path = None
         self._current_owner = None
         self._current_owner_base_bounds = None
+        self._refresh_collision_geometry_widget()
         self.model_tree.clear()
         self._model_info_by_vp = {}
         self._script_unit_references = []
+        self._script_unit_visual_reference = None
         self._set_script_unit_mode(False)
         self.source_label.setText("No source loaded.")
         self._set_model_browser_enabled(False)
@@ -6232,6 +6989,7 @@ class CollisionEditorWindow(QMainWindow):
         self._active_script_kind = ""
         self._active_script_id = None
         self._active_model_reference = None
+        self._active_visual_reference = None
         self._loaded_gun_points_enabled = False
         self._loaded_gun_points = []
         self._loaded_unit_gun_default_icon = ""
@@ -6300,39 +7058,77 @@ class CollisionEditorWindow(QMainWindow):
 
         current_set = self._current_set_bas_path()
         chosen_set = Path(set_bas_path) if set_bas_path is not None else current_set
-        if reference is None or chosen_set is None:
+        if reference is None or (
+                reference.vp_normal is not None and chosen_set is None
+                and not (reference.three_ds_normal or reference.base_normal)):
             dialog = OpenScriptObjectDialog(
                 self, script_path, references, current_set)
             if dialog.exec() != QDialog.DialogCode.Accepted:
                 return False
             reference, chosen_set = dialog.selected()
-
-        chosen_set = Path(chosen_set)
-        if current_set is None or current_set.resolve() != chosen_set.resolve():
-            if not self.open_base(chosen_set):
+        visual_source, override, visual_override, visual_warnings = (
+            _resolve_script_visual_source(
+                reference, script_path, chosen_set, current_set))
+        active_visual_reference = _reference_for_visual_source(
+            reference, visual_source)
+        chosen_asset: Path
+        if visual_source in {"3ds_normal", "base_normal"}:
+            if override is None:
+                QMessageBox.critical(
+                    self, "Script visual unavailable",
+                    "The selected script visual could not be resolved.")
                 return False
-        if self._vp_embedded is None or self._vp_table is None:
-            QMessageBox.critical(
-                self, "VP database unavailable",
-                "The selected archive did not expose a SET.BAS VP table.")
-            return False
-        if not 0 <= reference.vp_normal < len(self._vp_table.entries):
-            QMessageBox.critical(
-                self, "VP out of range",
-                f"vp_normal {reference.vp_normal} is outside the SET.BAS "
-                f"database (0..{len(self._vp_table.entries) - 1}).")
-            return False
-        model_info = self._model_info_by_vp.get(reference.vp_normal)
-        if model_info is None:
-            entry = self._vp_table.entry(reference.vp_normal)
-            QMessageBox.critical(
-                self, "VP model unavailable",
-                f"VP {reference.vp_normal} resolves to "
-                f"{entry.base_name}, but its SKLT could not be selected "
-                "from the loaded SET.BAS family. The active VP table may "
-                "reference a loose BASE that is not embedded in this SET.")
-            return False
-        _owner_path, source_model = model_info
+            chosen_asset = override
+            if (self._active_base_path is None
+                    or self._active_base_path.resolve(strict=False)
+                    != chosen_asset.resolve(strict=False)):
+                if not self.open_base(chosen_asset):
+                    return False
+            source_model = chosen_asset.stem
+        else:
+            if visual_source == "unavailable":
+                QMessageBox.critical(
+                    self, "Visual source unavailable",
+                    "No usable 3DS, BASE, or SET VP visual source was found. "
+                    + "\n".join(visual_warnings))
+                return False
+            if chosen_set is None:
+                fallback_set, _ = QFileDialog.getOpenFileName(
+                    self, "Select SET.BAS for vp_normal fallback",
+                    str(script_path.parent),
+                    "SET.BAS archive (SET.BAS *.bas *.BAS);;All files (*)")
+                if not fallback_set:
+                    return False
+                chosen_set = Path(fallback_set)
+            chosen_set = Path(chosen_set)
+            if (current_set is None
+                    or current_set.resolve(strict=False)
+                    != chosen_set.resolve(strict=False)):
+                if not self.open_base(chosen_set):
+                    return False
+            if self._vp_embedded is None or self._vp_table is None:
+                QMessageBox.critical(
+                    self, "VP database unavailable",
+                    "The selected archive did not expose a SET.BAS VP table.")
+                return False
+            if not 0 <= reference.vp_normal < len(self._vp_table.entries):
+                QMessageBox.critical(
+                    self, "VP out of range",
+                    f"vp_normal {reference.vp_normal} is outside the SET.BAS "
+                    f"database (0..{len(self._vp_table.entries) - 1}).")
+                return False
+            model_info = self._model_info_by_vp.get(reference.vp_normal)
+            if model_info is None:
+                entry = self._vp_table.entry(reference.vp_normal)
+                QMessageBox.critical(
+                    self, "VP model unavailable",
+                    f"VP {reference.vp_normal} resolves to "
+                    f"{entry.base_name}, but its SKLT could not be selected "
+                    "from the loaded SET.BAS family. The active VP table "
+                    "may reference a loose BASE that is not embedded in this SET.")
+                return False
+            _owner_path, source_model = model_info
+            chosen_asset = chosen_set
 
         block = reference.block
         target_category = (
@@ -6340,6 +7136,8 @@ class CollisionEditorWindow(QMainWindow):
         try:
             legacy, compounds, warnings = import_collision_block(
                 text, block, OPENNEOUA)
+            warnings.extend(visual_warnings)
+            shape_path = import_collision_shape_reference(text, block)
             if target_category == VEHICLE:
                 overeof_enabled, overeof = import_overeof_block(text, block)
                 (fire_enabled, fire_x, fire_y, fire_z,
@@ -6363,14 +7161,33 @@ class CollisionEditorWindow(QMainWindow):
 
         fallback_name = (
             "Weapon" if target_category == WEAPON else "Vehicle")
+        shape = None
+        shape_file_path = ""
+        if shape_path:
+            shape_file = _resolve_data_asset_path(
+                shape_path, script_path, chosen_asset, chosen_set)
+            if shape_file is None:
+                warnings.append(
+                    f"collision_shape file was not found: {shape_path}")
+            else:
+                try:
+                    shape = read_collision_shape(shape_file)
+                    shape_file_path = str(shape_file)
+                except (OSError, ValueError) as exc:
+                    warnings.append(
+                        f"collision_shape could not be read: {exc}")
+
         self.project = CollisionProject(
             name=block.name or f"{fallback_name}_{block.object_id}",
             source_model=source_model,
-            source_base=chosen_set.name,
+            source_base=chosen_asset.name,
             target_category=target_category,
             model_scale_x=reference.scale_x,
             model_scale_y=reference.scale_y,
             model_scale_z=reference.scale_z,
+            model_rotation_x=reference.rotation_x,
+            model_rotation_y=reference.rotation_y,
+            model_rotation_z=reference.rotation_z,
             overeof_enabled=overeof_enabled,
             overeof=overeof,
             fire_points_enabled=fire_enabled,
@@ -6389,6 +7206,9 @@ class CollisionEditorWindow(QMainWindow):
             cockpit_camera_offset_z=cockpit_z,
             legacy=legacy,
             compound=compounds,
+            collision_shape=shape,
+            collision_shape_path=shape_path,
+            collision_shape_file_path=shape_file_path,
         )
         imported_gun_schemes = gun_point_families_in_block(text, block)
         if len(imported_gun_schemes) == 1:
@@ -6406,7 +7226,8 @@ class CollisionEditorWindow(QMainWindow):
         self._active_script_kind = block.kind
         self._active_script_id = block.object_id
         self._active_model_reference = reference
-        self._active_base_path = chosen_set
+        self._active_visual_reference = active_visual_reference
+        self._active_base_path = chosen_asset
         if hasattr(self, "cockpit_model_state_combo"):
             with QSignalBlocker(self.cockpit_model_state_combo):
                 self.cockpit_model_state_combo.setCurrentIndex(0)
@@ -6421,21 +7242,26 @@ class CollisionEditorWindow(QMainWindow):
         # The left list becomes the unit browser of this script: every other
         # loadable definition is one click away, without importing again.
         self._set_script_unit_mode(True)
-        self._fill_script_units(references)
+        resolved_unit_reference = (
+            active_visual_reference
+            if active_visual_reference != reference else None)
+        self._fill_script_units(
+            references, active_visual_reference=resolved_unit_reference)
         self._show_model_item(self._select_script_unit_item(reference))
         self._set_modified(False)
         self.source_label.setText(
-            f"{chosen_set.name}\nVP {reference.vp_normal}: "
-            f"{source_model or '<model>'}\n"
-            f"VP source: {self._vp_table_source}\n"
+            f"{chosen_asset.name}\n"
+            + (f"Visual override: {visual_override}" if visual_override
+               else f"VP {reference.vp_normal}: {source_model or '<model>'}\n"
+               f"VP source: {self._vp_table_source}")
+            + "\n"
             f"Script: {script_path.name} — {block.kind} {block.object_id}")
         self._sync_all()
         message = (
-            f"Loaded {block.kind} {block.object_id} through VP "
-            f"{reference.vp_normal} with preview scale "
-            f"{_number(reference.scale_x)}/"
-            f"{_number(reference.scale_y)}/"
-            f"{_number(reference.scale_z)}.")
+            f"Loaded {block.kind} {block.object_id} using "
+            f"{visual_override if visual_override else 'VP ' + str(reference.vp_normal)} "
+            f"with preview scale {_number(reference.scale_x)}/"
+            f"{_number(reference.scale_y)}/{_number(reference.scale_z)}.")
         if warnings:
             message += " " + " ".join(warnings)
         self.statusBar().showMessage(message, 7000)
@@ -6444,6 +7270,8 @@ class CollisionEditorWindow(QMainWindow):
     def _cockpit_requested_vp(self) -> tuple[int | None, str]:
         reference = self._active_model_reference
         if reference is None or self.project.target_category != VEHICLE:
+            return None, ""
+        if reference.three_ds_normal or reference.base_normal:
             return None, ""
         state = (
             self.cockpit_model_state_combo.currentData()
@@ -6564,6 +7392,547 @@ class CollisionEditorWindow(QMainWindow):
                 self.statusBar().showMessage(
                     "Loaded definition overwritten.", 7000)
 
+    def _active_asset_set_id(self) -> int:
+        path = self._active_base_path
+        if path is None:
+            return 0
+        for part in reversed(path.resolve(strict=False).parts):
+            match = re.fullmatch(r"set(\d+)", part, re.IGNORECASE)
+            if match:
+                return int(match.group(1))
+        return 0
+
+    def _collision_shape_warnings(self) -> list[str]:
+        shape = self.project.collision_shape
+        if shape is None:
+            return []
+        warnings = []
+        scale = (self.project.model_scale_x, self.project.model_scale_y,
+                 self.project.model_scale_z)
+        rotation = (self.project.model_rotation_x,
+                    self.project.model_rotation_y,
+                    self.project.model_rotation_z)
+        if any(abs(a - b) > 1e-5 for a, b in zip(scale, shape.visual_scale)):
+            warnings.append("visual scale differs from generation metadata")
+        if any(abs(a - b) > 1e-5
+               for a, b in zip(rotation, shape.visual_rotation)):
+            warnings.append("visual rotation differs from generation metadata")
+        owners = self.project.collision_shape_owners
+        selected_keys = self.project.collision_shape_components
+        if self.family is not None and selected_keys is None:
+            warnings.append(
+                "source selection not stored; geometry revision unverified")
+        if (owners and selected_keys is not None and self.family is not None
+                and self._collision_geometry_cache_key
+                == self._current_collision_geometry_source_key()):
+            by_key = {
+                _geometry_component_key(component): component
+                for component in self._collision_geometry_components
+            }
+            keys = tuple(selected_keys)
+            missing = [key for key in keys if key not in by_key]
+            parts = [
+                (key, by_key[key].triangles)
+                for key in keys if key in by_key
+            ]
+            fingerprint = self._collision_geometry_fingerprints.get(keys)
+            if fingerprint is None and parts:
+                fingerprint = geometry_fingerprint(parts)
+                self._collision_geometry_fingerprints[keys] = fingerprint
+            if (missing or (fingerprint is not None
+                            and fingerprint != shape.source_hash)):
+                warnings.append(
+                    "source fingerprint differs from the current geometry "
+                    "selection or one or more selected components disappeared")
+        return warnings
+
+    def _sync_collision_shape_status(self) -> None:
+        shape = self.project.collision_shape
+        if shape is None:
+            if self.project.collision_shape_path:
+                self.collision_shape_status.setText(
+                    "Script references a shape file that is not loaded: "
+                    f"{self.project.collision_shape_path}")
+            else:
+                self.collision_shape_status.setText("No collision shape loaded.")
+            self.export_collision_shape_button.setEnabled(False)
+            return
+        details = f"Shape loaded: {len(shape.hulls)} parts"
+        if self.project.collision_shape_path:
+            details += f" — {Path(self.project.collision_shape_path).name}"
+        warnings = self._collision_shape_warnings()
+        scale_warning = (
+            "visual scale differs from generation metadata" in warnings)
+        rotation_warning = (
+            "visual rotation differs from generation metadata" in warnings)
+        if scale_warning or rotation_warning:
+            details += "\nVisual transform warning: " + (
+                "scale and rotation differ from the generated shape."
+                if scale_warning and rotation_warning else
+                "scale differs from the generated shape."
+                if scale_warning else
+                "rotation differs from the generated shape.")
+        self.collision_shape_status.setText(details)
+        self.export_collision_shape_button.setEnabled(True)
+
+    def _shape_preview_settings(self) -> None:
+        self.viewport.set_model_preview_scale(
+            self.project.model_scale_x, self.project.model_scale_y,
+            self.project.model_scale_z)
+        self.viewport.set_model_preview_rotation(
+            self.project.model_rotation_x, self.project.model_rotation_y,
+            self.project.model_rotation_z)
+        self.viewport.set_ground_alignment(
+            self.project.target_category == VEHICLE,
+            self.project.overeof_enabled, self.project.overeof)
+        self.viewport.set_collision_shape(self.project.collision_shape)
+
+    def _current_collision_geometry_source_key(self):
+        if self.family is None:
+            return None
+        reference = self._active_visual_reference
+        reference_key = None if reference is None else (
+            reference.block.kind, reference.block.object_id,
+            reference.vp_normal, reference.base_normal,
+            reference.three_ds_normal)
+        source_path = (
+            str(self._active_base_path.resolve(strict=False))
+            if self._active_base_path else "")
+        return (
+            source_path, id(self.family), reference_key,
+            self._collision_shape_root_owner(), self._current_owner,
+            self.project.source_model)
+
+    def _set_collision_geometry_preview(self, triangles) -> None:
+        self._collision_geometry_preview = (
+            tuple(triangles) if triangles else None)
+        self.viewport.set_geometry_component_preview(
+            self._collision_geometry_preview)
+
+    def _refresh_collision_geometry_widget(self) -> None:
+        widget = getattr(self, "collision_geometry_widget", None)
+        if widget is None:
+            return
+        source_key = self._current_collision_geometry_source_key()
+        if source_key == self._collision_geometry_cache_key:
+            return
+        self._collision_geometry_fingerprints.clear()
+        if self.family is None:
+            self._collision_geometry_cache_key = None
+            self._collision_geometry_components = ()
+            self._collision_geometry_triangles_by_owner = {}
+            self._collision_geometry_owners = ()
+            widget.set_geometry(None, None, (), {}, None)
+            self._set_collision_geometry_preview(None)
+            self._sync_collision_generation_controls()
+            return
+
+        root_owner = self._collision_shape_root_owner()
+        eligible = [
+            obj for obj in self.family.all_objects()
+            if obj.skeleton is not None and (
+                root_owner is None
+                or obj.owner_path == root_owner
+                or obj.owner_path.startswith(root_owner.rstrip("/") + "/"))
+        ]
+        if not eligible:
+            self._collision_geometry_cache_key = source_key
+            self._collision_geometry_components = ()
+            self._collision_geometry_triangles_by_owner = {}
+            self._collision_geometry_owners = ()
+            widget.set_geometry(self.family, root_owner, (), {}, source_key)
+            self._sync_collision_generation_controls()
+            return
+
+        from collision_editor.mesh_parts import split_triangle_components
+
+        previous_scope = self.viewport.visible_owners()
+        previous_camera = self.viewport._camera_state()
+        previous_home_camera = self.viewport._home_camera_state
+        owner_triangles = {}
+        components = ()
+        error = None
+        try:
+            self.viewport.load_family(
+                self.family, {obj.owner_path for obj in eligible},
+                keep_camera=True, primary_owner=root_owner)
+            self._shape_preview_settings()
+            owner_triangles = {
+                obj.owner_path: tuple(
+                    self.viewport.local_owner_triangles(obj.owner_path))
+                for obj in eligible
+            }
+            components = split_triangle_components([
+                (owner, triangles)
+                for owner, triangles in owner_triangles.items()
+            ])
+        except (TypeError, ValueError, RuntimeError) as exc:
+            error = str(exc)
+        finally:
+            self.viewport.load_family(
+                self.family, previous_scope, keep_camera=True,
+                primary_owner=self._current_owner)
+            self._shape_preview_settings()
+            self.viewport._set_camera_state(previous_camera)
+            self.viewport._home_camera_state = previous_home_camera
+
+        self._collision_geometry_cache_key = source_key
+        self._collision_geometry_components = tuple(components)
+        self._collision_geometry_triangles_by_owner = owner_triangles
+        self._collision_geometry_owners = tuple(sorted(owner_triangles))
+        widget.set_geometry(
+            self.family, root_owner, self._collision_geometry_components,
+            owner_triangles, source_key)
+        if error:
+            widget.summary_label.setText(f"Geometry unavailable: {error}")
+        self._sync_collision_generation_controls()
+
+    def _sync_collision_generation_controls(self) -> None:
+        process_running = self._collision_bake_process is not None
+        widget = getattr(self, "collision_geometry_widget", None)
+        has_selection = bool(
+            widget is not None and widget.selected_components())
+        if hasattr(self, "generate_collision_shape_button"):
+            self.generate_collision_shape_button.setEnabled(
+                self.family is not None and has_selection and not process_running)
+            self.collision_shape_quality.setEnabled(not process_running)
+            self.import_collision_shape_button.setEnabled(not process_running)
+            self.export_collision_shape_button.setEnabled(
+                self.project.collision_shape is not None and not process_running)
+            self.cancel_collision_shape_button.setEnabled(process_running)
+            self.collision_shape_progress.setVisible(
+                process_running and not self._collision_bake_cancelled)
+            if widget is not None:
+                widget.setEnabled(not process_running)
+
+    def generate_collision_shape(self) -> None:
+        if self._collision_bake_process is not None:
+            return
+        self._refresh_collision_geometry_widget()
+        if self.family is None:
+            return
+        if (self._active_visual_reference is not None
+                and not (self._active_visual_reference.three_ds_normal
+                         or self._active_visual_reference.base_normal)
+                and self._active_visual_reference.vp_normal is not None
+                and self._collision_shape_root_owner() is None):
+            self.collision_shape_status.setText(
+                "Generation unavailable: active VP has no model geometry.")
+            return
+        selected_components = (
+            self.collision_geometry_widget.selected_components())
+        if not selected_components:
+            self.collision_shape_status.setText(
+                "Select at least one geometry component.")
+            return
+        try:
+            parts = [
+                {
+                    "owner": _geometry_component_key(component),
+                    "model_owner": component.owner,
+                    "component_id": component.component_id,
+                    "triangles": component.triangles,
+                }
+                for component in selected_components
+            ]
+            request = {
+                "source": self.project.source_model
+                or self.project.source_base or "Model",
+                "parts": parts,
+                "visual_scale": [
+                    self.project.model_scale_x,
+                    self.project.model_scale_y,
+                    self.project.model_scale_z,
+                ],
+                "visual_rotation": [
+                    self.project.model_rotation_x,
+                    self.project.model_rotation_y,
+                    self.project.model_rotation_z,
+                ],
+                "asset_set": self._active_asset_set_id(),
+                "quality": self.collision_shape_quality.currentData(),
+            }
+            request_bytes = json.dumps(
+                request, allow_nan=False, separators=(",", ":")
+            ).encode("utf-8")
+        except (TypeError, ValueError, RuntimeError) as exc:
+            self.collision_shape_status.setText(
+                f"Generation unavailable: {exc}")
+            return
+
+        spheres = self.project.spheres()
+        if spheres:
+            answer = QMessageBox.question(
+                self, "Generate Collision Shape",
+                "All Legacy and OpenNeoUA collision spheres will be removed "
+                "after generation succeeds. Continue?",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                QMessageBox.StandardButton.No)
+            if answer != QMessageBox.StandardButton.Yes:
+                return
+
+        generation_tempdir = tempfile.TemporaryDirectory(
+            prefix="OpenNeoUAStudio-collision-")
+        input_path = Path(generation_tempdir.name) / "input.json"
+        output_path = Path(generation_tempdir.name) / "output.json"
+        try:
+            input_path.write_bytes(request_bytes)
+        except OSError as exc:
+            generation_tempdir.cleanup()
+            self.collision_shape_status.setText(
+                f"Generation could not start: {exc}")
+            return
+
+        process = QProcess(self)
+        process.setProcessChannelMode(QProcess.ProcessChannelMode.SeparateChannels)
+        process.setWorkingDirectory(str(Path(__file__).resolve().parents[1]))
+        process.setProcessEnvironment(QProcessEnvironment.systemEnvironment())
+        if getattr(sys, "frozen", False):
+            program = sys.executable
+            arguments = [
+                "--collision-bake-worker", str(input_path), str(output_path)]
+        else:
+            program = sys.executable
+            arguments = [
+                str(Path(__file__).resolve().parents[1] / "main.py"),
+                "--collision-bake-worker",
+                str(input_path), str(output_path),
+            ]
+        process.setProgram(program)
+        process.setArguments(arguments)
+        process.finished.connect(
+            lambda code, status, p=process:
+            self._collision_shape_bake_finished(p, code, status))
+        process.errorOccurred.connect(
+            lambda error, p=process:
+            self._collision_shape_bake_error(p, error))
+        self._collision_bake_process = process
+        self._collision_bake_cancelled = False
+        self._collision_bake_tempdir = generation_tempdir
+        self._collision_bake_context = {
+            "source_path": (str(self._active_base_path.resolve(strict=False))
+                            if self._active_base_path else ""),
+            "source_model": self.project.source_model,
+            "source_key": self._collision_geometry_cache_key,
+            "project_snapshot": self.project.snapshot(),
+            "scale": tuple(request["visual_scale"]),
+            "rotation": tuple(request["visual_rotation"]),
+            "owners": request["parts"],
+            "output_path": str(output_path),
+        }
+        self.collision_shape_status.setText(
+            f"Generating {len(parts)} selected parts at "
+            f"{request['quality']} quality…")
+        self._sync_collision_generation_controls()
+        process.start()
+
+    def _collision_shape_bake_error(self, process, error) -> None:
+        if process is not self._collision_bake_process:
+            return
+        if self._collision_bake_cancelled:
+            return
+        if process.state() == QProcess.ProcessState.NotRunning:
+            detail = process.errorString()
+            self._collision_bake_process = None
+            self._sync_collision_generation_controls()
+            self._cleanup_collision_bake_tempdir()
+            self.collision_shape_status.setText("Generation failed.")
+            QMessageBox.warning(
+                self, "Collision shape generation failed", detail)
+
+    def _cleanup_collision_bake_tempdir(self) -> None:
+        temporary = self._collision_bake_tempdir
+        self._collision_bake_tempdir = None
+        if temporary is not None:
+            try:
+                temporary.cleanup()
+            except OSError:
+                pass
+
+    def _collision_shape_bake_finished(self, process, exit_code, _status):
+        if process is not self._collision_bake_process:
+            return
+        stderr = bytes(process.readAllStandardError()).decode(
+            "utf-8", errors="replace").strip()
+        context = getattr(self, "_collision_bake_context", {})
+        cancelled = self._collision_bake_cancelled
+        self._collision_bake_process = None
+        self._sync_collision_generation_controls()
+        process.deleteLater()
+        response = None
+        response_error = ""
+        try:
+            response = json.loads(
+                Path(context["output_path"]).read_text(encoding="utf-8"))
+        except (KeyError, OSError, ValueError) as exc:
+            response_error = str(exc)
+        self._cleanup_collision_bake_tempdir()
+        if cancelled:
+            self.collision_shape_status.setText("Generation cancelled.")
+            return
+        current_source = (
+            str(self._active_base_path.resolve(strict=False))
+            if self._active_base_path else "")
+        if (current_source != context.get("source_path")
+                or self.project.source_model != context.get("source_model")
+                or self._current_collision_geometry_source_key()
+                != context.get("source_key")
+                or tuple((self.project.model_scale_x,
+                          self.project.model_scale_y,
+                          self.project.model_scale_z)) != context.get("scale")
+                or tuple((self.project.model_rotation_x,
+                          self.project.model_rotation_y,
+                          self.project.model_rotation_z))
+                != context.get("rotation")):
+            self.collision_shape_status.setText(
+                "Generation discarded because the model changed.")
+            return
+        if self.project.snapshot() != context.get("project_snapshot"):
+            self.collision_shape_status.setText(
+                "Generation discarded because project data changed.")
+            return
+        if exit_code != 0 or (response and response.get("error")):
+            detail = ((str(response.get("error")) if response else "")
+                      or stderr or response_error or "worker error")
+            self.collision_shape_status.setText(
+                "Generation failed.")
+            QMessageBox.warning(
+                self, "Collision shape generation failed",
+                detail if exit_code != 0
+                else f"Worker returned an error: {detail}")
+            return
+        try:
+            if response is None:
+                raise ValueError(response_error or "missing worker output")
+            shape = parse_collision_shape(response["shape"])
+            bake_warnings = tuple(str(value) for value in response.get(
+                "warnings", ()))
+        except (ValueError, KeyError, TypeError) as exc:
+            self.collision_shape_status.setText(
+                "Generation returned invalid data.")
+            QMessageBox.warning(
+                self, "Collision shape generation failed",
+                f"Worker response could not be validated: {exc}")
+            return
+        self._push_undo()
+        self.project.collision_shape = shape
+        self.project.collision_shape_path = ""
+        self.project.collision_shape_file_path = ""
+        selected_parts = tuple(context.get("owners", ()))
+        self.project.collision_shape_owners = tuple(sorted({
+            part["model_owner"] for part in selected_parts
+        }))
+        self.project.collision_shape_components = tuple(
+            part["owner"] for part in selected_parts)
+        self.project.collision_shape_warnings = bake_warnings
+        self.project.legacy = None
+        self.project.compound.clear()
+        self.project.sphere_isolation_active = False
+        self._selected = -1
+        self._selected_spheres.clear()
+        self._shape_preview_settings()
+        self._set_modified()
+        self._sync_all()
+        self.collision_shape_status.setText(
+            f"Shape ready: {len(shape.hulls)} parts.")
+
+    def cancel_collision_shape_bake(self) -> None:
+        process = self._collision_bake_process
+        if process is None:
+            return
+        self._collision_bake_cancelled = True
+        self.collision_shape_status.setText("Cancelling generation…")
+        self._sync_collision_generation_controls()
+        process.kill()
+
+    def import_collision_shape(self) -> None:
+        path, _ = QFileDialog.getOpenFileName(
+            self, "Import collision shape", str(self._last_directory),
+            "Collision shape (*.collision);;All files (*)")
+        if not path:
+            return
+        source = Path(path)
+        try:
+            shape = read_collision_shape(source)
+        except (OSError, ValueError) as exc:
+            QMessageBox.warning(self, "Invalid collision shape", str(exc))
+            return
+        data_root = _data_root_for_path(source)
+        script_path = ""
+        if data_root is not None:
+            try:
+                script_path = source.resolve(strict=False).relative_to(
+                    data_root.parent).as_posix()
+            except ValueError:
+                pass
+        self._push_undo()
+        self.project.collision_shape = shape
+        self.project.collision_shape_path = script_path
+        self.project.collision_shape_file_path = str(
+            source.resolve(strict=False))
+        self.project.collision_shape_owners = None
+        self.project.collision_shape_components = None
+        self.project.collision_shape_warnings = ()
+        self._shape_preview_settings()
+        self._sync_all()
+        self._set_modified()
+        self._last_directory = source.parent
+        if shape.visual_scale != (
+                self.project.model_scale_x, self.project.model_scale_y,
+                self.project.model_scale_z) or shape.visual_rotation != (
+                self.project.model_rotation_x, self.project.model_rotation_y,
+                self.project.model_rotation_z):
+            self.statusBar().showMessage(
+                "Imported shape transform metadata differs from this model.",
+                9000)
+
+    def export_collision_shape(self) -> None:
+        shape = self.project.collision_shape
+        if shape is None:
+            return
+        default_name = _collision_shape_export_filename(self.project)
+        data_root = _data_root_for_path(
+            self._active_base_path, self._active_script_path)
+        if data_root is not None:
+            initial = data_root / "Models" / "Collision" / default_name
+        elif self.project.collision_shape_file_path:
+            initial = Path(self.project.collision_shape_file_path)
+        else:
+            initial = self._last_directory / default_name
+        path, _ = QFileDialog.getSaveFileName(
+            self, "Export collision shape", str(initial),
+            "Collision shape (*.collision)")
+        if not path:
+            return
+        target = Path(path)
+        if target.suffix.casefold() != ".collision":
+            target = target.with_suffix(".collision")
+        try:
+            target.parent.mkdir(parents=True, exist_ok=True)
+            write_collision_shape(target, shape)
+        except (OSError, ValueError) as exc:
+            QMessageBox.critical(self, "Shape export failed", str(exc))
+            return
+        root = _data_root_for_path(target)
+        canonical = ""
+        if root is not None:
+            try:
+                canonical = target.resolve(strict=False).relative_to(
+                    root.parent).as_posix()
+            except ValueError:
+                pass
+        self._push_undo()
+        self.project.collision_shape_file_path = str(
+            target.resolve(strict=False))
+        self.project.collision_shape_path = canonical
+        self._sync_all()
+        self._set_modified()
+        self._last_directory = target.parent
+        self.collision_shape_status.setText(
+            f"Shape exported: {canonical or target.name}")
+        self.statusBar().showMessage(
+            f"Shape exported: {canonical or target.name}.", 5000)
+
     def save_loaded_vehicle_script(self):
         """Compatibility alias for the previous vehicle-only action."""
 
@@ -6576,6 +7945,31 @@ class CollisionEditorWindow(QMainWindow):
         vp_table = None
         vp_source = ""
         vp_warnings: list[str] = []
+        if path.suffix.casefold() == ".3ds":
+            try:
+                family = _load_3ds_family(path)
+            except Exception as exc:
+                QMessageBox.critical(
+                    self, "3DS load failed",
+                    f"No file was modified.\n\n{exc}")
+                return False
+            self.family = family
+            self._vp_embedded = None
+            self._vp_table = None
+            self._vp_table_source = ""
+            self._active_base_path = path
+            self._last_directory = path.parent
+            self.project.source_base = path.name
+            self._fill_models(family)
+            self.source_label.setText(
+                f"{path.name}\n{len(family.all_objects()) - 1} mesh parts; "
+                "geometry-only preview through AssetViewport")
+            self._set_model_browser_enabled(True)
+            self._sync_close_archive_action()
+            self._sync_animation_controls()
+            self._sync_all()
+            self._set_modified()
+            return True
         if path.name.casefold() == "set.bas":
             try:
                 embedded = reconstruct_embedded_vps(path)
@@ -6660,6 +8054,7 @@ class CollisionEditorWindow(QMainWindow):
         self.model_tree.clear()
         self._model_info_by_vp = {}
         self._script_unit_references = []
+        self._script_unit_visual_reference = None
         model_index = 0
         vp_ids_by_offset: dict[int, list[int]] = {}
         vp_ids_by_skeleton: dict[str, list[int]] = {}
@@ -6754,7 +8149,9 @@ class CollisionEditorWindow(QMainWindow):
         return f"{display_name} {owner_path} {unit_label}"
 
     def _fill_script_units(
-            self, references: list[VehicleModelReference]) -> None:
+            self, references: list[VehicleModelReference], *,
+            active_visual_reference: VehicleModelReference | None = None
+            ) -> None:
         """List the loadable units of the source script in the left panel.
 
         Rows are rebuilt only when the content really changes: rebuilding the
@@ -6764,25 +8161,56 @@ class CollisionEditorWindow(QMainWindow):
         list can never trigger a unit load on its own.
         """
 
-        if references == self._script_unit_references:
+        if (references == self._script_unit_references
+                and active_visual_reference
+                == self._script_unit_visual_reference):
             return
         self._script_unit_references = list(references)
+        self._script_unit_visual_reference = active_visual_reference
         with QSignalBlocker(self.model_tree):
             self.model_tree.clear()
             for reference in references:
                 block = reference.block
-                owner_path, display_name = self._model_info_by_vp.get(
-                    reference.vp_normal, ("", ""))
+                row_reference = (
+                    active_visual_reference
+                    if (active_visual_reference is not None
+                        and active_visual_reference.block == block)
+                    else reference)
+                if (row_reference.three_ds_normal
+                        or row_reference.base_normal):
+                    owner_path = ""
+                    display_name = Path(
+                        row_reference.three_ds_normal or
+                        row_reference.base_normal).stem
+                else:
+                    owner_path, display_name = self._model_info_by_vp.get(
+                        row_reference.vp_normal, ("", ""))
+                if not owner_path and row_reference.vp_normal is None:
+                    obj = next((candidate for candidate in self.family.all_objects()
+                                if candidate.skeleton is not None), None) \
+                        if self.family is not None else None
+                    if obj is not None:
+                        owner_path, display_name = (
+                            obj.owner_path, obj.display_name)
+                vp_text = (
+                    str(reference.vp_normal)
+                    if reference.vp_normal is not None else "—")
                 item = QTreeWidgetItem([
                     block.name or f"{block.kind} {block.object_id}",
-                    str(reference.vp_normal),
+                    vp_text,
                 ])
                 item.setData(0, Qt.ItemDataRole.UserRole, owner_path)
                 item.setData(0, _MODEL_NAME_ROLE, display_name)
-                item.setData(0, _MODEL_VP_ROLE, (reference.vp_normal,))
+                item.setData(
+                    0, _MODEL_VP_ROLE,
+                    (reference.vp_normal,)
+                    if reference.vp_normal is not None else ())
                 item.setData(0, _SCRIPT_REFERENCE_ROLE, reference)
                 item.setToolTip(0, reference.label)
-                item.setToolTip(1, f"VP {reference.vp_normal}")
+                item.setToolTip(
+                    1, f"VP {reference.vp_normal}"
+                    if reference.vp_normal is not None
+                    else "Visual override; no SET VP needed")
                 item.setTextAlignment(
                     1,
                     Qt.AlignmentFlag.AlignRight
@@ -6826,6 +8254,20 @@ class CollisionEditorWindow(QMainWindow):
         info = self._model_info_by_vp.get(int(vp_id))
         return info[0] if info is not None else None
 
+    def _collision_shape_root_owner(self) -> str | None:
+        """Return the owner subtree for the visual source actually loaded."""
+
+        reference = self._active_visual_reference
+        if reference is not None and (
+                reference.three_ds_normal or reference.base_normal):
+            return "root"
+        if reference is not None and reference.vp_normal is not None:
+            return self._owner_for_vp(reference.vp_normal)
+        if (self._active_base_path is not None
+                and self._active_base_path.suffix.casefold() == ".3ds"):
+            return "root"
+        return self._current_owner
+
     def _model_changed(self, current, _previous):
         if current is None or self.family is None:
             return
@@ -6865,11 +8307,13 @@ class CollisionEditorWindow(QMainWindow):
         """Present one left-list model or script unit in the viewport."""
 
         owner = item.data(0, Qt.ItemDataRole.UserRole)
+        owner = owner or None
         self._current_owner = owner
         # Capture the new unit's orbit view; _sync_all restores the active tab.
         self.viewport.set_cockpit_preview_active(False)
         self.viewport.load_family(
-            self.family, {owner}, primary_owner=owner)
+            self.family, {owner} if owner else None,
+            primary_owner=owner)
         self._current_owner_base_bounds = (
             self.viewport._model_preview_base_owner_bounds.get(owner))
         self._viewport_owner = owner
@@ -6881,11 +8325,15 @@ class CollisionEditorWindow(QMainWindow):
         self.viewport.set_ground_alignment(
             self.project.target_category == VEHICLE,
             self.project.overeof_enabled, self.project.overeof)
-        self.viewport.frame_owner(owner)
+        if owner:
+            self.viewport.frame_owner(owner)
+        else:
+            self.viewport.frame_all()
         # Same contract as Model Editor: Reset View restores the exact camera
         # first presented for this selected model, not a later re-fit.
         self.viewport.capture_reset_view()
         self.project.source_model = item.data(0, _MODEL_NAME_ROLE)
+        self._refresh_collision_geometry_widget()
         with QSignalBlocker(self.toolbar_view_preset_combo):
             self.toolbar_view_preset_combo.setCurrentText("Current View")
         self._sync_animation_controls()
@@ -7280,6 +8728,10 @@ class CollisionEditorWindow(QMainWindow):
         menu.addAction(self.add_legacy_action)
         menu.addAction(self.add_openneoua_action)
         menu.addSeparator()
+        self._context_action(
+            menu, "Select All Spheres",
+            lambda _checked=False: self.select_all_spheres(),
+            bool(self.project.spheres()))
         menu.addAction(self.duplicate_action)
         menu.addAction(self.delete_action)
         entries = self._selected_sphere_entries()
@@ -7866,6 +9318,7 @@ class CollisionEditorWindow(QMainWindow):
 
         active = self.properties_tabs.currentIndex()
         collision_tab = active == self.collision_tab_index
+        shape_tab = active == self.collision_shape_tab_index
         fire_tab = active == self.fire_points_tab_index
         gun_tab = active == self.gun_points_tab_index
 
@@ -7881,6 +9334,7 @@ class CollisionEditorWindow(QMainWindow):
             collision_tab and wanted("Show Ground Simulation"))
         self.viewport.set_overeof_visible(
             collision_tab and wanted("Show Overeof"))
+        self.viewport.set_collision_shape_overlay_visible(shape_tab)
 
         self.viewport.set_fire_points_visible(
             fire_tab and wanted("Show Fire Points"))
@@ -7907,14 +9361,20 @@ class CollisionEditorWindow(QMainWindow):
         # the viewport presentation and which object the shared gizmo moves.
         cockpit_selected = self._is_cockpit_tab_selected()
         cockpit_active = self._is_cockpit_tab_active()
+        shape_tab_active = (
+            hasattr(self, "collision_shape_tab_index")
+            and self.properties_tabs.currentIndex()
+            == self.collision_shape_tab_index)
         self._sync_workspace_overlay_visibility()
         self.viewport.set_cockpit_preview_active(cockpit_active)
         if hasattr(self, "toolbar_view_preset_combo"):
             self.toolbar_view_preset_combo.setEnabled(not cockpit_active)
         self._update_reset_view_controls()
         if hasattr(self, "selected_box"):
-            self.selected_box.setVisible(not cockpit_active)
+            self.selected_box.setVisible(
+                not cockpit_active and not shape_tab_active)
         if hasattr(self, "transform_box"):
+            self.transform_box.setVisible(not shape_tab_active)
             self.transform_box.setTitle(
                 "Move Cockpit Camera" if cockpit_selected else "Move Element")
         if hasattr(self, "cockpit_runtime_aspect_combo"):
@@ -8391,28 +9851,37 @@ class CollisionEditorWindow(QMainWindow):
         except (OSError, UnicodeError, CollisionScriptError):
             return False
 
-    @staticmethod
-    def _workspace_state(project: CollisionProject, tab_index: int) -> tuple:
+    def _workspace_state(self, project: CollisionProject,
+                         tab_index: int) -> tuple:
         def sphere_state(sphere):
             return None if sphere is None else (
                 sphere.category, sphere.x, sphere.y, sphere.z,
                 sphere.radius, sphere.visible,
             )
 
-        if tab_index == 0:  # Collision
+        if tab_index == self.collision_tab_index:
             return (
                 project.overeof_enabled, project.overeof,
                 sphere_state(project.legacy),
                 tuple(sphere_state(sphere) for sphere in project.compound),
                 project.sphere_isolation_active,
             )
-        if tab_index == 1:  # Fire Points
+        if tab_index == self.collision_shape_tab_index:
+            return (
+                project.collision_shape,
+                project.collision_shape_path,
+                project.collision_shape_file_path,
+                project.collision_shape_owners,
+                project.collision_shape_components,
+                project.collision_shape_warnings,
+            )
+        if tab_index == self.fire_points_tab_index:
             return (
                 project.fire_points_enabled,
                 project.fire_x, project.fire_y, project.fire_z,
                 project.num_weapons, project.num_weapons_max,
             )
-        if tab_index == 2:  # Gun Points
+        if tab_index == self.gun_points_tab_index:
             return (
                 project.gun_points_enabled,
                 project.unit_gun_default_icon,
@@ -8428,13 +9897,14 @@ class CollisionEditorWindow(QMainWindow):
                 ) for vehicle_id, limits in sorted(
                     project.turret_limits.items())),
             )
-        # Cockpit View
-        return (
-            project.cockpit_camera_enabled,
-            project.cockpit_camera_offset_x,
-            project.cockpit_camera_offset_y,
-            project.cockpit_camera_offset_z,
-        )
+        if tab_index == self.cockpit_tab_index:
+            return (
+                project.cockpit_camera_enabled,
+                project.cockpit_camera_offset_x,
+                project.cockpit_camera_offset_y,
+                project.cockpit_camera_offset_z,
+            )
+        return ()
 
     def _current_tab_has_changes(self) -> bool:
         if not hasattr(self, "properties_tabs"):
@@ -8480,6 +9950,17 @@ class CollisionEditorWindow(QMainWindow):
                 baseline.sphere_isolation_active)
             self._selected = min(
                 self._selected, len(self.project.spheres()) - 1)
+        elif tab_index == self.collision_shape_tab_index:
+            self.project.collision_shape = baseline.collision_shape
+            self.project.collision_shape_path = baseline.collision_shape_path
+            self.project.collision_shape_file_path = (
+                baseline.collision_shape_file_path)
+            self.project.collision_shape_owners = (
+                baseline.collision_shape_owners)
+            self.project.collision_shape_components = (
+                baseline.collision_shape_components)
+            self.project.collision_shape_warnings = (
+                baseline.collision_shape_warnings)
         elif tab_index == self.fire_points_tab_index:
             self.project.fire_points_enabled = baseline.fire_points_enabled
             self.project.fire_x = baseline.fire_x
@@ -9433,7 +10914,12 @@ class CollisionEditorWindow(QMainWindow):
         self._sync_cockpit_preview_model()
         self.toolbar_view_preset_combo.setEnabled(not cockpit_active)
         self.reset_view_action.setEnabled(not cockpit_active)
-        self.selected_box.setVisible(not cockpit_active)
+        shape_tab_active = (
+            self.properties_tabs.currentIndex()
+            == self.collision_shape_tab_index)
+        self.selected_box.setVisible(
+            not cockpit_active and not shape_tab_active)
+        self.transform_box.setVisible(not shape_tab_active)
 
         self.ground_alignment_box.setVisible(vehicle_mode)
         self.overeof_check.setChecked(
@@ -9849,10 +11335,13 @@ class CollisionEditorWindow(QMainWindow):
             "Show only the selected collision sphere. Use Unisolate Sphere "
             "to show all spheres again.")
         generation_enabled = bool(
-            self.viewport.local_owner_triangles(self._current_owner))
+            self._collision_geometry_triangles_by_owner.get(
+                self._current_owner, ()))
         self.generate_collision_spheres_button.setEnabled(generation_enabled)
         for action in self.generate_collision_sphere_actions.values():
             action.setEnabled(generation_enabled)
+        self._sync_collision_generation_controls()
+        self._sync_collision_shape_status()
         self.undo_button.setEnabled(bool(self._undo))
         self.redo_button.setEnabled(bool(self._redo))
         self.toolbar_undo_button.setEnabled(bool(self._undo))
@@ -10035,4 +11524,9 @@ class CollisionEditorWindow(QMainWindow):
             if answer != QMessageBox.StandardButton.Yes:
                 event.ignore()
                 return
+        if self._collision_bake_process is not None:
+            self._collision_bake_cancelled = True
+            self._collision_bake_process.kill()
+            self._collision_bake_process.waitForFinished(3000)
+        self._cleanup_collision_bake_tempdir()
         event.accept()

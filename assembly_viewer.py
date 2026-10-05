@@ -551,6 +551,7 @@ class AssetViewport(AcceleratedWidget):
         self._show_grid = True
         self._show_wire_overlay = False
         self._backface_cull = True
+        self._empty_hint_suppressed = False
 
         self._yaw = self.RESET_YAW
         self._pitch = self.RESET_PITCH
@@ -850,6 +851,10 @@ class AssetViewport(AcceleratedWidget):
 
     def set_overlay_visible(self, visible: bool) -> None:
         self._show_diag_overlay = visible
+        self.update()
+
+    def set_empty_hint_suppressed(self, suppressed: bool) -> None:
+        self._empty_hint_suppressed = bool(suppressed)
         self.update()
 
     # -- geometry Edit Mode (Blender-style vertex editing) ------------------------
@@ -3520,7 +3525,7 @@ class AssetViewport(AcceleratedWidget):
             painter.fillRect(target, QColor(24, 26, 32))
 
         if not self._faces:
-            if not clean:
+            if not clean and not self._empty_hint_suppressed:
                 painter.setPen(QColor(180, 185, 192))
                 painter.drawText(target, Qt.AlignmentFlag.AlignCenter,
                                  "Open a .base to assemble resources "

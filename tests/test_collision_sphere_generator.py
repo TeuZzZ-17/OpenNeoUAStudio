@@ -312,8 +312,8 @@ class CollisionSphereGeneratorTests(unittest.TestCase):
         self.assertFalse(hasattr(window, "create_suggested_action"))
         self.assertFalse(hasattr(window, "create_suggested_button"))
 
-    def test_runtime_and_editor_safety_cap_is_512(self):
-        self.assertEqual(UNIT_COLL_MAX_COUNT, 512)
+    def test_runtime_and_editor_safety_cap_is_256(self):
+        self.assertEqual(UNIT_COLL_MAX_COUNT, 256)
 
     def test_live_sphere_counter_tracks_openneoua_compound_only(self):
         window = self._window()
@@ -326,14 +326,14 @@ class CollisionSphereGeneratorTests(unittest.TestCase):
         window._sync_all()
         self.assertEqual(
             window.collision_sphere_count_label.text(),
-            "OpenNeoUA Spheres: 3 / 512")
+            "OpenNeoUA Spheres: 3 / 256")
 
         window._selected = 1
         window._selected_spheres = {1}
         window.delete_sphere()
         self.assertEqual(
             window.collision_sphere_count_label.text(),
-            "OpenNeoUA Spheres: 2 / 512")
+            "OpenNeoUA Spheres: 2 / 256")
 
     def test_manual_creation_stops_at_runtime_safety_cap(self):
         window = self._window()
@@ -349,7 +349,7 @@ class CollisionSphereGeneratorTests(unittest.TestCase):
 
         self.assertEqual(len(window.project.compound), UNIT_COLL_MAX_COUNT)
         self.assertEqual(window.project.snapshot(), before)
-        self.assertIn("512 / 512", window.statusBar().currentMessage())
+        self.assertIn("256 / 256", window.statusBar().currentMessage())
 
     def test_duplicate_and_mirror_are_atomic_when_they_would_exceed_cap(self):
         window = self._window()
