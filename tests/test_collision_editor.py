@@ -8,7 +8,7 @@ from unittest.mock import MagicMock, patch
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 from PySide6.QtCore import QEvent, QPoint, QPointF, QRectF, Qt
-from PySide6.QtGui import QColor, QKeyEvent, QMouseEvent
+from PySide6.QtGui import QColor, QKeyEvent, QImage, QMouseEvent, QPainter
 from PySide6.QtWidgets import (
     QAbstractItemView, QApplication, QDialog, QGridLayout, QHeaderView, QLabel,
     QMessageBox, QSizePolicy, QPushButton, QToolBar, QToolButton,
@@ -60,6 +60,7 @@ from collision_editor import (
     weapon_model_references,
     write_script_file,
 )
+from collision_editor.shape import CollisionHull, CollisionShape
 from sklt_parser import SkltModel
 
 
@@ -115,6 +116,18 @@ def _right_click(viewport, pos, hit_index):
     with patch.object(viewport, "_hit_sphere", return_value=hit_index):
         viewport.mousePressEvent(press)
         viewport.mouseReleaseEvent(release)
+
+
+def _sample_shape():
+    return CollisionShape(
+        source="Model",
+        source_hash="",
+        visual_scale=(1.0, 1.0, 1.0),
+        visual_rotation=(0.0, 0.0, 0.0),
+        hulls=(CollisionHull(
+            vertices=((0.0, 0.0, 0.0), (1.0, 0.0, 0.0), (0.0, 1.0, 0.0)),
+            faces=((0, 1, 2),)),),
+    )
 
 
 class CollisionEditorTests(unittest.TestCase):
@@ -2741,10 +2754,25 @@ class CollisionEditorTests(unittest.TestCase):
         self.assertEqual(
             [window.properties_tabs.tabText(index)
              for index in range(window.properties_tabs.count())],
-            ["Collision", "Fire Points", "Gun Points", "Cockpit View"])
+            ["Collision Spheres", "Collision Shape", "Fire Points",
+             "Gun Points", "Cockpit View"])
         self.assertIs(
             window.ground_alignment_box.parentWidget(), window.collision_tab)
         self.assertIs(window.spheres_box.parentWidget(), window.collision_tab)
+        self.assertIs(
+            window.collision_shape_box.parentWidget(),
+            window.collision_shape_tab)
+        self.assertIs(
+            window.collision_geometry_widget.parentWidget(),
+            window.collision_shape_tab)
+        self.assertEqual(window.collision_tab_index, 0)
+        self.assertEqual(window.collision_shape_tab_index, 1)
+        self.assertEqual(window.collision_shape_quality.currentData(), "normal")
+        self.assertEqual(
+            window.generate_collision_shape_button.text(),
+            "Generate OpenNeoUA Collision Shape")
+        self.assertEqual(
+            window.cancel_collision_shape_button.text(), "Cancel Generation")
         self.assertIs(
             window.fire_points_box.parentWidget(), window.fire_points_tab)
         self.assertIs(
@@ -2774,12 +2802,13 @@ class CollisionEditorTests(unittest.TestCase):
         bar = window.properties_tabs.tabBar()
         self.assertTrue(bar.expanding())
         self.assertEqual(bar.elideMode(), Qt.TextElideMode.ElideNone)
-        self.assertFalse(bar.usesScrollButtons())
+        self.assertTrue(bar.usesScrollButtons())
         self.assertFalse(bar.isMovable())
         self.assertEqual(
             [window.properties_tabs.tabText(index)
              for index in range(window.properties_tabs.count())],
-            ["Collision", "Fire Points", "Gun Points", "Cockpit View"])
+            ["Collision Spheres", "Collision Shape", "Fire Points",
+             "Gun Points", "Cockpit View"])
         window.properties_tabs.setCurrentIndex(window.fire_points_tab_index)
         self.assertEqual(
             window.properties_tabs.currentIndex(), window.fire_points_tab_index)
@@ -3519,6 +3548,34 @@ class CollisionEditorTests(unittest.TestCase):
         self.assertNotIn("Delete All Collisions", labels)
         self.assertIsNone(window.findChild(QToolBar, "collisionTools"))
 
+    def test_132b_sphere_context_select_all_includes_legacy_and_compound(self):
+        window = self._window()
+        window.project.legacy = CollisionSphere(LEGACY, radius=10)
+        window.project.compound = [
+            CollisionSphere(OPENNEOUA, x=1, radius=2),
+            CollisionSphere(OPENNEOUA, x=3, radius=4),
+        ]
+        window._sync_all()
+        menu = window._create_sphere_context_menu(0)
+        action = next(
+            action for action in menu.actions()
+            if action.text() == "Select All Spheres")
+        self.assertTrue(action.isEnabled())
+        action.trigger()
+        self.assertEqual(window._selected_sphere_indices(), {0, 1, 2})
+        self.assertEqual(
+            window.properties_tabs.currentIndex(), window.collision_tab_index)
+        menu.deleteLater()
+
+    def test_132c_collision_overlays_follow_their_workspace_tabs(self):
+        window = self._window()
+        window.properties_tabs.setCurrentIndex(window.collision_shape_tab_index)
+        self.assertTrue(window.viewport._collision_shape_overlay_visible)
+        window.properties_tabs.setCurrentIndex(window.collision_tab_index)
+        self.assertFalse(window.viewport._collision_shape_overlay_visible)
+        window.properties_tabs.setCurrentIndex(window.fire_points_tab_index)
+        self.assertFalse(window.viewport._collision_shape_overlay_visible)
+
     def test_133_reset_current_tab_keeps_other_workspace_changes(self):
         window = self._window()
         window.project.legacy = CollisionSphere(LEGACY, radius=10)
@@ -3545,7 +3602,8 @@ class CollisionEditorTests(unittest.TestCase):
         window = self._window()
         window._sync_all()
         self.assertIn("#e06060", window.source_detail_label.styleSheet())
-        self.assertIn("Workspace: Collision", window.source_detail_label.text())
+        self.assertIn(
+            "Workspace: Collision Spheres", window.source_detail_label.text())
         self.assertIn("Script link:", window.source_detail_label.text())
         self.assertIn("VANM animation:", window.source_detail_label.text())
 
@@ -3944,6 +4002,60 @@ class CollisionEditorTests(unittest.TestCase):
              for index in range(3)],
             [False, False, False])
 
+    def test_invalid_3ds_fallback_binds_active_unit_and_bake_to_vp_subtree(self):
+        from vp_manager import EmbeddedVPEntry, EmbeddedVPSet, VPEntry, VPTable
+
+        window = self._window()
+        window.family = _family()
+        temp = tempfile.TemporaryDirectory()
+        self.addCleanup(temp.cleanup)
+        data = Path(temp.name) / "Data"
+        script_path = data / "Scripts" / "Vehicles.cfg"
+        set_bas = data / "Sets" / "Set1" / "Objects" / "SET.BAS"
+        broken_3ds = data / "Models" / "Broken.3ds"
+        for path in (script_path.parent, set_bas.parent, broken_3ds.parent):
+            path.mkdir(parents=True, exist_ok=True)
+        set_bas.write_bytes(b"placeholder")
+        broken_3ds.write_bytes(b"not a 3DS file")
+        script_path.write_text(
+            "new_vehicle 77\n"
+            "    name = Fallback Test\n"
+            "    3ds_normal = Data/Models/Broken.3ds\n"
+            "    vp_normal = 1\n"
+            "end\n",
+            encoding="utf-8")
+        window._vp_embedded = EmbeddedVPSet(
+            source_path=set_bas,
+            container_source_offset=0,
+            entries=(
+                EmbeddedVPEntry(0, "Root.base", "models/root.sklt"),
+                EmbeddedVPEntry(1, "Kid.base", "models/kid.sklt"),
+            ))
+        window._vp_table = VPTable((
+            VPEntry(0, "Root.base"), VPEntry(1, "Kid.base")))
+        window._vp_table_source = "embedded test"
+        window._fill_models(window.family)
+
+        with patch.object(
+                editor_module, "read_3ds",
+                side_effect=ValueError("invalid 3DS mesh")):
+            self.assertTrue(window.open_vehicle_script(
+                script_path, object_id=77, object_kind="new_vehicle"))
+
+        self.assertEqual(
+            window._active_model_reference.three_ds_normal,
+            "Data/Models/Broken.3ds")
+        self.assertEqual(
+            window._active_visual_reference.three_ds_normal, "")
+        self.assertEqual(window._active_visual_reference.vp_normal, 1)
+        active_row = window.model_tree.currentItem()
+        self.assertIsNotNone(active_row)
+        self.assertEqual(
+            active_row.data(0, Qt.ItemDataRole.UserRole), "root/kid[0]")
+        self.assertEqual(window._current_owner, "root/kid[0]")
+        self.assertEqual(
+            window._collision_shape_root_owner(), "root/kid[0]")
+
     def test_145_script_unit_list_scrolls_with_the_mouse_wheel(self):
         from PySide6.QtGui import QWheelEvent
 
@@ -4102,6 +4214,53 @@ class CollisionEditorTests(unittest.TestCase):
                 self.assertTrue(window.toolbar_reset_view_button.isEnabled())
                 window._reset_view()
                 self.assertEqual(viewport._camera_state(), home)
+
+    def test_150_undo_redo_cover_generated_collision_shape(self):
+        window = self._window()
+        window.add_legacy()
+        shape = _sample_shape()
+        window._push_undo()
+        window.project.collision_shape = shape
+        window.project.legacy = None
+        window._shape_preview_settings()
+        window._sync_all()
+        self.assertIs(window.viewport._collision_shape, shape)
+        self.assertTrue(window.viewport._empty_hint_suppressed)
+        self.assertTrue(window.undo_action.isEnabled())
+
+        window.undo()
+        self.assertIsNone(window.project.collision_shape)
+        self.assertIsNone(window.viewport._collision_shape)
+        self.assertFalse(window.viewport._empty_hint_suppressed)
+        self.assertEqual(len(window.project.spheres()), 1)
+        self.assertTrue(window.redo_action.isEnabled())
+
+        window.redo()
+        self.assertIs(window.project.collision_shape, shape)
+        self.assertIs(window.viewport._collision_shape, shape)
+        self.assertTrue(window.viewport._empty_hint_suppressed)
+        self.assertFalse(window.project.spheres())
+
+    def test_151_collision_shape_hides_empty_view_hint(self):
+        viewport = CollisionViewport()
+        self.addCleanup(viewport.close)
+        reference = QImage(240, 180, QImage.Format.Format_ARGB32)
+        reference.fill(QColor(24, 26, 32))
+
+        def rendered():
+            image = QImage(240, 180, QImage.Format.Format_ARGB32)
+            painter = QPainter(image)
+            viewport._render_scene(
+                painter, QRectF(0, 0, 240, 180), QColor(24, 26, 32), False,
+                viewport._camera_state())
+            painter.end()
+            return image
+
+        self.assertNotEqual(rendered(), reference)
+        viewport.set_collision_shape(_sample_shape())
+        self.assertEqual(rendered(), reference)
+        viewport.set_collision_shape(None)
+        self.assertNotEqual(rendered(), reference)
 
 
 if __name__ == "__main__":
