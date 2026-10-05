@@ -16,6 +16,7 @@ from pathlib import Path
 
 APP_TITLE = "OpenNeoUA Studio"
 MAP_EDITOR_FLAG = "--map-editor"
+COLLISION_BAKE_WORKER_FLAG = "--collision-bake-worker"
 MAIN_SUITE_TOOL = "main_suite"  # backward-compatible internal key
 MODEL_EDITOR_TOOL = "model_editor"
 SNAPSHOT_STUDIO_TOOL = "snapshot_studio"
@@ -110,6 +111,15 @@ def _launch_selected_map_editor(startup_path: str | None = None) -> int:
 
 def main() -> int:
     args = sys.argv[1:]
+    if args and args[0] == COLLISION_BAKE_WORKER_FLAG:
+        from collision_editor.shape import worker_main
+
+        if len(args) == 3:
+            return worker_main(args[1], args[2])
+        if len(args) == 1 and not getattr(sys, "frozen", False):
+            # Source-only stdin/stdout entry retained for focused tests.
+            return worker_main()
+        return 2
     if MAP_EDITOR_FLAG in args:
         return _run_map_editor(args)
 

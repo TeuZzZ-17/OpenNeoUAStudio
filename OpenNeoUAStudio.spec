@@ -1,11 +1,23 @@
 # -*- mode: python ; coding: utf-8 -*-
 
+from PyInstaller.utils.hooks import collect_dynamic_libs, copy_metadata
+from pathlib import Path
+
+# ctypes loads CoACD before Qt in the bake worker, so keep its OpenMP
+# dependency next to the CoACD DLL rather than only in Qt's package folder.
+coacd_binaries = collect_dynamic_libs('coacd')
+coacd_binaries += [
+    (source, 'coacd')
+    for source, _destination in collect_dynamic_libs('shiboken6')
+    if Path(source).name.lower() == 'vcomp140.dll'
+]
+
 
 a = Analysis(
     ['main.py'],
     pathex=[],
-    binaries=[],
-    datas=[('.\\icons', 'icons')],
+    binaries=coacd_binaries,
+    datas=[('.\\icons', 'icons')] + copy_metadata('coacd'),
     hiddenimports=[
         'wireframe_editor.window',
         'map_editor.editor',
@@ -17,6 +29,9 @@ a = Analysis(
         'map_editor.render.gpu_renderer',
         'map_editor.ui.dialogs',
         'map_editor.ui.main_window',
+        'collision_editor.editor',
+        'collision_editor.shape',
+        'coacd',
         'OpenGL',
         'OpenGL.GL',
         'OpenGL.GL.shaders',
