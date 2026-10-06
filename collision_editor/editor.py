@@ -6948,17 +6948,29 @@ class CollisionEditorWindow(QMainWindow):
             action.setEnabled(self._current_visual_resource_is_open())
 
     def close_current_archive(self) -> None:
-        """Detach the current visual resource without touching collision work.
+        """Close the current resource and clear its whole authoring session.
 
-        Collision spheres/script data are a separate authoring document.
-        Closing the current visual resource therefore clears only the model/BAS
-        provider and VP lookup state, then re-applies the existing collision
-        project to the now-empty viewport.
+        Collision data belongs to the unit/model currently being edited.
+        Closing that resource must therefore clear the linked script, spheres,
+        shape, Fire Points, Gun Points, cockpit data and undo/redo history too.
         """
 
         if not self._current_visual_resource_is_open():
             self._sync_close_archive_action()
             return
+
+        process = self._collision_bake_process
+        if process is not None:
+            self._collision_bake_cancelled = True
+            process.kill()
+            process.waitForFinished(3000)
+            if self._collision_bake_process is process:
+                self._collision_bake_process = None
+            process.deleteLater()
+        self._cleanup_collision_bake_tempdir()
+        self._collision_bake_context = {}
+        self._collision_bake_cancelled = False
+
         self.viewport.clear()
         self.family = None
         self._vp_embedded = None
@@ -6967,20 +6979,50 @@ class CollisionEditorWindow(QMainWindow):
         self._active_base_path = None
         self._current_owner = None
         self._current_owner_base_bounds = None
-        self._refresh_collision_geometry_widget()
+        self._viewport_owner = None
+        self._clear_script_link()
+
+        self.project = CollisionProject()
+        self._new_gun_point_scheme = "unit"
+        self._capture_loaded_gun_points()
+        self._capture_loaded_cockpit_camera()
+        self._capture_tab_reset_baseline()
+        self._selected = -1
+        self._selected_spheres.clear()
+        self._selected_fire_point = -1
+        self._selected_gun_point = -1
+        self._undo.clear()
+        self._redo.clear()
+        self._vehicle_preview_active_edits.clear()
+        self._turret_slider_active_edits.clear()
+        self._gun_direction_slider_active = False
+
+        self._collision_geometry_cache_key = None
+        self._collision_geometry_components = ()
+        self._collision_geometry_triangles_by_owner = {}
+        self._collision_geometry_owners = ()
+        self._collision_geometry_fingerprints.clear()
+        widget = getattr(self, "collision_geometry_widget", None)
+        if widget is not None:
+            widget.set_geometry(None, None, (), {}, None)
+        self._set_collision_geometry_preview(None)
+
         self.model_tree.clear()
         self._model_info_by_vp = {}
         self._script_unit_references = []
         self._script_unit_visual_reference = None
         self._set_script_unit_mode(False)
+        if hasattr(self, "model_search"):
+            self.model_search.clear()
         self.source_label.setText("No source loaded.")
         self._set_model_browser_enabled(False)
+        self._set_modified(False)
         self._sync_animation_controls()
         self._sync_all()
         self._update_window_title()
         self._sync_close_archive_action()
         self.statusBar().showMessage(
-            "Current visual resource closed. Collision project kept in memory.",
+            "Current resource closed. Related Collision Editor data cleared.",
             5000)
 
     def _current_set_bas_path(self) -> Path | None:
