@@ -132,10 +132,6 @@ class _ToolCard(QFrame):
             self.clicked.emit(self._key)
             event.accept()
             return
-        if event.key() in (Qt.Key.Key_Return, Qt.Key.Key_Enter):
-            self.double_clicked.emit(self._key)
-            event.accept()
-            return
         super().keyPressEvent(event)
 
 
@@ -269,6 +265,15 @@ class StartupToolSelector(QDialog):
             shortcut.setContext(Qt.ShortcutContext.WidgetWithChildrenShortcut)
             shortcut.activated.connect(
                 lambda direction=step: self._move_tool_selection(direction))
+            self._selection_shortcuts.append(shortcut)
+
+        # Enter always opens the highlighted workspace. A card can retain
+        # keyboard focus while the mouse wheel moves the visual selection, so
+        # the focused card must not decide which workspace gets launched.
+        for key in (Qt.Key.Key_Return, Qt.Key.Key_Enter):
+            shortcut = QShortcut(QKeySequence(key), self)
+            shortcut.setContext(Qt.ShortcutContext.WidgetWithChildrenShortcut)
+            shortcut.activated.connect(self.accept)
             self._selection_shortcuts.append(shortcut)
 
         note = QLabel(

@@ -2772,7 +2772,7 @@ class CollisionEditorTests(unittest.TestCase):
             window.generate_collision_shape_button.text(),
             "Generate OpenNeoUA Collision Shape")
         self.assertEqual(
-            window.cancel_collision_shape_button.text(), "Cancel Generation")
+            window.delete_collision_shape_button.text(), "Delete")
         self.assertIs(
             window.fire_points_box.parentWidget(), window.fire_points_tab)
         self.assertIs(
@@ -3822,6 +3822,43 @@ class CollisionEditorTests(unittest.TestCase):
         self.assertIn("coll_radius = 40", preview)
         self.assertNotIn("; [Tab: Fire Points]", preview)
         self.assertNotIn("fire_x =", preview)
+
+    def test_139a_collision_shape_path_marks_collision_tab_as_changed(self):
+        window = self._window()
+        window.project = CollisionProject(
+            target_category=VEHICLE,
+            collision_shape_path="Data/Models/Collision/Weasel.collision",
+        )
+        window._capture_tab_reset_baseline()
+
+        window.project.collision_shape_path = (
+            "Data/Models/Collision/WeaselFF.collision")
+
+        self.assertEqual(window._changed_script_tabs(), {"collision"})
+        preview = build_editable_overwrite_preview(
+            "new_vehicle", 1, window.project, window._changed_script_tabs())
+        self.assertIn(
+            "collision_shape = Data/Models/Collision/WeaselFF.collision",
+            preview)
+
+    def test_139b_overwrite_blocks_generated_shape_until_it_is_exported(self):
+        window = self._window()
+        window._active_script_path = Path("C:/UA/Data/Scripts/Vehicles.cfg")
+        window._active_script_id = 1
+        window._active_script_kind = "new_vehicle"
+        window.project.target_category = VEHICLE
+        window.project.collision_shape = _sample_shape()
+        window.project.collision_shape_path = ""
+        window.project.collision_shape_file_path = ""
+
+        with patch.object(QMessageBox, "warning") as warning, patch.object(
+                editor_module, "ApplyScriptDialog") as apply_dialog:
+            window.overwrite_loaded_script()
+
+        apply_dialog.assert_not_called()
+        warning.assert_called_once()
+        self.assertEqual(warning.call_args.args[1], "Export Collision Shape first")
+        self.assertIn("has not been exported", warning.call_args.args[2])
 
     def test_140_editable_overwrite_applies_manual_code_and_preserves_other_tabs(self):
         source = (

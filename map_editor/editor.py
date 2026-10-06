@@ -43,18 +43,13 @@ def create_window(argv=None, parent=None):
     bootstrap.ensure_studio_on_path()
 
     from .core.ldf_model import LdfDocument, load_ldf
-    from .ui.dialogs import NewMapDialog
     from .ui.main_window import MainWindow
 
     path = args[0] if args else None
     if path:
         doc = load_ldf(path)
     else:
-        dialog = NewMapDialog(parent)
-        if not dialog.exec():
-            return None
-        width, height, set_number = dialog.values()
-        doc = LdfDocument(mw=width, mh=height, set_number=set_number)
+        doc = LdfDocument(mw=15, mh=15, set_number=1)
 
     window = MainWindow(doc, path)
     if parent is not None:
