@@ -122,8 +122,8 @@ class CollisionShapeTests(unittest.TestCase):
         shape = CollisionShape(
             source="VP_TIGER",
             source_hash="a" * 64,
-            visual_scale=(1.0, 2.0, 3.0),
-            visual_rotation=(0.0, 90.0, 0.0),
+            scale=(1.0, 2.0, 3.0),
+            rotation=(0.0, 90.0, 0.0),
             hulls=(_tetrahedron(),),
             asset_set=1,
         )
@@ -150,8 +150,8 @@ class CollisionShapeTests(unittest.TestCase):
                 "version = 1", "version = 1\nasset_set = 1.5"))
         with self.assertRaisesRegex(ValueError, "0..255"):
             parse_collision_shape(text.replace(
-                "visual_rotation = 0_0_0",
-                "visual_rotation = 0_0_0\nasset_set = 256"))
+                "rotation = 0_0_0",
+                "rotation = 0_0_0\nasset_set = 256"))
         oversized = CollisionHull(
             ((0, 0, 0), (1e7 + 1, 0, 0), (0, 1, 0), (0, 0, 1)),
             _tetrahedron().faces)
@@ -177,7 +177,7 @@ class CollisionShapeTests(unittest.TestCase):
         triangles = _l_prism()
         result = generate_collision_shape(
             [("root/body", triangles)], source="Concave_Test",
-            visual_scale=(1, 1, 1), visual_rotation=(0, 0, 0),
+            scale=(1, 1, 1), rotation=(0, 0, 0),
             asset_set=1, quality="normal")
         self.assertGreaterEqual(len(result.shape.hulls), 2)
         notch_point = (1.5, 1.5, 0.5)
@@ -942,10 +942,10 @@ class CollisionShapeTests(unittest.TestCase):
                 "new_vehicle 77\n"
                 "    name = Set Mismatch Test\n"
                 "    vp_normal = 1\n"
-                "    visual_scale_x = 2\n"
-                "    visual_scale_y = 3\n"
-                "    visual_scale_z = 4\n"
-                "    visual_rotation_y = 15\n"
+                "    scale_x = 2\n"
+                "    scale_y = 3\n"
+                "    scale_z = 4\n"
+                "    rotation_y = 15\n"
                 "    collision_shape = Data/Sets/Set1/Collision/SourceSet2.collision\n"
                 "end\n",
                 encoding="utf-8")
@@ -1012,7 +1012,7 @@ class CollisionShapeTests(unittest.TestCase):
         text = (
             "new_vehicle 3\n"
             "    3ds_normal = Data/Models/3ds/Test.3ds\n"
-            "    visual_rotation_x = 90\n"
+            "    rotation_x = 90\n"
             "    collision_shape = Data/Models/Collision/Test.collision\n"
             "end\n")
         reference = script_model_references(text)[0]
@@ -1126,8 +1126,8 @@ class CollisionShapeTests(unittest.TestCase):
                     tuple(_tetrahedron().vertices[index] for index in face)
                     for face in _tetrahedron().faces)
             ]}],
-            "visual_scale": [1, 1, 1],
-            "visual_rotation": [0, 0, 0],
+            "scale": [1, 1, 1],
+            "rotation": [0, 0, 0],
         }
         with TemporaryDirectory() as directory:
             input_path = Path(directory) / "input.json"

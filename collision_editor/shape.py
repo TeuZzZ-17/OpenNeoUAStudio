@@ -33,8 +33,8 @@ class CollisionHull:
 class CollisionShape:
     source: str
     source_hash: str
-    visual_scale: Point3
-    visual_rotation: Point3
+    scale: Point3
+    rotation: Point3
     hulls: tuple[CollisionHull, ...]
     version: int = 1
     asset_set: int = 0
@@ -162,10 +162,10 @@ def validate_shape(shape: CollisionShape) -> None:
         raise ValueError("Collision shape source must be an identifier without spaces.")
     if not _HASH_RE.fullmatch(shape.source_hash):
         raise ValueError("Collision shape source_hash must be a SHA-256 hex digest.")
-    scale = _point3(shape.visual_scale, "visual_scale")
+    scale = _point3(shape.scale, "scale")
     if any(value < 0.0 for value in scale):
-        raise ValueError("Collision shape visual_scale cannot be negative.")
-    _point3(shape.visual_rotation, "visual_rotation")
+        raise ValueError("Collision shape scale cannot be negative.")
+    _point3(shape.rotation, "rotation")
     try:
         asset_set = int(shape.asset_set)
     except (TypeError, ValueError, OverflowError) as exc:
@@ -189,9 +189,9 @@ def collision_shape_text(shape: CollisionShape) -> str:
         f"version = {shape.version}",
         f"source = {shape.source}",
         f"source_hash = {shape.source_hash}",
-        "visual_scale = " + "_".join(_fmt(value) for value in shape.visual_scale),
-        "visual_rotation = " + "_".join(
-            _fmt(value) for value in shape.visual_rotation),
+        "scale = " + "_".join(_fmt(value) for value in shape.scale),
+        "rotation = " + "_".join(
+            _fmt(value) for value in shape.rotation),
     ]
     if shape.asset_set:
         lines.append(f"asset_set = {int(shape.asset_set)}")
@@ -264,17 +264,17 @@ def parse_collision_shape(text: str) -> CollisionShape:
                 raise ValueError(f"Duplicate collision-shape field: {key!r}.")
             if key not in {
                     "version", "source", "source_hash",
-                    "visual_scale", "visual_rotation", "asset_set"}:
+                    "scale", "rotation", "asset_set"}:
                 raise ValueError(f"Unknown collision-shape field: {key!r}.")
             headers[key] = value
     if current_vertices is not None or current_faces is not None:
         raise ValueError("Missing end for collision hull.")
     required = {
-        "version", "source", "source_hash", "visual_scale", "visual_rotation"}
+        "version", "source", "source_hash", "scale", "rotation"}
     if set(headers) - {"asset_set"} != required:
         raise ValueError(
             "Collision shape requires version, source, source_hash, "
-            "visual_scale and visual_rotation.")
+            "scale and rotation.")
     try:
         version = int(headers["version"])
     except ValueError as exc:
@@ -287,9 +287,9 @@ def parse_collision_shape(text: str) -> CollisionShape:
     shape = CollisionShape(
         source=headers["source"],
         source_hash=headers["source_hash"].lower(),
-        visual_scale=_parse_vector(headers["visual_scale"], "visual_scale"),
-        visual_rotation=_parse_vector(
-            headers["visual_rotation"], "visual_rotation"),
+        scale=_parse_vector(headers["scale"], "scale"),
+        rotation=_parse_vector(
+            headers["rotation"], "rotation"),
         hulls=tuple(hulls), version=version, asset_set=asset_set,
     )
     validate_shape(shape)
@@ -331,7 +331,7 @@ def visual_transform_point(
     sin_x, cos_x = math.sin(sx), math.cos(sx)
     sin_y, cos_y = math.sin(sy), math.cos(sy)
     sin_z, cos_z = math.sin(sz), math.cos(sz)
-    kx, ky, kz = _point3(scale, "visual_scale")
+    kx, ky, kz = _point3(scale, "scale")
     matrix = (
         ((cos_z * cos_y - sin_z * sin_x * sin_y) * kx,
          -sin_z * cos_x * kx,
@@ -603,8 +603,8 @@ def _source_topology_warnings(parts) -> tuple[str, ...]:
 
 def generate_collision_shape(
         parts: Iterable[tuple[str, Iterable[Triangle3]]], *, source: str,
-        visual_scale: Point3 = (1.0, 1.0, 1.0),
-        visual_rotation: Point3 = (0.0, 0.0, 0.0),
+        scale: Point3 = (1.0, 1.0, 1.0),
+        rotation: Point3 = (0.0, 0.0, 0.0),
         asset_set: int = 0,
         quality: str = "normal") -> ShapeGenerationResult:
     """Bake each selected part separately with CoACD 1.0.14."""
@@ -630,8 +630,8 @@ def generate_collision_shape(
     if not clean_source:
         clean_source = "Model"
     fingerprint = geometry_fingerprint(raw_parts)
-    scale = _point3(visual_scale, "visual_scale")
-    rotation = _point3(visual_rotation, "visual_rotation")
+    scale = _point3(scale, "scale")
+    rotation = _point3(rotation, "rotation")
     prepared, transformed_source = _deduplicate_triangles(
         raw_parts, scale, rotation)
     prepared_owners = {owner for owner, _triangles in prepared}
@@ -728,8 +728,8 @@ def generate_collision_shape(
     shape = CollisionShape(
         source=clean_source,
         source_hash=fingerprint,
-        visual_scale=scale,
-        visual_rotation=rotation,
+        scale=scale,
+        rotation=rotation,
         hulls=tuple(hulls),
         asset_set=asset_set,
     )
@@ -765,8 +765,8 @@ def _worker_response(request: dict) -> dict:
             for part in request["parts"]
         ],
         source=request["source"],
-        visual_scale=request["visual_scale"],
-        visual_rotation=request["visual_rotation"],
+        scale=request["scale"],
+        rotation=request["rotation"],
         asset_set=request.get("asset_set", 0),
         quality=request.get("quality", "normal"),
     )
