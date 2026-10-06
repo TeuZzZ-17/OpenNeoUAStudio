@@ -732,9 +732,69 @@ class CollisionShapeTests(unittest.TestCase):
         self.assertTrue(window.collision_shape_progress.isHidden())
         warning.assert_not_called()
 
+    def test_collision_shape_import_requires_open_set(self):
+        window = CollisionEditorWindow()
+        self.addCleanup(lambda: (window._set_modified(False), window.close()))
+        window._sync_collision_generation_controls()
+        self.assertFalse(window.import_collision_shape_button.isEnabled())
+
+        with patch.object(
+                editor_module.QFileDialog, "getOpenFileName") as choose_path, \
+                patch.object(editor_module.QMessageBox, "information") as info:
+            window.import_collision_shape()
+        choose_path.assert_not_called()
+        info.assert_called_once()
+
+        window._vp_embedded = types.SimpleNamespace(
+            source_path="C:/Game/Data/Sets/Set1/Objects/SET.BAS")
+        window._sync_collision_generation_controls()
+        self.assertTrue(window.import_collision_shape_button.isEnabled())
+
+    def test_delete_collision_shape_clears_shape_state_and_is_undoable(self):
+        window = CollisionEditorWindow()
+        self.addCleanup(lambda: (window._set_modified(False), window.close()))
+        shape = CollisionShape(
+            "Delete_Test", "d" * 64, (1, 1, 1), (0, 0, 0),
+            (_tetrahedron(),))
+        window.project.collision_shape = shape
+        window.project.collision_shape_path = "Data/Collision/Delete_Test.collision"
+        window.project.collision_shape_file_path = (
+            "C:/Game/Data/Collision/Delete_Test.collision")
+        window.project.collision_shape_owners = ("root",)
+        window.project.collision_shape_components = ("root#component:test",)
+        window.project.collision_shape_warnings = ("test warning",)
+        window._shape_preview_settings()
+        window._sync_all()
+
+        self.assertTrue(window.delete_collision_shape_button.isEnabled())
+        menu = window._create_collision_shape_context_menu()
+        self.addCleanup(menu.deleteLater)
+        delete_action = next(
+            action for action in menu.actions()
+            if action.text() == "Delete Collision Shape")
+        self.assertTrue(delete_action.isEnabled())
+        delete_action.trigger()
+
+        self.assertIsNone(window.project.collision_shape)
+        self.assertEqual(window.project.collision_shape_path, "")
+        self.assertEqual(window.project.collision_shape_file_path, "")
+        self.assertIsNone(window.project.collision_shape_owners)
+        self.assertIsNone(window.project.collision_shape_components)
+        self.assertEqual(window.project.collision_shape_warnings, ())
+        self.assertIsNone(window.viewport._collision_shape)
+        self.assertFalse(window.delete_collision_shape_button.isEnabled())
+
+        window.undo()
+        self.assertEqual(window.project.collision_shape, shape)
+        self.assertEqual(
+            window.project.collision_shape_path,
+            "Data/Collision/Delete_Test.collision")
+
     def test_importing_shape_keeps_existing_legacy_and_compound_spheres(self):
         window = CollisionEditorWindow()
         self.addCleanup(lambda: (window._set_modified(False), window.close()))
+        window._vp_embedded = types.SimpleNamespace(
+            source_path="C:/Game/Data/Sets/Set1/Objects/SET.BAS")
         window.project.legacy = CollisionSphere(LEGACY, radius=11)
         window.project.compound = [CollisionSphere(OPENNEOUA, radius=8)]
         before = (window.project.legacy.clone(),

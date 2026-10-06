@@ -10,7 +10,7 @@ from PySide6.QtGui import (QAction, QActionGroup, QColor, QIcon, QImage, QKeySeq
                            QPainter, QPen, QPixmap)
 from PySide6.QtWidgets import (QApplication, QAbstractItemView, QComboBox, QDockWidget, QFileDialog,
                                QFormLayout, QHBoxLayout, QLabel, QLineEdit, QListView, QListWidget,
-                               QListWidgetItem, QMainWindow, QMessageBox, QPushButton,
+                               QListWidgetItem, QMainWindow, QMessageBox, QPushButton, QInputDialog,
                                QSlider, QVBoxLayout,
                                QWidget, QToolButton, QGroupBox, QSpinBox, QCheckBox,
                                QPlainTextEdit, QScrollArea, QDialog, QDialogButtonBox, QMenu)
@@ -224,6 +224,7 @@ class MainWindow(QMainWindow):
         act(file_menu, "Game folders...", self.file_game_folders)
         self.undo_action = act(edit_menu, "Undo", self.undo, QKeySequence.StandardKey.Undo)
         self.redo_action = act(edit_menu, "Redo", self.redo, QKeySequence.StandardKey.Redo)
+        act(map_menu, "Set...", self.map_set)
         act(map_menu, "Resize...", self.map_resize)
         self.reset_action = act(map_menu, "Reset...", self.map_reset)
         self.reset_camera_action = act(view_menu, 'Reset Camera', self.view.reset_camera, 'Home')
@@ -2085,6 +2086,12 @@ class MainWindow(QMainWindow):
     def _after_history(self):
         self.dirty = True
         self._draft_squads = []
+        view_lib = getattr(self.view, "lib", None)
+        view_assets = getattr(view_lib, "assets", None)
+        set_changed = (
+            getattr(view_assets, "set_number", None) != self.doc.set_number)
+        if set_changed:
+            self._refresh_map_set_assets()
         if (self.doc.mw, self.doc.mh) != (self.view.terrain.width, self.view.terrain.height):
             self.view.set_document(self.doc)
         else:
@@ -2099,6 +2106,45 @@ class MainWindow(QMainWindow):
         self._refresh_music()
         self._refresh_title()
         self._sync_side_panels()
+
+    def _refresh_map_set_assets(self):
+        """Reload every UI resource whose content depends on the map SET."""
+
+        self._palette_set = None
+        self._asset_epoch += 1
+        self._resource_icons.clear()
+        self._sky_state = None
+        self._ensure_lib()
+        self._rebuild_level_panel()
+        self._refresh_sky()
+        self._refresh_music()
+
+    def map_set(self):
+        if not self.doc:
+            return
+        self._released(-1, -1, Qt.KeyboardModifier.NoModifier)
+        number, accepted = QInputDialog.getInt(
+            self, "Map Set", "Set number:", int(self.doc.set_number),
+            1, 255, 1)
+        if not accepted or number == self.doc.set_number:
+            return
+        if number not in self.libs:
+            try:
+                self.libs[number] = SectorMeshLibrary(SetAssets(number).load())
+            except Exception as exc:
+                QMessageBox.warning(
+                    self, "Set unavailable",
+                    f"Set {number}: {exc}\nThe current map SET was not changed.")
+                return
+        self.history.push(self.doc)
+        self.doc.set_number = number
+        self.dirty = True
+        self._refresh_map_set_assets()
+        self._sync_side_panels()
+        self.building_overlay.update()
+        self.view.scene_changed()
+        self._refresh_title()
+        self.statusBar().showMessage(f"Map changed to Set {number}.", 4000)
 
     def map_resize(self):
         if not self.doc:
