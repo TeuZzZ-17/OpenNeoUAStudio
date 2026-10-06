@@ -116,6 +116,23 @@ class StartupToolSelectorTests(unittest.TestCase):
         QTest.keyClick(dialog.open_button, Qt.Key.Key_W)
         self.assertEqual(dialog.selected_tool(), "snapshot_studio")
 
+    def test_enter_opens_the_wheel_selected_workspace_not_the_focused_card(self):
+        dialog = StartupToolSelector()
+        self.addCleanup(dialog.close)
+        dialog.show()
+        self.app.processEvents()
+
+        cards = dialog.tool_list.findChildren(_ToolCard)
+        cards[0].setFocus()
+        for _ in range(3):
+            self._send_wheel(cards[0], -120)
+        self.assertEqual(dialog.selected_tool(), "collision_editor")
+
+        QTest.keyClick(cards[0], Qt.Key.Key_Return)
+        self.app.processEvents()
+        self.assertEqual(dialog.result(), dialog.DialogCode.Accepted)
+        self.assertEqual(dialog.selected_tool(), "collision_editor")
+
     @staticmethod
     def _send_wheel(widget, delta):
         position = QPointF(widget.rect().center())

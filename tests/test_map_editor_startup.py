@@ -94,7 +94,7 @@ def test_map_editor_loads_optional_ldf_and_reuses_existing_application(
         "remembered", ("installation", install), "studio-path", "window", "show"]
 
 
-def test_map_editor_prompts_for_installation_and_new_map_without_ldf(
+def test_map_editor_opens_default_set1_15x15_map_without_new_map_prompt(
         app, monkeypatch):
     events = []
     suggested, install = object(), object()
@@ -120,14 +120,13 @@ def test_map_editor_prompts_for_installation_and_new_map_without_ldf(
 
     class NewMapDialog:
         def __init__(self, parent):
-            events.append(("new-map-dialog", parent))
+            pytest.fail("Startup must not show the new-map dialog")
 
         def exec(self):
-            events.append("new-map-dialog-exec")
-            return QDialog.DialogCode.Accepted
+            pytest.fail("Startup must not show the new-map dialog")
 
         def values(self):
-            return 8, 10, 4
+            pytest.fail("Startup must not request custom map values")
 
     class Window:
         def __init__(self, doc, path):
@@ -160,7 +159,7 @@ def test_map_editor_prompts_for_installation_and_new_map_without_ldf(
     window = map_editor_entry.create_window([])
 
     assert isinstance(window.doc, LdfDocument)
-    assert (window.doc.mw, window.doc.mh, window.doc.set_number) == (8, 10, 4)
+    assert (window.doc.mw, window.doc.mh, window.doc.set_number) == (15, 15, 1)
     assert window.path is None
     assert events == [
         ("suggest", "C:/UA/Data"),
@@ -168,8 +167,6 @@ def test_map_editor_prompts_for_installation_and_new_map_without_ldf(
         "installation-dialog-exec",
         ("installation", install),
         "studio-path",
-        ("new-map-dialog", None),
-        "new-map-dialog-exec",
         "window",
         "show",
     ]

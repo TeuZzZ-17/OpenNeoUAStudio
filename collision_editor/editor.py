@@ -5673,6 +5673,10 @@ class CollisionEditorWindow(QMainWindow):
         self.collision_tab_layout.addWidget(self.ground_alignment_box)
 
         shape_box = QGroupBox("Convex Collision Shape")
+        shape_box.setContextMenuPolicy(
+            Qt.ContextMenuPolicy.CustomContextMenu)
+        shape_box.customContextMenuRequested.connect(
+            self._show_collision_shape_context_menu)
         shape_layout = QVBoxLayout(shape_box)
         shape_layout.setContentsMargins(6, 4, 6, 4)
         shape_layout.setSpacing(4)
@@ -5691,10 +5695,10 @@ class CollisionEditorWindow(QMainWindow):
         self.export_collision_shape_button = QPushButton("Export")
         self.export_collision_shape_button.clicked.connect(
             self.export_collision_shape)
-        self.cancel_collision_shape_button = QPushButton("Cancel Generation")
-        self.cancel_collision_shape_button.clicked.connect(
-            self.cancel_collision_shape_bake)
-        self.cancel_collision_shape_button.setEnabled(False)
+        self.delete_collision_shape_button = QPushButton("Delete")
+        self.delete_collision_shape_button.clicked.connect(
+            self.delete_collision_shape)
+        self.delete_collision_shape_button.setEnabled(False)
         shape_buttons = QHBoxLayout()
         shape_buttons.addWidget(self.generate_collision_shape_button, 1)
         shape_buttons.addWidget(self.collision_shape_quality)
@@ -5702,7 +5706,7 @@ class CollisionEditorWindow(QMainWindow):
         shape_io = QHBoxLayout()
         shape_io.addWidget(self.import_collision_shape_button)
         shape_io.addWidget(self.export_collision_shape_button)
-        shape_io.addWidget(self.cancel_collision_shape_button)
+        shape_io.addWidget(self.delete_collision_shape_button)
         shape_layout.addLayout(shape_io)
         self.collision_shape_status = QLabel("No convex shape loaded.")
         self.collision_shape_status.setWordWrap(True)
@@ -7357,6 +7361,16 @@ class CollisionEditorWindow(QMainWindow):
                 "The linked script definition and current project category "
                 "do not match.")
             return
+        if (self.project.collision_shape is not None
+                and not self.project.collision_shape_file_path):
+            QMessageBox.warning(
+                self, "Export Collision Shape first",
+                "The current Collision Shape was generated but has not been "
+                "exported yet. It cannot be applied to the linked vehicle or "
+                "weapon until it has been exported.\n\nExport the Collision "
+                "Shape first and then use Overwrite to Existing Script, or "
+                "delete the Collision Shape if you do not want to use it.")
+            return
         if not self._validate_for_output():
             return
         dialog = ApplyScriptDialog(
@@ -7596,10 +7610,12 @@ class CollisionEditorWindow(QMainWindow):
             self.generate_collision_shape_button.setEnabled(
                 self.family is not None and has_selection and not process_running)
             self.collision_shape_quality.setEnabled(not process_running)
-            self.import_collision_shape_button.setEnabled(not process_running)
+            self.import_collision_shape_button.setEnabled(
+                self._current_set_bas_path() is not None and not process_running)
             self.export_collision_shape_button.setEnabled(
                 self.project.collision_shape is not None and not process_running)
-            self.cancel_collision_shape_button.setEnabled(process_running)
+            self.delete_collision_shape_button.setEnabled(
+                self.project.collision_shape is not None and not process_running)
             self.collision_shape_progress.setVisible(
                 process_running and not self._collision_bake_cancelled)
             if widget is not None:
@@ -7836,16 +7852,29 @@ class CollisionEditorWindow(QMainWindow):
         self.collision_shape_status.setText(
             f"Shape ready: {len(shape.hulls)} parts.")
 
-    def cancel_collision_shape_bake(self) -> None:
-        process = self._collision_bake_process
-        if process is None:
+    def delete_collision_shape(self) -> None:
+        if (self._collision_bake_process is not None
+                or self.project.collision_shape is None):
             return
-        self._collision_bake_cancelled = True
-        self.collision_shape_status.setText("Cancelling generation…")
-        self._sync_collision_generation_controls()
-        process.kill()
+        self._push_undo()
+        self.project.collision_shape = None
+        self.project.collision_shape_path = ""
+        self.project.collision_shape_file_path = ""
+        self.project.collision_shape_owners = None
+        self.project.collision_shape_components = None
+        self.project.collision_shape_warnings = ()
+        self._shape_preview_settings()
+        self._sync_all()
+        self._set_modified()
+        self.statusBar().showMessage("Collision shape deleted.", 4500)
 
     def import_collision_shape(self) -> None:
+        if self._current_set_bas_path() is None:
+            QMessageBox.information(
+                self, "SET required",
+                "Open a SET.BAS archive in the Collision Editor before "
+                "importing a collision shape.")
+            return
         path, _ = QFileDialog.getOpenFileName(
             self, "Import collision shape", str(self._last_directory),
             "Collision shape (*.collision);;All files (*)")
@@ -8815,6 +8844,17 @@ class CollisionEditorWindow(QMainWindow):
         preset_menu = menu.addMenu("View Preset")
         self._populate_view_preset_context_menu(preset_menu)
 
+    def _create_collision_shape_context_menu(self) -> QMenu:
+        menu = QMenu(self)
+        menu.addAction(self.undo_action)
+        menu.addAction(self.redo_action)
+        menu.addSeparator()
+        self._context_action(
+            menu, "Delete Collision Shape", self.delete_collision_shape,
+            self.delete_collision_shape_button.isEnabled())
+        self._add_workspace_context_tail(menu)
+        return menu
+
     def _create_fire_point_context_menu(self) -> QMenu:
         menu = QMenu(self)
         menu.addAction(self.undo_action)
@@ -8920,6 +8960,10 @@ class CollisionEditorWindow(QMainWindow):
         menu.addAction(self.open_sklt_action)
         return menu
 
+    def _show_collision_shape_context_menu(self, local_pos: QPoint) -> None:
+        self._create_collision_shape_context_menu().exec(
+            self.collision_shape_box.mapToGlobal(local_pos))
+
     def _show_fire_points_context_menu(self, local_pos: QPoint) -> None:
         self._create_fire_point_context_menu().exec(
             self.fire_points_box.mapToGlobal(local_pos))
@@ -8947,6 +8991,10 @@ class CollisionEditorWindow(QMainWindow):
             self.gun_point_tree.viewport().mapToGlobal(local_pos))
 
     def _show_sphere_context_menu(self, index: int, global_pos: QPoint):
+        if (self.properties_tabs.currentIndex()
+                == self.collision_shape_tab_index):
+            self._create_collision_shape_context_menu().exec(global_pos)
+            return
         self._create_sphere_context_menu(index).exec(global_pos)
 
     def _show_sphere_tree_context_menu(self, local_pos: QPoint):
@@ -9724,9 +9772,11 @@ class CollisionEditorWindow(QMainWindow):
                 (float(sphere.x), float(sphere.y), float(sphere.z),
                  float(sphere.radius))
                 for sphere in project.compound)
+            shape_path = (
+                project.collision_shape_path.replace("\\", "/").strip())
             return (
                 bool(project.overeof_enabled), float(project.overeof),
-                legacy, compound,
+                legacy, compound, shape_path,
             )
         if group == _SCRIPT_TAB_FIRE:
             return (
@@ -9792,6 +9842,8 @@ class CollisionEditorWindow(QMainWindow):
             baseline = self._baseline_project()
             baseline.legacy, baseline.compound, _warnings = (
                 import_collision_block(text, block, OPENNEOUA))
+            baseline.collision_shape_path = import_collision_shape_reference(
+                text, block)
             if baseline.target_category == VEHICLE:
                 baseline.overeof_enabled, baseline.overeof = (
                     import_overeof_block(text, block))
