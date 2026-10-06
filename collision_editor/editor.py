@@ -582,7 +582,7 @@ class CollisionProject:
     source_model: str = ""
     source_base: str = ""
     target_category: str = VEHICLE
-    # Visual-only preview of OpenNeoUA's visual_scale_x/y/z. These values never
+    # Visual-only preview of OpenNeoUA's scale_x/y/z. These values never
     # modify the source model and are never emitted as collision parameters.
     model_scale_x: float = 1.0
     model_scale_y: float = 1.0
@@ -879,7 +879,7 @@ def script_model_references(text: str) -> list[VehicleModelReference]:
     excluded because resolving inherited visual prototypes would require the
     full include chain rather than one source file. ``vp_wait`` is retained so
     Cockpit View can preview the same stationary model used by the runtime.
-    OpenNeoUA's ``visual_scale_x/y/z`` drive the preview scale; the older
+    OpenNeoUA's ``scale_x/y/z`` drive the preview scale; the older
     ``vp_scale_x/y/z`` names are accepted only as a compatibility fallback.
     """
 
@@ -892,15 +892,15 @@ def script_model_references(text: str) -> list[VehicleModelReference]:
         values = {
             "vp_normal": None,
             "vp_wait": None,
-            "visual_scale_x": None,
-            "visual_scale_y": None,
-            "visual_scale_z": None,
+            "scale_x": None,
+            "scale_y": None,
+            "scale_z": None,
             "vp_scale_x": None,
             "vp_scale_y": None,
             "vp_scale_z": None,
-            "visual_rotation_x": None,
-            "visual_rotation_y": None,
-            "visual_rotation_z": None,
+            "rotation_x": None,
+            "rotation_y": None,
+            "rotation_z": None,
         }
         visual_paths = {
             "base_normal": "",
@@ -944,8 +944,8 @@ def script_model_references(text: str) -> list[VehicleModelReference]:
                     f"Invalid vp_wait in {block.kind} "
                     f"{block.object_id}: {raw_wait}")
         scales = tuple(
-            float(values[f"visual_scale_{axis}"])
-            if values[f"visual_scale_{axis}"] is not None
+            float(values[f"scale_{axis}"])
+            if values[f"scale_{axis}"] is not None
             else (
                 float(values[f"vp_scale_{axis}"])
                 if values[f"vp_scale_{axis}"] is not None
@@ -955,16 +955,16 @@ def script_model_references(text: str) -> list[VehicleModelReference]:
         )
         if not all(math.isfinite(value) and value >= 0.0 for value in scales):
             raise CollisionScriptError(
-                f"Invalid visual_scale_x/y/z in {block.kind} "
+                f"Invalid scale_x/y/z in {block.kind} "
                 f"{block.object_id}: {scales}")
         rotations = tuple(
-            float(values[f"visual_rotation_{axis}"])
-            if values[f"visual_rotation_{axis}"] is not None else 0.0
+            float(values[f"rotation_{axis}"])
+            if values[f"rotation_{axis}"] is not None else 0.0
             for axis in ("x", "y", "z")
         )
         if not all(math.isfinite(value) for value in rotations):
             raise CollisionScriptError(
-                f"Invalid visual_rotation_x/y/z in {block.kind} "
+                f"Invalid rotation_x/y/z in {block.kind} "
                 f"{block.object_id}: {rotations}")
         shape_path = visual_paths["collision_shape"].strip()
         if shape_path.casefold() == "0":
@@ -3393,7 +3393,7 @@ class CollisionViewport(AssetViewport):
 
         The base viewport already resolves BASE/SKLT transforms, children and
         textures.  Collision Editor only adds one final global axis scale,
-        matching the visual effect of visual_scale_x/y/z while leaving collision
+        matching the visual effect of scale_x/y/z while leaving collision
         sphere coordinates untouched.
         """
 
@@ -5406,7 +5406,7 @@ class CollisionEditorWindow(QMainWindow):
             spin.setMinimumWidth(92)
             spin.setMaximumWidth(118)
             spin.setToolTip(
-                f"OpenNeoUA visual_scale_{axis.lower()} preview. "
+                f"OpenNeoUA scale_{axis.lower()} preview. "
                 "The model changes size; collision spheres and exported "
                 "coll_* values are not transformed automatically.")
             spin.valueChanged.connect(self._model_preview_scale_changed)
@@ -7468,10 +7468,10 @@ class CollisionEditorWindow(QMainWindow):
         rotation = (self.project.model_rotation_x,
                     self.project.model_rotation_y,
                     self.project.model_rotation_z)
-        if any(abs(a - b) > 1e-5 for a, b in zip(scale, shape.visual_scale)):
+        if any(abs(a - b) > 1e-5 for a, b in zip(scale, shape.scale)):
             warnings.append("visual scale differs from generation metadata")
         if any(abs(a - b) > 1e-5
-               for a, b in zip(rotation, shape.visual_rotation)):
+               for a, b in zip(rotation, shape.rotation)):
             warnings.append("visual rotation differs from generation metadata")
         owners = self.project.collision_shape_owners
         selected_keys = self.project.collision_shape_components
@@ -7697,12 +7697,12 @@ class CollisionEditorWindow(QMainWindow):
                 "source": self.project.source_model
                 or self.project.source_base or "Model",
                 "parts": parts,
-                "visual_scale": [
+                "scale": [
                     self.project.model_scale_x,
                     self.project.model_scale_y,
                     self.project.model_scale_z,
                 ],
-                "visual_rotation": [
+                "rotation": [
                     self.project.model_rotation_x,
                     self.project.model_rotation_y,
                     self.project.model_rotation_z,
@@ -7773,8 +7773,8 @@ class CollisionEditorWindow(QMainWindow):
             "source_model": self.project.source_model,
             "source_key": self._collision_geometry_cache_key,
             "project_snapshot": self.project.snapshot(),
-            "scale": tuple(request["visual_scale"]),
-            "rotation": tuple(request["visual_rotation"]),
+            "scale": tuple(request["scale"]),
+            "rotation": tuple(request["rotation"]),
             "owners": request["parts"],
             "output_path": str(output_path),
         }
@@ -7948,9 +7948,9 @@ class CollisionEditorWindow(QMainWindow):
         self._sync_all()
         self._set_modified()
         self._last_directory = source.parent
-        if shape.visual_scale != (
+        if shape.scale != (
                 self.project.model_scale_x, self.project.model_scale_y,
-                self.project.model_scale_z) or shape.visual_rotation != (
+                self.project.model_scale_z) or shape.rotation != (
                 self.project.model_rotation_x, self.project.model_rotation_y,
                 self.project.model_rotation_z):
             self.statusBar().showMessage(

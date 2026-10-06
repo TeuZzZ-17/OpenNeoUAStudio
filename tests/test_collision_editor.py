@@ -122,8 +122,8 @@ def _sample_shape():
     return CollisionShape(
         source="Model",
         source_hash="",
-        visual_scale=(1.0, 1.0, 1.0),
-        visual_rotation=(0.0, 0.0, 0.0),
+        scale=(1.0, 1.0, 1.0),
+        rotation=(0.0, 0.0, 0.0),
         hulls=(CollisionHull(
             vertices=((0.0, 0.0, 0.0), (1.0, 0.0, 0.0), (0.0, 1.0, 0.0)),
             faces=((0, 1, 2),)),),
@@ -2128,9 +2128,9 @@ class CollisionEditorTests(unittest.TestCase):
             " name = Wasp\n"
             " vp_normal = 42\n"
             " vp_wait = 43\n"
-            " visual_scale_x = 2\n"
-            " visual_scale_y = 1.5\n"
-            " visual_scale_z = 0.75\n"
+            " scale_x = 2\n"
+            " scale_y = 1.5\n"
+            " scale_z = 0.75\n"
             "end\n"
             "modify_vehicle 17\n vp_normal = 99\nend\n"
         )
@@ -2149,8 +2149,8 @@ class CollisionEditorTests(unittest.TestCase):
         text = (
             "new_vehicle 1\n name = Wasp\n vp_normal = 30\nend\n"
             "new_weapon 1\n name = Rocket\n vp_normal = 91\n"
-            " visual_scale_x = 1.25\n visual_scale_y = 0.5\n"
-            " visual_scale_z = 3\nend\n"
+            " scale_x = 1.25\n scale_y = 0.5\n"
+            " scale_z = 3\nend\n"
             "modify_weapon 1\n vp_normal = 999\nend\n"
         )
         references = script_model_references(text)
@@ -2166,16 +2166,16 @@ class CollisionEditorTests(unittest.TestCase):
             (1.25, 0.5, 3.0),
         )
 
-    def test_90b2_visual_scale_precedes_legacy_vp_scale(self):
+    def test_90b2_scale_precedes_legacy_vp_scale(self):
         text = (
             "new_vehicle 9\n"
             " vp_normal = 11\n"
             " vp_scale_x = 9\n"
             " vp_scale_y = 9\n"
             " vp_scale_z = 9\n"
-            " visual_scale_x = 2\n"
-            " visual_scale_y = 3\n"
-            " visual_scale_z = 4\n"
+            " scale_x = 2\n"
+            " scale_y = 3\n"
+            " scale_z = 4\n"
             "end\n"
         )
         reference = vehicle_model_references(text)[0]
@@ -4247,11 +4247,11 @@ class CollisionEditorTests(unittest.TestCase):
             with self.subTest(vp=next_vp, kind=next_kind, cockpit=cockpit):
                 text = (
                     "new_vehicle 1\n name = First\n vp_normal = 0\n"
-                    " visual_scale_x = 4\n visual_scale_y = 2\n"
-                    " visual_scale_z = 3\n overeof = 100\nend\n"
+                    " scale_x = 4\n scale_y = 2\n"
+                    " scale_z = 3\n overeof = 100\nend\n"
                     f"{next_kind} 2\n name = Next\n vp_normal = {next_vp}\n"
-                    " visual_scale_x = 0.5\n visual_scale_y = 1.5\n"
-                    " visual_scale_z = 2\n overeof = 7\nend\n")
+                    " scale_x = 0.5\n scale_y = 1.5\n"
+                    " scale_z = 2\n overeof = 7\nend\n")
                 window, _script = self._script_unit_window(
                     object_id=1, object_kind="new_vehicle", script_text=text)
                 viewport = window.viewport
