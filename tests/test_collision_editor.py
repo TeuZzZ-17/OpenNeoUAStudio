@@ -2208,16 +2208,40 @@ class CollisionEditorTests(unittest.TestCase):
             "Overwrite to Existing Script")
 
 
-    def test_90da_close_bas_archive_detaches_visual_provider_only(self):
+    def test_90da_close_current_resource_clears_related_editor_data(self):
         window = self._window()
-        window.project.name = "Keep collision work"
+        window.project = _mixed_project()
+        window.project.collision_shape = _sample_shape()
+        window.project.collision_shape_path = (
+            "Data/Models/Collision/Wasp.collision")
+        window.project.collision_shape_file_path = (
+            "C:/UA/Data/Models/Collision/Wasp.collision")
+        window.project.fire_points_enabled = True
+        window.project.fire_x = 4.0
+        window.project.fire_y = 5.0
+        window.project.fire_z = 6.0
+        window.project.gun_points_enabled = True
+        window.project.gun_points = [
+            GunPoint(scheme="unit", x=7, y=8, z=9)]
+        window._active_script_path = Path("C:/UA/Data/Scripts/Vehicles.cfg")
+        window._active_script_kind = "new_vehicle"
+        window._active_script_id = 1
+        window._selected = 0
+        window._selected_spheres = {0}
+        window._selected_fire_point = 0
+        window._selected_gun_point = 0
+        window._undo.append((window.project.snapshot(), (0, (0,))))
+        window._redo.append((window.project.snapshot(), (0, (0,))))
         window.family = object()
         window._active_base_path = Path("C:/UA/Data/Set1/Objects/SET.BAS")
         window._vp_embedded = object()
         window._vp_table = object()
         window._vp_table_source = "embedded test"
-        window.model_tree.addTopLevelItem(QTreeWidgetItem(["Skeleton/test.sklt", "1"]))
+        window.model_tree.addTopLevelItem(
+            QTreeWidgetItem(["Skeleton/test.sklt", "1"]))
         window.source_label.setText("SET.BAS loaded")
+        window.model_search.setText("Wasp")
+        window._sync_all()
         window._sync_close_archive_action()
         self.assertTrue(window.close_bas_archive_action.isEnabled())
 
@@ -2227,9 +2251,31 @@ class CollisionEditorTests(unittest.TestCase):
         self.assertIsNone(window._active_base_path)
         self.assertIsNone(window._vp_embedded)
         self.assertIsNone(window._vp_table)
+        self.assertIsNone(window._active_script_path)
         self.assertEqual(window.model_tree.topLevelItemCount(), 0)
         self.assertEqual(window.source_label.text(), "No source loaded.")
-        self.assertEqual(window.project.name, "Keep collision work")
+        self.assertEqual(window.model_search.text(), "")
+        self.assertEqual(window.project.name, "")
+        self.assertEqual(window.project.source_model, "")
+        self.assertEqual(window.project.source_base, "")
+        self.assertEqual(window.project.spheres(), [])
+        self.assertIsNone(window.project.collision_shape)
+        self.assertEqual(window.project.collision_shape_path, "")
+        self.assertFalse(window.project.fire_points_enabled)
+        self.assertFalse(window.project.gun_points_enabled)
+        self.assertEqual(window.project.gun_points, [])
+        self.assertEqual(window.sphere_tree.topLevelItemCount(), 0)
+        self.assertEqual(window.fire_point_tree.topLevelItemCount(), 0)
+        self.assertEqual(window.gun_point_tree.topLevelItemCount(), 0)
+        self.assertEqual(
+            window.collision_shape_status.text(), "No collision shape loaded.")
+        self.assertEqual(window._selected, -1)
+        self.assertEqual(window._selected_spheres, set())
+        self.assertEqual(window._selected_fire_point, -1)
+        self.assertEqual(window._selected_gun_point, -1)
+        self.assertEqual(window._undo, [])
+        self.assertEqual(window._redo, [])
+        self.assertFalse(window._modified)
         self.assertFalse(window.close_bas_archive_action.isEnabled())
 
         # The shared action is resource-scoped, not SET.BAS-only.
