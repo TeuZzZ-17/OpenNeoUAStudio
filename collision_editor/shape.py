@@ -201,11 +201,16 @@ def collision_shape_text(shape: CollisionShape) -> str:
     ]
     if shape.asset_set:
         lines.append(f"asset_set = {int(shape.asset_set)}")
-    if shape.quality or any(hull.source_component for hull in enabled_hulls):
+    disabled_hulls = [{
+        "index": index, "vertices": hull.vertices, "faces": hull.faces,
+        "component": hull.source_component,
+    } for index, hull in enumerate(shape.hulls) if not hull.enabled]
+    if shape.quality or disabled_hulls or any(hull.source_component for hull in enabled_hulls):
         # Editor provenance is a comment; the runtime reads only physical hulls.
         lines.append("; studio_metadata = " + json.dumps({
             "quality": shape.quality,
             "components": [hull.source_component for hull in enabled_hulls],
+            "disabled_hulls": disabled_hulls,
         }, ensure_ascii=True, separators=(",", ":")))
     for hull in enabled_hulls:
         lines.append("begin_hull")
@@ -312,14 +317,37 @@ def parse_collision_shape(text: str) -> CollisionShape:
             or len(component_keys) != len(hulls)
             or any(not isinstance(key, str) for key in component_keys)):
         raise ValueError("Invalid Studio collision-shape metadata.")
+    hulls = [CollisionHull(hull.vertices, hull.faces, key)
+             for hull, key in zip(hulls, component_keys)]
+    disabled_hulls = metadata.get("disabled_hulls", [])
+    if (not isinstance(disabled_hulls, list)
+            or len(hulls) + len(disabled_hulls) > MAX_HULLS):
+        raise ValueError("Invalid Studio disabled-hull metadata.")
+    previous_index = -1
+    for entry in disabled_hulls:
+        try:
+            index = entry["index"]
+            component = entry["component"]
+            if (type(index) is not int or not previous_index < index <= len(hulls)
+                    or not isinstance(component, str)):
+                raise ValueError("Invalid disabled-hull index or component.")
+            vertices = tuple(_point3(point, "disabled vertex") for point in entry["vertices"])
+            faces = tuple(tuple(face) for face in entry["faces"])
+            if any(len(face) != 3 or any(type(i) is not int for i in face) for face in faces):
+                raise ValueError("Invalid disabled-hull faces.")
+            hull = CollisionHull(vertices, faces, component, enabled=False)
+            validate_hull(hull)
+        except (KeyError, TypeError, ValueError, OverflowError) as exc:
+            raise ValueError(f"Invalid Studio disabled-hull metadata: {exc}") from exc
+        hulls.insert(index, hull)
+        previous_index = index
     shape = CollisionShape(
         source=headers["source"],
         source_hash=headers["source_hash"].lower(),
         scale=_parse_vector(headers["scale"], "scale"),
         rotation=_parse_vector(
             headers["rotation"], "rotation"),
-        hulls=tuple(CollisionHull(hull.vertices, hull.faces, key)
-                    for hull, key in zip(hulls, component_keys)),
+        hulls=tuple(hulls),
         version=version, asset_set=asset_set, quality=quality,
     )
     validate_shape(shape)

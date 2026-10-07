@@ -3,6 +3,7 @@ import struct
 from pathlib import Path
 import tempfile
 import unittest
+from dataclasses import replace
 from unittest.mock import MagicMock, patch
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
@@ -4193,6 +4194,30 @@ class CollisionEditorTests(unittest.TestCase):
         self.assertEqual(window.project.name, "Rocket")
         self.assertEqual(window.project.target_category, WEAPON)
         self.assertEqual(window._active_script_kind, "new_weapon")
+
+    def test_146a_switch_after_restoring_shape_checks_does_not_prompt(self):
+        window, _script = self._script_unit_window(object_id=2, object_kind="new_vehicle")
+        hull = _sample_shape().hulls[0]
+        window.project.collision_shape = replace(_sample_shape(), hulls=(
+            replace(hull, source_component="part:1", enabled=False),
+            *(replace(hull, source_component="part:2") for _ in range(13)),
+            replace(hull, source_component="part:3", enabled=False)))
+        window.project.collision_shape_path = "Data/Models/Collision/Loaded.collision"
+        window.project.collision_shape_file_path = "C:/Game/Data/Models/Collision/Loaded.collision"
+        window._sync_all()
+        window._set_modified(False)
+        root = window.collision_geometry_widget._shape_root
+        for index, checked in ((2, True), (0, True), (2, False), (0, False)):
+            root.child(index).setCheckState(
+                0, Qt.CheckState.Checked if checked else Qt.CheckState.Unchecked)
+            QApplication.processEvents()
+        self.assertFalse(window._modified)
+        with patch("collision_editor.editor.QMessageBox.question") as question:
+            window.model_tree.setCurrentItem(window.model_tree.topLevelItem(0))
+            QApplication.processEvents()
+        question.assert_not_called()
+        self.assertEqual(window.project.name, "Wasp")
+        self.assertEqual(window.project.legacy.radius, 10)
 
     def test_147_mouse_click_keeps_list_scroll_position_and_selection(self):
         text = "".join(
