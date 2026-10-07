@@ -27,6 +27,8 @@ Triangle3 = tuple[Point3, Point3, Point3]
 class CollisionHull:
     vertices: tuple[Point3, ...]
     faces: tuple[tuple[int, int, int], ...]
+    source_component: str = ""
+    enabled: bool = True
 
 
 @dataclass(frozen=True)
@@ -38,6 +40,7 @@ class CollisionShape:
     hulls: tuple[CollisionHull, ...]
     version: int = 1
     asset_set: int = 0
+    quality: str = ""
 
 
 @dataclass(frozen=True)
@@ -184,6 +187,9 @@ def collision_shape_text(shape: CollisionShape) -> str:
     """Serialize a validated collision shape using the runtime text format."""
 
     validate_shape(shape)
+    enabled_hulls = tuple(hull for hull in shape.hulls if hull.enabled)
+    if not enabled_hulls:
+        raise ValueError("Enable at least one collision-shape component before export.")
     lines = [
         "begin_collision_shape",
         f"version = {shape.version}",
@@ -195,7 +201,13 @@ def collision_shape_text(shape: CollisionShape) -> str:
     ]
     if shape.asset_set:
         lines.append(f"asset_set = {int(shape.asset_set)}")
-    for hull in shape.hulls:
+    if shape.quality or any(hull.source_component for hull in enabled_hulls):
+        # Editor provenance is a comment; the runtime reads only physical hulls.
+        lines.append("; studio_metadata = " + json.dumps({
+            "quality": shape.quality,
+            "components": [hull.source_component for hull in enabled_hulls],
+        }, ensure_ascii=True, separators=(",", ":")))
+    for hull in enabled_hulls:
         lines.append("begin_hull")
         lines.extend(
             "vertex = " + "_".join(_fmt(value) for value in point)
@@ -212,7 +224,16 @@ def collision_shape_text(shape: CollisionShape) -> str:
 def parse_collision_shape(text: str) -> CollisionShape:
     """Read and validate one complete collision-shape document."""
 
-    lines = [line.strip() for line in text.splitlines()]
+    metadata = {}
+    for line in text.splitlines():
+        if line.strip().startswith("; studio_metadata = "):
+            try:
+                metadata = json.loads(line.strip().split("=", 1)[1])
+            except (ValueError, TypeError):
+                raise ValueError("Invalid Studio collision-shape metadata.")
+            if not isinstance(metadata, dict):
+                raise ValueError("Invalid Studio collision-shape metadata.")
+    lines = [line.split(";", 1)[0].strip() for line in text.splitlines()]
     lines = [line for line in lines if line]
     if not lines or lines[0] != "begin_collision_shape":
         raise ValueError("Missing begin_collision_shape.")
@@ -284,13 +305,22 @@ def parse_collision_shape(text: str) -> CollisionShape:
     except ValueError as exc:
         raise ValueError(
             "Collision shape asset_set must be an integer.") from exc
+    component_keys = metadata.get("components", [""] * len(hulls))
+    quality = metadata.get("quality", "")
+    if (not isinstance(quality, str) or quality not in {"", "low", "normal", "high"}
+            or not isinstance(component_keys, list)
+            or len(component_keys) != len(hulls)
+            or any(not isinstance(key, str) for key in component_keys)):
+        raise ValueError("Invalid Studio collision-shape metadata.")
     shape = CollisionShape(
         source=headers["source"],
         source_hash=headers["source_hash"].lower(),
         scale=_parse_vector(headers["scale"], "scale"),
         rotation=_parse_vector(
             headers["rotation"], "rotation"),
-        hulls=tuple(hulls), version=version, asset_set=asset_set,
+        hulls=tuple(CollisionHull(hull.vertices, hull.faces, key)
+                    for hull, key in zip(hulls, component_keys)),
+        version=version, asset_set=asset_set, quality=quality,
     )
     validate_shape(shape)
     return shape
@@ -679,7 +709,7 @@ def generate_collision_shape(
             preprocess_resolution=50, resolution=2000,
             mcts_nodes=20, mcts_iterations=150)
     hulls: list[CollisionHull] = []
-    for _owner, triangles in prepared:
+    for owner, triangles in prepared:
         vertices: list[Point3] = []
         vertex_map: dict[Point3, int] = {}
         indices: list[tuple[int, int, int]] = []
@@ -719,6 +749,7 @@ def generate_collision_shape(
                       for point in baked_vertices),
                 tuple(tuple(int(index) for index in face)
                       for face in baked_faces),
+                source_component=owner,
             )
             validate_hull(candidate)
             hulls.append(candidate)
@@ -732,6 +763,7 @@ def generate_collision_shape(
         rotation=rotation,
         hulls=tuple(hulls),
         asset_set=asset_set,
+        quality=quality,
     )
     validate_shape(shape)
     metrics = sampled_surface_metrics(transformed_source, shape.hulls)
