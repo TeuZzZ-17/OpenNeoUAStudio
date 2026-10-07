@@ -1237,8 +1237,11 @@ class GeometryPartSelectionWidget(QWidget):
         self.tree.header().setSectionResizeMode(
             2, QHeaderView.ResizeMode.ResizeToContents)
         layout.addWidget(self.tree, 1)
+        self.tree.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
         self.tree.currentItemChanged.connect(
             self._update_component_highlight)
+        self.tree.itemSelectionChanged.connect(
+            lambda: self._update_component_highlight(self.tree.currentItem(), None))
         self.tree.itemChanged.connect(self._selection_changed)
         self._selection_timer = QTimer(self)
         self._selection_timer.setSingleShot(True)
@@ -1248,12 +1251,26 @@ class GeometryPartSelectionWidget(QWidget):
 
     def _show_component_menu(self, position) -> None:
         item = self.tree.itemAt(position)
-        if item is None or not item.flags() & Qt.ItemFlag.ItemIsUserCheckable:
-            return
-        self.tree.setCurrentItem(item)
         menu = QMenu(self)
-        self._add_component_toggle_action(menu, item)
+        if item is not None:
+            self.tree.setCurrentItem(item, 0,
+                QItemSelectionModel.SelectionFlag.NoUpdate if item.isSelected()
+                else QItemSelectionModel.SelectionFlag.ClearAndSelect)
+            if item.flags() & Qt.ItemFlag.ItemIsUserCheckable:
+                self._add_component_toggle_action(menu, item)
+                menu.addSeparator()
+        self._add_component_deselect_action(menu)
         menu.exec(self.tree.viewport().mapToGlobal(position))
+
+    def deselect_component(self) -> None:
+        self.tree.setCurrentItem(None)
+        self.tree.clearSelection()
+        self._update_component_highlight(None, None)
+
+    def _add_component_deselect_action(self, menu) -> None:
+        action = menu.addAction("Deselect")
+        action.setEnabled(self.isEnabled() and bool(self.tree.selectedItems()))
+        action.triggered.connect(self.deselect_component)
 
     def _add_component_toggle_action(self, menu, item) -> None:
         enable = item.checkState(0) == Qt.CheckState.Unchecked
@@ -1271,10 +1288,12 @@ class GeometryPartSelectionWidget(QWidget):
             yield item
             stack.extend(item.child(i) for i in range(item.childCount()))
 
-    def select_shape_component(self, key) -> None:
+    def select_shape_component(self, key, additive=False) -> None:
         for item in self._items():
             if item.data(0, _GEOMETRY_COMPONENT_ROLE) == key:
-                self.tree.setCurrentItem(item)
+                self.tree.setCurrentItem(item, 0,
+                    QItemSelectionModel.SelectionFlag.Toggle if additive
+                    else QItemSelectionModel.SelectionFlag.ClearAndSelect)
                 self.tree.scrollToItem(item)
                 return
 
@@ -1287,6 +1306,7 @@ class GeometryPartSelectionWidget(QWidget):
         if shape is self._shape:
             return
         self._selection_timer.stop()
+        had_shape = self._shape is not None
         same_geometry = (shape is not None and self._shape is not None
                          and tuple((h.vertices, h.faces, h.source_component)
                                    for h in shape.hulls)
@@ -1294,8 +1314,12 @@ class GeometryPartSelectionWidget(QWidget):
                                   for h in self._shape.hulls))
         self._shape = shape
         current = self.tree.currentItem()
-        current_key = (current.data(0, _GEOMETRY_COMPONENT_ROLE)
+        current_key = ((current.data(0, _GEOMETRY_COMPONENT_ROLE),
+                        current.data(0, Qt.ItemDataRole.UserRole))
                        if current is not None else None)
+        selected_keys = {(row.data(0, _GEOMETRY_COMPONENT_ROLE),
+                          row.data(0, Qt.ItemDataRole.UserRole))
+                         for row in self.tree.selectedItems()}
         blocker = QSignalBlocker(self.tree)
         if self._shape_root is not None and not same_geometry:
             index = self.tree.indexOfTopLevelItem(self._shape_root)
@@ -1303,6 +1327,9 @@ class GeometryPartSelectionWidget(QWidget):
             self._shape_root = None
         for index in range(self.tree.topLevelItemCount()):
             self.tree.topLevelItem(index).setHidden(False)
+        for row in self._items():
+            if row.data(0, _GEOMETRY_COMPONENT_ROLE) in self._components_by_key:
+                row.setHidden(False)
         if shape is not None:
             by_key = {item.data(0, _GEOMETRY_COMPONENT_ROLE): item
                       for item in self._items()}
@@ -1310,6 +1337,11 @@ class GeometryPartSelectionWidget(QWidget):
             for index, hull in enumerate(shape.hulls):
                 key = hull.source_component or f"@hull:{index}"
                 grouped.setdefault(key, []).append(hull)
+            for row in self._items():
+                key = row.data(0, _GEOMETRY_COMPONENT_ROLE)
+                if key in self._components_by_key:
+                    # An old export may have permanently omitted this component's hulls.
+                    row.setHidden(key not in grouped)
             if not any(key in self._components_by_key for key in grouped):
                 # Old files have no source mapping: expose their actual hulls.
                 for index in range(self.tree.topLevelItemCount()):
@@ -1333,9 +1365,13 @@ class GeometryPartSelectionWidget(QWidget):
                 item.setCheckState(0, Qt.CheckState.Checked if any(
                     hull.enabled for hull in hulls) else Qt.CheckState.Unchecked)
             self.tree.expandAll()
-            if current_key is not None:
-                self.select_shape_component(current_key)
-            if self._shape_root is not None and self.tree.currentItem() is None:
+            for row in self._items():
+                key = (row.data(0, _GEOMETRY_COMPONENT_ROLE),
+                       row.data(0, Qt.ItemDataRole.UserRole))
+                row.setSelected(key in selected_keys)
+                if key == current_key:
+                    self.tree.setCurrentItem(row, 0, QItemSelectionModel.SelectionFlag.NoUpdate)
+            if not had_shape and self._shape_root is not None and self.tree.currentItem() is None:
                 self.tree.setCurrentItem(self._shape_root.child(0))
             self.summary_label.setText(
                 f"{len(grouped)} shape components; "
@@ -1494,14 +1530,14 @@ class GeometryPartSelectionWidget(QWidget):
 
     def _update_component_highlight(self, item, _previous) -> None:
         indices = set()
-        if self._shape is not None and item is not None:
+        for item in self.tree.selectedItems() if self._shape is not None else ():
             key = item.data(0, _GEOMETRY_COMPONENT_ROLE)
             owner = item.data(0, Qt.ItemDataRole.UserRole)
-            indices = {index for index, hull in enumerate(self._shape.hulls)
+            indices.update(index for index, hull in enumerate(self._shape.hulls)
                        if (hull.source_component or f"@hull:{index}") == key
                        or (owner and (hull.source_component.startswith(str(owner) + "#")
                            or hull.source_component.startswith(str(owner).rstrip("/") + "/")))
-                       or item is self._shape_root}
+                       or item is self._shape_root)
         self.shapeHighlightChanged.emit(indices)
         if self._shape is not None:
             if self._on_component_highlight is not None:
@@ -1509,26 +1545,22 @@ class GeometryPartSelectionWidget(QWidget):
             return
         if self._on_component_highlight is None:
             return
-        if item is None:
-            self._on_component_highlight(None)
-            return
-        key = item.data(0, _GEOMETRY_COMPONENT_ROLE)
-        component = self._components_by_key.get(key)
-        if component is not None:
-            self._on_component_highlight(
-                component.triangles if item.checkState(0) == Qt.CheckState.Checked else None)
-            return
-        owner = item.data(0, Qt.ItemDataRole.UserRole)
-        if owner:
-            prefix = str(owner).rstrip("/")
-            triangles = tuple(
-                triangle
-                for path, owner_triangles in self._triangles_by_owner.items()
-                if path == prefix or path.startswith(prefix + "/")
-                for triangle in owner_triangles)
-            self._on_component_highlight(triangles or None)
-        else:
-            self._on_component_highlight(None)
+        triangles = []
+        for item in self.tree.selectedItems():
+            key = item.data(0, _GEOMETRY_COMPONENT_ROLE)
+            component = self._components_by_key.get(key)
+            if component is not None:
+                if item.checkState(0) == Qt.CheckState.Checked:
+                    triangles.extend(component.triangles)
+                continue
+            owner = item.data(0, Qt.ItemDataRole.UserRole)
+            if owner:
+                prefix = str(owner).rstrip("/")
+                triangles.extend(triangle
+                    for path, owner_triangles in self._triangles_by_owner.items()
+                    if path == prefix or path.startswith(prefix + "/")
+                    for triangle in owner_triangles)
+        self._on_component_highlight(tuple(triangles) or None)
 
 
 def _geometry_component_key(component) -> str:
@@ -3232,7 +3264,8 @@ class CollisionViewport(AssetViewport):
     """
 
     spherePicked = Signal(int)
-    shapeComponentPicked = Signal(str)
+    shapeComponentPicked = Signal(str, bool)
+    shapeDeselectRequested = Signal()
     sphereToggleRequested = Signal(int)
     sphereBoxSelectionRequested = Signal(object, bool)
     firePointPicked = Signal(int)
@@ -4401,12 +4434,8 @@ class CollisionViewport(AssetViewport):
                     second_local[2]))
                 if first is not None and second is not None:
                     lines.append((first, second))
-            # A dark outline separates the orange highlight from textures and cyan lines.
-            pens = ([QPen(QColor(24, 26, 32), 6.8),
-                     QPen(QColor(255, 155, 45), 4.8)]
-                    if selected else [])
-            if hull.enabled:
-                pens.append(QPen(QColor(70, 230, 225), 1.8))
+            pens = [QPen(QColor(245, 55, 65) if selected
+                         else QColor(70, 230, 225), 1.8)]
             for pen in pens:
                 painter.setPen(pen)
                 for first, second in lines:
@@ -4541,7 +4570,8 @@ class CollisionViewport(AssetViewport):
             if abs(delta.x()) <= 4.0 and abs(delta.y()) <= 4.0:
                 key = self._hit_shape_component(event.position())
                 if key is not None:
-                    self.shapeComponentPicked.emit(key)
+                    self.shapeComponentPicked.emit(
+                        key, bool(event.modifiers() & Qt.KeyboardModifier.ControlModifier))
             return
         if event.button() == Qt.MouseButton.RightButton:
             press_pos = self._context_press_pos
@@ -4657,6 +4687,16 @@ class CollisionViewport(AssetViewport):
 
     def mouseDoubleClickEvent(self, event: QMouseEvent) -> None:  # noqa: N802
         if event.button() == Qt.MouseButton.LeftButton:
+            if self._collision_shape_overlay_visible:
+                self._shape_press_pos = None
+                key = self._hit_shape_component(event.position())
+                if key is None:
+                    self.shapeDeselectRequested.emit()
+                else:
+                    self.shapeComponentPicked.emit(
+                        key, bool(event.modifiers() & Qt.KeyboardModifier.ControlModifier))
+                event.accept()
+                return
             gun_index = self._hit_gun_point(event.position())
             if gun_index >= 0:
                 self._gun_point_selected = gun_index
@@ -5222,6 +5262,7 @@ class CollisionEditorWindow(QMainWindow):
         # and Cockpit View can be reverted independently without disturbing
         # edits made in the other tabs.
         self._tab_reset_baseline = self.project.snapshot()
+        self._export_baseline = self.project.snapshot()
         self._tab_reset_gun_point_scheme = self._new_gun_point_scheme
         self._modified = False
         self._syncing = False
@@ -5920,6 +5961,8 @@ class CollisionEditorWindow(QMainWindow):
             self.viewport.set_shape_selected_indices)
         self.viewport.shapeComponentPicked.connect(
             self.collision_geometry_widget.select_shape_component)
+        self.viewport.shapeDeselectRequested.connect(
+            self.collision_geometry_widget.deselect_component)
         self.collision_shape_tab_layout.addWidget(
             self.collision_geometry_widget, 1)
 
@@ -6949,7 +6992,39 @@ class CollisionEditorWindow(QMainWindow):
 
     def _set_modified(self, modified=True):
         self._modified = bool(modified)
+        if not self._modified:
+            self._export_baseline = self.project.snapshot()
         self._update_window_title()
+
+    def _mark_collision_shape_exported(self) -> None:
+        baseline = CollisionProject()
+        baseline.restore(self._export_baseline)
+        for name in (
+                "source_model", "source_base",
+                "collision_shape", "collision_shape_file_path",
+                "collision_shape_owners", "collision_shape_components",
+                "collision_shape_warnings", "model_scale_x", "model_scale_y", "model_scale_z",
+                "model_rotation_x", "model_rotation_y", "model_rotation_z"):
+            setattr(baseline, name, getattr(self.project, name))
+        # File export does not apply a linked unit's shape path or sphere removal to its script.
+        if self._active_model_reference is None:
+            baseline.collision_shape_path = self.project.collision_shape_path
+            if not self.project.spheres():
+                baseline.legacy = None
+                baseline.compound = []
+                baseline.sphere_isolation_active = self.project.sphere_isolation_active
+        self._export_baseline = baseline.snapshot()
+        self._set_modified(self.project.snapshot() != self._export_baseline)
+
+    def _unsaved_changes_message(self, action) -> str:
+        baseline = CollisionProject()
+        baseline.restore(self._export_baseline)
+        if (self.project.collision_shape is not None
+                and self.project.collision_shape == baseline.collision_shape
+                and self.project.collision_shape_file_path):
+            return ("The collision shape file is saved, but other project or script "
+                    f"changes are unsaved. {action} anyway?")
+        return f"The collision project has unexported changes. {action} anyway?"
 
     def undo(self):
         if not self._undo:
@@ -6967,7 +7042,7 @@ class CollisionEditorWindow(QMainWindow):
         self._selected_gun_point = min(
             self._selected_gun_point, len(self.project.gun_points) - 1)
         self._shape_preview_settings()
-        self._set_modified()
+        self._set_modified(self.project.snapshot() != self._export_baseline)
         self._sync_all()
 
     def redo(self):
@@ -6986,7 +7061,7 @@ class CollisionEditorWindow(QMainWindow):
         self._selected_gun_point = min(
             self._selected_gun_point, len(self.project.gun_points) - 1)
         self._shape_preview_settings()
-        self._set_modified()
+        self._set_modified(self.project.snapshot() != self._export_baseline)
         self._sync_all()
 
     def _sync_gizmo_camera(self):
@@ -7743,10 +7818,16 @@ class CollisionEditorWindow(QMainWindow):
             return
         self._push_undo()
         self.project.collision_shape = replace(shape, hulls=hulls)
-        # A changed shape must be exported before its script can be saved.
-        self.project.collision_shape_file_path = ""
-        self.project.collision_shape_path = ""
-        self._set_modified()
+        baseline = CollisionProject()
+        baseline.restore(self._export_baseline)
+        if self.project.collision_shape == baseline.collision_shape:
+            # Returning to the saved hull state also restores its existing file reference.
+            self.project.collision_shape_file_path = baseline.collision_shape_file_path
+            self.project.collision_shape_path = baseline.collision_shape_path
+        else:
+            self.project.collision_shape_file_path = ""
+            self.project.collision_shape_path = ""
+        self._set_modified(self.project.snapshot() != self._export_baseline)
         self._sync_all()
 
     def _shape_preview_settings(self) -> None:
@@ -8167,7 +8248,7 @@ class CollisionEditorWindow(QMainWindow):
         self.project.collision_shape_warnings = ()
         self._shape_preview_settings()
         self._sync_all()
-        self._set_modified()
+        self._mark_collision_shape_exported()
         self._last_directory = source.parent
         if shape.scale != (
                 self.project.model_scale_x, self.project.model_scale_y,
@@ -8220,7 +8301,7 @@ class CollisionEditorWindow(QMainWindow):
             target.resolve(strict=False))
         self.project.collision_shape_path = canonical
         self._sync_all()
-        self._set_modified()
+        self._mark_collision_shape_exported()
         self._last_directory = target.parent
         self._sync_collision_shape_status()
         self.statusBar().showMessage(
@@ -8534,9 +8615,8 @@ class CollisionEditorWindow(QMainWindow):
         """Ask before replacing unexported work with another script unit."""
 
         answer = QMessageBox.question(
-            self, "Unexported Collision Editor project",
-            "The collision project has unexported changes. Load another "
-            "unit anyway?",
+            self, "Unsaved Collision Editor changes",
+            self._unsaved_changes_message("Load another unit"),
             QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
             QMessageBox.StandardButton.No)
         return answer == QMessageBox.StandardButton.Yes
@@ -9115,9 +9195,14 @@ class CollisionEditorWindow(QMainWindow):
             item = next((row for row in widget._items()
                          if row.data(0, _GEOMETRY_COMPONENT_ROLE) == component_key), None)
             if item is not None:
-                widget.select_shape_component(component_key)
+                if not item.isSelected():
+                    widget.select_shape_component(component_key)
+                else:
+                    widget.tree.setCurrentItem(item, 0, QItemSelectionModel.SelectionFlag.NoUpdate)
                 widget._add_component_toggle_action(menu, item)
                 menu.addSeparator()
+        self.collision_geometry_widget._add_component_deselect_action(menu)
+        menu.addSeparator()
         menu.addAction(self.undo_action)
         menu.addAction(self.redo_action)
         menu.addSeparator()
@@ -11839,8 +11924,8 @@ class CollisionEditorWindow(QMainWindow):
     def closeEvent(self, event: QCloseEvent) -> None:  # noqa: N802
         if self._modified:
             answer = QMessageBox.question(
-                self, "Unexported Collision Editor project",
-                "The collision project has unexported changes. Close anyway?",
+                self, "Unsaved Collision Editor changes",
+                self._unsaved_changes_message("Close"),
                 QMessageBox.StandardButton.Yes
                 | QMessageBox.StandardButton.No,
                 QMessageBox.StandardButton.No)
