@@ -1942,9 +1942,10 @@ class CollisionEditorTests(unittest.TestCase):
         export_actions = window.file_export_menu.actions()
         self.assertEqual(export_actions[0], window.copy_output_action)
         self.assertEqual(export_actions[1], window.export_action)
-        self.assertTrue(export_actions[2].isSeparator())
-        self.assertEqual(export_actions[3], window.apply_script_action)
-        self.assertEqual(export_actions[4], window.save_loaded_script_action)
+        self.assertEqual(export_actions[2], window.export_collision_shape_action)
+        self.assertTrue(export_actions[3].isSeparator())
+        self.assertEqual(export_actions[4], window.apply_script_action)
+        self.assertEqual(export_actions[5], window.save_loaded_script_action)
         self.assertFalse(hasattr(window, "file_script_menu"))
         self.assertNotIn(
             "Script",
@@ -2818,7 +2819,7 @@ class CollisionEditorTests(unittest.TestCase):
             window.generate_collision_shape_button.text(),
             "Generate OpenNeoUA Collision Shape")
         self.assertEqual(
-            window.delete_collision_shape_button.text(), "Delete")
+            window.delete_collision_shape_button.text(), "Delete Collision Shape")
         self.assertIs(
             window.fire_points_box.parentWidget(), window.fire_points_tab)
         self.assertIs(

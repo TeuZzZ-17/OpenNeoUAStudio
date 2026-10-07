@@ -5,12 +5,14 @@ import sys
 import tempfile
 import types
 import unittest
+from dataclasses import replace
 from pathlib import Path
 from unittest.mock import patch
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-from PySide6.QtCore import Qt
+from PySide6.QtCore import Qt, QPointF, QTimer
+from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication, QMessageBox
 
 from asset_family import AssetFamily, FamilyObject
@@ -209,9 +211,11 @@ class CollisionShapeTests(unittest.TestCase):
             for face in tetra.faces
         ]
         with patch.dict(sys.modules, {"coacd": fake}):
-            generate_collision_shape(
+            result = generate_collision_shape(
                 [("root/body", triangles)], source="Low_Quality",
                 quality="low")
+        self.assertEqual(result.shape.quality, "low")
+        self.assertEqual(result.shape.hulls[0].source_component, "root/body")
         self.assertEqual(len(settings), 1)
         for key, expected in {
                 "threshold": 0.10,
@@ -769,11 +773,8 @@ class CollisionShapeTests(unittest.TestCase):
         self.assertTrue(window.delete_collision_shape_button.isEnabled())
         menu = window._create_collision_shape_context_menu()
         self.addCleanup(menu.deleteLater)
-        delete_action = next(
-            action for action in menu.actions()
-            if action.text() == "Delete Collision Shape")
-        self.assertTrue(delete_action.isEnabled())
-        delete_action.trigger()
+        self.assertNotIn("Delete Collision Shape", [a.text() for a in menu.actions()])
+        window.delete_collision_shape_button.click()
 
         self.assertIsNone(window.project.collision_shape)
         self.assertEqual(window.project.collision_shape_path, "")
@@ -863,7 +864,8 @@ class CollisionShapeTests(unittest.TestCase):
         self.assertEqual(window._selected, -1)
         self.assertEqual(window._selected_spheres, set())
         self.assertEqual(len(window._undo), 1)
-        self.assertEqual(window.collision_shape_status.text(), "Shape ready: 1 parts.")
+        self.assertEqual(window.collision_shape_status.text(),
+                         "Shape loaded: 1/1 active parts — Quality unknown")
 
         window.undo()
         self.assertEqual(window.project.collision_shape, old_shape)
@@ -990,7 +992,7 @@ class CollisionShapeTests(unittest.TestCase):
             self.assertFalse(any(
                 "set" in warning.casefold() for warning in warnings), warnings)
             self.assertEqual(window.project.collision_shape.asset_set, 2)
-            self.assertIn("Shape loaded: 1 parts", window.collision_shape_status.text())
+            self.assertIn("Shape loaded: 1/1 active parts", window.collision_shape_status.text())
             self.assertNotIn("source_set", window.collision_shape_status.text())
 
             window.project.model_scale_x = 2.25
@@ -1158,6 +1160,262 @@ class CollisionShapeTests(unittest.TestCase):
             self.assertIn("error", response)
             self.assertEqual(sorted(path.name for path in Path(directory).iterdir()),
                              ["input.json", "output.json"])
+
+    def test_editor_metadata_round_trip_and_disabled_export(self):
+        first = replace(_tetrahedron(), source_component="root#component:body")
+        second = replace(first, source_component="root#component:wing", enabled=False)
+        shape = CollisionShape("Model", "a" * 64, (1, 1, 1), (0, 0, 0),
+                               (first, second), quality="high")
+        text = collision_shape_text(shape)
+        loaded = parse_collision_shape(text)
+        self.assertEqual(loaded.quality, "high")
+        self.assertEqual(loaded.hulls, (first,))
+        # Removing comments leaves exactly the same runtime geometry.
+        physical = parse_collision_shape("\n".join(
+            line for line in text.splitlines() if not line.startswith(";")))
+        self.assertEqual(physical.hulls[0].vertices, first.vertices)
+        self.assertEqual(physical.hulls[0].faces, first.faces)
+        with self.assertRaisesRegex(ValueError, "Enable at least one"):
+            collision_shape_text(replace(shape, hulls=(second,)))
+
+    def test_disable_shape_component_is_undoable_and_selection_does_not_enable(self):
+        window = CollisionEditorWindow()
+        self.addCleanup(lambda: (window._set_modified(False), window.close()))
+        self.assertFalse(window.export_collision_shape_action.isEnabled())
+        window.project.collision_shape = CollisionShape(
+            "Model", "a" * 64, (1, 1, 1), (0, 0, 0),
+            (_tetrahedron(), _tetrahedron()), quality="low")
+        window.project.collision_shape_path = "Data/Models/Collision/Model.collision"
+        window.project.collision_shape_file_path = "old.collision"
+        window._sync_all()
+        widget = window.collision_geometry_widget
+        self.assertTrue(window.export_collision_shape_action.isEnabled())
+        item = widget._shape_root.child(0)
+        widget.tree.setCurrentItem(item)
+        item.setCheckState(0, Qt.CheckState.Unchecked)
+        self.app.processEvents()
+        self.assertFalse(window.project.collision_shape.hulls[0].enabled)
+        self.assertEqual(window.project.collision_shape_path, "")
+        self.assertEqual(window.project.collision_shape_file_path, "")
+        widget.select_shape_component("@hull:1")
+        widget.select_shape_component("@hull:0")
+        self.assertFalse(window.project.collision_shape.hulls[0].enabled)
+        self.assertEqual(window.viewport._shape_selected_indices, {0})
+        self.assertEqual(widget.tree.currentItem().checkState(0), Qt.CheckState.Unchecked)
+
+        self.assertEqual(len(parse_collision_shape(collision_shape_text(
+            window.project.collision_shape)).hulls), 1)
+        window.undo()
+        self.assertTrue(window.project.collision_shape.hulls[0].enabled)
+        window.redo()
+        self.assertFalse(window.project.collision_shape.hulls[0].enabled)
+        widget._shape_root.child(1).setCheckState(0, Qt.CheckState.Unchecked)
+        self.app.processEvents()
+        self.assertFalse(window.export_collision_shape_action.isEnabled())
+        self.assertFalse(window.export_collision_shape_button.isEnabled())
+
+    def test_viewport_click_selects_disabled_shape_without_enabling_it(self):
+        window = CollisionEditorWindow()
+        self.addCleanup(lambda: (window._set_modified(False), window.close()))
+        hull = replace(_tetrahedron(), enabled=False)
+        window.project.collision_shape = CollisionShape(
+            "Model", "a" * 64, (1, 1, 1), (0, 0, 0), (hull,))
+        window._sync_all()
+        window.properties_tabs.setCurrentIndex(window.collision_shape_tab_index)
+        viewport = window.viewport
+        viewport.resize(640, 480)
+        points = [viewport._project_visible_world(hull.vertices[i])
+                  for i in hull.faces[0]]
+        point = QPointF(sum(p.x() for p in points) / 3,
+                        sum(p.y() for p in points) / 3)
+        self.assertEqual(viewport._hit_shape_component(point), "@hull:0")
+        QTest.mouseClick(viewport, Qt.MouseButton.LeftButton, pos=point.toPoint())
+        self.assertEqual(viewport._shape_selected_indices, {0})
+        self.assertFalse(window.project.collision_shape.hulls[0].enabled)
+
+    def test_component_context_menu_disable_preserves_component_selection(self):
+        window = CollisionEditorWindow()
+        self.addCleanup(lambda: (window._set_modified(False), window.close()))
+        window.project.collision_shape = CollisionShape(
+            "Model", "a" * 64, (1, 1, 1), (0, 0, 0), (_tetrahedron(),))
+        window._sync_all()
+        window.properties_tabs.setCurrentIndex(window.collision_shape_tab_index)
+        window.show()
+        self.app.processEvents()
+        widget = window.collision_geometry_widget
+        item = widget._shape_root.child(0)
+        position = widget.tree.visualItemRect(item).center()
+        actions = []
+        def choose_disable():
+            menu = self.app.activePopupWidget()
+            action = menu.actions()[0]
+            actions.append((action.text(), action.isEnabled()))
+            action.trigger()
+            menu.close()
+        QTimer.singleShot(0, choose_disable)
+        widget._show_component_menu(position)
+        self.app.processEvents()
+        self.assertEqual(actions, [("Disable", True)])
+        self.assertFalse(window.project.collision_shape.hulls[0].enabled)
+        self.assertEqual(window.viewport._shape_selected_indices, {0})
+        self.assertEqual(widget.tree.currentItem().checkState(0), Qt.CheckState.Unchecked)
+        QTimer.singleShot(0, choose_disable)
+        widget._show_component_menu(position)
+        self.app.processEvents()
+        self.assertEqual(actions, [("Disable", True), ("Enable", True)])
+        self.assertTrue(window.project.collision_shape.hulls[0].enabled)
+        window.undo()
+        self.assertFalse(window.project.collision_shape.hulls[0].enabled)
+        window.redo()
+        self.assertTrue(window.project.collision_shape.hulls[0].enabled)
+
+    def test_shape_render_keeps_cyan_and_never_draws_disabled_parts(self):
+        viewport = editor_module.CollisionViewport()
+        self.addCleanup(viewport.close)
+        hull = _tetrahedron()
+        viewport.set_collision_shape(CollisionShape(
+            "Model", "a" * 64, (1, 1, 1), (0, 0, 0),
+            (hull, replace(hull, enabled=False))))
+        class Painter:
+            def __init__(self):
+                self.lines = []
+            def save(self): pass
+            def restore(self): pass
+            def setRenderHint(self, *_args): pass
+            def setPen(self, pen): self.pen = pen
+            def drawLine(self, *_args):
+                self.lines.append((self.pen.color().getRgb()[:3], self.pen.widthF()))
+        painter = Painter()
+        viewport.set_shape_selected_indices({0})
+        viewport._draw_collision_shape_overlay(painter)
+        self.assertEqual(painter.lines[:6], [((24, 26, 32), 6.8)] * 6)
+        self.assertEqual(painter.lines[6:12], [((255, 155, 45), 4.8)] * 6)
+        self.assertEqual(painter.lines[12:], [((70, 230, 225), 1.8)] * 6)
+        viewport.set_collision_shape(replace(viewport._collision_shape, hulls=(hull, hull)))
+        painter.lines.clear()
+        viewport._draw_collision_shape_overlay(painter)
+        self.assertEqual(painter.lines[:6], [((70, 230, 225), 1.8)] * 6)
+        self.assertEqual(painter.lines[6:12], [((24, 26, 32), 6.8)] * 6)
+        viewport.set_collision_shape(replace(viewport._collision_shape,
+            hulls=(hull, replace(hull, enabled=False))))
+        painter.lines.clear()
+        viewport.set_shape_selected_indices({1})
+        viewport._draw_collision_shape_overlay(painter)
+        self.assertEqual(painter.lines, [((70, 230, 225), 1.8)] * 6)
+        viewport.set_collision_shape(replace(viewport._collision_shape,
+            hulls=(replace(hull, enabled=False), replace(hull, enabled=False))))
+        painter.lines.clear()
+        viewport._draw_collision_shape_overlay(painter)
+        self.assertEqual(painter.lines, [])
+
+    def test_viewport_right_click_disables_only_clicked_shape_part(self):
+        window = CollisionEditorWindow()
+        self.addCleanup(lambda: (window._set_modified(False), window.close()))
+        first = _tetrahedron()
+        second = replace(first, vertices=tuple((x+3, y, z) for x,y,z in first.vertices))
+        window.project.collision_shape = CollisionShape(
+            "Model", "a"*64, (1,1,1), (0,0,0), (first, second))
+        window._sync_all()
+        window.properties_tabs.setCurrentIndex(window.collision_shape_tab_index)
+        window.show()
+        self.app.processEvents()
+        viewport = window.viewport
+        points = [viewport._project_visible_world(first.vertices[i]) for i in first.faces[0]]
+        point = QPointF(sum(p.x() for p in points)/3, sum(p.y() for p in points)/3)
+        self.assertEqual(viewport._hit_shape_component(point), "@hull:0")
+        chosen = []
+        def choose_disable():
+            menu = self.app.activePopupWidget()
+            action = menu.actions()[0]
+            chosen.append(action.text())
+            action.trigger()
+            menu.close()
+        QTimer.singleShot(0, choose_disable)
+        QTest.mouseClick(viewport, Qt.MouseButton.RightButton, pos=point.toPoint())
+        self.app.processEvents()
+        self.assertEqual(chosen, ["Disable"])
+        self.assertEqual([h.enabled for h in window.project.collision_shape.hulls], [False, True])
+        self.assertEqual(window.collision_geometry_widget.tree.currentItem().data(
+            0, editor_module._GEOMETRY_COMPONENT_ROLE), "@hull:0")
+        self.assertEqual(len(parse_collision_shape(collision_shape_text(
+            window.project.collision_shape)).hulls), 1)
+        menu = window._create_collision_shape_context_menu("@hull:0")
+        self.addCleanup(menu.deleteLater)
+        self.assertTrue(menu.actions()[0].isEnabled())
+        self.assertEqual(menu.actions()[0].text(), "Enable")
+        self.assertNotIn("Delete Collision Shape", [a.text() for a in menu.actions()])
+        QTimer.singleShot(0, choose_disable)
+        QTest.mouseClick(viewport, Qt.MouseButton.RightButton, pos=point.toPoint())
+        self.app.processEvents()
+        self.assertEqual(chosen, ["Disable", "Enable"])
+        self.assertEqual([h.enabled for h in window.project.collision_shape.hulls], [True, True])
+        self.assertEqual(len(parse_collision_shape(collision_shape_text(
+            window.project.collision_shape)).hulls), 2)
+        menu = window._create_collision_shape_context_menu("@hull:0")
+        self.addCleanup(menu.deleteLater)
+        self.assertEqual(menu.actions()[0].text(), "Disable")
+        menu = window._create_collision_shape_context_menu()
+        self.addCleanup(menu.deleteLater)
+        self.assertNotIn("Disable", [a.text() for a in menu.actions()])
+        self.assertNotIn("Enable", [a.text() for a in menu.actions()])
+
+    def test_parent_toggle_64_parts_is_atomic_stable_and_export_excludes_unchecked(self):
+        window = CollisionEditorWindow()
+        self.addCleanup(lambda: (window._set_modified(False), window.close()))
+        hulls = tuple(replace(_tetrahedron(), vertices=tuple(
+            (x + index * 2, y, z) for x, y, z in _tetrahedron().vertices))
+            for index in range(64))
+        window.project.collision_shape = CollisionShape(
+            "Many_Parts", "a"*64, (1,1,1), (0,0,0), hulls, quality="normal")
+        window._sync_all()
+        widget = window.collision_geometry_widget
+        root = widget._shape_root
+        undo_count = len(window._undo)
+        for iteration in range(20):
+            checked = iteration % 2 == 1
+            root.setCheckState(0, Qt.CheckState.Checked if checked else Qt.CheckState.Unchecked)
+            self.app.processEvents()
+            self.assertIs(widget._shape_root, root)
+            self.assertEqual(sum(h.enabled for h in window.project.collision_shape.hulls),
+                             64 if checked else 0)
+            self.assertEqual(len(window._undo), undo_count + iteration + 1)
+        expected_flags = [True] * 64
+        for iteration in range(400):
+            index = iteration * 17 % 64
+            expected_flags[index] = not expected_flags[index]
+            item = root.child(index)
+            widget.tree.setCurrentItem(item)
+            item.setCheckState(0, Qt.CheckState.Checked if expected_flags[index]
+                               else Qt.CheckState.Unchecked)
+            if iteration % 3 == 2:
+                self.app.processEvents()
+                self.assertIs(widget._shape_root, root)
+                self.assertEqual([h.enabled for h in window.project.collision_shape.hulls],
+                                 expected_flags)
+        self.app.processEvents()
+        self.assertEqual([h.enabled for h in window.project.collision_shape.hulls], expected_flags)
+        root.setCheckState(0, Qt.CheckState.Checked)
+        self.app.processEvents()
+        root.child(5).setCheckState(0, Qt.CheckState.Unchecked)
+        root.child(12).setCheckState(0, Qt.CheckState.Unchecked)
+        self.app.processEvents()
+        self.assertEqual(root.checkState(0), Qt.CheckState.PartiallyChecked)
+        with tempfile.TemporaryDirectory() as directory:
+            target = Path(directory) / "Subset.collision"
+            # Export also commits a pending checkbox update before reading the shape.
+            root.child(30).setCheckState(0, Qt.CheckState.Unchecked)
+            with patch.object(editor_module.QFileDialog, "getSaveFileName",
+                              return_value=(str(target), "")):
+                window.export_collision_shape()
+            loaded = shape_module.read_collision_shape(target)
+            self.assertEqual(loaded.hulls, tuple(
+                hull for index, hull in enumerate(hulls) if index not in {5,12,30}))
+        root.setCheckState(0, Qt.CheckState.Unchecked)
+        self.app.processEvents()
+        window.undo()
+        self.assertEqual(sum(h.enabled for h in window.project.collision_shape.hulls), 61)
+        window.redo()
+        self.assertEqual(sum(h.enabled for h in window.project.collision_shape.hulls), 0)
 
     def test_hidden_worker_entry_runs_before_qt_startup(self):
         import main
