@@ -3,12 +3,13 @@ os.environ.setdefault('QT_QPA_PLATFORM', 'offscreen')
 
 import struct
 from pathlib import Path
+from types import SimpleNamespace
 import numpy as np
 import pytest
 from PySide6.QtCore import QPoint, Qt
-from PySide6.QtGui import QIcon, QPixmap
+from PySide6.QtGui import QIcon, QImage, QPainter, QPixmap
 from PySide6.QtTest import QTest, QSignalSpy
-from PySide6.QtWidgets import QApplication
+from PySide6.QtWidgets import QApplication, QStyle, QStyleOptionViewItem
 
 from map_editor import bootstrap
 from map_editor.core.ldf_model import LdfDocument, loads_ldf, dumps_ldf, ensure_host_defaults, make_host_ai
@@ -23,7 +24,8 @@ from map_editor.render.terrain_mesh import TerrainMesh
 from map_editor.render.map_scene import scene_polygons, render_scene
 from map_editor.render.camera import IsoCamera
 from map_editor.ui.main_window import MainWindow
-from map_editor.ui.preview_cards import RESOURCE_ROLE
+from map_editor.ui.preview_cards import COLOR_ROLE, RESOURCE_ROLE, PreviewList, set_card
+from map_editor.ui.tech_panel import TechPanel
 
 
 def host(owner=1, vehicle=56, x=3, y=3):
@@ -190,6 +192,27 @@ def test_host_comment_is_one_live_edit_and_ai_player_order(win):
     assert win.host_panel.ai.isEnabled()
 
 
+def test_delete_shortcut_uses_host_delete_and_keeps_text_delete(win, app):
+    win.doc.host_stations = [host(1, 56, 3, 3), host(6, 57, 4, 4)]
+    win._refresh_squads()
+    win._refresh_hosts(0)
+    win.palette_tabs.setCurrentIndex(win.host_tab_index)
+    win.show()
+    app.processEvents()
+    win.host_panel.list.setCurrentRow(0)
+    win.host_panel.list.setFocus()
+    QTest.keyClick(win.host_panel.list, Qt.Key.Key_Delete)
+    assert len(win.doc.host_stations) == 1
+    assert win.doc.host_stations[0]['owner'] == 6
+
+    win.palette_tabs.setCurrentIndex(win.script_tab_index)
+    win.script_edit.setPlainText('keep normal text editing')
+    win.script_edit.selectAll()
+    QTest.keyClick(win.script_edit, Qt.Key.Key_Delete)
+    assert win.script_edit.toPlainText() == ''
+    assert len(win.doc.host_stations) == 1
+
+
 def test_dynamic_map_scripts_populate_all_panels_and_undo(win):
     script = 'new_vehicle 222\nname = Mod Host\nmodel = robo\nvp_normal = 3\nend\nnew_vehicle 223\nname = Mod Tank\nmodel = tank\nvp_normal = 4\nend'
     win.script_edit.setPlainText(script)
@@ -244,6 +267,78 @@ def test_tech_preview_decoration_does_not_change_permissions(win):
     win._resource_finished((id(win._lib()), win._asset_epoch, *key), pix.toImage())
     assert win.doc.snapshot() == before and not win.history.can_undo
     assert not win.tech_panel.list.item(0).icon().isNull()
+
+
+def test_tech_enabled_summary_focuses_card_without_changing_permission(app):
+    panel = TechPanel()
+    doc = LdfDocument()
+    doc.tech_explicit = {1}
+    doc.tech[1] = {'veh': [222], 'blg': [199]}
+    vehicles = {222: SimpleNamespace(name='Mod Vehicle', enabled_factions={1})}
+    buildings = {199: SimpleNamespace(name='Mod Building', enabled_factions={1})}
+    panel.refresh(doc, vehicles, buildings, {1: (50, 170, 220)})
+    panel.faction.setCurrentIndex(panel.faction.findData(1))
+    panel.resize(480, 700)
+    panel.show()
+    app.processEvents()
+    try:
+        assert panel.status.text() == 'Enabled Vehicles (1)'
+        assert panel.summary.topLevelItemCount() == 1
+        row = panel.summary.topLevelItem(0)
+        assert row.text(0) == '222' and row.text(1) == 'Mod Vehicle'
+
+        panel.search.setText('no matching card')
+        rect = panel.summary.visualItemRect(row)
+        QTest.mouseClick(panel.summary.viewport(), Qt.MouseButton.LeftButton, pos=rect.center())
+        target = panel.list.currentItem()
+        assert target.data(Qt.ItemDataRole.UserRole) == 222
+        assert not target.isHidden() and panel.search.text() == ''
+        assert panel.list.hasFocus()
+        assert target.checkState() == Qt.CheckState.Checked
+        assert doc.tech[1]['veh'] == [222]
+
+        panel.kind.setCurrentIndex(panel.kind.findData('blg'))
+        assert panel.status.text() == 'Enabled Buildings (1)'
+        assert panel.summary.topLevelItemCount() == 1
+        assert panel.summary.topLevelItem(0).text(0) == '199'
+    finally:
+        panel.close()
+        panel.deleteLater()
+        app.processEvents()
+
+
+def test_resource_card_selection_has_accented_background_and_pale_border(app):
+    view = PreviewList()
+    view.resize(260, 120)
+    view.addItem('')
+    item = view.item(0)
+    set_card(item, 'Mod Vehicle', 'Faction · Enabled', (35, 140, 200), ('veh', 222))
+    index = view.indexFromItem(item)
+    delegate = view.itemDelegate()
+
+    def render(selected):
+        image = QImage(260, 120, QImage.Format.Format_ARGB32_Premultiplied)
+        image.fill(Qt.GlobalColor.transparent)
+        option = QStyleOptionViewItem()
+        option.rect = image.rect()
+        option.state = QStyle.StateFlag.State_Enabled
+        if selected:
+            option.state |= QStyle.StateFlag.State_Selected
+        painter = QPainter(image)
+        delegate.paint(painter, option, index)
+        painter.end()
+        return image
+
+    idle = render(False)
+    selected = render(True)
+    assert selected.pixelColor(120, 3).red() > 220
+    assert selected.pixelColor(120, 3).blue() > 230
+    idle_fill = idle.pixelColor(10, 20)
+    selected_fill = selected.pixelColor(10, 20)
+    assert selected_fill != idle_fill
+    assert selected_fill.blue() > idle_fill.blue() + 20
+    view.deleteLater()
+    app.processEvents()
 
 
 def chunk(tag, data):

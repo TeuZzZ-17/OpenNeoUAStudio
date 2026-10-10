@@ -52,7 +52,9 @@ class IsoCamera:
         f = self.zoom / self.k
         if self.perspective:
             f = self.height / (2 * math.tan(math.radians(self.fov) / 2)) / max(1e-9, 4 - cam_point[2])
-        return (ox + cam_point[0] * f, oy - cam_point[1] * f)
+        # UA uses a left-handed view: the game's +X remains screen-right
+        # when looking along +Z. Match that handedness in every editor view.
+        return (ox - cam_point[0] * f, oy - cam_point[1] * f)
 
     def world_to_screen(self, point):
         cam = self.to_camera(point)
@@ -63,7 +65,7 @@ class IsoCamera:
         cyaw, syaw, cp, sp = self._trig()
         if self.perspective:
             focal = self.height / (2 * math.tan(math.radians(self.fov) / 2))
-            xc, yc = (sx-self.width/2)/focal, -(sy-self.height/2)/focal
+            xc, yc = -(sx-self.width/2)/focal, -(sy-self.height/2)/focal
             # Inverse rotation of the view ray (camera looks along negative Z).
             direction = (cyaw*xc + sp*syaw*yc + cp*syaw,
                          -cp*yc + sp, syaw*xc - sp*cyaw*yc - cp*cyaw)
@@ -75,7 +77,7 @@ class IsoCamera:
             return (self.center[0]+distance*direction[0], ground_y,
                     self.center[2]+distance*direction[2])
         f = self.zoom / self.k
-        xc = (sx - self.width / 2 - self.pan[0]) / f
+        xc = -(sx - self.width / 2 - self.pan[0]) / f
         yc = -(sy - self.height / 2 - self.pan[1]) / f
         cy = -(ground_y - self.center[1]) * self.k
         if abs(sp) < 1e-6:

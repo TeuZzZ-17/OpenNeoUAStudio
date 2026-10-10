@@ -3,6 +3,8 @@ from __future__ import annotations
 
 import os
 import time
+import traceback
+from pathlib import Path
 from collections import deque
 import numpy as np
 from PySide6.QtCore import Qt
@@ -87,16 +89,19 @@ class Canvas(QOpenGLWidget):
                     GL.glBindFramebuffer(GL.GL_FRAMEBUFFER, self.defaultFramebufferObject())
                     GL.glActiveTexture(GL.GL_TEXTURE0)
                     painter.endNativePainting()
-                overlay = getattr(self.owner, 'building_overlay', None)
-                if overlay is not None and not self.owner.camera.perspective:
-                    overlay.draw(painter)
-                overlay = getattr(self.owner, 'special_overlay', None)
-                if overlay is not None:
-                    overlay.draw(painter)
-                self.owner.draw_interaction_overlay(painter)
-                overlay = getattr(self.owner, 'squad_overlay', None)
-                if overlay is not None:
-                    overlay.draw(painter)
+                if not self.owner.clear_view:
+                    for name in ('building_overlay', 'special_overlay', 'squad_overlay'):
+                        overlay = getattr(self.owner, name, None)
+                        if overlay is None or (name == 'building_overlay' and self.owner.camera.perspective):
+                            continue
+                        try:
+                            overlay.draw(painter)
+                        except Exception as exc:
+                            self.owner._overlay_warning(name, exc)
+                try:
+                    self.owner.draw_interaction_overlay(painter)
+                except Exception as exc:
+                    self.owner._overlay_warning('interaction_overlay', exc)
             except Exception as exc:
                 self.owner._fallback(exc)
             finally:
@@ -117,6 +122,7 @@ class GpuMapViewport(SoftwareMapViewport):
     def __init__(self, parent=None):
         self._canvas = None
         self._software_fallback = False
+        self._overlay_errors = set()
         super().__init__(parent)
         self.renderer = None
         self._preview_renderer = None
@@ -135,12 +141,36 @@ class GpuMapViewport(SoftwareMapViewport):
         self._canvas = Canvas(self)
         self._canvas.setGeometry(self.rect())
 
+    def _overlay_warning(self, name, error):
+        """An optional UI overlay must never disable GPU map rendering."""
+        key = (name, type(error).__name__, str(error))
+        if key in self._overlay_errors:
+            return
+        self._overlay_errors.add(key)
+        log = Path.home() / 'OpenNeoUAStudio_Overlay_error.log'
+        try:
+            with log.open('a', encoding='utf-8') as stream:
+                stream.write(f'{name}: {type(error).__name__}: {error}\n{traceback.format_exc()}\n')
+        except OSError:
+            pass
+        self.statusMessage.emit(f'{name} unavailable: {error}. GPU rendering continues.')
+
     def _fallback(self, error):
+        # Keep the original exception: the cause matters when a particular map fails.
         self._software_fallback = True
         self.renderer_name = 'Software fallback'
         self.backendChanged.emit(self.renderer_name)
         self._canvas.hide()
-        self.statusMessage.emit(f'GPU rendering unavailable: {error}. Using software rendering.')
+        log = Path.home() / 'OpenNeoUAStudio_GPU_error.log'
+        doc = self.doc
+        context = (f'SET: {doc.set_number}, map: {doc.lvl_info.get("title", "unknown")}, '
+                   f'size: {doc.mw}x{doc.mh}\n') if doc is not None else 'No map loaded\n'
+        try:
+            log.write_text(context + f'{type(error).__name__}: {error}\n{traceback.format_exc()}', encoding='utf-8')
+            detail = f' Details: {log}'
+        except OSError:
+            detail = ''
+        self.statusMessage.emit(f'GPU rendering unavailable: {error}. Using software rendering.{detail}')
         super().update()
 
     def update(self, *args):
@@ -225,13 +255,22 @@ class GpuMapViewport(SoftwareMapViewport):
             renderer.set_heights(-(self.terrain.cells-DEFAULT_HGT)*HEIGHT_UNIT)
             self._heights_dirty = False
         state_key = (self._owner_revision, self.doc.mw, self.doc.mh,
-                     frozenset(self.brush_cells), frozenset(self.selection), frozenset(self.preview_cells))
+                     frozenset(self.brush_cells), frozenset(self.selection), frozenset(self.preview_cells), self.selected_building)
         if state_key != self._states_key:
             states = np.zeros((self.doc.mh, self.doc.mw, 4), np.uint8)
             states[:, :, 0] = self.doc.grids['own']
+            for r in range(self.doc.mh):
+                for c in range(self.doc.mw):
+                    if int(str(self.doc.grids['blg'][r][c]), 16):
+                        states[r, c, 3] = 1
+            if self.selected_building is not None:
+                c, r = self.selected_building
+                if 0 <= c < self.doc.mw and 0 <= r < self.doc.mh and states[r, c, 3] == 1:
+                    states[r, c, 3] = 3
             for c,r in self.preview_cells:
-                states[r,c,3] = 2
-                states[r,c,0] = 0
+                if 0 <= c < self.doc.mw and 0 <= r < self.doc.mh:
+                    states[r,c,3] = 2
+                    states[r,c,0] = 0
             for channel, cells in ((1, self.brush_cells), (2, self.selection)):
                 if channel == 1 and self.active_tool == 'terrain':
                     continue
@@ -244,12 +283,15 @@ class GpuMapViewport(SoftwareMapViewport):
             renderer.set_sky(self._sky_image)
             self._sky_dirty = False
         if not self._previews_primed:
-            # Drivers may compile a separate non-instanced shader variant on its
-            # first draw. Pay that startup cost before interactive palette scrolling.
+            # A palette thumbnail failure must not disable the whole GPU map.
+            self._previews_primed = True
             for typ in (0, 4):
                 if typ in self.lib.assets.sdf.sectors:
-                    self.render_icon(self.lib, typ, 1.1, current=True)
-            self._previews_primed = True
+                    try:
+                        self.render_icon(self.lib, typ, 1.1, current=True)
+                    except Exception:
+                        self.statusMessage.emit('GPU palette preview unavailable; map rendering continues.')
+                        break
         ratio = self._canvas.devicePixelRatioF()
         styles = [(*(c / 255 for c in row[:3]), row[3]) for row in scene_object_styles(self)]
         renderer.set_unit_styles(styles)
@@ -258,8 +300,8 @@ class GpuMapViewport(SoftwareMapViewport):
                         self._canvas.defaultFramebufferObject(), owner_colors=self.owner_colors,
                         grid=self.show_grid, sky=self.show_sky, hover=hover, pixel_scale=ratio,
                         overlays=not self.camera.perspective,
-                        cursor_color=self.current_cursor_color())
-        self._gpu_camera_key = (self._camera_key(), ratio)
+                        cursor_color=self.current_cursor_color(), clear_view=self.clear_view)
+        self._gpu_camera_key = (self._camera_key(), ratio, self.clear_view)
         self._frame_key = self._render_key()
         self.frame_ms.append((time.perf_counter()-start)*1000)
 
@@ -271,7 +313,8 @@ class GpuMapViewport(SoftwareMapViewport):
         self._canvas.makeCurrent()
         try:
             ratio = self._canvas.devicePixelRatioF()
-            if self._gpu_camera_key != (self._camera_key(), ratio) or self._geometry_dirty or self._heights_dirty:
+            if (self._gpu_camera_key != (self._camera_key(), ratio, self.clear_view)
+                    or self._geometry_dirty or self._heights_dirty):
                 self._paint_gpu()
             code = self.renderer.pick(int(x*ratio), int(y*ratio))
         finally:
@@ -290,7 +333,7 @@ class GpuMapViewport(SoftwareMapViewport):
     def pick_squad(self, x, y):
         if self._software_fallback:
             return super().pick_squad(x, y)
-        if self.doc is None:
+        if self.doc is None or self.clear_view:
             return None
         code = abs(self._pick_code(x, y)) - self.doc.mw * self.doc.mh - 1
         if 0 <= code < len(self.doc.squads):
@@ -301,7 +344,7 @@ class GpuMapViewport(SoftwareMapViewport):
     def pick_host(self, x, y):
         if self._software_fallback:
             return super().pick_host(x, y)
-        if self.doc is None:
+        if self.doc is None or self.clear_view:
             return None
         code = abs(self._pick_code(x, y)) - self.doc.mw * self.doc.mh - len(self.doc.squads) - 1
         return code if 0 <= code < len(self.doc.host_stations) else None

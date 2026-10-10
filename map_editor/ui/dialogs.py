@@ -98,7 +98,7 @@ class GameInstallationDialog(QDialog):
         layout = QHBoxLayout(row)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.addWidget(edit)
-        button = QPushButton("Browse...")
+        button = QPushButton("Browse")
         button.clicked.connect(lambda: self._browse(edit, after))
         layout.addWidget(button)
         return row
@@ -259,13 +259,14 @@ class LevelInfoPanel(QWidget):
 
             preview = QLabel("No preview")
             preview.setAlignment(Qt.AlignmentFlag.AlignCenter)
-            preview.setFixedSize(140, 110)
+            preview.setMinimumSize(100, 62)
+            preview.setMaximumSize(300, 188)
             preview.setStyleSheet("background:#171717; border:1px solid #454545")
             self.art_previews[key] = preview
             column.addWidget(preview, alignment=Qt.AlignmentFlag.AlignHCenter)
             status = QLabel()
             status.setWordWrap(True)
-            status.setMaximumWidth(140)
+            status.setMaximumWidth(300)
             self.art_status[key] = status
             column.addWidget(status)
             art_row.addLayout(column, 1)
@@ -274,7 +275,7 @@ class LevelInfoPanel(QWidget):
             box.activated.connect(lambda _index, k=key: self._emit_values_changed())
             box.lineEdit().editingFinished.connect(self._emit_values_changed)
         layout.addLayout(art_row)
-        self.generate_art_button = QPushButton('Generate MB / DB…')
+        self.generate_art_button = QPushButton('Generate MB / DB')
         self.generate_art_button.setToolTip('Create matching briefing and debriefing images from the current map')
         self.generate_art_button.clicked.connect(self.generateArtRequested.emit)
         layout.addWidget(self.generate_art_button)
@@ -369,7 +370,7 @@ class LevelInfoPanel(QWidget):
             self.art_status[key].setText("")
         self._art_requests[key] = path
         label.setPixmap(QPixmap())
-        label.setText("Loading preview…" if path else "No preview")
+        label.setText("Loading preview" if path else "No preview")
         if path:
             self._request_preview(('art', key, path), path)
 
@@ -421,9 +422,14 @@ class LevelInfoPanel(QWidget):
             label.setText("No preview")
         else:
             label.setText("")
-            label.setPixmap(QPixmap.fromImage(image).scaled(
-                label.size(), Qt.AspectRatioMode.KeepAspectRatio,
-                Qt.TransformationMode.SmoothTransformation))
+            self._scale_art_preview(key[1], image)
+
+    def _scale_art_preview(self, key: str, image: QImage):
+        label = self.art_previews[key]
+        label.setText("")
+        label.setPixmap(QPixmap.fromImage(image).scaled(
+            label.size(), Qt.AspectRatioMode.KeepAspectRatio,
+            Qt.TransformationMode.SmoothTransformation))
 
     def _select_sky(self, item, _previous=None):
         if item is None or self._disposed:
@@ -467,6 +473,17 @@ class LevelInfoPanel(QWidget):
                      else QHBoxLayout.Direction.TopToBottom)
         if self._art_row.direction() != direction:
             self._art_row.setDirection(direction)
+        columns = 2 if direction == QHBoxLayout.Direction.LeftToRight else 1
+        cell_width = (available_width - self._art_row.spacing() * (columns - 1)) // columns
+        preview_width = max(100, min(300, cell_width - 16))
+        preview_height = round(preview_width * 0.62)
+        for key, preview in self.art_previews.items():
+            preview.setFixedSize(preview_width, preview_height)
+            self.art_status[key].setMaximumWidth(preview_width)
+            source = self._art_requests.get(key)
+            image = self._image_cache.get(source)
+            if image is not None and not image.isNull():
+                self._scale_art_preview(key, image)
 
     def _load_visible_skies(self):
         if self._disposed or not self.isVisible():

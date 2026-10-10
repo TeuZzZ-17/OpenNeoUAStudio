@@ -10,13 +10,14 @@ from PySide6.QtCore import QEvent, QObject, QRunnable, QSize, Qt, QThreadPool, Q
 from PySide6.QtGui import (QAction, QActionGroup, QColor, QIcon, QImage, QKeySequence,
                            QPainter, QPen, QPixmap)
 from PySide6.QtWidgets import (QApplication, QAbstractItemView, QComboBox, QDockWidget, QFileDialog,
-                               QFormLayout, QHBoxLayout, QLabel, QLineEdit, QListView, QListWidget,
+                               QAbstractSpinBox, QFormLayout, QHBoxLayout, QLabel, QLineEdit, QListView, QListWidget,
                                QListWidgetItem, QMainWindow, QMessageBox, QPushButton, QInputDialog,
                                QSlider, QVBoxLayout,
                                QWidget, QToolButton, QGroupBox, QSpinBox, QCheckBox,
                                QPlainTextEdit, QScrollArea, QDialog, QDialogButtonBox, QMenu)
 
 from ..core.asset_bridge import SetAssets
+from ..core.actor_placement import actors_fit, host_copy_preview
 from ..core.building_defs import load_building_files
 from ..core.game_installation import GameInstallation, load_remembered
 from ..core.factions import load_owner_colors
@@ -147,6 +148,7 @@ class MainWindow(QMainWindow):
         self._special_target_slot = 0
         self._host_pov_index = None
         self._special_drag = None
+        self._building_drag = None
         self._resource_icons = {}
         self._clipboard = None
         self._draft_grid = None
@@ -157,6 +159,7 @@ class MainWindow(QMainWindow):
         self._drag_original = {}
         self._drag_cell = None
         self._drag_changed = False
+        self._drag_drop_valid = True
         self._drag_kind = 'squad'
         self._sampling_height = False
         self._script_pending = False
@@ -208,7 +211,7 @@ class MainWindow(QMainWindow):
 
     def _overlay_state(self):
         return {
-            "doc": self.doc,
+            "doc": self.view.doc or self.doc,
             "lib": self._lib(),
             "buildings": self.buildings,
         }
@@ -228,21 +231,23 @@ class MainWindow(QMainWindow):
             menu.addAction(action)
             return action
 
-        act(file_menu, "New...", self.file_new, QKeySequence.StandardKey.New)
-        act(file_menu, "Open...", self.file_open, QKeySequence.StandardKey.Open)
+        act(file_menu, "New", self.file_new, QKeySequence.StandardKey.New)
+        act(file_menu, "Open", self.file_open, QKeySequence.StandardKey.Open)
         act(file_menu, "Save", self.file_save, QKeySequence.StandardKey.Save)
-        act(file_menu, "Save as...", self.file_save_as,
+        act(file_menu, "Save as", self.file_save_as,
             QKeySequence.StandardKey.SaveAs)
-        act(file_menu, "Game folders...", self.file_game_folders)
+        act(file_menu, "Game folders", self.file_game_folders)
         self.undo_action = act(edit_menu, "Undo", self.undo, QKeySequence.StandardKey.Undo)
         self.redo_action = act(edit_menu, "Redo", self.redo, QKeySequence.StandardKey.Redo)
-        act(map_menu, "Set...", self.map_set)
-        act(map_menu, "Resize...", self.map_resize)
-        self.reset_action = act(map_menu, "Reset...", self.map_reset)
+        act(edit_menu, "Delete selected", self._delete_active_selection, "Delete")
+        act(map_menu, "Set", self.map_set)
+        act(map_menu, "Change map SET.BAS (experimental)", self.map_set_file)
+        act(map_menu, "Resize", self.map_resize)
+        self.reset_action = act(map_menu, "Reset", self.map_reset)
         self.reset_camera_action = act(view_menu, 'Reset Camera', self.view.reset_camera, 'Home')
         self.copy_action = act(edit_menu, 'Copy', self._copy_elements, 'Ctrl+C')
         self.paste_action = act(edit_menu, 'Paste', self._paste_elements, 'Ctrl+V')
-        act(map_menu, "Fill...", self.map_fill)
+        act(map_menu, "Fill", self.map_fill)
         act(map_menu, "Level Info", self.map_level_info)
         tools_menu = edit_menu.addMenu("Tool")
         group = QActionGroup(self)
@@ -258,6 +263,9 @@ class MainWindow(QMainWindow):
         self.grid_action.setShortcut("G")
         self.grid_action.toggled.connect(self.view.set_grid)
         view_menu.addAction(self.grid_action)
+        self.clear_view_action = QAction("Clear View", self, checkable=True, checked=False)
+        self.clear_view_action.toggled.connect(self.view.set_clear_view)
+        view_menu.addAction(self.clear_view_action)
         self.sky_action = QAction("Sky background", self, checkable=True, checked=True)
         self.sky_action.toggled.connect(self.view.set_sky_visible)
         view_menu.addAction(self.sky_action)
@@ -303,6 +311,10 @@ class MainWindow(QMainWindow):
         self.view.cameraChanged.connect(lambda: self.view_preset.setCurrentIndex(0))
         preset_form.addRow('View preset', self.view_preset)
         panel_layout.addLayout(preset_form)
+        self.hover_height = QLabel('Sector under mouse: —')
+        self.hover_height.setWordWrap(True)
+        self.hover_height.setStyleSheet('QLabel { padding: 5px; color: #ddd; background: #292929; border-radius: 4px; }')
+        panel_layout.addWidget(self.hover_height)
         panel_layout.addWidget(tabs)
         self.sector_list = self._make_list(True)
         self.sector_list.setItemDelegate(ThumbnailDelegate(self.sector_list))
@@ -310,7 +322,7 @@ class MainWindow(QMainWindow):
         self.sector_list.verticalScrollBar().valueChanged.connect(lambda _: self._icons.start())
         self.sector_list.currentItemChanged.connect(self._sector_selected)
         self.sector_list.itemClicked.connect(self._sector_selected)
-        self.sector_filter = QLineEdit(placeholderText="Filter sectors...")
+        self.sector_filter = QLineEdit(placeholderText="Filter sectors")
         self.sector_filter.textChanged.connect(lambda t: self._filter(self.sector_list, t))
         page = QWidget()
         layout = QVBoxLayout(page)
@@ -335,7 +347,7 @@ class MainWindow(QMainWindow):
 
         buildings_page = QWidget()
         buildings_layout = QVBoxLayout(buildings_page)
-        self.building_filter = QLineEdit(placeholderText="Filter buildings...")
+        self.building_filter = QLineEdit(placeholderText="Filter buildings")
         buildings_layout.addWidget(self.building_filter)
         self.show_special_buildings = QCheckBox('Show special buildings')
         self.show_special_buildings.toggled.connect(lambda: self._fill_buildings(self._lib()) if self._lib() else None)
@@ -439,7 +451,6 @@ class MainWindow(QMainWindow):
         force_row.addWidget(self.strength)
         force_row.addWidget(self.force_label)
         self.shape_combo.currentIndexChanged.connect(self._brush_params)
-        self.brush_label = QLabel()
         form.addRow(mode_row)
         form.addRow('Shape', self.shape_combo)
         form.addRow('Radius X', radius_x_row)
@@ -447,7 +458,7 @@ class MainWindow(QMainWindow):
         form.addRow(self.link_radii)
         form.addRow("Force", force_row)
         self.flatten_height = QSpinBox(minimum=0, maximum=60, value=30)
-        self.flatten_height.setToolTip("Height 0–60; 30 is the original ground level")
+        self.flatten_height.setToolTip("Flatten only: drag on the map to level the brush area to this height. 30 = original ground, 1 step = 100 world units.")
         self.flatten_height.valueChanged.connect(self._brush_params)
         self.sample_height = QPushButton("Sample from map", checkable=True)
         self.sample_height.toggled.connect(self._sample_toggled)
@@ -455,9 +466,9 @@ class MainWindow(QMainWindow):
         target_row = QHBoxLayout()
         target_row.addWidget(self.flatten_height)
         target_row.addWidget(self.sample_height)
-        form.addRow("Target height", target_row)
-        form.addRow(self.brush_label)
-        hint = QLabel("Drag to sculpt · Shift: lower · Alt: smooth · Ctrl: select")
+        form.addRow("Flatten to height", target_row)
+        self.flatten_height.setEnabled(self.mode_combo.currentData() == BrushMode.FLATTEN)
+        hint = QLabel('Drag to sculpt · Shift: lower · Alt: smooth · Ctrl: select')
         hint.setWordWrap(True)
         form.addRow(hint)
         tabs.addTab(terrain, "Terrain")
@@ -466,7 +477,7 @@ class MainWindow(QMainWindow):
         self.script_page = QWidget()
         script_layout = QVBoxLayout(self.script_page)
         script_row = QHBoxLayout()
-        for text, slot in (("Load script…", self._load_script), ("Save script…", self._save_script)):
+        for text, slot in (("Load script", self._load_script), ("Save script", self._save_script)):
             button = QPushButton(text)
             button.clicked.connect(slot)
             script_row.addWidget(button)
@@ -629,8 +640,7 @@ class MainWindow(QMainWindow):
         shape = self.shape_combo.currentText()
         if self.brush.shape == BrushShape.ROUND:
             shape = 'Circle' if equal else 'Ellipse'
-        self.brush_label.setText(f'{shape} · X {radius_x:g} · Z {radius_z:g} · Force {self.brush.strength:.0f} steps/s')
-        self.brush_label.setToolTip('Radii in sectors. One step = 100 game units. Height 0–60, initial ground 30.')
+        self.strength.setToolTip(f'{shape} · X {radius_x:g} · Z {radius_z:g} · Force {self.brush.strength:.0f} steps/s\nDrag to sculpt · Shift: lower · Alt: smooth · Ctrl: select')
         if self.doc is not None and self.view.hover is not None:
             self._hovered(*self.view.hover)
 
@@ -643,6 +653,9 @@ class MainWindow(QMainWindow):
     def _terrain_tool_changed(self, index):
         for key, button in self.terrain_buttons.items():
             button.setChecked(key == index)
+        if hasattr(self, 'flatten_height'):
+            self.flatten_height.setEnabled(self.mode_combo.currentData() == BrushMode.FLATTEN)
+            self._brush_params()
         self._update_cursor()
 
     def _update_cursor(self, modifiers=Qt.KeyboardModifier.NoModifier):
@@ -659,6 +672,7 @@ class MainWindow(QMainWindow):
         self._update_cursor()
 
     def _sample_map_height(self, col, row):
+        self.mode_combo.setCurrentIndex(self.mode_combo.findData(BrushMode.FLATTEN))
         self.flatten_height.setValue(self.doc.grids['hgt'][row][col] - HGT_MIN)
         self.sample_height.setChecked(False)
         self.view.sample_flash_until = time.monotonic() + 1.2
@@ -914,8 +928,10 @@ class MainWindow(QMainWindow):
         position = host_position(host, self.doc, self.view.terrain, lib)
         visual = lib.vehicles.get(host['veh'])
         offset = visual.viewer if visual is not None else (0, 0, 0)
+        from ..render.squad_scene import body_rotation
+        offset = body_rotation(host.get('body_angle', 0)) @ offset
         eye = tuple(value + delta for value, delta in zip(position, offset))
-        angle = math.radians(host['viewangle'])
+        angle = math.radians(host['viewangle'] + host.get('body_angle', 0))
         self.view.enter_pov_at(eye, (-math.sin(angle), 0, math.cos(angle)))
 
     def _add_host(self):
@@ -936,8 +952,12 @@ class MainWindow(QMainWindow):
             self.host_panel.status.setText('Place the host inside the map border.')
             self.host_panel.status.show()
             return
-        self.history.push(self.doc)
         host = dict(self._draft_host, x=cell[0], y=cell[1])
+        if not actors_fit(self.doc, [host], kind='host'):
+            self.host_panel.status.setText('This sector already contains another Host Station.')
+            self.host_panel.status.show()
+            return
+        self.history.push(self.doc)
         host.pop('pos_x', None)
         host.pop('pos_z', None)
         host.pop('_preview', None)
@@ -1006,6 +1026,10 @@ class MainWindow(QMainWindow):
         if self._draft_host is not None:
             self._draft_host = host
         else:
+            if field in ('x', 'y') and not actors_fit(self.doc, [host], kind='host', exclude_hosts={index}):
+                self.host_panel.status.setText('This sector already contains another Host Station.')
+                self.host_panel.status.show()
+                return
             if not self._live_pending:
                 self._released(-1, -1, Qt.KeyboardModifier.NoModifier)
                 self.history.begin(self.doc)
@@ -1019,7 +1043,7 @@ class MainWindow(QMainWindow):
             self._refresh_hosts(index)
         else:
             self.host_panel.update_rows()
-        if field == 'viewangle' and self.view.camera.perspective and self._host_pov_index == index:
+        if field in ('viewangle', 'body_angle', 'pos_y', 'x', 'y') and self.view.camera.perspective and self._host_pov_index == index:
             self._host_pov(index)
 
     def _deselect_other_objects(self, kind):
@@ -1136,6 +1160,15 @@ class MainWindow(QMainWindow):
         self.special_panels[kind].refresh(self.doc, slot)
         self._refresh_title()
 
+    def _delete_special_key(self, kind, slot, key):
+        """Remove only the clicked key; the parent special object stays intact."""
+        value = special_store(self.doc, kind).get(slot)
+        if value is None or not 0 <= key < len(value.get('keys', [])):
+            return
+        keys = list(value['keys'])
+        del keys[key]
+        self._special_changed(kind, slot, {'keys': keys})
+
     def _delete_special(self, kind, slot):
         if self._special_draft is not None and self._special_draft[0] == kind:
             self._cancel_operation(clear=False)
@@ -1158,36 +1191,48 @@ class MainWindow(QMainWindow):
             else:
                 payload.update(copy.deepcopy(values))
             self._refresh_squads(fields=False)
-            self.special_panels[kind].refresh(self.view.doc, slot)
+            panel = self.special_panels[kind]
+            if any(k in values for k in ('keys', 'actions', '_key_road')) or len(values) > 2:
+                panel.refresh(self.view.doc, slot)
+            else:
+                panel.update_preview_position(self.view.doc, slot)
             return True
         if slot not in special_slots(self.doc, kind):
             return False
-        self._released(-1, -1, Qt.KeyboardModifier.NoModifier)
-        self.history.begin(self.doc)
+        if not self._live_pending:
+            self._released(-1, -1, Qt.KeyboardModifier.NoModifier)
+            self.history.begin(self.doc)
+            self._live_pending = True
         try:
             if '_key_road' in values:
                 index, road = values['_key_road']
                 keys = special_store(self.doc, kind)[slot]['keys']
                 if not 0 <= index < len(keys):
-                    self.history.commit(self.doc, False)
                     return False
                 changed = set_item_key_road(self.doc, slot, index, road)
             else:
                 changed = update_special(self.doc, kind, slot, values, self.buildings)
         except ValueError as error:
-            self.history.commit(self.doc, False)
-            self.special_panels[kind].refresh(self.doc, slot)
             self.special_panels[kind].status.setText(str(error))
+            self._live_timer.start()
             return False
-        if self.history.commit(self.doc, changed):
+        self._live_timer.start()
+        if changed:
             self.dirty = True
             self.view.scene_changed()
-            self.special_panels[kind].refresh(self.doc, slot)
+            panel = self.special_panels[kind]
+            if any(k in values for k in ('keys', 'actions', '_key_road')) or len(values) > 2:
+                panel.refresh(self.doc, slot)
+            else:
+                panel.update_preview_position(self.doc, slot)
+                panel.list.previewsRequested.emit()
             self.view.update()
             self._refresh_title()
         return changed
 
     def _special_selected(self, kind, slot):
+        if self.view.selected_special is None or self.view.selected_special[:2] != (kind, slot):
+            self._finish_live()
         if self.palette_tabs.currentIndex() == self.special_tab_indices[kind]:
             if slot:
                 self._deselect_other_objects(kind)
@@ -1223,6 +1268,8 @@ class MainWindow(QMainWindow):
         self.view.update()
 
     def _special_click(self, cell):
+        if self.palette_tabs.currentIndex() in (2, 3):
+            return False
         if self._special_draft is not None:
             self._confirm_special(cell)
             return True
@@ -1295,14 +1342,23 @@ class MainWindow(QMainWindow):
             keys = list(special_store(self.doc, kind)[slot]['keys'])
             keys[key] = cell
             values = {'keys': keys}
+        # Rebuild previews from the original state. Crossing multiple sectors
+        # must not flatten every sector the cursor passes over.
+        self.doc.restore(before)
         try:
             changed = update_special(self.doc, kind, slot, values, self.buildings)
         except ValueError as error:
             self.special_panels[kind].status.setText(str(error))
+            self.view.scene_changed()
             return
         if changed:
             self.view.scene_changed()
-            self.special_panels[kind].refresh(self.doc, slot)
+            panel = self.special_panels[kind]
+            if any(k in values for k in ('keys', 'actions', '_key_road')) or len(values) > 2:
+                panel.refresh(self.doc, slot)
+            else:
+                panel.update_preview_position(self.doc, slot)
+                panel.list.previewsRequested.emit()
             self.view.update()
 
     def _finish_special_drag(self):
@@ -1457,6 +1513,15 @@ class MainWindow(QMainWindow):
                     for layer,value in zip(self._draft_grid.layers,values):
                         render_doc.grids[layer][r][c] = value
                     self.view.preview_cells.add((c,r))
+        if self._building_drag is not None:
+            source, target, payload = self._building_drag
+            render_doc = copy.copy(render_doc)
+            render_doc.grids = {key: [row[:] for row in grid] for key, grid in render_doc.grids.items()}
+            sx, sy = source; tx, ty = target
+            from ..tools.map_clipboard import move_grid_cell
+            if self._building_drop_valid:
+                move_grid_cell(render_doc, source, target, payload)
+                self.view.preview_cells = {target}
         self.view.doc = render_doc
         if self._draft_host is not None:
             render_doc = copy.copy(render_doc)
@@ -1534,6 +1599,9 @@ class MainWindow(QMainWindow):
                for s in self._draft_squads):
             self.squad_panel.status.setText('Place the complete selection inside the map border.')
             return
+        if not actors_fit(self.doc, self._draft_squads, kind='squad'):
+            self.squad_panel.status.setText('This sector already contains another squad.')
+            return
         self._released(-1, -1, Qt.KeyboardModifier.NoModifier)
         self.history.push(self.doc)
         start = len(self.doc.squads)
@@ -1575,6 +1643,11 @@ class MainWindow(QMainWindow):
             updates[index] = squad
         if not updates:
             return
+        if field in ('pos_x', 'pos_z') and not self._draft_squads:
+            candidates = [updates.get(i, self.doc.squads[i]) for i in indices]
+            if not actors_fit(self.doc, candidates, kind='squad', exclude_squads=indices):
+                self.squad_panel.status.setText('This sector already contains another squad.')
+                return
         if self._draft_squads:
             for index, squad in updates.items():
                 if index >= len(self.doc.squads):
@@ -1599,10 +1672,67 @@ class MainWindow(QMainWindow):
             self.history.commit(self.doc)
             self._refresh_title()
 
+    def _begin_building_drag(self, cell):
+        from ..tools.map_clipboard import copy_grid_cells
+        self._released(-1, -1, Qt.KeyboardModifier.NoModifier)
+        self._cancel_operation(clear=False)
+        if cell is None or not (1 <= cell[0] < self.doc.mw-1 and 1 <= cell[1] < self.doc.mh-1):
+            return
+        if not int(str(self.doc.grids['blg'][cell[1]][cell[0]]), 16):
+            return
+        self._building_click_values = (self.tool, self.sel_typ, self.sel_building)
+        payload = copy_grid_cells(self.doc, {cell}, 'building', ('type', 'blg'))
+        self._building_drag = (cell, cell, payload)
+        self._building_drop_valid = True
+        self.view.selected_building = cell
+        self.view.selection = {cell}
+        self._refresh_squads(fields=False)
+
+    def _move_building_drag(self, cell):
+        source, target, payload = self._building_drag
+        valid = (cell is not None and
+                 1 <= cell[0] < self.doc.mw-1 and 1 <= cell[1] < self.doc.mh-1)
+        if valid and cell != source:
+            # Building dragging does not move ordinary sectors.
+            valid = (self.special_overlay.pick(cell) is None
+                     and not int(str(self.doc.grids['blg'][cell[1]][cell[0]]), 16))
+        self._building_drop_valid = valid
+        if not valid:
+            self.statusBar().showMessage('Choose a valid sector without a conflicting object', 2000)
+        else:
+            self._building_drag = (source, cell, payload)
+        self._refresh_squads(fields=False)
+
+    def _finish_building_drag(self):
+        from ..tools.map_clipboard import move_grid_cell
+        source, target, payload = self._building_drag
+        _original_tool, typ, building = self._building_click_values
+        valid_drop = self._building_drop_valid
+        self._building_drag = None
+        # Dragging an existing object must not change the selected paint tool.
+        self.sel_typ, self.sel_building = typ, building
+        if source != target and valid_drop:
+            self.history.push(self.doc)
+            if move_grid_cell(self.doc, source, target, payload):
+                self.dirty = True
+        # Clicking a building selects it without replacing it with the active brush.
+        if self.palette_tabs.currentIndex() != 1:
+            self.palette_tabs.setCurrentIndex(1)
+        self.view.selection = {target if valid_drop else source}
+        self.view.selected_building = target if valid_drop else source
+        self._refresh_squads(fields=False)
+        self.view.unsetCursor()
+        self._refresh_title()
+
     def _actor_records(self):
         return self.doc.host_stations if self._drag_kind == 'host' else self.doc.squads
 
     def _begin_actor_drag(self, kind, cell):
+        if kind != 'building':
+            self.view.selected_building = None
+        if kind == 'building':
+            self._begin_building_drag(cell)
+            return
         if kind == 'special':
             self._begin_special_drag(cell)
             return
@@ -1613,6 +1743,7 @@ class MainWindow(QMainWindow):
         selected = {self.host_panel.list.currentRow()} if kind == 'host' else self.squad_panel.selected_indices()
         self._drag_original = {i: copy.deepcopy(records[i]) for i in selected if 0 <= i < len(records)}
         self._drag_changed = False
+        self._drag_drop_valid = True
         if self._drag_original and cell is not None:
             self.history.begin(self.doc)
             offset = len(self.doc.squads) if kind == 'host' else 0
@@ -1620,33 +1751,47 @@ class MainWindow(QMainWindow):
             self._refresh_squads(fields=False)
 
     def _move_actor_drag(self, cell):
+        if self._building_drag is not None:
+            self._move_building_drag(cell)
+            return
         if self._special_drag is not None:
             self._move_special_drag(cell)
             return
         if cell is None or self._drag_cell is None or not self._drag_original:
             return
         dc, dr = cell[0] - self._drag_cell[0], cell[1] - self._drag_cell[1]
-        if any(not (1 <= s['x'] + dc < self.doc.mw - 1 and 1 <= s['y'] + dr < self.doc.mh - 1)
-               for s in self._drag_original.values()):
-            return
+        proposed = {}
         for index, original in self._drag_original.items():
             x, z = squad_xz(original)
-            self._actor_records()[index] = dict(original, x=original['x'] + dc, y=original['y'] + dr,
-                                           pos_x=x + dc * SECTOR_SIZE, pos_z=z - dr * SECTOR_SIZE)
-        self._drag_changed = any(self._actor_records()[i] != s for i, s in self._drag_original.items())
+            proposed[index] = dict(original, x=original['x'] + dc, y=original['y'] + dr,
+                                   pos_x=x + dc * SECTOR_SIZE, pos_z=z - dr * SECTOR_SIZE)
+        excludes = set(self._drag_original)
+        valid = actors_fit(self.doc, proposed.values(), kind=self._drag_kind,
+                           exclude_hosts=excludes if self._drag_kind == 'host' else (),
+                           exclude_squads=excludes if self._drag_kind == 'squad' else ())
+        self._drag_drop_valid = valid
+        records = self._actor_records()
+        for index, original in self._drag_original.items():
+            records[index] = proposed[index] if valid else copy.deepcopy(original)
+        self._drag_changed = valid and any(records[i] != s for i, s in self._drag_original.items())
+        if not valid:
+            self.statusBar().showMessage('This sector already contains another object of the same kind, or is outside the map.', 3000)
         self._refresh_squads(fields=False)
         if self._drag_kind == 'host':
             self.host_panel.doc = self.view.doc
             self.host_panel.update_rows()
 
     def _finish_actor_drag(self):
+        if self._building_drag is not None:
+            self._finish_building_drag()
+            return
         self.view.dragged_codes.clear()
         if self._special_drag is not None:
             self._finish_special_drag()
             return
         self.view.unsetCursor()
         if self._drag_original:
-            self.history.commit(self.doc, self._drag_changed)
+            self.history.commit(self.doc, self._drag_changed and self._drag_drop_valid)
             self.dirty |= self._drag_changed
             self._drag_original = {}
             self._drag_cell = None
@@ -1654,6 +1799,10 @@ class MainWindow(QMainWindow):
             self._refresh_hosts()
 
     def _cancel_operation(self, clear=True):
+        if self._building_drag is not None:
+            self._building_drag = None
+            self._refresh_squads(fields=False)
+            self.view.unsetCursor()
         if self._special_drag is not None:
             self.doc.restore(self._special_drag[3])
             self._special_drag = None
@@ -1733,6 +1882,11 @@ class MainWindow(QMainWindow):
             if not squads:
                 return
             self._clipboard = ('squad',squads)
+        elif index == self.host_tab_index:
+            selected = self.host_panel.list.currentRow()
+            if not 0 <= selected < len(self.doc.host_stations):
+                return
+            self._clipboard = ('host', copy.deepcopy(self.doc.host_stations[selected]))
         else:
             from ..tools.map_clipboard import copy_grid_cells
             tool = {0:'sector',1:'building',2:'owner',3:'terrain'}.get(index)
@@ -1744,7 +1898,7 @@ class MainWindow(QMainWindow):
             if clipboard is None:
                 return
             self._clipboard = ('grid',clipboard)
-        if self._clipboard[0] in ('grid','squad'):
+        if self._clipboard[0] in ('grid', 'squad', 'host'):
             self._paste_elements()
         else:
             self.statusBar().showMessage('Copied level settings · Paste applies them',4000)
@@ -1770,7 +1924,15 @@ class MainWindow(QMainWindow):
             self._rebuild_level_panel()
             self.palette_tabs.setCurrentIndex(self.level_tab_index)
             return
-        if kind == 'squad':
+        if kind == 'host':
+            # Use the same placement preview as Add, preserving the copied host settings.
+            self.palette_tabs.setCurrentIndex(self.host_tab_index)
+            position = self.view.hover or (self.doc.mw // 2, self.doc.mh // 2)
+            self._draft_host = host_copy_preview(payload, position)
+            ensure_host_defaults(self._draft_host)
+            self._refresh_squads(fields=False)
+            self._refresh_hosts(len(self.doc.host_stations))
+        elif kind == 'squad':
             self.set_tool('squad')
             self._draft_previous_selection = self.squad_panel.selected_indices().copy()
             self._draft_squads = [dict(s,_preview=True) for s in copy.deepcopy(payload)]
@@ -1837,7 +1999,7 @@ class MainWindow(QMainWindow):
         self._cancel_operation(clear=False)
         self.view.enter_pov_at(eye,tuple(rotation[:,2]))
 
-    def _special_context_actions(self, menu, kind):
+    def _special_context_actions(self, menu, kind, allow_delete=True):
         panel = self.special_panels[kind]
         slot = panel.slot
         action = menu.addAction('Add preview', lambda: self._add_special(kind))
@@ -1846,8 +2008,9 @@ class MainWindow(QMainWindow):
         action.setEnabled(bool(slot))
         action = menu.addAction('Focus', lambda: self._focus_special(special_cell(panel.record())))
         action.setEnabled(bool(slot) and special_cell(panel.record()) is not None)
-        action = menu.addAction('Delete selected object', lambda: self._delete_special(kind, slot))
-        action.setEnabled(bool(slot))
+        if allow_delete:
+            action = menu.addAction('Delete', lambda: self._delete_special(kind, slot))
+            action.setEnabled(bool(slot))
         menu.addAction('Deselect', lambda: panel.list.setCurrentRow(-1))
         if kind != 'gem':
             action = menu.addAction('Add key preview', lambda: self._place_special(kind, 'key', -1))
@@ -1855,8 +2018,33 @@ class MainWindow(QMainWindow):
             key = panel.keys.currentRow()
             action = menu.addAction('Move selected key', lambda: self._place_special(kind, 'key', key))
             action.setEnabled(key >= 0 and self._special_draft is None)
-            action = menu.addAction('Delete selected key', panel._remove_key)
-            action.setEnabled(key >= 0 and self._special_draft is None)
+            if allow_delete:
+                action = menu.addAction('Delete key', panel._remove_key)
+                action.setEnabled(key >= 0 and self._special_draft is None)
+
+    def _delete_active_selection(self):
+        focus = QApplication.focusWidget()
+        if isinstance(focus, (QLineEdit, QPlainTextEdit, QAbstractSpinBox)):
+            return
+        if isinstance(focus, QComboBox) and focus.isEditable():
+            return
+
+        kind = next((key for key, tab in self.special_tab_indices.items()
+                     if self.palette_tabs.currentIndex() == tab), None)
+        if kind is not None:
+            panel = self.special_panels[kind]
+            selected = self.view.selected_special
+            key = panel.keys.currentRow() if kind != 'gem' else -1
+            if (key >= 0 and ((focus is panel.keys) or
+                              selected == (kind, panel.slot, key))):
+                panel._remove_key()
+            else:
+                self._delete_special(kind, panel.slot)
+            return
+        if self.palette_tabs.currentIndex() == self.host_tab_index:
+            self._delete_host(self.host_panel.list.currentRow())
+        elif self.palette_tabs.currentIndex() == self.squad_tab_index:
+            self._delete_squads(self.squad_panel.selected_indices())
 
     def _panel_context_menu(self, widget, position):
         menu = QMenu(self)
@@ -1878,7 +2066,6 @@ class MainWindow(QMainWindow):
             item = widget.itemAt(position)
             if item is not None and not item.isSelected():
                 self.squad_panel.set_selection({widget.row(item)})
-            menu.addAction('Add preview',self._add_squad)
             menu.addAction('Delete selected squads',lambda: self._delete_squads(self.squad_panel.selected_indices()))
             index = widget.currentRow()
             action = menu.addAction('Squad POV',lambda: self._squad_pov(index))
@@ -1893,16 +2080,34 @@ class MainWindow(QMainWindow):
             for text, slot in (('Host Station POV', self._host_pov), ('Host Station Focus', self._center_host)):
                 action = menu.addAction(text, lambda checked=False, fn=slot: fn(index))
                 action.setEnabled(0 <= index < len(self.doc.host_stations))
+            action = menu.addAction('Delete selected Host Station',
+                                    lambda checked=False, i=index: self._delete_host(i))
+            action.setEnabled(0 <= index < len(self.doc.host_stations))
         menu.popup(widget.mapToGlobal(position))
         self._context_menu = menu
 
+    def _delete_building_at(self, cell):
+        if cell is None or not self.doc.cell_is_valid({'x': cell[0], 'y': cell[1]}):
+            return
+        col, row = cell
+        if int(str(self.doc.grids['blg'][row][col]), 16) == 0:
+            return
+        self._released(-1, -1, Qt.KeyboardModifier.NoModifier)
+        self.history.begin(self.doc)
+        changed = paint_cells(self.doc, [cell], 'blg', '00')
+        changed = paint_cells(self.doc, [cell], 'type', '00') or changed
+        if self.history.commit(self.doc, bool(changed)):
+            self._after_history()
+
     def _select_cell(self, cell, modifiers):
-        if self._special_click(cell):
+        if not modifiers & Qt.KeyboardModifier.ControlModifier and self._special_click(cell):
+            self.view.selected_building = None
             return
         self._released(-1, -1, Qt.KeyboardModifier.NoModifier)
         additive = bool(modifiers & Qt.KeyboardModifier.ControlModifier)
         if not additive:
             self.view.selection.clear()
+            self.view.selected_building = None
             self.squad_panel.set_selection(set())
             self.host_panel.deselect()
         if cell is not None:
@@ -1910,6 +2115,8 @@ class MainWindow(QMainWindow):
                 self.view.selection ^= {cell}
             else:
                 self.view.selection.add(cell)
+                if self.tool == 'building' and int(str(self.doc.grids['blg'][cell[1]][cell[0]]), 16):
+                    self.view.selected_building = cell
                 if self.tool in ('sector', 'building', 'owner'):
                     self._apply_selection()
         self.view.update()
@@ -1946,8 +2153,10 @@ class MainWindow(QMainWindow):
             self._context_menu = menu
             return
         self._released(-1, -1, Qt.KeyboardModifier.NoModifier)
-        squad = self.view.pick_squad(position.x(), position.y())
-        host = self.view.pick_host(position.x(), position.y())
+        terrain_active = self.palette_tabs.currentIndex() == 3
+        painting = self.tool in ('owner', 'terrain')
+        squad = None if painting else self.view.pick_squad(position.x(), position.y())
+        host = None if painting else self.view.pick_host(position.x(), position.y())
         if host is not None:
             self._select_host(host)
         if squad is not None:
@@ -1964,7 +2173,7 @@ class MainWindow(QMainWindow):
         menu.addAction(self.copy_action)
         menu.addAction(self.paste_action)
         menu.addSeparator()
-        hit = self.view.pick_scene_object(position.x(), position.y())
+        hit = None if painting else self.view.pick_scene_object(position.x(), position.y())
         if hit is not None and hit[0] == 'special':
             kind, slot, key = hit[1]
             self.palette_tabs.setCurrentIndex(self.special_tab_indices[kind])
@@ -1976,7 +2185,7 @@ class MainWindow(QMainWindow):
         context_tool = ({0: 'sector', 1: 'building', 2: 'owner', 3: 'terrain'}.get(
             self.palette_tabs.currentIndex(), self.tool) if self.tool == 'select' else self.tool)
         if special_kind is not None:
-            self._special_context_actions(menu, special_kind)
+            self._special_context_actions(menu, special_kind, allow_delete=False)
         elif self.palette_tabs.currentIndex() == self.host_tab_index:
             index = host if host is not None else self.host_panel.list.currentRow()
             for text, slot in (('Host Station POV', self._host_pov), ('Host Station Focus', self._center_host)):
@@ -1988,33 +2197,52 @@ class MainWindow(QMainWindow):
             action.setEnabled(0 <= index < len(self.doc.squads))
             action = menu.addAction('Squad Focus', lambda: self._center_squad(index))
             action.setEnabled(0 <= index < len(self.doc.squads))
-            menu.addAction('Add preview', self._add_squad)
-            action = menu.addAction('Delete selected squads', lambda: self._delete_squads(self.squad_panel.selected_indices()))
-            action.setEnabled(bool(self.squad_panel.selected_indices()))
             menu.addAction('Select all squads', lambda: self.squad_panel.set_selection(set(range(len(self.doc.squads)))))
         elif self.palette_tabs.currentIndex() == self.script_tab_index:
-            menu.addAction('Load script…', self._load_script)
-            menu.addAction('Save script…', self._save_script)
+            menu.addAction('Load script', self._load_script)
+            menu.addAction('Save script', self._save_script)
             menu.addAction('Select script text', self.script_edit.selectAll)
         elif context_tool in ('sector', 'building', 'owner'):
             action = menu.addAction('Apply', lambda: self._apply_selection())
             action.setEnabled(bool(self.view.selection))
             if context_tool == 'sector':
-                selected_fill = menu.addAction('Fill selected sectors…', self.fill_selected)
+                selected_fill = menu.addAction('Fill selected sectors', self.fill_selected)
                 selected_fill.setEnabled(bool(self.view.selection))
                 if cell is not None:
                     menu.addAction('Pick this sector', lambda: self.sector_list.setCurrentItem(
                         self._icon_items.get(int(self.doc.grids['type'][cell[1]][cell[0]], 16))))
-            if context_tool == 'building':
-                menu.addAction('Remove selected buildings', lambda: self._apply_selection('blg', '00'))
-            menu.addAction('Fill map…', self.map_fill)
+            menu.addAction('Fill map', self.map_fill)
         elif context_tool == 'terrain':
             for i, name in enumerate(('Raise', 'Lower', 'Flatten', 'Smooth')):
                 menu.addAction(name, lambda checked=False, index=i: self._activate_terrain(index))
             if cell is not None:
                 menu.addAction('Sample this height', lambda: self._sample_map_height(*cell))
+        # One delete command for the object under the cursor, regardless of the active tab.
+        delete_action = None
+        hit_special = hit[1] if hit is not None and hit[0] == 'special' else None
+        if hit_special is None and cell is not None:
+            hit_special = self.special_overlay.pick(cell)
+        if hit_special is not None:
+            kind, slot, key = hit_special
+            if key >= 0:
+                delete_action = lambda checked=False, k=kind, i=slot, n=key: self._delete_special_key(k, i, n)
+            else:
+                delete_action = lambda checked=False, k=kind, i=slot: self._delete_special(k, i)
+        elif host is not None:
+            delete_action = lambda checked=False, i=host: self._delete_host(i)
+        elif squad is not None:
+            delete_action = lambda checked=False, i=squad: self._delete_squads({i})
+        elif cell is not None:
+            col, row = cell
+            building_id = int(str(self.doc.grids['blg'][row][col]), 16)
+            if building_id:
+                delete_action = lambda checked=False, target=cell: self._delete_building_at(target)
+        if delete_action is not None:
+            menu.addAction('Delete', delete_action)
         if cell is not None:
-            definition = self.buildings.get(int(self.doc.grids['blg'][cell[1]][cell[0]],16))
+            col, row = cell
+            building_id = int(str(self.doc.grids['blg'][row][col]), 16)
+            definition = self.buildings.get(building_id)
             if definition is not None and definition.guns:
                 menu.addSeparator()
                 if len(definition.guns)==1:
@@ -2026,9 +2254,8 @@ class MainWindow(QMainWindow):
                         label = f'Gun {index+1} · {name.name if name and name.name else mount.vehicle}'
                         guns.addAction(label,lambda checked=False,i=index: self._gun_pov(cell,i))
         menu.addSeparator()
-        menu.addAction('Selection tool', lambda: self.set_tool('select'))
         menu.addAction('Clear selection', self._clear_selection)
-        menu.addAction('Reset map…', self.map_reset)
+        menu.addAction('Reset map', self.map_reset)
         menu.addAction(self.reset_camera_action)
         menu.popup(global_position)
         self._context_menu = menu
@@ -2426,8 +2653,9 @@ class MainWindow(QMainWindow):
         self._refresh_title()
 
     def _refresh_title(self):
-        name = os.path.basename(self.path) if self.path else "untitled"
-        self.setWindowTitle(f"{'*' if self.dirty else ''}{name} - OpenNeoUA Studio · Map Editor")
+        name = os.path.abspath(self.path) if self.path else "Untitled.LDF"
+        set_number = self.doc.set_number if self.doc else "—"
+        self.setWindowTitle(f"{'*' if self.dirty else ''}{name} · Set {set_number} - OpenNeoUA Studio · Map Editor")
         self.undo_action.setEnabled(self.history.can_undo or self._script_pending or self._live_pending)
         self.redo_action.setEnabled(self.history.can_redo)
 
@@ -2578,7 +2806,12 @@ class MainWindow(QMainWindow):
         number, accepted = QInputDialog.getInt(
             self, "Map Set", "Set number:", int(self.doc.set_number),
             1, 255, 1)
-        if not accepted or number == self.doc.set_number:
+        if not accepted:
+            return
+        self._change_map_set(number)
+
+    def _change_map_set(self, number):
+        if number == self.doc.set_number:
             return
         if number not in self.libs:
             try:
@@ -2597,6 +2830,37 @@ class MainWindow(QMainWindow):
         self.view.scene_changed()
         self._refresh_title()
         self.statusBar().showMessage(f"Map changed to Set {number}.", 4000)
+
+    def map_set_file(self):
+        if self.doc is None:
+            return
+        current_assets = self._lib().assets if self._lib() else SetAssets(self.doc.set_number)
+        path, _ = QFileDialog.getOpenFileName(self, 'Choose map SET.BAS',
+                                             str(current_assets.set_dir), 'Set archives (SET.BAS *.bas *.BAS)')
+        if not path:
+            return
+        from pathlib import Path
+        import re
+        chosen = Path(path).resolve()
+        folder = chosen.parent.parent if chosen.parent.name.casefold() == 'objects' else chosen.parent
+        match = re.fullmatch(r'set(\d+)', folder.name, re.I)
+        number = int(match[1]) if match else 0
+        assets = SetAssets(number) if 1 <= number <= 255 else None
+        if assets is None or assets.setbas_path is None or assets.setbas_path.resolve() != chosen:
+            QMessageBox.warning(self, 'Set unavailable', 'Choose SET.BAS from an installed SetN/Objects folder. The map was not changed.')
+            return
+        if number == self.doc.set_number:
+            return
+        answer = QMessageBox.warning(self, 'Experimental SET change',
+            f'This map currently uses Set {self.doc.set_number}. You are loading it with Set {number}.\n\n'
+            'Incompatible sectors or models may cause crashes or corrupted results/files. Keep a backup of the map.\n\n'
+            f'SET.BAS: {chosen}\nContinue?', QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No)
+        if answer != QMessageBox.StandardButton.Yes:
+            return
+        self._released(-1, -1, Qt.KeyboardModifier.NoModifier)
+        self._cancel_operation(clear=False)
+        self._change_map_set(number)
 
     def map_resize(self):
         if not self.doc:
@@ -2665,6 +2929,8 @@ class MainWindow(QMainWindow):
 
     def _palette_changed(self, index):
         self._finish_script()
+        if index != 1 and self._building_drag is None:
+            self.view.selected_building = None
         self.set_tool({0: "sector", 1: "building", 2: "owner", 3: "terrain",
                        self.squad_tab_index: "squad"}.get(index, "select"))
         if index in self.special_tab_indices.values():
@@ -2693,6 +2959,7 @@ class MainWindow(QMainWindow):
             self.view.preview_cells = {(col, row)} if self.doc and 1 <= col < self.doc.mw - 1 and 1 <= row < self.doc.mh - 1 else set()
         if col < 0 or not self.doc:
             self.info.setText("")
+            self.hover_height.setText("Sector under mouse: —")
             self.view.brush_cells = set()
             self.view.update()
             return
@@ -2709,6 +2976,7 @@ class MainWindow(QMainWindow):
             self._draft_grid_cell = (col,row)
             self._refresh_squads(fields=False)
         hgt = g['hgt'][row][col]
+        self.hover_height.setText(f'Sector ({col}, {row}) · Height {hgt-HGT_MIN}/60 · {(hgt-DEFAULT_HGT)*HEIGHT_UNIT:+.0f} units')
         limit = " · maximum height" if hgt >= HGT_MAX else " · minimum height" if hgt <= HGT_MIN else ""
         try:
             blg_id = int(str(g['blg'][row][col]), 16)
@@ -2737,6 +3005,8 @@ class MainWindow(QMainWindow):
             return
         if self.tool == 'squad':
             return
+        if self.tool == 'sector':
+            self.view.selected_building = None
         self.view.selection = {(col, row)}
         if self.tool == "select":
             self.view.update()
@@ -2770,7 +3040,7 @@ class MainWindow(QMainWindow):
     def _released(self, _col, _row, _modifiers):
         self._finish_script()
         self._finish_live()
-        if self._drag_original or self._special_drag is not None:
+        if self._drag_original or self._special_drag is not None or self._building_drag is not None:
             self._finish_actor_drag()
         self._repeat.stop()
         self.view.set_editing(False)
@@ -2810,6 +3080,7 @@ class MainWindow(QMainWindow):
             return
         if self.tool == "sector":
             changed = paint_cells(self.doc, [(col, row)], 'type', f"{self.sel_typ:02x}")
+            changed = paint_cells(self.doc, [(col, row)], 'blg', '00') or changed
         elif self.tool == "building":
             definition = self.buildings.get(self.sel_building)
             if definition is not None:

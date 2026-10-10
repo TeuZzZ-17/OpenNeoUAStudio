@@ -78,14 +78,23 @@ def _sync_visual(doc, kind, old, value, buildings=None):
     visual = _visual(kind, value, buildings)
     if old_cell == cell and (old_visual == visual or kind == 'gem' and old['blg'] == value['blg']):
         return
-    _restore_visual(doc, old_cell, old_visual, old.get('_visual_before'))
+    if old_cell is not None:
+        x, y = old_cell
+        if old_cell != cell:
+            # A special object's old sector becomes flat after it is moved or removed.
+            # Never restore the building that happened to be under the special.
+            doc.grids['type'][y][x] = '00'
+            doc.grids['blg'][y][x] = '00'
+        else:
+            _restore_visual(doc, old_cell, old_visual, old.get('_visual_before'))
     value.pop('_visual_before', None)
     value.pop('_visual_applied', None)
     if cell is None or visual is None:
         return
     x, y = cell
-    # Respect an authored building for gates/items, as Sektor2 does.
     if kind != 'gem' and str(doc.grids['blg'][y][x]).lower() != '00':
+        # Keep the building visible under a newly placed gate or Super Item.
+        # It is cleared if the special object later leaves this position.
         return
     value['_visual_before'] = (doc.grids['type'][y][x], doc.grids['blg'][y][x])
     value['_visual_applied'] = visual
@@ -183,10 +192,11 @@ def set_item_key_road(doc, slot, index, road):
 def remove_special(doc, kind, slot, buildings=None):
     store = special_store(doc, kind)
     old = store[slot]
+    # All special kinds obey the same cleanup rule on removal.
+    values = {'x': -1, 'y': -1}
     if kind == 'item':
-        update_special(doc, kind, slot, {'x': -1, 'y': -1, 'keys': []})
-    else:
-        _restore_visual(doc, special_cell(old), _applied_visual(kind, old, buildings), old.get('_visual_before'))
+        values['keys'] = []
+    update_special(doc, kind, slot, values, buildings)
     count = getattr(doc, SPECIAL_KINDS[kind][1])
     for index in range(slot, count):
         store[index] = store[index + 1]

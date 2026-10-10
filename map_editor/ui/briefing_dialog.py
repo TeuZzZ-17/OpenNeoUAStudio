@@ -38,12 +38,12 @@ class BriefingArtDialog(QDialog):
         self.finished_rendering = False
         self._cancelled = False
         layout = QVBoxLayout(self)
-        self.preview = QLabel('Rendering the current map…')
+        self.preview = QLabel('Rendering the current map')
         self.preview.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.preview.setMinimumSize(302, 302)
         self.preview.setStyleSheet('background:#080808; border:1px solid #454545')
         layout.addWidget(self.preview)
-        self.status = QLabel('MB and DB will contain the same image. Existing artwork is preserved.')
+        self.status = QLabel('MB and DB preserve the map colours; DB is darker. Existing artwork is preserved.')
         self.status.setWordWrap(True)
         layout.addWidget(self.status)
         form = QFormLayout()

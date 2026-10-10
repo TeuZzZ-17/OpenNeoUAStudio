@@ -13,7 +13,7 @@ from .game_installation import (GameInstallation, IMAGE_SUFFIXES,
                                 MOVIE_SUFFIXES, MUSIC_SUFFIXES)
 
 
-LEGACY_SUFFIXES = {".iff", ".ilbm", ".lbm", ".vbmp"}
+LEGACY_SUFFIXES = {".iff", ".ilbm", ".ilb", ".lbm", ".vbmp"}
 
 
 @dataclass(frozen=True)

@@ -9,7 +9,7 @@ from types import SimpleNamespace
 pytest.importorskip("PySide6")
 from PySide6.QtCore import QObject, QPoint, Qt, Signal
 from PySide6.QtTest import QTest
-from PySide6.QtWidgets import QApplication, QToolBar
+from PySide6.QtWidgets import QApplication, QLabel, QToolBar
 
 from map_editor import bootstrap
 from map_editor.core.ldf_model import HGT_MAX, LdfDocument, load_ldf
@@ -206,10 +206,10 @@ def test_palette_ctrl_click_and_shift_sweep_only_select_without_applying(app):
     box_cells = ((1, 1), (2, 1))
     points = [win.view.camera.world_to_screen(win.view.terrain.cell_center(*target))[0]
               for target in box_cells]
-    start = QPoint(round(min(point[0] for point in points) - 3),
-                   round(min(point[1] for point in points) - 3))
-    end = QPoint(round(max(point[0] for point in points) + 3),
-                 round(max(point[1] for point in points) + 3))
+    start = QPoint(round(points[0][0]), round(points[0][1]))
+    end = QPoint(round(points[1][0]), round(points[1][1]))
+    assert win.view.ground_cell(start.x(), start.y()) == box_cells[0]
+    assert win.view.ground_cell(end.x(), end.y()) == box_cells[1]
     QTest.mousePress(win.view, Qt.MouseButton.LeftButton, Qt.KeyboardModifier.ShiftModifier, pos=start)
     QTest.mouseMove(win.view, end, 10)
     QTest.mouseRelease(win.view, Qt.MouseButton.LeftButton, Qt.KeyboardModifier.ShiftModifier, pos=end)
@@ -374,6 +374,9 @@ def test_brush_controls_update_shape_axes_and_preview(app):
     win = MainWindow()
     win._icons.stop()
     win.set_tool('terrain')
+    assert [label.text() for label in win.findChildren(QLabel)
+            if label.text() == 'Drag to sculpt · Shift: lower · Alt: smooth · Ctrl: select'] == [
+                'Drag to sculpt · Shift: lower · Alt: smooth · Ctrl: select']
     win.view.hover = (6, 6)
     win.radius_x_slider.setValue(8)
     assert (win.brush.radius_x, win.brush.radius_z) == (4, 4)
@@ -381,11 +384,11 @@ def test_brush_controls_update_shape_axes_and_preview(app):
     win.radius_z_slider.setValue(6)
     assert (win.brush.radius_x, win.brush.radius_z) == (4, 3)
     assert win.radius_x_label.text() == '4' and win.radius_z_label.text() == '3'
-    assert 'Square · X 4 · Z 3' in win.brush_label.text()
-    assert 'Force' in win.brush_label.text()
+    assert 'Square · X 4 · Z 3' in win.strength.toolTip()
+    assert 'Force' in win.strength.toolTip()
     assert len(win.view.brush_cells) == 35 and (9, 8) in win.view.brush_cells
     win.shape_combo.setCurrentIndex(win.shape_combo.findData(BrushShape.ROUND))
-    assert 'Ellipse' in win.brush_label.text()
+    assert 'Ellipse' in win.strength.toolTip()
     assert len(win.view.brush_cells) == 23 and (9, 8) not in win.view.brush_cells
     assert (win.brush.radius_x, win.brush.radius_z) == (4, 3)
 

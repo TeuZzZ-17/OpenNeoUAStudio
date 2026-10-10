@@ -12,9 +12,9 @@ from depth_renderer import CameraPolygon, order_camera_polygons, order_camera_po
 from indexed_renderer import IndexedPiece, IndexedRasterizer, retail_source_face_front_facing
 
 from ..core.ldf_model import DEFAULT_HGT, SECTOR_SIZE
-from .special_scene import special_cells, actor_code
+from .special_scene import special_cells, actor_code, key_building_sector
 from .terrain_mesh import HEIGHT_UNIT
-from .squad_scene import squad_members, host_members
+from .squad_scene import squad_members, host_members, body_rotation
 
 
 def _clip(vertices, uvs, axis, bound, positive):
@@ -99,10 +99,17 @@ def scene_polygons(lib, doc, terrain, cam):
 
     types = parse(doc.grids['type'], type_values, -1)
     buildings = parse(doc.grids['blg'], building_values, 0)
+    from .sector_state import sector_type
+    for row in range(doc.mh):
+        for col in range(doc.mw):
+            if buildings[row][col]:
+                types[row][col] = sector_type(doc, lib, col, row)
     specials = special_cells(doc, lib)
     for (col, row), (_, member) in specials.items():
         types[row][col], buildings[row][col] = member.typ, member.building
-    meshes = {t: lib.mesh(t) for row in types for t in row}
+    structure_types = {extra for _, member in specials.values()
+                       if (extra := key_building_sector(member, lib)) is not None}
+    meshes = {t: lib.mesh(t) for t in ({t for row in types for t in row} | structure_types)}
     extras = {b: lib.building_mesh(b) for row in buildings for b in row if b}
     bounds = [mesh.bounds for mesh in (*meshes.values(), *extras.values())]
     low_y = float(np.min(-(terrain.cells - DEFAULT_HGT) * HEIGHT_UNIT)) + min(b[1] for b in bounds)
@@ -119,7 +126,7 @@ def scene_polygons(lib, doc, terrain, cam):
     else:
         c0, c1, r0, r1 = 0, doc.mw, 0, doc.mh
 
-    def append_mesh(mesh, col, row, *, filler=False, position=None, actor_code=None, special_code=None):
+    def append_mesh(mesh, col, row, *, filler=False, structure_only=False, position=None, actor_code=None, special_code=None, body_angle=0):
         nonlocal order
         wx, wy, wz = position if position is not None else terrain.cell_center(col, row)
         if filler:
@@ -127,9 +134,14 @@ def scene_polygons(lib, doc, terrain, cam):
         for face, ox, oz in mesh.faces:
             source = order
             ground = actor_code is None and (filler or all(abs(v[1]) < 1e-6 for v in face.vertices))
+            if structure_only and ground:
+                continue
             if actor_code is None and (col in (0, doc.mw - 1) or row in (0, doc.mh - 1)) and not ground:
                 continue
-            vertices = [(v[0] + ox + wx, v[1] + wy, v[2] + oz + wz) for v in face.vertices]
+            local_vertices = [(v[0] + ox, v[1], v[2] + oz) for v in face.vertices]
+            if body_angle:
+                local_vertices = np.asarray(local_vertices) @ body_rotation(body_angle).T
+            vertices = [(v[0] + wx, v[1] + wy, v[2] + wz) for v in local_vertices]
             source_camera = tuple(cam.to_camera(v) for v in vertices)
             screen = [cam.to_screen(v) for v in source_camera]
             if not cam.perspective and (max(p[0] for p in screen) < 0 or min(p[0] for p in screen) >= cam.width
@@ -182,6 +194,10 @@ def scene_polygons(lib, doc, terrain, cam):
             special = specials.get((col, row))
             code = actor_code(doc, special[0]) if special else None
             append_mesh(meshes[types[row][col]], col, row, special_code=code)
+            structure_typ = key_building_sector(special[1], lib) if special else None
+            if structure_typ is not None and structure_typ != types[row][col]:
+                append_mesh(meshes[structure_typ], col, row,
+                            structure_only=True, special_code=code)
             # Conserva la visualizzazione dei blg già presenti nei documenti.
             building = buildings[row][col]
             if building:
@@ -198,7 +214,7 @@ def scene_polygons(lib, doc, terrain, cam):
         for member in chain(squad_members(doc, terrain, lib), host_members(doc, terrain, lib)):
             code = -(doc.mw * doc.mh + member.squad + 1)
             append_mesh(lib.actor_mesh(member.vehicle), 0, 0,
-                        position=member.position, actor_code=code)
+                        position=member.position, actor_code=code, body_angle=member.body_angle)
     return polygons
 
 

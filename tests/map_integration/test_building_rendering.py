@@ -189,3 +189,24 @@ def test_building_resize_reuses_rendered_source_and_stale_results_are_ignored(ap
                               SimpleNamespace(image=image)))
     win._bicon_finished.assert_not_called()
     win._icons.stop(); win.close()
+
+
+def test_key_sector_and_flak_keep_both_sector_and_building_geometry(app):
+    from map_editor.core.special_objects import add_special, update_special
+    from map_editor.render.special_scene import special_cells
+    lib = SectorMeshLibrary(SetAssets(1).load())
+    doc = LdfDocument(mw=8, mh=8)
+    slot = add_special(doc, 'item')
+    update_special(doc, 'item', slot, {'x': 2, 'y': 2, 'keys': [(4, 4)]})
+    doc.grids['blg'][4][4] = '02'
+    member = special_cells(doc, lib)[(4, 4)][1]
+    assert member.typ == 0xf3 and member.building == 2
+    terrain = TerrainMesh()
+    terrain.rebuild(doc.grids['hgt'])
+    scene = WorldScene()
+    scene.set_library(lib)
+    scene.update(doc, terrain)
+    structure_key = ('key-building-sector', lib.buildings[2].sec_type, False)
+    assert structure_key in scene.instances
+    assert ('sector', 0xf3, False) in scene.instances
+    assert ('building', 2, False) in scene.instances
