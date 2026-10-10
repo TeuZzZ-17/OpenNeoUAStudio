@@ -42,7 +42,7 @@ def win(app):
 
 def test_default_sizes_building_capabilities_and_search(win):
     assert win._icon_level == 1 and win._bicon_level == 2
-    assert [panel.list.preview_level for panel in (win.squad_panel, win.host_panel, win.tech_panel)] == [0, 0, 0]
+    assert [panel.list.preview_level for panel in (win.squad_panel, win.host_panel, win.tech_panel)] == [0, 1, 0]
     visible = set(win._bicon_items)
     assert visible and visible < set(win.buildings)
     assert all(win.buildings[key].has_power or win.buildings[key].is_radar or win.buildings[key].has_guns
@@ -210,6 +210,26 @@ def test_host_pov_uses_script_viewer_and_view_angle(win):
     assert y == -700 + .3 + visual.viewer[1]
     assert win.view.camera.perspective
     assert win.view.camera.to_camera((x-1000, y, z))[2] < 4 < win.view.camera.to_camera((x+1000, y, z))[2]
+
+
+def test_active_host_pov_viewangle_edit_turns_camera_without_changing_body(win):
+    value = dict(host(), viewangle=0, pos_x=4200.25, pos_z=-4300.5)
+    win.doc.host_stations = [value]
+    win._refresh_squads()
+    win._refresh_hosts(0)
+    win.host_panel.advanced.setChecked(True)
+    body_before = copy.deepcopy(win.doc.host_stations[0])
+    win._host_pov(0)
+    camera = win.view.camera
+    center, pitch, yaw = camera.center, camera.pitch, camera.yaw
+
+    win.host_panel.fields['viewangle'].setValue(90)
+
+    assert camera.perspective
+    assert camera.yaw == pytest.approx(-90)
+    assert camera.yaw != yaw
+    assert camera.center == center and camera.pitch == pitch
+    assert win.doc.host_stations[0] == body_before | {'viewangle': 90}
 
 
 def test_host_focus_and_pov_follow_raised_terrain(win):

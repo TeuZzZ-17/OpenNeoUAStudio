@@ -15,6 +15,7 @@ from types import SimpleNamespace
 
 from .map_viewport import MapViewport as SoftwareMapViewport
 from .gpu_scene import WorldScene
+from .special_scene import scene_object_styles
 from .gpu_renderer import GpuRenderer
 from .camera import IsoCamera
 from .terrain_mesh import HEIGHT_UNIT
@@ -88,6 +89,9 @@ class Canvas(QOpenGLWidget):
                     painter.endNativePainting()
                 overlay = getattr(self.owner, 'building_overlay', None)
                 if overlay is not None and not self.owner.camera.perspective:
+                    overlay.draw(painter)
+                overlay = getattr(self.owner, 'special_overlay', None)
+                if overlay is not None:
                     overlay.draw(painter)
                 self.owner.draw_interaction_overlay(painter)
                 overlay = getattr(self.owner, 'squad_overlay', None)
@@ -247,13 +251,7 @@ class GpuMapViewport(SoftwareMapViewport):
                     self.render_icon(self.lib, typ, 1.1, current=True)
             self._previews_primed = True
         ratio = self._canvas.devicePixelRatioF()
-        selected = getattr(self,'squad_overlay',None)
-        styles = [(*((.6,.6,.6) if s.get('_preview') else tuple(v/255 for v in self.owner_colors.get(s['owner'],(150,150,150)))),
-                   3 if s.get('_preview') else 2 if selected is not None and i in selected.selected else 1)
-                  for i,s in enumerate(self.doc.squads)]
-        styles.extend((*((.6,.6,.6) if h.get('_preview') else tuple(v/255 for v in self.owner_colors.get(h['owner'], (150,150,150)))),
-                       3 if h.get('_preview') else 2 if i == getattr(self, 'selected_host', -1) else 1)
-                      for i, h in enumerate(self.doc.host_stations))
+        styles = [(*(c / 255 for c in row[:3]), row[3]) for row in scene_object_styles(self)]
         renderer.set_unit_styles(styles)
         hover = self.hover[1]*self.doc.mw+self.hover[0]+1 if self.hover else 0
         renderer.render(self.camera, round(self.width()*ratio), round(self.height()*ratio),

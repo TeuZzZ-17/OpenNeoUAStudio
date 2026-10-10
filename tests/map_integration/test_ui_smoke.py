@@ -74,7 +74,7 @@ def test_palette_selection_click_apply_hold_undo_and_save(app, tmp_path):
     win.show()
     _wait_frame(app, win.view)
     assert [win.palette_tabs.tabText(i) for i in range(win.palette_tabs.count())] == [
-        "Sectors", "Buildings", "Factions", "Terrain", "Squad", "Hosts", "Tech", "Script", "Level Info"]
+        "Sectors", "Buildings", "Factions", "Terrain", "Squad", "Hosts", "Tech", "Beamgates", "Super Items", "Gems", "Script", "Level Info"]
     assert not win.findChildren(QToolBar)
     assert not hasattr(win.view, 'overlay')
     assert not hasattr(win.view, 'mode_isometric_lock')

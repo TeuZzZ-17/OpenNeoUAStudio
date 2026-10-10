@@ -47,3 +47,47 @@ def test_level_info_sky_label_and_removed_helper_copy(monkeypatch, tmp_path):
         panel.dispose()
         panel.close()
         app.processEvents()
+
+
+def test_sky_grid_fits_large_thumbnails_in_narrow_and_wide_views(monkeypatch, tmp_path):
+    app = QApplication.instance() or QApplication([])
+    monkeypatch.setattr(dialogs, "ResourceCatalog",
+                        lambda _installation, _set_number: _EmptyCatalog())
+    monkeypatch.setattr(dialogs.bootstrap, "installation", lambda: None)
+    monkeypatch.setattr(dialogs.bootstrap, "game_data_dir", lambda: tmp_path)
+
+    panel = dialogs.LevelInfoPanel(LdfDocument())
+    try:
+        assert panel.sky_list.minimumHeight() == 166
+        assert panel.sky_list.maximumHeight() == 278
+        panel.show()
+
+        for panel_width, expected_columns in ((300, 1), (740, 2)):
+            panel.resize(panel_width, 800)
+            panel.layout().activate()
+            app.processEvents()
+            panel._layout_sky_grid()
+            viewport_width = panel.sky_list.viewport().width()
+            grid = panel.sky_list.gridSize()
+            spacing = panel.sky_list.spacing()
+            assert grid.height() == 166
+            assert panel.sky_list.iconSize().height() == 124
+            assert panel.sky_list.iconSize().width() == grid.width() - 18
+
+            if expected_columns == 1:
+                assert grid.width() + spacing * 2 <= viewport_width
+                assert grid.width() * 2 + spacing * 3 > viewport_width
+            else:
+                assert grid.width() * 2 + spacing * 3 <= viewport_width
+
+            # ThumbnailDelegate leaves a separate row for the label below the fitted image.
+            card_bottom = grid.height() - 4
+            image_bottom = card_bottom - 30
+            text_top = card_bottom - 26
+            assert grid.height() - 42 == 124
+            assert image_bottom < text_top
+            assert panel.sky_list.iconSize().width() <= grid.width() - 18
+    finally:
+        panel.dispose()
+        panel.close()
+        app.processEvents()

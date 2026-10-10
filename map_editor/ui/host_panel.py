@@ -26,6 +26,7 @@ class HostPanel(QWidget):
         self.search.textChanged.connect(self._filter)
         layout.addWidget(self.search)
         self.list = PreviewList()
+        self.list.preview_level = 1
         layout.addLayout(self.list.preview_controls())
         layout.addWidget(self.list, 1)
         self.list.currentRowChanged.connect(self._selected)
