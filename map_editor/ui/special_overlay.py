@@ -7,7 +7,7 @@ from PySide6.QtCore import QPointF, Qt
 from PySide6.QtGui import QColor, QPen, QPolygonF, QTransform, QImage
 
 from ..core.special_objects import SPECIAL_KINDS, special_store, special_slots, special_cell
-from ..render.special_scene import SPECIAL_COLORS as COLORS, special_members, actor_code
+from ..render.special_scene import SPECIAL_COLORS as COLORS, special_members, actor_code, cell_owner_color
 from .game_icons import game_icon, draw_game_badge
 
 
@@ -51,7 +51,7 @@ class SpecialOverlay:
         for index, member in enumerate(special_members(doc, view.lib)):
             value = special_store(doc, member.kind)[member.slot]
             grey = member.preview or actor_code(doc, index) in view.dragged_codes
-            color = QColor(160, 160, 160) if grey else QColor(*COLORS[member.kind])
+            color = QColor(160, 160, 160) if grey else QColor(*cell_owner_color(view, doc, member.cell))
             selected = view.selected_special == (member.kind, member.slot, member.key)
             x, y, z = terrain.cell_center(*member.cell)
             icon = 'wave' if member.kind == 'item' and value.get('type') == 2 else member.kind

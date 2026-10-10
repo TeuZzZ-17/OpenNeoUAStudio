@@ -7,7 +7,7 @@ import numpy as np
 from OpenGL import GL as gl
 from OpenGL.GL.shaders import compileProgram, compileShader
 
-from .gpu_scene import STRIDE
+from .gpu_scene import STRIDE, INSTANCE_RANKS
 from ..core.ldf_model import SECTOR_SIZE
 
 VERTEX = '''#version 330 core
@@ -160,7 +160,8 @@ void main(){
         color.rgb=mix(vec3(grey),vec3(0.62),0.28);
     }
     // The visible negative sector pixels are the building silhouette.
-    // Keep a yellow inner edge and add a white outer edge only on selection.
+    // Same widths as special objects: 1px edge, or 2px edge plus 2px white
+    // outer ring when selected, scaled with the display pixel ratio.
     if(showOverlays){
         bool buildingPixel=code<0 && -code<=mapSize.x*mapSize.y;
         uvec4 building=uvec4(0);
@@ -171,22 +172,27 @@ void main(){
         }
         bool yellowEdge=false;
         bool whiteOuter=false;
-        for(int axis=0;axis<4;axis++){
-            ivec2 delta=axis==0 ? ivec2(1,0) : axis==1 ? ivec2(-1,0) : axis==2 ? ivec2(0,1) : ivec2(0,-1);
-            ivec2 otherPos=clamp(p+delta,ivec2(0),textureSize(cells,0)-1);
-            int other=texelFetch(cells,otherPos,0).r;
-            if(buildingPixel && other!=code){
-                yellowEdge=true;
-            }
-            if(!buildingPixel && other<0 && -other<=mapSize.x*mapSize.y){
-                int id=-other-1;
-                uvec4 neighbour=stateAt(ivec2(id%mapSize.x,id/mapSize.x));
-                if(neighbour.a==3u) whiteOuter=true;
+        int edgeReach=building.a==3u ? 2 : 1;
+        for(int d=1;d<=2;d++){
+            int step=max(1,int(float(d)*pixelScale));
+            for(int axis=0;axis<4;axis++){
+                ivec2 delta=axis==0 ? ivec2(step,0) : axis==1 ? ivec2(-step,0) : axis==2 ? ivec2(0,step) : ivec2(0,-step);
+                ivec2 otherPos=clamp(p+delta,ivec2(0),textureSize(cells,0)-1);
+                int other=texelFetch(cells,otherPos,0).r;
+                if(buildingPixel && other!=code && d<=edgeReach){
+                    yellowEdge=true;
+                }
+                if(!buildingPixel && other<0 && -other<=mapSize.x*mapSize.y){
+                    int id=-other-1;
+                    uvec4 neighbour=stateAt(ivec2(id%mapSize.x,id/mapSize.x));
+                    if(neighbour.a==3u) whiteOuter=true;
+                }
             }
         }
         if(whiteOuter){color.rgb=vec3(1.0);return;}
         if(yellowEdge){
-            color.rgb=building.a==2u ? vec3(0.62) : vec3(1.0,0.80,0.16);
+            vec3 owned=building.r>0u && building.r<8u ? ownerColors[int(building.r)] : vec3(0.57);
+            color.rgb=building.a==2u ? vec3(0.62) : owned;
             return;
         }
     }
@@ -526,8 +532,7 @@ class GpuRenderer:
         gl.glUniform1i(self.uniform(self.opaque_program, 'instanced'), True)
         # Stable order also makes coplanar boundary ties independent of Python
         # object addresses, set iteration, or a previously edited sector type.
-        ranks = {'sector': 0, 'building': 1, 'filler': 2}
-        for key in sorted(self.instance_buffers, key=lambda k: (ranks[k[0]], k[1:])):
+        for key in sorted(self.instance_buffers, key=lambda k: (INSTANCE_RANKS[k[0]], k[1:])):
             buffer, _, count = self.instance_buffers[key]
             gl.glBindVertexArray(buffer.vao)
             gl.glDrawArraysInstanced(gl.GL_TRIANGLES, 0, buffer.count, count)

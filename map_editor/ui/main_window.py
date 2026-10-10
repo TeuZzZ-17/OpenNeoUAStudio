@@ -928,10 +928,8 @@ class MainWindow(QMainWindow):
         position = host_position(host, self.doc, self.view.terrain, lib)
         visual = lib.vehicles.get(host['veh'])
         offset = visual.viewer if visual is not None else (0, 0, 0)
-        from ..render.squad_scene import body_rotation
-        offset = body_rotation(host.get('body_angle', 0)) @ offset
         eye = tuple(value + delta for value, delta in zip(position, offset))
-        angle = math.radians(host['viewangle'] + host.get('body_angle', 0))
+        angle = math.radians(host['viewangle'])
         self.view.enter_pov_at(eye, (-math.sin(angle), 0, math.cos(angle)))
 
     def _add_host(self):
@@ -1043,7 +1041,7 @@ class MainWindow(QMainWindow):
             self._refresh_hosts(index)
         else:
             self.host_panel.update_rows()
-        if field in ('viewangle', 'body_angle', 'pos_y', 'x', 'y') and self.view.camera.perspective and self._host_pov_index == index:
+        if field in ('viewangle', 'pos_y', 'x', 'y') and self.view.camera.perspective and self._host_pov_index == index:
             self._host_pov(index)
 
     def _deselect_other_objects(self, kind):

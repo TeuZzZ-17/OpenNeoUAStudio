@@ -4,7 +4,9 @@ from map_editor.core.asset_bridge import SetAssets
 from map_editor.core.ldf_model import LdfDocument
 from map_editor.render.terrain_mesh import TerrainMesh
 from map_editor.render.sector_mesh import SectorMeshLibrary
-from map_editor.render.gpu_scene import WorldScene
+from map_editor.render.gpu_scene import WorldScene, INSTANCE_RANKS
+from map_editor.core.ldf_model import load_ldf
+from map_editor import bootstrap
 
 
 @pytest.fixture(scope='module')
@@ -59,3 +61,14 @@ def test_gpu_resizing_and_preview_library_switch_leave_no_old_instances(library)
     other=SectorMeshLibrary(SetAssets(2).load())
     previews.set_library(other)
     assert not previews.chunks and not previews._previews and not previews.materials
+
+
+def test_every_instance_kind_of_a_real_level_has_a_draw_rank(library):
+    """A kind missing from INSTANCE_RANKS crashes the GPU renderer and forces software mode."""
+    doc=load_ldf(str(bootstrap.game_data_dir()/'Levels/Single/L0101.LDF'))
+    terrain=TerrainMesh(); terrain.rebuild(doc.grids['hgt'])
+    scene=WorldScene(); scene.set_library(library)
+    scene.update(doc,terrain)
+    kinds={key[0] for key in scene.instances}
+    assert 'key-building-sector' in kinds
+    assert kinds<=set(INSTANCE_RANKS)

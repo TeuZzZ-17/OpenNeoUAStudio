@@ -85,7 +85,8 @@ class BuildingOverlay(QObject):
             return
         pixels = building_outline_pixels(ids, doc.grids['blg'],
                                          selected=self.viewport.selected_building,
-                                         previews=self.viewport.preview_cells)
+                                         previews=self.viewport.preview_cells,
+                                         owners=doc.grids['own'], owner_colors=self.viewport.owner_colors)
         image = QImage(pixels.data, width, height, width * 4,
                        QImage.Format.Format_RGBA8888).copy()
         painter.drawImage(0, 0, image)
