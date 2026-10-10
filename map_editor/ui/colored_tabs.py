@@ -1,5 +1,6 @@
-"""Compact two-row colored tabs backed by a stacked page widget."""
+"""Compact colored tabs backed by a stacked page widget."""
 
+from .special_overlay import COLORS
 from PySide6.QtCore import Signal
 from PySide6.QtWidgets import (
     QGridLayout,
@@ -12,7 +13,8 @@ from PySide6.QtWidgets import (
 
 
 TAB_COLORS = ((75, 195, 220), (235, 155, 70), (90, 200, 125), (180, 135, 240),
-              (225, 120, 180), (235, 210, 80), (120, 155, 245))
+              (225, 120, 180), (235, 210, 80), (120, 155, 245),
+              COLORS['gate'], COLORS['item'], COLORS['gem'], (75, 195, 220), (235, 155, 70))
 
 
 class PaletteTabs(QWidget):
@@ -85,15 +87,14 @@ class PaletteTabs(QWidget):
 
     def _reflow_buttons(self):
         count = len(self._buttons)
-        columns = max(1, (count + 1) // 2)
+        columns = max(1, (count + 1) // 2) if count <= 10 else 4
         for button in self._buttons:
             self._button_grid.removeWidget(button)
         for index, button in enumerate(self._buttons):
-            row = 0 if index < columns else 1
-            column = index if row == 0 else index - columns
+            row, column = divmod(index, columns)
             self._button_grid.addWidget(button, row, column)
-        for column in range(columns):
-            self._button_grid.setColumnStretch(column, 1)
+        for column in range(self._button_grid.columnCount()):
+            self._button_grid.setColumnStretch(column, 1 if column < columns else 0)
 
     def _on_current_changed(self, index):
         for button_index, button in enumerate(self._buttons):

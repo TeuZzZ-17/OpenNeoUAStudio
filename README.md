@@ -35,6 +35,23 @@ startup, or run `python main.py --map-editor path/to/level.LDF`. Choose the loca
 game installation when prompted; game resources remain external and are loaded
 from the selected original Urban Assault or OpenNeoUA data folders.
 
+The map palette includes Beamgates, Super Items and Gems alongside the terrain,
+actor, technology, script and level pages. Configure the next object or select
+an existing one, then use Add for a movable grey preview. Click to confirm;
+Esc or Deselect cancels without changing the map. Place / Move previews a move
+of the selected object. Dragging temporarily greys the selected geometry. Gates and super items have editable
+key sectors; gems have effects for vehicles, buildings and weapons, with
+searchable targets and custom IDs. Copy places an independent duplicate with
+relative key positions. Esc cancels placement; Undo/Redo includes data and
+sector visuals. Place or delete pending objects before saving. Each special
+category retains the LDF limit of ten objects.
+Special sectors share actor picking and colored silhouettes, with a white
+selection contour. Host viewangle displays the actual viewing direction and
+updates an active POV; the host body follows the game orientation. Countdown
+controls display MM:SS while LDF values retain millisecond precision. Generated
+MB/DB use terrain relief, grain and palette statistics from local retail
+artwork; MB is brighter than DB.
+
 Install source dependencies with `python -m pip install -r requirements.txt`.
 The map uses persistent OpenGL 3.3 geometry. The Model, Snapshot, Collision and
 Wireframe and UV viewports use GPU painting; textured 3D previews share the map's

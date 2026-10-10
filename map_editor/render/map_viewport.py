@@ -78,6 +78,8 @@ class MapViewport(QWidget):
         self.sample_active = False
         self.sample_flash_until = 0.0
         self.draft_active = False
+        self.dragged_codes = set()
+        self.selected_special = None
         self._press_pos = None
         self._drag_actor = False
         self._moved = False
@@ -246,8 +248,9 @@ class MapViewport(QWidget):
             self._frame_key = key
             self.statusMessage.emit(f"Unable to update the view: {exc}")
             return
-        previews = tuple(-(self.doc.mw * self.doc.mh + i + 1) for i, actor in
-                         enumerate(self.doc.squads + self.doc.host_stations) if actor.get('_preview'))
+        from .special_scene import scene_object_styles
+        previews = tuple(-(self.doc.mw * self.doc.mh + i + 1) for i, style in
+                         enumerate(scene_object_styles(self)) if style[3] == 3)
         self._job = _RenderJob(polygons, cam, self.lib.tables, key, self._generation, terrain,
                               tuple(self.preview_cells), previews)
         self._job.signals.finished.connect(self._render_finished)
@@ -290,17 +293,20 @@ class MapViewport(QWidget):
             if self._image is None:
                 self._image = self._frame.image()
             painter.drawImage(0, 0, self._image)
+            cam = self.camera.copy()
+            cam.yaw, cam.pitch, cam.zoom, cam.center, cam.pan, cam.width, cam.height = self._frame_key[1][:7]
+            cam.perspective, cam.fov = self._frame_key[1][7:]
             overlay = getattr(self, 'building_overlay', None)
             if overlay is not None and not self.camera.perspective:
-                cam = self.camera.copy()
-                cam.yaw, cam.pitch, cam.zoom, cam.center, cam.pan, cam.width, cam.height = self._frame_key[1][:7]
-                cam.perspective, cam.fov = self._frame_key[1][7:]
                 overlay.draw(painter, cam, self._display_terrain)
             if self._frame_key[1] == self._camera_key() and not self.camera.perspective:
                 painter.drawImage(0, 0, self._annotations())
                 overlay = getattr(self, 'squad_overlay', None)
                 if overlay is not None:
                     overlay.draw(painter, cam, self._display_terrain)
+        overlay = getattr(self, 'special_overlay', None)
+        if overlay is not None and self._frame is not None:
+            overlay.draw(painter, cam, self._display_terrain)
         self.draw_interaction_overlay(painter)
         if self._job is not None or self._render_timer.isActive():
             painter.setPen(QColor(160, 170, 180))
@@ -481,6 +487,40 @@ class MapViewport(QWidget):
         overlay = getattr(self, 'squad_overlay', None)
         return overlay.pick(x, y) if overlay is not None else None
 
+    def _pick_code(self, x, y):
+        if (self._frame is None or self._frame_key[1] != self._camera_key()
+                or self._frame_key[0] != self._scene_revision):
+            return 0
+        ix, iy = int(x), int(y)
+        if 0 <= ix < self.width() and 0 <= iy < self.height():
+            return int(self._frame.cell_ids[iy, ix])
+        return 0
+
+    def pick_scene_object(self, x, y):
+        if self.doc is None:
+            return None
+        from .special_scene import special_members
+        code = self._pick_code(x, y)
+        index = -code - self.doc.mw * self.doc.mh - 1
+        if 0 <= index < len(self.doc.squads):
+            return 'squad', index
+        index -= len(self.doc.squads)
+        if 0 <= index < len(self.doc.host_stations):
+            return 'host', index
+        index -= len(self.doc.host_stations)
+        members = list(special_members(self.doc, self.lib))
+        if 0 <= index < len(members):
+            value = members[index]
+            return 'special', (value.kind, value.slot, value.key)
+        if 0 < abs(code) <= self.doc.mw * self.doc.mh:
+            cell_id = abs(code) - 1
+            cell = cell_id % self.doc.mw, cell_id // self.doc.mw
+            matches = [member for member in members if member.cell == cell]
+            if matches:
+                value = next((member for member in matches if member.key < 0), matches[0])
+                return 'special', (value.kind, value.slot, value.key)
+        return None
+
     def pick_host(self, x, y):
         if (self._frame is None or self._frame_key[1] != self._camera_key()
                 or self._frame_key[0] != self._scene_revision):
@@ -519,6 +559,13 @@ class MapViewport(QWidget):
             self._drag_button = None
             return
         if event.button() == Qt.MouseButton.LeftButton:
+            cell = self.ground_cell(event.position().x(), event.position().y())
+            overlay = getattr(self, 'special_overlay', None)
+            hit = self.pick_scene_object(event.position().x(), event.position().y())
+            if hit is not None and hit[0] == 'special' and overlay is not None and overlay.window._special_placement is None:
+                self._drag_actor = True
+                self.actorDragStarted.emit('special', {'cell': cell, 'hit': hit[1]})
+                return
             if event.modifiers() & Qt.KeyboardModifier.ShiftModifier and self.active_tool != 'terrain':
                 self._sweep_gesture = True
                 self._sweep_over(self.ground_cell(event.position().x(), event.position().y()))
@@ -537,6 +584,8 @@ class MapViewport(QWidget):
                     self.actorDragStarted.emit('squad', self.ground_cell(event.position().x(), event.position().y()))
                 else:
                     self._drag_button = None
+                return
+            if self.active_tool == 'special':
                 return
             cell = self.pick_cell(event.position().x(), event.position().y())
             if cell and self.sample_active and self.active_tool == 'terrain':
