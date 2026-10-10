@@ -15,15 +15,6 @@ class SquadMember:
     vehicle: int
     owner: int
     position: tuple
-    body_angle: float = 0
-
-
-def body_rotation(degrees):
-    import numpy as np
-    angle = math.radians(degrees)
-    c, s = math.cos(angle), math.sin(angle)
-    # World models use the transpose of the engine's RotateY body matrix.
-    return np.array(((c, 0, -s), (0, 1, 0), (s, 0, c)))
 
 
 def squad_xz(squad):
@@ -150,4 +141,4 @@ def host_members(doc, terrain, lib=None):
     for index, host in enumerate(doc.host_stations):
         if doc.cell_is_valid(host):
             yield SquadMember(len(doc.squads) + index, 0, host['veh'], host['owner'],
-                              host_position(host, doc, terrain, lib), host.get('body_angle', 0))
+                              host_position(host, doc, terrain, lib))

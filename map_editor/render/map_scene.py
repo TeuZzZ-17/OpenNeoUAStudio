@@ -14,7 +14,7 @@ from indexed_renderer import IndexedPiece, IndexedRasterizer, retail_source_face
 from ..core.ldf_model import DEFAULT_HGT, SECTOR_SIZE
 from .special_scene import special_cells, actor_code, key_building_sector
 from .terrain_mesh import HEIGHT_UNIT
-from .squad_scene import squad_members, host_members, body_rotation
+from .squad_scene import squad_members, host_members
 
 
 def _clip(vertices, uvs, axis, bound, positive):
@@ -126,7 +126,7 @@ def scene_polygons(lib, doc, terrain, cam):
     else:
         c0, c1, r0, r1 = 0, doc.mw, 0, doc.mh
 
-    def append_mesh(mesh, col, row, *, filler=False, structure_only=False, position=None, actor_code=None, special_code=None, body_angle=0):
+    def append_mesh(mesh, col, row, *, filler=False, structure_only=False, position=None, actor_code=None, special_code=None):
         nonlocal order
         wx, wy, wz = position if position is not None else terrain.cell_center(col, row)
         if filler:
@@ -138,10 +138,7 @@ def scene_polygons(lib, doc, terrain, cam):
                 continue
             if actor_code is None and (col in (0, doc.mw - 1) or row in (0, doc.mh - 1)) and not ground:
                 continue
-            local_vertices = [(v[0] + ox, v[1], v[2] + oz) for v in face.vertices]
-            if body_angle:
-                local_vertices = np.asarray(local_vertices) @ body_rotation(body_angle).T
-            vertices = [(v[0] + wx, v[1] + wy, v[2] + wz) for v in local_vertices]
+            vertices = [(v[0] + ox + wx, v[1] + wy, v[2] + oz + wz) for v in face.vertices]
             source_camera = tuple(cam.to_camera(v) for v in vertices)
             screen = [cam.to_screen(v) for v in source_camera]
             if not cam.perspective and (max(p[0] for p in screen) < 0 or min(p[0] for p in screen) >= cam.width
@@ -214,7 +211,7 @@ def scene_polygons(lib, doc, terrain, cam):
         for member in chain(squad_members(doc, terrain, lib), host_members(doc, terrain, lib)):
             code = -(doc.mw * doc.mh + member.squad + 1)
             append_mesh(lib.actor_mesh(member.vehicle), 0, 0,
-                        position=member.position, actor_code=code, body_angle=member.body_angle)
+                        position=member.position, actor_code=code)
     return polygons
 
 

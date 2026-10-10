@@ -41,26 +41,24 @@ def test_hover_height_and_flatten_sample_are_explicit_without_editing_map(win):
     assert win.hover_height.text().endswith('—')
 
 
-def test_host_body_heading_roundtrip_and_both_renderers_use_same_rotation(win):
+def test_host_viewangle_roundtrip_and_pov_follows_viewangle(win):
     host = dict(owner=1, veh=56, x=3, y=3, pos_y=-700, energy=500000,
-                custom_name=None, hidden=False, body_angle=90, viewangle=15)
+                custom_name=None, hidden=False, viewangle=15)
     ensure_host_defaults(host)
     win.doc.host_stations = [host]
     saved = dumps_ldf(win.doc)
-    assert 'body_angle = 90' in saved
+    assert 'body_angle' not in saved
     restored = loads_ldf(saved)
-    assert restored.host_stations[0]['body_angle'] == 90
     assert restored.host_stations[0]['viewangle'] == 15
     win._refresh_squads()
     scene = WorldScene(); scene.set_library(win._lib())
     geometry = scene._squads(win.doc, win.view.terrain)
     assert len(geometry.opaque)
     win._host_pov(0)
-    angle = math.radians(105)
+    angle = math.radians(15)
     eye = win.view.camera.center
     ahead = tuple(eye[i]+1000*v for i,v in enumerate((-math.sin(angle),0,math.cos(angle))))
     assert win.view.camera.to_camera(ahead)[2] < 4
-    assert win.doc.host_stations[0]['body_angle'] == 90
 
 
 def test_game_projection_keeps_right_axis_and_cpu_gpu_screen_in_sync():

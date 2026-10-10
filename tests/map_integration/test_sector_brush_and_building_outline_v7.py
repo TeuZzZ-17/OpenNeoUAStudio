@@ -71,6 +71,10 @@ def test_outline_follows_visible_model_pixels_with_yellow_under_white():
     assert tuple(dragging[0, 1]) == (0, 0, 0, 0)
     assert not np.any(idle[0, :, 3])
 
+    owned = building_outline_pixels(ids, building_grid, owners=[['00'] * 3, ['00', '03', '00'], ['00'] * 3],
+                                    owner_colors={3: (10, 20, 30)})
+    assert tuple(owned[4, 1]) == (10, 20, 30, 255)
+
 
 def test_single_delete_action_in_map_context_menu():
     path = ROOT / 'ui' / 'main_window.py'

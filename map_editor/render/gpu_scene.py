@@ -4,11 +4,13 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 import numpy as np
 from .sector_state import sector_type
-from .squad_scene import squad_members, host_members, body_rotation
+from .squad_scene import squad_members, host_members
 from .special_scene import special_cells, actor_code, key_building_sector
 
 CHUNK_SIZE = 8
 STRIDE = 16
+# Draw order of the instanced template kinds created by WorldScene._cell.
+INSTANCE_RANKS = {'sector': 0, 'key-building-sector': 1, 'building': 2, 'filler': 3}
 
 
 @dataclass
@@ -286,8 +288,6 @@ class WorldScene:
                 if not len(source):
                     continue
                 data = source.copy()
-                if member.body_angle:
-                    data[:, :3] = data[:, :3] @ body_rotation(member.body_angle).T
                 data[:, :3] += member.position
                 data[:, 11] = -(doc.mw * doc.mh + member.squad + 1)
                 data[:, 12:16] = -1
