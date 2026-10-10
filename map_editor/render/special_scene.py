@@ -60,6 +60,16 @@ def key_building_sector(member, lib):
     return definition.sec_type if definition is not None else None
 
 
+def cell_owner_color(view, doc, cell):
+    """Faction colour of the sector; neutral sectors use the same grey as the icons."""
+    owner = doc.grids['own'][cell[1]][cell[0]]
+    try:
+        owner = int(str(owner), 16)
+    except (ValueError, TypeError):
+        owner = 0
+    return view.owner_colors.get(owner, (145, 145, 145)) if owner else (145, 145, 145)
+
+
 def scene_object_styles(view):
     if view.doc is None:
         return []
@@ -78,7 +88,7 @@ def scene_object_styles(view):
         code = -(doc.mw * doc.mh + len(doc.squads) + len(doc.host_stations) + index + 1)
         preview = member.preview or code in dragged
         is_selected = selection == (member.kind, member.slot, member.key)
-        color = (160, 160, 160) if preview else SPECIAL_COLORS[member.kind]
+        color = (160, 160, 160) if preview else cell_owner_color(view, doc, member.cell)
         styles.append((*color, 3 if preview else 2 if is_selected else 1))
     return styles
 

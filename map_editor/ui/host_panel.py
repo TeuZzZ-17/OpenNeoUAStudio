@@ -70,8 +70,7 @@ class HostPanel(QWidget):
         fields.setRowWrapPolicy(QFormLayout.RowWrapPolicy.WrapLongRows)
         self.fields = {'pos_y': self.height}
         for key, title, low, high in (('reload_const', 'Reload constant', 0, 2147483647),
-                                     ('viewangle', 'View angle (POV)', -2147483647, 2147483647),
-                                     ('body_angle', 'Body orientation', 0, 359)):
+                                     ('viewangle', 'View angle (POV)', -2147483647, 2147483647)):
             spin = QSpinBox(minimum=low, maximum=high)
             self.fields[key] = spin
             if key == 'reload_const':
@@ -83,8 +82,7 @@ class HostPanel(QWidget):
                 row.addWidget(default)
                 fields.addRow(title, row)
             else:
-                spin.setToolTip('Heading of the host view in degrees; does not rotate the host body.' if key == 'viewangle' else
-                                'Initial body and mounted-gun orientation in degrees. Requires OpenNeoUA with body_angle support.')
+                spin.setToolTip('Heading of the host view in degrees; does not rotate the host body.')
                 fields.addRow(title, spin)
             spin.valueChanged.connect(lambda value, field=key: self._change(field, value))
         self.name = QLineEdit()
@@ -270,7 +268,7 @@ class HostPanel(QWidget):
     def placement_values(self):
         return dict(owner=self.owner.currentData(), veh=form_vehicle(self.vehicle),
                     energy=self.energy.value(), pos_y=self.height.value(),
-                    reload_const=self.fields['reload_const'].value(), viewangle=self.fields['viewangle'].value(), body_angle=self.fields['body_angle'].value(),
+                    reload_const=self.fields['reload_const'].value(), viewangle=self.fields['viewangle'].value(),
                     custom_name=self.name.text().strip() or None, hidden=self.hidden.isChecked(),
                     ai={**{key: spin.value() for key, spin in self.ai_spins.items()},
                         'preset': self.ai_preset.currentText()})

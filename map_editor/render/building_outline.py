@@ -3,8 +3,8 @@
 import numpy as np
 
 
-def building_outline_pixels(ids, building_grid, *, selected=None, previews=()):
-    """Return yellow model edges, grey drag edges and a white selection border."""
+def building_outline_pixels(ids, building_grid, *, selected=None, previews=(), owners=None, owner_colors=None):
+    """Return faction-coloured (yellow without owners) model edges, grey drag edges and a white selection border."""
     height, width = ids.shape
     rgba = np.zeros((height, width, 4), np.uint8)
     buildings = np.asarray([[int(str(value), 16) for value in row]
@@ -21,6 +21,12 @@ def building_outline_pixels(ids, building_grid, *, selected=None, previews=()):
                        (ids != surrounding[1:-1, :-2]) |
                        (ids != surrounding[1:-1, 2:]))
     rgba[inner] = (255, 204, 40, 255)
+    if owners is not None and owner_colors:
+        owner_ids = np.asarray([[int(str(value), 16) for value in row] for row in owners], dtype=np.int32)
+        flat = owner_ids.reshape(-1)[codes]
+        for owner in np.unique(flat[inner]):
+            r, g, b = owner_colors.get(int(owner), (145, 145, 145)) if owner else (145, 145, 145)
+            rgba[inner & (flat == owner)] = (r, g, b, 255)
     previews = set(previews)
     for col, row in previews:
         if 0 <= col < cols and 0 <= row < rows:

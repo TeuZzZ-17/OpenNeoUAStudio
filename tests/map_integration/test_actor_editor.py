@@ -108,7 +108,7 @@ def test_unselected_host_form_prepares_height_and_ai(win):
     assert win.doc.snapshot() == before
     titles = [button.text() for button in panel.findChildren(QPushButton)]
     assert 'Deselect' in titles and 'Place / Move' not in titles
-    assert set(panel.fields) == {'pos_y', 'viewangle', 'reload_const', 'body_angle'}
+    assert set(panel.fields) == {'pos_y', 'viewangle', 'reload_const'}
 
 
 def test_host_drag_reuses_history_and_preserves_exact_coordinates(win):
