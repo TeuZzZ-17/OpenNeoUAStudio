@@ -3,13 +3,13 @@ import re
 
 import copy
 from PySide6.QtCore import Qt, Signal
-from PySide6.QtGui import QValidator
+from PySide6.QtGui import QValidator, QIcon
 from PySide6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QFormLayout, QLineEdit,
                               QListWidget, QListWidgetItem, QPushButton, QSpinBox,
                               QComboBox, QCheckBox, QLabel, QGroupBox, QDialog, QDialogButtonBox)
 
 from ..core.ldf_model import GEM_ACTION_PARAMS_BY_TARGET, MAX_SPECIAL_SLOTS
-from .preview_cards import PreviewList, set_card
+from .preview_cards import PreviewList, set_card, RESOURCE_ROLE
 from .special_overlay import COLORS
 from ..core.special_objects import SPECIAL_KINDS, special_store, special_slots, special_cell
 
@@ -91,7 +91,7 @@ class SpecialPanel(QWidget):
         self.slot = 0
         self.template = SPECIAL_KINDS[kind][2]()
         layout = QVBoxLayout(self)
-        self.search = QLineEdit(placeholderText=f'Filter {SPECIAL_KINDS[kind][0]}...')
+        self.search = QLineEdit(placeholderText=f'Filter {SPECIAL_KINDS[kind][0]}')
         self.search.textChanged.connect(self._filter)
         layout.addWidget(self.search)
         self.list = PreviewList()
@@ -113,7 +113,7 @@ class SpecialPanel(QWidget):
         self.count = QLabel()
         count_row = QHBoxLayout()
         count_row.addWidget(self.count, 1)
-        self.clear_button = QPushButton('Delete all…')
+        self.clear_button = QPushButton('Delete all')
         self.clear_button.clicked.connect(self.clearRequested.emit)
         count_row.addWidget(self.clear_button)
         layout.addLayout(count_row)
@@ -126,7 +126,7 @@ class SpecialPanel(QWidget):
             spin = QSpinBox(minimum=-1, maximum=254)
             spin.setSpecialValueText('Unplaced')
             self.fields[field] = spin
-            spin.editingFinished.connect(self._coordinates)
+            spin.valueChanged.connect(self._coordinates)
             coords.addWidget(QLabel(title))
             coords.addWidget(spin, 1)
         form.addRow('Sector', coords)
@@ -164,7 +164,7 @@ class SpecialPanel(QWidget):
                     else QSpinBox(minimum=low, maximum=high))
             spin.setRange(low, high)
             self.fields[field] = spin
-            spin.editingFinished.connect(lambda f=field, s=spin: self._change({f: s.value()}))
+            spin.valueChanged.connect(lambda value, f=field: self._change({f: value}))
             form.addRow(title, spin)
         if kind == 'gem':
             self.fields['type'].setToolTip('1 = Weapon power, 2 = Shield, 3 = Tech / Unlock. Custom IDs are preserved.')
@@ -202,7 +202,7 @@ class SpecialPanel(QWidget):
         coords = QHBoxLayout()
         for title, spin in (('X', self.key_x), ('Y', self.key_y)):
             spin.setRange(1, 254)
-            spin.editingFinished.connect(self._key_coordinates)
+            spin.valueChanged.connect(self._key_coordinates)
             coords.addWidget(QLabel(title))
             coords.addWidget(spin, 1)
         layout.addLayout(coords)
@@ -246,8 +246,8 @@ class SpecialPanel(QWidget):
         dialog_layout.addWidget(buttons)
         self.catalogs = {}
         row = QHBoxLayout()
-        for title, callback in (('Add effect…', lambda: self._edit_action(False)),
-                                ('Edit…', lambda: self._edit_action(True)), ('Remove', self._remove_action)):
+        for title, callback in (('Add effect', lambda: self._edit_action(False)),
+                                ('Edit', lambda: self._edit_action(True)), ('Remove', self._remove_action)):
             button = QPushButton(title)
             button.clicked.connect(callback)
             row.addWidget(button)
@@ -350,7 +350,15 @@ class SpecialPanel(QWidget):
             self.fields[key].setValue(value[key])
         item = self.list.currentItem()
         if item is not None:
-            item.setText(f'{SPECIAL_KINDS[self.kind][3]} {slot} · {special_cell(value)}')
+            building = value['closed_bp'] if self.kind == 'gate' else value['inactive_bp'] if self.kind == 'item' else value['blg']
+            resource = ('blg', building)
+            if item.data(RESOURCE_ROLE) != resource:
+                item.setIcon(QIcon())
+            detail = f'Target level {value["target"]} · {len(value["keys"])} keys' if self.kind == 'gate' else (
+                f'{format_duration(value["countdown"])} · {len(value["keys"])} keys' if self.kind == 'item' else
+                f'Building {value["blg"]} · {len(value["actions"])} effects')
+            set_card(item, f'{SPECIAL_KINDS[self.kind][3]} {slot} · {special_cell(value)}',
+                     detail + (' · Hidden' if value.get('hidden') else ''), COLORS[self.kind], resource)
         if self.kind != 'gem':
             for index, (x, y) in enumerate(value['keys']):
                 item = self.keys.item(index)
@@ -374,7 +382,8 @@ class SpecialPanel(QWidget):
             self.valuesChanged.emit(self.slot, values)
         else:
             self.template.update(copy.deepcopy(values))
-            self._selected(None)
+            if len(values) > 1 or any(k in values for k in ('actions', 'keys')):
+                self._selected(None)
 
     def _coordinates(self):
         x, y = self.fields['x'].value(), self.fields['y'].value()
@@ -401,6 +410,8 @@ class SpecialPanel(QWidget):
             self.key_road.setEnabled(valid)
 
     def _key_coordinates(self):
+        if self._loading:
+            return
         index = self.keys.currentRow()
         if index >= 0:
             keys = list(self.record()['keys'])

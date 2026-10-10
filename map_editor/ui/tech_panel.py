@@ -1,6 +1,7 @@
 """Per-faction build permissions from discovered scripts and existing LDF IDs."""
 from PySide6.QtCore import Qt, Signal
-from PySide6.QtWidgets import QWidget, QVBoxLayout, QHBoxLayout, QComboBox, QLineEdit, QLabel, QPlainTextEdit
+from PySide6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QComboBox, QLineEdit, QLabel,
+                               QTreeWidget, QTreeWidgetItem, QHeaderView)
 from ..core.ldf_model import FACTIONS
 from .preview_cards import PreviewList, set_card, faction_style
 
@@ -25,13 +26,19 @@ class TechPanel(QWidget):
         row.addWidget(self.faction, 1)
         row.addWidget(self.kind)
         layout.addLayout(row)
-        self.search = QLineEdit(placeholderText='Filter by name or ID...')
+        self.search = QLineEdit(placeholderText='Filter by name or ID')
         layout.addWidget(self.search)
         self.status = QLabel()
-        self.status.setWordWrap(True)
-        self.summary = QPlainTextEdit()
-        self.summary.setReadOnly(True)
-        self.summary.setFixedHeight(78)
+        self.status.setFixedHeight(18)
+        self.summary = QTreeWidget()
+        self.summary.setHeaderLabels(['ID', 'Name'])
+        self.summary.setRootIsDecorated(False)
+        self.summary.setItemsExpandable(False)
+        self.summary.setMaximumHeight(126)
+        self.summary.setSelectionMode(QTreeWidget.SelectionMode.SingleSelection)
+        self.summary.header().setSectionResizeMode(0, QHeaderView.ResizeMode.ResizeToContents)
+        self.summary.header().setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
+        layout.addWidget(self.status)
         layout.addWidget(self.summary)
         self.list = PreviewList(large_text=False)
         layout.addLayout(self.list.preview_controls())
@@ -41,6 +48,7 @@ class TechPanel(QWidget):
         self.search.textChanged.connect(self._filter)
         self.list.itemChanged.connect(self._changed)
         self.list.itemClicked.connect(self._clicked)
+        self.summary.itemClicked.connect(self._summary_clicked)
 
     def refresh(self, doc, vehicles, buildings, colors):
         self.doc, self.vehicles, self.buildings, self.colors = doc, vehicles, buildings, colors
@@ -72,13 +80,17 @@ class TechPanel(QWidget):
                      + ('\nDefinition missing from scripts' if definition is None else ''),
                      self.colors.get(faction, (180, 180, 180)), (kind, key))
             item.setCheckState(Qt.CheckState.Checked if key in active else Qt.CheckState.Unchecked)
-        summaries = []
-        for label, category, catalog in (('Vehicles', 'veh', self.vehicles), ('Buildings', 'blg', self.buildings)):
-            enabled = self.permissions(category)
-            names = [f'{key} {catalog[key].name}' if key in catalog else f'ID {key}' for key in enabled]
-            summaries.append(f'{label} ({len(enabled)}): ' + (', '.join(names) or 'None'))
-        self.summary.setPlainText('\n'.join(summaries))
-        self.summary.setStyleSheet(f'QPlainTextEdit {{ color: rgb{self.colors.get(faction, (180,180,180))}; }}')
+        enabled = self.permissions(kind)
+        self.status.setText(f'Enabled {self.kind.currentText()} ({len(enabled)})')
+        self.status.setStyleSheet(f'QLabel {{ color: rgb{self.colors.get(faction, (180,180,180))}; font-weight: bold; }}')
+        self.summary.clear()
+        for key in enabled:
+            definition = definitions.get(key)
+            name = ((definition.name if definition else '') or
+                    self.doc.custom_tech_names.get(key) or f'Unknown ID {key}')
+            row = QTreeWidgetItem([str(key), str(name)])
+            row.setData(0, Qt.ItemDataRole.UserRole, key)
+            self.summary.addTopLevelItem(row)
         # Existing permissions stay visible even if a mod definition is missing.
         self.list.setEnabled(True)
         faction_style(self.faction, self.colors)
@@ -117,6 +129,18 @@ class TechPanel(QWidget):
         # The whole card is the toggle target; keep one change per click.
         item.setCheckState(Qt.CheckState.Unchecked if item.checkState() == Qt.CheckState.Checked
                            else Qt.CheckState.Checked)
+
+    def _summary_clicked(self, row, _column):
+        key = row.data(0, Qt.ItemDataRole.UserRole)
+        target = next((self.list.item(i) for i in range(self.list.count())
+                       if self.list.item(i).data(Qt.ItemDataRole.UserRole) == key), None)
+        if target is None:
+            return
+        if target.isHidden():
+            self.search.clear()
+        self.list.setCurrentItem(target)
+        self.list.scrollToItem(target, self.list.ScrollHint.PositionAtCenter)
+        self.list.setFocus(Qt.FocusReason.OtherFocusReason)
 
     def _changed(self, item):
         if not self._loading:

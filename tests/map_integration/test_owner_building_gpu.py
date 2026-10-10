@@ -218,12 +218,13 @@ def test_real_special_scene_ids_and_gpu_selected_and_drag_contours(app):
         view = SimpleNamespace(doc=doc, lib=lib, owner_colors={}, dragged_codes=set(),
                                selected_special=None, selected_host=-1, squad_overlay=None)
 
-        def render():
+        def render(*, clear_view=False):
             styles = [(*(color / 255 for color in row[:3]), row[3])
                       for row in scene_object_styles(view)]
             renderer.set_unit_styles(styles)
             renderer.render(camera, width, height, target, owner_colors={},
-                            grid=False, sky=False, overlays=True)
+                            grid=False, sky=False, overlays=True,
+                            clear_view=clear_view)
             ids = renderer.read_ids()
             previous = int(gl.glGetIntegerv(gl.GL_READ_FRAMEBUFFER_BINDING))
             gl.glBindFramebuffer(gl.GL_READ_FRAMEBUFFER, target)
@@ -240,6 +241,13 @@ def test_real_special_scene_ids_and_gpu_selected_and_drag_contours(app):
             edge_color = np.asarray(SPECIAL_COLORS[kind], np.uint8)
             assert np.any(np.all(pixels[:, :, :3] == edge_color, axis=2)), (
                 f'{kind} actor edge color was not drawn')
+
+        ground_ids, _ = render(clear_view=True)
+        assert np.any(ground_ids > 0), 'Clear View removed the terrain cells'
+        assert not np.any(ground_ids < 0), 'Clear View retained non-ground GPU geometry'
+        restored_ids, _ = render()
+        assert all(np.any(restored_ids == code) for code in codes.values()), (
+            'turning Clear View off did not restore actor geometry')
 
         gate_code = codes['gate']
         view.selected_special = ('gate', 1, -1)

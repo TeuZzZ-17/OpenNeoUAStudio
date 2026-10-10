@@ -45,3 +45,21 @@ def grid_paste_targets(doc, clipboard: GridClipboard, anchor, interior=False):
             return None
         result.append((c, r, values))
     return result
+
+
+def move_grid_cell(doc, source, target, clipboard):
+    """Move a sector or building, leaving base terrain at its old location.
+
+    Height and ownership belong to map coordinates, so they are not moved.
+    """
+    if clipboard is None or source == target:
+        return False
+    sx, sy = source
+    tx, ty = target
+    if not all(1 <= x < doc.mw - 1 and 1 <= y < doc.mh - 1
+               for x, y in (source, target)):
+        return False
+    for layer, value in zip(clipboard.layers, clipboard.cells[0][2]):
+        doc.grids[layer][sy][sx] = '00'
+        doc.grids[layer][ty][tx] = value
+    return True

@@ -106,7 +106,7 @@ def test_gate_and_item_visuals_restore_underlay_and_respect_authored_buildings()
     update_special(doc, 'gate', gate, {'x': 2, 'y': 2})
     assert (doc.grids['type'][2][2], doc.grids['blg'][2][2]) == ('03', '19')
     update_special(doc, 'gate', gate, {'x': 3, 'y': 3})
-    assert (doc.grids['type'][2][2], doc.grids['blg'][2][2]) == ('ab', '00')
+    assert (doc.grids['type'][2][2], doc.grids['blg'][2][2]) == ('00', '00')
     assert (doc.grids['type'][3][3], doc.grids['blg'][3][3]) == ('03', '19')
     remove_special(doc, 'gate', gate)
     assert (doc.grids['type'][3][3], doc.grids['blg'][3][3]) == ('ab', '00')
@@ -358,6 +358,36 @@ def test_special_context_menus_cancel_unplaced_previews_and_gate_key_actions(win
     assert all(placed_actions[label].isEnabled() for label in key_actions)
 
 
+def test_delete_shortcut_reuses_gate_key_and_object_callbacks(win, app):
+    slot = add_special(win.doc, 'gate')
+    update_special(win.doc, 'gate', slot, {'x': 2, 'y': 2, 'keys': [(3, 2)]})
+    panel = win.special_panels['gate']
+    win.palette_tabs.setCurrentIndex(win.special_tab_indices['gate'])
+    panel.refresh(win.doc, slot)
+    win.show()
+    app.processEvents()
+
+    panel.keys.setCurrentRow(0)
+    panel.keys.setFocus()
+    QTest.keyClick(panel.keys, Qt.Key.Key_Delete)
+    assert win.doc.visible_gate_slots == 1
+    assert win.doc.gates[slot]['keys'] == []
+
+    panel.list.setFocus()
+    QTest.keyClick(panel.list, Qt.Key.Key_Delete)
+    assert win.doc.visible_gate_slots == 0
+    win.undo()
+    assert win.doc.visible_gate_slots == 1 and win.doc.gates[slot]['keys'] == []
+
+    before = win.doc.snapshot()
+    win._add_special('gate')
+    assert win._special_draft is not None
+    panel.list.setFocus()
+    QTest.keyClick(panel.list, Qt.Key.Key_Delete)
+    assert win._special_draft is None
+    assert win.doc.snapshot() == before
+
+
 def test_copy_special_preview_shifts_keys_and_cancel_keeps_source(win):
     panel = win.special_panels['gate']
     win.palette_tabs.setCurrentIndex(win.special_tab_indices['gate'])
@@ -442,7 +472,7 @@ def test_gem_visual_uses_building_sector_type_and_restores_underlay():
     assert (doc.grids['type'][2][2], doc.grids['blg'][2][2]) == ('7b', '32')
 
     update_special(doc, 'gem', gem, {'x': 4, 'y': 4}, buildings=buildings)
-    assert (doc.grids['type'][2][2], doc.grids['blg'][2][2]) == ('ab', '00')
+    assert (doc.grids['type'][2][2], doc.grids['blg'][2][2]) == ('00', '00')
     assert (doc.grids['type'][4][4], doc.grids['blg'][4][4]) == ('7b', '32')
 
     update_special(doc, 'gem', gem, {'blg': 51}, buildings=buildings)
@@ -602,7 +632,7 @@ def test_item_preview_hover_preserves_uncommitted_countdown(win):
     QTest.keyClicks(line_edit, '12:34')
     pending_text, pending_value = line_edit.text(), countdown.value()
     assert pending_text == '12:34' and pending_value == 754000
-    assert win._special_draft[1]['countdown'] == 45001
+    assert win._special_draft[1]['countdown'] == 754000
 
     win._move_special_draft((2, 2))
     assert line_edit.text() == pending_text
@@ -776,3 +806,82 @@ def test_real_special_descriptors_actor_ids_and_rendered_pixel_selection(win, ap
     view._render_timer.stop()
     view._settle.stop()
     view._nav_timer.stop()
+
+
+def test_clear_view_filters_cpu_actor_geometry_without_document_edits(win, monkeypatch):
+    from PySide6.QtCore import QRunnable, Signal
+    from map_editor.core.ldf_model import dumps_ldf
+    from map_editor.render import map_viewport
+
+    view, doc = win.view, win.doc
+    lib = win._lib()
+    assert lib is not None
+    view._render_timer.stop()
+    view._settle.stop()
+    view._nav_timer.stop()
+    view._pool.waitForDone(10000)
+    view._job = None
+    view._software_fallback = True
+    view.doc, view.lib = doc, lib
+    view.resize(640, 480)
+
+    doc.squads = [dict(owner=1, veh=1, num=1, x=4, y=4,
+                       hidden=False, useable=False, custom_name=None)]
+    baseline = dumps_ldf(doc)
+    terrain = view.terrain
+    polygons = scene_polygons(lib, doc, terrain, view.camera.copy())
+    actor_code = -(doc.mw * doc.mh + 1)
+    assert any(int(polygon.payload[1]) == actor_code for polygon in polygons)
+
+    before_key = view._render_key()
+    history = (len(win.history._undo), len(win.history._redo), win.dirty)
+    assert not win.clear_view_action.isChecked()
+    win.clear_view_action.trigger()
+    assert view.clear_view and win.clear_view_action.isChecked()
+    assert dumps_ldf(doc) == baseline
+    assert (len(win.history._undo), len(win.history._redo), win.dirty) == history
+    current_key = view._render_key()
+    assert current_key[1] == before_key[1] and current_key[-1] == before_key[-1]
+    assert current_key[2] is True
+
+    captured = []
+
+    class _Signals(QObject):
+        finished = Signal(object)
+
+    class _CaptureJob(QRunnable):
+        def __init__(self, polygons, camera, tables, key, generation, terrain,
+                     preview_cells=(), preview_codes=()):
+            super().__init__()
+            self.polygons, self.camera, self.tables, self.key = polygons, camera, tables, key
+            self.signals = _Signals()
+            captured.append(self)
+
+        def run(self):
+            pass
+
+    monkeypatch.setattr(map_viewport, '_RenderJob', _CaptureJob)
+    view._launch_render()
+    assert captured
+    assert all(int(polygon.payload[1]) > 0 for polygon in captured[-1].polygons)
+    frame = render_scene(captured[-1].polygons, captured[-1].camera,
+                         captured[-1].tables, fast=captured[-1].key[-1])
+    assert np.any(frame.cell_ids > 0)
+    assert not np.any(frame.cell_ids < 0)
+
+
+def test_dragging_sector_over_ordinary_building_replaces_it_and_supports_undo(win):
+    win.doc.grids['type'][2][2] = 'a1'
+    win.doc.grids['blg'][4][4] = '02'
+    win.doc.grids['type'][4][4] = 'b2'
+    before = win.doc.snapshot()
+    win.set_tool('select')
+    win._begin_actor_drag('building', (2, 2))
+    win._move_actor_drag((4, 4))
+    assert win._building_drop_valid
+    win.view._moved = True
+    win._finish_building_drag()
+    assert (win.doc.grids['type'][4][4], win.doc.grids['blg'][4][4]) == ('a1', '00')
+    assert (win.doc.grids['type'][2][2], win.doc.grids['blg'][2][2]) == ('00', '00')
+    win.undo()
+    assert win.doc.snapshot() == before

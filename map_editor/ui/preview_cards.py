@@ -1,6 +1,6 @@
 """Resource cards with a fitted model, faction accent and readable details."""
 from PySide6.QtCore import QPointF, QRect, QSize, Qt, Signal
-from PySide6.QtGui import QColor, QFont, QTextLayout, QTextOption
+from PySide6.QtGui import QColor, QFont, QPen, QTextLayout, QTextOption
 from PySide6.QtWidgets import (QAbstractItemView, QHBoxLayout, QLabel, QListWidget, QLayout, QScrollArea,
                               QPushButton, QStyledItemDelegate, QStyle, QStyleOptionButton)
 
@@ -59,10 +59,21 @@ class ResourceCardDelegate(QStyledItemDelegate):
         card = option.rect.adjusted(3, 3, -3, -3)
         painter.save()
         color = index.data(COLOR_ROLE) or QColor(175, 175, 175)
-        painter.setPen(Qt.PenStyle.NoPen)
-        painter.setBrush(QColor(62, 62, 62) if option.state & QStyle.StateFlag.State_Selected
-                         else QColor(43, 43, 43))
+        selected = bool(option.state & QStyle.StateFlag.State_Selected)
+        if selected:
+            base = QColor(43, 45, 49)
+            tint = 0.24
+            background = QColor(*(round(base_value * (1 - tint) + accent_value * tint)
+                                  for base_value, accent_value in zip(
+                                      (base.red(), base.green(), base.blue()),
+                                      (color.red(), color.green(), color.blue()))))
+            painter.setPen(QPen(QColor(242, 247, 255), 2))
+        else:
+            background = QColor(43, 43, 43)
+            painter.setPen(Qt.PenStyle.NoPen)
+        painter.setBrush(background)
         painter.drawRoundedRect(card, 5, 5)
+        painter.setPen(Qt.PenStyle.NoPen)
         painter.setBrush(color)
         painter.drawRoundedRect(QRect(card.left(), card.top() + 7, 3, card.height() - 14), 1, 1)
         size, width, title_layout, detail_layout, title_height, detail_height = self.text_layout(index, option.rect.width())

@@ -109,6 +109,7 @@ def normalize_host_ai(ai=None) -> dict:
 def ensure_host_defaults(host: dict) -> None:
     host.setdefault("reload_const", DEFAULT_HOST_RELOAD_CONST)
     host.setdefault("viewangle", DEFAULT_HOST_VIEWANGLE)
+    host.setdefault("body_angle", 0)
     host["ai"] = normalize_host_ai(host.get("ai"))
 
 
@@ -743,6 +744,8 @@ def loads_ldf(raw_text: str, encoding: str = DEFAULT_LDF_ENCODING) -> LdfDocumen
                     cur_host['pos_y'] = float(get_val())
                 elif t == 'reload_const':
                     cur_host['reload_const'] = int(get_val())
+                elif t == 'body_angle':
+                    cur_host['body_angle'] = int(float(get_val())) % 360
                 elif t == 'viewangle':
                     cur_host['viewangle'] = int(float(get_val()))
                 elif t in HOST_AI_FIELDS:
@@ -944,6 +947,8 @@ def dumps_ldf(doc: LdfDocument, defs: dict | None = None) -> str:
             w("   mb_status = unknown")
         w(f"   reload_const = {h.get('reload_const', DEFAULT_HOST_RELOAD_CONST)}")
         w(f"   viewangle = {h.get('viewangle', DEFAULT_HOST_VIEWANGLE)}")
+        if h.get('body_angle', 0) % 360:
+            w(f"   body_angle = {h['body_angle'] % 360}")
         if idx > 0:
             ai = h['ai']
             if ai['preset'] not in HOST_AI_PRESETS and ai['preset'] != 'Custom':

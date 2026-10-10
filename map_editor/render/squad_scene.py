@@ -2,6 +2,7 @@
 from dataclasses import dataclass
 import math
 
+from .sector_state import sector_type
 from ..core.ldf_model import SECTOR_SIZE, grid_to_world
 
 MAX_PREVIEW_MEMBERS = 256
@@ -14,6 +15,15 @@ class SquadMember:
     vehicle: int
     owner: int
     position: tuple
+    body_angle: float = 0
+
+
+def body_rotation(degrees):
+    import numpy as np
+    angle = math.radians(degrees)
+    c, s = math.cos(angle), math.sin(angle)
+    # World models use the transpose of the engine's RotateY body matrix.
+    return np.array(((c, 0, -s), (0, 1, 0), (s, 0, c)))
 
 
 def squad_xz(squad):
@@ -56,7 +66,7 @@ def ground_height(doc, terrain, lib, x, z):
     hits, polygons = [], []
     if dx % 4 and dz % 4:
         if lib is not None:
-            resolved = lib.resolver.resolve_typ(int(doc.grids['type'][r][c], 16))
+            resolved = lib.resolver.resolve_typ(sector_type(doc, lib, c, r))
             index = 4 if resolved.sector.single else (dz % 4 - 1) * 3 + dx % 4 - 1
             sub = next((s for s in resolved.subs if s.index == index), None)
             skeleton = lib.collision_skeleton(sub.sklt_name) if sub and sub.sklt_name else None
@@ -140,4 +150,4 @@ def host_members(doc, terrain, lib=None):
     for index, host in enumerate(doc.host_stations):
         if doc.cell_is_valid(host):
             yield SquadMember(len(doc.squads) + index, 0, host['veh'], host['owner'],
-                              host_position(host, doc, terrain, lib))
+                              host_position(host, doc, terrain, lib), host.get('body_angle', 0))

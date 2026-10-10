@@ -80,6 +80,7 @@ class MapViewport(QWidget):
         self.draft_active = False
         self.dragged_codes = set()
         self.selected_special = None
+        self.selected_building = None
         self._press_pos = None
         self._drag_actor = False
         self._moved = False
@@ -98,12 +99,15 @@ class MapViewport(QWidget):
         self.owner_colors = load_owner_colors()
         self.show_grid = True
         self.show_sky = True
+        self.clear_view = False
         self._sky_image = QImage()
         self._sky_scaled = QPixmap()
         self.hover: tuple[int, int] | None = None
         self.brush_cells: set[tuple[int, int]] = set()
         self.selection: set[tuple[int, int]] = set()
         self._drag_button = None
+        self._space_pan_active = False
+        self._space_pan_gesture = False
         self._last = QPointF()
         self._interacting = False
         self._editing = False
@@ -141,6 +145,7 @@ class MapViewport(QWidget):
         self._annotation_base = None
         self.hover = None
         self.selection.clear()
+        self.selected_building = None
         self.brush_cells.clear()
         self.terrain.rebuild(doc.grids['hgt'])
         self.reset_camera()
@@ -176,6 +181,10 @@ class MapViewport(QWidget):
 
     def set_sky_visible(self, visible: bool):
         self.show_sky = visible
+        self.update()
+
+    def set_clear_view(self, visible: bool):
+        self.clear_view = bool(visible)
         self.update()
 
     def set_camera_angles(self, yaw, pitch):
@@ -230,7 +239,8 @@ class MapViewport(QWidget):
         return (cam.yaw, cam.pitch, cam.zoom, cam.center, cam.pan, self.width(), self.height(), cam.perspective, cam.fov)
 
     def _render_key(self):
-        return (self._scene_revision, self._camera_key(), self._interacting or self._editing)
+        return (self._scene_revision, self._camera_key(), self.clear_view,
+                self._interacting or self._editing)
 
     def _launch_render(self):
         if self._closed or self._job is not None or self.lib is None or self.doc is None:
@@ -244,6 +254,8 @@ class MapViewport(QWidget):
         try:
             # Il caricatore Qt resta nel thread della finestra; il raster lavora a parte.
             polygons = scene_polygons(self.lib, self.doc, terrain, cam)
+            if self.clear_view:
+                polygons = [polygon for polygon in polygons if int(polygon.payload[1]) > 0]
         except Exception as exc:
             self._frame_key = key
             self.statusMessage.emit(f"Unable to update the view: {exc}")
@@ -297,20 +309,20 @@ class MapViewport(QWidget):
             cam.yaw, cam.pitch, cam.zoom, cam.center, cam.pan, cam.width, cam.height = self._frame_key[1][:7]
             cam.perspective, cam.fov = self._frame_key[1][7:]
             overlay = getattr(self, 'building_overlay', None)
-            if overlay is not None and not self.camera.perspective:
+            if overlay is not None and not self.camera.perspective and not self.clear_view:
                 overlay.draw(painter, cam, self._display_terrain)
             if self._frame_key[1] == self._camera_key() and not self.camera.perspective:
                 painter.drawImage(0, 0, self._annotations())
                 overlay = getattr(self, 'squad_overlay', None)
-                if overlay is not None:
+                if overlay is not None and not self.clear_view:
                     overlay.draw(painter, cam, self._display_terrain)
         overlay = getattr(self, 'special_overlay', None)
-        if overlay is not None and self._frame is not None:
+        if overlay is not None and self._frame is not None and not self.clear_view:
             overlay.draw(painter, cam, self._display_terrain)
         self.draw_interaction_overlay(painter)
         if self._job is not None or self._render_timer.isActive():
             painter.setPen(QColor(160, 170, 180))
-            painter.drawText(12, self.height() - 12, "Updating view…")
+            painter.drawText(12, self.height() - 12, "Updating view")
 
     def _annotations(self):
         if self._annotation_base is None:
@@ -470,13 +482,15 @@ class MapViewport(QWidget):
                     painter.drawLine(a, b)
 
     def pick_cell(self, x: float, y: float):
-        if self._frame is None or self._frame_key[1] != self._camera_key():
+        if (self._frame is None or self._frame_key[1] != self._camera_key()
+                or self._frame_key[2] != self.clear_view):
             return None
         cell = self._frame.pick(x, y, self.doc.mw)
         return cell if cell is None or cell[1] < self.doc.mh else None
 
     def pick_squad(self, x, y):
-        if (self._frame is None or self._frame_key[1] != self._camera_key()
+        if (self.clear_view or self._frame is None or self._frame_key[1] != self._camera_key()
+                or self._frame_key[2] != self.clear_view
                 or self._frame_key[0] != self._scene_revision):
             return None
         ix, iy = int(x), int(y)
@@ -489,6 +503,7 @@ class MapViewport(QWidget):
 
     def _pick_code(self, x, y):
         if (self._frame is None or self._frame_key[1] != self._camera_key()
+                or self._frame_key[2] != self.clear_view
                 or self._frame_key[0] != self._scene_revision):
             return 0
         ix, iy = int(x), int(y)
@@ -497,7 +512,7 @@ class MapViewport(QWidget):
         return 0
 
     def pick_scene_object(self, x, y):
-        if self.doc is None:
+        if self.doc is None or self.clear_view:
             return None
         from .special_scene import special_members
         code = self._pick_code(x, y)
@@ -522,7 +537,8 @@ class MapViewport(QWidget):
         return None
 
     def pick_host(self, x, y):
-        if (self._frame is None or self._frame_key[1] != self._camera_key()
+        if (self.clear_view or self._frame is None or self._frame_key[1] != self._camera_key()
+                or self._frame_key[2] != self.clear_view
                 or self._frame_key[0] != self._scene_revision):
             return None
         ix, iy = int(x), int(y)
@@ -545,6 +561,7 @@ class MapViewport(QWidget):
         self._drag_button = event.button()
         self._last = event.position()
         self._press_pos = event.position()
+        self._space_pan_gesture = False
         self._moved = False
         self._drag_actor = False
         self._paint_gesture = False
@@ -554,6 +571,10 @@ class MapViewport(QWidget):
         self._sweep_last = None
         if self.camera.perspective:
             return
+        if event.button() == Qt.MouseButton.LeftButton and self._space_pan_active:
+            self._space_pan_gesture = True
+            self.setCursor(Qt.CursorShape.ClosedHandCursor)
+            return
         if self.draft_active and event.button() in (Qt.MouseButton.LeftButton, Qt.MouseButton.RightButton):
             self.placementConfirmed.emit(self.ground_cell(event.position().x(), event.position().y()))
             self._drag_button = None
@@ -561,33 +582,55 @@ class MapViewport(QWidget):
         if event.button() == Qt.MouseButton.LeftButton:
             cell = self.ground_cell(event.position().x(), event.position().y())
             overlay = getattr(self, 'special_overlay', None)
-            hit = self.pick_scene_object(event.position().x(), event.position().y())
-            if hit is not None and hit[0] == 'special' and overlay is not None and overlay.window._special_placement is None:
+            # Ownership and height tools never grab objects; sector paint grabs buildings only.
+            painting = self.active_tool in ('owner', 'terrain')
+            modifiers = event.modifiers()
+            if modifiers & Qt.KeyboardModifier.ShiftModifier and not painting:
+                self._sweep_gesture = True
+                self._sweep_over(cell)
+                return
+            hit = None if painting else self.pick_scene_object(event.position().x(), event.position().y())
+            if not painting and hit is None and overlay is not None:
+                special = overlay.pick(cell)
+                if special is not None:
+                    hit = ('special', special)
+            if (hit is not None and hit[0] == 'special' and overlay is not None
+                    and overlay.window._special_placement is None
+                    and not modifiers & Qt.KeyboardModifier.ControlModifier):
                 self._drag_actor = True
                 self.actorDragStarted.emit('special', {'cell': cell, 'hit': hit[1]})
                 return
-            if event.modifiers() & Qt.KeyboardModifier.ShiftModifier and self.active_tool != 'terrain':
-                self._sweep_gesture = True
-                self._sweep_over(self.ground_cell(event.position().x(), event.position().y()))
-                return
-            host = self.pick_host(event.position().x(), event.position().y())
-            if host is not None:
-                self.hostPressed.emit(host)
-                self._drag_actor = True
-                self.actorDragStarted.emit('host', self.ground_cell(event.position().x(), event.position().y()))
-                return
-            squad = self.pick_squad(event.position().x(), event.position().y())
-            if squad is not None:
-                self.squadPressed.emit(squad, event.modifiers())
-                self._drag_actor = not bool(event.modifiers() & Qt.KeyboardModifier.ControlModifier)
-                if self._drag_actor:
-                    self.actorDragStarted.emit('squad', self.ground_cell(event.position().x(), event.position().y()))
-                else:
-                    self._drag_button = None
-                return
+            if not painting:
+                host = self.pick_host(event.position().x(), event.position().y())
+                if host is not None and not modifiers & Qt.KeyboardModifier.ControlModifier:
+                    self.hostPressed.emit(host)
+                    self._drag_actor = True
+                    self.actorDragStarted.emit('host', cell)
+                    return
+                squad = self.pick_squad(event.position().x(), event.position().y())
+                if squad is not None:
+                    self.squadPressed.emit(squad, modifiers)
+                    self._drag_actor = not bool(modifiers & Qt.KeyboardModifier.ControlModifier)
+                    if self._drag_actor:
+                        self.actorDragStarted.emit('squad', cell)
+                    else:
+                        self._drag_button = None
+                    return
+            if not painting and not modifiers & Qt.KeyboardModifier.ControlModifier:
+                if (self.active_tool in ('select', 'sector', 'building', 'squad', 'host', 'special')
+                        and not self.clear_view and cell and self.doc is not None):
+                    col, row = cell
+                    if 1 <= col < self.doc.mw-1 and 1 <= row < self.doc.mh-1:
+                        building = int(str(self.doc.grids['blg'][row][col]), 16)
+                        # Ordinary sectors are painted, never moved. Only a placed building can be dragged.
+                        if building:
+                            self._drag_actor = True
+                            self.actorDragStarted.emit('building', cell)
+                            return
             if self.active_tool == 'special':
                 return
-            cell = self.pick_cell(event.position().x(), event.position().y())
+            cell = (self.ground_cell(event.position().x(), event.position().y()) if self.active_tool == 'terrain' else
+                    self.pick_cell(event.position().x(), event.position().y()))
             if cell and self.sample_active and self.active_tool == 'terrain':
                 self.cellPressed.emit(*cell, event.button(), event.modifiers())
                 self._drag_button = None
@@ -619,6 +662,11 @@ class MapViewport(QWidget):
             self.setCursor(Qt.CursorShape.ClosedHandCursor)
             self._pan_pixels(delta.x(), delta.y())
             return
+        if self._drag_button == Qt.MouseButton.LeftButton and self._space_pan_gesture:
+            if self._space_pan_active:
+                self.setCursor(Qt.CursorShape.ClosedHandCursor)
+                self._pan_pixels(delta.x(), delta.y())
+            return
         if self.camera.perspective:
             self.setCursor(Qt.CursorShape.CrossCursor)
             return
@@ -637,7 +685,7 @@ class MapViewport(QWidget):
             self.setCursor(Qt.CursorShape.PointingHandCursor)
         elif self.draft_active and not self.preview_cells and not any(a.get('_preview') for a in self.doc.squads + self.doc.host_stations):
             self.setCursor(Qt.CursorShape.ForbiddenCursor)
-        elif self.draft_active or self.active_tool == 'terrain' or event.modifiers() & Qt.KeyboardModifier.ControlModifier:
+        elif self.draft_active or self.active_tool in ('sector', 'building', 'owner', 'terrain') or event.modifiers() & Qt.KeyboardModifier.ControlModifier:
             self.setCursor(Qt.CursorShape.CrossCursor)
         elif self.pick_squad(pos.x(), pos.y()) is not None or self.pick_host(pos.x(), pos.y()) is not None:
             self.setCursor(Qt.CursorShape.OpenHandCursor)
@@ -661,6 +709,12 @@ class MapViewport(QWidget):
 
     def mouseReleaseEvent(self, event):
         cell = self.ground_cell(event.position().x(), event.position().y())
+        if event.button() == Qt.MouseButton.LeftButton and self._space_pan_gesture:
+            self._space_pan_gesture = False
+            self._drag_button = None
+            self._press_pos = None
+            self.unsetCursor()
+            return
         if self.camera.perspective or self._sweep_gesture:
             if self.camera.perspective and event.button() == Qt.MouseButton.RightButton and not self._moved:
                 self.contextRequested.emit(event.position(),event.globalPosition().toPoint())
@@ -675,6 +729,8 @@ class MapViewport(QWidget):
             return
         if event.button() == Qt.MouseButton.LeftButton:
             if self._drag_actor:
+                if self._moved:
+                    self.actorDragged.emit(cell)
                 self.actorDragFinished.emit()
                 self.unsetCursor()
             elif self._paint_gesture:
@@ -693,7 +749,8 @@ class MapViewport(QWidget):
     def mouseDoubleClickEvent(self, event):
         if self.camera.perspective:
             return
-        cell = self.pick_cell(event.position().x(), event.position().y())
+        cell = (self.ground_cell(event.position().x(), event.position().y()) if self.active_tool == 'terrain' else
+                    self.pick_cell(event.position().x(), event.position().y()))
         if self.active_tool == 'squad' and event.button() == Qt.MouseButton.LeftButton and self.pick_squad(event.position().x(), event.position().y()) is None:
             self.selectionCleared.emit()
         elif cell and event.button() == Qt.MouseButton.LeftButton:
@@ -802,8 +859,8 @@ class MapViewport(QWidget):
             length = max(1,math.sqrt(forward**2+side**2+up**2))
             speed = (2200 if QApplication.keyboardModifiers() & Qt.KeyboardModifier.ShiftModifier else 700)*dt/length
             x,y,z = self.camera.center
-            self.camera.center = (x+(forward*math.sin(yaw)+side*math.cos(yaw))*speed,
-                                  y-up*speed,z+(-forward*math.cos(yaw)+side*math.sin(yaw))*speed)
+            self.camera.center = (x+(forward*math.sin(yaw)+-side*math.cos(yaw))*speed,
+                                  y-up*speed,z+(-forward*math.cos(yaw)+-side*math.sin(yaw))*speed)
             self.cameraChanged.emit()
             self.update()
             return
@@ -819,6 +876,10 @@ class MapViewport(QWidget):
 
     def keyPressEvent(self, event):
         key = event.key()
+        if key == Qt.Key.Key_Space and not self.camera.perspective:
+            self._space_pan_active = True
+            event.accept()
+            return
         if key == Qt.Key.Key_Escape:
             if self.camera.perspective:
                 self.reset_camera()
@@ -854,6 +915,12 @@ class MapViewport(QWidget):
 
     def keyReleaseEvent(self, event):
         key = event.key()
+        if key == Qt.Key.Key_Space:
+            self._space_pan_active = False
+            if self._space_pan_gesture:
+                self.unsetCursor()
+            event.accept()
+            return
         if key in self._nav_keys:
             if not event.isAutoRepeat():
                 self._nav_keys.discard(key)
@@ -871,6 +938,10 @@ class MapViewport(QWidget):
         self._sweep_last = None
         self._sweep_gesture = False
         self._nav_keys.clear()
+        self._space_pan_active = False
+        if self._space_pan_gesture:
+            self._space_pan_gesture = False
+            self._drag_button = None
         self._nav_timer.stop()
         super().focusOutEvent(event)
 

@@ -36,41 +36,27 @@ def _smooth_noise(rng, height, width, cells):
             + (source[(y0+1)[:, None], x0] * (1-tx) + source[(y0+1)[:, None], x0+1] * tx) * ty[:, None])
 
 
-def _retail_palette(doc):
-    from .. import bootstrap
-    from ..core.game_installation import GameInstallation
-    from ..core.resource_catalog import preview_image
-    install = bootstrap.installation() or GameInstallation.suggest(bootstrap.game_data_dir())
-    directory = install.folder('briefings')
-    candidates = []
-    for field in ('mbmap', 'dbmap'):
-        name = Path(str(doc.lvl_info.get(field, '')).replace('\\', '/')).name
-        if re.fullmatch(r'[md]b_\d+\.(png|iff)', name, re.I):
-            candidates.append(directory / name)
-    candidates.extend(directory / name for name in ('Mb_01.png', 'MB_01.IFF', 'Db_01.png', 'DB_01.IFF'))
-    for path in candidates:
-        if path.is_file():
-            image = preview_image(path, None)
-            if image is not None and not image.isNull():
-                rgba = image.convertToFormat(QImage.Format.Format_RGBA8888)
-                pixels = np.frombuffer(rgba.bits(), np.uint8).reshape(rgba.height(), rgba.bytesPerLine())[:, :rgba.width()*4].reshape(-1, 4)[:, :3]
-                luminance = pixels @ np.array((.299, .587, .114))
-                order = np.argsort(luminance)
-                # Only colour statistics are reused; all geography comes from the edited map.
-                bins = np.array_split(order[luminance[order] > 3], 24)
-                if all(len(bucket) for bucket in bins):
-                    return np.vstack((np.zeros(3), [pixels[bucket].mean(axis=0) for bucket in bins]))
-    return None
+def _soften(field, radius):
+    # Small separable box filter: preserve terrain structures while reducing
+    # the stippled look of distant, indexed game textures.
+    output = field
+    for axis in (0, 1):
+        pad = [(0, 0)] * field.ndim
+        pad[axis] = (radius, radius)
+        padded = np.pad(output, pad, mode='edge')
+        output = sum(np.take(padded, range(i, i+field.shape[axis]), axis=axis)
+                     for i in range(2*radius+1)) / (2*radius+1)
+    return output
 
 
-def style_briefing(image, doc, camera, reference_palette=None):
+def style_briefing(image, doc, camera):
     image = image.convertToFormat(QImage.Format.Format_RGBA8888)
     height, width = image.height(), image.width()
     rgba = np.frombuffer(image.bits(), np.uint8).reshape(height, image.bytesPerLine())[:, :width * 4].reshape(height, width, 4)
     color = rgba[:, :, :3].astype(float)
     luminance = color @ np.array((.299, .587, .114))
     yy, xx = np.indices((height, width))
-    wx = (xx - width / 2) / camera.zoom + camera.center[0]
+    wx = -(xx - width / 2) / camera.zoom + camera.center[0]
     wz = (yy - height / 2) / camera.zoom + camera.center[2]
     cols, rows = np.floor(wx / SECTOR_SIZE).astype(int), np.floor(-wz / SECTOR_SIZE).astype(int)
     inside = ((cols >= 1) & (cols < doc.mw - 1) & (rows >= 1) & (rows < doc.mh - 1) & (rgba[:, :, 3] > 0))
@@ -88,19 +74,20 @@ def style_briefing(image, doc, camera, reference_palette=None):
     rng = np.random.default_rng(1977)
     grain = rng.random((height, width))
     mottling = _smooth_noise(rng, height, width, 12)
-    local = (np.roll(luminance,1,0) + np.roll(luminance,-1,0) + np.roll(luminance,1,1) + np.roll(luminance,-1,1)) / 4
     scale = max(1, float(np.percentile(luminance[inside], 95))) if inside.any() else 255
-    tone = np.clip(luminance / scale, 0, 1) ** 2.4 * .72
-    tone *= relief * (.86 + grain*.28) * (.68 + mottling*.55)
-    tone *= np.clip(1 + (luminance-local) / max(scale, 1)*1.5, .55, 1.6)
+    fine = _soften(luminance, 1)
+    broad = _soften(luminance, 2)
+    detail = np.maximum(0, fine-broad) / scale
+    # Original MBPIX combine painted relief with crisp urban accents. The
+    # relief follows authored heights; texture detail supplies the buildings.
+    tone = np.clip((luminance*.42 + fine*.48 + broad*.10) / scale, 0, 1) ** 1.65 * .82
+    tone *= _soften(relief, 2) * (.95 + grain*.10) * (.82 + mottling*.32)
+    tone += detail*.32
     tone = np.clip(tone, 0, 1)
-    if reference_palette is not None:
-        # Retail artwork has a narrow, dark terrain palette and bright relief accents.
-        palette = np.asarray(reference_palette, float)
-        coordinates = np.linspace(0, 1, len(palette))
-        color = np.stack([np.interp(tone, coordinates, palette[:, channel]) for channel in range(3)], axis=2)
-    else:
-        color = (color*.5 + luminance[:, :, None]*.5) * (.3 + tone*.6)[:, :, None]
+    # The edited map supplies the hue of every pixel. The MBPIX treatment
+    # changes luminance/relief, without borrowing a tint from unrelated art.
+    chroma = color / np.maximum(luminance[:, :, None], 1.0)
+    color = chroma * (tone * 170.0)[:, :, None]
     if cell_pixels >= 4:
         line = ((np.minimum(wx % SECTOR_SIZE, SECTOR_SIZE-wx % SECTOR_SIZE) < .4/camera.zoom)
                 | (np.minimum((-wz) % SECTOR_SIZE, SECTOR_SIZE-(-wz) % SECTOR_SIZE) < .4/camera.zoom))
@@ -157,7 +144,7 @@ def render_briefing(doc, lib, surface=None):
     image = image.scaled(output_camera.width, output_camera.height,
                          Qt.AspectRatioMode.IgnoreAspectRatio,
                          Qt.TransformationMode.SmoothTransformation)
-    return style_briefing(image, doc, output_camera, _retail_palette(doc))
+    return style_briefing(image, doc, output_camera)
 
 
 def available_stem(directory, preferred):

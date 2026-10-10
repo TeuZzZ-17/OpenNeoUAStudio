@@ -1,6 +1,5 @@
 """Compact colored tabs backed by a stacked page widget."""
 
-from .special_overlay import COLORS
 from PySide6.QtCore import Signal
 from PySide6.QtWidgets import (
     QGridLayout,
@@ -12,9 +11,21 @@ from PySide6.QtWidgets import (
 )
 
 
-TAB_COLORS = ((75, 195, 220), (235, 155, 70), (90, 200, 125), (180, 135, 240),
-              (225, 120, 180), (235, 210, 80), (120, 155, 245),
-              COLORS['gate'], COLORS['item'], COLORS['gem'], (75, 195, 220), (235, 155, 70))
+# Twelve contrasting colors, one for each palette entry (including Script/Level Info).
+TAB_COLORS = (
+    (75, 195, 220),    # Sectors - cyan
+    (240, 153, 75),    # Buildings - orange
+    (90, 210, 105),    # Factions - green
+    (169, 120, 238),   # Terrain - violet
+    (238, 106, 159),   # Squad - pink
+    (235, 210, 75),    # Hosts - yellow
+    (100, 146, 245),   # Tech - blue
+    (70, 208, 178),    # Beamgates - turquoise
+    (242, 105, 92),    # Super Items - red
+    (169, 219, 82),    # Gems - lime
+    (225, 105, 230),   # Script - magenta
+    (190, 165, 120),   # Level Info - sand
+)
 
 
 class PaletteTabs(QWidget):

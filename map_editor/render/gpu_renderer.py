@@ -65,12 +65,14 @@ uniform usampler2D shades;
 uniform usampler2D tracy;
 uniform usampler2D backdrop;
 uniform ivec2 mapSize;
+uniform bool groundOnly;
 layout(location=0) out uint indexOut;
 #ifndef FLAT_PASS
 layout(location=1) out int cellOut;
 layout(location=2) out vec4 edgesOut;
 #endif
 void main(){
+    if(groundOnly && mode.z<0.0) discard;
     uint source=uint(mode.y);
     if(mat.x>=0.0){
         ivec2 size=ivec2(mat.yz);
@@ -157,6 +159,37 @@ void main(){
         float grey=dot(color.rgb,vec3(0.299,0.587,0.114));
         color.rgb=mix(vec3(grey),vec3(0.62),0.28);
     }
+    // The visible negative sector pixels are the building silhouette.
+    // Keep a yellow inner edge and add a white outer edge only on selection.
+    if(showOverlays){
+        bool buildingPixel=code<0 && -code<=mapSize.x*mapSize.y;
+        uvec4 building=uvec4(0);
+        if(buildingPixel){
+            int id=-code-1;
+            building=stateAt(ivec2(id%mapSize.x,id/mapSize.x));
+            buildingPixel=building.a!=0u;
+        }
+        bool yellowEdge=false;
+        bool whiteOuter=false;
+        for(int axis=0;axis<4;axis++){
+            ivec2 delta=axis==0 ? ivec2(1,0) : axis==1 ? ivec2(-1,0) : axis==2 ? ivec2(0,1) : ivec2(0,-1);
+            ivec2 otherPos=clamp(p+delta,ivec2(0),textureSize(cells,0)-1);
+            int other=texelFetch(cells,otherPos,0).r;
+            if(buildingPixel && other!=code){
+                yellowEdge=true;
+            }
+            if(!buildingPixel && other<0 && -other<=mapSize.x*mapSize.y){
+                int id=-other-1;
+                uvec4 neighbour=stateAt(ivec2(id%mapSize.x,id/mapSize.x));
+                if(neighbour.a==3u) whiteOuter=true;
+            }
+        }
+        if(whiteOuter){color.rgb=vec3(1.0);return;}
+        if(yellowEdge){
+            color.rgb=building.a==2u ? vec3(0.62) : vec3(1.0,0.80,0.16);
+            return;
+        }
+    }
     if(showOverlays && unitCount>0){
         vec4 own=unitStyle(code);
         for(int d=1;d<=3;d++){
@@ -205,7 +238,7 @@ void main(){
 
 def camera_matrix(cam, map_size):
     cy, sy, cp, sp = cam._trig()
-    rotation = np.array(((cy, 0, sy), (sp*sy, -cp, -sp*cy),
+    rotation = np.array(((-cy, 0, -sy), (sp*sy, -cp, -sp*cy),
                          (-cp*sy, -sp, cp*cy)), dtype=np.float64)
     if cam.perspective:
         focal = 1 / math.tan(math.radians(cam.fov)/2)
@@ -485,10 +518,11 @@ class GpuRenderer:
 
     def render(self, camera, width, height, target, *, owner_colors, grid=True, sky=True,
                hover=0, pixel_scale=1.0, overlays=True, transparent_background=False,
-               cursor_color=(210, 210, 210)):
+               cursor_color=(210, 210, 210), clear_view=False):
         self._begin(width, height)
         matrix = camera_matrix(camera, self.map_size)
         self._geometry_program(self.opaque_program, matrix)
+        gl.glUniform1i(self.uniform(self.opaque_program, 'groundOnly'), clear_view)
         gl.glUniform1i(self.uniform(self.opaque_program, 'instanced'), True)
         # Stable order also makes coplanar boundary ties independent of Python
         # object addresses, set iteration, or a previously edited sector type.
@@ -522,7 +556,7 @@ class GpuRenderer:
                 counts = np.fromiter((f[1] for f in geometry.flat_faces), np.int32)
                 triangles = projected[:, :2].reshape(-1, 3, 2)
                 a, b = triangles[:, 1]-triangles[:, 0], triangles[:, 2]-triangles[:, 0]
-                front = np.logical_or.reduceat(a[:, 0]*b[:, 1]-a[:, 1]*b[:, 0]>0, starts//3)
+                front = np.logical_or.reduceat(a[:, 0]*b[:, 1]-a[:, 1]*b[:, 0]<0, starts//3)
                 lo = np.maximum(0, np.floor(np.minimum.reduceat(projected[:, :2], starts))).astype(int)
                 hi = np.minimum((width,height), np.ceil(np.maximum.reduceat(projected[:, :2], starts))).astype(int)
                 if camera.perspective:
@@ -538,6 +572,7 @@ class GpuRenderer:
             gl.glReadBuffer(gl.GL_COLOR_ATTACHMENT0)
             gl.glDepthMask(False)
             self._geometry_program(self.flat_program, matrix)
+            gl.glUniform1i(self.uniform(self.flat_program, 'groundOnly'), clear_view)
             self._bind(self.indices if self.texture_barrier else self.backdrop, 3)
             # Faces with disjoint screen bounds can share one backdrop copy.
             # Tile dependencies preserve painter order for every overlapping pair,
@@ -576,7 +611,7 @@ class GpuRenderer:
         gl.glDepthMask(True)
         gl.glClearBufferfv(gl.GL_DEPTH, 0, np.ones(1, np.float32))
         gl.glEnable(gl.GL_DEPTH_TEST); gl.glDepthFunc(gl.GL_LEQUAL)
-        gl.glEnable(gl.GL_CULL_FACE); gl.glFrontFace(gl.GL_CCW); gl.glCullFace(gl.GL_BACK)
+        gl.glEnable(gl.GL_CULL_FACE); gl.glFrontFace(gl.GL_CW); gl.glCullFace(gl.GL_BACK)
 
     def _present(self, target, width, height, *, owner_colors, grid=True, sky=True,
                  hover=0, pixel_scale=1.0, overlays=True, transparent_background=False,

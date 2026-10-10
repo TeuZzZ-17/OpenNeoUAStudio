@@ -1,0 +1,47 @@
+........................................................................ [ 39%]
+.............................................sssss...................... [ 78%]
+.s....................F.................                                 [100%]
+================================== FAILURES ===================================
+____ test_palette_ctrl_click_and_shift_sweep_only_select_without_applying _____
+
+app = <PySide6.QtWidgets.QApplication(0x2c5c7b43130) at 0x000002C5F80D9F00>
+
+    def test_palette_ctrl_click_and_shift_sweep_only_select_without_applying(app):
+        from map_editor.ui.main_window import MainWindow
+        win = MainWindow()
+        win._new_doc(LdfDocument(mw=7, mh=7), None)
+        win._icons.stop()
+        win.resize(1100, 800)
+        win.show()
+        _wait_frame(app, win.view)
+        win.set_tool('sector')
+        win.sel_typ = 5
+        before = win.doc.snapshot()
+        history_length = len(win.history._undo)
+    
+        cell = (3, 3)
+        point, _ = win.view.camera.world_to_screen(win.view.terrain.cell_center(*cell))
+        QTest.mouseClick(win.view, Qt.MouseButton.LeftButton,
+                         Qt.KeyboardModifier.ControlModifier,
+                         QPoint(round(point[0]), round(point[1])))
+        assert win.view.selection == {cell}
+        assert win.doc.snapshot() == before and len(win.history._undo) == history_length
+    
+        box_cells = ((1, 1), (2, 1))
+        points = [win.view.camera.world_to_screen(win.view.terrain.cell_center(*target))[0]
+                  for target in box_cells]
+        start = QPoint(round(min(point[0] for point in points) - 3),
+                       round(min(point[1] for point in points) - 3))
+        end = QPoint(round(max(point[0] for point in points) + 3),
+                     round(max(point[1] for point in points) + 3))
+        QTest.mousePress(win.view, Qt.MouseButton.LeftButton, Qt.KeyboardModifier.ShiftModifier, pos=start)
+        QTest.mouseMove(win.view, end, 10)
+        QTest.mouseRelease(win.view, Qt.MouseButton.LeftButton, Qt.KeyboardModifier.ShiftModifier, pos=end)
+>       assert all(target in win.view.selection for target in box_cells)
+E       assert False
+E        +  where False = all(<generator object test_palette_ctrl_click_and_shift_sweep_only_select_without_applying.<locals>.<genexpr> at 0x000002C68C2EBA00>)
+
+tests\map_integration\test_ui_smoke.py:216: AssertionError
+=========================== short test summary info ===========================
+FAILED tests/map_integration/test_ui_smoke.py::test_palette_ctrl_click_and_shift_sweep_only_select_without_applying
+1 failed, 177 passed, 6 skipped in 114.41s (0:01:54)

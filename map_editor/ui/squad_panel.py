@@ -30,7 +30,7 @@ class SquadPanel(QWidget):
         self.vehicles = {}
         layout = QVBoxLayout(self)
         filters = QHBoxLayout()
-        self.search = QLineEdit(placeholderText='Filter squads...')
+        self.search = QLineEdit(placeholderText='Filter squads')
         self.faction_filter = QComboBox()
         self.faction_filter.addItem('All factions', None)
         for key, name in FACTIONS.items():
