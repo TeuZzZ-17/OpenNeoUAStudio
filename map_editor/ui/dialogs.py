@@ -292,8 +292,8 @@ class LevelInfoPanel(QWidget):
         self.sky_list.setItemDelegate(ThumbnailDelegate(self.sky_list))
         self.sky_list.setResizeMode(QListWidget.ResizeMode.Adjust)
         self.sky_list.setMovement(QListWidget.Movement.Static)
-        self.sky_list.setMinimumHeight(118)
-        self.sky_list.setMaximumHeight(198)
+        self.sky_list.setMinimumHeight(166)
+        self.sky_list.setMaximumHeight(278)
         self.sky_items = {}
         self._failed_skies = set()
         current_name = Path(self.sky_value.replace("\\", "/")).stem.casefold()
@@ -454,10 +454,11 @@ class LevelInfoPanel(QWidget):
             return
         self._layout_artwork()
         width = self.sky_list.viewport().width()
-        columns = 2 if width >= 285 else 1
-        cell_width = max(120, (width - 2 * self.sky_list.spacing() * columns) // columns)
-        self.sky_list.setGridSize(QSize(cell_width, 118))
-        self.sky_list.setIconSize(QSize(max(92, cell_width - 18), 76))
+        spacing = self.sky_list.spacing()
+        columns = 2 if width >= 2 * 135 + spacing * 3 else 1
+        cell_width = max(1, (width - spacing * (columns + 1)) // columns)
+        self.sky_list.setGridSize(QSize(cell_width, 166))
+        self.sky_list.setIconSize(QSize(max(1, cell_width - 18), 124))
         self._schedule_visible_sky_load()
 
     def _layout_artwork(self):

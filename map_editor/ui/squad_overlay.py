@@ -3,7 +3,8 @@ import math
 import numpy as np
 from PySide6.QtCore import QPointF, QRectF, Qt
 from PySide6.QtGui import QColor, QPen, QPainter, QImage
-from ..render.squad_scene import squad_members
+from ..render.squad_scene import squad_members, host_position
+from ..render.special_scene import scene_object_styles
 
 
 class SquadOverlay:
@@ -59,20 +60,37 @@ class SquadOverlay:
                 padded = np.pad(mask,1)
                 return (mask | padded[:-2,1:-1] | padded[2:,1:-1]
                         | padded[1:-1,:-2] | padded[1:-1,2:])
-            for index,squad in enumerate(view.doc.squads + view.doc.host_stations):
+            for index, style in enumerate(scene_object_styles(view)):
                 mask = ids == -(view.doc.mw*view.doc.mh+index+1)
                 if not mask.any():
                     continue
-                selected = ((index < len(view.doc.squads) and index in self.selected) or
-                            (index - len(view.doc.squads) == getattr(view, 'selected_host', -1))) and not squad.get('_preview')
+                selected = style[3] == 2
                 edge = mask & expand(~mask)
                 if selected:
-                    pixels[expand(expand(mask)) & ~mask] = (255,250,210,255)
+                    pixels[expand(expand(mask)) & ~mask] = (255,255,255,255)
                     edge = expand(edge) & mask
-                color = (160,160,160) if squad.get('_preview') else view.owner_colors.get(squad['owner'],(150,150,150))
+                color = style[:3]
                 pixels[edge] = (*color,255)
             image = QImage(pixels.data,ids.shape[1],ids.shape[0],ids.shape[1]*4,QImage.Format.Format_RGBA8888).copy()
             painter.drawImage(0,0,image)
+        for index, host in enumerate(view.doc.host_stations):
+            x, y, z = host_position(host, view.doc, terrain, view.lib)
+            bounds = view.lib.actor_mesh(host['veh']).bounds
+            y += bounds[1] - 40
+            angle = math.radians(host.get('viewangle', 0))
+            direction = (-math.sin(angle), math.cos(angle))
+            length = max(250, min(900, max(bounds[3]-bounds[0], bounds[5]-bounds[2]) * .5))
+            start = QPointF(*camera.world_to_screen((x, y, z))[0])
+            end = QPointF(*camera.world_to_screen((x + direction[0]*length, y, z + direction[1]*length))[0])
+            code = -(view.doc.mw*view.doc.mh + len(view.doc.squads) + index + 1)
+            color = (160,160,160) if host.get('_preview') or code in getattr(view, 'dragged_codes', set()) else view.owner_colors.get(host['owner'], (150,150,150))
+            painter.setPen(QPen(QColor(*color), 2))
+            painter.drawLine(start, end)
+            dx, dy = end.x()-start.x(), end.y()-start.y()
+            distance = max(1, math.hypot(dx, dy))
+            ux, uy = dx/distance, dy/distance
+            for sign in (-1, 1):
+                painter.drawLine(end, end - QPointF(ux*8 - sign*uy*5, uy*8 + sign*ux*5))
         for member, center, radius in self.circles(camera, terrain):
             preview = view.doc.squads[member.squad].get('_preview', False)
             selected = member.squad in self.selected and not preview

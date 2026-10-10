@@ -12,6 +12,7 @@ from depth_renderer import CameraPolygon, order_camera_polygons, order_camera_po
 from indexed_renderer import IndexedPiece, IndexedRasterizer, retail_source_face_front_facing
 
 from ..core.ldf_model import DEFAULT_HGT, SECTOR_SIZE
+from .special_scene import special_cells, actor_code
 from .terrain_mesh import HEIGHT_UNIT
 from .squad_scene import squad_members, host_members
 
@@ -98,8 +99,11 @@ def scene_polygons(lib, doc, terrain, cam):
 
     types = parse(doc.grids['type'], type_values, -1)
     buildings = parse(doc.grids['blg'], building_values, 0)
-    meshes = {t: lib.mesh(t) for t in type_values.values()}
-    extras = {b: lib.building_mesh(b) for b in building_values.values() if b}
+    specials = special_cells(doc, lib)
+    for (col, row), (_, member) in specials.items():
+        types[row][col], buildings[row][col] = member.typ, member.building
+    meshes = {t: lib.mesh(t) for row in types for t in row}
+    extras = {b: lib.building_mesh(b) for row in buildings for b in row if b}
     bounds = [mesh.bounds for mesh in (*meshes.values(), *extras.values())]
     low_y = float(np.min(-(terrain.cells - DEFAULT_HGT) * HEIGHT_UNIT)) + min(b[1] for b in bounds)
     high_y = float(np.max(-(terrain.cells - DEFAULT_HGT) * HEIGHT_UNIT)) + max(b[4] for b in bounds)
@@ -115,7 +119,7 @@ def scene_polygons(lib, doc, terrain, cam):
     else:
         c0, c1, r0, r1 = 0, doc.mw, 0, doc.mh
 
-    def append_mesh(mesh, col, row, *, filler=False, position=None, actor_code=None):
+    def append_mesh(mesh, col, row, *, filler=False, position=None, actor_code=None, special_code=None):
         nonlocal order
         wx, wy, wz = position if position is not None else terrain.cell_center(col, row)
         if filler:
@@ -159,7 +163,7 @@ def scene_polygons(lib, doc, terrain, cam):
                     (col, row, points, attrs),)
                 for c, r, world, coordinates in regions:
                     camera = tuple(cam.to_camera(v) for v in world)
-                    code = actor_code if actor_code is not None else (r * doc.mw + c + 1) * (1 if ground else -1)
+                    code = actor_code if actor_code is not None else special_code if special_code is not None and not ground else (r * doc.mw + c + 1) * (1 if ground else -1)
                     polygon = CameraPolygon(
                         camera, tuple(coordinates),
                         (surface, code, source), order)
@@ -175,11 +179,13 @@ def scene_polygons(lib, doc, terrain, cam):
 
     for row in range(r0, r1):
         for col in range(c0, c1):
-            append_mesh(meshes[types[row][col]], col, row)
+            special = specials.get((col, row))
+            code = actor_code(doc, special[0]) if special else None
+            append_mesh(meshes[types[row][col]], col, row, special_code=code)
             # Conserva la visualizzazione dei blg già presenti nei documenti.
             building = buildings[row][col]
             if building:
-                append_mesh(extras[building], col, row)
+                append_mesh(extras[building], col, row, special_code=code)
             for vertical in (False, True):
                 if (vertical and col == 0) or (not vertical and row == 0):
                     continue

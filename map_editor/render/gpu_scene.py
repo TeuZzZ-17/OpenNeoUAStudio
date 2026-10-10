@@ -4,6 +4,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 import numpy as np
 from .squad_scene import squad_members, host_members
+from .special_scene import special_cells, actor_code
 
 CHUNK_SIZE = 8
 STRIDE = 16
@@ -38,6 +39,8 @@ class WorldScene:
         self.rebuilt_cells = 0
         self._size = None
         self._squad_key = None
+        self._specials = {}
+        self._special_actor_count = None
 
     def set_library(self, lib):
         if lib is self.lib:
@@ -57,6 +60,8 @@ class WorldScene:
         self.instances.clear()
         self._size = None
         self._squad_key = None
+        self._specials.clear()
+        self._special_actor_count = None
 
     def preview(self, typ, building_id=None, vehicle_id=None):
         key = (typ, building_id, vehicle_id)
@@ -125,7 +130,8 @@ class WorldScene:
             return fallback
 
     def _cell(self, doc, terrain, col, row):
-        typ = self._number(doc.grids['type'][row][col], -1)
+        special = self._specials.get((col, row))
+        typ = special[1].typ if special else self._number(doc.grids['type'][row][col], -1)
         border = col in (0, doc.mw - 1) or row in (0, doc.mh - 1)
         key = ('sector', typ, border)
         template = self._templates.get(key)
@@ -134,7 +140,7 @@ class WorldScene:
         x, _, z = terrain.cell_center(col, row)
         cell_ref = (row * doc.mw + col,) * 4
         parts = [(template, (x, 0, z), cell_ref, False)]
-        building = self._number(doc.grids['blg'][row][col])
+        building = special[1].building if special else self._number(doc.grids['blg'][row][col])
         if building:
             key = ('building', building, border)
             template = self._templates.get(key)
@@ -170,7 +176,7 @@ class WorldScene:
             if len(template.opaque):
                 # A template is uploaded once. A sector only contributes its origin,
                 # height-cell ID and filler orientation to the instance stream.
-                kind = filler or 1
+                kind = filler or (actor_code(doc, special[0]) if special else 1)
                 instances[template.template_key] = (template, np.asarray(
                     [(offset[0], offset[2], row*doc.mw+col, kind)], np.float32))
             if not len(template.flat):
@@ -182,7 +188,7 @@ class WorldScene:
             else:
                 a[:, 12:16] = refs
             a[:, :3] += offset
-            a[a[:, 11] < 0, 11] = -(row * doc.mw + col + 1)
+            a[a[:, 11] < 0, 11] = actor_code(doc, special[0]) if special and not filler else -(row * doc.mw + col + 1)
             flat.append(a)
             for start, count in template.flat_faces:
                 faces.append((flat_offset + start, count))
@@ -205,6 +211,14 @@ class WorldScene:
             affected = {(c + dx, r + dz) for c, r in dirty
                         for dx in (-1, 0, 1) for dz in (-1, 0, 1)
                         if 0 <= c + dx < doc.mw and 0 <= r + dz < doc.mh}
+        specials = special_cells(doc, self.lib)
+        affected |= {cell for cell in self._specials.keys() | specials.keys()
+                     if self._specials.get(cell) != specials.get(cell)}
+        actor_count = len(doc.squads) + len(doc.host_stations)
+        if actor_count != self._special_actor_count:
+            affected |= self._specials.keys() | specials.keys()
+        self._special_actor_count = actor_count
+        self._specials = specials
         chunks = set()
         for c, r in affected:
             self.cells[c, r] = self._cell(doc, terrain, c, r)

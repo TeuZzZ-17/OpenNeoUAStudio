@@ -1,6 +1,7 @@
 import os
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
+import numpy as np
 import pytest
 
 pytest.importorskip("PySide6")
@@ -84,16 +85,42 @@ def test_render_is_deterministic_proportional_and_does_not_mutate_document(libra
     assert doc.snapshot() == before
 
 
-def test_write_briefing_pair_uses_identical_png_bytes(library, tmp_path):
+def test_write_briefing_pair_keeps_geometry_and_darkens_debriefing(library, tmp_path):
     _, lib = library
     image = render_briefing(_document(), lib)
 
+    source = _image_bytes(image)
     mb_path, db_path = write_briefing_pair(image, tmp_path, "Field_01")
+    mb, db = QImage(str(mb_path)), QImage(str(db_path))
 
     assert mb_path.name == "Mb_Field_01.png"
     assert db_path.name == "Db_Field_01.png"
-    assert mb_path.read_bytes() == db_path.read_bytes()
     assert mb_path.read_bytes().startswith(b"\x89PNG\r\n\x1a\n")
+    assert (mb.width(), mb.height()) == (db.width(), db.height()) == (image.width(), image.height())
+    assert _image_bytes(mb) == source
+    assert _image_bytes(image) == source
+    mb_pixels = np.frombuffer(_image_bytes(mb), np.uint8).reshape(mb.height(), mb.width(), 4)
+    db_pixels = np.frombuffer(_image_bytes(db), np.uint8).reshape(db.height(), db.width(), 4)
+    expected_db = np.rint(mb_pixels[:, :, :3].astype(float) * .72).astype(np.uint8)
+    assert np.array_equal(db_pixels[:, :, :3], expected_db)
+    assert np.array_equal(db_pixels[:, :, 3], mb_pixels[:, :, 3])
+    assert db_pixels[:, :, :3].mean() < mb_pixels[:, :, :3].mean()
+
+
+def test_briefing_render_excludes_hosts_without_mutating_source(library):
+    _, lib = library
+    doc = _document()
+    with_hosts = _document()
+    with_hosts.host_stations = [dict(owner=1, veh=56, x=4, y=4, pos_y=-900,
+                                     viewangle=90, energy=500000)]
+    before_doc, before_hosts = doc.snapshot(), with_hosts.snapshot()
+
+    without_host_image = render_briefing(doc, lib)
+    with_host_image = render_briefing(with_hosts, lib)
+
+    assert _image_bytes(with_host_image) == _image_bytes(without_host_image)
+    assert doc.snapshot() == before_doc
+    assert with_hosts.snapshot() == before_hosts
 
 
 def test_write_briefing_pair_never_overwrites_existing_art(library, tmp_path):
