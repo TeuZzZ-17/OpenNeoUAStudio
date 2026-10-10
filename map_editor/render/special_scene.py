@@ -52,6 +52,14 @@ def special_cells(doc, lib=None):
     return result
 
 
+def key_building_sector(member, lib):
+    """Return the structure sector hidden by a key's authored terrain type."""
+    if member is None or member.key < 0 or not member.building or lib is None:
+        return None
+    definition = lib.buildings.get(member.building)
+    return definition.sec_type if definition is not None else None
+
+
 def scene_object_styles(view):
     if view.doc is None:
         return []

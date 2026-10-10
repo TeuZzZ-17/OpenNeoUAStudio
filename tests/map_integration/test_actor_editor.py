@@ -108,7 +108,7 @@ def test_unselected_host_form_prepares_height_and_ai(win):
     assert win.doc.snapshot() == before
     titles = [button.text() for button in panel.findChildren(QPushButton)]
     assert 'Deselect' in titles and 'Place / Move' not in titles
-    assert set(panel.fields) == {'pos_y', 'viewangle', 'reload_const'}
+    assert set(panel.fields) == {'pos_y', 'viewangle', 'reload_const', 'body_angle'}
 
 
 def test_host_drag_reuses_history_and_preserves_exact_coordinates(win):
@@ -179,7 +179,26 @@ def test_tech_edit_without_host_keeps_scroll_and_summary(win, app):
     expected = state != Qt.CheckState.Checked
     assert (key in win.doc.tech[1]['veh']) == expected
     assert panel.list.verticalScrollBar().value() == scroll
-    assert 'Vehicles (' in panel.summary.toPlainText() and 'Buildings (' in panel.summary.toPlainText()
+
+    kind = panel.kind.currentData()
+    enabled = set(panel.permissions(kind))
+    assert panel.status.text() == f'Enabled {panel.kind.currentText()} ({len(enabled)})'
+    rows = [panel.summary.topLevelItem(i) for i in range(panel.summary.topLevelItemCount())]
+    assert len(rows) == len(enabled)
+    assert {row.data(0, Qt.ItemDataRole.UserRole) for row in rows} == enabled
+    assert rows
+
+    row = rows[0]
+    summary_key = row.data(0, Qt.ItemDataRole.UserRole)
+    target = next(panel.list.item(i) for i in range(panel.list.count())
+                  if panel.list.item(i).data(Qt.ItemDataRole.UserRole) == summary_key)
+    checked = target.checkState()
+    before_summary_click = win.doc.snapshot()
+    rect = panel.summary.visualItemRect(row)
+    QTest.mouseClick(panel.summary.viewport(), Qt.MouseButton.LeftButton, pos=rect.center())
+    assert panel.list.currentItem().data(Qt.ItemDataRole.UserRole) == summary_key
+    assert target.checkState() == checked
+    assert win.doc.snapshot() == before_summary_click
 
 
 def test_custom_ai_file_and_map_round_trip(tmp_path):
@@ -286,3 +305,56 @@ def test_host_expanded_settings_fit_palette_width(win, app):
     scroll = win.palette_tabs.widget(win.host_tab_index)
     assert scroll.horizontalScrollBar().maximum() == 0
     assert win.host_panel.ai_fields.height() >= win.host_panel.ai_fields.minimumSizeHint().height()
+
+
+def test_sector_occupied_by_squad_allows_new_host(win):
+    win.doc.squads = [squad()]
+    win._draft_host = dict(host(), _preview=True)
+    win._confirm_host((3, 3))
+    assert (win.doc.host_stations[-1]['x'], win.doc.host_stations[-1]['y']) == (3, 3)
+    assert win._draft_host is None
+    assert (win.doc.squads[0]['x'], win.doc.squads[0]['y']) == (3, 3)
+
+
+def test_sector_occupied_by_host_allows_new_squad(win):
+    win.doc.host_stations = [host(x=4, y=4)]
+    draft = dict(squad(), _preview=True)
+    win._draft_squads = [draft]
+    win._draft_origin = copy.deepcopy(win._draft_squads)
+    win._confirm_add((4, 4))
+    assert (win.doc.squads[-1]['x'], win.doc.squads[-1]['y']) == (4, 4)
+    assert not win._draft_squads
+    assert (win.doc.host_stations[0]['x'], win.doc.host_stations[0]['y']) == (4, 4)
+
+
+def test_dragging_squad_onto_host_is_allowed_and_undoable(win):
+    initial_squad = dict(squad(), x=2, y=2)
+    win.doc.squads = [initial_squad]
+    win.doc.host_stations = [host(x=4, y=4)]
+    win._refresh_squads({0})
+    win._refresh_hosts()
+    before = win.doc.snapshot()
+    win._begin_actor_drag('squad', (2, 2))
+    win._move_actor_drag((4, 4))
+    win._finish_actor_drag()
+    assert (win.doc.squads[0]['x'], win.doc.squads[0]['y']) == (4, 4)
+    assert win.history.can_undo
+    win.undo()
+    assert win.doc.snapshot() == before
+
+
+def test_dragging_host_onto_squad_is_allowed_and_undoable(win):
+    win.doc.squads = [dict(squad(), x=4, y=4)]
+    win.doc.host_stations = [host(x=2, y=2)]
+    win._refresh_squads()
+    win._refresh_hosts(0)
+    before = win.doc.snapshot()
+    win._begin_actor_drag('host', (2, 2))
+    win._move_actor_drag((4, 4))
+    win._finish_actor_drag()
+    assert (win.doc.host_stations[0]['x'], win.doc.host_stations[0]['y']) == (4, 4)
+    assert win.history.can_undo
+    win.undo()
+    assert win.doc.snapshot() == before
+
+

@@ -135,6 +135,24 @@ def test_shift_sweep_adds_crossed_cells_without_rectangle_or_paint(win,app):
     assert not hasattr(win.view,'selection_box')
     assert win.doc.snapshot()==before
 
+def test_space_left_drag_pans_without_painting_or_selecting(win, app):
+    win.set_tool('sector')
+    before = win.doc.snapshot()
+    center = win.view.camera.center
+    win.show()
+    app.processEvents()
+    win.view.setFocus()
+    QTest.keyPress(win.view, Qt.Key.Key_Space)
+    QTest.mousePress(win.view, Qt.MouseButton.LeftButton, pos=QPoint(80, 80))
+    QTest.mouseMove(win.view, QPoint(140, 120))
+    QTest.mouseRelease(win.view, Qt.MouseButton.LeftButton, pos=QPoint(140, 120))
+    QTest.keyRelease(win.view, Qt.Key.Key_Space)
+
+    assert win.view.camera.center != center
+    assert win.doc.snapshot() == before
+    assert not win.view.selection
+    assert not win.view._space_pan_active and not win.view._space_pan_gesture
+
 def test_perspective_cpu_and_gpu_projection_agree_and_ground_ray_returns_point():
     cam=IsoCamera(yaw=20,pitch=12,center=(2500,-200, -3000),width=800,height=600,perspective=True)
     point=(2500,0,-6000)

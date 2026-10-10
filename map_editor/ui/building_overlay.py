@@ -4,11 +4,14 @@ from __future__ import annotations
 import math
 import time
 
+import numpy as np
 from PySide6.QtCore import QObject, QPointF, Qt, QTimer
-from PySide6.QtGui import QBrush, QColor, QPainter, QPainterPath, QPen, QPolygonF
+from PySide6.QtGui import QBrush, QColor, QPainter, QPen, QPolygonF, QImage
 from PySide6.QtWidgets import QWidget
 
 from ..core.ldf_model import SECTOR_SIZE
+from .game_icons import draw_game_badge
+from ..render.building_outline import building_outline_pixels
 
 
 class BuildingOverlay(QObject):
@@ -24,6 +27,7 @@ class BuildingOverlay(QObject):
         super().__init__(parent or viewport)
         self.viewport = viewport
         self.state_provider = state_provider
+        self._outline_cache = {}
         self._pulse = QTimer(self, interval=120)
         self._pulse.timeout.connect(viewport.update)
         self._pulse.start()
@@ -67,6 +71,24 @@ class BuildingOverlay(QObject):
                                         col, row, definition, now)
                 except Exception:
                     continue
+        if getattr(view, '_software_fallback', True):
+            self._draw_software_outlines(painter, doc)
+
+    def _draw_software_outlines(self, painter, doc):
+        """Outline actual visible building pixels, leaving their textures unchanged."""
+        frame = getattr(self.viewport, '_frame', None)
+        if frame is None:
+            return
+        ids = frame.cell_ids
+        height, width = ids.shape
+        if height != self.viewport.height() or width != self.viewport.width():
+            return
+        pixels = building_outline_pixels(ids, doc.grids['blg'],
+                                         selected=self.viewport.selected_building,
+                                         previews=self.viewport.preview_cells)
+        image = QImage(pixels.data, width, height, width * 4,
+                       QImage.Format.Format_RGBA8888).copy()
+        painter.drawImage(0, 0, image)
 
     def _visible_range(self, doc, camera):
         heights = (0.0,)
@@ -97,7 +119,8 @@ class BuildingOverlay(QObject):
         if not (-80 <= anchor[0] <= self.viewport.width() + 80 and -80 <= anchor[1] <= self.viewport.height() + 80):
             return
         owner = doc.grids["own"][row][col]
-        color = QColor(*self.viewport.owner_colors.get(owner, (145, 145, 145)))
+        color = (QColor(160, 160, 160) if (col, row) in self.viewport.preview_cells else
+                 QColor(*self.viewport.owner_colors.get(owner, (145, 145, 145))))
         self._draw_icons(painter, anchor, definition, color, now, col, row)
 
     def _draw_icons(self, painter, anchor, definition, color, now, col, row):
@@ -119,6 +142,9 @@ class BuildingOverlay(QObject):
         y = anchor[1] - size
         for kind in icons:
             center = QPointF(x + size / 2, y + size / 2)
+            if draw_game_badge(painter, center, size*1.35, kind, color, now+phase):
+                x += size + gap
+                continue
             if kind == "power":
                 self._energy_icon(painter, center, size, now + phase, color)
             elif kind == "flak":

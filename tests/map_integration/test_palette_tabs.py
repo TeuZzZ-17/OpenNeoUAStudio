@@ -54,3 +54,9 @@ def test_nine_tabs_fit_two_equal_rows_and_emit_selection(app):
         assert button.isChecked()
 
     assert changes == [8, *range(len(labels))]
+
+
+def test_all_twelve_palette_tabs_have_unique_colors():
+    from map_editor.ui.colored_tabs import TAB_COLORS
+    assert len(TAB_COLORS) == 12
+    assert len(set(TAB_COLORS)) == 12

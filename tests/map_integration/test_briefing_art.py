@@ -67,6 +67,41 @@ def test_briefing_style_is_deterministic():
     assert _image_bytes(first) == _image_bytes(second)
 
 
+def test_briefing_style_preserves_source_hues_and_ignores_level_info_art_names():
+    doc = _document()
+    doc.lvl_info.update(mbmap="MB_01", dbmap="DB30")
+    camera = briefing_camera(doc)
+    source_pixels = np.empty((camera.height, camera.width, 4), dtype=np.uint8)
+    source_pixels[:, :, :3] = (40, 80, 140)
+    source_pixels[:, camera.width // 2:, :3] = (140, 90, 40)
+    source_pixels[:, :, 3] = 255
+    source = QImage(source_pixels.data, camera.width, camera.height,
+                     camera.width * 4, QImage.Format.Format_RGBA8888).copy()
+    source_bytes = _image_bytes(source)
+    before = doc.snapshot()
+
+    styled = style_briefing(source, doc, camera)
+    output = np.frombuffer(_image_bytes(styled), np.uint8).reshape(
+        styled.height(), styled.width(), 4)
+    yy, xx = np.indices((camera.height, camera.width))
+    wx = -(xx - camera.width / 2) / camera.zoom + camera.center[0]
+    wz = (yy - camera.height / 2) / camera.zoom + camera.center[2]
+    cols, rows = np.floor(wx / 4000).astype(int), np.floor(-wz / 4000).astype(int)
+    inside = ((cols >= 1) & (cols < doc.mw - 1) & (rows >= 1)
+              & (rows < doc.mh - 1) & (output[:, :, 3] > 0))
+    blue_area = inside & (xx > camera.width * .28) & (xx < camera.width * .43)
+    brown_area = inside & (xx > camera.width * .57) & (xx < camera.width * .72)
+    blue = np.median(output[blue_area, :3], axis=0)
+    brown = np.median(output[brown_area, :3], axis=0)
+
+    assert blue[2] > blue[1] > blue[0]
+    assert brown[0] > brown[1] > brown[2]
+    assert np.allclose(blue / blue.sum(), np.array((40, 80, 140)) / 260, atol=.025)
+    assert np.allclose(brown / brown.sum(), np.array((140, 90, 40)) / 270, atol=.025)
+    assert _image_bytes(source) == source_bytes
+    assert doc.snapshot() == before
+
+
 def test_render_is_deterministic_proportional_and_does_not_mutate_document(library):
     _, lib = library
     doc = _document()

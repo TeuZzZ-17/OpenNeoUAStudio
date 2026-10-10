@@ -3,8 +3,9 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 import numpy as np
-from .squad_scene import squad_members, host_members
-from .special_scene import special_cells, actor_code
+from .sector_state import sector_type
+from .squad_scene import squad_members, host_members, body_rotation
+from .special_scene import special_cells, actor_code, key_building_sector
 
 CHUNK_SIZE = 8
 STRIDE = 16
@@ -87,14 +88,14 @@ class WorldScene:
             self.materials.append(s)
         return index, s
 
-    def _template(self, key, mesh, ground_only=False, filler=False):
+    def _template(self, key, mesh, ground_only=False, filler=False, structure_only=False):
         if key in self._templates:
             return self._templates[key]
         opaque, transparent, ranges = [], [], []
         flat_count = 0
         for face, ox, oz in mesh.faces:
             ground = filler or all(abs(v[1]) < 1e-6 for v in face.vertices)
-            if ground_only and not ground:
+            if (ground_only and not ground) or (structure_only and ground):
                 continue
             uv = self.lib.face_uvs(face)
             if len(uv) != len(face.vertices):
@@ -131,7 +132,7 @@ class WorldScene:
 
     def _cell(self, doc, terrain, col, row):
         special = self._specials.get((col, row))
-        typ = special[1].typ if special else self._number(doc.grids['type'][row][col], -1)
+        typ = special[1].typ if special else sector_type(doc, self.lib, col, row)
         border = col in (0, doc.mw - 1) or row in (0, doc.mh - 1)
         key = ('sector', typ, border)
         template = self._templates.get(key)
@@ -140,6 +141,16 @@ class WorldScene:
         x, _, z = terrain.cell_center(col, row)
         cell_ref = (row * doc.mw + col,) * 4
         parts = [(template, (x, 0, z), cell_ref, False)]
+        # Key terrain and building structure are independent. Keep the key
+        # ground graphic while drawing the building's elevated sector geometry.
+        structure_typ = key_building_sector(special[1], self.lib) if special else None
+        if structure_typ is not None and structure_typ != typ:
+            key = ('key-building-sector', structure_typ, border)
+            structure = self._templates.get(key)
+            if structure is None:
+                structure = self._template(key, self.lib.mesh(structure_typ),
+                                           ground_only=border, structure_only=True)
+            parts.append((structure, (x, 0, z), cell_ref, False))
         building = special[1].building if special else self._number(doc.grids['blg'][row][col])
         if building:
             key = ('building', building, border)
@@ -153,7 +164,8 @@ class WorldScene:
             if (vertical and col == 0) or (not vertical and row == 0):
                 continue
             c, r = (col - 1, row) if vertical else (col, row - 1)
-            neighbour = self.lib.assets.sdf.sectors.get(self._number(doc.grids['type'][r][c], -1))
+            other_special = self._specials.get((c, r))
+            neighbour = self.lib.assets.sdf.sectors.get(other_special[1].typ if other_special else sector_type(doc, self.lib, c, r))
             other_ground = neighbour.ground if neighbour else 0
             key = ('filler', other_ground, current_ground, vertical)
             template = self._templates.get(key)
@@ -204,10 +216,10 @@ class WorldScene:
         else:
             if dirty is None:
                 rows = [r for r in range(doc.mh) if self._row_keys.get(r) !=
-                        (doc.grids['type'][r], doc.grids['blg'][r], doc.mw, doc.mh)]
+                        (doc.grids['type'][r], doc.grids['blg'][r], [sector_type(doc, self.lib, c, r) for c in range(doc.mw)], doc.mw, doc.mh)]
                 dirty = {(c, r) for r in rows for c in range(doc.mw)
                          if self._cell_keys.get((c, r)) !=
-                         (doc.grids['type'][r][c], doc.grids['blg'][r][c], doc.mw, doc.mh)}
+                         (doc.grids['type'][r][c], doc.grids['blg'][r][c], sector_type(doc, self.lib, c, r), doc.mw, doc.mh)}
             affected = {(c + dx, r + dz) for c, r in dirty
                         for dx in (-1, 0, 1) for dz in (-1, 0, 1)
                         if 0 <= c + dx < doc.mw and 0 <= r + dz < doc.mh}
@@ -222,11 +234,11 @@ class WorldScene:
         chunks = set()
         for c, r in affected:
             self.cells[c, r] = self._cell(doc, terrain, c, r)
-            self._cell_keys[c, r] = (doc.grids['type'][r][c], doc.grids['blg'][r][c], doc.mw, doc.mh)
+            self._cell_keys[c, r] = (doc.grids['type'][r][c], doc.grids['blg'][r][c], sector_type(doc, self.lib, c, r), doc.mw, doc.mh)
             chunks.add((c // CHUNK_SIZE, r // CHUNK_SIZE))
         self.rebuilt_cells += len(affected)
         for r in {r for _, r in affected}:
-            self._row_keys[r] = (doc.grids['type'][r][:], doc.grids['blg'][r][:], doc.mw, doc.mh)
+            self._row_keys[r] = (doc.grids['type'][r][:], doc.grids['blg'][r][:], [sector_type(doc, self.lib, c, r) for c in range(doc.mw)], doc.mw, doc.mh)
         changed_templates = set()
         for cx, cz in chunks:
             old = self.chunks.get((cx, cz))
@@ -255,7 +267,7 @@ class WorldScene:
         self.changed_templates = changed_templates
         # Squad geometry uses exact world positions rather than cell instances.
         squad_key = (repr(doc.squads), repr(doc.host_stations), terrain.cells.tobytes(),
-                     repr(doc.grids['type'])) if doc.squads or doc.host_stations else ()
+                     repr(doc.grids['type']), repr(doc.grids['blg']), repr(doc.grids['own'])) if doc.squads or doc.host_stations else ()
         if squad_key != self._squad_key:
             key = (-1, -1)
             if doc.squads or doc.host_stations or key in self.chunks:
@@ -274,6 +286,8 @@ class WorldScene:
                 if not len(source):
                     continue
                 data = source.copy()
+                if member.body_angle:
+                    data[:, :3] = data[:, :3] @ body_rotation(member.body_angle).T
                 data[:, :3] += member.position
                 data[:, 11] = -(doc.mw * doc.mh + member.squad + 1)
                 data[:, 12:16] = -1
