@@ -85,7 +85,7 @@ class CollisionEditorOverwriteV2Tests(unittest.TestCase):
         self.assertEqual(updated.count("coll_act ="), 2)
         self.assertNotIn("coll_x = 1\n", updated)
         self.assertNotIn("coll_x = 90", updated)
-        self.assertNotIn("Collision Editor disabled", updated)
+        self.assertNotIn("Entity Designer disabled", updated)
         self.assertNotIn("\n\n\n", updated)
 
     def test_more_than_fifty_collision_spheres_round_trip_at_same_anchor(self):
@@ -250,7 +250,7 @@ class CollisionEditorOverwriteV2Tests(unittest.TestCase):
             "new_vehicle 7\r\n"
             "    name = Stable\r\n"
             "\r\n"
-            "    ; Collision Editor disabled: compound collisions\r\n"
+            "    ; Entity Designer disabled: compound collisions\r\n"
             "    ; coll_num = 1\r\n"
             "    ; coll_act = 0\r\n"
             "    ; coll_x = 1\r\n"
@@ -279,7 +279,7 @@ class CollisionEditorOverwriteV2Tests(unittest.TestCase):
         first = _apply(source, patch)
         second = _apply(first, patch)
         self.assertEqual(second, first)
-        self.assertNotIn("Collision Editor disabled", first)
+        self.assertNotIn("Entity Designer disabled", first)
         self.assertIn("\r\n", first)
 
     def test_new_family_reuses_existing_block_indentation(self):
@@ -344,7 +344,7 @@ class CollisionEditorOverwriteV2Tests(unittest.TestCase):
         source = (
             "new_vehicle 7\n"
             "    ; user's collision note\n"
-            "    ; Collision Editor disabled: compound collisions\n"
+            "    ; Entity Designer disabled: compound collisions\n"
             "    ; coll_num = 1\n"
             "    ; coll_act = 0\n"
             "    ; coll_x = 1\n"
@@ -366,7 +366,7 @@ class CollisionEditorOverwriteV2Tests(unittest.TestCase):
         )
         updated = _apply(source, patch)
         self.assertIn("; user's collision note", updated)
-        self.assertNotIn("Collision Editor disabled", updated)
+        self.assertNotIn("Entity Designer disabled", updated)
         self.assertNotIn("; coll_num", updated)
 
     def test_overwrite_removes_disabled_turret_data_without_a_header(self):
@@ -396,7 +396,7 @@ class CollisionEditorOverwriteV2Tests(unittest.TestCase):
         self.assertNotIn("gun_side_angle", updated)
         self.assertNotIn("gun_up_angle", updated)
         self.assertNotIn("gun_down_angle", updated)
-        self.assertNotIn("Collision Editor disabled", updated)
+        self.assertNotIn("Entity Designer disabled", updated)
         self.assertIn("; keep this manual comment", updated)
 
 

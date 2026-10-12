@@ -31,6 +31,8 @@ class WireframeTransformTests(unittest.TestCase):
         model.polygons = [[0, 1], [1, 2]]
         self.window._show_model(model, Path("test.SKL"))
         self.editor.auto_align_check.setChecked(False)
+        # These tests exercise free transforms; symmetry has a separate suite.
+        self.window.mirror_symmetry_check.setChecked(False)
         self.window.show()
         self.window.activateWindow()
         self.canvas.setFocus()

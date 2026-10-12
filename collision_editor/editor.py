@@ -134,7 +134,7 @@ LEGACY = "legacy"
 OPENNEOUA = "openneoua"
 VEHICLE = "vehicle"  # target category only
 WEAPON = "weapon"    # target category only
-WINDOW_TITLE = "Collision Editor — OpenNeoUA Studio"
+WINDOW_TITLE = "Entity Designer — OpenNeoUA Studio"
 COMPOUND_TYPES = (OPENNEOUA,)
 TYPE_LABELS = {
     LEGACY: "Legacy Radius",
@@ -218,18 +218,20 @@ _SCRIPT_TAB_COLLISION = "collision"
 _SCRIPT_TAB_FIRE = "fire"
 _SCRIPT_TAB_GUN = "gun"
 _SCRIPT_TAB_COCKPIT = "cockpit"
+_SCRIPT_TAB_BRIEFING = "briefing"
 _SCRIPT_TAB_ORDER = (
     _SCRIPT_TAB_COLLISION, _SCRIPT_TAB_FIRE,
-    _SCRIPT_TAB_GUN, _SCRIPT_TAB_COCKPIT,
+    _SCRIPT_TAB_GUN, _SCRIPT_TAB_COCKPIT, _SCRIPT_TAB_BRIEFING,
 )
 _SCRIPT_TAB_LABELS = {
     _SCRIPT_TAB_COLLISION: "Collision",
     _SCRIPT_TAB_FIRE: "Fire Points",
     _SCRIPT_TAB_GUN: "Gun Points",
     _SCRIPT_TAB_COCKPIT: "Cockpit View",
+    _SCRIPT_TAB_BRIEFING: "Briefing Model Size",
 }
 _SCRIPT_TAB_MARKER_RE = re.compile(
-    r"^\s*;\s*\[Tab:\s*(Collision|Fire Points|Gun Points|Cockpit View)\]\s*$",
+    r"^\s*;\s*\[Tab:\s*(Collision|Fire Points|Gun Points|Cockpit View|Briefing Model Size|Briefing Radius)\]\s*$",
     re.IGNORECASE,
 )
 _MODEL_NAME_ROLE = int(Qt.ItemDataRole.UserRole) + 1
@@ -248,7 +250,7 @@ _HEADER_RE = re.compile(
 )
 _PARAM_RE = re.compile(
     r"^(?P<indent>\s*)(?P<key>radius|overeof|fire_x|fire_y|fire_z|"
-    r"num_weapons|cockpit_camera_offset_x|cockpit_camera_offset_y|"
+    r"num_weapons|briefing_size|cockpit_camera_offset_x|cockpit_camera_offset_y|"
     r"cockpit_camera_offset_z|"
     r"robo_num_guns|robo_act_gun|robo_gun_pos_x|robo_gun_pos_y|"
     r"robo_gun_pos_z|robo_gun_dir_x|robo_gun_dir_y|robo_gun_dir_z|"
@@ -295,6 +297,15 @@ def _resolve_data_asset_path(
     if not raw or raw.casefold() == "0":
         return None
     candidates: list[Path] = []
+    from map_editor import bootstrap
+    install = bootstrap.installation()
+    if install is not None and raw.casefold().startswith("data/"):
+        parts = raw.split("/")[1:]
+        folder_keys = {"models": "models", "sets": "sets", "scripts": "scripts",
+                       "levels": "levels", "interface": "interface", "objects": "skies"}
+        if parts and parts[0].casefold() in folder_keys:
+            candidates.append(install.folder(folder_keys[parts[0].casefold()]).joinpath(*parts[1:]))
+        candidates.append(install.data.joinpath(*parts))
     if raw.casefold().startswith("data/"):
         for source in source_paths:
             data_root = _data_root_for_path(source)
@@ -623,6 +634,8 @@ class CollisionProject:
     cockpit_camera_offset_x: float = 0.0
     cockpit_camera_offset_y: float = 0.0
     cockpit_camera_offset_z: float = 0.0
+    briefing_size_enabled: bool = False
+    briefing_size: float = 0.0
     legacy: CollisionSphere | None = None
     compound: list[CollisionSphere] = field(default_factory=list)
     collision_shape: CollisionShape | None = None
@@ -660,6 +673,7 @@ class CollisionProject:
             self.cockpit_camera_enabled,
             self.cockpit_camera_offset_x, self.cockpit_camera_offset_y,
             self.cockpit_camera_offset_z,
+            self.briefing_size_enabled, self.briefing_size,
             tuple((
                 point.scheme, point.x, point.y, point.z,
                 point.dir_x, point.dir_y, point.dir_z, point.gun_type,
@@ -694,7 +708,8 @@ class CollisionProject:
          self.gun_points_enabled, self.unit_gun_default_icon,
          self.cockpit_camera_enabled,
          self.cockpit_camera_offset_x, self.cockpit_camera_offset_y,
-         self.cockpit_camera_offset_z, gun_points, turret_limits,
+         self.cockpit_camera_offset_z,
+         self.briefing_size_enabled, self.briefing_size, gun_points, turret_limits,
          legacy, compound, self.collision_shape,
          self.collision_shape_path, self.collision_shape_file_path,
          self.collision_shape_owners,
@@ -1666,6 +1681,24 @@ def import_fire_points_block(
     )
 
 
+def import_briefing_size_block(text: str, block: ScriptBlock) -> tuple[bool, float]:
+    value = 0.0
+    for _line, key, raw, _indent in _parameter_rows(text.splitlines(), block):
+        if key == "briefing_size":
+            try:
+                parsed = float(raw)
+                value = parsed if math.isfinite(parsed) and 1 <= parsed <= 10000 else 0.0
+            except ValueError:
+                value = 0.0
+    return value > 0, value
+
+
+def briefing_size_data_lines(project: CollisionProject) -> list[str]:
+    if project.target_category != VEHICLE or not project.briefing_size_enabled:
+        return []
+    return [f"briefing_size = {int(round(project.briefing_size))}"]
+
+
 def import_cockpit_camera_block(
         text: str, block: ScriptBlock,
 ) -> tuple[bool, float, float, float]:
@@ -1719,6 +1752,7 @@ _GUN_POINT_KEYS = {
     "unit_gun_type", "unit_gun_name", "unit_gun_icon",
 }
 _SCRIPT_TAB_KEYS = {
+    _SCRIPT_TAB_BRIEFING: {"briefing_size"},
     _SCRIPT_TAB_COLLISION: {
         "radius", "overeof", "coll_num", "coll_act", "collision_shape",
         "coll_x", "coll_y", "coll_z", "coll_radius",
@@ -1772,13 +1806,14 @@ _MANAGED_SCRIPT_FAMILIES = (
             "cockpit_camera_offset_z",
         }),
         frozenset({"cockpit camera offset", "cockpit view"})),
+    _ManagedScriptFamily("briefing size", frozenset({"briefing_size"})),
     _ManagedScriptFamily(
         "turret limits", frozenset(_TURRET_LIMIT_KEY_SET),
         frozenset({"turret limits"})),
 )
 
 _OLD_DISABLED_HEADER_RE = re.compile(
-    r"^\s*;\s*Collision Editor disabled:\s*(?P<label>.+?)\s*$",
+    r"^\s*;\s*(?:Entity Designer|Collision Editor) disabled:\s*(?P<label>.+?)\s*$",
     re.IGNORECASE,
 )
 _COMMENTED_ASSIGNMENT_RE = re.compile(
@@ -2087,6 +2122,7 @@ def collision_data_lines(project: CollisionProject) -> list[str]:
         lines.append(f"radius = {_radius_number(project.legacy.radius)}")
     if project.target_category == VEHICLE and project.overeof_enabled:
         lines.append(f"overeof = {_number(project.overeof)}")
+    lines.extend(briefing_size_data_lines(project))
     cockpit_lines = cockpit_camera_data_lines(project)
     if cockpit_lines:
         if lines:
@@ -2125,7 +2161,7 @@ def collision_data_lines(project: CollisionProject) -> list[str]:
 
 def export_collision_text(project: CollisionProject) -> str:
     header = [
-        f"; Collision Editor project: {project.name}",
+        f"; Entity Designer project: {project.name}",
         f"; Source model: {project.source_model or '<none>'}",
         f"; Source BASE: {project.source_base or '<none>'}",
         f"; Target category: {project.target_category}",
@@ -2265,7 +2301,7 @@ def _fire_tab_data_lines(project: CollisionProject) -> list[str]:
 
 def _script_tab_data_lines(
         project: CollisionProject, group: str) -> list[str]:
-    """Return the complete script payload for one Collision Editor tab."""
+    """Return the complete script payload for one Entity Designer tab."""
 
     if group == _SCRIPT_TAB_COLLISION:
         return _collision_tab_data_lines(project)
@@ -2277,6 +2313,8 @@ def _script_tab_data_lines(
         return gun_point_data_lines(project)
     if group == _SCRIPT_TAB_COCKPIT:
         return cockpit_camera_data_lines(project)
+    if group == _SCRIPT_TAB_BRIEFING:
+        return briefing_size_data_lines(project)
     raise CollisionScriptError(f"Gruppo script sconosciuto: {group}")
 
 
@@ -2368,6 +2406,8 @@ def _validate_editable_tab_lines(
         import_gun_points_block(text, block)
     elif group == _SCRIPT_TAB_COCKPIT:
         import_cockpit_camera_block(text, block)
+    elif group == _SCRIPT_TAB_BRIEFING:
+        import_briefing_size_block(text, block)
 
 
 def _resolve_patch_target_block(
@@ -2444,7 +2484,7 @@ def _replacement_lines_for_family(
 def _old_generated_family_lines(
         lines: list[str], block: ScriptBlock,
         family: _ManagedScriptFamily) -> set[int]:
-    """Find only comments emitted by the old Collision Editor writer."""
+    """Find only comments emitted by the old Entity Designer writer."""
 
     labels = {label.casefold() for label in family.old_disabled_labels}
     if not labels:
@@ -2539,7 +2579,7 @@ def _replace_top_level_family(
         for line in replacement_lines
     ]
     if not rendered and comment_missing and rows:
-        rendered = [indent + f"; Collision Editor disabled: {family.name}"]
+        rendered = [indent + f"; Entity Designer disabled: {family.name}"]
         rendered.extend(
             indent + "; " + source_lines[row[0]].lstrip()
             for row in rows
@@ -2797,7 +2837,7 @@ def plan_script_update(
         preview = "".join(difflib.unified_diff(
             text.splitlines(keepends=True),
             updated.splitlines(keepends=True),
-            fromfile="current", tofile="Collision Editor preview",
+            fromfile="current", tofile="Entity Designer preview",
         ))
         return updated, preview, block.name
 
@@ -2814,7 +2854,7 @@ def plan_script_update(
         elif rows_to_replace and comment_missing:
             first = rows_to_replace[0][0]
             replace[first] = [
-                indent + f"; Collision Editor disabled: {disabled_label}",
+                indent + f"; Entity Designer disabled: {disabled_label}",
                 indent + "; " + lines[first].lstrip(),
             ]
             for row in rows_to_replace[1:]:
@@ -2840,6 +2880,9 @@ def plan_script_update(
                 f"coll_radius = {_number(sphere.radius)}",
             ])
     replace_group(radius_rows, legacy_lines, "legacy radius")
+    if "vehicle" in kind and project.briefing_size_enabled:
+        briefing_rows = [row for row in rows if row[1] == "briefing_size"]
+        replace_group(briefing_rows, briefing_size_data_lines(project), "briefing size")
     # Overeof is a separate vanilla ground-alignment parameter, not a
     # collision sphere.  Preserve existing script data unless the user has
     # explicitly enabled management of it in a vehicle project.
@@ -2893,7 +2936,7 @@ def plan_script_update(
     preview = "".join(difflib.unified_diff(
         text.splitlines(keepends=True),
         updated.splitlines(keepends=True),
-        fromfile="current", tofile="Collision Editor preview",
+        fromfile="current", tofile="Entity Designer preview",
     ))
     return updated, preview, block.name
 
@@ -2929,8 +2972,6 @@ def validate_project(
         errors.append("Il progetto non ha un Vehicle / Weapon Name.")
     if not project.source_model:
         errors.append("Nessun modello è caricato.")
-    if not project.compound:
-        warnings.append("Il progetto non contiene sfere compound.")
     if (project.target_category == VEHICLE and project.compound
             and not project.overeof_enabled):
         warnings.append(
@@ -2946,6 +2987,9 @@ def validate_project(
                 project.cockpit_camera_offset_y,
                 project.cockpit_camera_offset_z)):
             errors.append("Cockpit Camera X/Y/Z devono essere numeri finiti.")
+    if project.target_category == VEHICLE and project.briefing_size_enabled:
+        if not math.isfinite(project.briefing_size) or not 1 <= project.briefing_size <= 10000:
+            errors.append("Briefing Model Size deve essere tra 1 e 10000.")
     if project.target_category == VEHICLE and project.fire_points_enabled:
         if not all(math.isfinite(value) for value in (
                 project.fire_x, project.fire_y, project.fire_z)):
@@ -3359,7 +3403,7 @@ class CollisionViewport(AssetViewport):
         return self._cockpit_offset
 
     def set_cockpit_preview_active(self, active: bool) -> None:
-        """Switch only the Collision Editor preview into OpenNeoUA cockpit view.
+        """Switch only the Entity Designer preview into OpenNeoUA cockpit view.
 
         The regular orbit camera state is never overwritten, so leaving this
         mode restores the exact previous editor view.
@@ -3557,7 +3601,7 @@ class CollisionViewport(AssetViewport):
         """Load through AssetViewport, then apply a non-destructive scale.
 
         The base viewport already resolves BASE/SKLT transforms, children and
-        textures.  Collision Editor only adds one final global axis scale,
+        textures.  Entity Designer only adds one final global axis scale,
         matching the visual effect of scale_x/y/z while leaving collision
         sphere coordinates untouched.
         """
@@ -4984,7 +5028,7 @@ class ApplyScriptDialog(QDialog):
         if self.replace_all_managed:
             self.setWindowTitle("Overwrite Loaded Definition")
             self.comment_missing.setText(
-                "Apply only Collision Editor tabs changed since this "
+                "Apply only Entity Designer tabs changed since this "
                 "definition was loaded")
             self.comment_missing.setChecked(True)
             self.comment_missing.setEnabled(False)
@@ -5399,9 +5443,6 @@ class CollisionEditorWindow(QMainWindow):
                 self.open_vehicle_script_action, self.import_action):
             self.file_import_menu.addAction(action)
 
-        self.export_action = QAction("Export Collision Text", self)
-        self.export_action.setIconText("Export Collision Text")
-        self.export_action.triggered.connect(self.export_text)
         self.export_collision_shape_action = QAction("Export Collision Shape", self)
         self.export_collision_shape_action.triggered.connect(self.export_collision_shape)
         self.export_collision_shape_action.setEnabled(False)
@@ -5410,7 +5451,7 @@ class CollisionEditorWindow(QMainWindow):
         self.copy_output_action.triggered.connect(self.copy_output)
 
         self.file_export_menu = file_menu.addMenu("Export")
-        for action in (self.copy_output_action, self.export_action,
+        for action in (self.copy_output_action,
                        self.export_collision_shape_action):
             self.file_export_menu.addAction(action)
 
@@ -5487,7 +5528,7 @@ class CollisionEditorWindow(QMainWindow):
         # Edit keeps only the standard history commands, avoiding a second,
         # generic home for controls that are meaningful only for collisions.
 
-        # Collision Editor owns this menu locally.  The three creation actions
+        # Entity Designer owns this menu locally.  The three creation actions
         # no longer consume toolbar width and no longer live under Edit.
         self.add_menu = self.menuBar().addMenu("&Add")
         self.add_menu.addAction(self.add_legacy_action)
@@ -5545,7 +5586,7 @@ class CollisionEditorWindow(QMainWindow):
             self._on_manual_camera_changed)
 
     def _build_model_preview_toolbar(self):
-        """Create the single compact toolbar used by the Collision Editor."""
+        """Create the single compact toolbar used by the Entity Designer."""
 
         toolbar = QToolBar("Model Preview Scale", self)
         toolbar.setObjectName("modelPreviewScaleTools")
@@ -5558,7 +5599,7 @@ class CollisionEditorWindow(QMainWindow):
         self.toolbar_undo_button.setEnabled(False)
         self.toolbar_undo_button.setMinimumWidth(88)
         self.toolbar_undo_button.setToolTip(
-            "Undo the latest Collision Editor edit.")
+            "Undo the latest Entity Designer edit.")
         self.toolbar_undo_button.clicked.connect(self.undo_action.trigger)
         toolbar.addWidget(self.toolbar_undo_button)
 
@@ -5566,7 +5607,7 @@ class CollisionEditorWindow(QMainWindow):
         self.toolbar_redo_button.setEnabled(False)
         self.toolbar_redo_button.setMinimumWidth(88)
         self.toolbar_redo_button.setToolTip(
-            "Redo the latest Collision Editor edit.")
+            "Redo the latest Entity Designer edit.")
         self.toolbar_redo_button.clicked.connect(self.redo_action.trigger)
         toolbar.addWidget(self.toolbar_redo_button)
 
@@ -5579,7 +5620,7 @@ class CollisionEditorWindow(QMainWindow):
         toolbar.addSeparator()
         self.reset_tab_button = QPushButton("Reset")
         self.reset_tab_button.setToolTip(
-            "Reset all authored changes in the current Collision Editor tab "
+            "Reset all authored changes in the current Entity Designer tab "
             "to the last loaded/imported state. Confirmation is required.")
         self.reset_tab_button.clicked.connect(self._reset_current_tab)
         toolbar.addWidget(self.reset_tab_button)
@@ -5663,26 +5704,26 @@ class CollisionEditorWindow(QMainWindow):
         source_panel.setSizePolicy(
             QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Expanding)
         source_layout = QVBoxLayout(source_panel)
-        source_layout.addWidget(QLabel("Resources in archive"))
-        self.model_search = QLineEdit()
+        source_layout.addWidget(QLabel("Game resources"))
+        from game_browser import GameObjectBrowser, configure_resource_tree
+        self.game_object_browser = GameObjectBrowser(self, kinds=("vehicle", "weapon"))
+        self.game_object_browser.selected.connect(self._open_game_object)
+        self.game_object_browser.setChanged.connect(self._game_set_changed)
+        self.model_search = QLineEdit(self)
         self.model_search.setPlaceholderText("Search model names")
         self.model_search.setClearButtonEnabled(True)
         self.model_search.setToolTip(
             "Filter models by name, internal path or owner path.")
         self.model_search.textChanged.connect(self._filter_models)
-        source_layout.addWidget(self.model_search)
-        source_layout.addWidget(self.model_tree, 1)
+        # The internal model index still resolves VP owners for script imports.
+        self.model_search.hide()
+        self.model_tree.setParent(self)
+        self.model_tree.hide()
+        configure_resource_tree(self.model_tree)
+        source_layout.addWidget(self.game_object_browser, 1)
         self.source_label = QLabel("No source loaded.")
         self.source_label.setWordWrap(True)
         source_layout.addWidget(self.source_label)
-        self.source_detail_label = QLabel()
-        self.source_detail_label.setWordWrap(True)
-        self.source_detail_label.setStyleSheet(
-            "color: #e06060; font-size: 10px;")
-        self.source_detail_label.setToolTip(
-            "Live Collision Editor context: selected VP/model, linked script, "
-            "active workspace, animation availability and unsaved state.")
-        source_layout.addWidget(self.source_detail_label)
         model_header = self.model_tree.header()
         model_header.setMinimumSectionSize(36)
         # QHeaderView stretches the last section by default.  With VP as the
@@ -5733,15 +5774,17 @@ class CollisionEditorWindow(QMainWindow):
         project_form.setRowWrapPolicy(
             QFormLayout.RowWrapPolicy.DontWrapRows)
         self.name_edit = QLineEdit()
+        self.name_edit.setReadOnly(True)
         self.name_edit.setPlaceholderText("Example")
         self.name_edit.editingFinished.connect(self._project_fields_changed)
         self.target_combo = QComboBox()
         self.target_combo.addItem("vehicle", VEHICLE)
         self.target_combo.addItem("weapon", WEAPON)
+        self.target_combo.setEnabled(False)
         self.target_combo.currentIndexChanged.connect(
             self._project_fields_changed)
-        project_form.addRow("Vehicle / Weapon Name", self.name_edit)
-        project_form.addRow("Target category", self.target_combo)
+        project_form.addRow("Entity Name", self.name_edit)
+        project_form.addRow("Target Category", self.target_combo)
         self.vanilla_collision_notice = QLabel(
             "Vanilla Urban Assault supports Legacy Radius only. "
             "OpenNeoUA Collision uses compound collision spheres.")
@@ -5786,32 +5829,34 @@ class CollisionEditorWindow(QMainWindow):
                 background: #7b3742;
             }
             QTabBar::scroller {
-                width: 54px;
+                width: 52px;
             }
             QTabBar QToolButton {
-                background: #f5c518;
-                color: #1c1a10;
-                border: 1px solid #b8930d;
-                width: 24px;
-                min-width: 24px;
-                max-width: 24px;
-                height: 24px;
-                min-height: 24px;
-                max-height: 24px;
+                background: #3a1d23;
+                color: #f8edef;
+                border: 1px solid #7c4049;
+                border-radius: 4px;
+                width: 22px;
+                min-width: 22px;
+                max-width: 22px;
+                height: 22px;
+                min-height: 22px;
+                max-height: 22px;
+                margin: 2px 1px;
                 padding: 0px;
             }
             QTabBar QToolButton:hover {
-                background: #ffd84d;
-                border-color: #d6b122;
+                background: #7b3742;
+                border-color: #d66b77;
             }
             QTabBar QToolButton:pressed {
-                background: #d9a90f;
-                border-color: #b8930d;
+                background: #a84552;
+                border-color: #d66b77;
             }
             QTabBar QToolButton:disabled {
-                background: #6b5c22;
-                color: #a99b62;
-                border-color: #8a762d;
+                background: #2a1519;
+                color: #6f5459;
+                border-color: #4a2a30;
             }
         """)
         self.collision_tab = QWidget()
@@ -5846,6 +5891,13 @@ class CollisionEditorWindow(QMainWindow):
             self.gun_points_tab, "Gun Points")
         self.cockpit_tab_index = self.properties_tabs.addTab(
             self.cockpit_tab, "Cockpit View")
+        from collision_editor.briefing import BriefingControls, BriefingPreview
+        self.briefing_tab = BriefingControls(self)
+        self.briefing_tab_index = self.properties_tabs.addTab(self.briefing_tab, "Briefing Model Size")
+        self.briefing_preview = BriefingPreview(self)
+        self.renderer_badge.add_viewport(self.briefing_preview)
+        self.viewport_layout.addWidget(self.briefing_preview, 0, 0)
+        self.briefing_preview.hide()
         self.properties_tabs.currentChanged.connect(
             self._properties_tab_changed)
         self.properties_tabs.setMinimumHeight(0)
@@ -6730,7 +6782,7 @@ class CollisionEditorWindow(QMainWindow):
         self.type_value.hide()
         self.index_value.hide()
         self.selected_element_label = QLabel("None")
-        self.visible_check = QCheckBox("Active / visible")
+        self.visible_check = QCheckBox("Active / Visible")
         self.visible_check.toggled.connect(self._visibility_changed)
         self.runtime_radius_value = QLabel("")
         self.runtime_radius_value.setAlignment(
@@ -6995,6 +7047,17 @@ class CollisionEditorWindow(QMainWindow):
         if not self._modified:
             self._export_baseline = self.project.snapshot()
         self._update_window_title()
+        browser = getattr(self, 'game_object_browser', None)
+        if browser is not None:
+            from game_browser import GAME_OBJECT_ROLE
+            from resource_status import mark_resource_modified
+            for index in range(browser.tree.topLevelItemCount()):
+                item = browser.tree.topLevelItem(index)
+                obj = item.data(0, GAME_OBJECT_ROLE)
+                matching = (self._active_script_id == obj.object_id
+                            and self._active_script_kind.endswith('_' + obj.kind)
+                            and self._active_script_path == obj.source)
+                mark_resource_modified(item, self._modified and matching)
 
     def _mark_collision_shape_exported(self) -> None:
         baseline = CollisionProject()
@@ -7129,7 +7192,7 @@ class CollisionEditorWindow(QMainWindow):
             self.statusBar().showMessage(text, 2500)
 
     def _sync_animation_controls(self) -> None:
-        """Keep Collision Editor animation controls honest after reloads."""
+        """Keep Entity Designer animation controls honest after reloads."""
 
         if not hasattr(self, "play_button"):
             return
@@ -7153,8 +7216,12 @@ class CollisionEditorWindow(QMainWindow):
             "Urban Assault assets (*.base *.bas *.BASE *.BAS *.3ds *.3DS);;"
             "All files (*)")
         if path:
+            from loading_feedback import loading_resources
             selected = Path(path)
-            self.open_base(selected)
+            label = ("Loading BAS archive. Please wait…" if selected.suffix.casefold() == ".bas"
+                     else "Importing model. Please wait…")
+            with loading_resources(self, label):
+                self.open_base(selected)
 
     def _set_model_browser_enabled(self, enabled: bool) -> None:
         """Enable model browsing only for the normal archive/SKLT workflow."""
@@ -7293,7 +7360,7 @@ class CollisionEditorWindow(QMainWindow):
         self._update_window_title()
         self._sync_close_archive_action()
         self.statusBar().showMessage(
-            "Current resource closed. Related Collision Editor data cleared.",
+            "Current resource closed. Related Entity Designer data cleared.",
             5000)
 
     def _current_set_bas_path(self) -> Path | None:
@@ -7315,6 +7382,41 @@ class CollisionEditorWindow(QMainWindow):
         self._loaded_cockpit_camera_enabled = False
         self._loaded_cockpit_camera_offset = (0.0, 0.0, 0.0)
 
+    def reload_game_resources(self):
+        from game_visuals import clear_visual_cache
+        clear_visual_cache()
+        self.game_object_browser.reload()
+
+    def _game_set_changed(self, number):
+        from loading_feedback import loading_resources
+        with loading_resources(self, f"Loading Set {number}. Please wait…"):
+            if self._load_game_set(number):
+                from studio_session import remember_set
+                remember_set(number)
+
+    def _load_game_set(self, number):
+        current = self.game_object_browser.tree.currentItem()
+        if current is not None:
+            from game_browser import GAME_OBJECT_ROLE
+            obj = current.data(0, GAME_OBJECT_ROLE)
+            if obj is not None:
+                return self._open_game_object(obj)
+        return True
+
+    def _open_game_object(self, obj):
+        if self._modified and not self._confirm_script_unit_switch():
+            return False
+        try:
+            from game_visuals import set_assets
+            assets = set_assets(self.game_object_browser.set_number)
+            result = self.open_vehicle_script(obj.source, object_id=obj.object_id,
+                object_kind=f"new_{obj.kind}", set_bas_path=assets.setbas_path,
+                resolved_text=obj.effective_text)
+            return result is not False
+        except (OSError, ValueError, RuntimeError) as exc:
+            QMessageBox.warning(self, "Game object unavailable", str(exc))
+            return False
+
     def open_vehicle_script_dialog(self):
         path, _ = QFileDialog.getOpenFileName(
             self, "Import vehicle / weapon definition",
@@ -7326,7 +7428,8 @@ class CollisionEditorWindow(QMainWindow):
     def open_vehicle_script(
             self, path: str | Path, *, vehicle_id: int | None = None,
             object_id: int | None = None, object_kind: str | None = None,
-            set_bas_path: str | Path | None = None) -> bool:
+            set_bas_path: str | Path | None = None,
+            resolved_text: str | None = None) -> bool:
         """Load one ``new_vehicle`` or ``new_weapon`` through ``vp_normal``.
 
         ``vehicle_id`` remains as a compatibility argument and implies
@@ -7338,6 +7441,8 @@ class CollisionEditorWindow(QMainWindow):
         script_path = Path(path)
         try:
             text, _encoding, _bom = read_script_file(script_path)
+            if resolved_text is not None:
+                text = resolved_text
             references = script_model_references(text)
             script_turret_limits = import_turret_limits(text)
         except (OSError, UnicodeError, CollisionScriptError) as exc:
@@ -7521,6 +7626,8 @@ class CollisionEditorWindow(QMainWindow):
             cockpit_camera_offset_x=cockpit_x,
             cockpit_camera_offset_y=cockpit_y,
             cockpit_camera_offset_z=cockpit_z,
+            briefing_size_enabled=import_briefing_size_block(text, block)[0] if target_category == VEHICLE else False,
+            briefing_size=import_briefing_size_block(text, block)[1] if target_category == VEHICLE else 0.0,
             legacy=legacy,
             compound=compounds,
             collision_shape=shape,
@@ -7567,12 +7674,10 @@ class CollisionEditorWindow(QMainWindow):
         self._show_model_item(self._select_script_unit_item(reference))
         self._set_modified(False)
         self.source_label.setText(
-            f"{chosen_asset.name}\n"
-            + (f"Visual override: {visual_override}" if visual_override
-               else f"VP {reference.vp_normal}: {source_model or '<model>'}\n"
-               f"VP source: {self._vp_table_source}")
+            (f"Visual override: {visual_override}" if visual_override
+             else f"VP {reference.vp_normal}: {source_model or '<model>'}")
             + "\n"
-            f"Script: {script_path.name} — {block.kind} {block.object_id}")
+            f"{script_path.name} — {block.kind} {block.object_id}")
         self._sync_all()
         message = (
             f"Loaded {block.kind} {block.object_id} using "
@@ -8216,7 +8321,7 @@ class CollisionEditorWindow(QMainWindow):
         if self._current_set_bas_path() is None:
             QMessageBox.information(
                 self, "SET required",
-                "Open a SET.BAS archive in the Collision Editor before "
+                "Open a SET.BAS archive in the Entity Designer before "
                 "importing a collision shape.")
             return
         path, _ = QFileDialog.getOpenFileName(
@@ -8375,11 +8480,13 @@ class CollisionEditorWindow(QMainWindow):
         self._last_directory = path.parent
         self.project.source_base = path.name
         self._fill_models(family)
+        if path.suffix.casefold() == '.bas':
+            from set_tabs import sync_archive_set_selector
+            sync_archive_set_selector(self.game_object_browser.set_combo, path)
+            self.game_object_browser.select_object(None)
         self.source_label.setText(
             f"{path.name}\n"
-            f"{len([o for o in family.all_objects() if o.skeleton])} models; "
-            f"{len(family.textures)} textures loaded"
-            + (f"\nVP source: {vp_source}" if vp_source else ""))
+            f"{len([o for o in family.all_objects() if o.skeleton])} models")
         self._set_model_browser_enabled(True)
         if vp_warnings:
             self.statusBar().showMessage(" ".join(vp_warnings), 9000)
@@ -8615,7 +8722,7 @@ class CollisionEditorWindow(QMainWindow):
         """Ask before replacing unexported work with another script unit."""
 
         answer = QMessageBox.question(
-            self, "Unsaved Collision Editor changes",
+            self, "Unsaved Entity Designer changes",
             self._unsaved_changes_message("Load another unit"),
             QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
             QMessageBox.StandardButton.No)
@@ -9763,6 +9870,12 @@ class CollisionEditorWindow(QMainWindow):
     def _properties_tab_changed(self, _index: int) -> None:
         # Changing workspace must never modify authored data. It only switches
         # the viewport presentation and which object the shared gizmo moves.
+        briefing_active = self.properties_tabs.currentIndex() == self.briefing_tab_index
+        self.renderer_badge.set_viewport(self.briefing_preview if briefing_active else self.viewport)
+        self.briefing_preview.setVisible(briefing_active)
+        self.viewport.setVisible(not briefing_active)
+        if briefing_active:
+            self.briefing_preview.refresh()
         cockpit_selected = self._is_cockpit_tab_selected()
         cockpit_active = self._is_cockpit_tab_active()
         shape_tab_active = (
@@ -9776,9 +9889,9 @@ class CollisionEditorWindow(QMainWindow):
         self._update_reset_view_controls()
         if hasattr(self, "selected_box"):
             self.selected_box.setVisible(
-                not cockpit_active and not shape_tab_active)
+                not cockpit_active and not shape_tab_active and not briefing_active)
         if hasattr(self, "transform_box"):
-            self.transform_box.setVisible(not shape_tab_active)
+            self.transform_box.setVisible(not shape_tab_active and not briefing_active)
             self.transform_box.setTitle(
                 "Move Cockpit Camera" if cockpit_selected else "Move Element")
         if hasattr(self, "cockpit_runtime_aspect_combo"):
@@ -10155,6 +10268,8 @@ class CollisionEditorWindow(QMainWindow):
                 bool(project.gun_points_enabled),
                 project.unit_gun_default_icon, points, limits,
             )
+        if group == _SCRIPT_TAB_BRIEFING:
+            return project.briefing_size_enabled, project.briefing_size
         if group == _SCRIPT_TAB_COCKPIT:
             return (
                 bool(project.cockpit_camera_enabled),
@@ -10171,7 +10286,7 @@ class CollisionEditorWindow(QMainWindow):
         groups = {_SCRIPT_TAB_COLLISION}
         if self.project.target_category == VEHICLE:
             groups.update((
-                _SCRIPT_TAB_FIRE, _SCRIPT_TAB_GUN, _SCRIPT_TAB_COCKPIT))
+                _SCRIPT_TAB_FIRE, _SCRIPT_TAB_GUN, _SCRIPT_TAB_COCKPIT, _SCRIPT_TAB_BRIEFING))
         return {
             group for group in groups
             if self._script_tab_state(self.project, group)
@@ -10210,6 +10325,7 @@ class CollisionEditorWindow(QMainWindow):
                 (baseline.gun_points_enabled, baseline.gun_points,
                  baseline.unit_gun_default_icon) = import_gun_points_block(
                     text, block)
+                baseline.briefing_size_enabled, baseline.briefing_size = import_briefing_size_block(text, block)
                 baseline.turret_limits = import_turret_limits(text)
                 (baseline.cockpit_camera_enabled,
                  baseline.cockpit_camera_offset_x,
@@ -10305,6 +10421,8 @@ class CollisionEditorWindow(QMainWindow):
                 ) for vehicle_id, limits in sorted(
                     project.turret_limits.items())),
             )
+        if tab_index == self.briefing_tab_index:
+            return project.briefing_size_enabled, project.briefing_size
         if tab_index == self.cockpit_tab_index:
             return (
                 project.cockpit_camera_enabled,
@@ -10391,6 +10509,9 @@ class CollisionEditorWindow(QMainWindow):
             self._selected_gun_point = min(
                 self._selected_gun_point,
                 len(self.project.gun_points) - 1)
+        elif tab_index == self.briefing_tab_index:
+            self.project.briefing_size_enabled = baseline.briefing_size_enabled
+            self.project.briefing_size = baseline.briefing_size
         elif tab_index == self.cockpit_tab_index:
             self.project.cockpit_camera_enabled = (
                 baseline.cockpit_camera_enabled)
@@ -11143,41 +11264,6 @@ class CollisionEditorWindow(QMainWindow):
             action = menu.addAction(line)
             action.setEnabled(False)
 
-    def _refresh_source_detail_label(self) -> None:
-        """Show compact live context in red at the lower-left source panel."""
-
-        if not hasattr(self, "source_detail_label"):
-            return
-        current = self.model_tree.currentItem()
-        vp_text = "—"
-        if current is not None:
-            vp_ids = current.data(0, _MODEL_VP_ROLE) or ()
-            if vp_ids:
-                vp_text = ", ".join(str(value) for value in vp_ids)
-        script_text = "not linked"
-        if (self._active_script_path is not None
-                and self._active_script_id is not None
-                and self._active_script_kind):
-            script_text = (
-                f"{self._active_script_path.name} — "
-                f"{self._active_script_kind} {self._active_script_id}")
-        workspace = "—"
-        if hasattr(self, "properties_tabs"):
-            workspace = self.properties_tabs.tabText(
-                self.properties_tabs.currentIndex())
-        animation = "available" if self.viewport.has_animation else "none"
-        dirty = "yes" if self._modified else "no"
-        browser = (
-            "script units" if self._script_unit_mode
-            else "enabled" if self._model_browser_enabled
-            else "locked")
-        self.source_detail_label.setText(
-            f"Selected VP: {vp_text}\n"
-            f"Script link: {script_text}\n"
-            f"Workspace: {workspace}\n"
-            f"Model browser: {browser}\n"
-            f"VANM animation: {animation} | Unsaved changes: {dirty}")
-
     def _preview_spheres(self) -> list[CollisionSphere]:
         """Return collision preview matching the shared runtime rule.
 
@@ -11247,14 +11333,14 @@ class CollisionEditorWindow(QMainWindow):
         self.viewport.set_ground_alignment(
             vehicle_mode, self.project.overeof_enabled,
             self.project.overeof)
-        self.target_combo.setCurrentIndex(0 if vehicle_mode else 1)
+        self.target_combo.setCurrentIndex(self.target_combo.findData(self.project.target_category))
         for index in (
                 self.fire_points_tab_index, self.gun_points_tab_index,
                 self.cockpit_tab_index):
             self.properties_tabs.setTabEnabled(index, vehicle_mode)
         if (not vehicle_mode
                 and self.properties_tabs.currentIndex()
-                != self.collision_tab_index):
+                not in (self.collision_tab_index, self.collision_shape_tab_index)):
             self.properties_tabs.setCurrentIndex(self.collision_tab_index)
 
         cockpit_enabled = vehicle_mode and self.project.cockpit_camera_enabled
@@ -11325,9 +11411,10 @@ class CollisionEditorWindow(QMainWindow):
         shape_tab_active = (
             self.properties_tabs.currentIndex()
             == self.collision_shape_tab_index)
+        briefing_active = self.properties_tabs.currentIndex() == self.briefing_tab_index
         self.selected_box.setVisible(
-            not cockpit_active and not shape_tab_active)
-        self.transform_box.setVisible(not shape_tab_active)
+            not cockpit_active and not shape_tab_active and not briefing_active)
+        self.transform_box.setVisible(not shape_tab_active and not briefing_active)
 
         self.ground_alignment_box.setVisible(vehicle_mode)
         self.overeof_check.setChecked(
@@ -11757,10 +11844,12 @@ class CollisionEditorWindow(QMainWindow):
         if hasattr(self, "reset_tab_button"):
             self.reset_tab_button.setEnabled(self._current_tab_has_changes())
         self._update_reset_view_controls()
-        self._refresh_source_detail_label()
         self._sync_workspace_overlay_visibility()
         del blockers
         self._syncing = False
+        self.briefing_tab.sync()
+        if self.briefing_preview.isVisible():
+            self.briefing_preview.refresh()
 
     def _validate_for_output(self) -> bool:
         errors, warnings = validate_project(
@@ -11778,29 +11867,6 @@ class CollisionEditorWindow(QMainWindow):
                 QMessageBox.StandardButton.Yes)
             return result == QMessageBox.StandardButton.Yes
         return True
-
-    def export_text(self):
-        if not self._validate_for_output():
-            return
-        suggested = (
-            f"{self.project.name}_collisions.txt"
-            if self.project.name else "collisions.txt")
-        path, _ = QFileDialog.getSaveFileName(
-            self, "Export Collision Text",
-            str(self._last_directory / suggested),
-            "Text files (*.txt);;All files (*)")
-        if not path:
-            return
-        try:
-            Path(path).write_text(
-                export_collision_text(self.project), encoding="utf-8",
-                newline="\n")
-        except OSError as exc:
-            QMessageBox.critical(self, "Export failed", str(exc))
-            return
-        self._last_directory = Path(path).parent
-        self._set_modified(False)
-        self.statusBar().showMessage(f"Exported {path}", 7000)
 
     def copy_output(self):
         if not self._validate_for_output():
@@ -11856,6 +11922,8 @@ class CollisionEditorWindow(QMainWindow):
         self.project.overeof = (
             overeof if self.project.overeof_enabled else 0.0)
         vehicle_block = self.project.target_category == VEHICLE
+        self.project.briefing_size_enabled, self.project.briefing_size = (
+            import_briefing_size_block(text, block) if vehicle_block else (False, 0.0))
         self.project.fire_points_enabled = vehicle_block and fire_enabled
         self.project.fire_x = fire_x if vehicle_block else 0.0
         self.project.fire_y = fire_y if vehicle_block else 0.0
@@ -11924,7 +11992,7 @@ class CollisionEditorWindow(QMainWindow):
     def closeEvent(self, event: QCloseEvent) -> None:  # noqa: N802
         if self._modified:
             answer = QMessageBox.question(
-                self, "Unsaved Collision Editor changes",
+                self, "Unsaved Entity Designer changes",
                 self._unsaved_changes_message("Close"),
                 QMessageBox.StandardButton.Yes
                 | QMessageBox.StandardButton.No,

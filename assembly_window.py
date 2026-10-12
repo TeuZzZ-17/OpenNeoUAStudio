@@ -701,6 +701,8 @@ class AssemblyWindow(QMainWindow):
             self._preview_visual_texture_item)
         self.setbas_tree = _BasResourceTree()
         self.setbas_tree.setHeaderLabels(["Resource", "Payload", "VP"])
+        from resource_status import ResourceStatusDelegate
+        self.setbas_tree.setItemDelegate(ResourceStatusDelegate(self.setbas_tree))
         self.setbas_tree.setSelectionMode(
             QAbstractItemView.SelectionMode.ExtendedSelection)
         select_all_setbas = QAction(self.setbas_tree)
@@ -909,10 +911,10 @@ class AssemblyWindow(QMainWindow):
         menu.addSeparator()
         extract = menu.addAction(
             f"Extract selected ({len(resources)})" if len(resources) > 1
-            else "Extract selected")
+            else "Extract Selected")
         extract.setEnabled(bool(resources))
         extract.triggered.connect(self._extract_setbas_selected)
-        menu.addAction("Extract archive",
+        menu.addAction("Extract Archive",
                        self._extract_setbas_archive).setEnabled(
                            self._setbas is not None)
         menu.addAction(
@@ -949,13 +951,13 @@ class AssemblyWindow(QMainWindow):
             base_name = (
                 item.data(0, _BAS_NAME_ROLE) or item.text(0)).strip()
             menu.addSeparator()
-            copy_name = menu.addAction("Copy BASE name")
+            copy_name = menu.addAction("Copy BASE Name")
             copy_name.triggered.connect(lambda: self._copy_text(
                 base_name, "BASE name copied successfully."))
         menu.addSeparator()
-        menu.addAction("Select all resources", self.setbas_tree.selectAll)
+        menu.addAction("Select All Resources", self.setbas_tree.selectAll)
         if self._last_output_directory is not None:
-            menu.addAction("Open last output folder",
+            menu.addAction("Open Last Output Folder",
                            self._open_last_output_folder)
         try:
             menu.exec(self.setbas_tree.viewport().mapToGlobal(position))
@@ -1045,13 +1047,13 @@ class AssemblyWindow(QMainWindow):
         if data:
             kind, payload = data
             if kind == "texture":
-                preview = menu.addAction("Preview texture")
+                preview = menu.addAction("Preview Texture")
                 preview.setEnabled(self._family is not None
                                    and self._visual_texture_available(payload))
                 preview.triggered.connect(
                     lambda: self._open_visual_texture(
                         payload, show_preview=True, switch_tabs=False))
-                export = menu.addAction("Export texture as PNG")
+                export = menu.addAction("Export Texture as PNG")
                 export.setEnabled(self._visual_texture_available(payload))
                 export.triggered.connect(
                     lambda: self._export_family_textures_png([payload]))
@@ -1122,10 +1124,10 @@ class AssemblyWindow(QMainWindow):
         export_onua3d.triggered.connect(export_current_onua3d)
         path = self._asset_item_path(item)
         if path is not None:
-            menu.addAction("Reveal source file",
+            menu.addAction("Reveal Source File",
                            lambda: self._reveal_asset_item(item))
         menu.addSeparator()
-        menu.addAction("Copy info", lambda: self._copy_text(
+        menu.addAction("Copy Info", lambda: self._copy_text(
             self._widget_item_text(self.asset_tree, item),
             "Asset information copied successfully."))
         menu.exec(self.asset_tree.viewport().mapToGlobal(position))
@@ -1149,7 +1151,7 @@ class AssemblyWindow(QMainWindow):
             lambda: self._preview_family_texture(names[0]) if names else None)
         export = menu.addAction(
             f"Export selected as PNG ({len(names)})" if len(names) > 1
-            else "Export selected as PNG")
+            else "Export Selected as PNG")
         export.setEnabled(bool(names))
         export.triggered.connect(
             lambda: self._export_family_textures_png(names))
@@ -1167,7 +1169,7 @@ class AssemblyWindow(QMainWindow):
             ref = self._family.texture_refs.get(names[0])
             if ref and ref.path:
                 menu.addAction(
-                    "Reveal source file",
+                    "Reveal Source File",
                     lambda: subprocess.Popen(
                         ["explorer", "/select,", str(ref.path)]))
         if names:
@@ -1175,7 +1177,7 @@ class AssemblyWindow(QMainWindow):
             menu.addAction("Copy texture name(s)",
                            lambda: self._copy_texture_names(names))
         menu.addSeparator()
-        menu.addAction("Select all textures", self.texture_list.selectAll)
+        menu.addAction("Select All Textures", self.texture_list.selectAll)
         menu.exec(self.texture_list.viewport().mapToGlobal(position))
 
     def _build_toolbar(self) -> None:
@@ -1407,22 +1409,22 @@ class AssemblyWindow(QMainWindow):
         tools_menu = self.menuBar().addMenu("&Tools")
         self.tools_menu = tools_menu
         setbas_tools_menu = tools_menu.addMenu("BAS Archive")
-        extract_setbas_action = QAction("Extract archive", self)
+        extract_setbas_action = QAction("Extract Archive", self)
         extract_setbas_action.triggered.connect(self._extract_setbas_archive)
         setbas_tools_menu.addAction(extract_setbas_action)
         setbas_tools_menu.addAction(self.export_runtime_loose_action)
-        metadata_action = QAction("Export scene metadata", self)
+        metadata_action = QAction("Export Scene Metadata", self)
         metadata_action.triggered.connect(self._export_setbas_metadata)
         setbas_tools_menu.addAction(metadata_action)
-        open_output = QAction("Open last output folder", self)
+        open_output = QAction("Open Last Output Folder", self)
         open_output.triggered.connect(self._open_last_output_folder)
         setbas_tools_menu.addAction(open_output)
 
-        conversion_menu = tools_menu.addMenu("Texture conversion")
+        conversion_menu = tools_menu.addMenu("Texture Conversion")
         conv_to_png = QAction("ILBM/VBMP to PNG", self)
         conv_to_png.triggered.connect(self._convert_ilbm_to_png_dialog)
         conversion_menu.addAction(conv_to_png)
-        conv_vbmp_to_ilbm = QAction("VBMP to standalone ILBM", self)
+        conv_vbmp_to_ilbm = QAction("VBMP to Standalone ILBM", self)
         conv_vbmp_to_ilbm.triggered.connect(
             self._convert_vbmp_to_ilbm_dialog)
         conversion_menu.addAction(conv_vbmp_to_ilbm)
@@ -1435,7 +1437,7 @@ class AssemblyWindow(QMainWindow):
             self._open_wireframe_editor)
         self.integrated_editors_separator = tools_menu.addSeparator()
         tools_menu.addAction(self.wireframe_editor_action)
-        self.collision_editor_action = QAction("Collision Editor", self)
+        self.collision_editor_action = QAction("Entity Designer", self)
         self.collision_editor_action.triggered.connect(
             self._open_collision_editor)
         tools_menu.addAction(self.collision_editor_action)
@@ -1598,7 +1600,7 @@ class AssemblyWindow(QMainWindow):
         self.vp_source_label.setWordWrap(True)
         setbas_layout.addWidget(self.vp_source_label)
 
-        vp_edit_box = QGroupBox("VP information")
+        vp_edit_box = QGroupBox("VP Information")
         vp_edit_layout = QGridLayout(vp_edit_box)
         vp_edit_layout.setContentsMargins(5, 4, 5, 5)
         vp_edit_layout.addWidget(QLabel("Selected:"), 0, 0)
@@ -1621,17 +1623,17 @@ class AssemblyWindow(QMainWindow):
             self._export_runtime_loose_set)
         self.setbas_runtime_loose_button.setEnabled(False)
         setbas_buttons.addWidget(self.setbas_runtime_loose_button, 0, 0)
-        self.setbas_extract_button = QPushButton("Extract selected")
+        self.setbas_extract_button = QPushButton("Extract Selected")
         self.setbas_extract_button.clicked.connect(
             self._extract_setbas_selected)
         self.setbas_extract_button.setEnabled(False)
         setbas_buttons.addWidget(self.setbas_extract_button, 0, 1)
-        self.setbas_extract_all_button = QPushButton("Extract archive")
+        self.setbas_extract_all_button = QPushButton("Extract Archive")
         self.setbas_extract_all_button.clicked.connect(
             self._extract_setbas_archive)
         self.setbas_extract_all_button.setEnabled(False)
         setbas_buttons.addWidget(self.setbas_extract_all_button, 1, 0)
-        self.setbas_open_output_button = QPushButton("Open output folder")
+        self.setbas_open_output_button = QPushButton("Open Output Folder")
         self.setbas_open_output_button.clicked.connect(
             self._open_last_output_folder)
         self.setbas_open_output_button.setEnabled(False)
@@ -1673,7 +1675,7 @@ class AssemblyWindow(QMainWindow):
         textures_layout.setContentsMargins(5, 5, 5, 5)
         textures_layout.setSpacing(4)
         textures_layout.addWidget(self.texture_list, 1)
-        self.texture_export_button = QPushButton("Export selected as PNG")
+        self.texture_export_button = QPushButton("Export Selected as PNG")
         self.texture_export_button.clicked.connect(self._export_texture_png)
         textures_layout.addWidget(self.texture_export_button)
 
@@ -1681,7 +1683,7 @@ class AssemblyWindow(QMainWindow):
         model_layout = QVBoxLayout(model_panel)
         model_layout.setContentsMargins(5, 5, 5, 5)
         model_layout.setSpacing(6)
-        model_box = QGroupBox("Model and texture editing")
+        model_box = QGroupBox("Model and Texture Editing")
         model_box_layout = QVBoxLayout(model_box)
         model_box_layout.setSpacing(5)
 
@@ -1919,7 +1921,7 @@ class AssemblyWindow(QMainWindow):
         self.load_texture_button.clicked.connect(self._load_model_texture)
         model_box_layout.addWidget(self.load_texture_button)
 
-        uv_box = QGroupBox("Texture and FX editor")
+        uv_box = QGroupBox("Texture and FX Editor")
         uv_layout = QVBoxLayout(uv_box)
         uv_layout.setContentsMargins(5, 5, 5, 5)
         self.uv_editor = UVEditorWidget()
@@ -2064,7 +2066,7 @@ class AssemblyWindow(QMainWindow):
         studio_layout.setContentsMargins(6, 6, 6, 6)
         studio_layout.setSpacing(5)
 
-        view_box = QGroupBox("View preset")
+        view_box = QGroupBox("View Preset")
         view_layout = QGridLayout(view_box)
         view_layout.setHorizontalSpacing(5)
         view_layout.setVerticalSpacing(4)
@@ -2127,7 +2129,7 @@ class AssemblyWindow(QMainWindow):
         background_layout.addWidget(self.snapshot_opacity_slider, 1, 2)
         studio_layout.addWidget(background_box)
 
-        output_box = QGroupBox("Output size")
+        output_box = QGroupBox("Output Size")
         output_layout = QGridLayout(output_box)
         self.snapshot_size_combo = QComboBox()
         self.snapshot_size_combo.addItems([
@@ -2154,7 +2156,7 @@ class AssemblyWindow(QMainWindow):
         output_layout.addWidget(self.snapshot_height_spin, 2, 1)
         self._set_snapshot_custom_size_visible(False)
 
-        animation_box = QGroupBox("Animation frame")
+        animation_box = QGroupBox("Animation Frame")
         animation_layout = QVBoxLayout(animation_box)
         self.snapshot_frame_label = QLabel("Current Animation Frame: No animation")
         self.snapshot_frame_label.setWordWrap(True)
@@ -2617,7 +2619,7 @@ class AssemblyWindow(QMainWindow):
             from collision_editor import CollisionEditorWindow
         except Exception as exc:
             QMessageBox.critical(
-                self, "Collision Editor unavailable",
+                self, "Entity Designer unavailable",
                 f"The integrated editor could not be loaded.\n\n{exc}")
             return
         window = CollisionEditorWindow()
@@ -2664,7 +2666,9 @@ class AssemblyWindow(QMainWindow):
         path = choose_bas_archive(self, self._last_directory)
         if not path:
             return
-        self.open_setbas(Path(path))
+        from loading_feedback import loading_resources
+        with loading_resources(self, 'Loading BAS archive. Please wait…'):
+            self.open_setbas(Path(path))
 
     def open_base_dialog(self) -> None:
         """Import a standalone, exportable BASE family entry point."""
@@ -2970,7 +2974,9 @@ class AssemblyWindow(QMainWindow):
     def open_setbas_dialog(self) -> None:
         path = choose_bas_archive(self, self._last_directory)
         if path:
-            self.open_setbas(path)
+            from loading_feedback import loading_resources
+            with loading_resources(self, 'Loading BAS archive. Please wait…'):
+                self.open_setbas(path)
 
     def open_setbas(self, path: str | Path) -> None:
         try:
@@ -3011,6 +3017,9 @@ class AssemblyWindow(QMainWindow):
             # visible after the internal family refresh.
             self._set_document_title(archive.path)
         self._preview_first_setbas_skeleton(confirm_discard=False)
+        synchronize = getattr(self, '_sync_imported_set', None)
+        if synchronize is not None:
+            synchronize(archive.path)
 
     def _set_vp_table(
             self, table: VPTable | None, source: str) -> None:
@@ -4070,7 +4079,7 @@ class AssemblyWindow(QMainWindow):
         png_check.setChecked(True)
         kids_check = QCheckBox(
             "Export raw BASE/KIDS chunks (slow, developer mode)")
-        meta_check = QCheckBox("Export BASE/KIDS scene metadata JSON")
+        meta_check = QCheckBox("Export BASE/KIDS Scene Metadata JSON")
         csv_check = QCheckBox("Write manifest.csv next to manifest.json")
         for check in (all_check, ilbm_check, png_check, kids_check, meta_check,
                       csv_check):
@@ -5481,6 +5490,7 @@ class AssemblyWindow(QMainWindow):
         self._update_editor_status()
 
     def _update_editor_status(self) -> None:
+        self._refresh_dirty_resource_rows()
         if self._family is None:
             self.loaded_resource_label.setText("No Resource Loaded")
             self.loaded_resource_label.setToolTip("")
@@ -5501,6 +5511,59 @@ class AssemblyWindow(QMainWindow):
         self.unsaved_edits_label.setVisible(n_dirty > 0)
 
     # -- log / profile / candidate tools ------------------------------------------
+
+    def _dirty_resource_names(self):
+        from vp_manager import normalize_base_name
+        names = set()
+        owners = set(self._geom_dirty)
+        owners.update(key[0] for key in self._uv_original)
+        owners.update(key[0] for key in self._texture_original)
+        if self._vanm_uv_original:
+            owners.update(owner for owner in self._owner_to_obj if self._owner_vanm_uv_keys(owner))
+        for owner in owners:
+            obj = self._owner_to_obj.get(owner)
+            if obj is None:
+                continue
+            for name in (self._base_entry_name(self._family, obj, owner),
+                         getattr(obj.skeleton, 'source_name', '')):
+                if name:
+                    names.add(normalize_base_name(str(name).replace('\\', '/').rsplit('/', 1)[-1]))
+        return names
+
+    def _refresh_dirty_resource_rows(self):
+        from resource_status import mark_resource_modified
+        from vp_manager import normalize_base_name
+        if not hasattr(self, 'setbas_tree'):
+            return
+        browser = getattr(self, 'entity_browser', None)
+        if not self.setbas_tree.topLevelItemCount() and (browser is None or not browser.tree.topLevelItemCount()):
+            return
+        names = self._dirty_resource_names()
+        for group_index in range(self.setbas_tree.topLevelItemCount()):
+            group = self.setbas_tree.topLevelItem(group_index)
+            for index in range(group.childCount()):
+                item = group.child(index)
+                name = str(item.data(0, _BAS_NAME_ROLE) or '')
+                mark_resource_modified(item, normalize_base_name(name.replace('\\', '/').rsplit('/', 1)[-1]) in names)
+        if browser is None:
+            return
+        from game_browser import GAME_OBJECT_ROLE
+        from game_visuals import visual_choices
+        for index in range(browser.tree.topLevelItemCount()):
+            item = browser.tree.topLevelItem(index)
+            obj = item.data(0, GAME_OBJECT_ROLE)
+            modified = False
+            if names and browser.set_number is not None:
+                key = (browser.set_number, obj.kind, obj.object_id)
+                choices = self._entity_choices.get(key)
+                if choices is None:
+                    try:
+                        choices = visual_choices(obj, browser.set_number)
+                    except (OSError, ValueError, RuntimeError):
+                        choices = []
+                    self._entity_choices[key] = choices
+                modified = any(normalize_base_name(choice.base_name or choice.path.name) in names for choice in choices)
+            mark_resource_modified(item, modified)
 
     def _log(self, text: str) -> None:
         self.log_list.addItem(text)
@@ -9499,7 +9562,7 @@ class AssemblyWindow(QMainWindow):
         rotate.setEnabled(editing and self._family is not None)
         menu.addSeparator()
         reset_camera = menu.addAction(
-            "Reset camera", self._reset_view_and_gizmo)
+            "Reset Camera", self._reset_view_and_gizmo)
         reset_camera.setEnabled(self.viewport.can_reset_camera)
         return menu
 

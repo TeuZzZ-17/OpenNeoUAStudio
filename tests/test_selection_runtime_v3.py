@@ -81,9 +81,12 @@ def _prepare_window():
     window._mapping_index = MappingIndex(obj)
     window.viewport.load_family(family, primary_owner="root")
     window.viewport.set_selected_owner("root")
+    window.edit_toggle_action.blockSignals(True)
+    window.edit_toggle_action.setChecked(True)
+    window.edit_toggle_action.blockSignals(False)
     window.viewport.enter_edit_mode("root")
     window.viewport.configure_edit_interaction(
-        selected_only=False, pick_polygons=True)
+        selected_only=False, pick_polygons=False)
     window._sync_edit_action_states()
     return window, obj, model
 

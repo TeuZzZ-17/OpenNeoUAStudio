@@ -253,7 +253,7 @@ def test_terrain_context_menu_ignores_actor_hits_and_keeps_height_sampling(win, 
         assert win.palette_tabs.currentIndex() == 3 and win.tool == 'terrain'
         assert _actor_selection_state(win) == actor_state
         assert not picks
-        sample = next(action for action in menu.actions() if action.text() == 'Sample this height')
+        sample = next(action for action in menu.actions() if action.text() == 'Sample This Height')
         sample.trigger()
         assert win.flatten_height.value() == win.doc.grids['hgt'][cell[1]][cell[0]] - HGT_MIN
         assert win.palette_tabs.currentIndex() == 3 and win.tool == 'terrain'

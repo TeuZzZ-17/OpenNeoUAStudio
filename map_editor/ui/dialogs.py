@@ -58,94 +58,7 @@ class NewMapDialog(_Form):
                 self.set_box.currentData())
 
 
-class GameInstallationDialog(QDialog):
-    def __init__(self, current: GameInstallation | None = None, parent=None):
-        super().__init__(parent)
-        self.setWindowTitle("Game installation")
-        self.resize(760, 520)
-        layout = QVBoxLayout(self)
-        layout.addWidget(QLabel("Choose the game's Data folder or its parent installation folder.\n"
-                                "Folders below are suggested automatically and can be changed."))
-        form = QFormLayout()
-        layout.addLayout(form)
-        self.root = QLineEdit(str(current.data) if current else "")
-        form.addRow("Game installation", self._picker(self.root, self._suggest))
-        self.edits = {}
-        for name in FOLDERS:
-            edit = QLineEdit()
-            self.edits[name] = edit
-            form.addRow(name.capitalize(), self._picker(edit))
-            edit.editingFinished.connect(self._refresh_inventory)
-        self.root.editingFinished.connect(self._suggest)
-        if current:
-            for name in FOLDERS:
-                self.edits[name].setText(str(current.folder(name)))
-        self.inventory_label = QLabel()
-        layout.addWidget(self.inventory_label)
-        if current:
-            self._refresh_inventory()
-        self.remember = QCheckBox("Remember these folders on this computer")
-        self.remember.setChecked(current is not None and current == load_remembered())
-        layout.addWidget(self.remember)
-        self.buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok |
-                                        QDialogButtonBox.StandardButton.Cancel)
-        self.buttons.accepted.connect(self._accept)
-        self.buttons.rejected.connect(self.reject)
-        layout.addWidget(self.buttons)
-
-    def _picker(self, edit: QLineEdit, after=None) -> QWidget:
-        row = QWidget()
-        layout = QHBoxLayout(row)
-        layout.setContentsMargins(0, 0, 0, 0)
-        layout.addWidget(edit)
-        button = QPushButton("Browse")
-        button.clicked.connect(lambda: self._browse(edit, after))
-        layout.addWidget(button)
-        return row
-
-    def _browse(self, edit: QLineEdit, after=None):
-        chosen = QFileDialog.getExistingDirectory(self, "Select folder", edit.text())
-        if chosen:
-            edit.setText(chosen)
-            if after:
-                after()
-
-    def _suggest(self):
-        if self.root.text().strip():
-            install = GameInstallation.suggest(self.root.text().strip())
-            for name in FOLDERS:
-                self.edits[name].setText(str(install.folder(name)))
-            self._refresh_inventory()
-
-    def _refresh_inventory(self):
-        if not self.root.text().strip():
-            self.inventory_label.setText("")
-            return
-        counts = self.installation().inventory()
-        self.inventory_label.setText(
-            f"Found: {counts['sets']} complete sets · {counts['mb']} MB · {counts['db']} DB · "
-            f"{counts['skies']} sky archives · {counts['music']} tracks · "
-            f"{counts['movies']} movies · {counts['scripts']} scripts · "
-            f"{counts.get('levels', 0)} levels · {counts.get('models', 0)} models · "
-            f"{counts.get('icons', 0)} icons")
-
-    def installation(self) -> GameInstallation:
-        data = GameInstallation.suggest(self.root.text().strip()).data
-        folders = {name: Path(edit.text().strip()).expanduser().resolve()
-                   for name, edit in self.edits.items()}
-        return GameInstallation(data, folders)
-
-    def _accept(self):
-        install = self.installation()
-        if not install.valid():
-            QMessageBox.warning(self, "Game installation",
-                                "Select an existing Data folder containing Sets.")
-            return
-        if self.remember.isChecked():
-            save_remembered(install)
-        else:
-            forget_remembered()
-        self.accept()
+from studio_resources import ResourcesDialog as GameInstallationDialog
 
 
 class ResizeDialog(_Form):
@@ -227,7 +140,7 @@ class LevelInfoPanel(QWidget):
 
         title_form = QFormLayout()
         self.title_edit = QLineEdit(str(doc.lvl_info.get("title", "")))
-        title_form.addRow("Level title", self.title_edit)
+        title_form.addRow("Level Title", self.title_edit)
         layout.addLayout(title_form)
         self.title_edit.editingFinished.connect(self._emit_values_changed)
 
@@ -321,7 +234,7 @@ class LevelInfoPanel(QWidget):
         self.music_box.currentTextChanged.connect(self._music_value_changed)
         self.music_box.activated.connect(lambda _index: self._emit_values_changed())
         self.music_box.lineEdit().editingFinished.connect(self._music_editing_finished)
-        media_form.addRow("Ambience track", self.music_box)
+        media_form.addRow("Ambience Track", self.music_box)
         self.movie_box = QComboBox()
         self.movie_box.setEditable(True)
         self.movie_box.addItem("None")
@@ -329,7 +242,7 @@ class LevelInfoPanel(QWidget):
         self.movie_box.setCurrentText(movie_filename(doc.lvl_info.get("movie")) or "None")
         self.movie_box.activated.connect(lambda _index: self._emit_values_changed())
         self.movie_box.lineEdit().editingFinished.connect(self._emit_values_changed)
-        media_form.addRow("Intro movie", self.movie_box)
+        media_form.addRow("Intro Movie", self.movie_box)
         layout.addLayout(media_form)
 
         for key, prefix in (("mbmap", "mb"), ("dbmap", "db")):

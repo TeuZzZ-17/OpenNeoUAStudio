@@ -158,7 +158,7 @@ class SpecialPanel(QWidget):
                 self.preset.addItem(f'{key} · {title}', {'blg': key})
             specs = [('blg', 'Building ID', 0, 255), ('type', 'Type', 0, 2147483647)]
         self.preset.activated.connect(self._preset)
-        form.addRow('Model preset', self.preset)
+        form.addRow('Model Preset', self.preset)
         for field, title, low, high in specs:
             spin = (DurationSpinBox() if kind == 'item' and field == 'countdown'
                     else QSpinBox(minimum=low, maximum=high))
@@ -168,7 +168,7 @@ class SpecialPanel(QWidget):
             form.addRow(title, spin)
         if kind == 'gem':
             self.fields['type'].setToolTip('1 = Weapon power, 2 = Shield, 3 = Tech / Unlock. Custom IDs are preserved.')
-        self.hidden = QCheckBox('Hidden in briefing')
+        self.hidden = QCheckBox('Hidden in Briefing')
         self.hidden.toggled.connect(lambda value: self._change({'hidden': value}))
         form.addRow(self.hidden)
         if kind in ('gate', 'item'):
@@ -183,7 +183,7 @@ class SpecialPanel(QWidget):
         self.delete_button.setEnabled(False)
 
     def _build_keys(self, form):
-        group = QGroupBox('Key sectors')
+        group = QGroupBox('Key Sectors')
         self.keys_group = group
         layout = QVBoxLayout(group)
         self.keys = QListWidget()
@@ -207,13 +207,13 @@ class SpecialPanel(QWidget):
             coords.addWidget(spin, 1)
         layout.addLayout(coords)
         if self.kind == 'item':
-            self.key_road = QCheckBox('Key sector with roads')
+            self.key_road = QCheckBox('Key Sector with Roads')
             self.key_road.toggled.connect(lambda road: self.valuesChanged.emit(self.slot, {'_key_road': (self.keys.currentRow(), road)}) if not self._loading and self.keys.currentRow() >= 0 else None)
             layout.addWidget(self.key_road)
         form.addRow(group)
 
     def _build_actions(self, form):
-        group = QGroupBox('Effects on capture')
+        group = QGroupBox('Effects on Capture')
         layout = QVBoxLayout(group)
         self.actions = QListWidget()
         self.actions.setMaximumHeight(110)
@@ -442,7 +442,7 @@ class SpecialPanel(QWidget):
             return
         if update:
             self._action_selected(self.actions.currentRow())
-        self.effect_dialog.setWindowTitle('Edit gem effect' if update else 'Add gem effect')
+        self.effect_dialog.setWindowTitle('Edit Gem Effect' if update else 'Add gem effect')
         if self.effect_dialog.exec():
             self._save_action(update)
 

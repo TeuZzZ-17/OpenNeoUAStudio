@@ -4,8 +4,8 @@ from types import SimpleNamespace
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-from PySide6.QtCore import QPointF, Qt
-from PySide6.QtGui import QColor, QImage, QPainter
+from PySide6.QtCore import QEvent, QPointF, Qt
+from PySide6.QtGui import QColor, QImage, QMouseEvent, QPainter
 from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication
 from PySide6.QtWidgets import QSizePolicy
@@ -137,10 +137,18 @@ class ModelSpaceGizmoTests(unittest.TestCase):
         gizmo.directionTriggered.connect(
             lambda direction: clicked.append(direction))
         gizmo.nudgeFinished.connect(lambda: finished.append(True))
-        handle = gizmo.handle_for_direction((0, 1, 1))
         gizmo.show()
         QApplication.processEvents()
-        QTest.mouseMove(gizmo, handle.position.toPoint())
+        handle = gizmo.handle_for_direction((0, 1, 1))
+        QApplication.sendEvent(
+            gizmo,
+            QMouseEvent(
+                QEvent.Type.MouseMove,
+                handle.position,
+                QPointF(gizmo.mapToGlobal(handle.position.toPoint())),
+                Qt.MouseButton.NoButton,
+                Qt.MouseButton.NoButton,
+                Qt.KeyboardModifier.NoModifier))
         self.assertEqual(gizmo._hover, (0, 1, 1))
         QTest.mousePress(
             gizmo, Qt.MouseButton.LeftButton,
@@ -252,7 +260,7 @@ class ModelSpaceGizmoTests(unittest.TestCase):
         viewport.edit_session.select_none()
         self.assertFalse(viewport.begin_model_nudge())
 
-    def test_window_gizmo_nudge_moves_only_paste_preview_ghost(self):
+    def test_window_gizmo_nudge_does_not_move_paste_preview_ghost(self):
         from tests.test_geometry_paste_preview import _fixture
 
         viewport, model, clipboard = _fixture()
@@ -272,13 +280,7 @@ class ModelSpaceGizmoTests(unittest.TestCase):
             window.gizmo_intensity_spin.setValue(0.20)
             window._apply_gizmo_nudge((0, 1, -1))
             after_delta = viewport.paste_preview_delta
-            expected = window._gizmo_intensity()
-            self.assertAlmostEqual(
-                after_delta[0], before_delta[0])
-            self.assertAlmostEqual(
-                after_delta[1] - before_delta[1], expected)
-            self.assertAlmostEqual(
-                after_delta[2] - before_delta[2], -expected)
+            self.assertEqual(after_delta, before_delta)
             self.assertEqual(model.points, before_points)
             self.assertEqual(window._edit_undo_stack, [])
             window._finish_gizmo_nudge()

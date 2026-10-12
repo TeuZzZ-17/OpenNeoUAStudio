@@ -511,10 +511,10 @@ class WindowContractV5Tests(unittest.TestCase):
                 window._create_viewport_context_menu().actions()
                 if not action.isSeparator()]
             labels = [action.text() for action in actions]
-            self.assertIn("Reset camera", labels)
+            self.assertIn("Reset Camera", labels)
             reset_camera = next(
                 action for action in actions
-                if action.text() == "Reset camera")
+                if action.text() == "Reset Camera")
             self.assertFalse(reset_camera.isEnabled())
             self.assertFalse(window.reset_camera_action.isEnabled())
             deselect = next(
@@ -558,7 +558,7 @@ class WindowContractV5Tests(unittest.TestCase):
                 if not action.isSeparator()]
             reset_camera = next(
                 action for action in actions
-                if action.text() == "Reset camera")
+                if action.text() == "Reset Camera")
             self.assertTrue(reset_camera.isEnabled())
 
             window._reset_view_and_gizmo()
@@ -647,7 +647,7 @@ class WindowContractV5Tests(unittest.TestCase):
                 window._show_setbas_context_menu(QPoint())
                 action = next(
                     candidate for candidate in fake_menu.actions()
-                    if candidate.text() == "Copy BASE name")
+                    if candidate.text() == "Copy BASE Name")
                 action.triggered.callback()
                 labels = [
                     candidate.text() for candidate in fake_menu.actions()
@@ -876,9 +876,9 @@ class WindowContractV5Tests(unittest.TestCase):
             captured = [
                 action.text() for action in fake_menu.actions()
                 if not action.isSeparator()]
-            self.assertIn("Preview texture", captured)
+            self.assertIn("Preview Texture", captured)
             self.assertIn("Select Resource", captured)
-            self.assertIn("Copy info", captured)
+            self.assertIn("Copy Info", captured)
             self.assertNotIn("Copy item", captured)
             self.assertNotIn("Expand all", captured)
             self.assertNotIn("Collapse all", captured)
@@ -943,7 +943,7 @@ class WindowContractV5Tests(unittest.TestCase):
         finally:
             window.close()
 
-    def test_child_metadata_and_texture_owner_selection_are_preserved(self):
+    def test_child_metadata_and_dependency_selection_preserve_active_model(self):
         window = AssemblyWindow()
         try:
             child = SimpleNamespace(
@@ -969,8 +969,7 @@ class WindowContractV5Tests(unittest.TestCase):
             window._saved_choice_for = lambda _name: None
             with patch.object(window, "_select_owner") as select_owner:
                 window._on_tree_node_selected(texture_item)
-            select_owner.assert_called_once_with(
-                "root/kid[0]", preserve_asset_selection=True)
+            select_owner.assert_not_called()
         finally:
             window.close()
 

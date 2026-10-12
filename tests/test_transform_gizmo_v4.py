@@ -12,6 +12,8 @@ from PySide6.QtTest import QTest
 from assembly_viewer import AssetViewport
 from assembly_window import AssemblyWindow
 from geometry_editor import GeometryEditSession
+from asset_family import AssetFamily, FamilyObject
+from base_parser import BaseObject
 from model_space_gizmo import (
     AXIS_DIRECTIONS,
     DIRECTIONS_26,
@@ -28,10 +30,7 @@ def _install_edit_session(viewport, points, selection):
         polygons=[[0, 1, 2]] if len(points) >= 3 else [],
         parsed_polygon_count=1 if len(points) >= 3 else 0,
     )
-    obj = SimpleNamespace(
-        skeleton=model,
-        base_object=SimpleNamespace(ades=[]),
-    )
+    obj = FamilyObject(base_object=BaseObject(name="Transform"), skeleton=model)
     viewport._edit_session = GeometryEditSession(
         obj,
         [[1.0, 0.0, 0.0],
@@ -111,7 +110,7 @@ class TransformGizmoV4Tests(unittest.TestCase):
         finally:
             window.close()
 
-    def test_move_gizmo_is_exact_even_when_auto_align_is_enabled(self):
+    def test_move_gizmo_honors_enabled_auto_alignment(self):
         viewport = AssetViewport()
         model = _install_edit_session(
             viewport,
@@ -126,7 +125,7 @@ class TransformGizmoV4Tests(unittest.TestCase):
         self.assertTrue(
             viewport.nudge_edit_selection_model(-0.02, 0.20, -0.20))
         self.assertTrue(viewport.end_model_nudge())
-        self.assertEqual(model.points[0], (0.02, 0.20, -0.20))
+        self.assertEqual(model.points[0], (0.0, 0.20, -0.20))
 
     def test_every_move_handle_applies_full_step_on_each_active_axis(self):
         for direction in DIRECTIONS_26:
@@ -158,6 +157,8 @@ class TransformGizmoV4Tests(unittest.TestCase):
                 {0, 1, 2},
             )
             window._selected_owner = "root"
+            window._family = AssetFamily(root_object=window.viewport.edit_session.fam_obj)
+            window._owner_to_obj = {"root": window.viewport.edit_session.fam_obj}
             window.edit_toggle_action.blockSignals(True)
             window.edit_toggle_action.setChecked(True)
             window.edit_toggle_action.blockSignals(False)

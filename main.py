@@ -58,9 +58,8 @@ def _startup_path(args: list[str]) -> str | None:
     return args[0] if args else None
 
 
-def _show_qt_tool(app, tool: str, startup_path: str | None) -> int:
-    """Create and show the selected Qt editor, then run its event loop."""
-
+def create_workspace(tool: str, startup_path: str | None = None):
+    """Create one workspace inside the existing application."""
     global _active_window
 
     if tool in {MODEL_EDITOR_TOOL, MAIN_SUITE_TOOL}:
@@ -94,10 +93,24 @@ def _show_qt_tool(app, tool: str, startup_path: str | None) -> int:
         window.show()
         if startup_path:
             window.open_file(startup_path)
+    elif tool == MAP_EDITOR_TOOL:
+        from map_editor.editor import create_window
+        window = create_window([startup_path] if startup_path else [])
+        if window is None:
+            return None
     else:
-        return 1
+        return None
 
+    from studio_shell import install_workspace_shell
+    install_workspace_shell(window, tool)
+    window.showMaximized()
     _active_window = window
+    return window
+
+
+def _show_qt_tool(app, tool: str, startup_path: str | None) -> int:
+    if create_workspace(tool, startup_path) is None:
+        return 1
     return app.exec()
 
 

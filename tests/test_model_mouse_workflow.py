@@ -62,19 +62,18 @@ class ModelMouseWorkflowTests(unittest.TestCase):
             mouse(view, QEvent.Type.MouseButtonRelease, QPoint(125, 110))
         self.assertEqual(confirmed, [True])
 
-    def test_plain_drag_selects_vertices_and_ctrl_extends(self):
+    def test_ctrl_drag_selects_vertices_and_extends(self):
         view, model, _ = _fixture()
         self.addCleanup(view.close)
-        view.drag_select_enabled = True
         points = [QPointF(30, 30), QPointF(60, 60), QPointF(150, 150)]
         yaw = view._yaw
         with patch.object(view, '_edit_screen_points', return_value=points), \
                 patch.object(view, '_available_edit_vertices', return_value={0, 1, 2}):
-            mouse(view, QEvent.Type.MouseButtonPress, QPoint(20, 20))
-            mouse(view, QEvent.Type.MouseMove, QPoint(80, 80))
-            mouse(view, QEvent.Type.MouseButtonRelease, QPoint(80, 80))
-            self.assertEqual(view.edit_session.selection, {0, 1})
             ctrl = Qt.KeyboardModifier.ControlModifier
+            mouse(view, QEvent.Type.MouseButtonPress, QPoint(20, 20), ctrl)
+            mouse(view, QEvent.Type.MouseMove, QPoint(80, 80), ctrl)
+            mouse(view, QEvent.Type.MouseButtonRelease, QPoint(80, 80), ctrl)
+            self.assertEqual(view.edit_session.selection, {0, 1})
             mouse(view, QEvent.Type.MouseButtonPress, QPoint(140, 140), ctrl)
             mouse(view, QEvent.Type.MouseMove, QPoint(170, 170), ctrl)
             mouse(view, QEvent.Type.MouseButtonRelease, QPoint(170, 170), ctrl)
@@ -82,7 +81,7 @@ class ModelMouseWorkflowTests(unittest.TestCase):
         self.assertEqual(view._yaw, yaw)
         self.assertFalse(view.edit_session.dirty)
 
-    def test_move_action_uses_existing_modal_and_cancel_restores_points(self):
+    def test_partial_vertex_move_modal_cancel_and_undo_restore_points(self):
         window, obj, model = _prepare_window()
         self.addCleanup(window.close)
         view = window.viewport
@@ -90,15 +89,16 @@ class ModelMouseWorkflowTests(unittest.TestCase):
         view.edit_session.selection = {0, 1}
         before = list(model.points)
         window._sync_edit_action_states()
-        self.assertTrue(window.edit_move_action.isEnabled())
-        window.edit_move_action.trigger()
+        # The Move menu places whole polygons; G still edits partial vertices.
+        self.assertFalse(window.edit_move_action.isEnabled())
+        view._begin_modal('grab', QPoint(100, 100))
         self.assertEqual(view._modal_op, 'grab')
         view._update_modal(view._modal_start + QPoint(25, 10))
         self.assertNotEqual(view.edit_session.points(), before)
         self.assertEqual(model.points, before)
         view._cancel_modal()
         self.assertEqual(model.points, before)
-        window.edit_move_action.trigger()
+        view._begin_modal('grab', QPoint(100, 100))
         view._update_modal(view._modal_start + QPoint(25, 10))
         view._commit_modal()
         self.assertNotEqual(model.points, before)
@@ -112,7 +112,6 @@ class ModelMouseWorkflowTests(unittest.TestCase):
     def test_alt_drag_keeps_camera_navigation_in_model_edit_mode(self):
         view, model, _ = _fixture()
         self.addCleanup(view.close)
-        view.drag_select_enabled = True
         yaw = view._yaw
         alt = Qt.KeyboardModifier.AltModifier
         mouse(view, QEvent.Type.MouseButtonPress, QPoint(20, 20), alt)

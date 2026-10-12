@@ -27,6 +27,38 @@ class ModelEditorWorkspaceTests(unittest.TestCase):
         finally:
             window.close()
 
+    def test_resources_sub_tabs_are_visible_in_the_resources_tab(self):
+        window = ModelEditorWindow()
+        try:
+            window.resize(1400, 900)
+            window.show()
+            window._right_tabs.setCurrentIndex(1)
+            self.app.processEvents()
+            tabs = window._resources_tabs
+            self.assertTrue(tabs.isVisible())
+            self.assertTrue(tabs.tabBar().isVisible())
+            self.assertEqual(
+                [tabs.tabText(i) for i in range(tabs.count())],
+                ["Bas Manager", "Entity List", "Asset Dependencies", "Asset Textures"])
+        finally:
+            window.close()
+
+    def test_set_selector_sits_right_under_the_resources_tab_bar(self):
+        window = ModelEditorWindow()
+        try:
+            window.resize(1400, 900)
+            window.show()
+            window._right_tabs.setCurrentIndex(1)
+            self.app.processEvents()
+            tabs = window._resources_tabs
+            self.assertTrue(tabs.set_combo.isVisible())
+            self.assertIs(tabs.set_combo, window.entity_browser.set_combo)
+            self.assertEqual(tabs._row.geometry().top(), tabs.tabBar().geometry().bottom() + 1)
+            self.assertGreaterEqual(tabs.currentWidget().mapTo(tabs, tabs.currentWidget().rect().topLeft()).y(),
+                                    tabs._row.geometry().bottom())
+        finally:
+            window.close()
+
     def test_tools_menu_keeps_mapping_repair_only_for_integrated_editors(self):
         window = ModelEditorWindow()
         try:

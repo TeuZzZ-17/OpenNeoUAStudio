@@ -208,7 +208,7 @@ class PickingDepthTests(unittest.TestCase):
             viewport.edit_session.selection.clear()
             viewport._box_rect = QRect(35, 35, 90, 90)
             viewport._apply_box_select(False)
-        self.assertEqual(viewport.edit_session.selection, {0, 1, 2})
+        self.assertEqual(viewport.edit_session.selection, {0, 1, 2, 3, 4, 5})
 
 
 if __name__ == "__main__":
