@@ -126,7 +126,7 @@ class EntityListMixin:
                 if self._activate_setbas_base(choice.base_name) is None:
                     return False
             elif choice.path.suffix.casefold() == ".3ds":
-                from collision_editor.editor import _load_3ds_family
+                from entity_designer.editor import _load_3ds_family
                 self._set_family(_load_3ds_family(choice.path))
                 self._set_document_title(choice.path)
             else:

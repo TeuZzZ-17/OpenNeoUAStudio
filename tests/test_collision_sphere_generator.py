@@ -6,13 +6,13 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 from PySide6.QtWidgets import QApplication
 
-from collision_editor import (
+from entity_designer import (
     CollisionEditorWindow,
     CollisionSphere,
     LEGACY,
     OPENNEOUA,
 )
-from collision_editor.sphere_generator import (
+from entity_designer.sphere_generator import (
     ACCURACY_PRESETS,
     UNIT_COLL_MAX_COUNT,
     generate_collision_spheres,

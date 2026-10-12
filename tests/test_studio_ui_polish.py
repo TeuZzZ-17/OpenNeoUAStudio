@@ -7,7 +7,7 @@ from PySide6.QtCore import Qt, QSignalBlocker
 from PySide6.QtGui import QColor
 from PySide6.QtWidgets import QApplication, QDialog, QLabel, QTreeWidgetItem, QMainWindow
 from model_editor.window import ModelEditorWindow
-from collision_editor.editor import CollisionEditorWindow, CollisionProject, WEAPON, validate_project
+from entity_designer.editor import CollisionEditorWindow, CollisionProject, WEAPON, validate_project
 from game_object_catalog import GameObject
 from game_visuals import VisualChoice
 from resource_status import MODIFIED_ROLE, MODIFIED_COLOR

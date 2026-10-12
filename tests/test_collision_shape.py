@@ -17,9 +17,9 @@ from PySide6.QtWidgets import QApplication, QMessageBox
 
 from asset_family import AssetFamily, FamilyObject
 from base_parser import BaseObject
-import collision_editor.editor as editor_module
-import collision_editor.shape as shape_module
-from collision_editor.editor import (
+import entity_designer.editor as editor_module
+import entity_designer.shape as shape_module
+from entity_designer.editor import (
     CollisionEditorWindow,
     CollisionProject,
     CollisionScriptError,
@@ -31,7 +31,7 @@ from collision_editor.editor import (
     plan_script_update,
     script_model_references,
 )
-from collision_editor.shape import (
+from entity_designer.shape import (
     CollisionHull,
     CollisionShape,
     ShapeGenerationResult,
@@ -462,7 +462,7 @@ class CollisionShapeTests(unittest.TestCase):
     def test_shape_tab_reset_is_scoped_and_undoable(self):
         window = CollisionEditorWindow()
         self.addCleanup(lambda: (window._set_modified(False), window.close()))
-        from collision_editor.shape import CollisionShape
+        from entity_designer.shape import CollisionShape
 
         baseline_shape = CollisionShape(
             "Fox", "1" * 64, (1, 1, 1), (0, 0, 0), (_tetrahedron(),))
@@ -1728,7 +1728,7 @@ class CollisionShapeTests(unittest.TestCase):
         with patch.object(sys, "argv", [
                 "main.py", "--collision-bake-worker", "input.json",
                 "output.json"]), \
-                patch("collision_editor.shape.worker_main", return_value=17) as worker:
+                patch("entity_designer.shape.worker_main", return_value=17) as worker:
             self.assertEqual(main.main(), 17)
         worker.assert_called_once_with("input.json", "output.json")
 

@@ -1,5 +1,5 @@
 """Topology preparation must retain geometry and expose every render part."""
-from collision_editor.mesh_parts import (split_triangle_components,
+from entity_designer.mesh_parts import (split_triangle_components,
     prepare_component_mesh, topology_diagnostic, _triangulate_loop)
 
 

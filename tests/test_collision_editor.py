@@ -20,8 +20,8 @@ from PySide6.QtWidgets import (
 from asset_family import AssetFamily, FamilyObject
 from base_parser import BaseObject
 from indexed_renderer import IndexedSurface
-import collision_editor.editor as editor_module
-from collision_editor import (
+import entity_designer.editor as editor_module
+from entity_designer import (
     ApplyScriptDialog,
     CollisionEditorWindow,
     CollisionProject,
@@ -62,7 +62,7 @@ from collision_editor import (
     weapon_model_references,
     write_script_file,
 )
-from collision_editor.shape import CollisionHull, CollisionShape
+from entity_designer.shape import CollisionHull, CollisionShape
 from sklt_parser import SkltModel
 
 
@@ -149,7 +149,7 @@ class CollisionEditorTests(unittest.TestCase):
 
     def test_01_base_lists_every_resolved_model(self):
         window = self._window()
-        with patch("collision_editor.load_asset_family", return_value=_family()):
+        with patch("entity_designer.load_asset_family", return_value=_family()):
             window.open_base("sample.base")
         self.assertEqual(window.model_tree.topLevelItemCount(), 2)
         self.assertEqual(
@@ -159,7 +159,7 @@ class CollisionEditorTests(unittest.TestCase):
 
     def test_02_model_search_filters_names_and_restores_list(self):
         window = self._window()
-        with patch("collision_editor.load_asset_family", return_value=_family()):
+        with patch("entity_designer.load_asset_family", return_value=_family()):
             window.open_base("sample.base")
         self.assertEqual(
             window.model_search.placeholderText(), "Search model names")
@@ -175,7 +175,7 @@ class CollisionEditorTests(unittest.TestCase):
 
     def test_02_switch_model_without_closing_editor(self):
         window = self._window()
-        with patch("collision_editor.load_asset_family", return_value=_family()):
+        with patch("entity_designer.load_asset_family", return_value=_family()):
             window.open_base("sample.base")
         second = window.model_tree.topLevelItem(1)
         window.model_tree.setCurrentItem(second)
@@ -186,7 +186,7 @@ class CollisionEditorTests(unittest.TestCase):
         window = self._window()
         self.assertFalse(window.model_tree.isEnabled())
         self.assertFalse(window.model_search.isEnabled())
-        with patch("collision_editor.load_asset_family", return_value=_family()):
+        with patch("entity_designer.load_asset_family", return_value=_family()):
             window.open_base("sample.base")
         self.assertTrue(window.model_tree.isEnabled())
         self.assertTrue(window.model_search.isEnabled())
@@ -197,7 +197,7 @@ class CollisionEditorTests(unittest.TestCase):
     def test_03_base_texture_family_reaches_existing_viewport(self):
         family = _family()
         window = self._window()
-        with patch("collision_editor.load_asset_family", return_value=family):
+        with patch("entity_designer.load_asset_family", return_value=family):
             window.open_base("sample.base")
         self.assertIs(window.viewport._family_ref, family)
         self.assertIn("dummy.ilbm", window.viewport._family_ref.textures)
@@ -207,7 +207,7 @@ class CollisionEditorTests(unittest.TestCase):
         family = _family()
         family.root_object.kids.clear()
         window = self._window()
-        with patch("collision_editor.load_manual_family",
+        with patch("entity_designer.load_manual_family",
                    return_value=family) as loader:
             window.open_sklt("loose.sklt")
         loader.assert_called_once_with("loose.sklt", [], [])
@@ -453,7 +453,7 @@ class CollisionEditorTests(unittest.TestCase):
             project, (-1, -1, -1, 1, 1, 1))
         self.assertTrue(any("distante" in warning for warning in warnings))
 
-    def test_28_tools_menu_exposes_collision_editor(self):
+    def test_28_tools_menu_exposes_entity_designer(self):
         from assembly_window import AssemblyWindow
         window = AssemblyWindow()
         self.addCleanup(window.close)
@@ -525,7 +525,7 @@ class CollisionEditorTests(unittest.TestCase):
         self.assertEqual(
             window.properties_tabs.currentIndex(), window.collision_tab_index)
 
-    def test_31_collision_editor_uses_single_toolbar_with_view_preset(self):
+    def test_31_entity_designer_uses_single_toolbar_with_view_preset(self):
         window = self._window()
         self.assertIsNone(window.findChild(QToolBar, "collisionTools"))
         toolbar = window.findChild(QToolBar, "modelPreviewScaleTools")
@@ -599,7 +599,7 @@ class CollisionEditorTests(unittest.TestCase):
 
     def test_35_models_stay_view_only_while_spheres_remain_editable(self):
         window = self._window()
-        with patch("collision_editor.load_asset_family", return_value=_family()):
+        with patch("entity_designer.load_asset_family", return_value=_family()):
             window.open_base("sample.base")
         key = QKeyEvent(
             QEvent.Type.KeyPress, Qt.Key.Key_Tab,
@@ -729,7 +729,7 @@ class CollisionEditorTests(unittest.TestCase):
         window.add_legacy()
         window.add_compound(OPENNEOUA)
         with patch(
-                "collision_editor.QMessageBox.question",
+                "entity_designer.QMessageBox.question",
                 return_value=QMessageBox.StandardButton.Yes):
             window.delete_all_collisions()
         self.assertFalse(window.project.spheres())
@@ -906,15 +906,15 @@ class CollisionEditorTests(unittest.TestCase):
         self.assertEqual(viewport._hit_sphere(point), 1)
         self.assertEqual(viewport._hit_sphere(point), 0)
 
-    def test_52_collision_editor_is_a_dedicated_package(self):
-        import collision_editor
-        from collision_editor import editor
-        self.assertTrue(collision_editor.__file__.endswith("__init__.py"))
+    def test_52_entity_designer_is_a_dedicated_package(self):
+        import entity_designer
+        from entity_designer import editor
+        self.assertTrue(entity_designer.__file__.endswith("__init__.py"))
         self.assertTrue(
             Path(editor.__file__).as_posix().endswith(
-                "collision_editor/editor.py"))
+                "entity_designer/editor.py"))
         self.assertFalse(
-            (Path(editor.__file__).parents[1] / "collision_editor.py").exists())
+            (Path(editor.__file__).parents[1] / "entity_designer.py").exists())
 
     def test_53b_sphere_multiselect_syncs_tree_viewport_and_select_all(self):
         window = self._window()
@@ -1591,7 +1591,7 @@ class CollisionEditorTests(unittest.TestCase):
 
     def test_57_vp_values_are_right_aligned_without_widening_panel(self):
         window = self._window()
-        with patch("collision_editor.load_asset_family", return_value=_family()):
+        with patch("entity_designer.load_asset_family", return_value=_family()):
             window.open_base("sample.base")
         item = window.model_tree.topLevelItem(0)
         alignment = item.textAlignment(1)
@@ -1623,7 +1623,7 @@ class CollisionEditorTests(unittest.TestCase):
     def test_60_model_preview_scale_changes_model_not_collision_spheres(self):
         family = _family()
         window = self._window()
-        with patch("collision_editor.load_asset_family", return_value=family):
+        with patch("entity_designer.load_asset_family", return_value=family):
             window.open_base("sample.base")
         window.add_compound(OPENNEOUA)
         sphere_before = window.project.compound[0].clone()
@@ -1641,7 +1641,7 @@ class CollisionEditorTests(unittest.TestCase):
     def test_61_generator_geometry_ignores_model_preview_scale(self):
         family = _family()
         window = self._window()
-        with patch("collision_editor.load_asset_family", return_value=family):
+        with patch("entity_designer.load_asset_family", return_value=family):
             window.open_base("sample.base")
         triangles_before = window.viewport.local_owner_triangles(
             window._current_owner)
@@ -1845,7 +1845,7 @@ class CollisionEditorTests(unittest.TestCase):
     def test_76_overeof_moves_preview_model_and_spheres_not_authored_data(self):
         family = _family()
         window = self._window()
-        with patch("collision_editor.load_asset_family", return_value=family):
+        with patch("entity_designer.load_asset_family", return_value=family):
             window.open_base("sample.base")
         window.project.compound = [
             CollisionSphere(OPENNEOUA, 1.0, 2.0, 3.0, 4.0)]
@@ -1866,7 +1866,7 @@ class CollisionEditorTests(unittest.TestCase):
     def test_77_suggest_overeof_uses_scaled_lowest_model_point(self):
         family = _family()
         window = self._window()
-        with patch("collision_editor.load_asset_family", return_value=family):
+        with patch("entity_designer.load_asset_family", return_value=family):
             window.open_base("sample.base")
         window.model_scale_y_spin.setValue(1.5)
         window._suggest_overeof_from_bounds()
@@ -3636,7 +3636,7 @@ class CollisionEditorTests(unittest.TestCase):
         window._sync_all()
         self.assertTrue(window.reset_tab_button.isEnabled())
         with patch(
-                "collision_editor.editor.QMessageBox.question",
+                "entity_designer.editor.QMessageBox.question",
                 return_value=QMessageBox.StandardButton.Yes):
             window._reset_current_tab()
 
@@ -3848,6 +3848,117 @@ class CollisionEditorTests(unittest.TestCase):
         self.assertEqual(updated.count("gun_side_angle = 1400"), 1)
         self.assertEqual(updated.count("gun_side_angle = 500"), 1)
         self.assertNotIn("gun_side_angle = 2000", updated)
+
+    def test_138a_script_status_ignores_export_rounding_and_turret_metadata(self):
+        window = self._window()
+        window.project = CollisionProject(
+            target_category=VEHICLE,
+            gun_points_enabled=True,
+            gun_points=[GunPoint(gun_type=90, x=1.123456789)],
+            turret_limits={90: TurretLimits(
+                vehicle_id=90, enabled=True, side=1200,
+                source_kind="new_vehicle")},
+        )
+        window._capture_tab_reset_baseline()
+        window.project.gun_points[0].x = 1.123457
+        window.project.turret_limits[90].source_kind = "modify_vehicle"
+        self.assertEqual(window._changed_script_tabs(), set())
+
+        window.project.gun_points[0].x = 1.5
+        self.assertEqual(window._changed_script_tabs(), {"gun"})
+
+    def test_138b_disabled_tabs_ignore_non_authored_values(self):
+        window = self._window()
+        window.project = CollisionProject(target_category=VEHICLE)
+        window._capture_tab_reset_baseline()
+        window.project.cockpit_camera_offset_x = 1000
+        window.project.fire_x = 500
+        window.project.briefing_size = 777
+        window.project.overeof = 50
+        self.assertEqual(window._changed_script_tabs(), set())
+
+    def test_138c_script_refresh_preserves_unapplied_tab_baselines(self):
+        # A game browser may load an effective script merged from multiple
+        # definitions. The saved file can omit unchanged Gun Points entirely.
+        window = self._window()
+        with tempfile.TemporaryDirectory() as temp:
+            script = Path(temp) / "VEHICLE.SCR"
+            script.write_text(
+                "new_vehicle 56\n"
+                "    name = Carrier\n"
+                "    radius = 35\n"
+                "end\n", encoding="utf-8")
+            window._active_script_path = script
+            window._active_script_kind = "new_vehicle"
+            window._active_script_id = 56
+            window.project = CollisionProject(
+                target_category=VEHICLE,
+                legacy=CollisionSphere(LEGACY, radius=30),
+                gun_points_enabled=True,
+                gun_points=[GunPoint(gun_type=90, x=12.0)],
+                turret_limits={90: TurretLimits(
+                    vehicle_id=90, enabled=True, side=1200)},
+            )
+            window._capture_tab_reset_baseline()
+            window.project.legacy.radius = 35
+            self.assertEqual(window._changed_script_tabs(), {"collision"})
+            self.assertTrue(window._refresh_linked_script_baseline({"collision"}))
+            self.assertEqual(window._changed_script_tabs(), set())
+            self.assertTrue(window.project.gun_points_enabled)
+            self.assertEqual(window.project.gun_points[0].gun_type, 90)
+
+    def test_138d_preview_skipped_tabs_remain_pending(self):
+        window = self._window()
+        with tempfile.TemporaryDirectory() as temp:
+            script = Path(temp) / "VEHICLE.SCR"
+            script.write_text(
+                "new_vehicle 56\n"
+                "    name = Carrier\n"
+                "    radius = 35\n"
+                "end\n", encoding="utf-8")
+            window._active_script_path = script
+            window._active_script_kind = "new_vehicle"
+            window._active_script_id = 56
+            window.project = CollisionProject(
+                target_category=VEHICLE,
+                legacy=CollisionSphere(LEGACY, radius=30),
+                gun_points_enabled=True,
+                gun_points=[GunPoint(gun_type=90, x=10)],
+            )
+            window._capture_tab_reset_baseline()
+            window.project.legacy.radius = 35
+            window.project.gun_points[0].x = 20
+            self.assertTrue(window._refresh_linked_script_baseline({"collision"}))
+            self.assertEqual(window._changed_script_tabs(), {"gun"})
+
+    def test_138e_gun_export_keeps_limits_from_other_catalog_sources(self):
+        window = self._window()
+        with tempfile.TemporaryDirectory() as temp:
+            script = Path(temp) / "VEHICLE.SCR"
+            script.write_text(
+                "new_vehicle 56\n"
+                "    name = Carrier\n"
+                "    unit_num_guns = 1\n"
+                "    unit_act_gun = 0\n"
+                "    unit_gun_pos_x = 20\n"
+                "    unit_gun_type = 90\n"
+                "end\n", encoding="utf-8")
+            window._active_script_path = script
+            window._active_script_kind = "new_vehicle"
+            window._active_script_id = 56
+            window.project = CollisionProject(
+                target_category=VEHICLE,
+                gun_points_enabled=True,
+                gun_points=[GunPoint(gun_type=90, x=10)],
+                turret_limits={90: TurretLimits(
+                    vehicle_id=90, enabled=True, side=1200)},
+            )
+            window._capture_tab_reset_baseline()
+            window.project.gun_points[0].x = 20
+            self.assertEqual(window._changed_script_tabs(), {"gun"})
+            self.assertTrue(window._refresh_linked_script_baseline({"gun"}))
+            self.assertEqual(window._changed_script_tabs(), set())
+            self.assertEqual(window.project.turret_limits[90].side, 1200)
 
     def test_139_editable_overwrite_preview_contains_only_changed_tabs(self):
         project = CollisionProject(
@@ -4202,7 +4313,7 @@ class CollisionEditorTests(unittest.TestCase):
 
         # Unexported work: the guard refuses and keeps the loaded unit.
         window._set_modified(True)
-        with patch("collision_editor.editor.QMessageBox.question",
+        with patch("entity_designer.editor.QMessageBox.question",
                    return_value=QMessageBox.StandardButton.No):
             window.model_tree.setCurrentItem(window.model_tree.topLevelItem(0))
             QApplication.processEvents()
@@ -4210,7 +4321,7 @@ class CollisionEditorTests(unittest.TestCase):
         self.assertEqual(window.model_tree.currentItem().text(0), "Firefly")
 
         # Accepted: the clicked unit loads with its own collision data.
-        with patch("collision_editor.editor.QMessageBox.question",
+        with patch("entity_designer.editor.QMessageBox.question",
                    return_value=QMessageBox.StandardButton.Yes):
             window.model_tree.setCurrentItem(window.model_tree.topLevelItem(0))
             QApplication.processEvents()
@@ -4245,7 +4356,7 @@ class CollisionEditorTests(unittest.TestCase):
                 0, Qt.CheckState.Checked if checked else Qt.CheckState.Unchecked)
             QApplication.processEvents()
         self.assertFalse(window._modified)
-        with patch("collision_editor.editor.QMessageBox.question") as question:
+        with patch("entity_designer.editor.QMessageBox.question") as question:
             window.model_tree.setCurrentItem(window.model_tree.topLevelItem(0))
             QApplication.processEvents()
         question.assert_not_called()

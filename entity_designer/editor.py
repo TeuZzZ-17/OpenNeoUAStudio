@@ -95,12 +95,12 @@ from editor_widgets import (
     create_import_bas_archive_action,
     install_standard_file_menu_tail,
 )
-from collision_editor.sphere_generator import (
+from entity_designer.sphere_generator import (
     ACCURACY_PRESETS,
     UNIT_COLL_MAX_COUNT,
     generate_collision_spheres,
 )
-from collision_editor.shape import (
+from entity_designer.shape import (
     CollisionHull,
     CollisionShape,
     collision_shape_text,
@@ -5891,7 +5891,7 @@ class CollisionEditorWindow(QMainWindow):
             self.gun_points_tab, "Gun Points")
         self.cockpit_tab_index = self.properties_tabs.addTab(
             self.cockpit_tab, "Cockpit View")
-        from collision_editor.briefing import BriefingControls, BriefingPreview
+        from entity_designer.briefing import BriefingControls, BriefingPreview
         self.briefing_tab = BriefingControls(self)
         self.briefing_tab_index = self.properties_tabs.addTab(self.briefing_tab, "Briefing Model Size")
         self.briefing_preview = BriefingPreview(self)
@@ -7805,7 +7805,8 @@ class CollisionEditorWindow(QMainWindow):
         dialog.kind_combo.setEnabled(False)
         dialog.id_spin.setEnabled(False)
         if dialog.exec() == QDialog.DialogCode.Accepted:
-            baseline_refreshed = self._refresh_linked_script_baseline()
+            baseline_refreshed = self._refresh_linked_script_baseline(
+                dialog.applied_groups)
             if not baseline_refreshed:
                 self.statusBar().showMessage(
                     "Definition overwritten, but the source baseline could "
@@ -8004,7 +8005,7 @@ class CollisionEditorWindow(QMainWindow):
             self._sync_collision_generation_controls()
             return
 
-        from collision_editor.mesh_parts import split_triangle_components
+        from entity_designer.mesh_parts import split_triangle_components
 
         previous_scope = self.viewport.visible_owners()
         previous_camera = self.viewport._camera_state()
@@ -10231,51 +10232,80 @@ class CollisionEditorWindow(QMainWindow):
 
     @staticmethod
     def _script_tab_state(project: CollisionProject, group: str) -> tuple:
-        """Return only values that are actually authored by one script tab."""
+        """Compare authored values using the precision written to scripts.
+
+        Disabled controls and the source block used for a turret are editor
+        metadata, not distinct game parameters. Ignore them when checking
+        whether the exported definition still differs from this project.
+        """
+
+        def authored_number(value: float) -> float:
+            return float(_number(float(value)))
 
         if group == _SCRIPT_TAB_COLLISION:
             legacy = (
                 None if project.legacy is None
-                else float(project.legacy.radius))
+                else int(round(project.legacy.radius)))
             compound = tuple(
-                (float(sphere.x), float(sphere.y), float(sphere.z),
-                 float(sphere.radius))
+                (authored_number(sphere.x), authored_number(sphere.y),
+                 authored_number(sphere.z), authored_number(sphere.radius))
                 for sphere in project.compound)
             shape_path = (
                 project.collision_shape_path.replace("\\", "/").strip())
             return (
-                bool(project.overeof_enabled), float(project.overeof),
+                bool(project.overeof_enabled),
+                authored_number(project.overeof)
+                if project.overeof_enabled else None,
                 legacy, compound, shape_path,
             )
         if group == _SCRIPT_TAB_FIRE:
+            if not project.fire_points_enabled:
+                return (False,)
             return (
-                bool(project.fire_points_enabled),
-                float(project.fire_x), float(project.fire_y),
-                float(project.fire_z), int(project.num_weapons),
-                int(project.num_weapons_max),
+                True,
+                authored_number(project.fire_x),
+                authored_number(project.fire_y),
+                authored_number(project.fire_z),
+                *_project_num_weapons_range(project),
             )
         if group == _SCRIPT_TAB_GUN:
+            authored_points = (
+                project.gun_points if project.gun_points_enabled else [])
             points = tuple((
-                point.scheme, float(point.x), float(point.y), float(point.z),
-                float(point.dir_x), float(point.dir_y), float(point.dir_z),
-                int(point.gun_type), point.name, point.icon,
-            ) for point in project.gun_points)
+                point.scheme, authored_number(point.x),
+                authored_number(point.y), authored_number(point.z),
+                authored_number(point.dir_x), authored_number(point.dir_y),
+                authored_number(point.dir_z), int(point.gun_type),
+                point.name, point.icon,
+            ) for point in authored_points)
+            default_icon = (
+                project.unit_gun_default_icon
+                if project.gun_points_enabled else "")
+            # The script catalog provides limits for every vehicle in the
+            # file; only guns mounted here (or explicitly edited limits)
+            # belong to this entity's Gun Points export status.
+            referenced_types = {point.gun_type for point in authored_points}
             limits = tuple((
-                vehicle_id, bool(limit.enabled), int(limit.side),
-                int(limit.up), int(limit.down), limit.source_kind,
-            ) for vehicle_id, limit in sorted(project.turret_limits.items()))
-            return (
-                bool(project.gun_points_enabled),
-                project.unit_gun_default_icon, points, limits,
-            )
+                vehicle_id, int(limit.side), int(limit.up),
+                int(limit.down),
+            ) for vehicle_id, limit in sorted(project.turret_limits.items())
+                if limit.enabled and
+                (vehicle_id in referenced_types or limit.dirty))
+            return (points, default_icon, limits)
         if group == _SCRIPT_TAB_BRIEFING:
-            return project.briefing_size_enabled, project.briefing_size
-        if group == _SCRIPT_TAB_COCKPIT:
             return (
-                bool(project.cockpit_camera_enabled),
-                float(project.cockpit_camera_offset_x),
-                float(project.cockpit_camera_offset_y),
-                float(project.cockpit_camera_offset_z),
+                bool(project.briefing_size_enabled),
+                int(round(project.briefing_size))
+                if project.briefing_size_enabled else None,
+            )
+        if group == _SCRIPT_TAB_COCKPIT:
+            if not project.cockpit_camera_enabled:
+                return (False,)
+            return (
+                True,
+                authored_number(project.cockpit_camera_offset_x),
+                authored_number(project.cockpit_camera_offset_y),
+                authored_number(project.cockpit_camera_offset_z),
             )
         raise ValueError(group)
 
@@ -10293,83 +10323,114 @@ class CollisionEditorWindow(QMainWindow):
             != self._script_tab_state(baseline, group)
         }
 
-    def _refresh_linked_script_baseline(self) -> bool:
-        """Refresh source baselines after an overwrite without losing edits.
+    def _refresh_linked_script_baseline(
+            self, applied_groups: set[str] | None = None) -> bool:
+        """Re-read exported tabs without replacing untouched import state.
 
-        The editor project is deliberately left untouched. If the editable
-        preview skipped a tab or manually changed it to values different from
-        the current workspace, that tab remains modified and can be applied
-        later.
+        The game catalog may have loaded an effective/merged definition while
+        the actual saved file contains only its own blocks. Refreshing every
+        tab from that file made unrelated Gun Points appear dirty after a
+        Cockpit or Collision export. Only explicitly applied groups change
+        their source baseline; skipped preview sections remain pending.
         """
 
         if (self._active_script_path is None
                 or self._active_script_id is None
                 or not self._active_script_kind):
             return False
+        groups = (
+            set(_SCRIPT_TAB_ORDER) if applied_groups is None
+            else set(applied_groups))
+        if not groups:
+            return True
         try:
             text, _encoding, _bom = read_script_file(self._active_script_path)
             block = _resolve_patch_target_block(
                 text, self._active_script_kind, self._active_script_id)
             baseline = self._baseline_project()
-            baseline.legacy, baseline.compound, _warnings = (
-                import_collision_block(text, block, OPENNEOUA))
-            baseline.collision_shape_path = import_collision_shape_reference(
-                text, block)
+            if _SCRIPT_TAB_COLLISION in groups:
+                baseline.legacy, baseline.compound, _warnings = (
+                    import_collision_block(text, block, OPENNEOUA))
+                baseline.collision_shape_path = import_collision_shape_reference(
+                    text, block)
+                if baseline.target_category == VEHICLE:
+                    baseline.overeof_enabled, baseline.overeof = (
+                        import_overeof_block(text, block))
             if baseline.target_category == VEHICLE:
-                baseline.overeof_enabled, baseline.overeof = (
-                    import_overeof_block(text, block))
-                (baseline.fire_points_enabled, baseline.fire_x, baseline.fire_y,
-                 baseline.fire_z, baseline.num_weapons,
-                 baseline.num_weapons_max) = import_fire_points_block(
-                    text, block)
-                (baseline.gun_points_enabled, baseline.gun_points,
-                 baseline.unit_gun_default_icon) = import_gun_points_block(
-                    text, block)
-                baseline.briefing_size_enabled, baseline.briefing_size = import_briefing_size_block(text, block)
-                baseline.turret_limits = import_turret_limits(text)
-                (baseline.cockpit_camera_enabled,
-                 baseline.cockpit_camera_offset_x,
-                 baseline.cockpit_camera_offset_y,
-                 baseline.cockpit_camera_offset_z) = (
-                    import_cockpit_camera_block(text, block))
+                if _SCRIPT_TAB_FIRE in groups:
+                    (baseline.fire_points_enabled, baseline.fire_x,
+                     baseline.fire_y, baseline.fire_z, baseline.num_weapons,
+                     baseline.num_weapons_max) = import_fire_points_block(
+                        text, block)
+                if _SCRIPT_TAB_GUN in groups:
+                    (baseline.gun_points_enabled, baseline.gun_points,
+                     baseline.unit_gun_default_icon) = import_gun_points_block(
+                        text, block)
+                    # Turret limits belong to their own vehicle definitions.
+                    # A merged game-catalog import can contain angles sourced
+                    # from other files: replace only limits actually edited
+                    # and written by this workspace, not every catalog entry.
+                    source_limits = import_turret_limits(text)
+                    for vehicle_id, current in self.project.turret_limits.items():
+                        if current.dirty:
+                            if vehicle_id in source_limits:
+                                baseline.turret_limits[vehicle_id] = (
+                                    source_limits[vehicle_id])
+                            else:
+                                baseline.turret_limits.pop(vehicle_id, None)
+                if _SCRIPT_TAB_BRIEFING in groups:
+                    (baseline.briefing_size_enabled,
+                     baseline.briefing_size) = import_briefing_size_block(
+                        text, block)
+                if _SCRIPT_TAB_COCKPIT in groups:
+                    (baseline.cockpit_camera_enabled,
+                     baseline.cockpit_camera_offset_x,
+                     baseline.cockpit_camera_offset_y,
+                     baseline.cockpit_camera_offset_z) = (
+                        import_cockpit_camera_block(text, block))
 
-            imported_schemes = gun_point_families_in_block(text, block)
-            if len(imported_schemes) == 1:
-                baseline_scheme = next(iter(imported_schemes))
-            elif "unit" in imported_schemes:
-                baseline_scheme = "unit"
-            else:
-                baseline_scheme = self._tab_reset_gun_point_scheme
-
+            if _SCRIPT_TAB_GUN in groups:
+                imported_schemes = gun_point_families_in_block(text, block)
+                if len(imported_schemes) == 1:
+                    baseline_scheme = next(iter(imported_schemes))
+                elif "unit" in imported_schemes:
+                    baseline_scheme = "unit"
+                else:
+                    baseline_scheme = self._tab_reset_gun_point_scheme
+                self._tab_reset_gun_point_scheme = baseline_scheme
+                self._loaded_gun_points_enabled = baseline.gun_points_enabled
+                self._loaded_gun_points = [
+                    point.clone() for point in baseline.gun_points]
+                self._loaded_unit_gun_default_icon = (
+                    baseline.unit_gun_default_icon)
+                self._loaded_gun_point_scheme = baseline_scheme
+                self._loaded_turret_limits = {
+                    vehicle_id: limits.clone()
+                    for vehicle_id, limits in baseline.turret_limits.items()
+                }
+                for vehicle_id, limits in self.project.turret_limits.items():
+                    source = baseline.turret_limits.get(vehicle_id)
+                    if source is not None:
+                        limits.source_kind = source.source_kind
+                        limits.source_name = source.source_name
+                    limits.dirty = (
+                        source is None or
+                        (limits.enabled, limits.side if limits.enabled else 0,
+                         limits.up if limits.enabled else 0,
+                         limits.down if limits.enabled else 0)
+                        != (source.enabled,
+                            source.side if source.enabled else 0,
+                            source.up if source.enabled else 0,
+                            source.down if source.enabled else 0))
+            if _SCRIPT_TAB_COCKPIT in groups:
+                self._loaded_cockpit_camera_enabled = (
+                    baseline.cockpit_camera_enabled)
+                self._loaded_cockpit_camera_offset = (
+                    baseline.cockpit_camera_offset_x,
+                    baseline.cockpit_camera_offset_y,
+                    baseline.cockpit_camera_offset_z,
+                )
             self._tab_reset_baseline = baseline.snapshot()
-            self._tab_reset_gun_point_scheme = baseline_scheme
-            self._loaded_gun_points_enabled = baseline.gun_points_enabled
-            self._loaded_gun_points = [
-                point.clone() for point in baseline.gun_points]
-            self._loaded_unit_gun_default_icon = (
-                baseline.unit_gun_default_icon)
-            self._loaded_gun_point_scheme = baseline_scheme
-            self._loaded_turret_limits = {
-                vehicle_id: limits.clone()
-                for vehicle_id, limits in baseline.turret_limits.items()
-            }
-            self._loaded_cockpit_camera_enabled = (
-                baseline.cockpit_camera_enabled)
-            self._loaded_cockpit_camera_offset = (
-                baseline.cockpit_camera_offset_x,
-                baseline.cockpit_camera_offset_y,
-                baseline.cockpit_camera_offset_z,
-            )
-
-            baseline_limits = baseline.turret_limits
-            for vehicle_id, limits in self.project.turret_limits.items():
-                source = baseline_limits.get(vehicle_id)
-                limits.dirty = (
-                    source is None
-                    or (limits.enabled, limits.side, limits.up, limits.down,
-                        limits.source_kind)
-                    != (source.enabled, source.side, source.up, source.down,
-                        source.source_kind))
             self._set_modified(bool(self._changed_script_tabs()))
             return True
         except (OSError, UnicodeError, CollisionScriptError):
@@ -11985,9 +12046,39 @@ class CollisionEditorWindow(QMainWindow):
         dialog = ApplyScriptDialog(
             self, self.project, initial_path=path)
         if dialog.exec() == QDialog.DialogCode.Accepted:
-            self._capture_tab_reset_baseline()
-            self.statusBar().showMessage(
-                "Script updated.", 10000)
+            # Apply to Script can target a different definition: updating it
+            # must not silently mark the currently loaded source as saved.
+            same_target = (
+                self._active_script_path is not None
+                and self._active_script_id == dialog.id_spin.value()
+                and self._active_script_kind == dialog.kind_combo.currentText()
+                and self._active_script_path.resolve(strict=False)
+                == Path(path).resolve(strict=False))
+            if same_target:
+                if self._refresh_linked_script_baseline():
+                    remaining = self._changed_script_tabs()
+                    if remaining:
+                        names = ", ".join(
+                            _SCRIPT_TAB_LABELS[group]
+                            for group in _SCRIPT_TAB_ORDER if group in remaining)
+                        self.statusBar().showMessage(
+                            "Script updated. Still different from the script: "
+                            f"{names}.", 10000)
+                    else:
+                        self.statusBar().showMessage(
+                            "Script updated. All changes applied.", 10000)
+                else:
+                    self.statusBar().showMessage(
+                        "Script updated, but the loaded baseline could not be "
+                        "verified. Reload the definition.", 10000)
+            elif self._active_script_path is None:
+                self._capture_tab_reset_baseline()
+                self._set_modified(False)
+                self.statusBar().showMessage("Script updated.", 10000)
+            else:
+                self.statusBar().showMessage(
+                    "Script updated. The loaded definition was not changed.",
+                    10000)
 
     def closeEvent(self, event: QCloseEvent) -> None:  # noqa: N802
         if self._modified:
