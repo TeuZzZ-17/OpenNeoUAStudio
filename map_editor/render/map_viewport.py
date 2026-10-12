@@ -422,10 +422,10 @@ class MapViewport(QWidget):
             mark_painter.translate(-rect.left(), -rect.top())
             mark_painter.setPen(Qt.PenStyle.NoPen)
             # Ogni colore resta sul proprio lato del confine, anche tra due owner diversi.
-            stroke.setWidth(6.0)
+            stroke.setWidth(3.0)
             mark_painter.setBrush(QColor(185, 195, 205, 120))
             mark_painter.drawPath(stroke.createStroke(path).intersected(path))
-            stroke.setWidth(4.0)
+            stroke.setWidth(2.0)
             mark_painter.setBrush(QColor(*self.owner_colors.get(owner, self.owner_colors[0])))
             mark_painter.drawPath(stroke.createStroke(path).intersected(path))
             mark_painter.end()
