@@ -26,7 +26,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import numpy as np
 from PySide6.QtWidgets import QApplication
 
-from collision_editor.editor import (
+from entity_designer.editor import (
     CollisionEditorWindow,
     CollisionSphere,
     OPENNEOUA,
@@ -36,7 +36,7 @@ from collision_editor.editor import (
     find_script_blocks,
     plan_script_update,
 )
-from collision_editor.sphere_generator import (
+from entity_designer.sphere_generator import (
     ACCURACY_PRESETS,
     generate_collision_spheres,
 )

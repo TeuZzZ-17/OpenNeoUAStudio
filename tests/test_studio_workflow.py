@@ -72,7 +72,7 @@ def test_entity_context_menu_only_copies_and_never_opens_on_right_click(app):
 
 
 def test_entity_designer_dirty_script_row_clears_after_save_or_reset(app, tmp_path):
-    from collision_editor.editor import CollisionEditorWindow
+    from entity_designer.editor import CollisionEditorWindow
     from game_object_catalog import GameObject
     from resource_status import MODIFIED_ROLE
     window = CollisionEditorWindow()

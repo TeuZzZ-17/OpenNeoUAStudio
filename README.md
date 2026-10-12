@@ -88,7 +88,7 @@ and supports Collision Shape for vehicles and weapons without a missing-spheres
 warning.
 
 Map Change Set choices are built from complete sets already present in the
-configured resources. Sector Editor is coming soon. The Collision Editor's
+configured resources. Sector Editor is coming soon. The Entity Designer's
 Briefing Model Size tab reads the installed Brief and Debrief files and previews
 the vehicle's `briefing_size` through Studio's renderer. The preview can differ
 visually from the retail game.

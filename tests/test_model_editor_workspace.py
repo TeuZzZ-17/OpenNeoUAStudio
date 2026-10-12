@@ -63,7 +63,7 @@ class ModelEditorWorkspaceTests(unittest.TestCase):
         window = ModelEditorWindow()
         try:
             self.assertFalse(window.wireframe_editor_action.isVisible())
-            self.assertFalse(window.collision_editor_action.isVisible())
+            self.assertFalse(window.entity_designer_action.isVisible())
             self.assertFalse(window.map_editor_action.isVisible())
             self.assertTrue(window.mapping_repair_action.isVisible())
             self.assertTrue(window.integrated_editors_separator.isVisible())

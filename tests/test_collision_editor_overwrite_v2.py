@@ -1,6 +1,6 @@
 import unittest
 
-from collision_editor import (
+from entity_designer import (
     CollisionProject,
     CollisionScriptError,
     CollisionSphere,
