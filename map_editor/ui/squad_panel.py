@@ -73,8 +73,8 @@ class SquadPanel(QWidget):
         self.vehicle.setToolTip("Search by name or enter the vehicle ID")
         self.count = QSpinBox(minimum=1, maximum=2147483647, value=1)
         self.name = QLineEdit()
-        self.hidden = QCheckBox("Hidden in briefing")
-        self.useable = QCheckBox("Usable by the host AI")
+        self.hidden = QCheckBox("Hidden in Briefing")
+        self.useable = QCheckBox("Usable by the Host AI")
         self.x = WorldCoordinateSpinBox()
         self.z = WorldCoordinateSpinBox()
         for title, widget in (("Faction", self.owner), ("Vehicle", self.vehicle),
@@ -82,7 +82,7 @@ class SquadPanel(QWidget):
             form.addRow(title, widget)
         form.addRow(self.hidden)
         form.addRow(self.useable)
-        self.advanced = QGroupBox('Advanced settings', checkable=True, checked=False)
+        self.advanced = QGroupBox('Advanced Settings', checkable=True, checked=False)
         advanced_layout = QVBoxLayout(self.advanced)
         self.advanced_fields = QWidget()
         advanced_form = QFormLayout(self.advanced_fields)
@@ -152,6 +152,11 @@ class SquadPanel(QWidget):
 
     def update_rows(self):
         signals_blocked = self.list.blockSignals(True)
+        # Draft squads can change the row count before a full form refresh.
+        while self.list.count() < len(self.doc.squads):
+            self.list.addItem('')
+        while self.list.count() > len(self.doc.squads):
+            self.list.takeItem(self.list.count() - 1)
         for i, squad in enumerate(self.doc.squads):
             visual = self.vehicles.get(squad['veh'])
             name = (visual.name if visual else '') or f"Vehicle {squad['veh']}"

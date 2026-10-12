@@ -162,7 +162,7 @@ class VPSnapshotBatchPanel(QGroupBox):
 
         options_row = QHBoxLayout()
         options_row.setSpacing(18)
-        self.skip_existing_check = QCheckBox("Skip existing")
+        self.skip_existing_check = QCheckBox("Skip Existing")
         self.skip_existing_check.setChecked(True)
         self.skip_existing_check.setToolTip(
             "Keep existing non-empty PNG files, allowing safe resume.")

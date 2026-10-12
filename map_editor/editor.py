@@ -28,7 +28,7 @@ def create_window(argv=None, parent=None):
         app = QApplication(app_args)
     _active_app = app
 
-    install = load_remembered()
+    install = bootstrap.installation() or load_remembered()
     if install is None:
         hint = os.environ.get("NME_GAME_DATA")
         suggested = GameInstallation.suggest(hint) if hint else None
@@ -49,15 +49,18 @@ def create_window(argv=None, parent=None):
     if path:
         doc = load_ldf(path)
     else:
-        doc = LdfDocument(mw=15, mh=15, set_number=1)
+        from studio_session import selected_set
+        doc = LdfDocument(mw=15, mh=15, set_number=selected_set())
 
     window = MainWindow(doc, path)
+    from studio_shell import install_workspace_shell
+    install_workspace_shell(window, "map_editor")
     if parent is not None:
         window.setParent(parent, Qt.WindowType.Window)
     window.setWindowTitle("OpenNeoUA Studio - Map Editor")
     window.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose, True)
     _active_window = window
-    window.show()
+    window.showMaximized()
     return window
 
 

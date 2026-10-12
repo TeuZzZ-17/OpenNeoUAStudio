@@ -3503,6 +3503,10 @@ class AssetViewport(AcceleratedWidget):
             return f'Software renderer error: {self._indexed_runtime_error}'
         return super().renderer_name
 
+    def _renderer_mode_changed(self):
+        self._last_effective_renderer = "not_rendered"
+        self._gpu_indexed_unavailable = False
+
     def _render_scene(self, painter: QPainter, target: QRectF,
                       background: QColor | None, clean: bool,
                       camera: dict,

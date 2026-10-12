@@ -117,18 +117,25 @@ class Canvas(QOpenGLWidget):
             self.owner.renderer = None
             self.doneCurrent()
 
+    def release_resources(self):
+        self.cleanup()
+        context = self.context()
+        if context is not None:
+            context.aboutToBeDestroyed.disconnect(self.cleanup)
+
 
 class GpuMapViewport(SoftwareMapViewport):
-    def __init__(self, parent=None):
+    def __init__(self, parent=None, *, enable_gpu=True):
         self._canvas = None
-        self._software_fallback = False
+        self._software_fallback = not enable_gpu
+        self.renderer_error = ""
         self._overlay_errors = set()
         super().__init__(parent)
         self.renderer = None
         self._preview_renderer = None
         self._preview_scene = WorldScene()
         self._previews_primed = False
-        self.renderer_name = 'OpenGL 3.3'
+        self.renderer_name = 'OpenGL 3.3' if enable_gpu else 'Software'
         self.world_scene = WorldScene()
         self._geometry_dirty = True
         self._dirty_cells = None
@@ -138,8 +145,46 @@ class GpuMapViewport(SoftwareMapViewport):
         self._owner_revision = 0
         self._gpu_camera_key = None
         self.frame_ms = deque(maxlen=600)
-        self._canvas = Canvas(self)
-        self._canvas.setGeometry(self.rect())
+        if enable_gpu:
+            self._canvas = Canvas(self)
+            self._canvas.setGeometry(self.rect())
+
+    @property
+    def renderer_mode(self):
+        return 'software' if self._software_fallback else 'gpu'
+
+    def set_renderer_mode(self, mode):
+        """Keep the document, camera, selection and history in this viewport."""
+        if mode not in {'gpu', 'software'}:
+            raise ValueError(mode)
+        if mode == self.renderer_mode:
+            return True
+        self.renderer_error = ''
+        if mode == 'gpu' and not available():
+            self.renderer_error = 'OpenGL 3.3 is unavailable. Software rendering remains active.'
+            return False
+        if self._canvas is not None:
+            self._canvas.release_resources()
+            self._canvas.hide()
+            self._canvas.deleteLater()
+            self._canvas = None
+        self._software_fallback = mode == 'software'
+        self._generation += 1
+        self._frame = self._image = self._frame_key = None
+        self._owner_marks = self._annotation_base = None
+        self._gpu_camera_key = None
+        self._geometry_dirty = self._heights_dirty = self._sky_dirty = True
+        self._dirty_cells = None
+        self._states_key = None
+        self._previews_primed = False
+        self.renderer_name = 'Software' if self._software_fallback else 'OpenGL 3.3'
+        if mode == 'gpu':
+            self._canvas = Canvas(self)
+            self._canvas.setGeometry(self.rect())
+            self._canvas.show()
+        self.backendChanged.emit(self.renderer_name)
+        self.update()
+        return True
 
     def _overlay_warning(self, name, error):
         """An optional UI overlay must never disable GPU map rendering."""
@@ -158,6 +203,7 @@ class GpuMapViewport(SoftwareMapViewport):
     def _fallback(self, error):
         # Keep the original exception: the cause matters when a particular map fails.
         self._software_fallback = True
+        self.renderer_error = str(error)
         self.renderer_name = 'Software fallback'
         self.backendChanged.emit(self.renderer_name)
         self._canvas.hide()
@@ -307,7 +353,7 @@ class GpuMapViewport(SoftwareMapViewport):
 
     def _pick_code(self, x, y):
         if self._software_fallback:
-            return 0
+            return super()._pick_code(x, y)
         if self.renderer is None or self.doc is None:
             return 0
         self._canvas.makeCurrent()
@@ -403,8 +449,5 @@ class GpuMapViewport(SoftwareMapViewport):
 
 
 def create_viewport():
-    if os.environ.get('NME_RENDERER', '').casefold() == 'software' or not available():
-        view = SoftwareMapViewport()
-        view.renderer_name = 'Software'
-        return view
-    return GpuMapViewport()
+    enabled = os.environ.get('NME_RENDERER', '').casefold() != 'software' and available()
+    return GpuMapViewport(enable_gpu=enabled)

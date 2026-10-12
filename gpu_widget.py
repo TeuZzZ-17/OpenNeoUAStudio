@@ -17,8 +17,8 @@ from PySide6.QtOpenGLWidgets import QOpenGLWidget
 from PySide6.QtWidgets import QApplication, QWidget
 
 
-def _use_opengl_canvas() -> bool:
-    if os.environ.get("NME_RENDERER", "").strip().casefold() == "software":
+def _use_opengl_canvas(*, explicit=False) -> bool:
+    if not explicit and os.environ.get("NME_RENDERER", "").strip().casefold() == "software":
         return False
     if QApplication.instance() is None:
         return False
@@ -131,6 +131,12 @@ class Canvas(QOpenGLWidget):
         finally:
             self.doneCurrent()
 
+    def release_resources(self):
+        self._cleanup_owner_gpu()
+        if self._cleanup_context is not None:
+            self._cleanup_context.aboutToBeDestroyed.disconnect(self._cleanup_owner_gpu)
+            self._cleanup_context = None
+
 
 class AcceleratedWidget(QWidget):
     """Route widget painting through Qt's OpenGL paint engine on desktop."""
@@ -140,11 +146,45 @@ class AcceleratedWidget(QWidget):
     def __init__(self, parent=None) -> None:
         self._gpu_canvas = None
         self._reported_backend = None
+        self.renderer_error = ""
         super().__init__(parent)
         if _use_opengl_canvas():
             self._gpu_canvas = Canvas(self)
             self._gpu_canvas.setGeometry(self.rect())
             self._gpu_canvas.show()
+
+    @property
+    def renderer_mode(self):
+        return "gpu" if self._gpu_canvas is not None else "software"
+
+    def set_renderer_mode(self, mode):
+        """Replace only the drawing surface, preserving the editing session."""
+        if mode not in {"gpu", "software"}:
+            raise ValueError(mode)
+        if mode == self.renderer_mode:
+            return True
+        self.renderer_error = ""
+        if mode == "gpu":
+            if not _use_opengl_canvas(explicit=True):
+                self.renderer_error = "OpenGL 3.3 is unavailable. Software rendering remains active."
+                self._report_backend()
+                return False
+            self._gpu_canvas = Canvas(self)
+            self._gpu_canvas.setGeometry(self.rect())
+            self._gpu_canvas.show()
+        else:
+            canvas = self._gpu_canvas
+            canvas.release_resources()
+            self._gpu_canvas = None
+            canvas.hide()
+            canvas.deleteLater()
+        self._renderer_mode_changed()
+        self._report_backend()
+        self.update()
+        return True
+
+    def _renderer_mode_changed(self):
+        pass
 
     @property
     def renderer_name(self):

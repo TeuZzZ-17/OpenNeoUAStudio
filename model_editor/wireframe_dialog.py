@@ -7,10 +7,8 @@ from pathlib import Path
 from PySide6.QtCore import QSize, Qt
 from PySide6.QtGui import QPixmap
 from PySide6.QtWidgets import (
-    QCheckBox,
     QComboBox,
     QDialog,
-    QDoubleSpinBox,
     QFileDialog,
     QFormLayout,
     QFrame,
@@ -90,36 +88,6 @@ class WireframeGeneratorDialog(QDialog):
             self.view_preset_combo.addItem(preset)
         settings.addRow("View:", self.view_preset_combo)
 
-        renderer_info = viewport.indexed_renderer_info()
-        self.respect_transparency_check = QCheckBox(
-            "Respect texture transparency", self)
-        self.respect_transparency_check.setEnabled(
-            getattr(viewport, "_indexed_adapter", None) is not None)
-        self.respect_transparency_check.setChecked(
-            bool(renderer_info.get("available")))
-        reason = str(renderer_info.get("availability_reason", "")).strip()
-        if reason:
-            self.respect_transparency_check.setToolTip(
-                "Textured rendering is currently unavailable: " + reason
-                + ". If generation fails, turn this option off to use model "
-                  "geometry instead.")
-        elif not self.respect_transparency_check.isEnabled():
-            self.respect_transparency_check.setToolTip(
-                "Texture-aware generation is unavailable for this model. "
-                "The preview uses model geometry.")
-        settings.addRow("Transparency:", self.respect_transparency_check)
-
-        self.simplification_spin = QDoubleSpinBox(self)
-        self.simplification_spin.setRange(0.5, 12.0)
-        self.simplification_spin.setSingleStep(0.5)
-        self.simplification_spin.setDecimals(1)
-        self.simplification_spin.setKeyboardTracking(False)
-        self.simplification_spin.setValue(3.0)
-        self.simplification_spin.setSuffix(" px")
-        self.simplification_spin.setToolTip(
-            "Simplify texture contours in the 1024-pixel projection.")
-        settings.addRow("Texture contour simplification:",
-                        self.simplification_spin)
         layout.addLayout(settings)
 
         self.preview = _ImagePreview(self)
@@ -137,7 +105,7 @@ class WireframeGeneratorDialog(QDialog):
 
         buttons = QHBoxLayout()
         buttons.addStretch(1)
-        self.save_button = QPushButton("Save .SKL...", self)
+        self.save_button = QPushButton("Export", self)
         self.save_button.setEnabled(False)
         self.save_button.clicked.connect(self._save_projection)
         buttons.addWidget(self.save_button)
@@ -147,10 +115,6 @@ class WireframeGeneratorDialog(QDialog):
         layout.addLayout(buttons)
 
         self.view_preset_combo.currentTextChanged.connect(
-            self._refresh_preview)
-        self.respect_transparency_check.toggled.connect(
-            self._refresh_preview)
-        self.simplification_spin.valueChanged.connect(
             self._refresh_preview)
         self._refresh_preview()
 
@@ -168,14 +132,14 @@ class WireframeGeneratorDialog(QDialog):
                 self.viewport,
                 preset=self.view_preset_combo.currentText(),
                 respect_transparency=(
-                    self.respect_transparency_check.isChecked()),
-                simplification=self.simplification_spin.value(),
+                    bool(self.viewport.indexed_renderer_info().get("available"))),
+                simplification=3.0,
             )
             image = projection.preview_image(size=self.PREVIEW_SIZE)
             if image is None or image.isNull():
                 raise ValueError("The generated wireframe preview is empty.")
             stats_text = (
-                f"{len(projection.points)} points · "
+                f"{len(projection.points)} points Â· "
                 f"{len(projection.segments)} segments")
         except Exception as exc:
             self.preview.setText("Preview unavailable")
@@ -197,7 +161,7 @@ class WireframeGeneratorDialog(QDialog):
         if last_directory:
             suggested = Path(last_directory) / suggested.name
         filename, _selected_filter = QFileDialog.getSaveFileName(
-            self, "Save Generated Wireframe", str(suggested),
+            self, "Export Generated Wireframe", str(suggested),
             "Urban Assault skeleton (*.SKL *.skl);;All files (*)")
         if not filename:
             return

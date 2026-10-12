@@ -267,15 +267,14 @@ class FxAuthoringTests(unittest.TestCase):
                 window.fx_combo.setCurrentIndex(1)
                 original = list(obj.skeleton.points)
                 window._set_transform_mode('scale')
-                window._apply_transform_preset(0)  # 50% of the original size
-                self.assertAlmostEqual(obj.skeleton.points[0][0], original[0][0] * .5)
-                self.assertEqual(len(window._edit_undo_stack), 1)
-                window._undo_edit()
+                window._apply_transform_preset(0)
                 self.assertEqual(obj.skeleton.points, original)
+                self.assertEqual(window._edit_undo_stack, [])
                 window._set_transform_mode('rotate')
                 window.transform_preset_axis.setCurrentText('Z')
                 window._apply_transform_preset(3)  # +90 degrees
                 self.assertNotEqual(obj.skeleton.points, original)
+                self.assertEqual(len(window._edit_undo_stack), 1)
                 window._undo_edit()
                 for actual, expected in zip(obj.skeleton.points, original):
                     for a, b in zip(actual, expected):

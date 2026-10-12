@@ -235,7 +235,8 @@ class Onua3dFidelityTests(unittest.TestCase):
             c = channel / 255.0
             return c / 12.92 if c <= 0.04045 else ((c + 0.055) / 1.055) ** 2.4
         reconstructed = round(255 * (a / 255.0) * linear(r))
-        self.assertAlmostEqual(reconstructed, 64, delta=2)
+        expected = round(255 * linear(tables.display_palette[64][0]))
+        self.assertAlmostEqual(reconstructed, expected, delta=2)
         self.assertEqual((g, b), (r, r))
 
     def test_flat_tracy_true_identity_column_stays_transparent(self):

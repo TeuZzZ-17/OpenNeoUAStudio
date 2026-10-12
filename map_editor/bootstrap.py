@@ -41,10 +41,15 @@ def ensure_studio_on_path() -> Path:
 
 
 def set_dir(set_number: int) -> Path:
+    if _installation is not None:
+        found = _installation.set_directories().get(set_number)
+        if found is not None:
+            return found
     base = _installation.folder("sets") if _installation is not None else game_data_dir() / "Sets"
-    for name in (f"Set{set_number}", f"set{set_number}"):
-        if (base / name).is_dir():
-            return base / name
+    if base.is_dir():
+        for path in base.iterdir():
+            if path.is_dir() and path.name.casefold() == f"set{set_number}":
+                return path
     return base / f"Set{set_number}"
 
 

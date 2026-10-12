@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -14,6 +15,13 @@ IMAGE_SUFFIXES = {".png", ".jpg", ".jpeg", ".bmp", ".webp", ".iff", ".ilbm", ".l
 MUSIC_SUFFIXES = {".ogg"}
 MOVIE_SUFFIXES = {".mpg", ".mpeg", ".avi", ".mp4", ".mkv", ".webm"}
 SCRIPT_SUFFIXES = {".cfg", ".ini", ".lua", ".sdf", ".scr"}
+
+
+_SET_NAME = re.compile(r"set(\d+)", re.I)
+
+
+def _has_loose_sets(folder: Path) -> bool:
+    return folder.is_dir() and any(p.is_dir() and _SET_NAME.fullmatch(p.name) for p in folder.iterdir())
 
 
 def _child(parent: Path, *names: str) -> Path:
@@ -31,6 +39,7 @@ def _child(parent: Path, *names: str) -> Path:
 class GameInstallation:
     data: Path
     folders: dict[str, Path] = field(default_factory=dict)
+    preview_backgrounds: dict[str, Path] = field(default_factory=dict)
 
     @classmethod
     def suggest(cls, chosen: str | Path) -> "GameInstallation":
@@ -47,6 +56,28 @@ class GameInstallation:
             "models": _child(data, "Models"),
             "interface": _child(data, "Interface"),
         }
+        # Vanilla keeps every set as a loose SetN folder, with no parent "Sets" folder.
+        if not folders["sets"].is_dir() and _has_loose_sets(data):
+            folders["sets"] = data
+        missing = {key for key, path in folders.items() if not path.is_dir()}
+        if missing and data.is_dir():
+            aliases = {"briefings": "mbpix", "skies": "objects", "music": "music",
+                       "movies": "mov", "sets": "sets", "scripts": "scripts",
+                       "levels": "levels", "models": "models", "interface": "interface"}
+            candidates = {key: [] for key in missing}
+            ignored = {".git", ".codex", "build", "dist", "outputs", "__pycache__", "node_modules"}
+            for directory, children, files in os.walk(data):
+                children[:] = [name for name in children if name.casefold() not in ignored]
+                path = Path(directory)
+                names = {name.casefold() for name in files}
+                for key in missing:
+                    named = path.name.casefold() == aliases[key]
+                    marker = key == "scripts" and bool(names & {"startup.cfg", "startup.scr", "vehicles.cfg", "weapons.cfg"})
+                    if named or marker:
+                        candidates[key].append(path)
+            for key, paths in candidates.items():
+                if paths:
+                    folders[key] = min(paths, key=lambda path: (len(path.relative_to(data).parts), str(path).casefold()))
         return cls(data, folders)
 
     def folder(self, name: str) -> Path:
@@ -55,18 +86,40 @@ class GameInstallation:
     def valid(self) -> bool:
         return self.data.is_dir() and self.folder("sets").is_dir()
 
+    def set_directories(self) -> dict[int, Path]:
+        """Map set number -> folder, for both the modern and the vanilla layout.
+
+        The "sets" folder may hold SetN subfolders (modern), be the game root
+        holding loose SetN folders (vanilla), or be a single SetN folder.
+        Only sets with both sector data and a VP archive are returned.
+        """
+        sets = self.folder("sets")
+        candidates = []
+        for root in (sets, self.data):
+            if not root.is_dir():
+                continue
+            if _SET_NAME.fullmatch(root.name):
+                candidates.append(root)
+            candidates.extend(p for p in sorted(root.iterdir()) if p.is_dir())
+        found: dict[int, Path] = {}
+        for path in candidates:
+            match = _SET_NAME.fullmatch(path.name)
+            if (match and 1 <= int(match[1]) <= 255 and int(match[1]) not in found
+                    and _child(path, "Objects", "SET.BAS").is_file()
+                    and _child(path, "Scripts", "set.sdf").is_file()):
+                found[int(match[1])] = path
+        return found
+
+    def available_sets(self) -> list[int]:
+        """Return only installed sets with both sector data and a VP archive."""
+        return sorted(self.set_directories())
+
     def inventory(self) -> dict[str, int]:
         def count(folder, predicate):
             root = self.folder(folder)
             return sum(1 for path in root.iterdir() if path.is_file() and predicate(path)) if root.is_dir() else 0
 
-        sets = self.folder("sets")
-        ready_sets = 0
-        if sets.is_dir():
-            for path in sets.iterdir():
-                if path.is_dir() and _child(path, "Objects", "SET.BAS").is_file() \
-                        and _child(path, "Scripts", "set.sdf").is_file():
-                    ready_sets += 1
+        ready_sets = len(self.available_sets())
 
         def count_recursive(folder, predicate):
             root = self.folder(folder)
@@ -109,14 +162,15 @@ class GameInstallation:
         }
 
     def to_json(self) -> dict:
-        return {"data": str(self.data), "folders": {key: str(self.folder(key)) for key in FOLDERS}}
+        return {"data": str(self.data), "folders": {key: str(self.folder(key)) for key in FOLDERS},
+                "preview_backgrounds": {key: str(path) for key, path in self.preview_backgrounds.items()}}
 
     @classmethod
     def from_json(cls, payload: dict) -> "GameInstallation":
         data = Path(payload["data"])
         suggested = cls.suggest(data)
         folders = {key: Path(payload.get("folders", {}).get(key, suggested.folder(key))) for key in FOLDERS}
-        return cls(data, folders)
+        return cls(data, folders, {key: Path(value) for key, value in payload.get("preview_backgrounds", {}).items()})
 
 
 def settings_path() -> Path:
