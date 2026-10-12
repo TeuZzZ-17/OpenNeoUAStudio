@@ -117,9 +117,9 @@ class MainWindow(QMainWindow):
         self.libs: dict[int, SectorMeshLibrary] = {}
         self.brush = TerrainBrush()
         self.tool = "sector"
-        self.sel_typ = 5
-        self.sel_building = 1
-        self.sel_owner = 1
+        self.sel_typ = None
+        self.sel_building = None
+        self.sel_owner = 0
         self.buildings: dict = {}
         self._sec_index: dict = {}
         self._bicon_level = 2
@@ -272,7 +272,7 @@ class MainWindow(QMainWindow):
         self.sky_action = QAction("Sky Background", self, checkable=True, checked=True)
         self.sky_action.toggled.connect(self.view.set_sky_visible)
         view_menu.addAction(self.sky_action)
-        self.music_action = QAction("Mute music", self, checkable=True, checked=False)
+        self.music_action = QAction("Mute Music", self, checkable=True, checked=False)
         self.music_action.toggled.connect(lambda muted: self.music_preview.set_enabled(not muted))
         map_menu.addSeparator()
         map_menu.addAction(self.music_action)
@@ -2666,12 +2666,35 @@ class MainWindow(QMainWindow):
         self.history.clear()
         self._draft_squads = []
         self._draft_host = None
+        self.sel_typ = None
+        self.sel_building = None
+        self.sel_owner = 0
+        for panel in self.special_panels.values():
+            panel.slot = 0
+        for widget in (self.squad_panel.list, self.host_panel.list, self.tech_panel.list,
+                       *(panel.list for panel in self.special_panels.values())):
+            blocked = widget.blockSignals(True)
+            widget.clearSelection()
+            widget.setCurrentRow(-1)
+            widget.blockSignals(blocked)
         self._ensure_lib()
         self._rebuild_level_panel()
         self._sync_side_panels()
+        for widget, attr in ((self.sector_list, 'sel_typ'),
+                             (self.building_list, 'sel_building'),
+                             (self.owner_list, 'sel_owner')):
+            first = next((widget.item(i) for i in range(widget.count())
+                          if not widget.item(i).isHidden()), None)
+            blocked = widget.blockSignals(True)
+            widget.setCurrentItem(first)
+            widget.blockSignals(blocked)
+            setattr(self, attr, first.data(Qt.ItemDataRole.UserRole) if first else None)
+            if first is not None:
+                widget.scrollToItem(first)
         self._refresh_sky()
         self._refresh_music()
         self.view.set_document(doc)
+        self._select_first_tab_item(self.palette_tabs.currentIndex())
         self.building_overlay.update()
         self._refresh_title()
 
@@ -2933,6 +2956,31 @@ class MainWindow(QMainWindow):
         self._update_cursor()
         self.view.update()
 
+    def _select_first_tab_item(self, index):
+        if index == self.squad_tab_index:
+            widget = self.squad_panel.list
+            if any(not widget.item(i).isHidden() for i in self.squad_panel.selected_indices()):
+                return
+        elif index == self.host_tab_index:
+            widget = self.host_panel.list
+        elif index == self.tech_tab_index:
+            widget = self.tech_panel.list
+        else:
+            kind = next((kind for kind, tab in self.special_tab_indices.items() if tab == index), None)
+            if kind is None:
+                return
+            widget = self.special_panels[kind].list
+        current = widget.currentItem()
+        if current is not None and current.isSelected() and not current.isHidden():
+            return
+        first = next((widget.item(i) for i in range(widget.count())
+                      if not widget.item(i).isHidden()), None)
+        if first is not None:
+            if index == self.squad_tab_index:
+                self.squad_panel.set_selection({widget.row(first)})
+            else:
+                widget.setCurrentItem(first)
+
     def _palette_changed(self, index):
         self._finish_script()
         if index != 1 and self._building_drag is None:
@@ -2947,6 +2995,7 @@ class MainWindow(QMainWindow):
             self._icons.start()
         if index in (self.squad_tab_index, self.host_tab_index, self.tech_tab_index, *self.special_tab_indices.values()):
             self._icons.start()
+        self._select_first_tab_item(index)
 
     def _sector_selected(self, item, _prev=None):
         if item:
