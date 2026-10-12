@@ -61,7 +61,7 @@ def visual_choices(obj, number):
         return choices
 
     # Keep the engine's external 3DS -> BASE -> positional VP precedence.
-    from collision_editor.editor import _resolve_data_asset_path
+    from entity_designer.editor import _resolve_data_asset_path
     vp_table = None
     for state in ("normal", "fire", "wait", "dead", "megadeth", "genesis", "launch"):
         choice = None

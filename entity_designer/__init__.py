@@ -1,7 +1,7 @@
 """Public package for OpenNeoUAStudio's Entity Designer.
 
-The implementation lives in :mod:`collision_editor.editor`; public names are
-re-exported here so existing imports such as ``from collision_editor import
+The implementation lives in :mod:`entity_designer.editor`; public names are
+re-exported here so imports such as ``from entity_designer import
 CollisionEditorWindow`` keep working.
 """
 

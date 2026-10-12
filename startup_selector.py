@@ -52,7 +52,7 @@ TOOL_OPTIONS = (
         "Create and edit Urban Assault maps with the GPU terrain viewport.",
     ),
     ToolOption(
-        "collision_editor",
+        "entity_designer",
         "Entity Designer",
         "Edit collision shapes, fire points, turrets, cockpit views and "
         "briefing framing for game entities.",
