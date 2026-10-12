@@ -702,7 +702,7 @@ def generate_collision_shape(
             "Selected part(s) contain no non-degenerate triangles: "
             + ", ".join(empty_owners))
     warnings = list(_source_topology_warnings(prepared))
-    from collision_editor.mesh_parts import prepare_component_mesh
+    from entity_designer.mesh_parts import prepare_component_mesh
 
     prepared_for_bake = []
     for owner, triangles in prepared:

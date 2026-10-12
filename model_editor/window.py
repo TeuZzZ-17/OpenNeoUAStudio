@@ -84,7 +84,7 @@ class ModelEditorWindow(EntityListMixin, SetBasMixin, AssemblyWindow):
         # Other editors are launched only from the startup workspace selector.
         for action in (
                 self.wireframe_editor_action,
-                self.collision_editor_action,
+                self.entity_designer_action,
                 self.map_editor_action):
             action.setVisible(False)
 

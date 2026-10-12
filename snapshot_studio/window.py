@@ -117,7 +117,7 @@ class SnapshotStudioWindow(EntityListMixin, SetBasMixin, AssemblyWindow):
         self.integrated_editors_separator.setVisible(False)
         for action in (
                 self.wireframe_editor_action,
-                self.collision_editor_action,
+                self.entity_designer_action,
                 self.map_editor_action):
             action.setVisible(False)
 

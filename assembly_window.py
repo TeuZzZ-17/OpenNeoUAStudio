@@ -1437,10 +1437,10 @@ class AssemblyWindow(QMainWindow):
             self._open_wireframe_editor)
         self.integrated_editors_separator = tools_menu.addSeparator()
         tools_menu.addAction(self.wireframe_editor_action)
-        self.collision_editor_action = QAction("Entity Designer", self)
-        self.collision_editor_action.triggered.connect(
-            self._open_collision_editor)
-        tools_menu.addAction(self.collision_editor_action)
+        self.entity_designer_action = QAction("Entity Designer", self)
+        self.entity_designer_action.triggered.connect(
+            self._open_entity_designer)
+        tools_menu.addAction(self.entity_designer_action)
         self.map_editor_action = QAction("Map Editor", self)
         self.map_editor_action.triggered.connect(self._open_map_editor)
         tools_menu.addAction(self.map_editor_action)
@@ -2614,9 +2614,9 @@ class AssemblyWindow(QMainWindow):
         window.raise_()
         window.activateWindow()
 
-    def _open_collision_editor(self) -> None:
+    def _open_entity_designer(self) -> None:
         try:
-            from collision_editor import CollisionEditorWindow
+            from entity_designer import CollisionEditorWindow
         except Exception as exc:
             QMessageBox.critical(
                 self, "Entity Designer unavailable",

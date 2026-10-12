@@ -80,7 +80,7 @@ class SnapshotStudioTests(unittest.TestCase):
         window = SnapshotStudioWindow()
         try:
             self.assertFalse(window.wireframe_editor_action.isVisible())
-            self.assertFalse(window.collision_editor_action.isVisible())
+            self.assertFalse(window.entity_designer_action.isVisible())
             self.assertFalse(window.map_editor_action.isVisible())
             self.assertFalse(window.mapping_repair_action.isVisible())
             self.assertFalse(window.integrated_editors_separator.isVisible())

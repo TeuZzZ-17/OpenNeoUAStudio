@@ -13,12 +13,12 @@ from map_editor import bootstrap
 from map_editor.core.game_installation import GameInstallation
 from game_object_catalog import load_game_objects
 from game_browser import GameObjectBrowser, game_files
-from collision_editor.editor import (
+from entity_designer.editor import (
     CollisionProject, CollisionSphere, CollisionEditorWindow, VEHICLE, WEAPON, LEGACY,
     find_script_blocks, import_briefing_size_block, export_collision_text,
     plan_script_update, build_editable_overwrite_preview, apply_editable_overwrite_preview,
 )
-from collision_editor.briefing import find_background, briefing_layout
+from entity_designer.briefing import find_background, briefing_layout
 
 
 def test_catalog_obeys_manifest_order_and_nested_scopes(tmp_path):
@@ -242,7 +242,7 @@ def test_snapshot_studio_loads_set_1_and_follows_the_set_selector(tmp_path):
 
 
 def test_briefing_size_is_an_integer_and_larger_means_larger():
-    from collision_editor.briefing import (
+    from entity_designer.briefing import (
         radius_to_briefing_size, briefing_size_to_slider, slider_to_briefing_size)
     assert radius_to_briefing_size(80) == 50 and radius_to_briefing_size(35) == 114
     assert radius_to_briefing_size(0.0001) == 10000 and radius_to_briefing_size(1e9) == 1

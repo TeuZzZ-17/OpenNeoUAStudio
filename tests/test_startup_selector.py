@@ -30,7 +30,7 @@ class StartupToolSelectorTests(unittest.TestCase):
                 "model_editor",
                 "snapshot_studio",
                 "map_editor",
-                "collision_editor",
+                "entity_designer",
                 "wireframe_editor",
                 "sector_editor",
             ],
@@ -54,7 +54,7 @@ class StartupToolSelectorTests(unittest.TestCase):
         self.addCleanup(dialog.close)
 
         dialog.tool_list.set_current_row(3)
-        self.assertEqual(dialog.selected_tool(), "collision_editor")
+        self.assertEqual(dialog.selected_tool(), "entity_designer")
         dialog.tool_list.set_current_row(4)
         self.assertEqual(dialog.selected_tool(), "wireframe_editor")
 
@@ -134,12 +134,12 @@ class StartupToolSelectorTests(unittest.TestCase):
         cards[0].setFocus()
         for _ in range(3):
             self._send_wheel(cards[0], -120)
-        self.assertEqual(dialog.selected_tool(), "collision_editor")
+        self.assertEqual(dialog.selected_tool(), "entity_designer")
 
         QTest.keyClick(cards[0], Qt.Key.Key_Return)
         self.app.processEvents()
         self.assertEqual(dialog.result(), dialog.DialogCode.Accepted)
-        self.assertEqual(dialog.selected_tool(), "collision_editor")
+        self.assertEqual(dialog.selected_tool(), "entity_designer")
 
     def test_embedded_resources_box_has_the_reset_button(self):
         dialog = StartupToolSelector()
