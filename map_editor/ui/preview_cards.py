@@ -19,6 +19,23 @@ def actor_scroll_area(panel):
     return scroll
 
 
+def paint_card_background(painter, card, color, selected):
+    """Draw the shared resource card background and selection border."""
+    if selected:
+        base = QColor(43, 45, 49)
+        tint = 0.24
+        background = QColor(*(round(base_value * (1 - tint) + accent_value * tint)
+                              for base_value, accent_value in zip(
+                                  (base.red(), base.green(), base.blue()),
+                                  (color.red(), color.green(), color.blue()))))
+        painter.setPen(QPen(QColor(242, 247, 255), 2))
+    else:
+        background = QColor(43, 43, 43)
+        painter.setPen(Qt.PenStyle.NoPen)
+    painter.setBrush(background)
+    painter.drawRoundedRect(card, 5, 5)
+
+
 class ResourceCardDelegate(QStyledItemDelegate):
     @staticmethod
     def wrapped_text(text, font, width):
@@ -60,19 +77,7 @@ class ResourceCardDelegate(QStyledItemDelegate):
         painter.save()
         color = index.data(COLOR_ROLE) or QColor(175, 175, 175)
         selected = bool(option.state & QStyle.StateFlag.State_Selected)
-        if selected:
-            base = QColor(43, 45, 49)
-            tint = 0.24
-            background = QColor(*(round(base_value * (1 - tint) + accent_value * tint)
-                                  for base_value, accent_value in zip(
-                                      (base.red(), base.green(), base.blue()),
-                                      (color.red(), color.green(), color.blue()))))
-            painter.setPen(QPen(QColor(242, 247, 255), 2))
-        else:
-            background = QColor(43, 43, 43)
-            painter.setPen(Qt.PenStyle.NoPen)
-        painter.setBrush(background)
-        painter.drawRoundedRect(card, 5, 5)
+        paint_card_background(painter, card, color, selected)
         painter.setPen(Qt.PenStyle.NoPen)
         painter.setBrush(color)
         painter.drawRoundedRect(QRect(card.left(), card.top() + 7, 3, card.height() - 14), 1, 1)

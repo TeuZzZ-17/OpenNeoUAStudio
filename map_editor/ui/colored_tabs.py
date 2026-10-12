@@ -81,8 +81,9 @@ class PaletteTabs(QWidget):
             "}"
             "QPushButton:hover { background-color: #303030; }"
             "QPushButton:checked {"
-            f"background-color: rgba({red}, {green}, {blue}, 42);"
-            f"border: 1px solid rgb({red}, {green}, {blue});"
+            f"background-color: rgba({red}, {green}, {blue}, 85);"
+            "color: #ffffff; padding: 3px 1px;"
+            f"border: 2px solid rgb({red}, {green}, {blue});"
             f"border-bottom: 3px solid rgb({red}, {green}, {blue});"
             "}"
         )

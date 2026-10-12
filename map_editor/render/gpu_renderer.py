@@ -220,7 +220,7 @@ void main(){
     vec4 e=texelFetch(edgeMap,p,0)/pixelScale;
     float edge=min(min(e.x,e.y),min(e.z,e.w));
     if(showGrid && edge<0.55) color.rgb*=0.65;
-    if(state.r>0u && state.r<8u && edge<2.0){
+    if(state.r>0u && state.r<8u && edge<1.0){
         color.rgb=ownerColors[int(state.r)]; return;
     }
     if(state.g!=0u){

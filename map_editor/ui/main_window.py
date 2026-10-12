@@ -35,7 +35,7 @@ from ..tools.paint import paint_cells
 from .dialogs import GameInstallationDialog, LevelInfoPanel, NewMapDialog, ResizeDialog
 from .music_preview import MusicPreview
 from .building_overlay import BuildingOverlay, CapabilityPreview
-from .thumbnail_delegate import ThumbnailDelegate
+from .thumbnail_delegate import ThumbnailDelegate, PaletteCardDelegate
 from .squad_panel import SquadPanel
 from .host_panel import HostPanel
 from .tech_panel import TechPanel
@@ -43,7 +43,7 @@ from .special_panel import SpecialPanel
 from .special_overlay import SpecialOverlay
 from ..core.special_objects import (SPECIAL_KINDS, special_store, special_slots, special_cell,
                                     add_special, update_special, remove_special, set_item_key_road)
-from .preview_cards import RESOURCE_ROLE
+from .preview_cards import RESOURCE_ROLE, COLOR_ROLE
 from ..core.ldf_model import ensure_host_defaults, make_host_ai
 from .squad_overlay import SquadOverlay
 from .colored_tabs import PaletteTabs, TAB_COLORS
@@ -272,9 +272,10 @@ class MainWindow(QMainWindow):
         self.sky_action = QAction("Sky Background", self, checkable=True, checked=True)
         self.sky_action.toggled.connect(self.view.set_sky_visible)
         view_menu.addAction(self.sky_action)
-        self.music_action = QAction("Music Preview", self, checkable=True, checked=True)
-        self.music_action.toggled.connect(self.music_preview.set_enabled)
-        view_menu.addAction(self.music_action)
+        self.music_action = QAction("Mute music", self, checkable=True, checked=False)
+        self.music_action.toggled.connect(lambda muted: self.music_preview.set_enabled(not muted))
+        map_menu.addSeparator()
+        map_menu.addAction(self.music_action)
         self.palette_menu = view_menu
 
     def _build_palette(self):
@@ -373,6 +374,7 @@ class MainWindow(QMainWindow):
         self.building_zoom_in.setEnabled(False)
         buildings_layout.addLayout(building_zoom_row)
         self.building_list = QListWidget()
+        self.building_list.setItemDelegate(PaletteCardDelegate(self.building_list))
         self.building_list.setViewMode(QListWidget.ViewMode.ListMode)
         self.building_list.setFlow(QListView.Flow.TopToBottom)
         self.building_list.setWrapping(False)
@@ -389,6 +391,7 @@ class MainWindow(QMainWindow):
         self._layout_building_rows()
 
         self.owner_list = QListWidget()
+        self.owner_list.setItemDelegate(PaletteCardDelegate(self.owner_list))
         font = self.owner_list.font()
         font.setPointSizeF(max(13, font.pointSizeF() + 4))
         self.owner_list.setFont(font)
@@ -2284,6 +2287,14 @@ class MainWindow(QMainWindow):
             else:
                 self._icon_queue.append((typ, item))
         self._layout_sector_icons()
+        selected_sector = self._icon_items.get(self.sel_typ)
+        if selected_sector is None and self.sector_list.count():
+            selected_sector = self.sector_list.item(0)
+        self.sector_list.blockSignals(True)
+        self.sector_list.setCurrentItem(selected_sector)
+        self.sector_list.blockSignals(False)
+        if selected_sector is not None:
+            self.sel_typ = selected_sector.data(Qt.ItemDataRole.UserRole)
         self._fill_buildings(lib)
         self.sector_list.scrollToTop()
         self._icons.start()
@@ -2427,6 +2438,7 @@ class MainWindow(QMainWindow):
             text_layout.addWidget(detail)
             text_layout.addLayout(badges)
             row = QWidget()
+            row.setStyleSheet('QWidget { background: transparent; }')
             row_layout = QHBoxLayout(row)
             row_layout.setContentsMargins(6, 4, 6, 4)
             row_layout.setSpacing(8)
@@ -2445,8 +2457,14 @@ class MainWindow(QMainWindow):
                 self._bicon_queue.append(bid)
         self._layout_building_rows()
         self._filter(self.building_list, self.building_filter.text())
-        if self.buildings and self.sel_building not in self.buildings:
-            self.sel_building = next(iter(sorted(self.buildings)))
+        selected_building = self._bicon_items.get(self.sel_building)
+        if selected_building is None or selected_building.isHidden():
+            selected_building = next((self.building_list.item(i) for i in range(self.building_list.count())
+                                      if not self.building_list.item(i).isHidden()), None)
+        self.building_list.blockSignals(True)
+        self.building_list.setCurrentItem(selected_building)
+        self.building_list.blockSignals(False)
+        self.sel_building = selected_building.data(Qt.ItemDataRole.UserRole) if selected_building else None
         self._icons.start()
 
     @staticmethod
@@ -2635,6 +2653,7 @@ class MainWindow(QMainWindow):
             painter.drawRect(0, 0, 35, 35)
             painter.end()
             item.setIcon(QIcon(pix))
+            item.setData(COLOR_ROLE, QColor(*self.view.owner_colors[owner]) if owner else QColor(145, 145, 145))
 
     def _new_doc(self, doc: LdfDocument, path: str | None):
         if self.doc is not None:
@@ -3066,9 +3085,15 @@ class MainWindow(QMainWindow):
             self._apply_terrain(col, row, self._stroke_mode)
             return
         if self.tool == "sector":
+            item = self.sector_list.currentItem()
+            if item is None or not item.isSelected() or item.isHidden():
+                return
             changed = paint_cells(self.doc, [(col, row)], 'type', f"{self.sel_typ:02x}")
             changed = paint_cells(self.doc, [(col, row)], 'blg', '00') or changed
         elif self.tool == "building":
+            item = self.building_list.currentItem()
+            if item is None or not item.isSelected() or item.isHidden():
+                return
             definition = self.buildings.get(self.sel_building)
             if definition is not None:
                 interior = (1 <= col < self.doc.mw - 1 and 1 <= row < self.doc.mh - 1)

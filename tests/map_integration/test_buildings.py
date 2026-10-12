@@ -128,3 +128,45 @@ def test_building_overlay_paints_without_errors(app):
     win.view.grab()
     win.dirty = False
     win.close()
+
+def test_palette_selection_matches_initial_paint_values_and_blocks_unselected(app):
+    from map_editor.ui.main_window import MainWindow
+    from PySide6.QtCore import Qt
+    win = MainWindow()
+    win._icons.stop()
+    for tool, widget, value, grid in (
+        ('sector', win.sector_list, win.sel_typ, 'type'),
+        ('building', win.building_list, win.sel_building, 'blg'),
+    ):
+        item = widget.currentItem()
+        assert item is not None and item.isSelected()
+        assert item.data(Qt.ItemDataRole.UserRole) == value
+        win.set_tool(tool)
+        widget.clearSelection()
+        before = win.doc.grids[grid][3][3]
+        win._apply(3, 3)
+        assert win.doc.grids[grid][3][3] == before
+        widget.setCurrentItem(item)
+        item.setSelected(True)
+        item.setHidden(True)
+        win._apply(3, 3)
+        assert win.doc.grids[grid][3][3] == before
+        item.setHidden(False)
+    win.close()
+
+
+def test_map_menu_music_mute_persists_when_opening_new_map(app):
+    from map_editor.ui.main_window import MainWindow
+    from map_editor.core.ldf_model import LdfDocument
+    win = MainWindow()
+    menus = {action.text().replace('&', ''): action.menu() for action in win.menuBar().actions()}
+    assert win.music_action in menus['Map'].actions()
+    assert win.music_action not in menus['View'].actions()
+    assert not hasattr(win, 'mute_music')
+    win.music_action.setChecked(True)
+    assert not win.music_preview.enabled
+    win._new_doc(LdfDocument(mw=7, mh=7), None)
+    assert win.music_action.isChecked() and not win.music_preview.enabled
+    win.music_action.setChecked(False)
+    assert win.music_preview.enabled
+    win.close()
