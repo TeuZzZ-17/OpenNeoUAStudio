@@ -83,8 +83,15 @@ def test_single_delete_action_in_map_context_menu():
     assert 'Delete building at this sector' not in code
     assert 'Remove selected buildings' not in code
     assert 'Delete selected Host Station' not in code
-    assert 'Delete selected squads' not in code
+    assert 'Delete Selected Squads' not in code
     assert '_delete_special_key(' in code
+
+
+def test_edit_menu_has_no_delete_selected_entry():
+    source = (ROOT / 'ui' / 'main_window.py').read_text()
+    assert '"Delete selected"' not in source
+    # The Delete key stays alive through a window action that is not in any menu.
+    assert 'delete_action.triggered.connect(self._delete_active_selection)' in source
 
 
 def test_mouse_drag_paints_existing_sectors_instead_of_grabbing_them():

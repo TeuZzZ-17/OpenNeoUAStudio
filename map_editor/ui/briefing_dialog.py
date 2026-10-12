@@ -30,7 +30,7 @@ class _BriefingJob(QRunnable):
 class BriefingArtDialog(QDialog):
     def __init__(self, doc, lib, directory, preferred, pool, parent=None):
         super().__init__(parent)
-        self.setWindowTitle('Generate briefing / debriefing artwork')
+        self.setWindowTitle('Generate Briefing / Debriefing Artwork')
         self.resize(430, 510)
         self.directory = directory
         self.paths = None
@@ -48,7 +48,7 @@ class BriefingArtDialog(QDialog):
         layout.addWidget(self.status)
         form = QFormLayout()
         self.name = QLineEdit(available_stem(directory, preferred))
-        form.addRow('Map image name', self.name)
+        form.addRow('Map Image Name', self.name)
         layout.addLayout(form)
         destination = QLabel(f'Destination: {directory}')
         destination.setWordWrap(True)

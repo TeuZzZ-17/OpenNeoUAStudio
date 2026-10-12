@@ -4,6 +4,7 @@ from pathlib import Path
 import tempfile
 import unittest
 from dataclasses import replace
+from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
@@ -368,7 +369,7 @@ class CollisionEditorTests(unittest.TestCase):
         project = CollisionProject(name="Empty", source_model="x.sklt")
         updated, _preview, _name = plan_script_update(
             text, "modify_weapon", 4, project, comment_missing=True)
-        self.assertIn("; Collision Editor disabled: legacy radius", updated)
+        self.assertIn("; Entity Designer disabled: legacy radius", updated)
         self.assertIn("; radius = 9", updated)
         self.assertIn("; coll_radius = 4", updated)
 
@@ -442,7 +443,7 @@ class CollisionEditorTests(unittest.TestCase):
         self.assertTrue(any("Name" in error for error in errors))
         self.assertTrue(any("modello" in error for error in errors))
         self.assertTrue(any("raggio" in error for error in errors))
-        self.assertTrue(warnings)
+        self.assertFalse(warnings)
 
     def test_27_validation_warns_for_distant_sphere(self):
         project = CollisionProject(
@@ -462,7 +463,7 @@ class CollisionEditorTests(unittest.TestCase):
                 labels = [
                     action.text() for action in menu_action.menu().actions()]
                 break
-        self.assertIn("Collision Editor", labels)
+        self.assertIn("Entity Designer", labels)
 
     def test_29_window_is_an_autonomous_top_level_window(self):
         from wireframe_editor.window import WireframeEditorWindow
@@ -1934,7 +1935,6 @@ class CollisionEditorTests(unittest.TestCase):
     def test_83_output_actions_live_only_in_file_menus(self):
         window = self._window()
         self.assertIsNone(window.findChild(QToolBar, "collisionTools"))
-        self.assertIn(window.export_action, window.file_export_menu.actions())
         self.assertIn(window.copy_output_action, window.file_export_menu.actions())
         self.assertIn(window.import_action, window.file_import_menu.actions())
         self.assertIn(window.apply_script_action, window.file_export_menu.actions())
@@ -1942,11 +1942,11 @@ class CollisionEditorTests(unittest.TestCase):
             window.save_loaded_script_action, window.file_export_menu.actions())
         export_actions = window.file_export_menu.actions()
         self.assertEqual(export_actions[0], window.copy_output_action)
-        self.assertEqual(export_actions[1], window.export_action)
-        self.assertEqual(export_actions[2], window.export_collision_shape_action)
-        self.assertTrue(export_actions[3].isSeparator())
-        self.assertEqual(export_actions[4], window.apply_script_action)
-        self.assertEqual(export_actions[5], window.save_loaded_script_action)
+        self.assertEqual(export_actions[1], window.export_collision_shape_action)
+        self.assertTrue(export_actions[2].isSeparator())
+        self.assertEqual(export_actions[3], window.apply_script_action)
+        self.assertEqual(export_actions[4], window.save_loaded_script_action)
+        self.assertFalse(hasattr(window, "export_action"))
         self.assertFalse(hasattr(window, "file_script_menu"))
         self.assertNotIn(
             "Script",
@@ -1954,7 +1954,7 @@ class CollisionEditorTests(unittest.TestCase):
         self.assertEqual(window.generate_collision_spheres_button.text(),
                          "Generate Collision Spheres")
         for action in (
-                window.export_action, window.copy_output_action,
+                window.copy_output_action,
                 window.import_action, window.apply_script_action):
             self.assertNotIn(
                 action, window.model_preview_scale_toolbar.actions())
@@ -2202,7 +2202,6 @@ class CollisionEditorTests(unittest.TestCase):
             window.open_vehicle_script_action.text(),
             "Import Vehicle / Weapon from Script")
         self.assertEqual(window.import_action.text(), "Import Collision Text")
-        self.assertEqual(window.export_action.text(), "Export Collision Text")
         self.assertEqual(
             window.apply_script_action.text(), "Apply to Script")
         self.assertEqual(
@@ -2236,7 +2235,7 @@ class CollisionEditorTests(unittest.TestCase):
         window._redo.append((window.project.snapshot(), (0, (0,))))
         window.family = object()
         window._active_base_path = Path("C:/UA/Data/Set1/Objects/SET.BAS")
-        window._vp_embedded = object()
+        window._vp_embedded = SimpleNamespace(source_path="C:/UA/Data/Set1/Objects/SET.BAS")
         window._vp_table = object()
         window._vp_table_source = "embedded test"
         window.model_tree.addTopLevelItem(
@@ -2339,7 +2338,7 @@ class CollisionEditorTests(unittest.TestCase):
             " radius = 10\n"
             " radius = 20\n"
             " fire_x = 999\n"
-            " num_mguns = 8\n"
+            " mgun_energy = 800\n"
             " coll_num = 1\n"
             " coll_act = 0\n"
             " coll_x = 3\n"
@@ -2365,7 +2364,7 @@ class CollisionEditorTests(unittest.TestCase):
         self.assertNotIn("radius = 10", updated)
         self.assertNotIn("radius = 20", updated)
         self.assertNotIn("fire_x = 999", updated)
-        self.assertIn("num_mguns = 8", updated)
+        self.assertIn("mgun_energy = 800", updated)
         self.assertEqual(updated.count("coll_num ="), 1)
         self.assertEqual(updated.count("coll_act ="), 1)
         self.assertIn("fire_x = 30", updated)
@@ -2612,12 +2611,12 @@ class CollisionEditorTests(unittest.TestCase):
         self.assertEqual(points[2].direction, (0.0, 1.0, 0.0))
         self.assertEqual(points[2].icon, "side.bmp")
 
-    def test_103_canonical_gun_save_preserves_num_mguns(self):
+    def test_103_canonical_gun_save_preserves_mgun_energy(self):
         text = (
             "new_vehicle 17\n"
             " name = Carrier\n"
             " vp_normal = 42\n"
-            " num_mguns = 8\n"
+            " mgun_energy = 800\n"
             " unit_num_guns = 1\n"
             " unit_act_gun = 0\n"
             " unit_gun_pos_x = 999\n"
@@ -2633,7 +2632,7 @@ class CollisionEditorTests(unittest.TestCase):
         )
         updated, _preview, _name = plan_script_update(
             text, "new_vehicle", 17, project, replace_all_managed=True)
-        self.assertIn("num_mguns = 8", updated)
+        self.assertIn("mgun_energy = 800", updated)
         self.assertNotIn("unit_gun_pos_x = 999", updated)
         self.assertIn("unit_num_guns = 1", updated)
         self.assertIn("unit_gun_pos_x = 12", updated)
@@ -2803,7 +2802,7 @@ class CollisionEditorTests(unittest.TestCase):
             [window.properties_tabs.tabText(index)
              for index in range(window.properties_tabs.count())],
             ["Collision Spheres", "Collision Shape", "Fire Points",
-             "Gun Points", "Cockpit View"])
+             "Gun Points", "Cockpit View", "Briefing Model Size"])
         self.assertIs(
             window.ground_alignment_box.parentWidget(), window.collision_tab)
         self.assertIs(window.spheres_box.parentWidget(), window.collision_tab)
@@ -2856,7 +2855,7 @@ class CollisionEditorTests(unittest.TestCase):
             [window.properties_tabs.tabText(index)
              for index in range(window.properties_tabs.count())],
             ["Collision Spheres", "Collision Shape", "Fire Points",
-             "Gun Points", "Cockpit View"])
+             "Gun Points", "Cockpit View", "Briefing Model Size"])
         window.properties_tabs.setCurrentIndex(window.fire_points_tab_index)
         self.assertEqual(
             window.properties_tabs.currentIndex(), window.fire_points_tab_index)
@@ -2937,7 +2936,7 @@ class CollisionEditorTests(unittest.TestCase):
             " cockpit_camera_offset_x = 999\n"
             " cockpit_camera_offset_y = 888\n"
             " cockpit_camera_offset_z = 777\n"
-            " num_mguns = 2\n"
+            " mgun_energy = 900\n"
             "end\n"
         )
         project = CollisionProject(
@@ -2951,13 +2950,13 @@ class CollisionEditorTests(unittest.TestCase):
         self.assertIn("cockpit_camera_offset_y = -2", updated)
         self.assertIn("cockpit_camera_offset_z = 3", updated)
         self.assertNotIn("cockpit_camera_offset_x = 999", updated)
-        self.assertIn("num_mguns = 2", updated)
+        self.assertIn("mgun_energy = 900", updated)
 
         project.cockpit_camera_enabled = False
         removed, _preview, _name = plan_script_update(
             text, "new_vehicle", 17, project, replace_all_managed=True)
         self.assertNotIn("cockpit_camera_offset", removed)
-        self.assertIn("num_mguns = 2", removed)
+        self.assertIn("mgun_energy = 900", removed)
 
     def test_117_cockpit_tab_enters_fixed_preview_and_restores_orbit_state(self):
         window = self._window()
@@ -3646,14 +3645,10 @@ class CollisionEditorTests(unittest.TestCase):
         window.undo()
         self.assertEqual(window.project.legacy.radius, 99)
 
-    def test_134_source_context_is_red_and_reports_workspace(self):
+    def test_134_source_panel_has_no_diagnostic_context_label(self):
         window = self._window()
         window._sync_all()
-        self.assertIn("#e06060", window.source_detail_label.styleSheet())
-        self.assertIn(
-            "Workspace: Collision Spheres", window.source_detail_label.text())
-        self.assertIn("Script link:", window.source_detail_label.text())
-        self.assertIn("VANM animation:", window.source_detail_label.text())
+        self.assertFalse(hasattr(window, "source_detail_label"))
 
 
     def test_135_host_station_export_updates_referenced_gun_vehicle(self):
@@ -3907,6 +3902,44 @@ class CollisionEditorTests(unittest.TestCase):
         warning.assert_called_once()
         self.assertEqual(warning.call_args.args[1], "Export Collision Shape first")
         self.assertIn("has not been exported", warning.call_args.args[2])
+
+    def test_139c_weapon_collision_shape_follows_the_vehicle_rules(self):
+        window = self._window()
+        window.project = CollisionProject(
+            target_category=WEAPON,
+            collision_shape_path="Data/Models/Collision/Rocket.collision",
+        )
+        window._capture_tab_reset_baseline()
+        self.assertTrue(window.properties_tabs.isTabEnabled(window.collision_shape_tab_index))
+        window.project.collision_shape_path = "Data/Models/Collision/RocketFF.collision"
+
+        self.assertEqual(window._changed_script_tabs(), {"collision"})
+        preview = build_editable_overwrite_preview(
+            "new_weapon", 5, window.project, window._changed_script_tabs())
+        self.assertIn(
+            "collision_shape = Data/Models/Collision/RocketFF.collision", preview)
+        source = "new_weapon 5\n name = Rocket\n radius = 3\nend\n"
+        updated, groups = apply_editable_overwrite_preview(
+            source, preview, "new_weapon", 5)
+        self.assertEqual(groups, {"collision"})
+        self.assertIn("collision_shape = Data/Models/Collision/RocketFF.collision", updated)
+
+    def test_139d_overwrite_blocks_unexported_weapon_shape(self):
+        window = self._window()
+        window._active_script_path = Path("C:/UA/Data/Scripts/Weapons.cfg")
+        window._active_script_id = 5
+        window._active_script_kind = "new_weapon"
+        window.project.target_category = WEAPON
+        window.project.collision_shape = _sample_shape()
+        window.project.collision_shape_path = ""
+        window.project.collision_shape_file_path = ""
+
+        with patch.object(QMessageBox, "warning") as warning, patch.object(
+                editor_module, "ApplyScriptDialog") as apply_dialog:
+            window.overwrite_loaded_script()
+
+        apply_dialog.assert_not_called()
+        self.assertEqual(warning.call_args.args[1], "Export Collision Shape first")
 
     def test_140_editable_overwrite_applies_manual_code_and_preserves_other_tabs(self):
         source = (

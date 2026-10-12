@@ -22,6 +22,8 @@ def app():
 
 
 def _fake_editor_ui(monkeypatch, window_type, new_map_type, install_type=None):
+    monkeypatch.setattr(map_editor_entry.bootstrap, "installation", lambda: None)
+    monkeypatch.setattr("studio_shell.install_workspace_shell", lambda *_args: None)
     ui_package = ModuleType("map_editor.ui")
     ui_package.__path__ = []
     dialogs = ModuleType("map_editor.ui.dialogs")
@@ -66,8 +68,8 @@ def test_map_editor_loads_optional_ldf_and_reuses_existing_application(
         def setAttribute(self, attribute, enabled):
             self.attribute = (attribute, enabled)
 
-        def show(self):
-            events.append("show")
+        def showMaximized(self):
+            events.append("show-maximized")
 
     monkeypatch.setattr(map_editor_entry, "QApplication", Application)
     monkeypatch.setattr(
@@ -91,7 +93,7 @@ def test_map_editor_loads_optional_ldf_and_reuses_existing_application(
     assert window.attribute == (Qt.WidgetAttribute.WA_DeleteOnClose, True)
     assert map_editor_entry._active_window is window
     assert events == [
-        "remembered", ("installation", install), "studio-path", "window", "show"]
+        "remembered", ("installation", install), "studio-path", "window", "show-maximized"]
 
 
 def test_map_editor_opens_default_set1_15x15_map_without_new_map_prompt(
@@ -139,8 +141,8 @@ def test_map_editor_opens_default_set1_15x15_map_without_new_map_prompt(
         def setAttribute(self, _attribute, _enabled):
             pass
 
-        def show(self):
-            events.append("show")
+        def showMaximized(self):
+            events.append("show-maximized")
 
     monkeypatch.setattr(map_editor_entry, "QApplication", Application)
     monkeypatch.setattr(map_editor_entry, "load_remembered", lambda: None)
@@ -168,7 +170,7 @@ def test_map_editor_opens_default_set1_15x15_map_without_new_map_prompt(
         ("installation", install),
         "studio-path",
         "window",
-        "show",
+        "show-maximized",
     ]
 
 

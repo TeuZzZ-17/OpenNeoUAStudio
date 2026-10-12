@@ -5,6 +5,7 @@ import time
 import copy
 import math
 import re
+from loading_feedback import loading_set
 
 from PySide6.QtCore import QEvent, QObject, QRunnable, QSize, Qt, QThreadPool, QTimer, Signal
 from PySide6.QtGui import (QAction, QActionGroup, QColor, QIcon, QImage, QKeySequence,
@@ -236,12 +237,14 @@ class MainWindow(QMainWindow):
         act(file_menu, "Save", self.file_save, QKeySequence.StandardKey.Save)
         act(file_menu, "Save as", self.file_save_as,
             QKeySequence.StandardKey.SaveAs)
-        act(file_menu, "Game folders", self.file_game_folders)
         self.undo_action = act(edit_menu, "Undo", self.undo, QKeySequence.StandardKey.Undo)
         self.redo_action = act(edit_menu, "Redo", self.redo, QKeySequence.StandardKey.Redo)
-        act(edit_menu, "Delete selected", self._delete_active_selection, "Delete")
-        act(map_menu, "Set", self.map_set)
-        act(map_menu, "Change map SET.BAS (experimental)", self.map_set_file)
+        # The Delete key still deletes the active selection, but no longer has a menu entry.
+        delete_action = QAction(self)
+        delete_action.setShortcut("Delete")
+        delete_action.triggered.connect(self._delete_active_selection)
+        self.addAction(delete_action)
+        act(map_menu, "Change Set", self.map_set)
         act(map_menu, "Resize", self.map_resize)
         self.reset_action = act(map_menu, "Reset", self.map_reset)
         self.reset_camera_action = act(view_menu, 'Reset Camera', self.view.reset_camera, 'Home')
@@ -266,10 +269,10 @@ class MainWindow(QMainWindow):
         self.clear_view_action = QAction("Clear View", self, checkable=True, checked=False)
         self.clear_view_action.toggled.connect(self.view.set_clear_view)
         view_menu.addAction(self.clear_view_action)
-        self.sky_action = QAction("Sky background", self, checkable=True, checked=True)
+        self.sky_action = QAction("Sky Background", self, checkable=True, checked=True)
         self.sky_action.toggled.connect(self.view.set_sky_visible)
         view_menu.addAction(self.sky_action)
-        self.music_action = QAction("Music preview", self, checkable=True, checked=True)
+        self.music_action = QAction("Music Preview", self, checkable=True, checked=True)
         self.music_action.toggled.connect(self.music_preview.set_enabled)
         view_menu.addAction(self.music_action)
         self.palette_menu = view_menu
@@ -309,7 +312,7 @@ class MainWindow(QMainWindow):
                 self.view_preset.addItem(name, angles)
         self.view_preset.activated.connect(self._set_view_preset)
         self.view.cameraChanged.connect(lambda: self.view_preset.setCurrentIndex(0))
-        preset_form.addRow('View preset', self.view_preset)
+        preset_form.addRow('View Preset', self.view_preset)
         panel_layout.addLayout(preset_form)
         self.hover_height = QLabel('Sector under mouse: —')
         self.hover_height.setWordWrap(True)
@@ -349,7 +352,7 @@ class MainWindow(QMainWindow):
         buildings_layout = QVBoxLayout(buildings_page)
         self.building_filter = QLineEdit(placeholderText="Filter buildings")
         buildings_layout.addWidget(self.building_filter)
-        self.show_special_buildings = QCheckBox('Show special buildings')
+        self.show_special_buildings = QCheckBox('Show Special Buildings')
         self.show_special_buildings.toggled.connect(lambda: self._fill_buildings(self._lib()) if self._lib() else None)
         buildings_layout.addWidget(self.show_special_buildings)
         building_zoom_row = QHBoxLayout()
@@ -460,13 +463,13 @@ class MainWindow(QMainWindow):
         self.flatten_height = QSpinBox(minimum=0, maximum=60, value=30)
         self.flatten_height.setToolTip("Flatten only: drag on the map to level the brush area to this height. 30 = original ground, 1 step = 100 world units.")
         self.flatten_height.valueChanged.connect(self._brush_params)
-        self.sample_height = QPushButton("Sample from map", checkable=True)
+        self.sample_height = QPushButton("Sample from Map", checkable=True)
         self.sample_height.toggled.connect(self._sample_toggled)
         self.sample_height.setToolTip("Click a sector to set the flatten height without changing the map")
         target_row = QHBoxLayout()
         target_row.addWidget(self.flatten_height)
         target_row.addWidget(self.sample_height)
-        form.addRow("Flatten to height", target_row)
+        form.addRow("Flatten to Height", target_row)
         self.flatten_height.setEnabled(self.mode_combo.currentData() == BrushMode.FLATTEN)
         hint = QLabel('Drag to sculpt · Shift: lower · Alt: smooth · Ctrl: select')
         hint.setWordWrap(True)
@@ -477,7 +480,7 @@ class MainWindow(QMainWindow):
         self.script_page = QWidget()
         script_layout = QVBoxLayout(self.script_page)
         script_row = QHBoxLayout()
-        for text, slot in (("Load script", self._load_script), ("Save script", self._save_script)):
+        for text, slot in (("Load Script", self._load_script), ("Save Script", self._save_script)):
             button = QPushButton(text)
             button.clicked.connect(slot)
             script_row.addWidget(button)
@@ -823,7 +826,7 @@ class MainWindow(QMainWindow):
             return
         dialog = QDialog(self)
         selected = cells is not None
-        dialog.setWindowTitle('Fill selected sectors' if selected else 'Fill map with sector')
+        dialog.setWindowTitle('Fill Selected Sectors' if selected else 'Fill map with sector')
         layout = QVBoxLayout(dialog)
         choice = QComboBox()
         for i in range(self.sector_list.count()):
@@ -2000,9 +2003,9 @@ class MainWindow(QMainWindow):
     def _special_context_actions(self, menu, kind, allow_delete=True):
         panel = self.special_panels[kind]
         slot = panel.slot
-        action = menu.addAction('Add preview', lambda: self._add_special(kind))
+        action = menu.addAction('Add Preview', lambda: self._add_special(kind))
         action.setEnabled(panel.add_button.isEnabled())
-        action = menu.addAction('Move selected object', lambda: self._place_special(kind, 'object', -1))
+        action = menu.addAction('Move Selected Object', lambda: self._place_special(kind, 'object', -1))
         action.setEnabled(bool(slot))
         action = menu.addAction('Focus', lambda: self._focus_special(special_cell(panel.record())))
         action.setEnabled(bool(slot) and special_cell(panel.record()) is not None)
@@ -2011,10 +2014,10 @@ class MainWindow(QMainWindow):
             action.setEnabled(bool(slot))
         menu.addAction('Deselect', lambda: panel.list.setCurrentRow(-1))
         if kind != 'gem':
-            action = menu.addAction('Add key preview', lambda: self._place_special(kind, 'key', -1))
+            action = menu.addAction('Add Key Preview', lambda: self._place_special(kind, 'key', -1))
             action.setEnabled(bool(slot) and self._special_draft is None)
             key = panel.keys.currentRow()
-            action = menu.addAction('Move selected key', lambda: self._place_special(kind, 'key', key))
+            action = menu.addAction('Move Selected Key', lambda: self._place_special(kind, 'key', key))
             action.setEnabled(key >= 0 and self._special_draft is None)
             if allow_delete:
                 action = menu.addAction('Delete key', panel._remove_key)
@@ -2064,7 +2067,7 @@ class MainWindow(QMainWindow):
             item = widget.itemAt(position)
             if item is not None and not item.isSelected():
                 self.squad_panel.set_selection({widget.row(item)})
-            menu.addAction('Delete selected squads',lambda: self._delete_squads(self.squad_panel.selected_indices()))
+            menu.addAction('Delete Selected Squads',lambda: self._delete_squads(self.squad_panel.selected_indices()))
             index = widget.currentRow()
             action = menu.addAction('Squad POV',lambda: self._squad_pov(index))
             action.setEnabled(0 <= index < len(self.doc.squads))
@@ -2195,26 +2198,26 @@ class MainWindow(QMainWindow):
             action.setEnabled(0 <= index < len(self.doc.squads))
             action = menu.addAction('Squad Focus', lambda: self._center_squad(index))
             action.setEnabled(0 <= index < len(self.doc.squads))
-            menu.addAction('Select all squads', lambda: self.squad_panel.set_selection(set(range(len(self.doc.squads)))))
+            menu.addAction('Select All Squads', lambda: self.squad_panel.set_selection(set(range(len(self.doc.squads)))))
         elif self.palette_tabs.currentIndex() == self.script_tab_index:
-            menu.addAction('Load script', self._load_script)
-            menu.addAction('Save script', self._save_script)
-            menu.addAction('Select script text', self.script_edit.selectAll)
+            menu.addAction('Load Script', self._load_script)
+            menu.addAction('Save Script', self._save_script)
+            menu.addAction('Select Script Text', self.script_edit.selectAll)
         elif context_tool in ('sector', 'building', 'owner'):
             action = menu.addAction('Apply', lambda: self._apply_selection())
             action.setEnabled(bool(self.view.selection))
             if context_tool == 'sector':
-                selected_fill = menu.addAction('Fill selected sectors', self.fill_selected)
+                selected_fill = menu.addAction('Fill Selected Sectors', self.fill_selected)
                 selected_fill.setEnabled(bool(self.view.selection))
                 if cell is not None:
-                    menu.addAction('Pick this sector', lambda: self.sector_list.setCurrentItem(
+                    menu.addAction('Pick This Sector', lambda: self.sector_list.setCurrentItem(
                         self._icon_items.get(int(self.doc.grids['type'][cell[1]][cell[0]], 16))))
             menu.addAction('Fill map', self.map_fill)
         elif context_tool == 'terrain':
             for i, name in enumerate(('Raise', 'Lower', 'Flatten', 'Smooth')):
                 menu.addAction(name, lambda checked=False, index=i: self._activate_terrain(index))
             if cell is not None:
-                menu.addAction('Sample this height', lambda: self._sample_map_height(*cell))
+                menu.addAction('Sample This Height', lambda: self._sample_map_height(*cell))
         # One delete command for the object under the cursor, regardless of the active tab.
         delete_action = None
         hit_special = hit[1] if hit is not None and hit[0] == 'special' else None
@@ -2252,7 +2255,7 @@ class MainWindow(QMainWindow):
                         label = f'Gun {index+1} · {name.name if name and name.name else mount.vehicle}'
                         guns.addAction(label,lambda checked=False,i=index: self._gun_pov(cell,i))
         menu.addSeparator()
-        menu.addAction('Clear selection', self._clear_selection)
+        menu.addAction('Clear Selection', self._clear_selection)
         menu.addAction('Reset map', self.map_reset)
         menu.addAction(self.reset_camera_action)
         menu.popup(global_position)
@@ -2597,8 +2600,11 @@ class MainWindow(QMainWindow):
         if not dialog.exec():
             return
         new = dialog.installation()
-        self.view.set_library(None)
         bootstrap.set_installation(new)
+        self.reload_game_resources()
+
+    def reload_game_resources(self):
+        self.view.set_library(None)
         self._asset_epoch += 1
         self._resource_icons.clear()
         self._sky_state = None
@@ -2683,7 +2689,8 @@ class MainWindow(QMainWindow):
     def file_new(self):
         if not self._confirm_discard():
             return
-        dialog = NewMapDialog(self)
+        install = bootstrap.installation()
+        dialog = NewMapDialog(self, sets=install.available_sets() if install else ())
         if dialog.exec():
             w, h, set_number = dialog.values()
             doc = LdfDocument(mw=w, mh=h, set_number=set_number)
@@ -2801,14 +2808,25 @@ class MainWindow(QMainWindow):
         if not self.doc:
             return
         self._released(-1, -1, Qt.KeyboardModifier.NoModifier)
-        number, accepted = QInputDialog.getInt(
-            self, "Map Set", "Set number:", int(self.doc.set_number),
-            1, 255, 1)
+        install = bootstrap.installation()
+        numbers = install.available_sets() if install is not None else []
+        if not numbers:
+            QMessageBox.information(self, "Change Set", "No complete sets were found. Check Resources.")
+            return
+        labels = [f"Set {number}" for number in numbers]
+        current = numbers.index(self.doc.set_number) if self.doc.set_number in numbers else 0
+        label, accepted = QInputDialog.getItem(
+            self, "Change Set", "Installed set:", labels, current, False)
         if not accepted:
             return
-        self._change_map_set(number)
+        self._change_map_set(numbers[labels.index(label)])
 
+    @loading_set
     def _change_map_set(self, number):
+        install = bootstrap.installation()
+        if install is not None and number not in install.available_sets():
+            QMessageBox.warning(self, "Set unavailable", f"Set {number} is not installed.")
+            return
         if number == self.doc.set_number:
             return
         if number not in self.libs:
@@ -2821,6 +2839,8 @@ class MainWindow(QMainWindow):
                 return
         self.history.push(self.doc)
         self.doc.set_number = number
+        from studio_session import remember_set
+        remember_set(number)
         self.dirty = True
         self._refresh_map_set_assets()
         self._sync_side_panels()
@@ -2828,37 +2848,6 @@ class MainWindow(QMainWindow):
         self.view.scene_changed()
         self._refresh_title()
         self.statusBar().showMessage(f"Map changed to Set {number}.", 4000)
-
-    def map_set_file(self):
-        if self.doc is None:
-            return
-        current_assets = self._lib().assets if self._lib() else SetAssets(self.doc.set_number)
-        path, _ = QFileDialog.getOpenFileName(self, 'Choose map SET.BAS',
-                                             str(current_assets.set_dir), 'Set archives (SET.BAS *.bas *.BAS)')
-        if not path:
-            return
-        from pathlib import Path
-        import re
-        chosen = Path(path).resolve()
-        folder = chosen.parent.parent if chosen.parent.name.casefold() == 'objects' else chosen.parent
-        match = re.fullmatch(r'set(\d+)', folder.name, re.I)
-        number = int(match[1]) if match else 0
-        assets = SetAssets(number) if 1 <= number <= 255 else None
-        if assets is None or assets.setbas_path is None or assets.setbas_path.resolve() != chosen:
-            QMessageBox.warning(self, 'Set unavailable', 'Choose SET.BAS from an installed SetN/Objects folder. The map was not changed.')
-            return
-        if number == self.doc.set_number:
-            return
-        answer = QMessageBox.warning(self, 'Experimental SET change',
-            f'This map currently uses Set {self.doc.set_number}. You are loading it with Set {number}.\n\n'
-            'Incompatible sectors or models may cause crashes or corrupted results/files. Keep a backup of the map.\n\n'
-            f'SET.BAS: {chosen}\nContinue?', QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
-            QMessageBox.StandardButton.No)
-        if answer != QMessageBox.StandardButton.Yes:
-            return
-        self._released(-1, -1, Qt.KeyboardModifier.NoModifier)
-        self._cancel_operation(clear=False)
-        self._change_map_set(number)
 
     def map_resize(self):
         if not self.doc:

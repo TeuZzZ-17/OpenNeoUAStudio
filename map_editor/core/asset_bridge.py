@@ -63,7 +63,9 @@ class SetAssets:
     def _index_loose(self) -> dict[str, Path]:
         if self._loose_index is None:
             index: dict[str, Path] = {}
-            roots = [self.set_dir, bootstrap.game_data_dir() / "Models" / "Base"]
+            install = bootstrap.installation()
+            models = install.folder("models") if install is not None else bootstrap.game_data_dir() / "Models"
+            roots = [self.set_dir, models / "Base"]
             for root in roots:
                 if not root.is_dir():
                     continue

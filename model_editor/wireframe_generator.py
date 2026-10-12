@@ -304,5 +304,5 @@ def generate_wireframe(viewport, preset: str = "Current View", *,
             lines.append(indices)
     if len(points) > 65535:
         raise ValueError("The wireframe exceeds the SKLT 16-bit point index limit. "
-                         "Increase contour simplification or isolate fewer objects.")
+                         "Isolate fewer objects or choose another view.")
     return WireframeProjection(points, lines)

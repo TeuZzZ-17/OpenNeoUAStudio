@@ -18,6 +18,8 @@ from PySide6.QtWidgets import (
     QLabel,
     QPushButton,
     QSizePolicy,
+    QScrollArea,
+    QLineEdit,
     QVBoxLayout,
 )
 
@@ -51,15 +53,16 @@ TOOL_OPTIONS = (
     ),
     ToolOption(
         "collision_editor",
-        "Collision Editor",
-        "Create and edit collision spheres, then export collision scripts "
-        "for vehicles and models.",
+        "Entity Designer",
+        "Edit collision shapes, fire points, turrets, cockpit views and "
+        "briefing framing for game entities.",
     ),
     ToolOption(
         "wireframe_editor",
         "Wireframe Editor",
         "Inspect and edit 2D wireframe geometry stored in SKLT files.",
     ),
+    ToolOption("sector_editor", "Sector Editor", "Edit SET.SDF sector placement and states. Coming soon."),
 )
 
 
@@ -227,11 +230,17 @@ class StartupToolSelector(QDialog):
         super().__init__(parent)
         self.setWindowTitle("OpenNeoUA Studio - Select Tool")
         self.setModal(True)
-        self.setMinimumSize(720, 720)
-        self.resize(760, 760)
+        self.setMinimumSize(720, 650)
+        self.resize(860, 920)
         self.setWindowFlag(Qt.WindowType.WindowContextHelpButtonHint, False)
 
-        layout = QVBoxLayout(self)
+        outer = QVBoxLayout(self)
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        body = QFrame()
+        scroll.setWidget(body)
+        outer.addWidget(scroll)
+        layout = QVBoxLayout(body)
         layout.setContentsMargins(28, 24, 28, 22)
         layout.setSpacing(12)
 
@@ -254,6 +263,12 @@ class StartupToolSelector(QDialog):
         self.tool_list.double_activated.connect(
             lambda _key: self.accept())
         layout.addWidget(self.tool_list)
+
+        from studio_resources import ResourcesPanel, load_remembered
+        self.resources_panel = ResourcesPanel(load_remembered(), self)
+        for edit in (self.resources_panel.root, *self.resources_panel.edits.values()):
+            edit.installEventFilter(self)
+        layout.addWidget(self.resources_panel)
 
         # WidgetWithChildrenShortcut keeps navigation available when focus is
         # on either a workspace card or one of the dialog's buttons.
@@ -294,7 +309,7 @@ class StartupToolSelector(QDialog):
         self.open_button.setDefault(True)
         self.open_button.clicked.connect(self.accept)
         buttons_layout.addWidget(self.open_button)
-        layout.addLayout(buttons_layout)
+        outer.addLayout(buttons_layout)
 
         self.setStyleSheet(
             """
@@ -359,6 +374,20 @@ class StartupToolSelector(QDialog):
                 background: #4197b5;
             }
             """)
+
+    def eventFilter(self, watched, event):
+        if isinstance(watched, QLineEdit) and event.type() == QEvent.Type.ShortcutOverride:
+            event.accept()
+            return True
+        return super().eventFilter(watched, event)
+
+    def accept(self):
+        if self.selected_tool() == "sector_editor":
+            from PySide6.QtWidgets import QMessageBox
+            QMessageBox.information(self, "Sector Editor", "Sector Editor will be available soon.\nIt will edit sector placement, states and SET.SDF definitions.")
+            return
+        if self.resources_panel.apply() is not None:
+            super().accept()
 
     def selected_tool(self) -> str | None:
         """Return the selected tool key, if a card is selected."""

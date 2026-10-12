@@ -75,3 +75,34 @@ def test_preview_cache_invalidates_local_file_changes(tmp_path):
     image.fill(0xff0000ff); image.save(str(path))
     os.utime(path,ns=(first+1000000,first+1000000))
     assert preview_image(path).pixelColor(0,0).blue()==255
+
+
+def _make_set(folder):
+    (folder / "Objects").mkdir(parents=True)
+    (folder / "Scripts").mkdir(parents=True)
+    (folder / "Objects" / "SET.BAS").write_bytes(b"")
+    (folder / "Scripts" / "set.sdf").write_bytes(b"")
+
+
+def test_vanilla_loose_set_folders_are_found_without_a_sets_parent(tmp_path):
+    for number in (1, 4):
+        _make_set(tmp_path / f"set{number}")
+    install = GameInstallation.suggest(tmp_path)
+    assert install.valid()
+    assert install.available_sets() == [1, 4]
+    previous = bootstrap.installation()
+    bootstrap.set_installation(install)
+    try:
+        assert bootstrap.set_dir(4) == tmp_path / "set4"
+    finally:
+        bootstrap.set_installation(previous)
+
+
+def test_sets_field_may_point_to_one_set_or_the_modern_parent(tmp_path):
+    _make_set(tmp_path / "Sets" / "Set2")
+    _make_set(tmp_path / "loose" / "Set3")
+    modern = GameInstallation.suggest(tmp_path)
+    assert modern.available_sets() == [2]
+    single = GameInstallation(tmp_path, {"sets": tmp_path / "loose" / "Set3"})
+    assert single.available_sets() == [3]
+

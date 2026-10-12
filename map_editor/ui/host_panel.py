@@ -55,14 +55,14 @@ class HostPanel(QWidget):
         self.height = WorldCoordinateSpinBox()
         self.height.setValue(DEFAULT_HOST_POS_Y)
         self.height.setToolTip('Height offset from the ground; negative values are above the surface.')
-        self.hidden = QCheckBox('Hidden in briefing')
-        self.player = QPushButton('Use this faction as player')
+        self.hidden = QCheckBox('Hidden in Briefing')
+        self.player = QPushButton('Use This Faction as Player')
         self.player.clicked.connect(lambda: self.playerRequested.emit(self.list.currentRow()))
         for title, widget in (('Faction', self.owner), ('Host station', self.vehicle), ('Energy', self.energy), ('Height', self.height)):
             form.addRow(title, widget)
         form.addRow(self.hidden)
         form.addRow(self.player)
-        advanced = QGroupBox('Advanced settings', checkable=True, checked=False)
+        advanced = QGroupBox('Advanced Settings', checkable=True, checked=False)
         self.advanced = advanced
         advanced_layout = QVBoxLayout(advanced)
         self.advanced_fields = QWidget()
@@ -74,7 +74,7 @@ class HostPanel(QWidget):
             spin = QSpinBox(minimum=low, maximum=high)
             self.fields[key] = spin
             if key == 'reload_const':
-                default = QPushButton('Game default')
+                default = QPushButton('Game Default')
                 default.setToolTip('0 lets the game derive the reload value from the host energy.')
                 default.clicked.connect(lambda: self.fields['reload_const'].setValue(0))
                 row = QHBoxLayout()

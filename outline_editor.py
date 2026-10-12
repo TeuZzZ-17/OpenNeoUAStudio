@@ -317,7 +317,7 @@ class OutlineCanvas(AcceleratedWidget):
         visual_selected_indices = set(self._selected_indices)
 
         painter.setPen(Qt.PenStyle.NoPen)
-        painter.setBrush(QColor(210, 215, 220))
+        painter.setBrush(QColor(255, 230, 0))
         for index, point in enumerate(self._points):
             if index in visual_selected_indices:
                 continue

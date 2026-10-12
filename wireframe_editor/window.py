@@ -247,7 +247,7 @@ class WireframeEditorWindow(QMainWindow):
         self.outline_editor.canvas.pointsMoved.connect(self._move_points_with_mirror)
         self.outline_editor.canvas.selectionDragStarted.connect(self._prepare_mirror_drag)
         self.outline_editor.canvas.selectionDragFinished.connect(self._finish_mirror_drag)
-        self.outline_editor.show_indices_check.setChecked(True)
+        self.outline_editor.show_indices_check.setChecked(False)
         self.outline_editor.dirtyChanged.connect(self._outline_dirty_changed)
         self.outline_editor.geometryChanged.connect(self._outline_geometry_changed)
         self.outline_editor.undoRedoChanged.connect(self._update_edit_controls)
@@ -293,7 +293,7 @@ class WireframeEditorWindow(QMainWindow):
         self._build_edit_toolbar()
         # Start in the same editable empty-wireframe state as File -> New,
         # but keep the untouched startup document clean so opening an existing
-        # file does not prompt to export an empty session.
+        # file does not prompt to overwrite an empty session.
         self._start_new_session(mark_dirty=False)
 
     def eventFilter(self, watched, event) -> bool:
@@ -352,6 +352,11 @@ class WireframeEditorWindow(QMainWindow):
         side_layout = QVBoxLayout(side_panel)
         side_layout.setContentsMargins(10, 8, 8, 8)
         side_layout.setSpacing(6)
+
+        from game_browser import GameFileBrowser
+        self.game_file_browser = GameFileBrowser({".skl", ".sklt"}, self, allow_folder=True)
+        self.game_file_browser.selected.connect(self._open_game_file)
+        side_layout.addWidget(self.game_file_browser, 4)
 
         title = QLabel("Wireframe Overview")
         title.setObjectName("panelTitle")
@@ -464,15 +469,18 @@ class WireframeEditorWindow(QMainWindow):
         self.import_action.setShortcut(QKeySequence.StandardKey.Open)
         self.import_action.triggered.connect(self.open_dialog)
 
-        self.save_action = QAction("&Export / Overwrite", self)
+        self.save_action = QAction("&Overwrite", self)
         self.save_action.setShortcut(QKeySequence.StandardKey.Save)
+        self.save_action.setToolTip("Write the changes into the loaded file.")
         self.save_action.triggered.connect(self.save_current_file)
-        self.export_action = self.save_action
+        self.overwrite_action = self.save_action
 
-        self.save_as_action = QAction("Export &As", self)
+        self.save_as_action = QAction("&Export", self)
         self.save_as_action.setShortcut(QKeySequence.StandardKey.SaveAs)
+        self.save_as_action.setToolTip(
+            "Save a copy to a location you choose; the loaded file is left untouched.")
         self.save_as_action.triggered.connect(self.save_outline_as)
-        self.export_as_action = self.save_as_action
+        self.export_action = self.save_as_action
 
         file_menu.addAction(self.import_action)
         file_menu.addAction(self.save_action)
@@ -702,17 +710,17 @@ class WireframeEditorWindow(QMainWindow):
         title = self._current_file_path.name if self._current_file_path else "current file"
         message_box = QMessageBox(self)
         message_box.setIcon(QMessageBox.Icon.Question)
-        message_box.setWindowTitle("Export changes?")
+        message_box.setWindowTitle("Overwrite changes?")
         message_box.setText(
-            f"Export changes to {title} before continuing?")
+            f"Overwrite changes to {title} before continuing?")
         message_box.setStandardButtons(
             QMessageBox.StandardButton.Save
             | QMessageBox.StandardButton.Discard
             | QMessageBox.StandardButton.Cancel)
         message_box.setDefaultButton(QMessageBox.StandardButton.Save)
-        export_button = message_box.button(QMessageBox.StandardButton.Save)
-        if export_button:
-            export_button.setText("Export")
+        overwrite_button = message_box.button(QMessageBox.StandardButton.Save)
+        if overwrite_button:
+            overwrite_button.setText("Overwrite")
         reply = message_box.exec()
         if reply == QMessageBox.StandardButton.Cancel:
             return False
@@ -737,6 +745,7 @@ class WireframeEditorWindow(QMainWindow):
         model = create_minimal_sklt_model("Untitled.SKL")
         self._current_file_path = None
         self._current_model = model
+        self.game_file_browser.select_path(None)
         self._show_model(model, Path("Untitled.SKL"))
         if mark_dirty:
             self.outline_editor.mark_dirty()
@@ -778,13 +787,13 @@ class WireframeEditorWindow(QMainWindow):
             self._write_edited_file(self._current_file_path)
             saved_model = parse_sklt_file(self._current_file_path)
         except SkltParseError as exc:
-            QMessageBox.warning(self, "Could not export file", str(exc))
-            self.statusBar().showMessage("Export failed")
+            QMessageBox.warning(self, "Could not overwrite file", str(exc))
+            self.statusBar().showMessage("Overwrite failed")
             return
 
         save_label = "OTL2 outline" if save_mode == "otl2" else "wireframe"
-        message = f"Exported edited {save_label} to {self._current_file_path.name}."
-        QMessageBox.information(self, "File exported", message)
+        message = f"Overwrote {self._current_file_path.name} with the edited {save_label}."
+        QMessageBox.information(self, "File overwritten", message)
         self._show_model(saved_model, self._current_file_path)
 
     def save_outline_as(self) -> None:
@@ -815,8 +824,8 @@ class WireframeEditorWindow(QMainWindow):
             QMessageBox.warning(
                 self,
                 "Choose a different file",
-                "Direct overwrite of the loaded original is disabled. "
-                "Choose a different export destination.",
+                "Export saves a copy, so it cannot target the loaded file. "
+                "Use Overwrite to replace it, or choose a different destination.",
             )
             return
 
@@ -832,8 +841,11 @@ class WireframeEditorWindow(QMainWindow):
         QMessageBox.information(self, "Outline exported", message)
 
         self._last_directory = output_path.parent
-        self._current_file_path = output_path
-        self._show_model(saved_model, output_path)
+        # Export is a copy: the loaded file and its pending edits stay as they
+        # are. Only a session without a file yet adopts the exported one.
+        if self._current_file_path is None:
+            self._current_file_path = output_path
+            self._show_model(saved_model, output_path)
 
     def _write_edited_file(self, output_path: Path) -> Path | None:
         if not self._current_model:
@@ -880,7 +892,18 @@ class WireframeEditorWindow(QMainWindow):
         self._current_file_path = file_path
         self._show_model(model, file_path)
 
+    def reload_game_resources(self):
+        self.game_file_browser.reload()
+        self.game_file_browser.select_path(self._current_file_path)
+
+    def _open_game_file(self, path):
+        previous = self._current_file_path
+        self.open_file(path)
+        if self._current_file_path != Path(path):
+            self.game_file_browser.select_path(previous)
+
     def _show_model(self, model: SkltModel, file_path: Path) -> None:
+        self.game_file_browser.select_path(self._current_file_path)
         self._current_model = model
         self.outline_editor.set_model(model)
         self.file_value.setText(file_path.name)
@@ -976,22 +999,22 @@ class WireframeEditorWindow(QMainWindow):
             )
 
     def _update_save_controls(self) -> None:
-        # Export / Overwrite only makes sense for pending edits, while Export
-        # As remains available for any editable wireframe so an imported file
-        # can always be written to a different destination.
-        can_export_as = bool(self._current_model and self.outline_editor.can_save)
-        can_overwrite = can_export_as and self.outline_editor.is_dirty
+        # Overwrite only makes sense for pending edits, while Export remains
+        # available for any editable wireframe so an imported file can always
+        # be copied to a different destination.
+        can_export = bool(self._current_model and self.outline_editor.can_save)
+        can_overwrite = can_export and self.outline_editor.is_dirty
         if self.save_action:
             self.save_action.setEnabled(can_overwrite)
         if self.save_as_action:
-            self.save_as_action.setEnabled(can_export_as)
+            self.save_as_action.setEnabled(can_export)
         self._update_status_value()
 
     def _update_status_value(self) -> None:
         if self._current_model is None:
             self.status_value.setText("Ready to import a file")
         elif self.outline_editor.is_dirty:
-            self.status_value.setText("Changes to export")
+            self.status_value.setText("Unsaved changes")
         else:
             self.status_value.setText("Ready")
 

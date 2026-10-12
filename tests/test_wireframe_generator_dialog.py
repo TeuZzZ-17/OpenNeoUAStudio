@@ -74,7 +74,8 @@ class WireframeGeneratorDialogTests(unittest.TestCase):
              for i in range(dialog.view_preset_combo.count())],
             ["Current View", *VIEW_PRESET_ANGLES],
         )
-        self.assertTrue(dialog.respect_transparency_check.isChecked())
+        self.assertFalse(hasattr(dialog, "respect_transparency_check"))
+        self.assertEqual(dialog.save_button.text(), "Export")
         self.assertTrue(dialog.save_button.isEnabled())
         self.assertEqual(len(calls), 1)
         self.assertEqual(calls[0]["preset"], "Current View")
@@ -91,12 +92,11 @@ class WireframeGeneratorDialogTests(unittest.TestCase):
         dialog = self.make_dialog(generate)
         preset = next(iter(VIEW_PRESET_ANGLES))
         dialog.view_preset_combo.setCurrentText(preset)
-        dialog.respect_transparency_check.setChecked(False)
-        dialog.simplification_spin.setValue(5.0)
 
         self.assertEqual(calls[-1]["preset"], preset)
-        self.assertFalse(calls[-1]["respect_transparency"])
-        self.assertEqual(calls[-1]["simplification"], 5.0)
+        self.assertTrue(calls[-1]["respect_transparency"])
+        self.assertEqual(calls[-1]["simplification"], 3.0)
+        self.assertFalse(hasattr(dialog, "simplification_spin"))
         self.assertTrue(dialog.save_button.isEnabled())
 
     def test_transparency_error_disables_save_without_silent_fallback(self):
@@ -115,20 +115,6 @@ class WireframeGeneratorDialogTests(unittest.TestCase):
         self.assertIn("texture mapping is unavailable", dialog.error_label.text())
         self.assertTrue(dialog.preview._image.isNull())
 
-        dialog.respect_transparency_check.setChecked(False)
-        self.assertTrue(dialog.save_button.isEnabled())
-        self.assertEqual(calls, [True, False])
-
-        dialog.respect_transparency_check.setChecked(True)
-
-        self.assertEqual(calls, [True, False, True])
-        self.assertFalse(dialog.save_button.isEnabled())
-        self.assertTrue(dialog.preview._image.isNull())
-
-        dialog.respect_transparency_check.setChecked(False)
-        self.assertEqual(calls, [True, False, True, False])
-        self.assertTrue(dialog.save_button.isEnabled())
-
     def test_unavailable_renderer_defaults_to_disabled_geometry_option(self):
         calls = []
 
@@ -139,8 +125,6 @@ class WireframeGeneratorDialogTests(unittest.TestCase):
         dialog = self.make_dialog(
             generate, _Viewport(available=False, adapter=False))
 
-        self.assertFalse(dialog.respect_transparency_check.isEnabled())
-        self.assertFalse(dialog.respect_transparency_check.isChecked())
         self.assertFalse(calls[0]["respect_transparency"])
         self.assertTrue(dialog.save_button.isEnabled())
 

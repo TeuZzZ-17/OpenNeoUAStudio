@@ -6,6 +6,7 @@ from pathlib import Path
 
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (
+    QComboBox,
     QDoubleSpinBox,
     QFrame,
     QGroupBox,
@@ -15,9 +16,13 @@ from PySide6.QtWidgets import (
     QMessageBox,
     QPushButton,
     QToolBar,
+    QWidget,
 )
 
 from assembly_window import AssemblyWindow
+from map_editor import bootstrap
+from set_tabs import SetBasMixin, bind_entity_set_selector
+from entity_list import EntityListMixin
 from editor_widgets import (
     ViewportWidthScrollArea as _ViewportWidthScrollArea,
 )
@@ -27,7 +32,7 @@ from snapshot_studio.batch_export import VPSnapshotBatchPanel
 WINDOW_TITLE = "OpenNeoUA Studio - Snapshot Studio"
 
 
-class SnapshotStudioWindow(AssemblyWindow):
+class SnapshotStudioWindow(EntityListMixin, SetBasMixin, AssemblyWindow):
     """Focused view-only workspace using the existing Snapshot renderer."""
 
     _EDIT_ACTION_NAMES = (
@@ -53,6 +58,7 @@ class SnapshotStudioWindow(AssemblyWindow):
         super().__init__(parent)
         self._configure_snapshot_workspace()
         self._set_document_title(None)
+        self._load_default_bas()
         self.statusBar().showMessage(
             "Snapshot Studio: compose one image or export every renderable "
             "VP and embedded SKLT model. Editing is disabled."
@@ -133,10 +139,36 @@ class SnapshotStudioWindow(AssemblyWindow):
 
         self._configure_snapshot_controls()
         self._install_batch_panel()
+        self._install_set_selector()
 
         self._snapshot_workspace_configured = True
         self._force_view_only()
         self._on_right_tab_changed(right_tabs.currentIndex())
+
+    def _install_set_selector(self) -> None:
+        """Same set selector as the Model Editor, at the top of the BAS Manager."""
+
+        panel = self._create_entity_list()
+        self._right_tabs.addTab(panel, 'Entity List')
+        row_widget = QWidget(self._bas_panel)
+        row = QHBoxLayout(row_widget)
+        row.setContentsMargins(0, 0, 0, 0)
+        row.addWidget(QLabel('Set:'))
+        row.addWidget(self._set_combo, 1)
+        self._bas_panel.layout().insertWidget(0, row_widget)
+        bind_entity_set_selector(self._right_tabs, row_widget, panel, self._entity_controls, self._set_combo)
+
+    def _load_default_bas(self) -> None:
+        super()._load_default_bas()
+        # Loading raises the BAS tab; the Snapshot tab stays the landing tab.
+        self._right_tabs.setCurrentWidget(self._snapshot_scroll)
+
+    def reload_game_resources(self) -> None:
+        from game_visuals import clear_visual_cache
+        clear_visual_cache()
+        self._reload_entity_resources()
+        self._load_bas_for_set(self._set_combo.currentData() or 1)
+        self._right_tabs.setCurrentWidget(self._snapshot_scroll)
 
     def _configure_snapshot_controls(self) -> None:
         """Create focused VANM controls and hide, but never destroy, toolbars.
@@ -152,7 +184,7 @@ class SnapshotStudioWindow(AssemblyWindow):
         animation_box = next(
             (
                 box for box in self._snapshot_panel.findChildren(QGroupBox)
-                if box.title() == "Animation frame"
+                if box.title() == "Animation Frame"
             ),
             None,
         )
@@ -326,7 +358,7 @@ class SnapshotStudioWindow(AssemblyWindow):
     def _create_viewport_context_menu(self, _position=None) -> QMenu:
         menu = QMenu(self.viewport)
         reset_camera = menu.addAction(
-            "Reset camera", self._reset_view_and_gizmo)
+            "Reset Camera", self._reset_view_and_gizmo)
         reset_camera.setEnabled(self.viewport.can_reset_camera)
         return menu
 

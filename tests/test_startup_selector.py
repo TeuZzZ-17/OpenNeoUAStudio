@@ -1,5 +1,6 @@
 import os
 import unittest
+from unittest.mock import patch
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
@@ -16,7 +17,13 @@ class StartupToolSelectorTests(unittest.TestCase):
     def setUpClass(cls):
         cls.app = QApplication.instance() or QApplication([])
 
-    def test_selector_exposes_the_five_startup_workspaces(self):
+    def setUp(self):
+        # Resource validation has its own tests; these check tool navigation.
+        validation = patch("studio_resources.ResourcesPanel.apply", return_value=object())
+        validation.start()
+        self.addCleanup(validation.stop)
+
+    def test_selector_exposes_the_six_startup_workspaces(self):
         self.assertEqual(
             [option.key for option in TOOL_OPTIONS],
             [
@@ -25,6 +32,7 @@ class StartupToolSelectorTests(unittest.TestCase):
                 "map_editor",
                 "collision_editor",
                 "wireframe_editor",
+                "sector_editor",
             ],
         )
         self.assertNotIn(
@@ -37,7 +45,7 @@ class StartupToolSelectorTests(unittest.TestCase):
         dialog = StartupToolSelector()
         self.addCleanup(dialog.close)
 
-        self.assertEqual(dialog.tool_list.count(), 5)
+        self.assertEqual(dialog.tool_list.count(), 6)
         self.assertEqual(dialog.selected_tool(), "model_editor")
         self.assertEqual(dialog.windowTitle(), "OpenNeoUA Studio - Select Tool")
 
@@ -57,7 +65,7 @@ class StartupToolSelectorTests(unittest.TestCase):
         self.app.processEvents()
 
         cards = dialog.tool_list.findChildren(_ToolCard)
-        self.assertEqual(len(cards), 5)
+        self.assertEqual(len(cards), 6)
         QTest.mouseClick(cards[1], Qt.MouseButton.LeftButton)
         self.assertEqual(dialog.selected_tool(), "snapshot_studio")
 
@@ -97,7 +105,7 @@ class StartupToolSelectorTests(unittest.TestCase):
         self._send_wheel(dialog.tool_list, -120)
         for _ in range(dialog.tool_list.count()):
             self._send_wheel(dialog.tool_list, -120)
-        self.assertEqual(dialog.selected_tool(), "wireframe_editor")
+        self.assertEqual(dialog.selected_tool(), "sector_editor")
 
     def test_w_s_navigate_with_focus_on_cards_and_buttons(self):
         dialog = StartupToolSelector()
@@ -132,6 +140,16 @@ class StartupToolSelectorTests(unittest.TestCase):
         self.app.processEvents()
         self.assertEqual(dialog.result(), dialog.DialogCode.Accepted)
         self.assertEqual(dialog.selected_tool(), "collision_editor")
+
+    def test_embedded_resources_box_has_the_reset_button(self):
+        dialog = StartupToolSelector()
+        self.addCleanup(dialog.close)
+
+        self.assertEqual(dialog.resources_panel.reset_button.text(), "Reset Configuration")
+        self.assertEqual(
+            sorted(dialog.resources_panel.edits),
+            sorted(["briefings", "skies", "music", "movies", "sets",
+                    "scripts", "levels", "models", "interface"]))
 
     @staticmethod
     def _send_wheel(widget, delta):

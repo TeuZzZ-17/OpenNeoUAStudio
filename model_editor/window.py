@@ -5,10 +5,14 @@ from __future__ import annotations
 from pathlib import Path
 
 from PySide6.QtGui import QAction
-from PySide6.QtCore import Qt
-from PySide6.QtWidgets import QHBoxLayout, QPushButton, QMessageBox
+from PySide6.QtCore import Qt, QSignalBlocker
+from PySide6.QtWidgets import QComboBox, QHBoxLayout, QLabel, QPushButton, QMessageBox, QVBoxLayout, QWidget
+
+from map_editor import bootstrap
 
 from assembly_window import AssemblyWindow, _BAS_KIND_ROLE, _BAS_NAME_ROLE
+from set_tabs import SetBasMixin, build_set_tabs, bind_entity_set_selector
+from entity_list import EntityListMixin
 
 
 WINDOW_TITLE = "OpenNeoUA Studio - Model Editor"
@@ -23,13 +27,14 @@ def _tab_index(tabs, title: str) -> int:
     return -1
 
 
-class ModelEditorWindow(AssemblyWindow):
+class ModelEditorWindow(EntityListMixin, SetBasMixin, AssemblyWindow):
     """Main asset workbench without the dedicated Snapshot workspace."""
 
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
         self._configure_model_editor_workspace()
         self._set_document_title(None)
+        self._load_default_bas()
         self.statusBar().showMessage(
             "Model Editor: view and edit textured models. Snapshot export "
             "is available from the separate Snapshot Studio workspace."
@@ -40,6 +45,9 @@ class ModelEditorWindow(AssemblyWindow):
         editor_tabs = self._editor_tabs
         visuals_tabs = self._visuals_tabs
 
+        entity_panel = self._create_entity_list()
+        resources_tabs.insertTab(1, entity_panel, "Entity List")
+
         texture_index = _tab_index(visuals_tabs, "Textures")
         if texture_index >= 0:
             textures_panel = visuals_tabs.widget(texture_index)
@@ -47,18 +55,31 @@ class ModelEditorWindow(AssemblyWindow):
             resources_tabs.addTab(textures_panel, "Asset Textures")
             self._asset_textures_panel = textures_panel
 
+        # The set selector sits right under the sub-tab bar because it drives both
+        # the Entity List and the Bas Manager. The new tabs replace the old ones
+        # in every attribute other code already uses.
+        old_index = self._right_tabs.indexOf(resources_tabs)
+        if old_index >= 0:
+            self._right_tabs.removeTab(old_index)
+        self._set_combo = self.entity_browser.set_combo
+        resources_panel = build_set_tabs(resources_tabs, self._set_combo)
+        self._detached_resources_tabs = resources_tabs
+        self._resources_tabs = resources_panel
+        self._setbas_panel = resources_panel
+        bind_entity_set_selector(resources_panel, resources_panel._row, self._entity_panel, self._entity_controls, self._set_combo)
+
         visuals_index = self._right_tabs.indexOf(visuals_tabs)
         if visuals_index >= 0:
             self._right_tabs.removeTab(visuals_index)
 
         # Put the working editor first, followed by resource browsing.
         # Remove/reinsert the existing widgets; no panel is duplicated.
-        for panel in (resources_tabs, editor_tabs):
+        for panel in (resources_panel, editor_tabs):
             index = self._right_tabs.indexOf(panel)
             if index >= 0:
                 self._right_tabs.removeTab(index)
         self._right_tabs.addTab(editor_tabs, "Editor")
-        self._right_tabs.addTab(resources_tabs, "Resources")
+        self._right_tabs.addTab(resources_panel, "Resources")
 
         # Other editors are launched only from the startup workspace selector.
         for action in (
@@ -107,6 +128,25 @@ class ModelEditorWindow(AssemblyWindow):
                 self._asset_textures_panel)
         super()._open_visual_texture(
             name, show_preview=show_preview, switch_tabs=False)
+
+    def reload_game_resources(self):
+        from game_visuals import clear_visual_cache
+        clear_visual_cache()
+        self.entity_browser.reload()
+        self.entity_browser.enable_state_column()
+        self._entity_choices.clear()
+        self._entity_visual_states.clear()
+        self.entity_state.clear()
+        self._current_entity = None
+        self._load_bas_for_set(self.entity_browser.set_number or 1)
+
+    def _load_default_bas(self):
+        super()._load_default_bas()
+        # open_setbas raises the Resources tab; the Editor stays the landing tab.
+        self._right_tabs.setCurrentWidget(self._editor_tabs)
+
+
+
 
     def _sync_wireframe_generator_action(self) -> None:
         self.generate_wireframe_action.setEnabled(self.viewport.has_model)

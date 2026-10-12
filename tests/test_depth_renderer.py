@@ -263,7 +263,7 @@ class DepthRendererTests(unittest.TestCase):
                 (-2.0 / 3.0, 2.0 / 3.0, 0.0),
                 (-2.0 / 3.0, -2.0 / 3.0, 0.0),
                 (2.0 / 3.0, -2.0 / 3.0, 0.0),
-                (-2.0 / 3.0, -4.0 / 3.0, 0.0),
+                (0.0, -4.0 / 3.0, 0.0),
             ],
             [],
             0,
@@ -280,6 +280,16 @@ class DepthRendererTests(unittest.TestCase):
         })
         output = QImage(200, 200, QImage.Format.Format_ARGB32)
         output.fill(QColor(0, 0, 0, 0))
+        painter = QPainter(output)
+        viewport._render_scene(
+            painter, QRectF(0, 0, 200, 200), None, False, camera,
+            allow_transparent_background=True)
+        painter.end()
+        self.assertEqual(len(viewport._pick_shapes), 0)
+        # Swap the first triangle's winding: both fan pieces survive together,
+        # including the concave fan piece with the opposite local winding.
+        vertices = viewport._faces[0].vertices
+        vertices[1], vertices[2] = vertices[2], vertices[1]
         painter = QPainter(output)
         viewport._render_scene(
             painter, QRectF(0, 0, 200, 200), None, False, camera,

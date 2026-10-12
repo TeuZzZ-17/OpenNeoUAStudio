@@ -24,14 +24,14 @@ class SnapshotStudioTests(unittest.TestCase):
         finally:
             window.close()
 
-    def test_workspace_has_only_snapshot_and_bas_manager_tabs(self):
+    def test_workspace_has_snapshot_bas_manager_and_entity_list_tabs(self):
         window = SnapshotStudioWindow()
         try:
             labels = [
                 window._right_tabs.tabText(index)
                 for index in range(window._right_tabs.count())
             ]
-            self.assertEqual(labels, ["Snapshot", "BAS Manager"])
+            self.assertEqual(labels, ["Snapshot", "BAS Manager", "Entity List"])
             self.assertIs(
                 window._right_tabs.widget(0), window._snapshot_scroll)
             self.assertIs(window._right_tabs.widget(1), window._bas_panel)
@@ -71,7 +71,7 @@ class SnapshotStudioTests(unittest.TestCase):
             menu = window._create_viewport_context_menu()
             self.assertEqual(
                 [action.text() for action in menu.actions()],
-                ["Reset camera"],
+                ["Reset Camera"],
             )
         finally:
             window.close()

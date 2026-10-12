@@ -148,7 +148,7 @@ class ModelSpaceGizmo(QWidget):
             line_scale: float | None = None) -> None:
         """Tune the gizmo drawing without changing transform semantics.
 
-        The Collision Editor uses a deliberately larger presentation, while
+        The Entity Designer uses a deliberately larger presentation, while
         every existing caller keeps the historical defaults above.
         """
 

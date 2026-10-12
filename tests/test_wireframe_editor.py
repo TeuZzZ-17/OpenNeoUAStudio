@@ -1,13 +1,15 @@
 import os
 from pathlib import Path
+import tempfile
 import unittest
+import unittest.mock
 from unittest.mock import patch
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 from PySide6.QtCore import QEvent, QPoint, QPointF, Qt
 from PySide6.QtGui import QColor, QImage, QMouseEvent, QPainter, QWheelEvent
-from PySide6.QtWidgets import QApplication, QMenu
+from PySide6.QtWidgets import QApplication, QMenu, QMessageBox
 
 from editor_widgets import MODEL_EDIT_SELECTION_RED
 from outline_editor import OutlineCanvas, OutlineEditor
@@ -35,9 +37,10 @@ class WireframeEditorUiTests(unittest.TestCase):
             if not action.isSeparator()
         ]
         self.assertEqual(
-            labels, ["New", "Import", "Export / Overwrite", "Export As", "Exit"])
-        self.assertIs(window.export_action, window.save_action)
-        self.assertIs(window.export_as_action, window.save_as_action)
+            labels, ["New", "Import", "Overwrite", "Export", "Exit"])
+        self.assertIs(window.overwrite_action, window.save_action)
+        self.assertIs(window.export_action, window.save_as_action)
+        self.assertFalse(hasattr(window, "export_as_action"))
 
 
     def test_export_as_stays_available_without_pending_edits(self):
@@ -45,6 +48,39 @@ class WireframeEditorUiTests(unittest.TestCase):
         self.assertFalse(window.outline_editor.is_dirty)
         self.assertFalse(window.save_action.isEnabled())
         self.assertTrue(window.save_as_action.isEnabled())
+
+    def test_dirty_prompt_offers_overwrite(self):
+        window = self._window()
+        window.outline_editor.mark_dirty()
+        box = unittest.mock.MagicMock()
+        box.exec.return_value = QMessageBox.StandardButton.Cancel
+        with patch("wireframe_editor.window.QMessageBox") as message_class:
+            message_class.return_value = box
+            message_class.StandardButton = QMessageBox.StandardButton
+            self.assertFalse(window._maybe_save_dirty())
+        box.setText.assert_called_once()
+        self.assertTrue(box.setText.call_args.args[0].startswith("Overwrite changes to"))
+        box.button.return_value.setText.assert_called_with("Overwrite")
+
+    def test_export_saves_a_copy_and_keeps_the_loaded_file(self):
+        window = self._window()
+        with tempfile.TemporaryDirectory() as directory:
+            source = Path(directory) / "source.SKL"
+            copy = Path(directory) / "copy.SKL"
+            model = create_minimal_sklt_model()
+            window.outline_editor.set_model(model)
+            window._current_model = model
+            window._write_edited_file(source)
+            window.open_file(source)
+            window.outline_editor.mark_dirty()
+            with patch("wireframe_editor.window.QFileDialog") as dialog, \
+                    patch("wireframe_editor.window.QMessageBox"):
+                dialog.getSaveFileName.return_value = (str(copy), "")
+                window.save_outline_as()
+            self.assertTrue(copy.exists())
+            self.assertEqual(window._current_file_path, source)
+            self.assertTrue(window.outline_editor.is_dirty)
+            window.outline_editor.mark_clean()
 
     def test_wireframe_editor_has_no_mode_menu(self):
         window = self._window()
@@ -78,10 +114,11 @@ class WireframeEditorUiTests(unittest.TestCase):
                 window.outline_editor.reset_button,
                 window.outline_editor.show_indices_check,
                 window.outline_editor.auto_align_check,
+                window.mirror_symmetry_check,
             ],
         )
-        self.assertTrue(window.outline_editor.show_indices_check.isChecked())
-        self.assertTrue(window.outline_editor.canvas._show_vertex_indices)
+        self.assertFalse(window.outline_editor.show_indices_check.isChecked())
+        self.assertFalse(window.outline_editor.canvas._show_vertex_indices)
         self.assertFalse(hasattr(window, "mode_3d_check"))
         self.assertFalse(hasattr(window, "viewer"))
         self.assertNotIn(window.outline_editor.selected_label, widgets)

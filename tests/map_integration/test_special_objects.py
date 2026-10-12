@@ -109,7 +109,7 @@ def test_gate_and_item_visuals_restore_underlay_and_respect_authored_buildings()
     assert (doc.grids['type'][2][2], doc.grids['blg'][2][2]) == ('00', '00')
     assert (doc.grids['type'][3][3], doc.grids['blg'][3][3]) == ('03', '19')
     remove_special(doc, 'gate', gate)
-    assert (doc.grids['type'][3][3], doc.grids['blg'][3][3]) == ('ab', '00')
+    assert (doc.grids['type'][3][3], doc.grids['blg'][3][3]) == ('00', '00')
 
     doc.grids['type'][4][4] = '12'
     doc.grids['blg'][4][4] = '37'
@@ -117,7 +117,7 @@ def test_gate_and_item_visuals_restore_underlay_and_respect_authored_buildings()
     update_special(doc, 'item', item, {'x': 4, 'y': 4})
     assert (doc.grids['type'][4][4], doc.grids['blg'][4][4]) == ('12', '37')
     remove_special(doc, 'item', item)
-    assert (doc.grids['type'][4][4], doc.grids['blg'][4][4]) == ('12', '37')
+    assert (doc.grids['type'][4][4], doc.grids['blg'][4][4]) == ('00', '00')
 
 
 def test_special_validation_is_atomic_and_keys_match_legacy_occupancy():
@@ -296,9 +296,9 @@ def test_special_template_survives_deselect_cancelling_draft(win):
 
 
 def test_special_context_menus_cancel_unplaced_previews_and_gate_key_actions(win):
-    expected = {'Add preview', 'Move selected object', 'Focus',
-                'Delete selected object', 'Deselect'}
-    key_actions = {'Add key preview', 'Move selected key', 'Delete selected key'}
+    expected = {'Add Preview', 'Move Selected Object', 'Focus',
+                'Delete', 'Deselect'}
+    key_actions = {'Add Key Preview', 'Move Selected Key', 'Delete key'}
     for kind, panel in win.special_panels.items():
         assert panel.list.contextMenuPolicy() == Qt.ContextMenuPolicy.CustomContextMenu
         menu = QMenu(win)
@@ -318,7 +318,7 @@ def test_special_context_menus_cancel_unplaced_previews_and_gate_key_actions(win
         win._special_context_actions(menu, 'gate')
         return {action.text(): action for action in menu.actions()}
 
-    menu_actions()['Add preview'].trigger()
+    menu_actions()['Add Preview'].trigger()
     assert win._special_draft is not None and win._special_draft[0] == 'gate'
     assert not panel.keys_group.isEnabled()
     assert win.doc.snapshot() == baseline
@@ -335,10 +335,10 @@ def test_special_context_menus_cancel_unplaced_previews_and_gate_key_actions(win
         undo_depth, redo_depth, dirty)
 
     # The delete command also cancels a preview instead of deleting data.
-    menu_actions()['Add preview'].trigger()
+    menu_actions()['Add Preview'].trigger()
     draft_actions = menu_actions()
-    assert draft_actions['Delete selected object'].isEnabled()
-    draft_actions['Delete selected object'].trigger()
+    assert draft_actions['Delete'].isEnabled()
+    draft_actions['Delete'].trigger()
     assert win._special_draft is None
     assert win.doc.snapshot() == baseline
     assert (len(win.history._undo), len(win.history._redo), win.dirty) == (
@@ -346,11 +346,11 @@ def test_special_context_menus_cancel_unplaced_previews_and_gate_key_actions(win
 
     # Once the object is placed, adding a key is available; with a key selected,
     # all three key actions are enabled outside any preview draft.
-    menu_actions()['Add preview'].trigger()
+    menu_actions()['Add Preview'].trigger()
     win._special_click((2, 2))
     assert win._special_draft is None and win.doc.visible_gate_slots == 1
     assert panel.keys_group.isEnabled()
-    menu_actions()['Add key preview'].trigger()
+    menu_actions()['Add Key Preview'].trigger()
     assert win._special_placement == ('gate', 1, 'key', -1)
     win._special_click((3, 2))
     panel.keys.setCurrentRow(0)
@@ -481,7 +481,7 @@ def test_gem_visual_uses_building_sector_type_and_restores_underlay():
     assert (restored.grids['type'][4][4], restored.grids['blg'][4][4]) == ('7c', '33')
 
     remove_special(doc, 'gem', gem, buildings=buildings)
-    assert (doc.grids['type'][4][4], doc.grids['blg'][4][4]) == ('cd', '00')
+    assert (doc.grids['type'][4][4], doc.grids['blg'][4][4]) == ('00', '00')
 
     fallback = LdfDocument(mw=9, mh=9)
     fallback.grids['type'][3][3], fallback.grids['blg'][3][3] = 'ef', '00'
@@ -489,7 +489,7 @@ def test_gem_visual_uses_building_sector_type_and_restores_underlay():
     update_special(fallback, 'gem', fallback_gem, {'actions': actions, 'x': 3, 'y': 3})
     assert (fallback.grids['type'][3][3], fallback.grids['blg'][3][3]) == ('ef', '32')
     remove_special(fallback, 'gem', fallback_gem)
-    assert (fallback.grids['type'][3][3], fallback.grids['blg'][3][3]) == ('ef', '00')
+    assert (fallback.grids['type'][3][3], fallback.grids['blg'][3][3]) == ('00', '00')
 
 
 def _loaded_item_with_key_visual(visual='f4'):
@@ -549,12 +549,12 @@ def test_loaded_and_saved_gem_visual_restore_preserves_type_map():
     buildings = {50: SimpleNamespace(sec_type=123)}
     loaded = _loaded_legacy_gem('05')
     remove_special(loaded, 'gem', 1, buildings=buildings)
-    assert (loaded.grids['type'][2][2], loaded.grids['blg'][2][2]) == ('05', '00')
+    assert (loaded.grids['type'][2][2], loaded.grids['blg'][2][2]) == ('00', '00')
 
     moved = _loaded_legacy_gem('05')
     moved.grids['type'][4][4], moved.grids['blg'][4][4] = '06', '00'
     update_special(moved, 'gem', 1, {'x': 4, 'y': 4}, buildings=buildings)
-    assert (moved.grids['type'][2][2], moved.grids['blg'][2][2]) == ('05', '00')
+    assert (moved.grids['type'][2][2], moved.grids['blg'][2][2]) == ('00', '00')
     assert (moved.grids['type'][4][4], moved.grids['blg'][4][4]) == ('7b', '32')
 
     authored = LdfDocument(mw=9, mh=9)
@@ -565,7 +565,7 @@ def test_loaded_and_saved_gem_visual_restore_preserves_type_map():
     reloaded = loads_ldf(dumps_ldf(authored))
     assert (reloaded.grids['type'][2][2], reloaded.grids['blg'][2][2]) == ('7b', '32')
     remove_special(reloaded, 'gem', 1, buildings=buildings)
-    assert (reloaded.grids['type'][2][2], reloaded.grids['blg'][2][2]) == ('7b', '00')
+    assert (reloaded.grids['type'][2][2], reloaded.grids['blg'][2][2]) == ('00', '00')
 
 
 def test_special_preview_defaults_and_item_countdown_mm_ss(win):
@@ -870,18 +870,27 @@ def test_clear_view_filters_cpu_actor_geometry_without_document_edits(win, monke
     assert not np.any(frame.cell_ids < 0)
 
 
-def test_dragging_sector_over_ordinary_building_replaces_it_and_supports_undo(win):
+def test_building_drag_rejects_ordinary_sectors_and_occupied_destinations(win):
     win.doc.grids['type'][2][2] = 'a1'
     win.doc.grids['blg'][4][4] = '02'
     win.doc.grids['type'][4][4] = 'b2'
     before = win.doc.snapshot()
     win.set_tool('select')
     win._begin_actor_drag('building', (2, 2))
+    assert win._building_drag is None
+    assert win.doc.snapshot() == before
+    win.doc.grids['blg'][2][2] = '01'
+    before = win.doc.snapshot()
+    win._begin_actor_drag('building', (2, 2))
     win._move_actor_drag((4, 4))
+    assert not win._building_drop_valid
+    assert win.doc.snapshot() == before
+    win._move_actor_drag((3, 3))
     assert win._building_drop_valid
     win.view._moved = True
     win._finish_building_drag()
-    assert (win.doc.grids['type'][4][4], win.doc.grids['blg'][4][4]) == ('a1', '00')
+    assert (win.doc.grids['type'][3][3], win.doc.grids['blg'][3][3]) == ('a1', '01')
+    assert (win.doc.grids['type'][4][4], win.doc.grids['blg'][4][4]) == ('b2', '02')
     assert (win.doc.grids['type'][2][2], win.doc.grids['blg'][2][2]) == ('00', '00')
     win.undo()
     assert win.doc.snapshot() == before
