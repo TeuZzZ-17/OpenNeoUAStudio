@@ -2,7 +2,7 @@
 
 from pathlib import Path
 
-from PySide6.QtCore import QEvent, QSignalBlocker
+from PySide6.QtCore import QEvent, QSignalBlocker, QTimer
 from PySide6.QtWidgets import QHBoxLayout, QLabel, QTabWidget, QWidget
 
 from map_editor import bootstrap
@@ -32,8 +32,11 @@ class SetSelectorTabs(QTabWidget):
         self._place_row()
 
     def _place_row(self):
-        bar = self.tabBar().geometry()
-        self._row.setGeometry(0, bar.bottom() + 1, self.width(), _ROW_HEIGHT)
+        # Inside a flat Studio palette the own tab bar is hidden: the row
+        # then starts at the top of the pane area.
+        bar = self.tabBar()
+        top = 0 if bar.isHidden() else bar.geometry().bottom() + 1
+        self._row.setGeometry(0, top, self.width(), _ROW_HEIGHT)
         self._row.raise_()
 
     def resizeEvent(self, event):
@@ -43,6 +46,9 @@ class SetSelectorTabs(QTabWidget):
     def eventFilter(self, watched, event):
         if watched is self.tabBar() and event.type() in (QEvent.Type.Resize, QEvent.Type.Move):
             self._place_row()
+        elif watched is self.tabBar() and event.type() in (QEvent.Type.Hide, QEvent.Type.HideToParent):
+            # The hidden state is final only after the event: place next.
+            QTimer.singleShot(0, self._place_row)
         return super().eventFilter(watched, event)
 
 

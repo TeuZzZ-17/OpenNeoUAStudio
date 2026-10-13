@@ -27,23 +27,30 @@ class ModelEditorWorkspaceTests(unittest.TestCase):
         finally:
             window.close()
 
-    def test_resources_sub_tabs_are_visible_in_the_resources_tab(self):
+    def test_resources_pages_are_flat_palette_buttons(self):
         window = ModelEditorWindow()
         try:
             window.resize(1400, 900)
             window.show()
-            window._right_tabs.setCurrentIndex(1)
+            strip = window._right_tabs._palette_strip
+            strip.refresh()
             self.app.processEvents()
-            tabs = window._resources_tabs
-            self.assertTrue(tabs.isVisible())
-            self.assertTrue(tabs.tabBar().isVisible())
+            # One flat level of palette buttons: no sub-tab bars.
             self.assertEqual(
-                [tabs.tabText(i) for i in range(tabs.count())],
-                ["Bas Manager", "Entity List", "Asset Dependencies", "Asset Textures"])
+                [button.text() for button in strip.buttons()],
+                ["Model and Texture Editor", "Bas Manager", "Entity List",
+                 "Asset Dependencies", "Asset Textures"])
+            self.assertTrue(window._right_tabs.tabBar().isHidden())
+            self.assertTrue(window._resources_tabs.tabBar().isHidden())
+            strip.buttons()[2].click()
+            self.assertIs(window._right_tabs.currentWidget(), window._resources_tabs)
+            self.assertEqual(
+                window._resources_tabs.tabText(
+                    window._resources_tabs.currentIndex()), "Entity List")
         finally:
             window.close()
 
-    def test_set_selector_sits_right_under_the_resources_tab_bar(self):
+    def test_set_selector_sits_at_the_top_of_the_resources_pages(self):
         window = ModelEditorWindow()
         try:
             window.resize(1400, 900)
@@ -53,7 +60,8 @@ class ModelEditorWorkspaceTests(unittest.TestCase):
             tabs = window._resources_tabs
             self.assertTrue(tabs.set_combo.isVisible())
             self.assertIs(tabs.set_combo, window.entity_browser.set_combo)
-            self.assertEqual(tabs._row.geometry().top(), tabs.tabBar().geometry().bottom() + 1)
+            # Flattened into the palette, the row opens the page area.
+            self.assertEqual(tabs._row.geometry().top(), 0)
             self.assertGreaterEqual(tabs.currentWidget().mapTo(tabs, tabs.currentWidget().rect().topLeft()).y(),
                                     tabs._row.geometry().bottom())
         finally:

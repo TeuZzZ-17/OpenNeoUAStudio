@@ -319,7 +319,7 @@ class MainWindow(QMainWindow):
         self.hover_height.setWordWrap(True)
         self.hover_height.setStyleSheet('QLabel { padding: 5px; color: #ddd; background: #292929; border-radius: 4px; }')
         panel_layout.addWidget(self.hover_height)
-        panel_layout.addWidget(tabs)
+        panel_layout.addWidget(tabs, 1)
         self.sector_list = self._make_list(True)
         self.sector_list.setItemDelegate(ThumbnailDelegate(self.sector_list))
         self.sector_list.viewport().installEventFilter(self)

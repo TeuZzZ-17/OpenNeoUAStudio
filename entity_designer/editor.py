@@ -17,6 +17,7 @@ import sys
 import tempfile
 
 from PySide6.QtCore import (
+    QFileSystemWatcher,
     QEvent,
     QProcess,
     QProcessEnvironment,
@@ -32,6 +33,7 @@ from PySide6.QtCore import (
 )
 from PySide6.QtGui import (
     QAction,
+    QShortcut,
     QBrush,
     QColor,
     QCloseEvent,
@@ -95,6 +97,14 @@ from editor_widgets import (
     create_import_bas_archive_action,
     install_standard_file_menu_tail,
 )
+from entity_designer import destruction_fx as fx
+from entity_designer.fx_panel import DestructionFxPanel
+from entity_designer.fx_viewport import FxPreviewViewportMixin
+from studio_compat import (
+    MIXED, OPENNEOUA as COMPAT_OPENNEOUA, VANILLA,
+    compat_color,
+)
+from studio_tabs import PaletteTabStrip
 from entity_designer.sphere_generator import (
     ACCURACY_PRESETS,
     UNIT_COLL_MAX_COUNT,
@@ -3299,7 +3309,7 @@ class CompactScaleSpinBox(QDoubleSpinBox):
         return text
 
 
-class CollisionViewport(AssetViewport):
+class CollisionViewport(FxPreviewViewportMixin, AssetViewport):
     """Existing AssetViewport plus the exact F10 three-ring overlay.
 
     Right-drag pans the camera exactly like the Model Viewer.  The contextual
@@ -3376,6 +3386,7 @@ class CollisionViewport(AssetViewport):
         self._model_preview_base_sen_boxes: list[
             tuple[tuple[float, float, float], ...]] = []
         self._model_preview_base_owner_bounds: dict[str, tuple] = {}
+        self._fx_init()
 
     @property
     def model_preview_scale(self) -> tuple[float, float, float]:
@@ -3555,7 +3566,7 @@ class CollisionViewport(AssetViewport):
         signature = super()._indexed_view_cache_signature(
             width, height, camera)
         if not self._cockpit_preview_active:
-            return signature + ("collision-editor",)
+            return signature + ("collision-editor",) + self._fx_cache_signature()
         return signature + (
             "cockpit",
             tuple(float(value) for value in self._cockpit_offset),
@@ -3906,7 +3917,8 @@ class CollisionViewport(AssetViewport):
     def _draw_grid(self, painter: QPainter, target: QRectF, camera: dict) -> None:
         """Draw a fixed Y=0 ground plane instead of a model-centered grid."""
 
-        if not (self._ground_alignment_available
+        # Destruction FX always needs the ground, weapons included.
+        if not ((self._ground_alignment_available or self._fx_active)
                 and self._ground_alignment_source_loaded
                 and self._ground_simulation_visible):
             return
@@ -4520,6 +4532,19 @@ class CollisionViewport(AssetViewport):
                 painter.drawText(
                     target, Qt.AlignmentFlag.AlignCenter, "Model hidden")
             painter.restore()
+            return
+
+        if self._fx_active:
+            # Destruction FX owns the whole view: unit, effects and their
+            # guides. Collision and weapon overlays belong to other tabs.
+            painter.save()
+            suppressed = self._empty_hint_suppressed
+            self._empty_hint_suppressed = True
+            try:
+                self._paint_fx_viewport(painter)
+            finally:
+                self._empty_hint_suppressed = suppressed
+                painter.restore()
             return
 
         if self._collision_show_model:
@@ -5341,6 +5366,26 @@ class CollisionEditorWindow(QMainWindow):
         # rebuild identical rows, or the click doing the switch gets corrupted.
         self._script_unit_references: list[VehicleModelReference] = []
         self._script_unit_visual_reference: VehicleModelReference | None = None
+        # Destruction FX preview: FX vehicles for dest_fx, the viewport scope
+        # widened with the effect VP owners while the tab is shown, the VP
+        # owner map, the definition already framed once, and the script
+        # files watched by Auto reload.
+        self._fx_catalog: dict[int, fx.LegacyFxVehicle] = {}
+        self._fx_scope: set[str] | None = None
+        self._fx_owner_map: dict[int, str] = {}
+        self._fx_fitted_definition = None
+        self._fx_source_from_catalog = False
+        self._fx_script_sources = set()
+        self._fx_asset_paths = set()
+        self._fx_watch_signatures = {}
+        self._fx_changed_assets = set()
+        self._fx_watcher = QFileSystemWatcher(self)
+        self._fx_watcher.fileChanged.connect(self._fx_watched_file_changed)
+        self._fx_watcher.directoryChanged.connect(self._fx_watched_directory_changed)
+        self._fx_reload_timer = QTimer(self)
+        self._fx_reload_timer.setSingleShot(True)
+        self._fx_reload_timer.setInterval(300)
+        self._fx_reload_timer.timeout.connect(self.reload_fx_from_file)
 
         configure_operation_status_bar(self)
 
@@ -5412,6 +5457,10 @@ class CollisionEditorWindow(QMainWindow):
 
         self._build_actions()
         self._build_ui()
+        # F5 reloads the Destruction FX preview from the script file.
+        reload_shortcut = QShortcut(QKeySequence(Qt.Key.Key_F5), self)
+        reload_shortcut.activated.connect(
+            lambda: self._is_fx_tab_active() and self.reload_fx_from_file())
         self._set_model_browser_enabled(False)
         self._fit_initial_window_to_screen()
         self._sync_all()
@@ -5763,116 +5812,28 @@ class CollisionEditorWindow(QMainWindow):
         self._properties_layout_margins = (4, 7, 4, 3)
         right.setContentsMargins(*self._properties_layout_margins)
         right.setSpacing(1)
-        project_box = QGroupBox("Project")
-        project_form = QFormLayout(project_box)
-        project_form.setContentsMargins(6, 5, 6, 5)
-        project_form.setHorizontalSpacing(6)
-        project_form.setVerticalSpacing(3)
-        # The right pane is intentionally wide enough to keep both project
-        # rows on one line. Stable row heights prevent the tab strip from
-        # shifting when the window is resized or another workspace is opened.
-        project_form.setRowWrapPolicy(
-            QFormLayout.RowWrapPolicy.DontWrapRows)
-        self.name_edit = QLineEdit()
-        self.name_edit.setReadOnly(True)
-        self.name_edit.setPlaceholderText("Example")
-        self.name_edit.editingFinished.connect(self._project_fields_changed)
-        self.target_combo = QComboBox()
-        self.target_combo.addItem("vehicle", VEHICLE)
-        self.target_combo.addItem("weapon", WEAPON)
-        self.target_combo.setEnabled(False)
-        self.target_combo.currentIndexChanged.connect(
-            self._project_fields_changed)
-        project_form.addRow("Entity Name", self.name_edit)
-        project_form.addRow("Target Category", self.target_combo)
-        self.vanilla_collision_notice = QLabel(
-            "Vanilla Urban Assault supports Legacy Radius only. "
-            "OpenNeoUA Collision uses compound collision spheres.")
-        self.vanilla_collision_notice.setWordWrap(True)
-        self.vanilla_collision_notice.setStyleSheet(
-            "color: #e1aa62; font-size: 10px;")
-        self.vanilla_collision_notice.setToolTip(
-            "Legacy Radius writes radius. OpenNeoUA Collision writes the "
-            "shared coll_num/coll_act/coll_x/coll_y/coll_z/coll_radius syntax "
-            "for both Vehicle and Weapon targets.")
-        right.addWidget(project_box)
-
         # Keep the right-side workspaces explicit. Collision, Fire Points, Gun
         # Points and the OpenNeoUA-only Cockpit View share one compact properties
         # column instead of stacking unrelated controls vertically.
         self.properties_tabs = QTabWidget()
         self.properties_tabs.setDocumentMode(True)
-        # Keep the four workspaces inside the actual properties-pane width.
-        # On high-DPI / narrower displays the old tab size hints could make
-        # the whole editor wider than the available desktop.
-        tab_bar = self.properties_tabs.tabBar()
-        tab_bar.setExpanding(True)
-        tab_bar.setElideMode(Qt.TextElideMode.ElideNone)
-        tab_bar.setUsesScrollButtons(True)
-        tab_bar.setMovable(False)
-        # Match OpenNeoUAStudio's established red primary-workspace tabs.
-        tab_bar.setStyleSheet("""
-            QTabBar::tab {
-                background: #602d37;
-                color: #f8edef;
-                border: 1px solid #7c4049;
-                border-bottom: none;
-                padding: 7px 9px;
-                font-weight: normal;
-            }
-            QTabBar::tab:selected {
-                background: #a84552;
-                border-color: #d66b77;
-                color: #ffffff;
-            }
-            QTabBar::tab:hover:!selected {
-                background: #7b3742;
-            }
-            QTabBar::scroller {
-                width: 52px;
-            }
-            QTabBar QToolButton {
-                background: #3a1d23;
-                color: #f8edef;
-                border: 1px solid #7c4049;
-                border-radius: 4px;
-                width: 22px;
-                min-width: 22px;
-                max-width: 22px;
-                height: 22px;
-                min-height: 22px;
-                max-height: 22px;
-                margin: 2px 1px;
-                padding: 0px;
-            }
-            QTabBar QToolButton:hover {
-                background: #7b3742;
-                border-color: #d66b77;
-            }
-            QTabBar QToolButton:pressed {
-                background: #a84552;
-                border-color: #d66b77;
-            }
-            QTabBar QToolButton:disabled {
-                background: #2a1519;
-                color: #6f5459;
-                border-color: #4a2a30;
-            }
-        """)
         self.collision_tab = QWidget()
         self.collision_shape_tab = QWidget()
+        self.ground_tab = QWidget()
         self.fire_points_tab = QWidget()
         self.gun_points_tab = QWidget()
         self.cockpit_tab = QWidget()
         self.collision_tab_layout = QVBoxLayout(self.collision_tab)
         self.collision_shape_tab_layout = QVBoxLayout(
             self.collision_shape_tab)
+        self.ground_tab_layout = QVBoxLayout(self.ground_tab)
         self.fire_points_tab_layout = QVBoxLayout(self.fire_points_tab)
         self.gun_points_tab_layout = QVBoxLayout(self.gun_points_tab)
         self.cockpit_tab_layout = QVBoxLayout(self.cockpit_tab)
         for tab, layout in (
                 (self.collision_tab, self.collision_tab_layout),
                 (self.collision_shape_tab, self.collision_shape_tab_layout),
+                (self.ground_tab, self.ground_tab_layout),
                 (self.fire_points_tab, self.fire_points_tab_layout),
                 (self.gun_points_tab, self.gun_points_tab_layout),
                 (self.cockpit_tab, self.cockpit_tab_layout)):
@@ -5885,6 +5846,10 @@ class CollisionEditorWindow(QMainWindow):
             self.collision_tab, "Collision Spheres")
         self.collision_shape_tab_index = self.properties_tabs.addTab(
             self.collision_shape_tab, "Collision Shape")
+        # Ground alignment (overeof) is a vehicle placement setting, not a
+        # collision sphere: it has its own page.
+        self.ground_tab_index = self.properties_tabs.addTab(
+            self.ground_tab, "Ground Alignment")
         self.fire_points_tab_index = self.properties_tabs.addTab(
             self.fire_points_tab, "Fire Points")
         self.gun_points_tab_index = self.properties_tabs.addTab(
@@ -5898,6 +5863,17 @@ class CollisionEditorWindow(QMainWindow):
         self.renderer_badge.add_viewport(self.briefing_preview)
         self.viewport_layout.addWidget(self.briefing_preview, 0, 0)
         self.briefing_preview.hide()
+        self.fx_panel = DestructionFxPanel(self)
+        self.fx_tab_index = self.properties_tabs.addTab(
+            self.fx_panel, "Destruction FX")
+        self.fx_panel.frameChanged.connect(self._push_fx_frame)
+        self.fx_panel.fitRequested.connect(self._fit_fx_view)
+        # The playback bar uses the full width under the viewport.
+        self.viewport_layout.addWidget(self.fx_panel.transport_bar, 1, 0)
+        # The bar keeps its natural height; the viewport takes the rest.
+        self.viewport_layout.setRowStretch(0, 1)
+        self.viewport_layout.setRowStretch(1, 0)
+        self.fx_panel.transport_bar.hide()
         self.properties_tabs.currentChanged.connect(
             self._properties_tab_changed)
         self.properties_tabs.setMinimumHeight(0)
@@ -5906,9 +5882,43 @@ class CollisionEditorWindow(QMainWindow):
         # The tab workspace owns the flexible vertical area; the shared gizmo
         # below has a stable height on every tab. This also lets the lists
         # extend down to the gizmo instead of leaving dead space.
+        # Studio-wide palette tabs; the dot shows each page's compatibility.
+        self._tab_compatibility = {
+            self.collision_tab: (
+                MIXED, "Legacy Radius (radius) works in vanilla Urban "
+                "Assault; OpenNeoUA Collision spheres (coll_*) work only in "
+                "OpenNeoUA."),
+            self.collision_shape_tab: (
+                COMPAT_OPENNEOUA, "collision_shape is read only by OpenNeoUA; "
+                "vanilla keeps using the radius and collision spheres."),
+            self.ground_tab: (
+                VANILLA, "overeof (height of the vehicle above the ground) "
+                "works in vanilla Urban Assault and in OpenNeoUA."),
+            self.fire_points_tab: (
+                MIXED, "fire_x/y/z and a fixed num_weapons work in vanilla; a "
+                "Min/Max weapons range is OpenNeoUA only."),
+            self.gun_points_tab: (
+                MIXED, "robo_* gun points (Host Stations) and turret angles "
+                "are vanilla; unit_* gun points on other vehicles are "
+                "OpenNeoUA only."),
+            self.cockpit_tab: (
+                COMPAT_OPENNEOUA, "Cockpit camera offsets exist only in "
+                "OpenNeoUA. The preview keeps the vehicle's real orientation; "
+                "only the camera position is authored."),
+            self.briefing_tab: (
+                COMPAT_OPENNEOUA, "briefing_size exists only in OpenNeoUA."),
+            self.fx_panel: (
+                MIXED, "Preview only: edit the script and press Reload. "
+                "Vanilla dest_fx/scale_fx effects work everywhere; begin_fx "
+                "effects are OpenNeoUA only, as labelled in the list."),
+        }
+        self.properties_tab_strip = PaletteTabStrip.install(
+            self.properties_tabs, markers={
+                page: compat_color(level)
+                for page, (level, _note) in self._tab_compatibility.items()})
         right.addWidget(self.properties_tabs, 1)
 
-        self.ground_alignment_box = QGroupBox("Ground Alignment (Vanilla)")
+        self.ground_alignment_box = QGroupBox("Ground Alignment")
         ground_layout = QVBoxLayout(self.ground_alignment_box)
         ground_layout.setContentsMargins(6, 4, 6, 4)
         ground_layout.setSpacing(3)
@@ -5952,8 +5962,8 @@ class CollisionEditorWindow(QMainWindow):
         ground_layout.addLayout(ground_controls)
         self.ground_alignment_notice = QLabel("")
         self.ground_alignment_notice.hide()
-        self.collision_tab_layout.addWidget(self.vanilla_collision_notice)
-        self.collision_tab_layout.addWidget(self.ground_alignment_box)
+        self.ground_tab_layout.addWidget(self.ground_alignment_box)
+        self.ground_tab_layout.addStretch(1)
 
         shape_box = QGroupBox("Convex Collision Shape")
         shape_box.setContextMenuPolicy(
@@ -6018,7 +6028,7 @@ class CollisionEditorWindow(QMainWindow):
         self.collision_shape_tab_layout.addWidget(
             self.collision_geometry_widget, 1)
 
-        spheres_box = QGroupBox("Spheres (Vanilla/OpenNeoUA)")
+        spheres_box = QGroupBox("Spheres")
         spheres_layout = QVBoxLayout(spheres_box)
         spheres_layout.setContentsMargins(6, 4, 6, 4)
         spheres_layout.setSpacing(3)
@@ -6230,7 +6240,7 @@ class CollisionEditorWindow(QMainWindow):
 
         self.collision_tab_layout.addWidget(spheres_box, 1)
 
-        self.fire_points_box = QGroupBox("Fire Points (Vanilla)")
+        self.fire_points_box = QGroupBox("Fire Points")
         self.fire_points_box.setContextMenuPolicy(
             Qt.ContextMenuPolicy.CustomContextMenu)
         self.fire_points_box.customContextMenuRequested.connect(
@@ -6320,12 +6330,6 @@ class CollisionEditorWindow(QMainWindow):
         fire_grid.addWidget(self.num_weapons_max_spin, 1, 4, 1, 2)
         for column in (1, 3, 5):
             fire_grid.setColumnStretch(column, 1)
-        self.fire_point_range_notice = QLabel(
-            "Weapons Min / Max range is an OpenNeoUA-only feature.")
-        self.fire_point_range_notice.setStyleSheet(
-            "color: #d9a35f; font-size: 10px;")
-        self.fire_point_range_notice.setWordWrap(True)
-        fire_grid.addWidget(self.fire_point_range_notice, 2, 0, 1, 6)
         fire_layout.addLayout(fire_grid)
         self.fire_point_notice = QLabel("")
         self.fire_point_notice.hide()
@@ -6345,7 +6349,7 @@ class CollisionEditorWindow(QMainWindow):
             QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
         self.fire_points_tab_layout.addWidget(self.fire_points_box, 1)
 
-        self.gun_points_box = QGroupBox("Gun Points (Vanilla/OpenNeoUA)")
+        self.gun_points_box = QGroupBox("Gun Points")
         self.gun_points_box.setContextMenuPolicy(
             Qt.ContextMenuPolicy.CustomContextMenu)
         self.gun_points_box.customContextMenuRequested.connect(
@@ -6623,7 +6627,7 @@ class CollisionEditorWindow(QMainWindow):
             QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
         self.gun_points_tab_layout.addWidget(self.gun_points_box, 1)
 
-        self.cockpit_box = QGroupBox("Cockpit View (OpenNeoUA)")
+        self.cockpit_box = QGroupBox("Cockpit View")
         self.cockpit_box.setContextMenuPolicy(
             Qt.ContextMenuPolicy.CustomContextMenu)
         self.cockpit_box.customContextMenuRequested.connect(
@@ -6631,14 +6635,6 @@ class CollisionEditorWindow(QMainWindow):
         cockpit_layout = QVBoxLayout(self.cockpit_box)
         cockpit_layout.setContentsMargins(6, 4, 6, 4)
         cockpit_layout.setSpacing(3)
-        self.cockpit_notice = QLabel(
-            "OpenNeoUA only — not supported by vanilla Urban Assault. "
-            "The preview keeps the vehicle's real orientation; only the "
-            "local camera position X/Y/Z is authored.")
-        self.cockpit_notice.setWordWrap(True)
-        self.cockpit_notice.setStyleSheet(
-            "color: #e1aa62; font-size: 10px;")
-        cockpit_layout.addWidget(self.cockpit_notice)
 
         self.cockpit_camera_button = QPushButton("Enable Cockpit Camera Offset")
         self.cockpit_camera_button.setToolTip(
@@ -6873,7 +6869,19 @@ class CollisionEditorWindow(QMainWindow):
         # tab pages into view, so forcing it back to zero breaks normal tab
         # interaction and mouse-wheel navigation.
         properties_scroll.setVerticalScrollBarPolicy(
-            Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+            Qt.ScrollBarPolicy.ScrollBarAlwaysOn)
+        properties_scroll.verticalScrollBar().setStyleSheet(
+            "QScrollBar:vertical { width: 12px; background: transparent; border: none; margin: 0; }"
+            "QScrollBar::handle:vertical { min-height: 22px; background: #58616b; border-radius: 5px; }"
+            "QScrollBar::handle:vertical:disabled { background: transparent; }"
+            "QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical { height: 0; }"
+            "QScrollBar::add-page:vertical, QScrollBar::sub-page:vertical { background: transparent; }")
+        properties_scroll_bar = properties_scroll.verticalScrollBar()
+        properties_scroll_bar.setEnabled(
+            properties_scroll_bar.maximum() > properties_scroll_bar.minimum())
+        properties_scroll_bar.rangeChanged.connect(
+            lambda minimum, maximum, bar=properties_scroll_bar:
+            bar.setEnabled(maximum > minimum))
         # Keep the authoring column at the user-validated compact width while
         # still leaving room for all four full tab labels and controls.
         # The user can continue widening it manually when desired.
@@ -6886,11 +6894,6 @@ class CollisionEditorWindow(QMainWindow):
         properties_scroll.setWidget(properties)
         self.properties_scroll = properties_scroll
         splitter.addWidget(properties_scroll)
-        properties_scroll.verticalScrollBar().rangeChanged.connect(
-            self._sync_properties_scroll_gutter)
-        self._sync_properties_scroll_gutter(
-            properties_scroll.verticalScrollBar().minimum(),
-            properties_scroll.verticalScrollBar().maximum())
         splitter.setStretchFactor(0, 0)
         splitter.setStretchFactor(1, 1)
         splitter.setStretchFactor(2, 0)
@@ -6898,15 +6901,6 @@ class CollisionEditorWindow(QMainWindow):
         # wide enough for full resource names, while the properties column is
         # compact and the viewport remains the flexible central workspace.
         splitter.setSizes([230, 850, 430])
-
-    def _sync_properties_scroll_gutter(
-            self, minimum: int, maximum: int) -> None:
-        """Keep the right content width stable while its scrollbar is hidden."""
-
-        left, top, right, bottom = self._properties_layout_margins
-        if maximum <= minimum:
-            right += self.properties_scroll.verticalScrollBar().sizeHint().width()
-        self._properties_layout.setContentsMargins(left, top, right, bottom)
 
     def eventFilter(self, watched, event):
         if (hasattr(self, "gun_point_tree")
@@ -7197,6 +7191,13 @@ class CollisionEditorWindow(QMainWindow):
         if not hasattr(self, "play_button"):
             return
         has_anim = self.viewport.has_animation
+        if self._is_fx_tab_active():
+            unit = self.fx_panel.unit
+            owners = {self._owner_for_vp(ref.vp) for ref in (unit.normal, unit.dead, unit.megadeth)
+                      if ref.vp > 0}
+            owners.add(self._current_owner)
+            has_anim = any(self.viewport._materials[face.material].anim_frames
+                           for face in self.viewport._faces if face.owner in owners)
         self.play_button.setEnabled(has_anim)
         self.step_button.setEnabled(has_anim)
         self.speed_spin.setEnabled(has_anim)
@@ -7443,6 +7444,7 @@ class CollisionEditorWindow(QMainWindow):
             text, _encoding, _bom = read_script_file(script_path)
             if resolved_text is not None:
                 text = resolved_text
+            self._fx_source_from_catalog = resolved_text is not None
             references = script_model_references(text)
             script_turret_limits = import_turret_limits(text)
         except (OSError, UnicodeError, CollisionScriptError) as exc:
@@ -7672,6 +7674,7 @@ class CollisionEditorWindow(QMainWindow):
         self._fill_script_units(
             references, active_visual_reference=resolved_unit_reference)
         self._show_model_item(self._select_script_unit_item(reference))
+        self._load_fx_context(text, block, reference)
         self._set_modified(False)
         self.source_label.setText(
             (f"Visual override: {visual_override}" if visual_override
@@ -8795,6 +8798,7 @@ class CollisionEditorWindow(QMainWindow):
         self.viewport.load_family(
             self.family, {owner} if owner else None,
             primary_owner=owner)
+        self._fx_scope = None
         self._current_owner_base_bounds = (
             self.viewport._model_preview_base_owner_bounds.get(owner))
         self._viewport_owner = owner
@@ -9452,7 +9456,21 @@ class CollisionEditorWindow(QMainWindow):
         self._create_gun_point_context_menu().exec(
             self.gun_point_tree.viewport().mapToGlobal(local_pos))
 
+    def _create_fx_context_menu(self) -> QMenu:
+        """Expose only existing destruction-preview controls in the FX viewport."""
+        menu = QMenu(self)
+        panel = self.fx_panel
+        menu.addAction("Pause" if panel.is_playing() else "Play", panel.play_button.click)
+        menu.addAction("Restart", panel.restart)
+        menu.addAction("Stop", panel.stop)
+        menu.addSeparator()
+        menu.addAction(self.reset_view_action)
+        return menu
+
     def _show_sphere_context_menu(self, index: int, global_pos: QPoint):
+        if self._is_fx_tab_active():
+            self._create_fx_context_menu().exec(global_pos)
+            return
         if (self.properties_tabs.currentIndex()
                 == self.collision_shape_tab_index):
             key = self.viewport._hit_shape_component(
@@ -9830,6 +9848,7 @@ class CollisionEditorWindow(QMainWindow):
 
         active = self.properties_tabs.currentIndex()
         collision_tab = active == self.collision_tab_index
+        ground_tab = active == self.ground_tab_index
         shape_tab = active == self.collision_shape_tab_index
         fire_tab = active == self.fire_points_tab_index
         gun_tab = active == self.gun_points_tab_index
@@ -9842,10 +9861,13 @@ class CollisionEditorWindow(QMainWindow):
             LEGACY, collision_tab and wanted("Show Legacy Radius"))
         self.viewport.set_collision_category_visible(
             OPENNEOUA, collision_tab and wanted("Show OpenNeoUA Collisions"))
+        # The ground plane is also the reference surface of Destruction FX:
+        # wrecks, fragments and decals land on it.
         self.viewport.set_ground_simulation_visible(
-            collision_tab and wanted("Show Ground Simulation"))
+            (collision_tab or ground_tab or self._is_fx_tab_active())
+            and wanted("Show Ground Simulation"))
         self.viewport.set_overeof_visible(
-            collision_tab and wanted("Show Overeof"))
+            ground_tab and wanted("Show Overeof"))
         self.viewport.set_collision_shape_overlay_visible(shape_tab)
 
         self.viewport.set_fire_points_visible(
@@ -9890,20 +9912,413 @@ class CollisionEditorWindow(QMainWindow):
         self._update_reset_view_controls()
         if hasattr(self, "selected_box"):
             self.selected_box.setVisible(
-                not cockpit_active and not shape_tab_active and not briefing_active)
+                not cockpit_active and not shape_tab_active and not briefing_active
+                and not self._is_fx_tab_active())
         if hasattr(self, "transform_box"):
-            self.transform_box.setVisible(not shape_tab_active and not briefing_active)
+            self.transform_box.setVisible(
+                not shape_tab_active and not briefing_active
+                and self.properties_tabs.currentIndex() != self.ground_tab_index
+                and not self._is_fx_tab_active())
             self.transform_box.setTitle(
                 "Move Cockpit Camera" if cockpit_selected else "Move Element")
         if hasattr(self, "cockpit_runtime_aspect_combo"):
             self.viewport.set_cockpit_runtime_aspect(
                 self.cockpit_runtime_aspect_combo.currentData())
+        # Restore the unit-only viewport scope before Cockpit View loads its
+        # own preview model.
+        self._sync_fx_preview()
         self._sync_cockpit_preview_model()
         self._sync_gizmo_camera()
         if cockpit_active:
             self.viewport.setFocus(Qt.FocusReason.OtherFocusReason)
         if not self._syncing:
             self._sync_all()
+
+    # -- Destruction FX preview -------------------------------------------------------
+
+    def _is_fx_tab_active(self) -> bool:
+        return (hasattr(self, "fx_tab_index")
+                and self.properties_tabs.currentIndex() == self.fx_tab_index)
+
+    def _fx_unit_radius(self) -> float:
+        # StartDestFX scales dest_fx offsets by the unit's vanilla radius.
+        legacy = self.project.legacy
+        return (legacy.radius if legacy is not None
+                else effective_runtime_radius(self.project))
+
+    def _fx_unit_transform(self):
+        """Preview scale/rotation of the unit as a matrix (static preview)."""
+
+        scale = (self.project.model_scale_x, self.project.model_scale_y,
+                 self.project.model_scale_z)
+        rotation = (self.project.model_rotation_x,
+                    self.project.model_rotation_y,
+                    self.project.model_rotation_z)
+        columns = [visual_transform_point(axis, scale, rotation)
+                   for axis in ((1.0, 0.0, 0.0), (0.0, 1.0, 0.0), (0.0, 0.0, 1.0))]
+        return tuple(tuple(columns[column][row] for column in range(3))
+                     for row in range(3))
+
+    def _build_fx_catalog(self, text: str, objects=None):
+        """FX vehicles for dest_fx previews: game catalog plus this script."""
+
+        catalog: dict[int, fx.LegacyFxVehicle] = {}
+        if objects is None:
+            objects = getattr(self.game_object_browser, "objects", None) or []
+        for obj in objects:
+            if obj.kind == "vehicle":
+                catalog[obj.object_id] = fx.legacy_vehicle_from_text(
+                    obj.object_id, obj.effective_text, str(obj.source))
+        lines = text.splitlines()
+        for block in find_script_blocks(text):
+            if block.kind == "new_vehicle" and block.complete                     and block.object_id not in catalog:
+                body = "\n".join(lines[block.start_line:block.end_line + 1])
+                catalog[block.object_id] = fx.legacy_vehicle_from_text(
+                    block.object_id, body)
+        return catalog
+
+    def _fx_unit_phases(self, text: str, block: ScriptBlock,
+                        reference: VehicleModelReference) -> fx.UnitPhases:
+        """Death models of the definition, resolved like the engine."""
+
+        def value(key: str) -> str:
+            return fx.top_level_value(
+                text, block.start_line, block.end_line, key) or ""
+
+        def state(name: str) -> fx.VisualRef:
+            vp = (reference.vp_normal or 0 if name == "normal"
+                  else fx.script_int(value(f"vp_{name}")))
+            return fx.VisualRef(vp=vp, mesh3ds=value(f"3ds_{name}"),
+                                base_path=value(f"base_{name}"))
+
+        weapon = block.kind.endswith("weapon")
+        model = value("model").casefold()
+        unit = fx.UnitPhases(
+            normal=state("normal"), dead=state("dead"),
+            megadeth=state("megadeth"), model=model, weapon=weapon,
+            transform=self._fx_unit_transform(),
+            overeof=(self.project.overeof
+                     if self.project.overeof_enabled else 0.0))
+        if unit.flies:
+            unit = replace(unit, altitude=fx.DEFAULT_FLIGHT_ALTITUDE)
+        return unit
+
+    def _load_fx_context(self, text: str, block: ScriptBlock,
+                         reference: VehicleModelReference, *,
+                         keep_view: bool = False, objects=None) -> None:
+        """Show one loaded definition in the Destruction FX preview."""
+
+        self._fx_catalog = self._build_fx_catalog(text, objects)
+        if not keep_view:
+            self._fx_changed_assets.clear()
+        if not keep_view or self._fx_source_from_catalog:
+            self._fx_script_sources = set()
+            if self._fx_source_from_catalog:
+                from map_editor import bootstrap
+                from map_editor.core.script_catalog import script_texts
+                scripts = bootstrap.installation().folder("scripts")
+                self._fx_script_sources.update(str((scripts / source).resolve())
+                                               for _body, source in script_texts(scripts, with_source=True))
+                self._fx_script_sources.update(str(path.resolve()) for path in
+                                               (scripts / "Startup.cfg", scripts / "startup.scr") if path.is_file())
+        unit = self._fx_unit_phases(text, block, reference)
+        if keep_view and self.fx_panel.unit.flies:
+            unit = replace(unit, altitude=self.fx_panel.unit.altitude)
+        self.fx_panel.set_context(
+            fx.CONTEXT_WEAPON if unit.weapon else fx.CONTEXT_VEHICLE,
+            fx.extract_fx_document(text, block.start_line, block.end_line),
+            catalog=self._fx_catalog, unit=unit, keep_view=keep_view)
+        self._fx_update_watcher()
+        self._sync_fx_preview()
+
+    def reload_fx_from_file(self) -> None:
+        """Read the definition again from disk and refresh the preview."""
+
+        if (self._active_script_path is None or self._active_script_id is None
+                or self._active_model_reference is None):
+            self.statusBar().showMessage(
+                "Load a vehicle or weapon from a script before reloading.", 5000)
+            return
+        kind = self._active_script_kind
+        objects = None
+        try:
+            if self._fx_source_from_catalog:
+                # Game catalog definitions merge every script of the game.
+                from game_object_catalog import load_game_objects
+                from map_editor import bootstrap
+                objects = load_game_objects(bootstrap.installation())
+                match = next(
+                    (obj for obj in objects
+                     if f"new_{obj.kind}" == kind
+                     and obj.object_id == self._active_script_id), None)
+                if match is None:
+                    raise CollisionScriptError(
+                        f"{kind} {self._active_script_id} is no longer in the game scripts.")
+                text = match.effective_text
+            else:
+                text, _encoding, _bom = read_script_file(self._active_script_path)
+            block = _resolve_patch_target_block(
+                text, kind, self._active_script_id)
+        except (OSError, UnicodeError, CollisionScriptError, RuntimeError) as exc:
+            self.statusBar().showMessage(f"Reload failed: {exc}", 8000)
+            return
+        if self._fx_changed_assets:
+            try:
+                self._reload_fx_assets()
+            except (OSError, ValueError, RuntimeError) as exc:
+                self.statusBar().showMessage(f"Asset reload failed: {exc}", 8000)
+                return
+        reference = next((ref for ref in script_model_references(text)
+                          if ref.block.kind == kind and ref.block.object_id == self._active_script_id),
+                         self._active_model_reference)
+        self._active_model_reference = reference
+        self._load_fx_context(text, block, reference,
+                              keep_view=True, objects=objects)
+        self.statusBar().showMessage(
+            f"Destruction FX reloaded from {self._active_script_path.name}.", 4000)
+
+    def _fx_dependency_paths(self):
+        """Collect loaded model, animation and texture sources plus external FX assets."""
+        paths = set()
+        families = [self.family]
+        families.extend(helper._family_ref for helper in self.viewport._fx_external_cache.values()
+                        if helper is not None)
+        for family in families:
+            if family is None:
+                continue
+            paths.update(str(path.resolve()) for path in
+                         (family.base_path, family.setbas_path, family.external_palette_path) if path)
+            paths.update(str(dep.resolved_path.resolve()) for dep in family.dependencies
+                         if dep.resolved_path is not None)
+            paths.update(str(path.resolve()) for path in family.effect_override_paths.values())
+        unit = self.fx_panel.unit
+        visuals = [unit.normal, unit.dead, unit.megadeth]
+        values = []
+        for item in self.fx_panel.document.items:
+            if isinstance(item, fx.FxBlock):
+                spec = fx.interpret_block(item, self.fx_panel.context)
+                visuals.extend(spec.visuals)
+                if spec.physical_model is not None:
+                    visuals.append(spec.physical_model)
+                if spec.texture:
+                    values.append(spec.texture)
+        for visual in visuals:
+            values.extend(value for value in (visual.mesh3ds, visual.base_path) if value)
+        for value in values:
+            path = _resolve_data_asset_path(value, self._active_script_path, self._active_base_path)
+            if path is not None:
+                paths.add(str(path.resolve()))
+        return paths
+
+    @staticmethod
+    def _fx_file_signature(path):
+        try:
+            stat = Path(path).stat()
+            return stat.st_mtime_ns, stat.st_size
+        except OSError:
+            return None
+
+    def _fx_update_watcher(self) -> None:
+        """Always watch the active FX definition and its loaded dependencies."""
+        watched = self._fx_watcher.files() + self._fx_watcher.directories()
+        if watched:
+            self._fx_watcher.removePaths(watched)
+        self._fx_watch_signatures = {}
+        if not self._is_fx_tab_active() or self._active_script_path is None:
+            self._fx_reload_timer.stop()
+            return
+        paths = {str(self._active_script_path.resolve())} | self._fx_script_sources
+        paths.update(str(Path(vehicle.source).resolve()) for vehicle in self._fx_catalog.values()
+                     if vehicle.source)
+        self._fx_asset_paths = self._fx_dependency_paths()
+        paths.update(self._fx_asset_paths)
+        self._fx_watch_signatures = {path: self._fx_file_signature(path) for path in paths}
+        existing = [path for path in paths if Path(path).is_file()]
+        directories = {str(Path(path).parent) for path in paths if Path(path).parent.is_dir()}
+        if existing or directories:
+            self._fx_watcher.addPaths(existing + sorted(directories))
+
+    def _fx_watched_directory_changed(self, directory):
+        # Atomic saves replace files; directory notifications keep their watches alive.
+        for path, signature in tuple(self._fx_watch_signatures.items()):
+            if str(Path(path).parent) == directory and self._fx_file_signature(path) != signature:
+                self._fx_watched_file_changed(path)
+
+    def _fx_watched_file_changed(self, path: str) -> None:
+        if not self._is_fx_tab_active():
+            return
+        if path in self._fx_asset_paths:
+            self._fx_changed_assets.add(path)
+        self._fx_watch_signatures[path] = self._fx_file_signature(path)
+        self._fx_reload_timer.start()
+
+    def _reload_fx_assets(self):
+        """Refresh rendered assets through the existing loaders, preserving authoring data."""
+        family = self.family
+        if family is not None and family.base_path is not None:
+            path = family.base_path
+            if path.suffix.casefold() == ".3ds":
+                refreshed = _load_3ds_family(path)
+            else:
+                refreshed = _public_dependency("load_asset_family", load_asset_family)(
+                    path, extra_roots=family.search_roots, overrides=family.overrides,
+                    setbas=family.setbas_path)
+            references = list(self._script_unit_references)
+            visual_reference = self._script_unit_visual_reference
+            unit_mode = self._script_unit_mode
+            self.family = refreshed
+            if family.setbas_path and str(family.setbas_path.resolve()) in self._fx_changed_assets:
+                self._vp_embedded = reconstruct_embedded_vps(family.setbas_path)
+                self._vp_table, self._vp_table_source, _warnings = runtime_vp_table(
+                    family.setbas_path, self._vp_embedded)
+            with QSignalBlocker(self.model_tree):
+                self._fill_models(refreshed)
+                if unit_mode:
+                    self._fill_script_units(references, active_visual_reference=visual_reference)
+                    self._select_script_unit_item(self._active_model_reference)
+            self._load_viewport_scope(self.viewport.visible_owners())
+            self._sync_animation_controls()
+        for helper in self.viewport._fx_external_cache.values():
+            if helper is not None:
+                helper.close()
+        self.viewport._fx_external_cache.clear()
+        self.viewport._fx_decal_cache.clear()
+        self.viewport._fx_emitter_cache.clear()
+        self.viewport._fx_tinted_stage_cache.clear()
+        self._fx_changed_assets.clear()
+
+    def _sync_fx_preview(self) -> None:
+        """Enter/leave the FX viewport mode and load the effect VP owners."""
+
+        if not hasattr(self, "fx_panel"):
+            return
+        active = self._is_fx_tab_active()
+        self.fx_panel.transport_bar.setVisible(active)
+        self._fx_owner_map = {
+            vp: owner for vp in self.fx_panel.required_vps()
+            if (owner := self._owner_for_vp(vp)) is not None}
+        if active and self.family is not None:
+            owners = set(self._fx_owner_map.values())
+            if self._current_owner:
+                owners.add(self._current_owner)
+            if owners != (self.viewport.visible_owners() or set()):
+                self._fx_scope = owners
+                self._load_viewport_scope(owners)
+        else:
+            if self.fx_panel.is_playing():
+                self.fx_panel.play_button.setChecked(False)
+            if self._fx_scope is not None:
+                self._fx_scope = None
+                self._load_viewport_scope(
+                    {self._current_owner} if self._current_owner else None)
+        self.fx_panel.set_scene(
+            (0.0, self.viewport.overeof_preview_offset, 0.0), 0.0,
+            self._fx_unit_radius(), transform=self._fx_unit_transform(),
+            overeof=self.project.overeof if self.project.overeof_enabled else 0.)
+        self._fx_update_watcher()
+        definition = (self._active_script_path, self._active_script_kind,
+                      self._active_script_id)
+        if (active and self.family is not None
+                and definition != self._fx_fitted_definition):
+            # Effects are usually far larger than the unit: frame them once
+            # per definition, later camera moves are left to the user.
+            self._fx_fitted_definition = definition
+            self._fit_fx_view()
+        self._push_fx_frame()
+        self._sync_animation_controls()
+
+    def _load_viewport_scope(self, owners) -> None:
+        """Reload the visible owners without moving the camera."""
+
+        camera = self.viewport._camera_state()
+        home = self.viewport._home_camera_state
+        self.viewport.load_family(
+            self.family, owners, keep_camera=True,
+            primary_owner=self._current_owner)
+        self.viewport.set_model_preview_scale(
+            self.project.model_scale_x, self.project.model_scale_y,
+            self.project.model_scale_z)
+        self.viewport.set_ground_alignment(
+            self.project.target_category == VEHICLE,
+            self.project.overeof_enabled, self.project.overeof)
+        self.viewport._set_camera_state(camera)
+        self.viewport._home_camera_state = home
+
+    def _fit_fx_view(self) -> None:
+        simulation = self.fx_panel.simulation
+        extent = simulation.extent() if simulation is not None else None
+        if extent is None:
+            return
+        center, radius = extent
+        if self.fx_panel.follow_unit.isChecked():
+            bounds = self.viewport._owner_bounds.get(self._current_owner)
+            if bounds is not None:
+                center = tuple((bounds[axis] + bounds[axis + 3]) * .5 for axis in range(3))
+                # Leave room around the unit while avoiding the full debris envelope.
+                radius = max(max(bounds[axis + 3] - bounds[axis] for axis in range(3)) * .75, 1.)
+        self.viewport._center = center
+        self.viewport._scale = 1.0 / radius
+        self.viewport._zoom = 1.0
+        self.viewport._pan = QPointF(0.0, 0.0)
+        if self._is_fx_tab_active():
+            self._push_fx_frame()
+        self.viewport._fx_home_camera = self.viewport._camera_state()
+        self.viewport.update()
+
+    def _load_fx_external_model(self, value: str):
+        """Family of an external 3DS/BASE model named by a script path."""
+
+        path = _resolve_data_asset_path(
+            value, self._active_script_path, self._active_base_path)
+        if path is None:
+            return None
+        try:
+            if path.suffix.casefold() == ".3ds":
+                family = _load_3ds_family(path)
+            else:
+                family = _public_dependency("load_asset_family", load_asset_family)(path)
+            QTimer.singleShot(0, self._fx_update_watcher)
+            return family
+        except (OSError, ValueError, RuntimeError):
+            return None
+
+    def _push_fx_frame(self) -> None:
+        """Send the current preview time of the FX tab to the viewport."""
+
+        if not hasattr(self, "fx_panel"):
+            return
+        if not self._is_fx_tab_active():
+            if self.viewport.fx_preview_active:
+                self.viewport.set_fx_preview(active=False)
+            return
+        panel = self.fx_panel
+        items = panel.preview_items()
+        tracked_unit = next((item for item in items if item.kind == "unit"), None)
+        show_unit = panel.show_unit.isChecked()
+        if not show_unit:
+            items = [item for item in items if item.kind != "unit"]
+        # The unit is drawn by its phase items (normal -> dead -> megadeth)
+        # instead of the static model whenever the preview plays a sequence.
+        phased = panel.simulation is not None and panel.simulation.shows_unit
+        particles = []
+        if panel.simulation is not None:
+            emitters = {
+                vp: self.viewport.fx_emitter_specs(owner)
+                for vp, owner in self._fx_owner_map.items()}
+            particles = panel.simulation.particles_at(panel.time_ms, emitters)
+            if not show_unit:
+                particles = [sprite for sprite in particles if sprite.source >= 0]
+        self.viewport.set_fx_preview(
+            active=True, items=items, owner_by_vp=self._fx_owner_map,
+            unit_owners={self._current_owner} if self._current_owner else set(),
+            boxes=panel.offset_boxes(), time_ms=panel.time_ms,
+            show_unit=show_unit and not phased,
+            data_root=_data_root_for_path(
+                self._active_script_path, self._active_base_path),
+            highlight=panel.highlight, particles=particles,
+            external_loader=self._load_fx_external_model)
+        self.viewport.set_fx_follow_unit(
+            panel.follow_unit.isChecked(), tracked_unit, self._current_owner)
 
     def _toggle_cockpit_camera(self) -> None:
         if self._syncing or self.project.target_category != VEHICLE:
@@ -10444,9 +10859,10 @@ class CollisionEditorWindow(QMainWindow):
                 sphere.radius, sphere.visible,
             )
 
+        if tab_index == self.ground_tab_index:
+            return (project.overeof_enabled, project.overeof)
         if tab_index == self.collision_tab_index:
             return (
-                project.overeof_enabled, project.overeof,
                 sphere_state(project.legacy),
                 tuple(sphere_state(sphere) for sphere in project.compound),
                 project.sphere_isolation_active,
@@ -10525,9 +10941,10 @@ class CollisionEditorWindow(QMainWindow):
         self._vehicle_preview_active_edits.clear()
         self._push_undo()
 
-        if tab_index == self.collision_tab_index:
+        if tab_index == self.ground_tab_index:
             self.project.overeof_enabled = baseline.overeof_enabled
             self.project.overeof = baseline.overeof
+        elif tab_index == self.collision_tab_index:
             self.project.legacy = (
                 baseline.legacy.clone() if baseline.legacy is not None
                 else None)
@@ -10862,18 +11279,6 @@ class CollisionEditorWindow(QMainWindow):
         self._set_modified()
         self._sync_all()
 
-
-    def _project_fields_changed(self, *_args):
-        if self._syncing:
-            return
-        self._push_undo()
-        self.project.name = self.name_edit.text()
-        self.project.target_category = self.target_combo.currentData()
-        if self.project.target_category != VEHICLE:
-            self._selected_fire_point = -1
-            self._selected_gun_point = -1
-        self._set_modified()
-        self._sync_all()
 
     def _new_gun_point_scheme_changed(self, _index: int) -> None:
         if self._syncing:
@@ -11355,7 +11760,7 @@ class CollisionEditorWindow(QMainWindow):
         self._syncing = True
         blockers = [
             QSignalBlocker(widget) for widget in (
-                self.name_edit, self.target_combo, self.radius_slider,
+                self.radius_slider,
                 self.radius_spin, self.visible_check,
                 self.model_scale_x_spin, self.model_scale_y_spin,
                 self.model_scale_z_spin, self.overeof_check,
@@ -11373,7 +11778,6 @@ class CollisionEditorWindow(QMainWindow):
                 *self.turret_limit_sliders.values(),
                 *self.turret_limit_spins.values())
         ]
-        self.name_edit.setText(self.project.name)
         self.model_scale_x_spin.setValue(self.project.model_scale_x)
         self.model_scale_y_spin.setValue(self.project.model_scale_y)
         self.model_scale_z_spin.setValue(self.project.model_scale_z)
@@ -11394,14 +11798,16 @@ class CollisionEditorWindow(QMainWindow):
         self.viewport.set_ground_alignment(
             vehicle_mode, self.project.overeof_enabled,
             self.project.overeof)
-        self.target_combo.setCurrentIndex(self.target_combo.findData(self.project.target_category))
         for index in (
+                self.ground_tab_index,
                 self.fire_points_tab_index, self.gun_points_tab_index,
                 self.cockpit_tab_index):
             self.properties_tabs.setTabEnabled(index, vehicle_mode)
+        # Weapons keep the tabs that also apply to projectiles.
         if (not vehicle_mode
                 and self.properties_tabs.currentIndex()
-                not in (self.collision_tab_index, self.collision_shape_tab_index)):
+                not in (self.collision_tab_index, self.collision_shape_tab_index,
+                        self.fx_tab_index)):
             self.properties_tabs.setCurrentIndex(self.collision_tab_index)
 
         cockpit_enabled = vehicle_mode and self.project.cockpit_camera_enabled
@@ -11474,8 +11880,13 @@ class CollisionEditorWindow(QMainWindow):
             == self.collision_shape_tab_index)
         briefing_active = self.properties_tabs.currentIndex() == self.briefing_tab_index
         self.selected_box.setVisible(
-            not cockpit_active and not shape_tab_active and not briefing_active)
-        self.transform_box.setVisible(not shape_tab_active and not briefing_active)
+            not cockpit_active and not shape_tab_active and not briefing_active
+                and not self._is_fx_tab_active())
+        self.transform_box.setVisible(
+            not shape_tab_active and not briefing_active
+            and self.properties_tabs.currentIndex() != self.ground_tab_index
+            and not self._is_fx_tab_active())
+        self._sync_fx_preview()
 
         self.ground_alignment_box.setVisible(vehicle_mode)
         self.overeof_check.setChecked(
@@ -11753,7 +12164,8 @@ class CollisionEditorWindow(QMainWindow):
                         sphere.category == LEGACY and self.project.compound)
                     else "")
         self._refresh_sphere_tree()
-        self._refresh_gun_point_tree()
+        if self.properties_tabs.currentIndex() == self.gun_points_tab_index:
+            self._refresh_gun_point_tree()
         self._refresh_project_summary_menu()
         self.viewport.set_collision_spheres(
             self._preview_spheres(), self._selected,
