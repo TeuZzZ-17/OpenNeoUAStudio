@@ -1,4 +1,4 @@
-"""One Resources menu and one Change Editor menu shared by all Studio tools."""
+"""Shared resources, compatibility and workspace navigation for Studio."""
 
 from PySide6.QtWidgets import QApplication, QMessageBox
 
@@ -13,7 +13,9 @@ def install_workspace_shell(window, key):
     menu_bar = window.menuBar()
     resources = menu_bar.addMenu("Resources")
     resources.addAction("Game Folders", lambda: _edit_resources(window))
-    # Added right after Resources so it sits in the same place in every tool.
+    window.studio_compat_action = menu_bar.addAction("Vanilla Compatibility Checker")
+    window.studio_compat_action.triggered.connect(
+        lambda: _show_compatibility(window, key))
     change = menu_bar.addMenu("Change Editor")
     for option in TOOL_OPTIONS:
         action = change.addAction(option.title)
@@ -23,6 +25,8 @@ def install_workspace_shell(window, key):
         action.setEnabled(not current)
         action.triggered.connect(lambda _checked=False, target=option.key: switch_workspace(window, target))
     window.studio_change_menu = change
+    from studio_compat import install_compatibility_markers
+    install_compatibility_markers(window, key)
 
 
 def _edit_resources(window):
@@ -53,3 +57,10 @@ def switch_workspace(source, key):
         target.deleteLater()
         source.raise_()
         source.activateWindow()
+
+
+def _show_compatibility(window, key):
+    """Show compatibility of the current editor without occupying its panels."""
+    from studio_compat import CompatibilityDialog
+    dialog = CompatibilityDialog(window, key)
+    dialog.exec()
