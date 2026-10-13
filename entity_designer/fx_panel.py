@@ -22,6 +22,7 @@ from PySide6.QtWidgets import (
 
 from entity_designer import destruction_fx as fx
 from entity_designer.fx_audio import FxSoundPlayer
+from resource_status import LIST_BASE, LIST_ALTERNATE, LIST_SELECTED, LIST_HOVER
 
 SPEEDS = (0.1, 0.25, 0.5, 1.0, 2.0, 4.0)
 MODE_COLORS = {
@@ -443,13 +444,14 @@ class DestructionFxPanel(QWidget):
         layout.addWidget(hint)
         self.effects_list = FxEffectsList(self)
         self.effects_list.setItemDelegate(FxEffectDelegate(self.effects_list))
+        self.effects_list.setAlternatingRowColors(True)
         self.effects_list.setStyleSheet(
-            "QListWidget { font-size: 12px; background: #1b1e24; border: 1px solid #343b46; border-radius: 5px; }"
+            f"QListWidget {{ font-size: 12px; background: {LIST_BASE}; alternate-background-color: {LIST_ALTERNATE}; border: 1px solid #343b46; border-radius: 5px; }}"
             "QListWidget::indicator { width: 20px; height: 20px; }"
             "QListWidget::item { padding: 8px 5px; border-bottom: 1px solid #303743; color: #edf1f7; }"
-            "QListWidget::item:hover:!selected { background: #234e64; color: #ffffff; }"
-            "QListWidget::item:selected { background: #006d96; color: #ffffff; }"
-            "QListWidget::item:selected:!active { background: #006d96; color: #ffffff; }")
+            f"QListWidget::item:hover:!selected {{ background: {LIST_HOVER}; color: #ffffff; }}"
+            f"QListWidget::item:selected {{ background: {LIST_SELECTED}; color: #ffffff; }}"
+            f"QListWidget::item:selected:!active {{ background: {LIST_SELECTED}; color: #ffffff; }}")
         self.effects_list.setToolTip("Click text to select. Click or drag over checkboxes to show/hide. "
                                      "Ctrl/Shift selects multiple effects; Space toggles their visibility.")
         self.effects_list.setMouseTracking(True)

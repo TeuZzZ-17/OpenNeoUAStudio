@@ -634,6 +634,10 @@ class AssemblyWindow(QMainWindow):
             self._show_viewport_context_menu)
 
         self.asset_tree = QTreeWidget()
+        from resource_status import (
+            LIST_DEPENDENCY_SELECTED, use_standard_list_style)
+        use_standard_list_style(
+            self.asset_tree, selected_color=LIST_DEPENDENCY_SELECTED)
         self.asset_tree.setSelectionMode(
             QAbstractItemView.SelectionMode.ExtendedSelection)
         self.asset_tree.setHeaderLabels(["Asset", "Status", "Source / Path"])
@@ -642,16 +646,9 @@ class AssemblyWindow(QMainWindow):
         self.asset_tree.setAnimated(False)
         self.asset_tree.setIconSize(QSize(10, 10))
         self.asset_tree.setStyleSheet(
-            "QTreeWidget::item { padding-top: 0px; padding-bottom: 0px; "
+            self.asset_tree.styleSheet()
+            + "QTreeWidget::item { padding-top: 0px; padding-bottom: 0px; "
             "padding-left: 1px; padding-right: 1px; }"
-            # Persistent model dependencies: muted sage green, intentionally
-            # distinct from ordinary grey hover feedback and from error red.
-            "QTreeWidget::item:selected { "
-            "background-color: rgba(74, 112, 84, 180); }"
-            "QTreeWidget::item:selected:hover { "
-            "background-color: rgba(74, 112, 84, 180); }"
-            "QTreeWidget::item:hover:!selected { "
-            "background-color: rgba(255, 255, 255, 24); }"
         )
         asset_header = self.asset_tree.header()
         asset_header.setSectionsMovable(False)
@@ -682,6 +679,7 @@ class AssemblyWindow(QMainWindow):
         self.tree_search.setPlaceholderText("Filter objects/textures")
         self.tree_search.textChanged.connect(self._filter_asset_tree)
         self.texture_list = QListWidget()
+        use_standard_list_style(self.texture_list)
         self.texture_list.setIconSize(QPixmap(96, 96).size())
         self.texture_list.setSelectionMode(
             QAbstractItemView.SelectionMode.ExtendedSelection)
@@ -704,6 +702,8 @@ class AssemblyWindow(QMainWindow):
         self.setbas_tree.setHeaderLabels(["Resource", "Payload", "VP"])
         from resource_status import use_resource_delegate
         use_resource_delegate(self.setbas_tree)
+        self.setbas_tree.setSelectionBehavior(
+            QAbstractItemView.SelectionBehavior.SelectRows)
         self.setbas_tree.setSelectionMode(
             QAbstractItemView.SelectionMode.ExtendedSelection)
         select_all_setbas = QAction(self.setbas_tree)
@@ -742,8 +742,6 @@ class AssemblyWindow(QMainWindow):
         self.setbas_tree.setColumnWidth(2, 130)
         self.setbas_tree.setHorizontalScrollBarPolicy(
             Qt.ScrollBarPolicy.ScrollBarAsNeeded)
-        self.setbas_label = QLabel("No SET.BAS loaded.")
-        self.setbas_label.setWordWrap(True)
         self.poly_uv_label = QLabel("Select a polygon in the viewport.")
         self.poly_uv_label.setMinimumHeight(200)
         self.fx_combo = QComboBox()
@@ -751,6 +749,7 @@ class AssemblyWindow(QMainWindow):
             "Choose an FX element to select it and edit its vertices.")
         self.fx_combo.currentIndexChanged.connect(self._on_fx_selected)
         self.blocks_list = QListWidget()
+        use_standard_list_style(self.blocks_list)
         self.blocks_list.currentRowChanged.connect(self._on_block_selected)
         self.material_copy_button = QPushButton("Copy Material")
         self.material_copy_button.clicked.connect(self._copy_material_block)
@@ -769,6 +768,7 @@ class AssemblyWindow(QMainWindow):
         self.repair_planar_button = QPushButton("Create Planar Mapping")
         self.repair_planar_button.clicked.connect(self._plan_planar)
         self.repair_preview = QListWidget()
+        use_standard_list_style(self.repair_preview)
         self.repair_apply_button = QPushButton("Apply")
         self.repair_apply_button.clicked.connect(self._apply_repair_in_memory)
         self.repair_revert_button = QPushButton("Revert")
@@ -776,10 +776,13 @@ class AssemblyWindow(QMainWindow):
         self.repair_save_button = QPushButton("Export Repaired BASE")
         self.repair_save_button.clicked.connect(self._save_repaired_as)
         self.chunk_tree = QTreeWidget()
+        use_standard_list_style(self.chunk_tree)
         self.chunk_tree.setHeaderLabels(["Chunk", "Size", "Offset"])
         self.warning_list = QListWidget()
         self.checks_list = QListWidget()
         self.log_list = QListWidget()
+        for view in (self.warning_list, self.checks_list, self.log_list):
+            use_standard_list_style(view)
         for widget in (
                 self.blocks_list, self.repair_preview,
                 self.warning_list, self.checks_list, self.log_list):
@@ -1569,7 +1572,6 @@ class AssemblyWindow(QMainWindow):
         setbas_layout = QVBoxLayout(setbas_panel)
         setbas_layout.setContentsMargins(3, 5, 3, 4)
         setbas_layout.setSpacing(4)
-        setbas_layout.addWidget(self.setbas_label)
         from PySide6.QtWidgets import QLineEdit
         self.setbas_search = QLineEdit()
         self.setbas_search.setPlaceholderText(
@@ -2862,7 +2864,6 @@ class AssemblyWindow(QMainWindow):
         # Resource browsers and diagnostics belonging to the closed document.
         self.setbas_tree.clear()
         self.setbas_search.clear()
-        self.setbas_label.setText("No SET.BAS loaded.")
         self.asset_tree.clear()
         self.tree_search.clear()
         self.texture_list.clear()
@@ -3143,11 +3144,6 @@ class AssemblyWindow(QMainWindow):
     def _fill_setbas(self, archive: SetBasArchive) -> None:
         self.setbas_tree.clear()
         census = archive.census()
-        summary = ", ".join(f"{cls}: {count}" for cls, count in census.items())
-        self.setbas_label.setText(
-            f"Archive loaded as READ-ONLY resource provider:\n{archive.path}\n"
-            f"{len(archive.resources)} EMRS resources ({summary})."
-        )
         groups: dict[str, QTreeWidgetItem] = {}
         class_ids = ["base.class"] + [
             class_id for class_id in census
@@ -5956,6 +5952,8 @@ class AssemblyWindow(QMainWindow):
         info.setWordWrap(True)
         layout.addWidget(info)
         tree = QTreeWidget()
+        from resource_status import use_standard_list_style
+        use_standard_list_style(tree)
         tree.setHeaderLabels(["Reference", "Native name", "Writer support"])
         tree.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         tree.setUniformRowHeights(True)

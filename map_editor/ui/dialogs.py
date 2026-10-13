@@ -197,6 +197,8 @@ class LevelInfoPanel(QWidget):
         sky_label.setAlignment(Qt.AlignmentFlag.AlignHCenter)
         layout.addWidget(sky_label)
         self.sky_list = QListWidget()
+        from resource_status import use_standard_list_style
+        use_standard_list_style(self.sky_list)
         self.sky_list.setViewMode(QListWidget.ViewMode.IconMode)
         self.sky_list.setFlow(QListWidget.Flow.LeftToRight)
         self.sky_list.setWrapping(True)

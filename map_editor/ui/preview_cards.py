@@ -3,6 +3,7 @@ from PySide6.QtCore import QPointF, QRect, QSize, Qt, Signal
 from PySide6.QtGui import QColor, QFont, QPen, QTextLayout, QTextOption
 from PySide6.QtWidgets import (QAbstractItemView, QHBoxLayout, QLabel, QListWidget, QLayout, QScrollArea,
                               QPushButton, QStyledItemDelegate, QStyle, QStyleOptionButton)
+from resource_status import LIST_BASE, LIST_SELECTED, LIST_HOVER
 
 DETAIL_ROLE = int(Qt.ItemDataRole.UserRole) + 1
 COLOR_ROLE = DETAIL_ROLE + 1
@@ -19,18 +20,16 @@ def actor_scroll_area(panel):
     return scroll
 
 
-def paint_card_background(painter, card, color, selected):
+def paint_card_background(painter, card, color, selected, hovered=False):
     """Draw the shared resource card background and selection border."""
     if selected:
-        base = QColor(43, 45, 49)
-        tint = 0.24
-        background = QColor(*(round(base_value * (1 - tint) + accent_value * tint)
-                              for base_value, accent_value in zip(
-                                  (base.red(), base.green(), base.blue()),
-                                  (color.red(), color.green(), color.blue()))))
+        background = QColor(LIST_SELECTED)
         painter.setPen(QPen(QColor(242, 247, 255), 2))
+    elif hovered:
+        background = QColor(LIST_HOVER)
+        painter.setPen(Qt.PenStyle.NoPen)
     else:
-        background = QColor(43, 43, 43)
+        background = QColor(LIST_BASE)
         painter.setPen(Qt.PenStyle.NoPen)
     painter.setBrush(background)
     painter.drawRoundedRect(card, 5, 5)
@@ -77,7 +76,8 @@ class ResourceCardDelegate(QStyledItemDelegate):
         painter.save()
         color = index.data(COLOR_ROLE) or QColor(175, 175, 175)
         selected = bool(option.state & QStyle.StateFlag.State_Selected)
-        paint_card_background(painter, card, color, selected)
+        paint_card_background(painter, card, color, selected,
+                              bool(option.state & QStyle.StateFlag.State_MouseOver))
         painter.setPen(Qt.PenStyle.NoPen)
         painter.setBrush(color)
         painter.drawRoundedRect(QRect(card.left(), card.top() + 7, 3, card.height() - 14), 1, 1)
@@ -126,6 +126,7 @@ class PreviewList(QListWidget):
             font.setPointSizeF(max(11, font.pointSizeF() + 2))
             self.setFont(font)
         self.setItemDelegate(ResourceCardDelegate(self))
+        self.setMouseTracking(True)
         self.setVerticalScrollMode(QAbstractItemView.ScrollMode.ScrollPerPixel)
         self.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         self.setSpacing(3)

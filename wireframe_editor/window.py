@@ -415,6 +415,8 @@ class WireframeEditorWindow(QMainWindow):
         selected_elements_layout.setContentsMargins(8, 6, 8, 8)
         selected_elements_layout.setSpacing(4)
         self.selected_elements_list.setAlternatingRowColors(True)
+        from resource_status import use_standard_list_style
+        use_standard_list_style(self.selected_elements_list)
         self.selected_elements_list.setMinimumHeight(150)
         self.selected_elements_list.setSizePolicy(
             QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding
