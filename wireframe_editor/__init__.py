@@ -1,4 +1,4 @@
-"""Integrated OpenNeoUAStudio Wireframe Editor."""
+"""Wireframe Editor workspace: edits the 2D SKLT wireframe format."""
 
 from .window import WireframeEditorWindow
 

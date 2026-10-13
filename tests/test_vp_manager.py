@@ -7,7 +7,7 @@ from unittest.mock import patch
 
 os.environ.setdefault("PYTHONDONTWRITEBYTECODE", "1")
 
-from vp_manager import (
+from studio.assets.visproto import (
     AMBIGUOUS_VP,
     EmbeddedVPEntry,
     VPConflictError,
@@ -295,7 +295,7 @@ class EmbeddedVPTests(unittest.TestCase):
         parsed = SimpleNamespace(
             root=SimpleNamespace(kids=[visproto, unrelated]))
 
-        with patch("vp_manager.parse_base_file", return_value=parsed):
+        with patch("studio.assets.visproto.parse_base_file", return_value=parsed):
             embedded = reconstruct_embedded_vps("SET.BAS")
 
         self.assertEqual(embedded.container_source_offset, 100)
@@ -315,7 +315,7 @@ class EmbeddedVPTests(unittest.TestCase):
             self._object("VP_ONE", "Skeleton/ONE.sklt", 110),
             self._object("dummy", "Skeleton/DUMMY.sklt", 120),
         ]))
-        with patch("vp_manager.parse_base_file", return_value=parsed):
+        with patch("studio.assets.visproto.parse_base_file", return_value=parsed):
             table = load_visproto_base("Loose/VISPROTO.BASE")
         self.assertEqual(
             [entry.base_name for entry in table],
@@ -324,7 +324,7 @@ class EmbeddedVPTests(unittest.TestCase):
 
     def test_missing_first_child_is_rejected_without_guessing(self):
         parsed = SimpleNamespace(root=SimpleNamespace(kids=[]))
-        with patch("vp_manager.parse_base_file", return_value=parsed):
+        with patch("studio.assets.visproto.parse_base_file", return_value=parsed):
             with self.assertRaises(VPEmbeddedError):
                 reconstruct_embedded_vps("SET.BAS")
 

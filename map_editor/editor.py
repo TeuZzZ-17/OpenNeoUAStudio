@@ -49,11 +49,11 @@ def create_window(argv=None, parent=None):
     if path:
         doc = load_ldf(path)
     else:
-        from studio_session import selected_set
+        from studio.ui.shell import selected_set
         doc = LdfDocument(mw=15, mh=15, set_number=selected_set())
 
     window = MainWindow(doc, path)
-    from studio_shell import install_workspace_shell
+    from studio.ui.shell import install_workspace_shell
     install_workspace_shell(window, "map_editor")
     if parent is not None:
         window.setParent(parent, Qt.WindowType.Window)

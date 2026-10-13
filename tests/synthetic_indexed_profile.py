@@ -5,8 +5,8 @@ from __future__ import annotations
 from pathlib import Path
 import struct
 
-from asset_resolver import ResolvedFile
-from ilbm_parser import parse_pal_file
+from studio.exchange.portable import ResolvedFile
+from studio.formats.images import parse_pal_file
 
 
 def _chunk(tag: bytes, payload: bytes) -> bytes:

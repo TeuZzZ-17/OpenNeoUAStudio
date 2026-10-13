@@ -1,4 +1,3 @@
-from pathlib import Path
 import os
 
 from PySide6.QtGui import QImage

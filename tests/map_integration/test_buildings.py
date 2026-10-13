@@ -83,7 +83,6 @@ def test_installation_scripts_include_scr_and_buildings():
 
 def test_building_tool_paints_sector_and_script_id_with_undo(app):
     from PySide6.QtCore import Qt
-    from map_editor.core.ldf_model import LdfDocument
     from map_editor.ui.main_window import MainWindow
     win = MainWindow()
     win._icons.stop()
@@ -115,7 +114,6 @@ def test_building_tool_paints_sector_and_script_id_with_undo(app):
 
 
 def test_building_overlay_paints_without_errors(app):
-    from map_editor.core.ldf_model import LdfDocument
     from map_editor.ui.main_window import MainWindow
     win = MainWindow()
     win._icons.stop()

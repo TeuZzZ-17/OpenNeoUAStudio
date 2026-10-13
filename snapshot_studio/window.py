@@ -6,7 +6,6 @@ from pathlib import Path
 
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (
-    QComboBox,
     QDoubleSpinBox,
     QFrame,
     QGroupBox,
@@ -16,16 +15,12 @@ from PySide6.QtWidgets import (
     QMessageBox,
     QPushButton,
     QToolBar,
-    QWidget,
 )
 
-from assembly_window import AssemblyWindow
-from map_editor import bootstrap
-from set_tabs import SetBasMixin
-from entity_list import EntityListMixin
-from editor_widgets import (
-    ViewportWidthScrollArea as _ViewportWidthScrollArea,
-)
+from studio.workbench.window import AssemblyWindow
+from studio.ui.tabs import SetBasMixin
+from studio.ui.browsers import EntityListMixin
+from studio.ui.widgets import ViewportWidthScrollArea as _ViewportWidthScrollArea
 from snapshot_studio.batch_export import VPSnapshotBatchPanel
 
 
@@ -157,7 +152,7 @@ class SnapshotStudioWindow(EntityListMixin, SetBasMixin, AssemblyWindow):
         self._right_tabs.setCurrentWidget(self._snapshot_scroll)
 
     def reload_game_resources(self) -> None:
-        from game_visuals import clear_visual_cache
+        from studio.assets.catalog import clear_visual_cache
         clear_visual_cache()
         self._reload_entity_resources()
         self._load_bas_for_set(self._set_combo.currentData() or 1)

@@ -7,8 +7,8 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 from PySide6.QtGui import QColor, QSurfaceFormat
 from PySide6.QtWidgets import QApplication
 
-import gpu_widget
-from gpu_widget import AcceleratedWidget
+import studio.rendering.gpu as gpu_widget
+from studio.rendering.gpu import AcceleratedWidget
 
 
 class _FormatProbe:
@@ -79,8 +79,8 @@ class AcceleratedWidgetTests(unittest.TestCase):
             patch.dict(os.environ, {"NME_RENDERER": "gpu"}),
             patch.object(gpu_widget.QGuiApplication, "platformName",
                          return_value="windows"),
-            patch("gpu_widget.QOffscreenSurface", return_value=surface),
-            patch("gpu_widget.QOpenGLContext", return_value=context),
+            patch("studio.rendering.gpu.QOffscreenSurface", return_value=surface),
+            patch("studio.rendering.gpu.QOpenGLContext", return_value=context),
         ):
             widget = _PaintProbe()
 
@@ -92,8 +92,8 @@ class AcceleratedWidgetTests(unittest.TestCase):
     def test_probe_rejects_context_below_opengl_33(self):
         surface, context = self._probe_mocks(major=3, minor=2)
         with (
-            patch("gpu_widget.QOffscreenSurface", return_value=surface),
-            patch("gpu_widget.QOpenGLContext", return_value=context),
+            patch("studio.rendering.gpu.QOffscreenSurface", return_value=surface),
+            patch("studio.rendering.gpu.QOpenGLContext", return_value=context),
         ):
             self.assertFalse(gpu_widget._has_opengl_33_context())
 
@@ -106,8 +106,8 @@ class AcceleratedWidgetTests(unittest.TestCase):
         context_type = Mock(return_value=context)
         context_type.currentContext.return_value = current
         with (
-            patch("gpu_widget.QOffscreenSurface", return_value=surface),
-            patch("gpu_widget.QOpenGLContext", context_type),
+            patch("studio.rendering.gpu.QOffscreenSurface", return_value=surface),
+            patch("studio.rendering.gpu.QOpenGLContext", context_type),
         ):
             self.assertTrue(gpu_widget._has_opengl_33_context())
 

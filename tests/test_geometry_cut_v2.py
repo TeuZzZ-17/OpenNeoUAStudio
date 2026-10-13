@@ -10,12 +10,12 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 from PySide6.QtWidgets import QApplication, QMessageBox
 
-from assembly_window import AssemblyWindow
-from asset_family import AssetFamily, FamilyObject, MaterialGroup
-from base_mapping_editor import MappingIndex
-from base_parser import AttsEntry, parse_base_bytes
-from geometry_editor import build_geometry_clipboard
-from sklt_parser import (
+from studio.workbench.window import AssemblyWindow
+from studio.assets.family import AssetFamily, FamilyObject, MaterialGroup
+from studio.assets.mapping import MappingIndex
+from studio.formats.base_format import AttsEntry, parse_base_bytes
+from studio.rendering.geometry import build_geometry_clipboard
+from studio.formats.sklt import (
     create_minimal_sklt_model,
     parse_sklt_file,
     save_sklt_with_poo2_pol2_structure,

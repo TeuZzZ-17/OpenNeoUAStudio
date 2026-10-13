@@ -211,9 +211,3 @@ def load_building_files(scripts_dir: Path, extra: str = '') -> dict[int, Buildin
     return merged
 
 
-def sec_type_index(definitions: dict[int, BuildingDef]) -> dict[int, list[int]]:
-    index: dict[int, list[int]] = {}
-    for bid, definition in definitions.items():
-        if definition.sec_type:
-            index.setdefault(definition.sec_type, []).append(bid)
-    return {key: sorted(value) for key, value in index.items()}

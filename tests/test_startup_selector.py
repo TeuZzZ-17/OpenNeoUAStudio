@@ -9,7 +9,7 @@ from PySide6.QtGui import QWheelEvent
 from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication, QAbstractScrollArea, QSizePolicy
 
-from startup_selector import TOOL_OPTIONS, StartupToolSelector, _ToolCard
+from studio.ui.shell import TOOL_OPTIONS, StartupToolSelector, _ToolCard
 
 
 class StartupToolSelectorTests(unittest.TestCase):
@@ -19,7 +19,7 @@ class StartupToolSelectorTests(unittest.TestCase):
 
     def setUp(self):
         # Resource validation has its own tests; these check tool navigation.
-        validation = patch("studio_resources.ResourcesPanel.apply", return_value=object())
+        validation = patch("studio.ui.shell.ResourcesPanel.apply", return_value=object())
         validation.start()
         self.addCleanup(validation.stop)
 

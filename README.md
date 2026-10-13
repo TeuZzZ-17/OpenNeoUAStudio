@@ -29,6 +29,8 @@ python main.py
 
 A precompiled Windows executable may also be included in the repository for convenience.
 
+For a map of the source code (folders, shared layers, where each editor lives) see [ARCHITECTURE.md](ARCHITECTURE.md).
+
 ## License
 
 Copyright (C) 2025-2026 TeuZzZ-17

@@ -191,7 +191,7 @@ def set_item_key_road(doc, slot, index, road):
 
 def remove_special(doc, kind, slot, buildings=None):
     store = special_store(doc, kind)
-    old = store[slot]
+    store[slot]  # fails early on an unknown slot
     # All special kinds obey the same cleanup rule on removal.
     values = {'x': -1, 'y': -1}
     if kind == 'item':

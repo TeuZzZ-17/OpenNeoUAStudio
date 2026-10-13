@@ -11,34 +11,34 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import QApplication, QMessageBox
 
-from assembly_window import AssemblyWindow
-from asset_family import AssetFamily, FamilyObject, rebuild_materials
-from anm_parser import parse_anm_bytes
-from base_mapping_editor import MappingIndex
-from base_parser import AmeshBlock, AttsEntry, parse_base_bytes
-from fx_element_editor import (
+from studio.workbench.window import AssemblyWindow
+from studio.assets.family import AssetFamily, FamilyObject, rebuild_materials
+from studio.formats.animation import parse_anm_bytes
+from studio.assets.mapping import MappingIndex
+from studio.formats.base_format import AmeshBlock, parse_base_bytes
+from studio.rendering.geometry import (
     append_fx_element_clipboard,
     build_fx_element_clipboard,
     detect_fx_elements,
 )
-from geometry_editor import (
+from studio.rendering.geometry import (
     GeometryClipboardError,
     apply_delete_geometry,
     append_geometry_clipboard,
     build_geometry_clipboard,
     plan_delete_geometry,
 )
-from polygon_reference_graph import (
+from studio.assets.mapping import (
     build_polygon_reference_graph,
     diagnose_polygon_references,
     plan_polygon_renumber,
 )
-from sklt_parser import (
+from studio.formats.sklt import (
     create_minimal_sklt_model,
     parse_sklt_file,
     save_sklt_with_poo2_pol2_structure,
 )
-from ilbm_parser import parse_ilbm_bytes
+from studio.formats.images import parse_ilbm_bytes
 from tests.synthetic_indexed_profile import attach_synthetic_indexed_profile
 
 

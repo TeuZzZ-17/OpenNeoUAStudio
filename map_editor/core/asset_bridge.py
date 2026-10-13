@@ -1,3 +1,7 @@
+"""Bridge to the Studio asset readers: loads the resources of one Set in the order the game
+uses (loose files first, then SET.BAS).
+"""
+
 from __future__ import annotations
 
 from pathlib import Path
@@ -6,10 +10,9 @@ from .. import bootstrap
 
 bootstrap.ensure_studio_on_path()
 
-from asset_family import AssetFamily, FamilyObject, load_asset_family  # noqa: E402
-from setbas_reader import SetBasArchive, read_setbas  # noqa: E402
-from vp_manager import normalize_base_name  # noqa: E402
-from sklt_parser import parse_sklt_bytes  # noqa: E402,F401
+from studio.assets.family import AssetFamily, FamilyObject, load_asset_family
+from studio.formats.setbas import SetBasArchive, read_setbas
+from studio.assets.visproto import normalize_base_name
 
 from .set_sdf_parser import SetSdf, parse_set_sdf  # noqa: E402
 

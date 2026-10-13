@@ -9,13 +9,17 @@ from contextlib import contextmanager, nullcontext
 from unittest.mock import MagicMock, patch
 import zipfile
 
-from asset_family import load_asset_family, rebuild_materials
-from asset_family_package import MANIFEST_NAME, PackageEntry, validate_family_package, write_package_manifest
-from base_parser import parse_base_bytes
-from onua3d_export import MANIFEST, _Glb, build_scene, write_onua3d
-from onua3d_identity import ATTRIBUTE, IDENTITY_CONTRACT, vertex_identity_mapping
-from onua3d_import import Onua3dImportError, import_onua3d, validate_scene_positions
-from sklt_parser import parse_sklt_file
+from studio.assets.family import load_asset_family, rebuild_materials
+from studio.exchange.portable import MANIFEST_NAME
+from studio.assets.family import PackageEntry, validate_family_package, write_package_manifest
+from studio.formats.base_format import parse_base_bytes
+from studio.exchange.portable import MANIFEST
+from studio.exchange.onua3d import _Glb, build_scene, write_onua3d
+from studio.exchange.portable import ATTRIBUTE, IDENTITY_CONTRACT, vertex_identity_mapping
+from studio.exchange.portable import Onua3dImportError
+from studio.exchange.onua3d import import_onua3d
+from studio.exchange.portable import validate_scene_positions
+from studio.formats.sklt import parse_sklt_file
 from tests import test_onua3d_export as fixture
 from tests.test_onua3d_identity_blender import reorder_scene
 from tests.test_asset_family_package import _chunk, _form
@@ -215,7 +219,7 @@ class Onua3dImportTests(unittest.TestCase):
         self.assertEqual(sentinel.read_text(), 'keep')
 
     def test_unsafe_zip_member_is_refused_before_extraction(self):
-        from asset_family_package import AssetFamilyPackageError
+        from studio.exchange.portable import AssetFamilyPackageError
         source = self.root / 'unsafe.onua3d'
         for name in ('ua_family/../escape.sklt', 'ua_family/NUL.sklt', '/absolute.sklt'):
             with zipfile.ZipFile(source, 'w') as archive: archive.writestr(name, b'bad')
@@ -244,10 +248,10 @@ class Onua3dImportTests(unittest.TestCase):
         self.assertIn(window.import_onua3d_action, window.file_import_menu.actions())
         destination = self.root / 'ui_result'
         destination.mkdir()
-        with patch('assembly_window.QFileDialog.getOpenFileName', return_value=(str(self.package), '')), \
-                patch('assembly_window.QFileDialog.getExistingDirectory', return_value=str(destination)), \
+        with patch('studio.workbench.window.QFileDialog.getOpenFileName', return_value=(str(self.package), '')), \
+                patch('studio.workbench.window.QFileDialog.getExistingDirectory', return_value=str(destination)), \
                 patch.object(window, '_confirm_discard_geometry', return_value=True), \
-                patch('assembly_window.QMessageBox.critical') as errors:
+                patch('studio.workbench.window.QMessageBox.critical') as errors:
             window.import_onua3d_action.trigger()
             errors.assert_not_called()
             loaded = window._family
@@ -259,10 +263,10 @@ class Onua3dImportTests(unittest.TestCase):
 
     def test_ui_discard_cancel_runs_prepare_but_never_materializes(self):
         window = fixture.Onua3dTests.window(self)
-        with patch('assembly_window.QFileDialog.getOpenFileName', return_value=(str(self.package), '')), \
+        with patch('studio.workbench.window.QFileDialog.getOpenFileName', return_value=(str(self.package), '')), \
                 patch.object(window, '_confirm_discard_geometry', return_value=False), \
-                patch('assembly_window.QFileDialog.getExistingDirectory') as destination, \
-                patch('onua3d_import.prepare_onua3d') as prepare:
+                patch('studio.workbench.window.QFileDialog.getExistingDirectory') as destination, \
+                patch('studio.exchange.onua3d.prepare_onua3d') as prepare:
             prepared = MagicMock()
             prepare.return_value = nullcontext(prepared)
             window.import_onua3d_action.trigger()
@@ -276,7 +280,7 @@ class Onua3dImportTests(unittest.TestCase):
         destination = self.root / 'ordered'
         destination.mkdir()
         events = []
-        from onua3d_import import prepare_onua3d as real_prepare
+        from studio.exchange.onua3d import prepare_onua3d as real_prepare
 
         @contextmanager
         def tracked_prepare(source):
@@ -288,11 +292,11 @@ class Onua3dImportTests(unittest.TestCase):
             events.append('destination-dialog')
             return str(destination)
 
-        with patch('assembly_window.QFileDialog.getOpenFileName', return_value=(str(self.package), '')), \
-                patch('assembly_window.QFileDialog.getExistingDirectory', side_effect=destination_dialog), \
+        with patch('studio.workbench.window.QFileDialog.getOpenFileName', return_value=(str(self.package), '')), \
+                patch('studio.workbench.window.QFileDialog.getExistingDirectory', side_effect=destination_dialog), \
                 patch.object(window, '_confirm_discard_geometry', return_value=True), \
-                patch('onua3d_import.prepare_onua3d', side_effect=tracked_prepare), \
-                patch('assembly_window.QMessageBox.critical') as errors:
+                patch('studio.exchange.onua3d.prepare_onua3d', side_effect=tracked_prepare), \
+                patch('studio.workbench.window.QMessageBox.critical') as errors:
             window.import_onua3d_action.trigger()
             errors.assert_not_called()
         self.assertEqual(events[:2], ['prepared', 'destination-dialog'])
@@ -300,10 +304,10 @@ class Onua3dImportTests(unittest.TestCase):
 
     def test_ui_invalid_package_never_opens_destination_dialog(self):
         window = fixture.Onua3dTests.window(self)
-        with patch('assembly_window.QFileDialog.getOpenFileName', return_value=(str(self.package), '')), \
-                patch('assembly_window.QFileDialog.getExistingDirectory') as destination, \
-                patch('onua3d_import.prepare_onua3d', side_effect=Onua3dImportError('invalid package')), \
-                patch('assembly_window.QMessageBox.critical') as errors:
+        with patch('studio.workbench.window.QFileDialog.getOpenFileName', return_value=(str(self.package), '')), \
+                patch('studio.workbench.window.QFileDialog.getExistingDirectory') as destination, \
+                patch('studio.exchange.onua3d.prepare_onua3d', side_effect=Onua3dImportError('invalid package')), \
+                patch('studio.workbench.window.QMessageBox.critical') as errors:
             window.import_onua3d_action.trigger()
             destination.assert_not_called()
             errors.assert_called_once()
@@ -312,10 +316,10 @@ class Onua3dImportTests(unittest.TestCase):
     def test_ui_destination_cancel_preserves_loaded_document(self):
         window = fixture.Onua3dTests.window(self)
         prepared = MagicMock()
-        with patch('assembly_window.QFileDialog.getOpenFileName', return_value=(str(self.package), '')), \
-                patch('assembly_window.QFileDialog.getExistingDirectory', return_value=''), \
+        with patch('studio.workbench.window.QFileDialog.getOpenFileName', return_value=(str(self.package), '')), \
+                patch('studio.workbench.window.QFileDialog.getExistingDirectory', return_value=''), \
                 patch.object(window, '_confirm_discard_geometry', return_value=True), \
-                patch('onua3d_import.prepare_onua3d', return_value=nullcontext(prepared)):
+                patch('studio.exchange.onua3d.prepare_onua3d', return_value=nullcontext(prepared)):
             window.import_onua3d_action.trigger()
         prepared.materialize.assert_not_called()
         self.assertIs(window._family, self.family)

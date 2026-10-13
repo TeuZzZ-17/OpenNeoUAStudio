@@ -3,10 +3,10 @@ from __future__ import annotations
 import copy
 import unittest
 
-from anm_parser import VanmData, VanmFrame
-from indexed_renderer import IndexedTables
-from onua3d_export import build_scene
-from onua3d_preview import (
+from studio.formats.animation import VanmData, VanmFrame
+from studio.rendering.indexed import IndexedTables
+from studio.exchange.onua3d import build_scene
+from studio.exchange.onua3d import (
     TICKS_PER_SECOND,
     tracy_rgba_table,
     vanm_timeline,
@@ -14,7 +14,7 @@ from onua3d_preview import (
     surface_image,
 )
 from tests import test_onua3d_export as export_fixtures
-from asset_family_package import AssetFamilyPackageError
+from studio.exchange.portable import AssetFamilyPackageError
 
 
 class Onua3dFidelityTests(unittest.TestCase):
@@ -144,7 +144,7 @@ class Onua3dFidelityTests(unittest.TestCase):
         shader = bytearray(bytes(range(256)) * 256)
         shader[128 * 256 + 8] = 12
         tables = IndexedTables(tuple((i, i, i) for i in range(256)), bytes(shader), bytes(range(256)) * 256)
-        from indexed_renderer import IndexedSurface
+        from studio.rendering.indexed import IndexedSurface
         surface = IndexedSurface("Texture:STATIC.ILB", "texture", b"\x08", 1, 1, None,
                                  "gradient", 128, "none", "linear")
         qimage, _metadata = surface_image(image, surface, tables)
@@ -158,7 +158,7 @@ class Onua3dFidelityTests(unittest.TestCase):
         for background in range(256):
             tracy[background * 256] = background
         tables = IndexedTables(tuple((i, i, i) for i in range(256)), identity, bytes(tracy))
-        from indexed_renderer import IndexedSurface
+        from studio.rendering.indexed import IndexedSurface
         surface = IndexedSurface("Texture:STATIC.ILB", "texture", image.pixels, 2, 1, None,
                                  "none", 0, "flat", "linear")
         qimage, metadata = surface_image(image, surface, tables, tracy_rgba_table(tables))

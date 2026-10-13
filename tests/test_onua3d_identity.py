@@ -6,12 +6,16 @@ import unittest
 from unittest.mock import patch
 import zipfile
 
-from asset_family import rebuild_materials
-from asset_family_package import family_semantic_snapshot, validate_family_package
-from onua3d_export import MANIFEST, build_scene, write_onua3d
-from onua3d_identity import (
-    ATTRIBUTE, IDENTITY_CONTRACT, VertexIdentityError,
-    canonical_vertex_positions, vertex_identity_mapping,
+from studio.assets.family import rebuild_materials
+from studio.assets.family import family_semantic_snapshot, validate_family_package
+from studio.exchange.portable import MANIFEST
+from studio.exchange.onua3d import build_scene, write_onua3d
+from studio.exchange.portable import (
+    ATTRIBUTE,
+    IDENTITY_CONTRACT,
+    VertexIdentityError,
+    canonical_vertex_positions,
+    vertex_identity_mapping,
 )
 from tests import test_onua3d_export as fixtures
 from tests import test_onua3d_fidelity as fidelity_fixtures
@@ -151,7 +155,7 @@ class VertexIdentityTests(unittest.TestCase):
 
     def test_float_id_limit_fails_without_replacing_destination(self):
         target = self.root / "keep.onua3d"; target.write_bytes(b"old output")
-        with patch("onua3d_export.MAX_VERTEX_ID", 2):
+        with patch("studio.exchange.onua3d.MAX_VERTEX_ID", 2):
             with self.assertRaisesRegex(Exception, "ID limit exceeded"):
                 write_onua3d(self.source, target)
         self.assertEqual(target.read_bytes(), b"old output")

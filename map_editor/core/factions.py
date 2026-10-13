@@ -1,3 +1,5 @@
+"""Owner (faction) colors: vanilla defaults overridden by the game's World.ini."""
+
 from __future__ import annotations
 
 import re

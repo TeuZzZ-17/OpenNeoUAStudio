@@ -1,14 +1,14 @@
 import unittest
 from types import SimpleNamespace
 
-from base_mapping_editor import MappingIndex
-from base_parser import AmeshBlock, AttsEntry, TextureRef
-from geometry_editor import (
+from studio.assets.mapping import MappingIndex
+from studio.formats.base_format import AmeshBlock, AttsEntry, TextureRef
+from studio.rendering.geometry import (
     GeometryClipboardError,
     append_geometry_clipboard,
     build_geometry_clipboard,
 )
-from sklt_parser import SkltModel
+from studio.formats.sklt import SkltModel
 
 
 def _fixture(polygons=None, *, texture_kind="ilbm"):

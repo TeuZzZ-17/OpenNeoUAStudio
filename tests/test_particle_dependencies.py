@@ -4,10 +4,10 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
-from asset_family import AssetFamily, FamilyObject, _load_family_object
-from asset_resolver import AssetResolver, ResolvedFile
-from base_dependency_resolver import collect_dependencies
-from base_parser import parse_base_bytes
+from studio.assets.family import AssetFamily, FamilyObject, _load_family_object
+from studio.exchange.portable import AssetResolver, ResolvedFile
+from studio.assets.dependencies import collect_dependencies
+from studio.formats.base_format import parse_base_bytes
 
 
 def _chunk(tag, payload):
@@ -103,8 +103,8 @@ class ParticleDependencyTests(unittest.TestCase):
     def test_nested_resources_are_loaded_and_reported_as_real_dependencies(self):
         family = AssetFamily()
         resolver = AssetResolver([])
-        with patch("asset_family._load_animation") as load_animation, \
-                patch("asset_family._load_texture") as load_texture:
+        with patch("studio.assets.family._load_animation") as load_animation, \
+                patch("studio.assets.family._load_texture") as load_texture:
             _load_family_object(self.asset.root, family, resolver)
         load_animation.assert_called_once_with(
             family, resolver, "SMOKE.ANM")

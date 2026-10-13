@@ -30,10 +30,10 @@ class ModelMouseWorkflowTests(unittest.TestCase):
         view.begin_paste_preview(clipboard, QPoint(100, 100))
         confirmed = []
         view.pastePreviewConfirmRequested.connect(lambda: confirmed.append(True))
-        with patch('assembly_viewer.time.monotonic', return_value=10):
+        with patch('studio.rendering.asset_viewport.time.monotonic', return_value=10):
             mouse(view, QEvent.Type.MouseButtonPress, QPoint(100, 100))
         self.assertEqual(confirmed, [])
-        with patch('assembly_viewer.time.monotonic', return_value=10.1):
+        with patch('studio.rendering.asset_viewport.time.monotonic', return_value=10.1):
             mouse(view, QEvent.Type.MouseButtonRelease, QPoint(100, 100))
         self.assertEqual(confirmed, [True])
 
@@ -46,9 +46,9 @@ class ModelMouseWorkflowTests(unittest.TestCase):
         yaw = view._yaw
         confirmed = []
         view.pastePreviewConfirmRequested.connect(lambda: confirmed.append(True))
-        with patch('assembly_viewer.time.monotonic', return_value=10):
+        with patch('studio.rendering.asset_viewport.time.monotonic', return_value=10):
             mouse(view, QEvent.Type.MouseButtonPress, QPoint(100, 100))
-        with patch('assembly_viewer.time.monotonic', return_value=10.4):
+        with patch('studio.rendering.asset_viewport.time.monotonic', return_value=10.4):
             mouse(view, QEvent.Type.MouseMove, QPoint(125, 110))
             mouse(view, QEvent.Type.MouseButtonRelease, QPoint(125, 110))
         self.assertNotEqual(view._yaw, yaw)
@@ -56,9 +56,9 @@ class ModelMouseWorkflowTests(unittest.TestCase):
         self.assertEqual(view.paste_preview_delta, translation)
         self.assertEqual(model.points, before)
         self.assertEqual(confirmed, [])
-        with patch('assembly_viewer.time.monotonic', return_value=11):
+        with patch('studio.rendering.asset_viewport.time.monotonic', return_value=11):
             mouse(view, QEvent.Type.MouseButtonPress, QPoint(125, 110))
-        with patch('assembly_viewer.time.monotonic', return_value=11.1):
+        with patch('studio.rendering.asset_viewport.time.monotonic', return_value=11.1):
             mouse(view, QEvent.Type.MouseButtonRelease, QPoint(125, 110))
         self.assertEqual(confirmed, [True])
 

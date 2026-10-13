@@ -7,7 +7,7 @@ from PySide6.QtCore import QPointF, Qt
 from PySide6.QtGui import QColor, QPen, QPolygonF, QTransform, QImage
 
 from ..core.special_objects import SPECIAL_KINDS, special_store, special_slots, special_cell
-from ..render.special_scene import SPECIAL_COLORS as COLORS, special_members, actor_code, cell_owner_color
+from ..render.special_scene import special_members, actor_code, cell_owner_color
 from .game_icons import game_icon, draw_game_badge
 
 
@@ -41,7 +41,7 @@ class SpecialOverlay:
         return image
 
     def draw(self, painter, camera=None, terrain=None):
-        win, view = self.window, self.window.view
+        view = self.window.view
         doc = view.doc
         camera, terrain = camera or view.camera, terrain or view.terrain
         if doc is None or camera.perspective or terrain.width != doc.mw or terrain.height != doc.mh:

@@ -2,14 +2,14 @@ import copy
 import unittest
 from types import SimpleNamespace
 
-from base_mapping_editor import MappingIndex
-from base_parser import AmeshBlock, AttsEntry
-from geometry_editor import (
+from studio.assets.mapping import MappingIndex
+from studio.formats.base_format import AmeshBlock, AttsEntry
+from studio.rendering.geometry import (
     GeometryClipboardError,
     apply_delete_geometry,
     plan_delete_geometry,
 )
-from sklt_parser import SkltModel
+from studio.formats.sklt import SkltModel
 
 
 def _fixture():

@@ -13,7 +13,12 @@ from PySide6.QtGui import QImage, QMouseEvent
 from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication, QDoubleSpinBox, QLineEdit, QMenu, QMessageBox
 
-from sklt_parser import create_minimal_sklt_model, parse_sklt_bytes, parse_sklt_file, save_sklt_with_poo2_pol2_structure
+from studio.formats.sklt import (
+    create_minimal_sklt_model,
+    parse_sklt_bytes,
+    parse_sklt_file,
+    save_sklt_with_poo2_pol2_structure,
+)
 from wireframe_editor.window import WireframeEditorWindow
 
 
@@ -138,7 +143,7 @@ class WireframeTransformTests(unittest.TestCase):
             return action
 
         self.editor.select_link(0, 1)
-        with patch("outline_editor.QMenu", type("TestMenu", (QMenu,), {"exec": choose_move})):
+        with patch("studio.workbench.outline.QMenu", type("TestMenu", (QMenu,), {"exec": choose_move})):
             for handler, args in (
                 (self.editor._show_selection_context_menu, (0, 0, QPoint())),
                 (self.editor._show_point_context_menu, (0, -100, 0, QPoint())),
@@ -208,7 +213,7 @@ class WireframeTransformTests(unittest.TestCase):
         def choose_paste(menu, *args):
             return next(action for action in menu.actions() if action.text() == "Paste")
 
-        with patch("outline_editor.QMenu", type("TestMenu", (QMenu,), {"exec": choose_paste})):
+        with patch("studio.workbench.outline.QMenu", type("TestMenu", (QMenu,), {"exec": choose_paste})):
             self.editor._show_empty_context_menu(-500, -500, QPoint())
         self.assertEqual([(p[0], p[2]) for p in self.editor.projected_points], ghost)
         self.assertEqual(len(self.editor._undo_stack), 2)
@@ -289,7 +294,7 @@ class WireframeTransformTests(unittest.TestCase):
                                               self.editor.polygons, source)
             self.window._show_model(parse_sklt_file(source), source)
             self.editor.copy_selection()  # A visible ghost must never enter the exported document.
-            with patch("wireframe_editor.window.QFileDialog") as dialog, patch("wireframe_editor.window.QMessageBox"), patch("outline_editor.QMessageBox") as message:
+            with patch("wireframe_editor.window.QFileDialog") as dialog, patch("wireframe_editor.window.QMessageBox"), patch("studio.workbench.outline.QMessageBox", create=True) as message:
                 dialog.getSaveFileName.return_value = (str(target), "")
                 message.StandardButton = QMessageBox.StandardButton
                 message.question.return_value = QMessageBox.StandardButton.Yes

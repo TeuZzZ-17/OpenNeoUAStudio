@@ -77,7 +77,7 @@ class ResourceCatalog:
     @staticmethod
     def _palette(set_number: int):
         bootstrap.ensure_studio_on_path()
-        from ilbm_parser import parse_pal_file
+        from studio.formats.images import parse_pal_file
 
         set_path = bootstrap.set_dir(set_number)
         for name in ("NORMAL.PAL", "STANDARD.PAL"):
@@ -98,8 +98,8 @@ def preview_image(source: Path | SkyResource, palette=None) -> QImage:
 @lru_cache(maxsize=48)
 def _cached_preview(source, palette, _mtime, _size):
     bootstrap.ensure_studio_on_path()
-    from ilbm_parser import parse_ilbm_file
-    from setbas_reader import decode_texture, read_setbas
+    from studio.formats.images import parse_ilbm_file
+    from studio.formats.setbas import decode_texture, read_setbas
 
     if isinstance(source, SkyResource):
         if source.loose_preview is not None:

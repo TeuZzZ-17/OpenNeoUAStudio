@@ -1,0 +1,15 @@
+# Tooling configuration only; the Studio is started with `python main.py`.
+
+[tool.ruff]
+extend-exclude = ["work", "build", "dist", "outputs"]
+
+[tool.ruff.lint]
+# Pyflakes rules: undefined names, unused imports/variables, redefinitions.
+select = ["F"]
+
+[tool.ruff.lint.per-file-ignores]
+# Qt tests create a QApplication only to keep it alive; pytest fixtures imported from another file look redefined.
+"tests/*" = ["F841", "F811"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

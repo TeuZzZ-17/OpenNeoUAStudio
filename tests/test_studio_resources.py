@@ -1,5 +1,4 @@
 import os
-from pathlib import Path
 from unittest.mock import patch
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
@@ -8,9 +7,9 @@ from PySide6.QtWidgets import QApplication, QMainWindow, QMessageBox
 
 from map_editor import bootstrap
 from map_editor.core.game_installation import GameInstallation, load_remembered
-from startup_selector import TOOL_OPTIONS
-from studio_resources import ResourcesPanel
-from studio_shell import install_workspace_shell
+from studio.ui.shell import TOOL_OPTIONS
+from studio.ui.shell import ResourcesPanel
+from studio.ui.shell import install_workspace_shell
 
 
 def test_only_complete_existing_sets_are_offered(tmp_path):
@@ -48,7 +47,7 @@ def test_resource_paths_are_shared_and_remembered(tmp_path):
 def test_resource_selection_is_required_and_shell_is_shared(tmp_path):
     app = QApplication.instance() or QApplication([])
     panel = ResourcesPanel()
-    with patch("studio_resources.QMessageBox.warning") as warning:
+    with patch("studio.ui.shell.QMessageBox.warning") as warning:
         assert panel.apply() is None
         warning.assert_called_once()
     window = QMainWindow()
@@ -126,7 +125,7 @@ def test_sector_editor_only_shows_a_notice():
     source = _Tool()
     install_workspace_shell(source, "wireframe_editor")
     action = next(a for a in source.studio_change_menu.actions() if a.text() == "Sector Editor")
-    with patch("main.create_workspace") as create, patch("studio_shell.QMessageBox.information") as info:
+    with patch("main.create_workspace") as create, patch("studio.ui.shell.QMessageBox.information") as info:
         action.trigger()
     create.assert_not_called()
     info.assert_called_once()
@@ -147,11 +146,11 @@ def test_reset_configuration_asks_then_clears_everything(tmp_path):
             resets = []
             panel.reset_done.connect(lambda: resets.append(True))
             yes, no = QMessageBox.StandardButton.Yes, QMessageBox.StandardButton.No
-            with patch("studio_resources.QMessageBox.question", return_value=no) as ask:
+            with patch("studio.ui.shell.QMessageBox.question", return_value=no) as ask:
                 assert panel.reset_configuration() is False
                 ask.assert_called_once()
             assert settings.is_file() and panel.root.text() and not resets
-            with patch("studio_resources.QMessageBox.question", return_value=yes):
+            with patch("studio.ui.shell.QMessageBox.question", return_value=yes):
                 assert panel.reset_configuration() is True
             assert not settings.exists()
             assert load_remembered(settings) is None

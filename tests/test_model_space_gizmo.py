@@ -5,16 +5,16 @@ from types import SimpleNamespace
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 from PySide6.QtCore import QEvent, QPointF, Qt
-from PySide6.QtGui import QColor, QImage, QMouseEvent, QPainter
+from PySide6.QtGui import QColor, QImage, QMouseEvent
 from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication
 from PySide6.QtWidgets import QSizePolicy
 
-from assembly_viewer import AssetViewport
-from assembly_window import AssemblyWindow
-from geometry_editor import GeometryEditSession
-from model_space_gizmo import DIRECTIONS_26, ModelSpaceGizmo
-from sklt_parser import SkltModel
+from studio.rendering.asset_viewport import AssetViewport
+from studio.workbench.window import AssemblyWindow
+from studio.rendering.geometry import GeometryEditSession
+from studio.rendering.gizmo import DIRECTIONS_26, ModelSpaceGizmo
+from studio.formats.sklt import SkltModel
 
 
 def _editable_viewport():

@@ -15,14 +15,17 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 from PySide6.QtGui import QImage
 from PySide6.QtWidgets import QApplication
 
-from anm_parser import VanmData, VanmFrame
-from assembly_viewer import _apply, _rotation_matrix
-from assembly_window import AssemblyWindow
-from asset_family import load_asset_family, rebuild_materials
-from asset_family_package import (AssetFamilyPackageError, validate_family_package,
-                                  MANIFEST_NAME, PackageEntry, write_package_manifest)
-from base_parser import BaseTransform
-from onua3d_export import MANIFEST, build_scene, convert_point, write_onua3d
+from studio.formats.animation import VanmData, VanmFrame
+from studio.rendering.asset_viewport import _apply, _rotation_matrix
+from studio.workbench.window import AssemblyWindow
+from studio.assets.family import load_asset_family, rebuild_materials
+from studio.exchange.portable import AssetFamilyPackageError
+from studio.assets.family import validate_family_package, PackageEntry, write_package_manifest
+from studio.exchange.portable import MANIFEST_NAME
+from studio.formats.base_format import BaseTransform
+from studio.exchange.portable import MANIFEST
+from studio.exchange.onua3d import build_scene, write_onua3d
+from studio.exchange.portable import convert_point
 from tests.test_asset_family_package import _make_package, _base_bytes, _chunk, _form
 
 
@@ -32,7 +35,7 @@ def _textured_base_bytes():
     data = bytearray(_base_bytes().replace(
         struct.pack(">hHHBBBB", 1, 0, 0x08, 0, 255, 0, 0),
         struct.pack(">hHHBBBB", 1, 0, 0x0a, 0, 255, 0, 0)))
-    from base_parser import parse_base_bytes
+    from studio.formats.base_format import parse_base_bytes
     parsed = parse_base_bytes(bytes(data))
     def set_scale(chunk):
         if chunk.form_type == "BASE":
@@ -102,9 +105,9 @@ class Onua3dTests(unittest.TestCase):
         return window
 
     def export(self, window, target):
-        with patch("assembly_window.QFileDialog.getSaveFileName",
+        with patch("studio.workbench.window.QFileDialog.getSaveFileName",
                    return_value=(str(target), "")), patch.object(window, "_notify"), \
-                patch("assembly_window.QMessageBox.critical") as error:
+                patch("studio.workbench.window.QMessageBox.critical") as error:
             window._export_to_blender()
             error.assert_not_called()
         self.assertTrue(target.is_file())
@@ -183,7 +186,7 @@ class Onua3dTests(unittest.TestCase):
         objt = original[12:]
         # Build through the same IFF fixture helpers; BASE wrapper size is
         # recalculated, and both nested BASEs retain their own source spans.
-        from base_parser import parse_base_bytes
+        from studio.formats.base_format import parse_base_bytes
         parsed = parse_base_bytes(original)
         # Locate BASE via the existing IFF tree, not a second parser.
         def find_base(chunk):
@@ -304,9 +307,9 @@ class Onua3dTests(unittest.TestCase):
         window = self.window()
         target = self.root / "old.onua3d"
         target.write_bytes(b"previous export")
-        with patch("assembly_window.QFileDialog.getSaveFileName", return_value=(str(target), "")), \
-                patch("onua3d_export.build_scene", side_effect=AssetFamilyPackageError("invalid UV")), \
-                patch("assembly_window.QMessageBox.critical") as error:
+        with patch("studio.workbench.window.QFileDialog.getSaveFileName", return_value=(str(target), "")), \
+                patch("studio.exchange.onua3d.build_scene", side_effect=AssetFamilyPackageError("invalid UV")), \
+                patch("studio.workbench.window.QMessageBox.critical") as error:
             window._export_to_blender()
         error.assert_called_once()
         self.assertEqual(target.read_bytes(), b"previous export")
