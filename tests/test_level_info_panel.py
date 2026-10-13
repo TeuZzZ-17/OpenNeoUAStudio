@@ -95,6 +95,44 @@ def test_sky_grid_fits_large_thumbnails_in_narrow_and_wide_views(monkeypatch, tm
         app.processEvents()
 
 
+def test_sky_grid_keeps_two_columns_when_the_scroll_bar_appears(monkeypatch, tmp_path):
+    app = QApplication.instance() or QApplication([])
+
+    class _Catalog(_EmptyCatalog):
+        skies = {f"sky{n}": Path(f"sky{n}.ILB") for n in range(1, 9)}
+
+    monkeypatch.setattr(dialogs, "ResourceCatalog",
+                        lambda _installation, _set_number: _Catalog())
+    monkeypatch.setattr(dialogs.bootstrap, "installation", lambda: None)
+    monkeypatch.setattr(dialogs.bootstrap, "game_data_dir", lambda: tmp_path)
+    monkeypatch.setattr(dialogs.LevelInfoPanel, "_load_visible_skies", lambda self: None)
+
+    panel = dialogs.LevelInfoPanel(LdfDocument())
+    try:
+        panel.resize(600, 900)
+        panel.show()
+        app.processEvents()
+        widths = []
+        for policy in (Qt.ScrollBarPolicy.ScrollBarAlwaysOn, Qt.ScrollBarPolicy.ScrollBarAlwaysOff):
+            panel.sky_list.setVerticalScrollBarPolicy(policy)
+            app.processEvents()
+            panel._layout_sky_grid()
+            widths.append(panel.sky_list.gridSize().width())
+        # The scroll bar changes the viewport, never the column count or size.
+        assert widths[0] == widths[1]
+        assert panel.sky_list.gridSize().width() * 2 < panel.sky_list.width()
+        # Resizing only the list (not the panel) lays the grid out again.
+        panel.sky_list.setGridSize(panel.sky_list.gridSize() * 3)
+        panel.sky_list.resize(panel.sky_list.width() - 40, panel.sky_list.height())
+        app.processEvents()
+        app.processEvents()
+        assert panel.sky_list.gridSize().width() == widths[0] - 20
+    finally:
+        panel.dispose()
+        panel.close()
+        app.processEvents()
+
+
 def test_briefing_previews_adapt_to_two_columns_and_keep_image_ratio(monkeypatch, tmp_path):
     app = QApplication.instance() or QApplication([])
     image_path = tmp_path / "MB_SAMPLE.png"

@@ -50,20 +50,17 @@ class ModelEditorWorkspaceTests(unittest.TestCase):
         finally:
             window.close()
 
-    def test_set_selector_sits_at_the_top_of_the_resources_pages(self):
+    def test_set_is_chosen_from_the_menu_not_from_a_visible_selector(self):
         window = ModelEditorWindow()
         try:
             window.resize(1400, 900)
             window.show()
             window._right_tabs.setCurrentIndex(1)
             self.app.processEvents()
-            tabs = window._resources_tabs
-            self.assertTrue(tabs.set_combo.isVisible())
-            self.assertIs(tabs.set_combo, window.entity_browser.set_combo)
-            # Flattened into the palette, the row opens the page area.
-            self.assertEqual(tabs._row.geometry().top(), 0)
-            self.assertGreaterEqual(tabs.currentWidget().mapTo(tabs, tabs.currentWidget().rect().topLeft()).y(),
-                                    tabs._row.geometry().bottom())
+            # The combo stays as the hidden holder of the current set.
+            self.assertIs(window._set_combo, window.entity_browser.set_combo)
+            self.assertFalse(window._set_combo.isVisible())
+            self.assertFalse(hasattr(window._resources_tabs, "set_combo"))
         finally:
             window.close()
 

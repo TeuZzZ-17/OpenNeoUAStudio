@@ -10,7 +10,7 @@ class EntityListMixin:
         panel = QWidget(self)
         layout = QVBoxLayout(panel)
         layout.setContentsMargins(0, 0, 0, 0)
-        self.entity_browser = GameObjectBrowser(self, inline_set_selector=False)
+        self.entity_browser = GameObjectBrowser(self)
         self.entity_browser.enable_state_column()
         self._entity_visual_states = {}
         self._entity_choices = {}
@@ -23,8 +23,7 @@ class EntityListMixin:
         controls = QHBoxLayout()
         controls.setContentsMargins(0, 0, 0, 0)
         controls.setSpacing(5)
-        for label, combo, stretch in (('Set:', self.entity_browser.set_combo, 0),
-                                       ('State:', self.entity_state, 1),
+        for label, combo, stretch in (('State:', self.entity_state, 1),
                                        ('Type:', self.entity_browser.category, 0)):
             controls.addWidget(QLabel(label))
             combo.setSizeAdjustPolicy(QComboBox.SizeAdjustPolicy.AdjustToMinimumContentsLengthWithIcon)

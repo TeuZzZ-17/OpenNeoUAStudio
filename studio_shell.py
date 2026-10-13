@@ -16,6 +16,9 @@ def install_workspace_shell(window, key):
     window.studio_compat_action = menu_bar.addAction("Vanilla Compatibility Checker")
     window.studio_compat_action.triggered.connect(
         lambda: _show_compatibility(window, key))
+    from set_menu import SET_MENU_TOOLS, install_set_menu
+    if key in SET_MENU_TOOLS:
+        install_set_menu(window, menu_bar)
     change = menu_bar.addMenu("Change Editor")
     for option in TOOL_OPTIONS:
         action = change.addAction(option.title)

@@ -21,7 +21,7 @@ from PySide6.QtWidgets import (
 
 from assembly_window import AssemblyWindow
 from map_editor import bootstrap
-from set_tabs import SetBasMixin, bind_entity_set_selector
+from set_tabs import SetBasMixin
 from entity_list import EntityListMixin
 from editor_widgets import (
     ViewportWidthScrollArea as _ViewportWidthScrollArea,
@@ -139,24 +139,17 @@ class SnapshotStudioWindow(EntityListMixin, SetBasMixin, AssemblyWindow):
 
         self._configure_snapshot_controls()
         self._install_batch_panel()
-        self._install_set_selector()
+        self._install_entity_list()
 
         self._snapshot_workspace_configured = True
         self._force_view_only()
         self._on_right_tab_changed(right_tabs.currentIndex())
 
-    def _install_set_selector(self) -> None:
-        """Same set selector as the Model Editor, at the top of the BAS Manager."""
+    def _install_entity_list(self) -> None:
+        """Same Entity List as the Model Editor; the set comes from Change Set."""
 
         panel = self._create_entity_list()
         self._right_tabs.addTab(panel, 'Entity List')
-        row_widget = QWidget(self._bas_panel)
-        row = QHBoxLayout(row_widget)
-        row.setContentsMargins(0, 0, 0, 0)
-        row.addWidget(QLabel('Set:'))
-        row.addWidget(self._set_combo, 1)
-        self._bas_panel.layout().insertWidget(0, row_widget)
-        bind_entity_set_selector(self._right_tabs, row_widget, panel, self._entity_controls, self._set_combo)
 
     def _load_default_bas(self) -> None:
         super()._load_default_bas()

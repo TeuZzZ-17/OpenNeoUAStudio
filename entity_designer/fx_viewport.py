@@ -102,11 +102,66 @@ def colorize_image(image: QImage, tint) -> QImage:
     return result.copy()
 
 
+def _bake_edge_fade(image: QImage, edge_fade: float) -> QImage:
+    """GroundDecalBakedEdgeFadeTexture: multiply the alpha by a radial falloff."""
+
+    if edge_fade <= 0 or _np is None:
+        return image
+    image = image.convertToFormat(QImage.Format.Format_RGBA8888)
+    width, height = image.width(), image.height()
+    pixels = _np.frombuffer(image.bits(), dtype=_np.uint8).reshape(
+        height, image.bytesPerLine() // 4, 4)[:, :width].copy()
+    axis_x = (_np.arange(width, dtype=_np.float32) + 0.5) / width - 0.5
+    axis_y = (_np.arange(height, dtype=_np.float32) + 0.5) / height - 0.5
+    radius = _np.clip(_np.sqrt(axis_x[None, :] ** 2 + axis_y[:, None] ** 2) * 2.0, 0.0, 1.0)
+    fade = max(0.0, min(edge_fade / 10.0, 1.0))
+    t = _np.clip((radius - (1.0 - fade)) / max(fade, 1e-4), 0.0, 1.0)
+    pixels[..., 3] = (pixels[..., 3] * (1.0 - t * t * (3.0 - 2.0 * t)) + 0.5).astype(_np.uint8)
+    return QImage(pixels.tobytes(), width, height, width * 4,
+                  QImage.Format.Format_RGBA8888).copy()
+
+
+def apply_palette(image: QImage, norm, inv) -> QImage:
+    """The engine's palette shader: ``scene * norm + (1 - scene) * inv``."""
+
+    if _np is None:
+        return image
+    image = image.convertToFormat(QImage.Format.Format_RGBA8888)
+    width, height = image.width(), image.height()
+    pixels = _np.frombuffer(image.bits(), dtype=_np.uint8).reshape(
+        height, image.bytesPerLine() // 4, 4)[:, :width].copy()
+    scene = pixels[..., :3].astype(_np.float32) / 255.0
+    result = scene * _np.array(norm, dtype=_np.float32) \
+        + (1.0 - scene) * _np.array(inv, dtype=_np.float32)
+    pixels[..., :3] = (_np.clip(result, 0.0, 1.0) * 255.0 + 0.5).astype(_np.uint8)
+    return QImage(pixels.tobytes(), width, height, width * 4,
+                  QImage.Format.Format_RGBA8888).copy()
+
+
+def _procedural_decal(size: int = 128) -> QImage:
+    """Texture-less decal: the engine's dark disc, darker toward the center."""
+
+    image = QImage(size, size, QImage.Format.Format_RGBA8888)
+    image.fill(Qt.GlobalColor.transparent)
+    if _np is None:
+        return image
+    axis = (_np.arange(size, dtype=_np.float32) + 0.5) / size - 0.5
+    radius = _np.sqrt(axis[None, :] ** 2 + axis[:, None] ** 2)
+    normalized = _np.clip(radius / 0.5, 0.0, 1.0)
+    radial = normalized * normalized * (3.0 - 2.0 * normalized)
+    pixels = _np.zeros((size, size, 4), dtype=_np.uint8)
+    pixels[..., :3] = ((0.10 + radial * 0.12) * 255.0).astype(_np.uint8)[..., None]
+    pixels[..., 3] = _np.where(radius <= 0.5, 255, 0)
+    return QImage(pixels.tobytes(), size, size, size * 4,
+                  QImage.Format.Format_RGBA8888).copy()
+
+
 class FxPreviewViewportMixin:
     """Adds the Destruction FX preview pass to a CollisionViewport."""
 
     def _fx_init(self) -> None:
         self._fx_active = False
+        self._fx_weapon_context = False
         self._fx_home_camera = None
         self._fx_follow_enabled = False
         self._fx_tracking_item = None
@@ -119,7 +174,7 @@ class FxPreviewViewportMixin:
         self._fx_show_unit = True
         self._fx_revision = 0
         self._fx_data_root: Path | None = None
-        self._fx_decal_cache: dict[str, QImage | None] = {}
+        self._fx_decal_cache: dict[tuple, QImage | None] = {}
         self._fx_highlight: int | None = None
         self._fx_particles = []
         # owner -> [(EmitterSpec, [stage look])]; rebuilt with the family.
@@ -129,13 +184,18 @@ class FxPreviewViewportMixin:
         # External 3DS/BASE models: path -> hidden renderer (None = failed).
         self._fx_external_loader = None
         self._fx_external_cache: dict[str, AssetViewport | None] = {}
+        # Palette flash (normclr, invclr) of the whole view.
+        self._fx_palette = None
 
     def set_fx_preview(self, *, active: bool, items=(), owner_by_vp=None,
                        unit_owners=None, boxes=(), time_ms: float = 0.0,
                        show_unit: bool = True, data_root=None,
                        highlight: int | None = None, particles=(),
-                       external_loader=None) -> None:
+                       external_loader=None,
+                       weapon_context: bool = False, palette=None) -> None:
         self._fx_active = bool(active)
+        self._fx_palette = palette if active else None
+        self._fx_weapon_context = bool(active and weapon_context)
         if external_loader is not None:
             self._fx_external_loader = external_loader
         self._fx_items = list(items)
@@ -149,6 +209,7 @@ class FxPreviewViewportMixin:
         if data_root is not None and Path(data_root) != self._fx_data_root:
             self._fx_data_root = Path(data_root)
             self._fx_decal_cache.clear()
+            self._fx_tinted_stage_cache.clear()
         self._fx_revision += 1
         self.update()
 
@@ -399,14 +460,21 @@ class FxPreviewViewportMixin:
                     helper._fx_base_faces = [
                         (face, [tuple(vertex) for vertex in face.vertices])
                         for face in helper._faces]
+                    helper._fx_flat = str(family.base_path).casefold().endswith(".3ds")
                 self._fx_external_cache[path] = helper
             helper = self._fx_external_cache[path]
             if helper is not None:
                 return helper
         return None
 
-    def _draw_fx_external(self, painter, target, camera, helper, items) -> None:
-        """Render external-model instances with their own family palette."""
+    def _draw_fx_external(self, painter, target, camera, helper, items, *,
+                          opacity: float = 1.0, rgb=None,
+                          additive: bool = False) -> None:
+        """Render external-model instances with their own family palette.
+
+        ``rgb`` colorizes the layer and ``opacity`` fades it; ``additive``
+        adds it to the scene instead of covering it (tracer glow).
+        """
 
         helper._faces = [
             ViewFace(vertices=[_transform(item, vertex) for vertex in vertices],
@@ -421,12 +489,68 @@ class FxPreviewViewportMixin:
         layer.fill(Qt.GlobalColor.transparent)
         layer_painter = QPainter(layer)
         try:
-            helper._render_scene(
-                layer_painter, QRectF(0, 0, width, height), None, clean=True,
-                camera=camera, allow_transparent_background=True)
+            if getattr(helper, "_fx_flat", False):
+                # 3DS meshes carry no texture: the textured pass would draw
+                # nothing, so they are filled with plain white and tinted.
+                self._paint_flat_faces(
+                    layer_painter, QRectF(0, 0, width, height), camera,
+                    helper._faces, shaded=items[0].kind != "tracer")
+            else:
+                helper._render_scene(
+                    layer_painter, QRectF(0, 0, width, height), None,
+                    clean=True, camera=camera,
+                    allow_transparent_background=True)
         finally:
             layer_painter.end()
+        if rgb is not None:
+            layer = colorize_image(layer, (*rgb, 255))
+        painter.save()
+        painter.setOpacity(max(0.0, min(1.0, opacity)))
+        if additive:
+            painter.setCompositionMode(QPainter.CompositionMode.CompositionMode_Plus)
         painter.drawImage(target, layer)
+        painter.restore()
+
+    def _paint_flat_faces(self, painter, target, camera, faces, *,
+                          shaded: bool) -> None:
+        """Fill untextured faces far to near; ``shaded`` darkens grazing faces.
+
+        Both sides are drawn, like the engine does for its beam meshes.
+        """
+
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+        painter.setPen(Qt.PenStyle.NoPen)
+        drawn = []
+        for face in faces:
+            points = [self._camera_vertex(vertex, camera)
+                      for vertex in face.vertices]
+            if len(points) < 3 or not all(
+                    self._camera_point_is_projectable(point) for point in points):
+                continue
+            depth = sum(point[2] for point in points) / len(points)
+            level = 255
+            if shaded:
+                ax, ay = points[1][0] - points[0][0], points[1][1] - points[0][1]
+                bx, by = points[2][0] - points[0][0], points[2][1] - points[0][1]
+                az, bz = points[1][2] - points[0][2], points[2][2] - points[0][2]
+                normal = (ay * bz - az * by, az * bx - ax * bz, ax * by - ay * bx)
+                length = math.sqrt(sum(value * value for value in normal)) or 1.0
+                level = int(255 * (0.55 + 0.45 * abs(normal[2]) / length))
+            drawn.append((depth, level, points))
+        for _depth, level, points in sorted(drawn, key=lambda entry: entry[0]):
+            painter.setBrush(QColor(level, level, level))
+            painter.drawPolygon(QPolygonF(
+                [self._project(point, target, camera) for point in points]))
+
+    @staticmethod
+    def _fx_item_look(item):
+        """(tint rgb or None, opacity, shared opacity step) of one item."""
+
+        tinted = item.tint is not None and tuple(item.tint) != (255, 255, 255, 255)
+        opacity = item.alpha * ((item.tint[3] / 255.0) if item.tint else 1.0)
+        rgb = tuple(item.tint[:3]) if tinted else None
+        step = max(0, min(_ALPHA_STEPS, round(opacity * _ALPHA_STEPS)))
+        return tinted, rgb, opacity, step
 
     def _fx_material_ids(self, templates) -> set[int]:
         return {face.material for faces in templates.values()
@@ -435,6 +559,57 @@ class FxPreviewViewportMixin:
     # -- painting -------------------------------------------------------------
 
     def _paint_fx_viewport(self, painter: QPainter) -> None:
+        """The FX scene with the palette flash on top."""
+
+        if self._fx_palette is None:
+            self._paint_fx_scene(painter)
+            return
+        canvas = getattr(self, "_gpu_canvas", None)
+        if canvas is not None and painter.device() is canvas:
+            # GPU: painting the scene into an image would drop the textured
+            # renderer to the slow software path, so the finished frame is
+            # read back from the canvas and tinted instead.
+            self._paint_fx_scene(painter)
+            frame = self._fx_read_canvas(painter, canvas)
+            if frame is not None:
+                painter.drawImage(QRectF(self.rect()), apply_palette(frame, *self._fx_palette))
+            return
+        image = QImage(self.size(), QImage.Format.Format_RGBA8888)
+        image.fill(QColor(24, 26, 32))
+        layer = QPainter(image)
+        try:
+            self._paint_fx_scene(layer)
+        finally:
+            layer.end()
+        painter.drawImage(0, 0, apply_palette(image, *self._fx_palette))
+
+    @staticmethod
+    def _fx_read_canvas(painter: QPainter, canvas) -> QImage | None:
+        """The frame painted so far on the GPU canvas, or None if unreadable."""
+
+        try:
+            from OpenGL import GL as gl
+            ratio = canvas.devicePixelRatioF()
+            width, height = round(canvas.width() * ratio), round(canvas.height() * ratio)
+            painter.beginNativePainting()
+            try:
+                gl.glBindFramebuffer(gl.GL_FRAMEBUFFER, canvas.defaultFramebufferObject())
+                alignment = int(gl.glGetIntegerv(gl.GL_PACK_ALIGNMENT))
+                gl.glPixelStorei(gl.GL_PACK_ALIGNMENT, 1)
+                try:
+                    data = gl.glReadPixels(0, 0, width, height, gl.GL_RGBA, gl.GL_UNSIGNED_BYTE)
+                finally:
+                    gl.glPixelStorei(gl.GL_PACK_ALIGNMENT, alignment)
+            finally:
+                painter.endNativePainting()
+            raw = data.tobytes() if hasattr(data, "tobytes") else bytes(data)
+            # OpenGL rows run bottom-up; the alpha of the frame is ignored.
+            return QImage(raw, width, height, width * 4,
+                          QImage.Format.Format_RGBX8888).mirrored(False, True)
+        except Exception:
+            return None
+
+    def _paint_fx_scene(self, painter: QPainter) -> None:
         target = QRectF(self.rect())
         camera = self._camera_state()
         saved_faces = self._faces
@@ -454,14 +629,27 @@ class FxPreviewViewportMixin:
         layers: dict[tuple, list[ViewFace]] = {}
         markers = []
         decals = []
-        externals: dict[int, tuple[AssetViewport, list]] = {}
+        # External models are grouped by tint, fade and blending so each group
+        # is one layer: (helper id, rgb, opacity step, additive) -> items.
+        externals: dict[tuple, tuple[AssetViewport, list]] = {}
+        tracer_marked = False
         for item in self._fx_items:
             if item.kind == "ground_decal":
                 decals.append(item)
                 continue
             helper = self._fx_external_for(item)
             if helper is not None:
-                externals.setdefault(id(helper), (helper, []))[1].append(item)
+                _tinted, rgb, _opacity, step = self._fx_item_look(item)
+                if step:
+                    externals.setdefault(
+                        (id(helper), rgb, step, item.additive),
+                        (helper, []))[1].append(item)
+                continue
+            if item.kind == "tracer":
+                # One marker is enough when the tracer mesh cannot be loaded.
+                if not tracer_marked and not item.additive:
+                    markers.append(item)
+                    tracer_marked = True
                 continue
             faces = self._fx_item_faces(item, templates)
             if not faces:
@@ -471,13 +659,10 @@ class FxPreviewViewportMixin:
                 if not item.vp or int(item.vp) not in self._fx_owner_by_vp:
                     markers.append(item)
                 continue
-            tinted = item.tint is not None and tuple(item.tint) != (255, 255, 255, 255)
-            opacity = item.alpha * ((item.tint[3] / 255.0) if item.tint else 1.0)
+            tinted, rgb, opacity, step = self._fx_item_look(item)
             if not tinted and opacity >= 0.999:
                 main_faces.extend(faces)
                 continue
-            rgb = tuple(item.tint[:3]) if tinted else None
-            step = max(0, min(_ALPHA_STEPS, round(opacity * _ALPHA_STEPS)))
             if step == 0:
                 continue
             layers.setdefault((step, rgb), []).extend(faces)
@@ -511,9 +696,11 @@ class FxPreviewViewportMixin:
             else:
                 AssetViewport._paint_viewport(self, painter)
             self._draw_fx_decals(painter, target, camera, decals)
-            for helper, helper_items in externals.values():
-                self._draw_fx_external(painter, target, camera, helper,
-                                       helper_items)
+            for (_key, rgb, step, additive), (helper, helper_items) in sorted(
+                    externals.items(), key=lambda entry: (entry[0][3], entry[0][2])):
+                self._draw_fx_external(
+                    painter, target, camera, helper, helper_items,
+                    opacity=step / _ALPHA_STEPS, rgb=rgb, additive=additive)
             if textured:
                 for (step, rgb), faces in sorted(
                         layers.items(), key=lambda entry: entry[0][0]):
@@ -552,12 +739,20 @@ class FxPreviewViewportMixin:
             return None
         return self._project(camera_point, target, camera)
 
-    def _decal_image(self, texture: str) -> QImage | None:
-        if texture in self._fx_decal_cache:
-            return self._fx_decal_cache[texture]
+    def _decal_image(self, texture: str, edge_fade: float = 0.0) -> QImage | None:
+        """Decal texture with its radial edge fade baked in (None = not loadable).
+
+        An empty ``texture`` is the engine's procedural dark disc.
+        """
+
+        key = (texture, round(max(0.0, min(10.0, edge_fade)), 3))
+        if key in self._fx_decal_cache:
+            return self._fx_decal_cache[key]
         image = None
         root = self._fx_data_root
-        if root is not None and texture:
+        if not texture:
+            image = _procedural_decal()
+        elif root is not None:
             relative = texture.replace("\\", "/")
             if relative.casefold().startswith("data/"):
                 relative = relative[5:]
@@ -565,8 +760,11 @@ class FxPreviewViewportMixin:
             if candidate.is_file():
                 loaded = QImage(str(candidate))
                 image = None if loaded.isNull() else loaded.convertToFormat(
-                    QImage.Format.Format_ARGB32_Premultiplied)
-        self._fx_decal_cache[texture] = image
+                    QImage.Format.Format_RGBA8888)
+        if image is not None:
+            image = _bake_edge_fade(image, key[1]).convertToFormat(
+                QImage.Format.Format_ARGB32_Premultiplied)
+        self._fx_decal_cache[key] = image
         return image
 
     def _draw_fx_decals(self, painter, target, camera, decals) -> None:
@@ -582,20 +780,30 @@ class FxPreviewViewportMixin:
             polygon = QPolygonF(corners)
             tint = item.tint or (255, 255, 255, 255)
             opacity = item.alpha * tint[3] / 255.0
-            image = self._decal_image(item.texture)
+            image = self._decal_image(item.texture, item.decal_edge_fade)
             painter.save()
             painter.setOpacity(max(0.0, min(1.0, opacity)))
             if image is not None:
-                image = colorize_image(image, tint)
+                if tuple(tint[:3]) != (255, 255, 255):
+                    key = (id(image), tuple(tint[:3]))
+                    tinted = self._fx_tinted_stage_cache.get(key)
+                    if tinted is None:
+                        tinted = colorize_image(image, (*tint[:3], 255))
+                        self._fx_tinted_stage_cache[key] = tinted
+                    image = tinted
                 source = QPolygonF([
                     QPointF(0, 0), QPointF(image.width(), 0),
                     QPointF(image.width(), image.height()),
                     QPointF(0, image.height())])
                 transform = QTransform()
                 if QTransform.quadToQuad(source, polygon, transform):
+                    painter.setRenderHint(
+                        QPainter.RenderHint.SmoothPixmapTransform, True)
                     painter.setTransform(transform, True)
                     painter.drawImage(0, 0, image)
             else:
+                # The texture cannot be loaded: the engine drops the decal,
+                # the preview keeps a dashed outline so the cause is visible.
                 painter.setPen(QPen(QColor(230, 180, 90), 1.2, Qt.PenStyle.DashLine))
                 painter.setBrush(QColor(tint[0], tint[1], tint[2], 70))
                 painter.drawPolygon(polygon)
