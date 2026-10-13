@@ -97,14 +97,19 @@ def test_geometry_edit_colors_both_browsers_and_undo_restores_color(app):
 def test_entity_designer_identity_is_read_only_and_weapon_shape_tab_stays_active(app):
     window = CollisionEditorWindow()
     try:
-        assert window.name_edit.isReadOnly()
-        assert not window.target_combo.isEnabled()
+        # Compatibility explanations are kept in the checker.
+        assert not hasattr(window, 'name_edit')
+        assert not hasattr(window, 'target_combo')
+        assert not hasattr(window, 'compat_section')
         assert not hasattr(window, 'source_browser_tabs')
         window.project.target_category = WEAPON
         window.properties_tabs.setCurrentIndex(window.collision_shape_tab_index)
         window._sync_all()
         assert window.properties_tabs.currentIndex() == window.collision_shape_tab_index
         assert window.properties_tabs.isTabEnabled(window.collision_shape_tab_index)
+        window.properties_tabs.setCurrentIndex(window.fx_tab_index)
+        window._sync_all()
+        assert window.properties_tabs.currentIndex() == window.fx_tab_index
         _, warnings = validate_project(CollisionProject(name='Projectile', source_model='test.sklt', target_category=WEAPON), None)
         assert not warnings
     finally:
@@ -231,3 +236,585 @@ def test_manual_bas_import_clears_entity_selection_but_entity_workflow_preserves
         assert window.entity_browser.tree.currentItem() is None
     finally:
         window.close()
+
+@pytest.mark.parametrize('key', ['model_editor', 'snapshot_studio', 'map_editor', 'entity_designer', 'wireframe_editor'])
+def test_checker_is_between_resources_and_change_editor(app, key):
+    from studio_shell import install_workspace_shell
+    from studio_compat import CompatibilityDialog
+    from PySide6.QtWidgets import QTabWidget, QWidget
+    window = QMainWindow()
+    tabs = QTabWidget(window)
+    page = QWidget()
+    tabs.addTab(page, 'Script')
+    window.palette_tabs = tabs
+    window.properties_tabs = tabs
+    window._tab_compatibility = {page: ('mixed', 'Vanilla and OpenNeoUA features')}
+    try:
+        install_workspace_shell(window, key)
+        actions = [action.text() for action in window.menuBar().actions()]
+        assert actions == ['Resources', 'Vanilla Compatibility Checker', 'Change Editor']
+        with patch('studio_compat.CompatibilityDialog.exec', return_value=0) as opened:
+            window.studio_compat_action.trigger()
+            opened.assert_called_once()
+        dialog = CompatibilityDialog(window, key)
+        assert dialog.entries and all(note for _, _, note in dialog.entries)
+        dialog.show()
+        app.processEvents()
+        assert dialog.width() == 740
+        dialog.close()
+    finally:
+        window.close()
+
+
+def test_fx_transport_fits_and_ground_survives_empty_loop_tail(app):
+    from tests.test_selection_runtime_v3 import _selection_family
+    from PySide6.QtCore import QRectF
+    from PySide6.QtGui import QImage, QPainter
+    window = CollisionEditorWindow()
+    try:
+        family, obj, _ = _selection_family()
+        window.family = family
+        window.viewport.load_family(family, primary_owner='root')
+        window.viewport.set_ground_alignment(True, False, 0)
+        window.properties_tabs.setCurrentIndex(window.fx_tab_index)
+        window.resize(1200, 800)
+        window.show()
+        app.processEvents()
+        bar = window.fx_panel.transport_bar
+        assert bar.minimumSizeHint().width() < 550
+        assert window.width() == 1200
+        assert window.properties_scroll.geometry().right() < window.width()
+        window.fx_panel.speed_combo.setCurrentIndex(0)
+        assert window.fx_panel.speed == 0.1
+        viewport = window.viewport
+        viewport.resize(500, 350)
+        # Empty tail, restart and another empty tail all keep the ground.
+        for time_ms in (1000.0, 0.0, 2000.0):
+            viewport.set_fx_preview(active=True, items=[], show_unit=False, time_ms=time_ms)
+            image = QImage(500, 350, QImage.Format.Format_RGBA8888)
+            image.fill(Qt.GlobalColor.transparent)
+            painter = QPainter(image)
+            with patch.object(viewport, '_draw_grid', wraps=viewport._draw_grid) as ground:
+                viewport._paint_fx_viewport(painter)
+                assert ground.call_count == 1
+            painter.end()
+            background = QColor(24, 26, 32)
+            assert any(image.pixelColor(x, y) != background
+                       for x in range(20, 480, 10) for y in range(20, 330, 10))
+    finally:
+        window._modified = False
+        window.close()
+
+
+def test_resource_bands_are_visible_and_modified_selection_stays_red(app):
+    from PySide6.QtWidgets import QTreeWidget, QStyle, QStyleOptionViewItem
+    from PySide6.QtGui import QImage, QPainter
+    from resource_status import use_resource_delegate, mark_resource_modified
+    tree = QTreeWidget()
+    tree.setHeaderLabels(['Entity'])
+    row = QTreeWidgetItem(['Modified vehicle'])
+    tree.addTopLevelItem(row)
+    use_resource_delegate(tree)
+    tree.resize(320, 160)
+    tree.show()
+    app.processEvents()
+    delegate = tree.itemDelegate()
+    index = tree.indexFromItem(row)
+    mark_resource_modified(row, True)
+    colors = []
+    for state in (QStyle.StateFlag.State_MouseOver, QStyle.StateFlag.State_Selected):
+        option = QStyleOptionViewItem()
+        option.initFrom(tree)
+        option.widget = tree
+        option.rect = tree.visualRect(index)
+        option.state |= state
+        image = QImage(tree.size(), QImage.Format.Format_RGBA8888)
+        image.fill(Qt.GlobalColor.transparent)
+        painter = QPainter(image)
+        delegate.paint(painter, option, index)
+        painter.end()
+        colors.append(image.pixelColor(option.rect.right() - 10, option.rect.center().y()))
+        assert row.foreground(0).color() == MODIFIED_COLOR
+    assert colors[0] != colors[1]
+    assert all(color.blue() > color.red() for color in colors)
+    assert tree.hasMouseTracking()
+    tree.close()
+
+@pytest.mark.parametrize('key', ['model_editor', 'snapshot_studio', 'map_editor', 'entity_designer'])
+def test_all_workspace_tabs_use_checker_marker_colors(app, key):
+    from studio_shell import install_workspace_shell
+    from studio_compat import compatibility_entries, compat_color, PREVIEW
+    from studio_tabs import PaletteTabStrip
+    from snapshot_studio.window import SnapshotStudioWindow
+    from map_editor.editor import create_window
+    factories = {'model_editor': ModelEditorWindow,
+                 'snapshot_studio': SnapshotStudioWindow,
+                 'map_editor': lambda: create_window([]),
+                 'entity_designer': CollisionEditorWindow}
+    from map_editor import bootstrap
+    previous_installation = bootstrap.installation()
+    window = factories[key]()
+    try:
+        install_workspace_shell(window, key)
+        expected = {name.casefold(): level for names, level, _ in compatibility_entries(window, key)
+                    for name in names.split(' / ')}
+        expected.update({name: PREVIEW for name in ('log', 'warnings', 'validation')})
+        if key == 'map_editor':
+            buttons = window.palette_tabs._buttons
+        else:
+            from PySide6.QtWidgets import QTabWidget
+            buttons = [button for tabs in window.findChildren(QTabWidget)
+                       if hasattr(tabs, '_palette_strip')
+                       for button in tabs._palette_strip.buttons()]
+        assert buttons
+        for button in buttons:
+            assert button.marker is not None, button.text()
+            if button.text().casefold() in expected:
+                assert button.marker == compat_color(expected[button.text().casefold()])
+        assert all(button.marker.name() in ('#5cbf72', '#e3c447', '#e8873a') for button in buttons)
+    finally:
+        window.close()
+        bootstrap.set_installation(previous_installation)
+
+
+def test_ground_has_only_alignment_controls_and_other_tabs_keep_the_gizmo(app):
+    window = CollisionEditorWindow()
+    try:
+        gizmo = window.transform_box
+        window.show()
+        window.properties_tabs.setCurrentIndex(window.ground_tab_index)
+        app.processEvents()
+        assert gizmo.isHidden()
+        assert gizmo.parentWidget() is not window.ground_tab
+        assert window.ground_tab_layout.indexOf(window.ground_alignment_box) == 0
+        assert window.ground_tab_layout.indexOf(gizmo) == -1
+        window._sync_all()
+        assert gizmo.isHidden()
+        window.properties_tabs.setCurrentIndex(window.fire_points_tab_index)
+        app.processEvents()
+        assert window.transform_box is gizmo and not gizmo.isHidden()
+        assert len(window.gizmo.directions) == 6
+    finally:
+        window.close()
+
+
+def test_fx_reset_view_restores_scene_camera_without_changing_models(app):
+    from types import SimpleNamespace
+    from tests.test_selection_runtime_v3 import _selection_family
+    from PySide6.QtCore import QPointF
+    window = CollisionEditorWindow()
+    try:
+        family, _, _ = _selection_family()
+        viewport = window.viewport
+        viewport.load_family(family, primary_owner='root')
+        viewport.capture_reset_view()
+        normal_home = viewport._home_camera_state
+        window.fx_panel.simulation = SimpleNamespace(extent=lambda: ((300., -100., 20.), 600.))
+        window._fit_fx_view()
+        scene_home = viewport._camera_state()
+        faces = viewport._faces
+        viewport.set_fx_preview(active=True, time_ms=420.)
+        viewport._zoom = 8.
+        viewport._pan = QPointF(300., 200.)
+        viewport._center = (0., 0., 0.)
+        viewport.reset_view()
+        assert viewport._camera_state() == scene_home
+        assert viewport._faces is faces
+        assert viewport._fx_time_ms == 420.
+        viewport.set_fx_preview(active=False)
+        viewport.reset_view()
+        assert viewport._camera_state() == normal_home
+    finally:
+        window.close()
+
+
+def test_fx_unit_vanm_uses_toolbar_frames_and_effects_use_scene_clock(app):
+    from assembly_viewer import AssetViewport, ViewMaterial
+    from entity_designer.editor import CollisionViewport
+    from tests.test_selection_runtime_v3 import _selection_family
+    from PySide6.QtGui import QImage, QPainter
+    family, _, _ = _selection_family()
+    viewport = CollisionViewport()
+    viewport.load_family(family, primary_owner='root')
+    frames = [(16, 0, 0), (16, 0, 0)]
+    viewport._materials = [ViewMaterial('unit', anim_frames=frames),
+                           ViewMaterial('effect', anim_frames=frames)]
+    viewport._faces[0].material = 0
+    viewport._faces[1].material = 1
+    viewport._faces[1].owner = 'effect'
+    viewport._reset_animation_states()
+    viewport.set_fx_preview(active=True, owner_by_vp={10: 'root', 20: 'effect'},
+                            unit_owners={'root'}, time_ms=0.)
+    viewport.play_animation(True)
+    viewport._anim_timer.stop()
+    viewport._advance_animation()
+    assert viewport._anim_states[0] == (1, 1)
+    rendered = []
+    image = QImage(400, 300, QImage.Format.Format_RGBA8888)
+    painter = QPainter(image)
+    try:
+        with patch.object(AssetViewport, '_paint_viewport',
+                          lambda self, painter: rendered.append(dict(self._anim_states))):
+            viewport._paint_fx_viewport(painter)
+        assert rendered[-1][0] == (1, 1)
+        assert rendered[-1][1] == (0, 1)
+        viewport.play_animation(False)
+        viewport.step_animation()
+        with patch.object(AssetViewport, '_paint_viewport',
+                          lambda self, painter: rendered.append(dict(self._anim_states))):
+            viewport._paint_fx_viewport(painter)
+        assert rendered[-1][0] == (0, 1)
+        assert rendered[-1][1] == (0, 1)
+    finally:
+        painter.end()
+        viewport.close()
+
+
+def test_fx_context_menu_only_contains_preview_actions_and_routes_click(app):
+    from PySide6.QtCore import QPoint
+    from PySide6.QtWidgets import QMenu
+    window = CollisionEditorWindow()
+    try:
+        window.properties_tabs.setCurrentIndex(window.fx_tab_index)
+        menu = window._create_fx_context_menu()
+        actions = [action for action in menu.actions() if not action.isSeparator()]
+        assert [action.text() for action in actions] == [
+            'Play', 'Restart', 'Stop', 'Reset View']
+        actions[0].trigger()
+        assert window.fx_panel.is_playing()
+        assert window._create_fx_context_menu().actions()[0].text() == 'Pause'
+        actions[2].trigger()
+        assert not window.fx_panel.is_playing()
+        assert window.fx_panel.time_ms == 0.
+        with patch.object(window, '_create_fx_context_menu') as created, \
+             patch.object(window, '_create_sphere_context_menu') as spheres:
+            window._show_sphere_context_menu(-1, QPoint(100, 100))
+            created.return_value.exec.assert_called_once()
+            spheres.assert_not_called()
+    finally:
+        window.close()
+
+
+def test_effect_list_drag_visibility_ctrl_selection_and_space(app):
+    from entity_designer.fx_panel import DestructionFxPanel
+    from entity_designer import destruction_fx as fx
+    from PySide6.QtTest import QTest
+    panel = DestructionFxPanel()
+    items = [fx.FxBlock(['begin_fx', 'trigger = destroyed', 'mode = visual',
+                         'duration = 1000', 'vp_model = 7', 'end']) for _ in range(4)]
+    panel.set_context(fx.CONTEXT_VEHICLE, fx.FxDocument(items))
+    panel.resize(430, 650)
+    panel.show()
+    app.processEvents()
+    tree = panel.effects_list
+    try:
+        points = [tree.checkbox_rect(tree.item(index)).center() for index in range(4)]
+        body_points = [tree.visualItemRect(tree.item(index)).center() for index in range(4)]
+        QTest.mousePress(tree.viewport(), Qt.MouseButton.LeftButton, pos=points[0])
+        QTest.mouseMove(tree.viewport(), points[2])
+        QTest.mouseRelease(tree.viewport(), Qt.MouseButton.LeftButton, pos=points[2])
+        assert panel.hidden_items == {0, 1, 2}
+        QTest.mousePress(tree.viewport(), Qt.MouseButton.LeftButton, pos=points[0])
+        QTest.mouseMove(tree.viewport(), points[2])
+        QTest.mouseRelease(tree.viewport(), Qt.MouseButton.LeftButton, pos=points[2])
+        assert panel.hidden_items == set()
+        tree.clearSelection()
+        for index in (0, 2):
+            QTest.mouseClick(tree.viewport(), Qt.MouseButton.LeftButton,
+                             Qt.KeyboardModifier.ControlModifier, body_points[index])
+        assert {tree.row(item) for item in tree.selectedItems()} == {0, 2}
+        QTest.keyClick(tree, Qt.Key.Key_Space)
+        assert panel.hidden_items == {0, 2}
+        QTest.keyClick(tree, Qt.Key.Key_Space)
+        assert panel.hidden_items == set()
+        assert all('\n' in tree.item(index).text() for index in range(4))
+        assert '#006d96' in tree.styleSheet() and 'color: #ffffff' in tree.styleSheet()
+    finally:
+        panel.close()
+
+
+def test_follow_camera_tracks_falling_unit_and_reset_keeps_current_target(app):
+    from dataclasses import replace
+    from entity_designer import destruction_fx as fx
+    from entity_designer.editor import CollisionViewport
+    from tests.test_selection_runtime_v3 import _selection_family
+    from PySide6.QtCore import QPointF
+    family, _, _ = _selection_family()
+    viewport = CollisionViewport()
+    viewport.load_family(family, primary_owner='root')
+    viewport.set_fx_preview(active=True, owner_by_vp={10: 'root'})
+    item = fx.PreviewItem(-1, 'unit', 10, (0., -500., 0.), fx.IDENTITY, (1., 1., 1.))
+    viewport.set_fx_follow_unit(True, item, 'root')
+    high = viewport._center
+    zoom = viewport._zoom
+    viewport._fx_home_camera = viewport._camera_state()
+    falling = replace(item, position=(0., -100., 0.))
+    viewport.set_fx_follow_unit(True, falling, 'root')
+    assert viewport._center[1] - high[1] == 400.
+    assert viewport._zoom == zoom
+    current_target = viewport._center
+    viewport._pan = QPointF(200., 100.)
+    viewport.reset_view()
+    assert viewport._center == current_target
+    assert viewport._pan == QPointF(0., 0.)
+    viewport.set_fx_follow_unit(False, item, 'root')
+    assert viewport._center == current_target
+    viewport.close()
+
+
+def test_transport_has_classic_icons_and_follow_is_default(app):
+    from entity_designer.fx_panel import DestructionFxPanel
+    panel = DestructionFxPanel()
+    assert panel.follow_unit.isChecked()
+    for button in (panel.restart_button, panel.play_button, panel.stop_button, panel.loop_button):
+        assert not button.text()
+        assert not button.icon().isNull()
+        assert button.toolTip() and button.accessibleName()
+    panel.close()
+
+
+def test_fx_scale_controls_update_current_unit_without_rewinding(app, tmp_path):
+    from tests.test_destruction_fx import UNIT
+    from entity_designer.editor import VehicleModelReference, find_script_blocks
+    script = tmp_path / 'Vehicles.cfg'
+    script.write_text(UNIT, encoding='utf-8')
+    window = CollisionEditorWindow()
+    try:
+        block = find_script_blocks(UNIT)[0]
+        reference = VehicleModelReference(block=block, vp_normal=10)
+        window._active_script_path = script
+        window._active_script_id = 5
+        window._active_script_kind = 'new_vehicle'
+        window._active_model_reference = reference
+        window._load_fx_context(UNIT, block, reference)
+        window.properties_tabs.setCurrentIndex(window.fx_tab_index)
+        window.fx_panel.seek(100.)
+        before = next(item for item in window.fx_panel.preview_items() if item.kind == 'unit')
+        window.model_scale_x_spin.setValue(6.)
+        after = next(item for item in window.fx_panel.preview_items() if item.kind == 'unit')
+        assert [after.rotation[row][0] for row in range(3)] == pytest.approx(
+            [before.rotation[row][0] * 6. for row in range(3)])
+        assert [after.rotation[row][1:] for row in range(3)] == [before.rotation[row][1:] for row in range(3)]
+        assert window.fx_panel.time_ms == 100.
+    finally:
+        window._modified = False
+        window.close()
+
+
+def test_fx_auto_reload_handles_atomic_script_save_and_texture_update(app, tmp_path):
+    from tests.test_destruction_fx import UNIT
+    from entity_designer.editor import VehicleModelReference, find_script_blocks
+    from PySide6.QtTest import QTest
+    from PySide6.QtGui import QImage
+    script_dir = tmp_path / 'Data' / 'Scripts'
+    textures = tmp_path / 'Data' / 'Textures'
+    script_dir.mkdir(parents=True)
+    textures.mkdir()
+    texture = textures / 'impact.png'
+    image = QImage(8, 8, QImage.Format.Format_ARGB32)
+    image.fill(QColor('red'))
+    assert image.save(str(texture))
+    text = UNIT.replace('    dest_fx = death_40_0_-20_0',
+        'begin_fx\ntrigger = destroyed\nmode = ground_decal\ntexture = Data/Textures/impact.png\nsize = 100\nduration = 1000\nend\n    dest_fx = death_40_0_-20_0')
+    script = script_dir / 'Vehicles.cfg'
+    script.write_text(text, encoding='utf-8')
+    window = CollisionEditorWindow()
+    try:
+        block = find_script_blocks(text)[0]
+        reference = VehicleModelReference(block=block, vp_normal=10)
+        window._active_script_path = script
+        window._active_script_id = 5
+        window._active_script_kind = 'new_vehicle'
+        window._active_model_reference = reference
+        window._load_fx_context(text, block, reference)
+        window.properties_tabs.setCurrentIndex(window.fx_tab_index)
+        panel = window.fx_panel
+        assert str(script.resolve()) in window._fx_watcher.files()
+        assert str(texture.resolve()) in window._fx_watcher.files()
+        assert not any(hasattr(panel, name) for name in
+                       ('reload_button', 'auto_reload', 'reroll_button', 'fit_button'))
+        panel.seek(100.)
+        panel.effects_list.item(0).setCheckState(Qt.CheckState.Unchecked)
+        updated = text.replace('duration   = 800', 'duration   = 1600')
+        replacement = script.with_suffix('.tmp')
+        replacement.write_text(updated, encoding='utf-8')
+        replacement.replace(script)
+        QTest.qWait(800)
+        assert any('1600 ms' in panel.effects_list.item(i).text()
+                   for i in range(panel.effects_list.count()))
+        assert panel.time_ms == 100. and 0 in panel.hidden_items
+        assert str(script.resolve()) in window._fx_watcher.files()
+        window.viewport._fx_decal_cache['Data/Textures/impact.png'] = image.copy()
+        image.fill(QColor('blue'))
+        assert image.save(str(texture))
+        QTest.qWait(800)
+        assert 'Data/Textures/impact.png' not in window.viewport._fx_decal_cache
+        assert str(texture.resolve()) in window._fx_watcher.files()
+        window.properties_tabs.setCurrentIndex(window.ground_tab_index)
+        assert not window._fx_watcher.files()
+    finally:
+        window._modified = False
+        window.close()
+
+
+def test_fx_options_show_distinct_checked_and_unchecked_indicators(app):
+    from entity_designer.fx_panel import DestructionFxPanel, FxEffectDelegate
+    panel = DestructionFxPanel()
+    panel.resize(430, 650)
+    panel.show()
+    app.processEvents()
+    try:
+        assert isinstance(panel.effects_list.itemDelegate(), FxEffectDelegate)
+        for checkbox in (panel.show_unit, panel.follow_unit):
+            checkbox.setChecked(True)
+            on = checkbox.grab().toImage()
+            checkbox.setChecked(False)
+            off = checkbox.grab().toImage()
+            cyan = QColor('#39b8d9').rgb()
+            assert any(on.pixel(x, y) == cyan for x in range(min(20, on.width())) for y in range(on.height()))
+            assert not any(off.pixel(x, y) == cyan for x in range(min(20, off.width())) for y in range(off.height()))
+    finally:
+        panel.close()
+
+
+def test_fx_preview_box_aligns_with_ground_and_timeline_is_passive(app):
+    from PySide6.QtTest import QTest
+    from PySide6.QtCore import QPoint
+    from entity_designer import destruction_fx as fx
+    window = CollisionEditorWindow()
+    try:
+        window.resize(1200, 900)
+        window.show()
+        window.properties_tabs.setCurrentIndex(window.ground_tab_index)
+        app.processEvents()
+        ground = window.ground_alignment_box.mapTo(window.properties_tabs, QPoint(0, 0))
+        window.properties_tabs.setCurrentIndex(window.fx_tab_index)
+        app.processEvents()
+        panel = window.fx_panel
+        preview = panel.layout().itemAt(0).widget()
+        assert preview.mapTo(window.properties_tabs, QPoint(0, 0)) == ground
+        document = fx.FxDocument([fx.FxBlock(['begin_fx', 'trigger = destroyed',
+            'mode = visual', 'duration = 1000', 'vp_model = 7', 'end']) for _ in range(2)])
+        panel.set_context(fx.CONTEXT_VEHICLE, document)
+        panel.seek(200.)
+        panel.effects_list.setCurrentRow(1)
+        before = (panel.time_ms, panel.highlight, set(panel.hidden_items), panel.effects_list.currentRow())
+        timeline = panel.timeline
+        assert timeline.testAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
+        for point in (QPoint(20, 40), QPoint(timeline.LABEL + 50, 40)):
+            QTest.mouseClick(timeline, Qt.MouseButton.LeftButton, pos=point)
+            QTest.mousePress(timeline, Qt.MouseButton.LeftButton, pos=point)
+            QTest.mouseMove(timeline, point + QPoint(30, 0))
+            QTest.mouseRelease(timeline, Qt.MouseButton.LeftButton, pos=point + QPoint(30, 0))
+        assert (panel.time_ms, panel.highlight, set(panel.hidden_items), panel.effects_list.currentRow()) == before
+    finally:
+        window.close()
+
+
+def test_effect_row_click_double_click_and_drag_do_not_change_visibility(app):
+    from entity_designer.fx_panel import DestructionFxPanel
+    from entity_designer import destruction_fx as fx
+    from PySide6.QtTest import QTest
+    panel = DestructionFxPanel()
+    panel.set_context(fx.CONTEXT_VEHICLE, fx.FxDocument([fx.FxBlock([
+        'begin_fx', 'trigger = destroyed', 'mode = visual', 'duration = 1000',
+        'vp_model = 7', 'end']) for _ in range(3)]))
+    panel.resize(430, 650)
+    panel.show()
+    app.processEvents()
+    tree = panel.effects_list
+    try:
+        tree.item(1).setCheckState(Qt.CheckState.Unchecked)
+        points = [tree.visualItemRect(tree.item(i)).center() for i in range(3)]
+        QTest.mouseClick(tree.viewport(), Qt.MouseButton.LeftButton, pos=points[1])
+        assert tree.currentRow() == 1 and panel.hidden_items == {1}
+        QTest.mouseDClick(tree.viewport(), Qt.MouseButton.LeftButton, pos=points[0])
+        assert panel.hidden_items == {1}
+        QTest.mousePress(tree.viewport(), Qt.MouseButton.LeftButton, pos=points[0])
+        QTest.mouseMove(tree.viewport(), points[2])
+        QTest.mouseRelease(tree.viewport(), Qt.MouseButton.LeftButton, pos=points[2])
+        assert panel.hidden_items == {1}
+        rect = tree.checkbox_rect(tree.item(1))
+        assert rect.width() >= 20 and rect.height() >= 20
+        QTest.mouseClick(tree.viewport(), Qt.MouseButton.LeftButton, pos=rect.center())
+        assert panel.hidden_items == set()
+    finally:
+        panel.close()
+
+
+def test_four_effect_visibility_buttons_and_menu_share_actions(app):
+    from entity_designer.fx_panel import DestructionFxPanel
+    from entity_designer import destruction_fx as fx
+    from PySide6.QtTest import QTest
+    panel = DestructionFxPanel()
+    panel.set_context(fx.CONTEXT_VEHICLE, fx.FxDocument([fx.FxBlock([
+        'begin_fx', 'trigger = destroyed', 'mode = visual', 'duration = 1000',
+        'vp_model = 7', 'end']) for _ in range(4)]))
+    panel.resize(430, 650)
+    panel.show()
+    app.processEvents()
+    tree = panel.effects_list
+    try:
+        assert [action.text() for action in panel._visibility_actions] == [
+            'Show All', 'Hide All', 'Hide Selected', 'Show Selected']
+        assert not panel.show_selected_button.isEnabled()
+        assert not panel.hide_selected_button.isEnabled()
+        for i in (0, 2):
+            QTest.mouseClick(tree.viewport(), Qt.MouseButton.LeftButton,
+                Qt.KeyboardModifier.ControlModifier, tree.visualItemRect(tree.item(i)).center())
+        assert panel.show_selected_button.isEnabled()
+        panel.show_selected_button.click()
+        assert panel.hidden_items == {1, 3}
+        panel.hide_selected_button.click()
+        assert panel.hidden_items == {0, 1, 2, 3}
+        panel.show_all_button.click()
+        assert not panel.hidden_items
+        panel.hide_all_button.click()
+        assert panel.hidden_items == {0, 1, 2, 3}
+        menu = panel._create_effects_context_menu()
+        assert menu.actions() == panel._visibility_actions
+        menu.actions()[3].trigger()
+        assert panel.hidden_items == {1, 3}
+        with patch.object(panel, '_create_effects_context_menu') as created:
+            panel._show_effects_context_menu(tree.visualItemRect(tree.item(0)).center())
+            assert {tree.row(row) for row in tree.selectedItems()} == {0, 2}
+            panel._show_effects_context_menu(tree.visualItemRect(tree.item(3)).center())
+            assert [tree.row(row) for row in tree.selectedItems()] == [3]
+            assert created.return_value.exec.call_count == 2
+        panel.show_selected_button.click()
+        assert panel.hidden_items == {0, 1, 2}
+    finally:
+        panel.close()
+
+
+
+
+def test_effect_checkbox_every_rapid_click_toggles_once(app):
+    from entity_designer.fx_panel import DestructionFxPanel
+    from entity_designer import destruction_fx as fx
+    from PySide6.QtTest import QTest
+    panel = DestructionFxPanel()
+    panel.set_context(fx.CONTEXT_VEHICLE, fx.FxDocument([fx.FxBlock([
+        'begin_fx', 'trigger = destroyed', 'mode = visual', 'duration = 1000',
+        'vp_model = 7', 'end'])]))
+    panel.resize(430, 650)
+    panel.show()
+    app.processEvents()
+    tree = panel.effects_list
+    point = tree.checkbox_rect(tree.item(0)).center()
+    try:
+        with patch.object(panel, '_rebuild_simulation', wraps=panel._rebuild_simulation) as rebuild:
+            QTest.mouseClick(tree.viewport(), Qt.MouseButton.LeftButton, pos=point)
+            assert panel.hidden_items == {0} and rebuild.call_count == 1
+            QTest.mouseDClick(tree.viewport(), Qt.MouseButton.LeftButton, pos=point)
+            QTest.mouseRelease(tree.viewport(), Qt.MouseButton.LeftButton, pos=point)
+            assert panel.hidden_items == set() and rebuild.call_count == 2
+            for modifier in (Qt.KeyboardModifier.NoModifier, Qt.KeyboardModifier.ControlModifier,
+                             Qt.KeyboardModifier.ShiftModifier):
+                QTest.mouseClick(tree.viewport(), Qt.MouseButton.LeftButton, modifier, point)
+                assert panel.hidden_items == {0}
+                QTest.mouseDClick(tree.viewport(), Qt.MouseButton.LeftButton, modifier, point)
+                QTest.mouseRelease(tree.viewport(), Qt.MouseButton.LeftButton, modifier, point)
+                assert panel.hidden_items == set()
+    finally:
+        panel.close()

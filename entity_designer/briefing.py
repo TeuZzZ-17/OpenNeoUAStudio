@@ -8,7 +8,10 @@ from functools import lru_cache
 
 from PySide6.QtCore import QPointF, QRectF, QSize, Qt, QSignalBlocker, QTimer
 from PySide6.QtGui import QImage, QPainter, QColor
-from PySide6.QtWidgets import QCheckBox, QComboBox, QFileDialog, QLabel, QPushButton, QSlider, QSpinBox, QVBoxLayout, QWidget
+from PySide6.QtWidgets import (
+    QCheckBox, QComboBox, QFileDialog, QGroupBox, QLabel, QPushButton,
+    QSizePolicy, QSlider, QSpinBox, QVBoxLayout, QWidget,
+)
 
 from map_editor import bootstrap
 from map_editor.core.game_installation import IMAGE_SUFFIXES, save_remembered
@@ -204,9 +207,19 @@ class BriefingControls(QWidget):
         super().__init__(editor)
         self.editor = editor
         layout = QVBoxLayout(self)
-        label = QLabel("OpenNeoUA only. A larger size makes the vehicle larger in briefing and debriefing.")
+        layout.setContentsMargins(2, 3, 2, 3)
+        layout.setSpacing(3)
+        group = QGroupBox("Briefing Model Size")
+        group.setSizePolicy(
+            QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
+        group_layout = QVBoxLayout(group)
+        group_layout.setContentsMargins(6, 4, 6, 4)
+        group_layout.setSpacing(3)
+        layout.addWidget(group)
+        layout.addStretch(1)
+        label = QLabel("A larger size makes the vehicle larger in briefing and debriefing.")
         label.setWordWrap(True)
-        layout.addWidget(label)
+        group_layout.addWidget(label)
         self.enabled = QCheckBox("Include briefing_size")
         self.value = QSpinBox()
         self.value.setRange(BRIEFING_SIZE_MIN, BRIEFING_SIZE_MAX)
@@ -216,29 +229,28 @@ class BriefingControls(QWidget):
         self.enabled.toggled.connect(self._enabled)
         self.value.valueChanged.connect(self._value)
         self.slider.valueChanged.connect(lambda value: self.value.setValue(slider_to_briefing_size(value)))
-        layout.addWidget(self.enabled)
-        layout.addWidget(self.value)
-        layout.addWidget(self.slider)
+        group_layout.addWidget(self.enabled)
+        group_layout.addWidget(self.value)
+        group_layout.addWidget(self.slider)
         self.mode = QComboBox()
         self.mode.addItem("Brief", "brief")
         self.mode.addItem("Debrief", "debrief")
         self.mode.currentIndexChanged.connect(self._mode)
-        layout.addWidget(self.mode)
+        group_layout.addWidget(self.mode)
         self.aspect = QComboBox()
         for text, ratio in (("16:10", 16/10), ("16:9", 16/9), ("4:3", 4/3)):
             self.aspect.addItem(text, ratio)
         self.aspect.currentIndexChanged.connect(lambda: editor.briefing_preview.update())
-        layout.addWidget(self.aspect)
+        group_layout.addWidget(self.aspect)
         self.background_label = QLabel()
         self.background_label.setWordWrap(True)
-        layout.addWidget(self.background_label)
+        group_layout.addWidget(self.background_label)
         choose = QPushButton("Choose Background")
         choose.clicked.connect(self.choose_background)
-        layout.addWidget(choose)
+        group_layout.addWidget(choose)
         self.output = QLabel()
         self.output.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
-        layout.addWidget(self.output)
-        layout.addStretch(1)
+        group_layout.addWidget(self.output)
 
     def sync(self):
         project = self.editor.project

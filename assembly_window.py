@@ -149,6 +149,7 @@ from fx_authoring import (
     stage_fx_clipboard,
 )
 from polygon_reference_graph import diagnose_polygon_references
+from studio_tabs import PaletteTabStrip
 from setbas_reader import (
     SetBasArchive,
     SetBasError,
@@ -701,8 +702,8 @@ class AssemblyWindow(QMainWindow):
             self._preview_visual_texture_item)
         self.setbas_tree = _BasResourceTree()
         self.setbas_tree.setHeaderLabels(["Resource", "Payload", "VP"])
-        from resource_status import ResourceStatusDelegate
-        self.setbas_tree.setItemDelegate(ResourceStatusDelegate(self.setbas_tree))
+        from resource_status import use_resource_delegate
+        use_resource_delegate(self.setbas_tree)
         self.setbas_tree.setSelectionMode(
             QAbstractItemView.SelectionMode.ExtendedSelection)
         select_all_setbas = QAction(self.setbas_tree)
@@ -1561,26 +1562,6 @@ class AssemblyWindow(QMainWindow):
     def _build_layout(self) -> None:
         tabs = QTabWidget()
         tabs.setDocumentMode(True)
-        tabs.setUsesScrollButtons(True)
-        tabs.tabBar().setExpanding(True)
-        tabs.tabBar().setStyleSheet("""
-            QTabBar::tab {
-                background: #602d37;
-                color: #f8edef;
-                border: 1px solid #7c4049;
-                border-bottom: none;
-                padding: 7px 14px;
-                font-weight: normal;
-            }
-            QTabBar::tab:selected {
-                background: #a84552;
-                border-color: #d66b77;
-                color: #ffffff;
-            }
-            QTabBar::tab:hover:!selected {
-                background: #7b3742;
-            }
-        """)
         tabs.setMinimumWidth(330)
 
         # SET.BAS is a primary workflow, not an advanced diagnostic panel.
@@ -2220,28 +2201,9 @@ class AssemblyWindow(QMainWindow):
         snapshot_layout.addStretch(1)
 
         def category_tabs() -> QTabWidget:
+            # Categories are flattened into the workspace palette below.
             category = QTabWidget()
             category.setDocumentMode(True)
-            category.setUsesScrollButtons(True)
-            category.tabBar().setExpanding(True)
-            category.tabBar().setStyleSheet("""
-                QTabBar::tab {
-                    background: #60442e;
-                    color: #fff3e8;
-                    border: 1px solid #825d3d;
-                    border-bottom: none;
-                    padding: 5px 11px;
-                    font-weight: normal;
-                }
-                QTabBar::tab:selected {
-                    background: #c27635;
-                    border-color: #e5a45b;
-                    color: #ffffff;
-                }
-                QTabBar::tab:hover:!selected {
-                    background: #7b5638;
-                }
-            """)
             return category
 
         resources_tabs = category_tabs()
@@ -2283,6 +2245,8 @@ class AssemblyWindow(QMainWindow):
         visuals_tabs.currentChanged.connect(self._on_nested_tab_changed)
         tabs.currentChanged.connect(self._on_right_tab_changed)
         tabs.setCurrentWidget(resources_tabs)
+        # One flat palette of buttons for every page and sub-page.
+        PaletteTabStrip.install(tabs)
         self._update_snapshot_color_button()
         self._sync_animation_controls()
 
@@ -2290,50 +2254,6 @@ class AssemblyWindow(QMainWindow):
         right_layout = QVBoxLayout(right_panel)
         right_layout.setContentsMargins(0, 0, 0, 0)
         right_layout.setSpacing(2)
-        editor_status_row = QWidget()
-        editor_status_layout = QHBoxLayout(editor_status_row)
-        editor_status_layout.setContentsMargins(0, 0, 0, 0)
-        editor_status_layout.setSpacing(0)
-        editor_status_layout.addStretch(1)
-        self.editor_status_panel = QWidget()
-        self.editor_status_panel.setObjectName("editorStatusPanel")
-        self.editor_status_panel.setMinimumHeight(44)
-        self.editor_status_panel.setStyleSheet("""
-            QWidget#editorStatusPanel {
-                background: #202126;
-                border: 2px solid #b3485c;
-            }
-            QLabel {
-                border: none;
-                background: transparent;
-            }
-        """)
-        editor_status_center = QHBoxLayout(self.editor_status_panel)
-        editor_status_center.setContentsMargins(14, 3, 14, 3)
-        editor_status_center.setSpacing(18)
-        editor_status_center.addStretch(1)
-        self.loaded_resource_label = QLabel("No Resource Loaded")
-        self.loaded_resource_label.setAlignment(
-            Qt.AlignmentFlag.AlignCenter)
-        resource_font = self.loaded_resource_label.font()
-        resource_font.setPointSize(13)
-        resource_font.setBold(True)
-        self.loaded_resource_label.setFont(resource_font)
-        self.loaded_resource_label.setStyleSheet("color: #ffffff;")
-        editor_status_center.addWidget(self.loaded_resource_label)
-        self.unsaved_edits_label = QLabel()
-        self.unsaved_edits_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        unsaved_font = self.unsaved_edits_label.font()
-        unsaved_font.setPointSize(13)
-        unsaved_font.setBold(True)
-        self.unsaved_edits_label.setFont(unsaved_font)
-        self.unsaved_edits_label.setStyleSheet("color: #ffffff;")
-        self.unsaved_edits_label.hide()
-        editor_status_center.addWidget(self.unsaved_edits_label)
-        editor_status_center.addStretch(1)
-        editor_status_layout.addWidget(self.editor_status_panel, 8)
-        editor_status_layout.addStretch(1)
-        right_layout.addWidget(editor_status_row)
         right_layout.addWidget(tabs, 1)
 
         center_panel = QWidget()
@@ -2372,6 +2292,7 @@ class AssemblyWindow(QMainWindow):
         diagnostics_tabs.addTab(self.warning_list, "Warnings")
         diagnostics_tabs.addTab(self.checks_list, "Validation")
         diagnostics_tabs.setCurrentIndex(0)
+        PaletteTabStrip.install(diagnostics_tabs)
         for diagnostic_list in (self.log_list, self.warning_list,
                                 self.checks_list):
             diagnostic_list.setMinimumHeight(0)
@@ -5490,27 +5411,9 @@ class AssemblyWindow(QMainWindow):
         self._update_editor_status()
 
     def _update_editor_status(self) -> None:
-        self._refresh_dirty_resource_rows()
-        if self._family is None:
-            self.loaded_resource_label.setText("No Resource Loaded")
-            self.loaded_resource_label.setToolTip("")
-            self.unsaved_edits_label.clear()
-            self.unsaved_edits_label.hide()
-            return
-        obj = (self._owner_to_obj.get(self._selected_owner)
-               if self._selected_owner else None)
-        selected = obj.display_name if obj else "NO RESOURCE SELECTED"
-        n_dirty = (
-            len(self._geom_dirty) + len(self._uv_original)
-            + len(self._vanm_uv_original) + len(self._texture_original))
-        self.loaded_resource_label.setText(selected)
-        self.loaded_resource_label.setToolTip(
-            self._archive_read_only_message()
-            if self._selected_model_is_archive_read_only() else selected)
-        self.unsaved_edits_label.setText(f"Unsave edits: {n_dirty}")
-        self.unsaved_edits_label.setVisible(n_dirty > 0)
+        """Refresh the unsaved-edit markers of the resource rows."""
 
-    # -- log / profile / candidate tools ------------------------------------------
+        self._refresh_dirty_resource_rows()
 
     def _dirty_resource_names(self):
         from vp_manager import normalize_base_name

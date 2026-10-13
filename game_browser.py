@@ -14,8 +14,8 @@ GAME_OBJECT_ROLE = int(Qt.ItemDataRole.UserRole) + 64
 
 
 def configure_resource_tree(tree):
-    from resource_status import ResourceStatusDelegate
-    tree.setItemDelegate(ResourceStatusDelegate(tree))
+    from resource_status import use_resource_delegate
+    use_resource_delegate(tree)
     tree.setAlternatingRowColors(True)
     tree.setUniformRowHeights(True)
     tree.setRootIsDecorated(False)

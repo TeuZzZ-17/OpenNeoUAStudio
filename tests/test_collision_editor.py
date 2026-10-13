@@ -889,9 +889,13 @@ class CollisionEditorTests(unittest.TestCase):
         self.assertEqual(
             window.model_tree.textElideMode(), Qt.TextElideMode.ElideNone)
 
-    def test_50_project_name_uses_neutral_example_placeholder(self):
+    def test_50_compatibility_box_replaces_project_fields(self):
         window = self._window()
-        self.assertEqual(window.name_edit.placeholderText(), "Example")
+        self.assertFalse(hasattr(window, "name_edit"))
+        self.assertFalse(hasattr(window, "target_combo"))
+        window.properties_tabs.setCurrentIndex(window.cockpit_tab_index)
+        self.assertEqual(window._tab_compatibility[window.cockpit_tab][0], "openneoua")
+        self.assertFalse(hasattr(window, "compat_section"))
 
     def test_51_overlapping_spheres_cycle_on_repeated_clicks(self):
         viewport = CollisionViewport()
@@ -1601,13 +1605,15 @@ class CollisionEditorTests(unittest.TestCase):
         self.assertFalse(window.model_tree.header().stretchLastSection())
         self.assertEqual(item.toolTip(0), "models/root.sklt")
 
-    def test_58_vanilla_collision_notice_is_visible_and_precise(self):
+    def test_58_collision_compatibility_is_explained_in_the_box(self):
         window = self._window()
-        notice = window.vanilla_collision_notice
-        self.assertTrue(notice.isVisibleTo(window) or not window.isVisible())
-        self.assertIn("Vanilla Urban Assault", notice.text())
-        self.assertIn("Legacy Radius only", notice.text())
-        self.assertIn("OpenNeoUA", notice.text())
+        window.properties_tabs.setCurrentIndex(window.collision_tab_index)
+        from studio_compat import compatibility_entries
+        _, level, note = compatibility_entries(window, "entity_designer")[0]
+        self.assertEqual(level, "mixed")
+        self.assertIn("vanilla Urban Assault", note)
+        self.assertIn("Legacy Radius", note)
+        self.assertIn("OpenNeoUA", note)
 
     def test_59_model_preview_scale_defaults_to_identity(self):
         window = self._window()
@@ -1788,7 +1794,7 @@ class CollisionEditorTests(unittest.TestCase):
         self.assertEqual(window.project.overeof, 0.0)
         self.assertEqual(window.viewport.overeof_preview_offset, 0.0)
         self.assertEqual(
-            window.ground_alignment_box.title(), "Ground Alignment (Vanilla)")
+            window.ground_alignment_box.title(), "Ground Alignment")
         self.assertEqual(window.ground_alignment_notice.text(), "")
         self.assertTrue(window.ground_alignment_notice.isHidden())
         self.assertIn("Show Ground Simulation", window.viewpoint_actions)
@@ -2086,7 +2092,7 @@ class CollisionEditorTests(unittest.TestCase):
         self.assertIsNone(
             window.findChild(QToolBar, "vehicleSpatialPreviewTools"))
         self.assertEqual(
-            window.fire_points_box.title(), "Fire Points (Vanilla)")
+            window.fire_points_box.title(), "Fire Points")
         self.assertEqual(
             window.add_fire_point_button.text(), "Add Fire Point")
         self.assertEqual(window.remove_fire_point_button.text(), "Remove")
@@ -2119,10 +2125,8 @@ class CollisionEditorTests(unittest.TestCase):
         self.assertEqual(positions["x"][0], 0)
         self.assertEqual(positions["y"][0], 0)
         self.assertEqual(positions["z"][0], 0)
-        self.assertEqual(
-            window.fire_point_range_notice.text(),
-            "Weapons Min / Max range is an OpenNeoUA-only feature.")
-        self.assertIn("#d9a35f", window.fire_point_range_notice.styleSheet())
+        self.assertFalse(hasattr(window, "fire_point_range_notice"))
+        self.assertIn("Min/Max", window._tab_compatibility[window.fire_points_tab][1])
 
     def test_90_vehicle_model_reference_reads_vp_and_preview_scale(self):
         text = (
@@ -2731,7 +2735,7 @@ class CollisionEditorTests(unittest.TestCase):
     def test_109_gun_direction_controls_are_canonical_and_name_is_script_name(self):
         window = self._window()
         self.assertEqual(window.gun_points_box.title(),
-                         "Gun Points (Vanilla/OpenNeoUA)")
+                         "Gun Points")
         for spin in window.gun_dir_spins.values():
             self.assertEqual(spin.minimum(), -1.0)
             self.assertEqual(spin.maximum(), 1.0)
@@ -2801,10 +2805,11 @@ class CollisionEditorTests(unittest.TestCase):
         self.assertEqual(
             [window.properties_tabs.tabText(index)
              for index in range(window.properties_tabs.count())],
-            ["Collision Spheres", "Collision Shape", "Fire Points",
-             "Gun Points", "Cockpit View", "Briefing Model Size"])
+            ["Collision Spheres", "Collision Shape", "Ground Alignment",
+             "Fire Points", "Gun Points", "Cockpit View",
+             "Briefing Model Size", "Destruction FX"])
         self.assertIs(
-            window.ground_alignment_box.parentWidget(), window.collision_tab)
+            window.ground_alignment_box.parentWidget(), window.ground_tab)
         self.assertIs(window.spheres_box.parentWidget(), window.collision_tab)
         self.assertIs(
             window.collision_shape_box.parentWidget(),
@@ -2846,16 +2851,18 @@ class CollisionEditorTests(unittest.TestCase):
         self.assertEqual(vertical_bar.value(), 50)
         self.assertGreaterEqual(window.properties_scroll.minimumWidth(), 420)
         self.assertLessEqual(window.properties_scroll.minimumWidth(), 430)
-        bar = window.properties_tabs.tabBar()
-        self.assertTrue(bar.expanding())
-        self.assertEqual(bar.elideMode(), Qt.TextElideMode.ElideNone)
-        self.assertTrue(bar.usesScrollButtons())
-        self.assertFalse(bar.isMovable())
+        # Studio palette buttons replace the single-row tab bar.
+        self.assertTrue(window.properties_tabs.tabBar().isHidden())
+        strip = window.properties_tab_strip
+        self.assertEqual([button.text() for button in strip.buttons()],
+                         ["Collision Spheres", "Collision Shape", "Ground Alignment",
+             "Fire Points", "Gun Points", "Cockpit View",
+             "Briefing Model Size", "Destruction FX"])
+        self.assertGreaterEqual(strip.row_count(), 2)
+        strip.buttons()[window.ground_tab_index].click()
         self.assertEqual(
-            [window.properties_tabs.tabText(index)
-             for index in range(window.properties_tabs.count())],
-            ["Collision Spheres", "Collision Shape", "Fire Points",
-             "Gun Points", "Cockpit View", "Briefing Model Size"])
+            window.properties_tabs.currentIndex(), window.ground_tab_index)
+        self.assertEqual(window._tab_compatibility[window.ground_tab][0], "vanilla")
         window.properties_tabs.setCurrentIndex(window.fire_points_tab_index)
         self.assertEqual(
             window.properties_tabs.currentIndex(), window.fire_points_tab_index)
@@ -3343,7 +3350,7 @@ class CollisionEditorTests(unittest.TestCase):
     def test_125_domain_context_menus_reuse_existing_workspace_actions(self):
         window = self._window()
         self.assertEqual(
-            window.ground_alignment_box.title(), "Ground Alignment (Vanilla)")
+            window.ground_alignment_box.title(), "Ground Alignment")
         self.assertFalse(hasattr(window, "cockpit_hint"))
 
         fire_menu = window._create_fire_point_context_menu()

@@ -172,11 +172,9 @@ class WindowContractV5Tests(unittest.TestCase):
             self.assertFalse(hasattr(window, "mirror_copy_check"))
             self.assertFalse(hasattr(window, "mirror_delete_check"))
             self.assertFalse(hasattr(window, "completeness_label"))
-            self.assertTrue(window.loaded_resource_label.font().bold())
-            self.assertGreaterEqual(
-                window.loaded_resource_label.font().pointSize(), 13)
-            self.assertEqual(
-                window.loaded_resource_label.text(), "No Resource Loaded")
+            # The resource-name header above the workspace tabs is gone.
+            self.assertFalse(hasattr(window, "loaded_resource_label"))
+            self.assertFalse(hasattr(window, "editor_status_panel"))
             self.assertFalse(hasattr(window, "setbas_preview_button"))
             self.assertEqual(
                 window.setbas_runtime_loose_button.text(),
@@ -236,14 +234,6 @@ class WindowContractV5Tests(unittest.TestCase):
                              "Add Compatible Slot")
             self.assertEqual(window.material_delete_button.text(),
                              "Delete Material")
-            editor_tab_center = window._right_tabs.tabBar().mapToGlobal(
-                window._right_tabs.tabBar().tabRect(1).center()).x()
-            status_center = window.editor_status_panel.mapToGlobal(
-                window.editor_status_panel.rect().center()).x()
-            self.assertLessEqual(abs(editor_tab_center - status_center), 2)
-            self.assertGreater(
-                window.editor_status_panel.width(),
-                window._right_tabs.tabBar().tabRect(1).width() * 2)
             window._right_tabs.setCurrentWidget(window._editor_tabs)
             self.app.processEvents()
         finally:
@@ -378,41 +368,6 @@ class WindowContractV5Tests(unittest.TestCase):
                 window.open_base_dialog()
             open_base.assert_called_once_with(path)
             open_setbas.assert_not_called()
-        finally:
-            window.close()
-
-    def test_editor_status_shows_only_resource_and_all_unsaved_edits(self):
-        window = AssemblyWindow()
-        try:
-            window._family = object()
-            window._selected_owner = "root"
-            window._owner_to_obj = {
-                "root": SimpleNamespace(display_name="VP_HUBI1.sklt")}
-            window._geom_dirty = {"root": object()}
-            window._uv_original = {}
-            window._vanm_uv_original = {}
-            window._texture_original = {("root", 1): object()}
-
-            window._update_editor_status()
-
-            self.assertEqual(
-                window.loaded_resource_label.text(), "VP_HUBI1.sklt")
-            self.assertEqual(
-                window.unsaved_edits_label.text(), "Unsave edits: 2")
-            self.assertIn(
-                "color: #ffffff",
-                window.unsaved_edits_label.styleSheet())
-            self.assertFalse(window.unsaved_edits_label.isHidden())
-            self.assertEqual(
-                window.loaded_resource_label.geometry().center().y(),
-                window.unsaved_edits_label.geometry().center().y())
-            visible_text = (
-                window.loaded_resource_label.text() + " "
-                + window.unsaved_edits_label.text())
-            for removed in (
-                    "Complete textured preview", "selected + children",
-                    "large family", "TEXTURE PREVIEW"):
-                self.assertNotIn(removed, visible_text)
         finally:
             window.close()
 
