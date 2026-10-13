@@ -10,22 +10,9 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-
-# Twelve contrasting colors, one for each palette entry (including Script/Level Info).
-TAB_COLORS = (
-    (75, 195, 220),    # Sectors - cyan
-    (240, 153, 75),    # Buildings - orange
-    (90, 210, 105),    # Factions - green
-    (169, 120, 238),   # Terrain - violet
-    (238, 106, 159),   # Squad - pink
-    (235, 210, 75),    # Hosts - yellow
-    (100, 146, 245),   # Tech - blue
-    (70, 208, 178),    # Beamgates - turquoise
-    (242, 105, 92),    # Super Items - red
-    (169, 219, 82),    # Gems - lime
-    (225, 105, 230),   # Script - magenta
-    (190, 165, 120),   # Level Info - sand
-)
+# Colors and button style are shared with every Studio workspace palette;
+# TAB_COLORS stays importable from here for the Map Editor.
+from studio_tabs import TAB_COLORS, _PaletteButton, palette_columns
 
 
 class PaletteTabs(QWidget):
@@ -63,30 +50,12 @@ class PaletteTabs(QWidget):
     def addTab(self, page, label):
         index = len(self._buttons)
         text = str(label)
-        button = QPushButton(text, self._tab_bar)
+        button = _PaletteButton(text, TAB_COLORS[index % len(TAB_COLORS)], None, self._tab_bar)
         button.setObjectName(f"palette_tab_{index}")
         button.setCheckable(True)
         button.setMinimumWidth(0)
         button.setSizePolicy(QSizePolicy.Policy.Ignored,
                              QSizePolicy.Policy.Fixed)
-        color = TAB_COLORS[index % len(TAB_COLORS)]
-        red, green, blue = color
-        button.setStyleSheet(
-            "QPushButton {"
-            f"color: rgb({red}, {green}, {blue});"
-            "background-color: #252525;"
-            f"border: 1px solid rgba({red}, {green}, {blue}, 105);"
-            f"border-bottom: 2px solid rgba({red}, {green}, {blue}, 150);"
-            "border-radius: 5px; padding: 4px 2px;"
-            "}"
-            "QPushButton:hover { background-color: #303030; }"
-            "QPushButton:checked {"
-            f"background-color: rgba({red}, {green}, {blue}, 85);"
-            "color: #ffffff; padding: 3px 1px;"
-            f"border: 2px solid rgb({red}, {green}, {blue});"
-            f"border-bottom: 3px solid rgb({red}, {green}, {blue});"
-            "}"
-        )
         button.clicked.connect(
             lambda checked=False, tab_index=index: self.setCurrentIndex(tab_index)
         )
@@ -99,7 +68,7 @@ class PaletteTabs(QWidget):
 
     def _reflow_buttons(self):
         count = len(self._buttons)
-        columns = max(1, (count + 1) // 2) if count <= 10 else 4
+        columns = palette_columns(count)
         for button in self._buttons:
             self._button_grid.removeWidget(button)
         for index, button in enumerate(self._buttons):
