@@ -6,22 +6,41 @@ from PySide6.QtWidgets import QStyledItemDelegate, QStyleOptionViewItem, QStyle
 MODIFIED_ROLE = int(Qt.ItemDataRole.UserRole) + 90
 ORIGINAL_COLORS_ROLE = MODIFIED_ROLE + 1
 MODIFIED_COLOR = QColor(255, 80, 80)
+LIST_BASE = "#2d2d2d"
+LIST_ALTERNATE = "#383838"
+LIST_SELECTED = "#006d96"
+LIST_HOVER = "#234e64"
+LIST_DEPENDENCY_SELECTED = "#31483a"
 # One selection look for every resource list (game catalog, BAS Manager,
 # entity lists). Without it some lists took the Windows accent color and
 # others the native grey.
 SELECTION_STYLE = (
-    "QTreeView::item:selected { background-color: #006d96; color: #ffffff; }"
-    "QTreeView::item:hover:!selected { background-color: #234e64; }"
+    f"QTreeView, QListView {{ background-color: {LIST_BASE}; alternate-background-color: {LIST_ALTERNATE}; }}"
+    f"QTreeView::item:selected, QListView::item:selected, QTreeView::item:selected:!active, QListView::item:selected:!active {{ background-color: {LIST_SELECTED}; color: #ffffff; }}"
+    f"QTreeView::item:hover:!selected, QListView::item:hover:!selected {{ background-color: {LIST_HOVER}; color: #ffffff; }}"
 )
+
+
+def use_standard_list_style(view, *, selected_color: str | None = None) -> None:
+    """Apply the shared list colors, with an optional selection accent."""
+
+    view.setAlternatingRowColors(True)
+    view.setMouseTracking(True)
+    if SELECTION_STYLE not in view.styleSheet():
+        view.setStyleSheet(view.styleSheet() + SELECTION_STYLE)
+    if selected_color is not None:
+        view.setStyleSheet(
+            view.styleSheet()
+            + f"QTreeWidget::item:selected, QTreeWidget::item:selected:!active {{ background-color: {selected_color}; color: #ffffff; }}"
+            + f"QTreeWidget::item:selected:hover {{ background-color: {LIST_HOVER}; color: #ffffff; }}"
+        )
 
 
 def use_resource_delegate(tree) -> None:
     """Shared dirty-row delegate and selection colors of a resource list."""
 
-    tree.setMouseTracking(True)
+    use_standard_list_style(tree)
     tree.setItemDelegate(ResourceStatusDelegate(tree))
-    if SELECTION_STYLE not in tree.styleSheet():
-        tree.setStyleSheet(tree.styleSheet() + SELECTION_STYLE)
 
 
 class ResourceStatusDelegate(QStyledItemDelegate):

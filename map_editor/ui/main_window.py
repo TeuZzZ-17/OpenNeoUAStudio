@@ -374,6 +374,8 @@ class MainWindow(QMainWindow):
         self.building_zoom_in.setEnabled(False)
         buildings_layout.addLayout(building_zoom_row)
         self.building_list = QListWidget()
+        from resource_status import use_standard_list_style
+        use_standard_list_style(self.building_list)
         self.building_list.setItemDelegate(PaletteCardDelegate(self.building_list))
         self.building_list.setViewMode(QListWidget.ViewMode.ListMode)
         self.building_list.setFlow(QListView.Flow.TopToBottom)
@@ -391,6 +393,7 @@ class MainWindow(QMainWindow):
         self._layout_building_rows()
 
         self.owner_list = QListWidget()
+        use_standard_list_style(self.owner_list)
         self.owner_list.setItemDelegate(PaletteCardDelegate(self.owner_list))
         font = self.owner_list.font()
         font.setPointSizeF(max(13, font.pointSizeF() + 4))
@@ -548,6 +551,8 @@ class MainWindow(QMainWindow):
     @staticmethod
     def _make_list(icons: bool) -> QListWidget:
         widget = QListWidget()
+        from resource_status import use_standard_list_style
+        use_standard_list_style(widget)
         if icons:
             widget.setViewMode(QListWidget.ViewMode.IconMode)
             widget.setFlow(QListView.Flow.LeftToRight)

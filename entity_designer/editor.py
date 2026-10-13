@@ -1254,6 +1254,8 @@ class GeometryPartSelectionWidget(QWidget):
         self.summary_label = QLabel("Load a model to select collision geometry.")
         layout.addWidget(self.summary_label)
         self.tree = QTreeWidget()
+        from resource_status import use_standard_list_style
+        use_standard_list_style(self.tree)
         self.tree.setHeaderLabels(["Geometry / component", "Triangles", "Topology"])
         self.tree.header().setSectionResizeMode(
             0, QHeaderView.ResizeMode.Stretch)
@@ -5458,11 +5460,14 @@ class CollisionEditorWindow(QMainWindow):
         self.viewport.animationFrameChanged.connect(
             self._on_animation_frame_changed)
         self.model_tree = QTreeWidget()
+        from resource_status import use_standard_list_style
+        use_standard_list_style(self.model_tree)
         self.model_tree.setHeaderLabels(["Internal path", "VP"])
         self.model_tree.setSelectionMode(
             QAbstractItemView.SelectionMode.SingleSelection)
         self.model_tree.currentItemChanged.connect(self._model_changed)
         self.sphere_tree = SphereTreeWidget()
+        use_standard_list_style(self.sphere_tree)
         self.sphere_tree.setHeaderLabels(
             ["Sphere", "Radius", "Visible", "X", "Y", "Z", "Index"])
         self.sphere_tree.setSelectionMode(
@@ -5477,12 +5482,14 @@ class CollisionEditorWindow(QMainWindow):
         self.sphere_tree.itemSelectionChanged.connect(
             self._sphere_tree_selection_changed)
         self.fire_point_tree = QTreeWidget()
+        use_standard_list_style(self.fire_point_tree)
         self.fire_point_tree.setHeaderLabels(["Point", "X", "Y", "Z"])
         self.fire_point_tree.setSelectionMode(
             QAbstractItemView.SelectionMode.SingleSelection)
         self.fire_point_tree.currentItemChanged.connect(
             self._fire_point_tree_selection_changed)
         self.gun_point_tree = QTreeWidget()
+        use_standard_list_style(self.gun_point_tree)
         self.gun_point_tree.setHeaderLabels([
             "Gun", "Family", "Vehicle", "Side", "Up", "Down", "X", "Y", "Z",
         ])

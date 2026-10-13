@@ -331,6 +331,8 @@ class TexturePickerDialog(QDialog):
         layout.addWidget(self.search)
 
         self.list = QListWidget()
+        from resource_status import use_standard_list_style
+        use_standard_list_style(self.list)
         self.list.setViewMode(QListView.ViewMode.IconMode)
         self.list.setResizeMode(QListView.ResizeMode.Adjust)
         self.list.setMovement(QListView.Movement.Static)
