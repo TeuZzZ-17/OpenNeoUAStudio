@@ -3309,6 +3309,40 @@ class CompactScaleSpinBox(QDoubleSpinBox):
         return text
 
 
+# Camera-space depth beyond which AssetViewport's projection folds points
+# back (its denominator is clamped); shapes are cut here before projecting.
+_NEAR_CAMERA_Z = 3.65
+
+
+def _near_clip_segment(a, b):
+    """Part of a camera-space segment in front of the near plane, or None."""
+
+    a_in, b_in = a[2] < _NEAR_CAMERA_Z, b[2] < _NEAR_CAMERA_Z
+    if a_in and b_in:
+        return a, b
+    if not a_in and not b_in:
+        return None
+    ratio = (_NEAR_CAMERA_Z - a[2]) / (b[2] - a[2])
+    cut = tuple(a[axis] + (b[axis] - a[axis]) * ratio for axis in range(3))
+    return (a, cut) if a_in else (cut, b)
+
+
+def _near_clip_polygon(points):
+    """Sutherland-Hodgman cut of a camera-space polygon at the near plane."""
+
+    clipped = []
+    for index, current in enumerate(points):
+        previous = points[index - 1]
+        current_in = current[2] < _NEAR_CAMERA_Z
+        if current_in != (previous[2] < _NEAR_CAMERA_Z):
+            ratio = (_NEAR_CAMERA_Z - previous[2]) / (current[2] - previous[2])
+            clipped.append(tuple(previous[axis] + (current[axis] - previous[axis]) * ratio
+                                 for axis in range(3)))
+        if current_in:
+            clipped.append(current)
+    return clipped
+
+
 class CollisionViewport(FxPreviewViewportMixin, AssetViewport):
     """Existing AssetViewport plus the exact F10 three-ring overlay.
 
@@ -3912,6 +3946,8 @@ class CollisionViewport(FxPreviewViewportMixin, AssetViewport):
 
     def _ground_grid_spec(self) -> tuple[float, float, float]:
         size = 1.4 / max(abs(self._scale), 1e-9)
+        if self._fx_active and self._fx_weapon_context:
+            size *= 4.0
         return self._center[0], self._center[2], size
 
     def _draw_grid(self, painter: QPainter, target: QRectF, camera: dict) -> None:
@@ -3929,13 +3965,16 @@ class CollisionViewport(FxPreviewViewportMixin, AssetViewport):
             (center_x + size, 0.0, center_z + size),
             (center_x - size, 0.0, center_z + size),
         )
-        corners = QPolygonF([
-            self._project(self._camera_vertex(point), target, camera)
-            for point in corners_world
-        ])
-        painter.setPen(Qt.PenStyle.NoPen)
-        painter.setBrush(QColor(34, 118, 132, 42))
-        painter.drawPolygon(corners)
+        # The plane can reach behind the camera. Every shape is cut at the
+        # near plane before projecting; projecting points behind the camera
+        # would fold them back and draw stray lines across the viewport.
+        corners = _near_clip_polygon(
+            [self._camera_vertex(point, camera) for point in corners_world])
+        if len(corners) >= 3:
+            painter.setPen(Qt.PenStyle.NoPen)
+            painter.setBrush(QColor(34, 118, 132, 42))
+            painter.drawPolygon(QPolygonF([
+                self._project(point, target, camera) for point in corners]))
 
         steps = 8
         for i in range(-steps, steps + 1):
@@ -3951,11 +3990,13 @@ class CollisionViewport(FxPreviewViewportMixin, AssetViewport):
                 ((center_x - size, 0.0, center_z + offset),
                  (center_x + size, 0.0, center_z + offset)),
             ):
-                a = self._project(
-                    self._camera_vertex(start), target, camera)
-                b = self._project(
-                    self._camera_vertex(end), target, camera)
-                painter.drawLine(a, b)
+                segment = _near_clip_segment(
+                    self._camera_vertex(start, camera),
+                    self._camera_vertex(end, camera))
+                if segment is not None:
+                    painter.drawLine(
+                        self._project(segment[0], target, camera),
+                        self._project(segment[1], target, camera))
 
     def _is_sphere_drawn(self, sphere: CollisionSphere) -> bool:
         return (
@@ -5386,6 +5427,16 @@ class CollisionEditorWindow(QMainWindow):
         self._fx_reload_timer.setSingleShot(True)
         self._fx_reload_timer.setInterval(300)
         self._fx_reload_timer.timeout.connect(self.reload_fx_from_file)
+        # Safety net for the file watcher: while the FX tab is open the files
+        # are also compared with what was loaded, so no edit is ever missed
+        # (editors that save by renaming, locked files, a tab left and reopened).
+        self._fx_tracked: set[str] = set()
+        self._fx_loaded_signatures: dict = {}
+        self._fx_failed_signatures = None
+        self._fx_script_snapshot = None
+        self._fx_poll_timer = QTimer(self)
+        self._fx_poll_timer.setInterval(400)
+        self._fx_poll_timer.timeout.connect(self._fx_poll)
 
         configure_operation_status_bar(self)
 
@@ -5866,6 +5917,7 @@ class CollisionEditorWindow(QMainWindow):
         self.fx_panel = DestructionFxPanel(self)
         self.fx_tab_index = self.properties_tabs.addTab(
             self.fx_panel, "Destruction FX")
+        self.fx_panel.sound.resolver = self._resolve_fx_sound
         self.fx_panel.frameChanged.connect(self._push_fx_frame)
         self.fx_panel.fitRequested.connect(self._fit_fx_view)
         # The playback bar uses the full width under the viewport.
@@ -5908,9 +5960,11 @@ class CollisionEditorWindow(QMainWindow):
             self.briefing_tab: (
                 COMPAT_OPENNEOUA, "briefing_size exists only in OpenNeoUA."),
             self.fx_panel: (
-                MIXED, "Preview only: edit the script and press Reload. "
-                "Vanilla dest_fx/scale_fx effects work everywhere; begin_fx "
-                "effects are OpenNeoUA only, as labelled in the list."),
+                MIXED, "Preview only: it never changes game data. Vanilla "
+                "dest_fx/scale_fx effects work everywhere; begin_fx effects "
+                "and the OpenNeoUA weapon/vehicle FX (tracers, decorations, "
+                "clusters, lasers, debuffs, palette flashes) need OpenNeoUA, "
+                "as labelled in the list. Camera shake (shk_*) is not shown."),
         }
         self.properties_tab_strip = PaletteTabStrip.install(
             self.properties_tabs, markers={
@@ -9946,14 +10000,18 @@ class CollisionEditorWindow(QMainWindow):
         return (legacy.radius if legacy is not None
                 else effective_runtime_radius(self.project))
 
+    def _fx_unit_scale_rotation(self):
+        """Preview scale and Euler rotation (degrees) of the unit."""
+
+        return ((self.project.model_scale_x, self.project.model_scale_y,
+                 self.project.model_scale_z),
+                (self.project.model_rotation_x, self.project.model_rotation_y,
+                 self.project.model_rotation_z))
+
     def _fx_unit_transform(self):
         """Preview scale/rotation of the unit as a matrix (static preview)."""
 
-        scale = (self.project.model_scale_x, self.project.model_scale_y,
-                 self.project.model_scale_z)
-        rotation = (self.project.model_rotation_x,
-                    self.project.model_rotation_y,
-                    self.project.model_rotation_z)
+        scale, rotation = self._fx_unit_scale_rotation()
         columns = [visual_transform_point(axis, scale, rotation)
                    for axis in ((1.0, 0.0, 0.0), (0.0, 1.0, 0.0), (0.0, 0.0, 1.0))]
         return tuple(tuple(columns[column][row] for column in range(3))
@@ -9977,6 +10035,40 @@ class CollisionEditorWindow(QMainWindow):
                     block.object_id, body)
         return catalog
 
+    def _build_fx_weapons(self, text: str, objects=None):
+        """Weapons a cluster can spawn: the game catalog plus this script."""
+
+        weapons: dict[int, fx.WeaponDef] = {}
+        if objects is None:
+            objects = getattr(self.game_object_browser, "objects", None) or []
+        for obj in objects:
+            if obj.kind == "weapon":
+                weapons[obj.object_id] = fx.weapon_def_from_text(
+                    obj.object_id, obj.effective_text)
+        lines = text.splitlines()
+        for block in find_script_blocks(text):
+            if block.kind == "new_weapon" and block.complete:
+                body = "\n".join(lines[block.start_line:block.end_line + 1])
+                weapons[block.object_id] = fx.weapon_def_from_text(
+                    block.object_id, body + "\n")
+        return weapons
+
+    def _build_fx_debuffs(self, text: str):
+        """Debuff profiles of the game scripts plus this script."""
+
+        debuffs: dict[int, fx.DebuffSpec] = {}
+        try:
+            from map_editor import bootstrap
+            from map_editor.core.script_catalog import script_texts
+            install = bootstrap.installation()
+            if install is not None:
+                for body in script_texts(install.folder("scripts")):
+                    debuffs.update(fx.debuff_profiles_from_text(body))
+        except (OSError, ValueError, RuntimeError, TypeError):
+            pass
+        debuffs.update(fx.debuff_profiles_from_text(text))
+        return debuffs
+
     def _fx_unit_phases(self, text: str, block: ScriptBlock,
                         reference: VehicleModelReference) -> fx.UnitPhases:
         """Death models of the definition, resolved like the engine."""
@@ -9986,21 +10078,31 @@ class CollisionEditorWindow(QMainWindow):
                 text, block.start_line, block.end_line, key) or ""
 
         def state(name: str) -> fx.VisualRef:
+            # Engine defaults when the key is absent: vp_dead 4, vp_megadeth 2.
             vp = (reference.vp_normal or 0 if name == "normal"
-                  else fx.script_int(value(f"vp_{name}")))
+                  else fx.script_int(value(f"vp_{name}"),
+                                     {"dead": 4, "megadeth": 2}.get(name, 0)))
             return fx.VisualRef(vp=vp, mesh3ds=value(f"3ds_{name}"),
                                 base_path=value(f"base_{name}"))
 
         weapon = block.kind.endswith("weapon")
         model = value("model").casefold()
+        scale, euler = self._fx_unit_scale_rotation()
+        look = fx.unit_look(
+            fx.top_level_values(text, block.start_line, block.end_line),
+            weapon=weapon)
         unit = fx.UnitPhases(
             normal=state("normal"), dead=state("dead"),
             megadeth=state("megadeth"), model=model, weapon=weapon,
             transform=self._fx_unit_transform(),
             overeof=(self.project.overeof
-                     if self.project.overeof_enabled else 0.0))
+                     if self.project.overeof_enabled else 0.0),
+            scale=scale, euler=euler, **look)
         if unit.flies:
             unit = replace(unit, altitude=fx.DEFAULT_FLIGHT_ALTITUDE)
+        elif weapon:
+            # Artillery shells fall from their arc height, other weapons from 550.
+            unit = replace(unit, altitude=unit.altitude or fx.WEAPON_LAUNCH_HEIGHT)
         return unit
 
     def _load_fx_context(self, text: str, block: ScriptBlock,
@@ -10022,14 +10124,71 @@ class CollisionEditorWindow(QMainWindow):
                 self._fx_script_sources.update(str(path.resolve()) for path in
                                                (scripts / "Startup.cfg", scripts / "startup.scr") if path.is_file())
         unit = self._fx_unit_phases(text, block, reference)
-        if keep_view and self.fx_panel.unit.flies:
+        if keep_view and (unit.weapon or self.fx_panel.unit.flies):
             unit = replace(unit, altitude=self.fx_panel.unit.altitude)
         self.fx_panel.set_context(
             fx.CONTEXT_WEAPON if unit.weapon else fx.CONTEXT_VEHICLE,
             fx.extract_fx_document(text, block.start_line, block.end_line),
-            catalog=self._fx_catalog, unit=unit, keep_view=keep_view)
+            catalog=self._fx_catalog, unit=unit, keep_view=keep_view,
+            weapons=self._build_fx_weapons(text, objects),
+            debuffs=self._build_fx_debuffs(text))
         self._fx_update_watcher()
+        if not keep_view:
+            # A fresh definition: what is on disk now is what the tab shows.
+            self._fx_script_snapshot = self._fx_script_values(text, block, reference)
+            self._fx_loaded_signatures = self._fx_signatures(self._fx_tracked)
+            self._fx_failed_signatures = None
         self._sync_fx_preview()
+
+    def _fx_script_values(self, text: str, block: ScriptBlock,
+                          reference: VehicleModelReference) -> dict:
+        """The script values the unit preview depends on (see _fx_apply_script_changes)."""
+
+        values = {
+            "scale": (reference.scale_x, reference.scale_y, reference.scale_z),
+            "rotation": (reference.rotation_x, reference.rotation_y, reference.rotation_z),
+            "overeof": None, "legacy": None, "legacy_radius": None}
+        try:
+            legacy, _compounds, _warnings = import_collision_block(text, block, OPENNEOUA)
+            values["legacy"] = legacy
+            values["legacy_radius"] = legacy.radius if legacy is not None else None
+            if not block.kind.endswith("weapon"):
+                values["overeof"] = import_overeof_block(text, block)
+        except CollisionScriptError:
+            pass
+        return values
+
+    def _fx_apply_script_changes(self, text: str, block: ScriptBlock,
+                                 reference: VehicleModelReference) -> None:
+        """Bring the project in line with script edits that change the preview.
+
+        scale/rotation, overeof and radius are copied only when the script
+        value itself changed since the last load, so values the user is
+        trying out in the Designer are not overwritten by a reload.
+        """
+
+        current = self._fx_script_values(text, block, reference)
+        previous = self._fx_script_snapshot
+        self._fx_script_snapshot = current
+        if previous is None:
+            return
+        project = self.project
+        changed = False
+        if current["scale"] != previous["scale"]:
+            project.model_scale_x, project.model_scale_y, project.model_scale_z = current["scale"]
+            changed = True
+        if current["rotation"] != previous["rotation"]:
+            (project.model_rotation_x, project.model_rotation_y,
+             project.model_rotation_z) = current["rotation"]
+            changed = True
+        if current["overeof"] != previous["overeof"] and current["overeof"] is not None:
+            project.overeof_enabled, project.overeof = current["overeof"]
+            changed = True
+        if current["legacy_radius"] != previous["legacy_radius"]:
+            project.legacy = current["legacy"]
+            changed = True
+        if changed:
+            self._sync_all()
 
     def reload_fx_from_file(self) -> None:
         """Read the definition again from disk and refresh the preview."""
@@ -10041,6 +10200,8 @@ class CollisionEditorWindow(QMainWindow):
             return
         kind = self._active_script_kind
         objects = None
+        # Taken before reading: a save during the read is caught by the next poll.
+        snapshot = self._fx_signatures(self._fx_tracked)
         try:
             if self._fx_source_from_catalog:
                 # Game catalog definitions merge every script of the game.
@@ -10060,20 +10221,28 @@ class CollisionEditorWindow(QMainWindow):
             block = _resolve_patch_target_block(
                 text, kind, self._active_script_id)
         except (OSError, UnicodeError, CollisionScriptError, RuntimeError) as exc:
+            # Not retried until a file changes again (the poll would loop).
+            self._fx_failed_signatures = snapshot
             self.statusBar().showMessage(f"Reload failed: {exc}", 8000)
             return
         if self._fx_changed_assets:
             try:
                 self._reload_fx_assets()
             except (OSError, ValueError, RuntimeError) as exc:
+                self._fx_failed_signatures = snapshot
                 self.statusBar().showMessage(f"Asset reload failed: {exc}", 8000)
                 return
         reference = next((ref for ref in script_model_references(text)
                           if ref.block.kind == kind and ref.block.object_id == self._active_script_id),
                          self._active_model_reference)
         self._active_model_reference = reference
+        self._fx_apply_script_changes(text, block, reference)
         self._load_fx_context(text, block, reference,
                               keep_view=True, objects=objects)
+        self._fx_failed_signatures = None
+        self._fx_loaded_signatures = {
+            path: snapshot[path] if path in snapshot else self._fx_file_signature(path)
+            for path in self._fx_tracked}
         self.statusBar().showMessage(
             f"Destruction FX reloaded from {self._active_script_path.name}.", 4000)
 
@@ -10092,7 +10261,7 @@ class CollisionEditorWindow(QMainWindow):
                          if dep.resolved_path is not None)
             paths.update(str(path.resolve()) for path in family.effect_override_paths.values())
         unit = self.fx_panel.unit
-        visuals = [unit.normal, unit.dead, unit.megadeth]
+        visuals = [unit.normal, unit.dead, unit.megadeth, unit.genesis, unit.launch]
         values = []
         for item in self.fx_panel.document.items:
             if isinstance(item, fx.FxBlock):
@@ -10102,6 +10271,38 @@ class CollisionEditorWindow(QMainWindow):
                     visuals.append(spec.physical_model)
                 if spec.texture:
                     values.append(spec.texture)
+        if unit.decoration is not None:
+            visuals.append(unit.decoration.visual)
+        if unit.tracer is not None:
+            values.append(unit.tracer.mesh)
+        samples = [spec.sample for spec in unit.sounds.values() if spec.sample]
+        for item in self.fx_panel.document.items:
+            if isinstance(item, fx.FxBlock):
+                samples.extend(spec.sample for spec in fx.interpret_block(
+                    item, self.fx_panel.context).sounds.values() if spec.sample)
+            elif item.parsed is not None:
+                vehicle = self.fx_panel.catalog.get(item.parsed.vehicle_id)
+                if vehicle is not None:
+                    samples.extend(spec.sample for spec in vehicle.sounds.values()
+                                   if spec.sample)
+        if unit.cluster is not None and unit.cluster.sound is not None:
+            samples.append(unit.cluster.sound.sample)
+        for sample in samples:
+            path = self._resolve_fx_sound(sample)
+            if path is not None:
+                paths.add(str(path.resolve()))
+        for child in fx.cluster_chain(unit, self.fx_panel.weapons):
+            samples = [spec.sample for spec in child.unit.sounds.values() if spec.sample]
+            for sample in samples:
+                path = self._resolve_fx_sound(sample)
+                if path is not None:
+                    paths.add(str(path.resolve()))
+            visuals.extend((child.unit.normal, child.unit.dead, child.unit.megadeth,
+                            child.unit.launch))
+            if child.unit.tracer is not None:
+                values.append(child.unit.tracer.mesh)
+            if child.unit.decoration is not None:
+                visuals.append(child.unit.decoration.visual)
         for visual in visuals:
             values.extend(value for value in (visual.mesh3ds, visual.base_path) if value)
         for value in values:
@@ -10126,17 +10327,41 @@ class CollisionEditorWindow(QMainWindow):
         self._fx_watch_signatures = {}
         if not self._is_fx_tab_active() or self._active_script_path is None:
             self._fx_reload_timer.stop()
+            self._fx_poll_timer.stop()
             return
         paths = {str(self._active_script_path.resolve())} | self._fx_script_sources
         paths.update(str(Path(vehicle.source).resolve()) for vehicle in self._fx_catalog.values()
                      if vehicle.source)
         self._fx_asset_paths = self._fx_dependency_paths()
         paths.update(self._fx_asset_paths)
+        self._fx_tracked = set(paths)
         self._fx_watch_signatures = {path: self._fx_file_signature(path) for path in paths}
+        if not self._fx_poll_timer.isActive():
+            self._fx_poll_timer.start()
+        # Files edited while the tab was away are picked up right now.
+        QTimer.singleShot(0, self._fx_poll)
         existing = [path for path in paths if Path(path).is_file()]
         directories = {str(Path(path).parent) for path in paths if Path(path).parent.is_dir()}
         if existing or directories:
             self._fx_watcher.addPaths(existing + sorted(directories))
+
+    def _fx_signatures(self, paths) -> dict:
+        return {path: self._fx_file_signature(path) for path in paths}
+
+    def _fx_poll(self) -> None:
+        """Reload when a tracked file differs from what the tab loaded."""
+
+        if (not self._is_fx_tab_active() or self._active_script_path is None
+                or self._fx_reload_timer.isActive()):
+            return
+        current = self._fx_signatures(self._fx_tracked)
+        if current == self._fx_loaded_signatures or current == self._fx_failed_signatures:
+            return
+        for path, signature in current.items():
+            if (self._fx_loaded_signatures.get(path) != signature
+                    and path in self._fx_asset_paths):
+                self._fx_changed_assets.add(path)
+        self._fx_reload_timer.start()
 
     def _fx_watched_directory_changed(self, directory):
         # Atomic saves replace files; directory notifications keep their watches alive.
@@ -10211,10 +10436,12 @@ class CollisionEditorWindow(QMainWindow):
                 self._fx_scope = None
                 self._load_viewport_scope(
                     {self._current_owner} if self._current_owner else None)
+        scale, euler = self._fx_unit_scale_rotation()
         self.fx_panel.set_scene(
             (0.0, self.viewport.overeof_preview_offset, 0.0), 0.0,
             self._fx_unit_radius(), transform=self._fx_unit_transform(),
-            overeof=self.project.overeof if self.project.overeof_enabled else 0.)
+            overeof=self.project.overeof if self.project.overeof_enabled else 0.,
+            scale=scale, euler=euler)
         self._fx_update_watcher()
         definition = (self._active_script_path, self._active_script_kind,
                       self._active_script_id)
@@ -10255,7 +10482,8 @@ class CollisionEditorWindow(QMainWindow):
             if bounds is not None:
                 center = tuple((bounds[axis] + bounds[axis + 3]) * .5 for axis in range(3))
                 # Leave room around the unit while avoiding the full debris envelope.
-                radius = max(max(bounds[axis + 3] - bounds[axis] for axis in range(3)) * .75, 1.)
+                radius = max(max(bounds[axis + 3] - bounds[axis] for axis in range(3)) * .75,
+                             fx.FOLLOW_MIN_RADIUS, self.fx_panel.unit.look_reach())
         self.viewport._center = center
         self.viewport._scale = 1.0 / radius
         self.viewport._zoom = 1.0
@@ -10264,6 +10492,59 @@ class CollisionEditorWindow(QMainWindow):
             self._push_fx_frame()
         self.viewport._fx_home_camera = self.viewport._camera_state()
         self.viewport.update()
+
+    def _fx_palette(self):
+        """(normclr, invclr) of the palette flash playing now, or None."""
+
+        palettes = self.fx_panel.palette_effects()
+        if not palettes:
+            return None
+        custom, powers = self._fx_color_settings()
+        return fx.palette_colors(palettes, custom, powers)
+
+    def _fx_color_settings(self):
+        """Custom palette slots and slot powers of the game's OpenNeoUA.ini."""
+
+        from map_editor import bootstrap
+        install = bootstrap.installation()
+        ini = None
+        if install is not None:
+            ini = bootstrap.find_ci(Path(install.data), "OpenNeoUA.ini")
+        if ini is None:
+            root = _data_root_for_path(self._active_script_path, self._active_base_path)
+            ini = bootstrap.find_ci(root, "OpenNeoUA.ini") if root is not None else None
+        signature = (str(ini), self._fx_file_signature(ini)) if ini is not None else None
+        if getattr(self, "_fx_color_cache", (None,))[0] != signature:
+            settings = ({}, {})
+            if ini is not None:
+                try:
+                    settings = fx.parse_color_settings(
+                        Path(ini).read_text(encoding="utf-8", errors="replace"))
+                except OSError:
+                    pass
+            self._fx_color_cache = (signature, settings)
+        return self._fx_color_cache[1]
+
+    def _resolve_fx_sound(self, name: str) -> Path | None:
+        """Sound sample named by a script, relative to the game Data folder."""
+
+        raw = name.strip().replace("\\", "/")
+        if not raw:
+            return None
+        relative = raw[5:] if raw.casefold().startswith("data/") else raw
+        roots = []
+        from map_editor import bootstrap
+        install = bootstrap.installation()
+        if install is not None:
+            roots.append(Path(install.data))
+        root = _data_root_for_path(self._active_script_path, self._active_base_path)
+        if root is not None:
+            roots.append(root)
+        for folder in roots:
+            candidate = folder / relative
+            if candidate.is_file():
+                return candidate
+        return None
 
     def _load_fx_external_model(self, value: str):
         """Family of an external 3DS/BASE model named by a script path."""
@@ -10296,7 +10577,10 @@ class CollisionEditorWindow(QMainWindow):
         tracked_unit = next((item for item in items if item.kind == "unit"), None)
         show_unit = panel.show_unit.isChecked()
         if not show_unit:
-            items = [item for item in items if item.kind != "unit"]
+            # Decorations and the tracer belong to the unit and hide with it.
+            items = [item for item in items
+                     if item.kind not in ("unit", "plasma", "decoration", "tracer",
+                                          "launch", "cluster", "laser")]
         # The unit is drawn by its phase items (normal -> dead -> megadeth)
         # instead of the static model whenever the preview plays a sequence.
         phased = panel.simulation is not None and panel.simulation.shows_unit
@@ -10313,10 +10597,12 @@ class CollisionEditorWindow(QMainWindow):
             unit_owners={self._current_owner} if self._current_owner else set(),
             boxes=panel.offset_boxes(), time_ms=panel.time_ms,
             show_unit=show_unit and not phased,
+            weapon_context=panel.context == fx.CONTEXT_WEAPON,
             data_root=_data_root_for_path(
                 self._active_script_path, self._active_base_path),
             highlight=panel.highlight, particles=particles,
-            external_loader=self._load_fx_external_model)
+            external_loader=self._load_fx_external_model,
+            palette=self._fx_palette())
         self.viewport.set_fx_follow_unit(
             panel.follow_unit.isChecked(), tracked_unit, self._current_owner)
 

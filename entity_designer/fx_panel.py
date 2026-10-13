@@ -21,6 +21,7 @@ from PySide6.QtWidgets import (
 )
 
 from entity_designer import destruction_fx as fx
+from entity_designer.fx_audio import FxSoundPlayer
 
 SPEEDS = (0.1, 0.25, 0.5, 1.0, 2.0, 4.0)
 MODE_COLORS = {
@@ -39,6 +40,29 @@ STATUS_GLYPHS = {
 LOOP_TAIL_MS = 400.0
 EMPTY_TIMELINE_MS = 2000.0
 
+# Compact version for the "Hits a unit / Hits the ground" choice.
+_SMALL_BUTTON = """
+QPushButton {
+    background: #252e3a; color: #eef0f4; border: 1px solid #8190a4;
+    border-radius: 4px; padding: 1px 8px; font-size: 11px; min-height: 18px;
+}
+QPushButton:hover:!checked { background: #394759; border-color: #bdd3e7; }
+QPushButton:checked { background: #11799e; border: 2px solid #a9edff; color: #ffffff; padding: 0px 7px; }
+QPushButton:checked:hover { background: #178bac; }
+"""
+
+# Icon-only transport buttons: narrow enough for seven of them in a small window.
+_ICON_BUTTON = """
+QPushButton {
+    background: #252e3a; color: #eef0f4; border: 1px solid #8190a4;
+    border-radius: 5px; padding: 3px 4px; font-size: 13px; min-height: 24px;
+}
+QPushButton:hover:!checked { background: #394759; border-color: #bdd3e7; }
+QPushButton:checked { background: #11799e; border: 2px solid #a9edff; color: #ffffff; padding: 2px 3px; }
+QPushButton:checked:hover { background: #178bac; }
+QPushButton:disabled { color: #6b6f78; }
+"""
+
 _BIG_BUTTON = """
 QPushButton {
     background: #252e3a; color: #eef0f4; border: 1px solid #8190a4;
@@ -50,6 +74,28 @@ QPushButton:checked:hover { background: #178bac; }
 QPushButton:disabled { color: #6b6f78; }
 """
 
+
+
+def _palette_icon(muted: bool) -> QIcon:
+    """Palette glyph (three color dots); a white slash when switched off."""
+
+    pixmap = QPixmap(20, 20)
+    pixmap.fill(Qt.GlobalColor.transparent)
+    painter = QPainter(pixmap)
+    painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+    color = QColor("#8d96a3" if muted else "#eef0f4")
+    painter.setPen(QPen(color, 1.4))
+    painter.setBrush(Qt.BrushStyle.NoBrush)
+    painter.drawEllipse(QRectF(2, 2, 16, 16))
+    painter.setPen(Qt.PenStyle.NoPen)
+    for center, dot in (((7, 8), "#e0524a"), ((13, 8), "#52c46b"), ((10, 13.5), "#4f8fe8")):
+        painter.setBrush(QColor("#6e7782") if muted else QColor(dot))
+        painter.drawEllipse(QPointF(*center), 2.3, 2.3)
+    if muted:
+        painter.setPen(QPen(QColor("#eef0f4"), 2.0, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap))
+        painter.drawLine(QPointF(3, 17), QPointF(17, 3))
+    painter.end()
+    return QIcon(pixmap)
 
 
 def _issues_status(issues) -> str:
@@ -292,6 +338,8 @@ class DestructionFxPanel(QWidget):
         self.context = fx.CONTEXT_VEHICLE
         self.document = fx.FxDocument()
         self.catalog: dict[int, fx.LegacyFxVehicle] = {}
+        self.weapons: dict[int, fx.WeaponDef] = {}
+        self.debuffs: dict[int, fx.DebuffSpec] = {}
         self.unit = fx.UnitPhases()
         self.current_trigger = fx.SEQUENCE_TRIGGER
         self.origin = (0.0, 0.0, 0.0)
@@ -303,6 +351,11 @@ class DestructionFxPanel(QWidget):
         self.hidden_items: set[int] = set()
         self.highlight: int | None = None
         self.simulation: fx.PreviewSimulation | None = None
+        self.sound = FxSoundPlayer()
+        self._sound_events: list = []
+        # Clock position the sounds were last advanced to (-1 = before 0 ms).
+        self._sound_cursor = -1.0
+        self._sound_notes: list[str] = []
         self._last_tick = None
         self._build_page()
         self.transport_bar = self._build_transport_bar()
@@ -337,10 +390,11 @@ class DestructionFxPanel(QWidget):
             button = QPushButton(text, self.weapon_box)
             button.setCheckable(True)
             button.setToolTip(tip)
-            button.setStyleSheet(_BIG_BUTTON)
+            button.setStyleSheet(_SMALL_BUTTON)
             button.setProperty("trigger", trigger)
             self.weapon_group.addButton(button)
-            weapon_row.addWidget(button, 1)
+            weapon_row.addWidget(button)
+        weapon_row.addStretch(1)
         self.weapon_group.buttonClicked.connect(
             lambda button: self._set_trigger(button.property("trigger")))
         layout.addWidget(self.weapon_box)
@@ -348,12 +402,8 @@ class DestructionFxPanel(QWidget):
         self.altitude_box = QWidget(self)
         altitude_row = QHBoxLayout(self.altitude_box)
         altitude_row.setContentsMargins(0, 0, 0, 0)
-        altitude_label = QLabel("Flight altitude", self.altitude_box)
-        altitude_label.setToolTip(
-            "Height of the kill for flying units: the unit explodes in the "
-            "air (air_destroyed), falls, and the ground effects start on "
-            "impact. 0 = killed on the ground.")
-        altitude_row.addWidget(altitude_label)
+        self.altitude_label = QLabel("Flight altitude", self.altitude_box)
+        altitude_row.addWidget(self.altitude_label)
         self.altitude_slider = QSlider(Qt.Orientation.Horizontal, self.altitude_box)
         self.altitude_slider.setRange(0, 3000)
         self.altitude_spin = QSpinBox(self.altitude_box)
@@ -453,7 +503,7 @@ class DestructionFxPanel(QWidget):
         layout.setContentsMargins(8, 5, 8, 5)
         layout.setSpacing(4)
         controls = QHBoxLayout()
-        controls.setSpacing(6)
+        controls.setSpacing(4)
 
         def button(text: str, tip: str, checkable: bool = False) -> QPushButton:
             widget = QPushButton(text, bar)
@@ -469,19 +519,32 @@ class DestructionFxPanel(QWidget):
         self.stop_button = button("Stop", "Stop and rewind")
         self.loop_button = button("Loop", "Repeat the preview", True)
         self.loop_button.setChecked(True)
+        self.mute_button = button("Mute", "Mute the preview sounds", True)
+        self.pal_button = button("Palette", "Switch off the palette flashes (pal_*)", True)
         for widget, symbol in (
                 (self.restart_button, QStyle.StandardPixmap.SP_MediaSkipBackward),
                 (self.play_button, QStyle.StandardPixmap.SP_MediaPlay),
                 (self.stop_button, QStyle.StandardPixmap.SP_MediaStop),
-                (self.loop_button, QStyle.StandardPixmap.SP_BrowserReload)):
+                (self.loop_button, QStyle.StandardPixmap.SP_BrowserReload),
+                (self.mute_button, QStyle.StandardPixmap.SP_MediaVolume)):
             widget.setText("")
             widget.setIcon(self._transport_icon(symbol))
             widget.setIconSize(QSize(20, 20))
-            widget.setMinimumWidth(36)
+            widget.setStyleSheet(_ICON_BUTTON)
+            widget.setMinimumWidth(32)
         self.restart_button.setAccessibleName("Restart")
         self.play_button.setAccessibleName("Play / pause")
         self.stop_button.setAccessibleName("Stop")
         self.loop_button.setAccessibleName("Loop")
+        self.mute_button.setAccessibleName("Mute sound")
+        self.mute_button.toggled.connect(self._mute_toggled)
+        self.pal_button.setText("")
+        self.pal_button.setIcon(_palette_icon(False))
+        self.pal_button.setIconSize(QSize(20, 20))
+        self.pal_button.setStyleSheet(_ICON_BUTTON)
+        self.pal_button.setMinimumWidth(32)
+        self.pal_button.toggled.connect(self._palette_toggled)
+        self.pal_button.setAccessibleName("Mute palette flashes")
         self.restart_button.clicked.connect(self.restart)
         self.play_button.toggled.connect(self._play_toggled)
         self.stop_button.clicked.connect(self.stop)
@@ -491,13 +554,15 @@ class DestructionFxPanel(QWidget):
         for speed in SPEEDS:
             self.speed_combo.addItem(f"{speed:g}×", speed)
         self.speed_combo.setCurrentIndex(SPEEDS.index(1.0))
-        self.speed_combo.currentIndexChanged.connect(
-            lambda index: setattr(self, "speed", float(self.speed_combo.itemData(index))))
+        self.speed_combo.setSizeAdjustPolicy(
+            QComboBox.SizeAdjustPolicy.AdjustToMinimumContentsLengthWithIcon)
+        self.speed_combo.setMinimumContentsLength(3)
+        self.speed_combo.currentIndexChanged.connect(self._speed_changed)
         controls.addWidget(self.speed_combo)
         controls.addStretch(1)
         self.time_label = QLabel(bar)
         self.time_label.setStyleSheet(
-            "font-size: 15px; font-family: monospace; color: #ffd65a;")
+            "font-size: 13px; font-family: monospace; color: #ffd65a;")
         controls.addWidget(self.time_label)
         layout.addLayout(controls)
 
@@ -518,12 +583,14 @@ class DestructionFxPanel(QWidget):
 
     def set_context(self, context: str, document: fx.FxDocument, *,
                     catalog=None, unit: fx.UnitPhases | None = None,
-                    keep_view: bool = False) -> None:
+                    keep_view: bool = False, weapons=None, debuffs=None) -> None:
         """Show one definition; ``keep_view`` keeps time and hidden effects."""
 
         self.context = context
         self.document = document
         self.catalog = dict(catalog or {})
+        self.weapons = dict(weapons or {})
+        self.debuffs = dict(debuffs or {})
         self.unit = unit or fx.UnitPhases(weapon=context == fx.CONTEXT_WEAPON)
         if not keep_view:
             self.hidden_items.clear()
@@ -535,22 +602,53 @@ class DestructionFxPanel(QWidget):
                                     else fx.SEQUENCE_TRIGGER)
         weapon = context == fx.CONTEXT_WEAPON
         self.weapon_box.setVisible(weapon)
+        self.show_unit.setText(
+            "Show the weapon and its model changes" if weapon
+            else "Show the unit and its model changes")
+        self.follow_unit.setText(
+            "Follow weapon with camera" if weapon
+            else "Follow unit with camera")
+        self.follow_unit.setToolTip(
+            "Follow the weapon's position during flight and impact. Disable "
+            "to explore the scene freely." if weapon else
+            "Follow the unit's position during flight and falling. Disable "
+            "to explore the scene freely.")
         for widget in self.weapon_group.buttons():
             widget.setChecked(widget.property("trigger") == self.current_trigger)
-        self.altitude_box.setVisible(not weapon and self.unit.flies)
+        self.altitude_box.setVisible(weapon or self.unit.flies)
+        # Vehicles: kill height of flying units (0 = ground). Weapons: the
+        # height the projectile falls from, so it can never be 0.
+        minimum = 50 if weapon else 0
+        self.altitude_label.setText("Missile altitude" if weapon else "Flight altitude")
+        self.altitude_label.setToolTip(
+            "Height the weapon starts from before it falls onto the target. "
+            "Higher means a longer flight." if weapon else
+            "Height of the kill for flying units: the unit explodes in the "
+            "air (air_destroyed), falls, and the ground effects start on "
+            "impact. 0 = killed on the ground.")
         with QSignalBlocker(self.altitude_spin), QSignalBlocker(self.altitude_slider):
-            self.altitude_spin.setValue(int(self.unit.altitude))
-            self.altitude_slider.setValue(int(self.unit.altitude))
+            for widget in (self.altitude_spin, self.altitude_slider):
+                widget.setRange(minimum, 3000)
+            value = int(self.unit.altitude) if self.unit.altitude > 0 else int(
+                fx.WEAPON_LAUNCH_HEIGHT if weapon else 0)
+            self.altitude_spin.setValue(value)
+            self.altitude_slider.setValue(value)
         count = len(self.document.items)
         self.hidden_items = {index for index in self.hidden_items if index < count}
         self._fill_list()
         self._rebuild_simulation()
         self.seek(min(self.time_ms, self._length()))
+        if keep_view and self.is_playing() and self._sound_cursor >= 0:
+            # A reload while playing: loops that are in progress start again.
+            self.sound.resume(self._sound_events, self.time_ms)
 
-    def set_scene(self, origin, ground_y: float, unit_radius: float, *, transform=None, overeof=None) -> None:
+    def set_scene(self, origin, ground_y: float, unit_radius: float, *, transform=None, overeof=None,
+                  scale=None, euler=None) -> None:
         values = (tuple(origin), float(ground_y), float(unit_radius))
         unit = replace(self.unit, transform=transform if transform is not None else self.unit.transform,
-                       overeof=overeof if overeof is not None else self.unit.overeof)
+                       overeof=overeof if overeof is not None else self.unit.overeof,
+                       scale=scale if scale is not None else self.unit.scale,
+                       euler=euler if euler is not None else self.unit.euler)
         if values == (self.origin, self.ground_y, self.unit_radius) and unit == self.unit:
             return
         self.origin, self.ground_y, self.unit_radius = values
@@ -565,10 +663,7 @@ class DestructionFxPanel(QWidget):
     def _altitude_changed(self, value: int) -> None:
         with QSignalBlocker(self.altitude_slider):
             self.altitude_slider.setValue(value)
-        unit = self.unit
-        self.unit = fx.UnitPhases(
-            unit.normal, unit.dead, unit.megadeth, unit.model, unit.weapon,
-            unit.transform, unit.overeof, float(value))
+        self.unit = replace(self.unit, altitude=float(value))
         self._rebuild_simulation()
 
     # -- effects list --------------------------------------------------------------------
@@ -725,20 +820,34 @@ class DestructionFxPanel(QWidget):
             self.document, self.context, self.current_trigger, seed=self.seed,
             origin=self.origin, ground_y=self.ground_y,
             unit_radius=self.unit_radius, legacy_catalog=self.catalog,
-            enabled=enabled, unit=self.unit)
+            enabled=enabled, unit=self.unit, weapons=self.weapons,
+            debuffs=self.debuffs)
         self.timeline.set_tracks(self.simulation.tracks, self._length())
-        notes = list(dict.fromkeys(self.simulation.notes))
-        self.notes_label.setText("\n".join(notes))
-        self.notes_label.setVisible(bool(notes))
+        self.sound.stop_all()
+        self._sound_events = self.simulation.sound_events
+        self._sound_notes = []
+        self.sound.missing.clear()
+        self._show_notes()
         self._update_time_label()
         self.frameChanged.emit()
+
+    def _show_notes(self) -> None:
+        notes = list(dict.fromkeys(self.simulation.notes)) if self.simulation else []
+        if self._sound_notes:
+            notes.append("Sound file not found: " + ", ".join(self._sound_notes))
+        self.notes_label.setText("\n".join(notes))
+        self.notes_label.setVisible(bool(notes))
 
     def _length(self) -> float:
         duration = self.simulation.duration if self.simulation else 0.0
         return duration if duration > 0 else EMPTY_TIMELINE_MS
 
-    def seek(self, time_ms: float) -> None:
+    def seek(self, time_ms: float, *, keep_sound: bool = False) -> None:
         self.time_ms = max(0.0, float(time_ms))
+        if not keep_sound:
+            # A jump in time silences everything; playback restarts from here.
+            self.sound.stop_all()
+            self._sound_cursor = -1.0 if self.time_ms <= 0 else self.time_ms
         self.timeline.set_time(self.time_ms)
         self._update_time_label()
         self.frameChanged.emit()
@@ -770,10 +879,61 @@ class DestructionFxPanel(QWidget):
         if playing:
             if self.time_ms >= self._length():
                 self.seek(0.0)
+            elif self._sound_cursor >= 0:
+                self.sound.resume(self._sound_events, self.time_ms)
             self._last_tick = None
             self._timer.start()
         else:
             self._timer.stop()
+            self.sound.stop_all()
+
+    def _palette_toggled(self, muted: bool) -> None:
+        self.pal_button.setIcon(_palette_icon(muted))
+        self.pal_button.setToolTip(
+            "Palette flashes switched off: click to show them" if muted
+            else "Switch off the palette flashes (pal_*)")
+        self.frameChanged.emit()
+
+    def palette_effects(self) -> list[tuple[int, float]]:
+        """[(palette slot, strength)] of the current time; empty when switched off."""
+
+        if self.simulation is None or self.pal_button.isChecked():
+            return []
+        return self.simulation.palette_effects_at(self.time_ms)
+
+    def _speed_changed(self, index: int) -> None:
+        """New playback speed: the sounds follow it and restart their loops."""
+
+        self.speed = float(self.speed_combo.itemData(index))
+        self.sound.set_speed(self.speed)
+        if self.is_playing() and self._sound_cursor >= 0:
+            self.sound.resume(self._sound_events, self.time_ms)
+
+    def _mute_toggled(self, muted: bool) -> None:
+        self.mute_button.setIcon(self._transport_icon(
+            QStyle.StandardPixmap.SP_MediaVolumeMuted if muted
+            else QStyle.StandardPixmap.SP_MediaVolume))
+        self.mute_button.setToolTip(
+            "Sound muted: click to hear the preview" if muted
+            else "Mute the preview sounds")
+        self.sound.set_muted(muted)
+        if not muted and self.is_playing() and self._sound_cursor >= 0:
+            self.sound.resume(self._sound_events, self.time_ms)
+
+    def _advance_sound(self, now: float) -> None:
+        """Start and stop the sounds the clock just passed."""
+
+        previous = self._sound_cursor
+        if now < previous:
+            # The preview looped back to the start.
+            self.sound.stop_all()
+            previous = -1.0
+        self.sound.step(self._sound_events, previous, now)
+        self._sound_cursor = now
+        missing = sorted(self.sound.missing)
+        if missing and missing != self._sound_notes:
+            self._sound_notes = missing
+            self._show_notes()
 
     def _tick(self) -> None:
         now = perf_counter()
@@ -790,11 +950,12 @@ class DestructionFxPanel(QWidget):
             else:
                 time_ms = length
                 self.play_button.setChecked(False)
-        self.seek(time_ms)
+        self._advance_sound(time_ms)
+        self.seek(time_ms, keep_sound=True)
 
     def _update_time_label(self) -> None:
         self.time_label.setText(
-            f"{self.time_ms / 1000:5.2f} / {self._length() / 1000:4.2f} s")
+            f"{self.time_ms / 1000:.2f} / {self._length() / 1000:.2f} s")
 
     def preview_items(self):
         return self.simulation.items_at(self.time_ms) if self.simulation else []
@@ -808,6 +969,16 @@ class DestructionFxPanel(QWidget):
         unit = self.unit
         vps: set[int] = {ref.vp for ref in (unit.normal, unit.dead, unit.megadeth)
                          if ref.vp > 0}
+        if unit.decoration is not None and unit.decoration.visual.vp > 0:
+            vps.add(unit.decoration.visual.vp)
+        if not unit.weapon and unit.genesis.vp > 0:
+            vps.add(unit.genesis.vp)
+        if unit.weapon and unit.launch.vp > 0:
+            vps.add(unit.launch.vp)
+        if unit.weapon:
+            # Cluster children bring their own models and effects.
+            vps |= fx.weapon_vps(unit, self.document, self.weapons, None,
+                                 self.debuffs)
         for item in self.document.items:
             if isinstance(item, fx.FxBlock):
                 spec = fx.interpret_block(item, self.context)

@@ -26,9 +26,9 @@ def test_entity_state_control_precedes_tree_and_state_column_tracks_selection(ap
         window._resources_tabs.setCurrentWidget(window._entity_panel)
         assert browser.layout().indexOf(browser.search) == 0
         assert browser.layout().itemAt(1).layout() is window._entity_controls
-        assert window._entity_controls.indexOf(browser.set_combo) == 1
-        assert window._entity_controls.indexOf(window.entity_state) == 3
-        assert window._entity_controls.indexOf(browser.category) == 5
+        assert window._entity_controls.indexOf(browser.set_combo) == -1
+        assert window._entity_controls.indexOf(window.entity_state) == 1
+        assert window._entity_controls.indexOf(browser.category) == 3
         assert browser.tree.headerItem().text(1) == 'State'
         obj = GameObject('building', 3, Path('building.cfg'), {'name': 'Building'})
         browser.objects = [obj]
@@ -160,8 +160,8 @@ def test_snapshot_uses_the_same_compact_entity_list_as_model(app):
     window = SnapshotStudioWindow()
     try:
         window._right_tabs.setCurrentWidget(window._entity_panel)
-        assert window._entity_controls.indexOf(window._set_combo) == 1
-        assert window._entity_controls.indexOf(window.entity_state) == 3
+        assert window._entity_controls.indexOf(window._set_combo) == -1
+        assert window._entity_controls.indexOf(window.entity_state) == 1
         assert window.entity_browser.tree.headerItem().text(1) == 'State'
         assert window._entity_selected.__func__ is EntityListMixin._entity_selected
         assert ModelEditorWindow._entity_selected is EntityListMixin._entity_selected
@@ -237,6 +237,100 @@ def test_manual_bas_import_clears_entity_selection_but_entity_workflow_preserves
     finally:
         window.close()
 
+def _two_set_install(tmp_path):
+    from map_editor.core.game_installation import GameInstallation
+    sets = tmp_path / 'Sets'
+    for number in (1, 2):
+        (sets / f'Set{number}' / 'Objects').mkdir(parents=True)
+        (sets / f'Set{number}' / 'Objects' / 'SET.BAS').touch()
+        (sets / f'Set{number}' / 'Scripts').mkdir()
+        (sets / f'Set{number}' / 'Scripts' / 'set.sdf').touch()
+    return GameInstallation(tmp_path, {'sets': sets}), sets
+
+
+def test_change_set_menu_lists_the_sets_and_drives_the_hidden_combo(app, tmp_path):
+    from PySide6.QtWidgets import QComboBox
+    from map_editor import bootstrap
+    from set_menu import install_set_menu
+    install, _sets = _two_set_install(tmp_path)
+    old = bootstrap.installation()
+    bootstrap.set_installation(install)
+    window = QMainWindow()
+    window._set_combo = QComboBox(window)
+    try:
+        from set_tabs import fill_set_combo
+        fill_set_combo(window._set_combo, install, selected=1)
+        menu = install_set_menu(window, window.menuBar())
+        menu.aboutToShow.emit()
+        labels = [a.text() for a in menu.actions() if not a.isSeparator()]
+        assert labels == ['Set 1', 'Set 2', 'Browse…']
+        assert [a.isChecked() for a in menu.actions() if a.isCheckable()] == [True, False]
+        changes = []
+        window._set_combo.currentIndexChanged.connect(lambda _i: changes.append(window._set_combo.currentData()))
+        menu.actions()[1].trigger()
+        assert changes == [2] and window._set_combo.currentData() == 2
+        menu.aboutToShow.emit()
+        assert [a.isChecked() for a in menu.actions() if a.isCheckable()] == [False, True]
+    finally:
+        bootstrap.set_installation(old)
+        window.close()
+
+
+def test_browse_adds_a_hand_picked_set_and_switches_to_it(app, tmp_path):
+    from PySide6.QtWidgets import QComboBox
+    from map_editor import bootstrap
+    from set_menu import browse_for_set, install_set_menu
+    from set_tabs import fill_set_combo
+    install, _sets = _two_set_install(tmp_path)
+    outside = tmp_path / 'elsewhere' / 'Set7'
+    (outside / 'Objects').mkdir(parents=True)
+    (outside / 'Objects' / 'SET.BAS').touch()
+    (outside / 'Scripts').mkdir()
+    (outside / 'Scripts' / 'set.sdf').touch()
+    old = bootstrap.installation()
+    bootstrap.set_installation(install)
+    window = QMainWindow()
+    window._set_combo = QComboBox(window)
+    try:
+        fill_set_combo(window._set_combo, install, selected=1)
+        install_set_menu(window, window.menuBar())
+        with patch('set_menu.QFileDialog.getExistingDirectory', return_value=str(outside)):
+            browse_for_set(window)
+        assert install.available_sets() == [1, 2, 7]
+        assert window._set_combo.currentData() == 7
+        window.studio_set_menu.aboutToShow.emit()
+        assert 'Set 7 (custom)' in [a.text() for a in window.studio_set_menu.actions()]
+        # A folder that is not a set is refused with a reason and nothing changes.
+        bad = tmp_path / 'NotASet'
+        bad.mkdir()
+        with patch('set_menu.QFileDialog.getExistingDirectory', return_value=str(bad)), \
+                patch('set_menu.QMessageBox.warning') as warned:
+            browse_for_set(window)
+        warned.assert_called_once()
+        assert window._set_combo.currentData() == 7 and install.available_sets() == [1, 2, 7]
+    finally:
+        bootstrap.set_installation(old)
+        window.close()
+
+
+def test_register_set_validates_the_folder_and_replaces_an_installed_number(tmp_path):
+    install, sets = _two_set_install(tmp_path)
+    assert install.register_set(sets / 'Set2') == 2 and install.custom_sets == {}
+    other = tmp_path / 'other' / 'Set2'
+    (other / 'Objects').mkdir(parents=True)
+    (other / 'Objects' / 'SET.BAS').touch()
+    (other / 'Scripts').mkdir()
+    (other / 'Scripts' / 'set.sdf').touch()
+    assert install.register_set(other) == 2
+    assert install.set_directories()[2] == other.resolve()
+    with pytest.raises(ValueError, match='named Set'):
+        install.register_set(tmp_path)
+    empty = tmp_path / 'empty' / 'Set9'
+    empty.mkdir(parents=True)
+    with pytest.raises(ValueError, match='SET.BAS'):
+        install.register_set(empty)
+
+
 @pytest.mark.parametrize('key', ['model_editor', 'snapshot_studio', 'map_editor', 'entity_designer', 'wireframe_editor'])
 def test_checker_is_between_resources_and_change_editor(app, key):
     from studio_shell import install_workspace_shell
@@ -252,7 +346,10 @@ def test_checker_is_between_resources_and_change_editor(app, key):
     try:
         install_workspace_shell(window, key)
         actions = [action.text() for action in window.menuBar().actions()]
-        assert actions == ['Resources', 'Vanilla Compatibility Checker', 'Change Editor']
+        # Change Set belongs to the three set-based tools only.
+        with_set = key in ('model_editor', 'snapshot_studio', 'entity_designer')
+        assert actions == ['Resources', 'Vanilla Compatibility Checker',
+                           *(['Change Set'] if with_set else []), 'Change Editor']
         with patch('studio_compat.CompatibilityDialog.exec', return_value=0) as opened:
             window.studio_compat_action.trigger()
             opened.assert_called_once()

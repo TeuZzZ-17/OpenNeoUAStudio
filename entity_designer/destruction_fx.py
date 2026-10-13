@@ -22,7 +22,7 @@ from __future__ import annotations
 import math
 import random
 import re
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 
 CONTEXT_VEHICLE = "vehicle"
 CONTEXT_WEAPON = "weapon"
@@ -56,7 +56,7 @@ IMPACT_PREVIEW_MS = 600
 SIMULATION_STEP_MS = 10.0
 LEGACY_NESTING_LIMIT = 3
 
-_SOUND_PREFIXES = ("snd_", "pal_", "shk_")
+_SOUND_PREFIXES = ("snd_", "pal_", "shk_")  # shk_ is read by the game, never previewed
 _VISUAL_KEYS = ("vp_model", "base_model", "3ds_model", "tint")
 
 SEVERITY_FATAL = "fatal"      # the whole script file stops loading
@@ -229,6 +229,152 @@ def format_range(low: float, high: float) -> str:
     if abs(low - high) < 1e-9:
         return format_number(low)
     return f"{format_number(low)}_{format_number(high)}"
+
+
+# -- sounds --------------------------------------------------------------------
+
+VEHICLE_SOUND_EVENTS = (
+    "normal", "fire", "wait", "genesis", "explode", "crashland", "crashvhcl",
+    "goingdown", "cockpit", "beamin", "beamout", "build", "airexplode")
+WEAPON_SOUND_EVENTS = ("normal", "launch", "hit")
+PHYSICAL_SOUND_EVENTS = ("normal", "goingdown", "explode")
+# Sounds that keep playing while their state lasts (TVhclProto::IsLoopingSnd).
+LOOPING_VEHICLE_SOUNDS = frozenset({
+    "normal", "fire", "wait", "genesis", "goingdown", "cockpit"})
+
+
+@dataclass(frozen=True)
+class ScreenFx:
+    """``pal_<event>_*``: a palette flash of the whole view.
+
+    The strength goes from ``mag0`` to ``mag1`` over ``time`` ms; a looping
+    event holds ``mag0`` for as long as it loops.
+    """
+
+    slot: int
+    mag0: float = 0.0
+    mag1: float = 0.0
+    time: int = 0
+
+
+@dataclass(frozen=True)
+class SoundSpec:
+    """The ``snd_`` and ``pal_`` packages of one event.
+
+    ``sample`` may be empty when the event only flashes the palette. The
+    engine plays the sample at (sample rate + pitch), a random whole pitch of
+    the inclusive range for every play.
+    """
+
+    sample: str = ""
+    volume: int = 0
+    pitch: tuple[int, int] = (0, 0)
+    palette: ScreenFx | None = None
+
+
+def _palette_fx(values: dict[str, str], event: str) -> ScreenFx | None:
+    slot = script_int(values.get(f"pal_{event}_slot"))
+    if slot == 0:
+        return None
+    return ScreenFx(
+        slot=slot, mag0=_stof(values.get(f"pal_{event}_mag0", "0")),
+        mag1=_stof(values.get(f"pal_{event}_mag1", "0")),
+        time=script_int(values.get(f"pal_{event}_time")))
+
+
+def sound_specs(values: dict[str, str], events) -> dict[str, SoundSpec]:
+    """Every event of ``events`` with a sample or a palette flash."""
+
+    specs: dict[str, SoundSpec] = {}
+    for event in events:
+        sample = values.get(f"snd_{event}_sample", "")
+        palette = _palette_fx(values, event)
+        if not (sample or palette):
+            continue
+        pitch = parse_int_range(values.get(f"snd_{event}_pitch", "")) or (0, 0)
+        specs[event] = SoundSpec(
+            sample=sample, volume=script_int(values.get(f"snd_{event}_volume")),
+            pitch=pitch, palette=palette)
+    return specs
+
+
+# Palette slots 0..7 of the engine (GFXEngine::_clrEff); 4, 5 and 7 invert.
+CLASSIC_PALETTE = (
+    (1.0, 1.0, 1.0), (1.21, 0.0, 0.29), (0.13, 0.43, 2.17), (0.0, 1.60, 1.60),
+    (1.0, 1.0, 1.0), (0.57, 0.59, 0.59), (1.4, 1.08, 1.12), (0.3, 0.60, 0.7))
+INVERSE_PALETTE_SLOTS = frozenset({4, 5, 7})
+MAX_PALETTE_EFFECTS = 8
+
+
+def parse_color_settings(text: str) -> tuple[dict[int, tuple], dict[int, float]]:
+    """Custom palette colors (slots 8..16) and slot powers from OpenNeoUA.ini."""
+
+    custom: dict[int, tuple] = {}
+    powers: dict[int, float] = {}
+    for line in text.splitlines():
+        code = line.split(";", 1)[0].strip()
+        key, _sep, value = code.partition("=")
+        key, value = key.strip().casefold(), value.strip()
+        match = re.fullmatch(r"gfx\.color_eff\[(\d+)\]", key)
+        if match and 8 <= int(match[1]) <= 16:
+            parts = [part for part in re.split(r"[_,\s]+", value) if part]
+            if len(parts) == 3 and all(p.isdigit() and int(p) <= 255 for p in parts):
+                custom[int(match[1])] = tuple(int(p) / 255.0 for p in parts)
+            continue
+        match = re.fullmatch(r"gfx\.color_eff_pwr\[(\d+)\]", key)
+        if match and 1 <= int(match[1]) <= 7 and _full_float(value) is not None:
+            powers[int(match[1])] = max(0.0, min(100.0, _full_float(value))) / 100.0
+    return custom, powers
+
+
+def palette_colors(effects, custom=None, powers=None):
+    """(normclr, invclr) of the active palette effects, like the engine.
+
+    ``effects`` is [(slot, strength)]. The screen becomes
+    ``scene * normclr + (1 - scene) * invclr``. None when nothing is active.
+    """
+
+    if not effects:
+        return None
+    custom, powers = custom or {}, powers or {}
+    remaining = 1.0
+    chosen = []
+    for slot, strength in sorted(effects, key=lambda entry: -entry[1])[:MAX_PALETTE_EFFECTS]:
+        power = (powers.get(slot, 1.0) if 1 <= slot <= 7
+                 else 1.0 if slot in custom else 0.0)
+        chosen.append((slot, strength * power))
+        remaining -= strength * power
+    if remaining > 0:
+        chosen.append((0, remaining))
+    norm, inv, applied = [0.0] * 3, [0.0] * 3, False
+    for slot, power in chosen:
+        if 0 <= slot < len(CLASSIC_PALETTE):
+            color, inverse = CLASSIC_PALETTE[slot], slot in INVERSE_PALETTE_SLOTS
+        elif slot in custom:
+            color, inverse = custom[slot], False
+        else:
+            continue
+        applied = True
+        target = inv if inverse else norm
+        for axis in range(3):
+            target[axis] += color[axis] * power
+    return (tuple(norm), tuple(inv)) if applied else ((1.0, 1.0, 1.0), (0.0, 0.0, 0.0))
+
+
+@dataclass(frozen=True)
+class SoundEvent:
+    """A sound the preview plays: one-shot at ``start`` or a loop until ``end``."""
+
+    start: float
+    end: float | None          # None = plays once to its end
+    spec: SoundSpec
+    event: str                 # normal, launch, explode ...
+    pitch: int = 0
+    label: str = ""
+
+    @property
+    def loops(self) -> bool:
+        return self.end is not None
 
 
 # -- script blocks (read only) -----------------------------------------------
@@ -472,6 +618,8 @@ class FxSpec:
     decal_tint: tuple[int, int, int, int] = (255, 255, 255, 255)
     edge_fade: tuple[float, float] = (0.0, 0.0)
     permanent: bool = False
+    # Physical fragments: normal / goingdown / explode sounds.
+    sounds: dict = field(default_factory=dict)
 
     @property
     def fatal(self) -> bool:
@@ -525,6 +673,7 @@ def interpret_block(block: FxBlock, context: str) -> FxSpec:
     decal_tint = (255, 255, 255, 255)
     random_rotation = False
     edge_fade = (0.0, 0.0)
+    sound_values: dict[str, str] = {}
 
     if not block.lines or _key(block.lines[-1]) != "end":
         issue(SEVERITY_FATAL,
@@ -695,6 +844,7 @@ def interpret_block(block: FxBlock, context: str) -> FxSpec:
                 radius = parsed
         elif key.startswith(_SOUND_PREFIXES):
             has_inline = True
+            sound_values[key] = value
         elif key == "physical_vehicle":
             has_physical_vehicle_key = True
             physical_vehicle = _stol(value)[0]
@@ -740,6 +890,9 @@ def interpret_block(block: FxBlock, context: str) -> FxSpec:
                   "keyword).")
 
     def build(active: bool, **values) -> FxSpec:
+        if mode == MODE_PHYSICAL:
+            values.setdefault("sounds", sound_specs(
+                sound_values, PHYSICAL_SOUND_EVENTS))
         return FxSpec(mode=mode, trigger=trigger, active=active,
                       issues=tuple(issues), **values)
 
@@ -867,6 +1020,7 @@ class LegacyFxVehicle:
     scale_fx_text: str = ""
     dest_fx: tuple[DestFx, ...] = ()
     source: str = ""
+    sounds: dict = field(default_factory=dict)
 
 
 def legacy_vehicle_from_values(vehicle_id: int, values: dict[str, str],
@@ -896,6 +1050,7 @@ def legacy_vehicle_from_values(vehicle_id: int, values: dict[str, str],
         scale_fx_text=scale_text,
         dest_fx=dests,
         source=source,
+        sounds=sound_specs(values, VEHICLE_SOUND_EVENTS),
     )
 
 
@@ -1032,7 +1187,7 @@ class PreviewItem:
     """One model to draw at the current preview time."""
 
     source: int                 # item index in the FxDocument, -1 = the unit
-    kind: str                   # visual | physical | impact | legacy | ground_decal | unit
+    kind: str                   # visual | physical | impact | legacy | ground_decal | unit | decoration | tracer
     vp: int                     # VP id to draw (0 = marker only)
     position: tuple[float, float, float]
     rotation: Matrix3
@@ -1042,6 +1197,8 @@ class PreviewItem:
     label: str = ""
     # External 3DS/BASE models, in engine priority; the VP is the fallback.
     external: tuple[str, ...] = ()
+    # Drawn with additive blending (tracer glow).
+    additive: bool = False
     # Ground decal only.
     texture: str = ""
     decal_size: tuple[float, float] = (0.0, 0.0)
@@ -1062,6 +1219,646 @@ class PreviewTrack:
     approximate: bool = False
 
 
+# -- visual look of the definition itself --------------------------------------
+# Main-model tint/spin, weapon mesh tracer and decoration_fx. They are plain
+# top-level keys of the vehicle/weapon, not begin_fx blocks.
+
+Tint = tuple[int, int, int, int]
+WHITE: Tint = (255, 255, 255, 255)
+DECORATION_PERIODIC = "periodic"
+DECORATION_PERSISTENT = "persistent"
+# Preview windows that let slow decorations show up before the unit dies.
+DECORATION_PERSISTENT_PREVIEW_MS = 1500.0
+DECORATION_PERIODIC_PREVIEW_MAX_MS = 12000.0
+DECORATION_PERIODIC_PREVIEW_MIN_MS = 1200.0
+# Death plasma (genesis VP) left by a destroyed vehicle: it lasts 70% of the
+# vehicle energy, clamped to 10..25 s, and the preview plays its first part.
+# Weapon launch VP (vp_launch) stays alive for this long at the muzzle.
+LAUNCH_FLASH_MS = 1000.0
+PLASMA_SCALE = 0.75
+PLASMA_MIN_MS = 10000.0
+PLASMA_MAX_MS = 25000.0
+PLASMA_PREVIEW_MS = 6000.0
+# Smallest radius the follow camera frames, so tiny or empty projectile
+# models (DUMMY, tracer-only weapons) do not zoom the scene to a point.
+FOLLOW_MIN_RADIUS = 80.0
+
+
+def top_level_values(text: str, start_line: int, end_line: int) -> dict[str, str]:
+    """Last value of every top-level key of one definition (engine tokens)."""
+
+    lines = text.splitlines()
+    depth = 1
+    values: dict[str, str] = {}
+    for index in range(start_line + 1, min(end_line, len(lines))):
+        token = _scope_token(lines[index])
+        if token == "begin" or token.startswith("begin_"):
+            depth += 1
+        elif token == "end":
+            depth -= 1
+        elif depth == 1:
+            tokens = engine_tokens(lines[index])
+            if tokens:
+                values[tokens[0].casefold()] = tokens[1]
+    return values
+
+
+def _tint_value(values: dict[str, str], key: str, default: Tint) -> Tint:
+    """Absent key keeps ``default``; a malformed value is neutral white."""
+
+    text = values.get(key)
+    if text is None:
+        return default
+    return parse_tint(text) or WHITE
+
+
+def _positive_scale(values: dict[str, str], prefix: str) -> tuple[float, float, float]:
+    """ParseVPScaleParam: finite and > 0, otherwise 1.0."""
+
+    result = []
+    for axis in "xyz":
+        text = values.get(f"{prefix}scale_{axis}")
+        value = _stof(text) if text is not None else 1.0
+        result.append(value if math.isfinite(value) and value > 0 else 1.0)
+    return tuple(result)
+
+
+def _spin_strength(values: dict[str, str], prefix: str) -> tuple[float, float, float]:
+    """ParseVPSpinParam: Spin::ClampStrength, 0..10."""
+
+    result = []
+    for axis in "xyz":
+        text = values.get(f"{prefix}spin_{axis}")
+        value = _stof(text) if text is not None else 0.0
+        result.append(max(0.0, min(SPIN_MAX, value)) if math.isfinite(value) else 0.0)
+    return tuple(result)
+
+
+def _non_negative_int(text: str | None, default: int = 0) -> int:
+    value = script_int(text, default)
+    return value if value > 0 else 0
+
+
+@dataclass(frozen=True)
+class TracerSpec:
+    """mesh_tracer_* of a weapon (TWeaponTracerConfig)."""
+
+    mesh: str
+    tint: Tint = (255, 210, 80, 180)
+    tint_head: Tint | None = None
+    tint_tail: Tint | None = None
+    size_x: float = 3.0
+    size_y: float = 3.0
+    size_z: float = 300.0
+    pos: tuple[float, float, float] = (0.0, 0.0, 0.0)
+    head_size: float | None = None
+    tail_size: float | None = None
+    glow_rate: float = 0.0
+    pulse_rate: float = 0.0
+    pulse_speed: float = 0.0
+
+
+def parse_tracer(values: dict[str, str], prefix: str = "mesh_tracer_") -> TracerSpec | None:
+    """Tracer the engine would start (ConfigureWeaponTracer), else None."""
+
+    if values.get(prefix + "enable") != "1" or not values.get(prefix + "path"):
+        return None
+
+    def bounded(key: str, maximum: float, default: float) -> float:
+        text = values.get(prefix + key)
+        if text is None:
+            return default
+        value = _full_float(text)
+        if value is None or value <= 0:
+            return 0.0
+        return min(value, maximum)
+
+    def non_negative(key: str, maximum: float, default: float | None) -> float | None:
+        text = values.get(prefix + key)
+        value = _full_float(text) if text is not None else None
+        if value is None or value < 0:
+            return default
+        return min(value, maximum)
+
+    def signed(key: str) -> float:
+        value = _full_float(values.get(prefix + key) or "")
+        return 0.0 if value is None else max(-6000.0, min(6000.0, value))
+
+    size_x = bounded("size_x", 100.0, 3.0)
+    size_z = bounded("size_z", 6000.0, 300.0)
+    tint = _tint_value(values, prefix + "tint", (255, 210, 80, 180))
+    size_y = non_negative("size_y", 100.0, None)
+    if size_z <= 0.01 or size_x <= 0.01 or tint[3] <= 0:
+        return None
+    return TracerSpec(
+        mesh=values[prefix + "path"], tint=tint,
+        tint_head=(_tint_value(values, prefix + "head_tint", WHITE)
+                   if prefix + "head_tint" in values else None),
+        tint_tail=(_tint_value(values, prefix + "tail_tint", WHITE)
+                   if prefix + "tail_tint" in values else None),
+        size_x=size_x, size_y=size_x if size_y is None else size_y,
+        size_z=size_z,
+        pos=(signed("pos_x"), signed("pos_y"), signed("pos_z")),
+        head_size=non_negative("head_size", 100.0, None),
+        tail_size=non_negative("tail_size", 100.0, None),
+        glow_rate=non_negative("glow_rate", 10.0, 0.0),
+        pulse_rate=non_negative("pulse_rate", 10.0, 0.0),
+        pulse_speed=non_negative("pulse_speed", 10.0, 0.0))
+
+
+@dataclass(frozen=True)
+class DecorationSpec:
+    """decoration_fx_* of a vehicle or weapon (TDecorationFXConfig)."""
+
+    visual: VisualRef
+    mode: str = DECORATION_PERIODIC
+    interval: tuple[int, int] = (0, 0)
+    count: tuple[int, int] = (0, 0)
+    duration: int = 1000
+    random_pos: float = 0.0
+    offset: tuple[float, float, float] = (0.0, 0.0, 0.0)
+    scale: tuple[float, float, float] = (1.0, 1.0, 1.0)
+    spin: tuple[float, float, float] = (0.0, 0.0, 0.0)
+    tint: Tint = WHITE
+    fade_in: int = 0
+    fade_out: int = 0
+    trail_tint: Tint = WHITE
+    trail_scale: tuple[float, float, float] = (1.0, 1.0, 1.0)
+    trail_fade_in: int = 0
+    trail_fade_out: int = 0
+
+    @property
+    def persistent(self) -> bool:
+        return self.mode == DECORATION_PERSISTENT
+
+    @property
+    def spawns(self) -> bool:
+        """Periodic mode needs a positive interval and count (engine rule)."""
+
+        return self.persistent or (min(self.interval) > 0 and min(self.count) > 0)
+
+
+def parse_decoration(values: dict[str, str]) -> DecorationSpec | None:
+    """Decoration the engine would spawn (UpdateDecorationFX), else None."""
+
+    vp = _non_negative_int(values.get("decoration_fx_vp"))
+    mesh = values.get("decoration_fx_3ds", "")
+    base = values.get("decoration_fx_base", "")
+    if vp <= 0 and not mesh and not base:
+        return None
+
+    def int_range(key: str, clamp: int | None) -> tuple[int, int]:
+        parsed = parse_int_range(values.get(key, ""))
+        if parsed is None:
+            return (0, 0)
+        if clamp is not None:
+            parsed = tuple(max(0, min(clamp, value)) for value in parsed)
+        return parsed
+
+    def vector(prefix: str) -> tuple[float, float, float]:
+        return tuple(_stof(values.get(f"{prefix}_{axis}", "0")) for axis in "xyz")
+
+    random_pos = _stof(values.get("decoration_fx_random_pos", "0"))
+    return DecorationSpec(
+        visual=VisualRef(vp=vp, mesh3ds=mesh, base_path=base),
+        mode=(DECORATION_PERSISTENT
+              if values.get("decoration_fx_mode", "").casefold() == "persistent"
+              else DECORATION_PERIODIC),
+        interval=int_range("decoration_fx_interval", None),
+        count=int_range("decoration_fx_count", MAX_COUNT),
+        duration=_non_negative_int(values.get("decoration_fx_duration"), 1000) or 1000,
+        random_pos=random_pos if math.isfinite(random_pos) and random_pos > 0 else 0.0,
+        offset=vector("decoration_fx_offset"),
+        scale=_positive_scale(values, "decoration_fx_"),
+        spin=_spin_strength(values, "decoration_fx_"),
+        tint=_tint_value(values, "decoration_fx_tint", WHITE),
+        fade_in=_non_negative_int(values.get("decoration_fx_fade_in")),
+        fade_out=_non_negative_int(values.get("decoration_fx_fade_out")),
+        trail_tint=_tint_value(values, "decoration_fx_vp_trail_tint", WHITE),
+        trail_scale=_positive_scale(values, "decoration_fx_vp_trail_"),
+        trail_fade_in=_non_negative_int(values.get("decoration_fx_vp_trail_fade_in")),
+        trail_fade_out=_non_negative_int(values.get("decoration_fx_vp_trail_fade_out")))
+
+
+def unit_look(values: dict[str, str], *, weapon: bool) -> dict:
+    """UnitPhases keyword values read from the top-level keys of a definition."""
+
+    return {
+        "tint": parse_tint(values["tint"]) if "tint" in values else None,
+        "spin": _spin_strength(values, ""),
+        "trail_tint": (parse_tint(values["vp_trail_tint"])
+                       if weapon and "vp_trail_tint" in values else None),
+        "trail_scale": (_positive_scale(values, "vp_trail_")
+                        if weapon else (1.0, 1.0, 1.0)),
+        "tracer": parse_tracer(values) if weapon else None,
+        "decoration": parse_decoration(values),
+        # Projectiles never leave plasma; vehicles do (vp_genesis defaults to 5).
+        "sounds": sound_specs(
+            values, WEAPON_SOUND_EVENTS if weapon else VEHICLE_SOUND_EVENTS),
+        "motion": parse_motion(values) if weapon else None,
+        "cluster": parse_cluster(values) if weapon else None,
+        "laser": parse_laser(values) if weapon else None,
+        "delay_time": (_non_negative_int(values.get("delay_time"))
+                       if weapon else 0),
+        "debuff_id": script_int(values.get("debuff_id"), -1) if weapon else -1,
+        "delay_debuff_id": (script_int(values.get("delay_time_debuff_id"), -1)
+                            if weapon else -1),
+        # artillery_shell vertical_barrage: rounds fall from arc_height.
+        "fixed_speed": (_stof(values.get("artillery_shell_speed", "0"))
+                        if weapon and values.get("model", "").casefold() == "artillery_shell"
+                        and values.get("artillery_shell_mode", "").casefold() == "vertical_barrage"
+                        else 0.0),
+        "altitude": (min(3000.0, _stof(values.get("artillery_shell_arc_height", "0")))
+                     if weapon and values.get("model", "").casefold() == "artillery_shell"
+                     else 0.0),
+        "start_speed": max(0.0, _stof(values.get("start_speed", "0"))),
+        # Weapons flash a launch VP (1 s) at the muzzle.
+        "launch": VisualRef(
+            vp=_non_negative_int(values.get("vp_launch")),
+            mesh3ds=values.get("3ds_launch", ""),
+            base_path=values.get("base_launch", "")) if weapon else VisualRef(),
+        "launch_scale": (lambda v: v if math.isfinite(v) and v > 0 else 1.0)(
+            _stof(values.get("launch_scale", "1"))),
+        "genesis": VisualRef() if weapon else VisualRef(
+            vp=script_int(values.get("vp_genesis"), 5),
+            mesh3ds=values.get("3ds_genesis", ""),
+            base_path=values.get("base_genesis", "")),
+        "energy": max(0.0, _stof(values.get("energy", "0"))),
+        "maxrot": _stof(values.get("maxrot", "0")),
+    }
+
+
+@dataclass(frozen=True)
+class MotionSpec:
+    """Render-only spiral or chaos motion of a projectile (spiral_* / chaos_*).
+
+    Chaos wins when both are valid, like ``GetProjectileVisualMotionDelta``.
+    """
+
+    kind: str          # "spiral" | "chaos"
+    rate: float        # turns per second / random targets per second
+    radius: float
+    # Chaos picks its random targets from a per-projectile seed.
+    seed: int = 0x9E3779B9 ^ 1
+
+    def offset(self, age_ms: float) -> tuple[float, float, float]:
+        """Local X/Y offset from the flight line (Z is the forward axis)."""
+
+        age = max(age_ms, 0.0)
+        if self.kind == "spiral":
+            phase = math.fmod(self.rate * age * 0.001, 1.0) * 2.0 * math.pi
+            return (math.cos(phase) * self.radius, -math.sin(phase) * self.radius, 0.0)
+        motion = age * 0.001 * self.rate
+        segment = math.floor(motion)
+        fraction = motion - segment
+        smooth = fraction * fraction * (3.0 - 2.0 * fraction)
+        current = self._target(int(segment))
+        following = self._target(int(segment) + 1)
+        return tuple(a + (b - a) * smooth for a, b in zip(current, following))
+
+    def _target(self, segment: int) -> tuple[float, float, float]:
+        mask = 0xFFFFFFFF
+
+        def unit(value: int) -> float:
+            value &= mask
+            value ^= value >> 16
+            value = (value * 0x7FEB352D) & mask
+            value ^= value >> 15
+            value = (value * 0x846CA68B) & mask
+            value ^= value >> 16
+            return (value & 0x00FFFFFF) / 16777215.0
+
+        seed = self.seed ^ ((segment * 0x85EBCA6B) & mask)
+        angle = unit(seed ^ 0xA341316C) * 2.0 * math.pi
+        radius = self.radius * math.sqrt(unit(seed ^ 0xC8013EA4))
+        return (math.cos(angle) * radius, math.sin(angle) * radius, 0.0)
+
+    def tilt(self, age_ms: float, speed: float) -> Matrix3:
+        """Model rotation that follows the rendered curve (plus the spiral roll).
+
+        ``speed`` is the projectile speed in units per second.
+        """
+
+        if self.kind == "spiral":
+            phase = math.fmod(self.rate * max(age_ms, 0.0) * 0.001, 1.0) * 2.0 * math.pi
+            omega = self.rate * 2.0 * math.pi
+            velocity = (-math.sin(phase) * self.radius * omega,
+                        -math.cos(phase) * self.radius * omega, 0.0)
+        else:
+            now, later = self.offset(age_ms), self.offset(age_ms + 1.0)
+            velocity = tuple((b - a) * 1000.0 for a, b in zip(now, later))
+        tangent = (velocity[0], velocity[1], speed + velocity[2])
+        length = math.sqrt(sum(value * value for value in tangent))
+        rotation = IDENTITY
+        if length > 1e-6:
+            tangent = tuple(value / length for value in tangent)
+            axis = (-tangent[1], tangent[0], 0.0)            # z x tangent
+            sine = math.sqrt(axis[0] ** 2 + axis[1] ** 2)
+            if sine > 1e-6:
+                rotation = _axis_rotation(
+                    tuple(value / sine for value in axis), math.atan2(sine, tangent[2]))
+            elif tangent[2] < 0:
+                rotation = _rot_x(math.pi)
+        if self.kind == "spiral":
+            rotation = _mat_mul(rotation, _rot_z(phase))
+        return rotation
+
+
+def _axis_rotation(axis, angle: float) -> Matrix3:
+    """Rodrigues rotation of ``angle`` radians around a unit ``axis``."""
+
+    x, y, z = axis
+    c, s = math.cos(angle), math.sin(angle)
+    k = 1.0 - c
+    return ((c + x * x * k, x * y * k - z * s, x * z * k + y * s),
+            (y * x * k + z * s, c + y * y * k, y * z * k - x * s),
+            (z * x * k - y * s, z * y * k + x * s, c + z * z * k))
+
+
+def parse_motion(values: dict[str, str]) -> MotionSpec | None:
+    """Spiral or chaos motion the engine would apply, else None."""
+
+    def strength(key: str) -> float:
+        value = _stof(values.get(key, "0"))
+        return max(0.0, min(SPIN_MAX, value)) if math.isfinite(value) else 0.0
+
+    def radius(key: str) -> float:
+        value = _stof(values.get(key, "0"))
+        return min(value, 1000.0) if math.isfinite(value) and value > 0 else 0.0
+
+    if strength("chaos_factor") > 0 and radius("chaos_radius") > 0:
+        return MotionSpec("chaos", strength("chaos_factor"), radius("chaos_radius"))
+    if strength("spiral_speed") > 0 and radius("spiral_radius") > 0:
+        return MotionSpec("spiral", strength("spiral_speed"), radius("spiral_radius"))
+    return None
+
+
+@dataclass(frozen=True)
+class _Flight:
+    """Where a projectile (or a unit phase) is and how it is oriented in time."""
+
+    path: list
+    heading: Matrix3 = IDENTITY
+    motion: MotionSpec | None = None
+    speed: float = 0.0               # units per second, for the motion tilt
+    frozen_at: float | None = None   # the visual motion stops at impact
+
+    def pose(self, time_ms: float):
+        """(position, rotation) with the spiral/chaos motion applied."""
+
+        base = _path_position(self.path, time_ms)
+        if self.motion is None:
+            return base, self.heading
+        age = self.frozen_at if self.frozen_at is not None else time_ms
+        offset = _rotate_vector(self.heading, self.motion.offset(age))
+        rotation = _mat_mul(self.heading, self.motion.tilt(age, self.speed))
+        return tuple(b + o for b, o in zip(base, offset)), rotation
+
+
+@dataclass(frozen=True)
+class ClusterSpec:
+    """cluster_* of a weapon: it splits into ``weapon_id`` projectiles."""
+
+    weapon_id: int
+    count: tuple[int, int]
+    # > 0: split after this many ms of flight; 0: split when it hits something.
+    trigger_time: int = 0
+    # How many split levels the children may add (0 = one split only).
+    generations: int = 0
+    horizontal: tuple[float, float] | None = None
+    vertical: tuple[float, float] | None = None
+    spread: tuple[float, float] = (0.0, 0.0)
+    visual: VisualRef = VisualRef()
+    sound: SoundSpec | None = None
+
+
+CLUSTER_MAX_COUNT = 64
+# The preview shows at most this many projectiles born from clusters.
+CLUSTER_PREVIEW_LIMIT = 160
+# A child that never reaches the ground is followed this long.
+CLUSTER_FREE_FLIGHT_MS = 700.0
+CLUSTER_MAX_FLIGHT_MS = 3000.0
+# cluster_vp / 3ds / base is a transient visual of this length at the split.
+CLUSTER_FLASH_MS = 1000.0
+
+
+def parse_cluster(values: dict[str, str]) -> ClusterSpec | None:
+    """The cluster the engine would split into (TryClusterSplit), else None."""
+
+    if script_int(values.get("cluster_enable")) == 0:
+        return None
+    count = parse_int_range(values.get("cluster_count", ""))
+    weapon_id = script_int(values.get("cluster_weapon_id"))
+    if count is None or min(count) < 1 or weapon_id <= 0:
+        return None
+    trigger = parse_int_range(values.get("cluster_trigger_time", ""))
+    return ClusterSpec(
+        weapon_id=weapon_id,
+        count=tuple(min(CLUSTER_MAX_COUNT, value) for value in count),
+        trigger_time=trigger[0] if trigger and trigger[0] == trigger[1] > 0 else 0,
+        generations=_non_negative_int(values.get("cluster_generations")),
+        horizontal=parse_float_range(values.get("cluster_horizontal_angle", "")),
+        vertical=parse_float_range(values.get("cluster_vertical_angle", "")),
+        spread=tuple(max(0.0, _stof(values.get(f"cluster_spread_{axis}", "0")))
+                     for axis in "xy"),
+        visual=VisualRef(vp=_non_negative_int(values.get("cluster_vp")),
+                         mesh3ds=values.get("cluster_3ds", ""),
+                         base_path=values.get("cluster_base", "")),
+        sound=(lambda spec: None if spec is None else replace(
+            spec, volume=spec.volume or 120))(
+            sound_specs(values, ("cluster",)).get("cluster")))
+
+
+@dataclass(frozen=True)
+class DebuffSpec:
+    """The visual side of a ``new_debuff`` profile hit units show."""
+
+    debuff_id: int
+    vps: tuple[int, ...] = ()
+    mesh3ds: str = ""
+    tint: Tint = WHITE
+    trail_tint: Tint | None = None
+    scale: float = 1.0
+    max_offset: float = 0.0
+    offset_percent: bool = False
+    tick_time: int = 0
+    duration: int = 0
+    sound: SoundSpec | None = None
+
+
+# Size the preview assumes for a hit unit when a debuff offset is a percentage.
+DEBUFF_UNIT_SIZE = 60.0
+DEBUFF_PREVIEW_MS = 5000.0
+DELAY_PREVIEW_MAX_MS = 8000.0
+
+
+def parse_debuff(debuff_id: int, values: dict[str, str]) -> DebuffSpec:
+    """The visual and sound values of one debuff profile."""
+
+    vps = parse_int_list(values.get("debuff_vp", ""), allow_zero=False) or []
+    offset_text = values.get("debuff_random_max_offset", "")
+    percent = offset_text.endswith("%")
+    offset = _stof(offset_text.rstrip("%")) if offset_text else 0.0
+    scale = _stof(values.get("debuff_scale", "1"))
+    return DebuffSpec(
+        debuff_id=debuff_id, vps=tuple(vps), mesh3ds=values.get("debuff_3ds", ""),
+        tint=_tint_value(values, "debuff_tint", WHITE),
+        trail_tint=(_tint_value(values, "debuff_vp_trail_tint", WHITE)
+                    if "debuff_vp_trail_tint" in values else None),
+        scale=scale if math.isfinite(scale) and scale > 0 else 1.0,
+        max_offset=max(0.0, offset) if math.isfinite(offset) else 0.0,
+        offset_percent=percent,
+        tick_time=_non_negative_int(values.get("debuff_tick_time")),
+        duration=_non_negative_int(values.get("debuff_duration")),
+        sound=sound_specs(values, ("debuff",)).get("debuff"))
+
+
+def debuff_profiles_from_text(text: str) -> dict[int, DebuffSpec]:
+    """Every ``new_debuff N ... end`` profile of a script text."""
+
+    profiles: dict[int, DebuffSpec] = {}
+    lines = text.splitlines()
+    index = 0
+    while index < len(lines):
+        match = re.match(r"\s*new_debuff\s+(\d+)", lines[index], re.IGNORECASE)
+        if match is None:
+            index += 1
+            continue
+        depth, cursor = 1, index + 1
+        while cursor < len(lines) and depth:
+            token = _scope_token(lines[cursor])
+            if token == "begin" or token.startswith("begin_"):
+                depth += 1
+            elif token == "end":
+                depth -= 1
+            cursor += 1
+        end_line = cursor - 1 if depth == 0 else len(lines)
+        profiles[int(match[1])] = parse_debuff(
+            int(match[1]), top_level_values(text, index, end_line))
+        index = cursor
+    return profiles
+
+
+@dataclass(frozen=True)
+class LaserSpec:
+    """model = laser: the beam is drawn instead of a flying projectile."""
+
+    spacing: float = 40.0
+    mesh: str = ""
+    tint: Tint = WHITE
+    size_x: float = 5.0
+    size_y: float = 5.0
+    glow_rate: float = 1.0
+    impact_fade: float = 0.0
+
+
+def parse_laser(values: dict[str, str]) -> LaserSpec | None:
+    if values.get("model", "").casefold() != "laser":
+        return None
+    spacing = _stof(values.get("laser_spacing", "40"))
+    size_x = _stof(values.get("laser_mesh_size_x", "5"))
+    size_y = _full_float(values.get("laser_mesh_size_y", ""))
+    return LaserSpec(
+        spacing=min(max(spacing, 5.0), 400.0) if math.isfinite(spacing) and spacing > 0 else 40.0,
+        mesh=values.get("laser_mesh_path", "") if values.get("laser_mesh_enable") == "1" else "",
+        tint=_tint_value(values, "laser_mesh_tint", WHITE),
+        size_x=size_x if math.isfinite(size_x) and size_x > 0 else 5.0,
+        size_y=size_y if size_y and size_y > 0 else (size_x if size_x > 0 else 5.0),
+        glow_rate=max(0.0, min(10.0, _stof(values.get("laser_mesh_glow_rate", "1")))),
+        impact_fade=max(0.0, _stof(values.get("laser_mesh_impact_fade_length", "0"))))
+
+
+@dataclass(frozen=True)
+class WeaponDef:
+    """Another weapon of the game, as a cluster child needs it."""
+
+    weapon_id: int
+    unit: "UnitPhases"
+    document: "FxDocument"
+
+
+def _body_values(text: str) -> tuple[dict[str, str], int]:
+    """Top-level values and the closing line of one ``new_weapon ... end`` text."""
+
+    lines = text.splitlines()
+    last = len(lines) - 1 if lines and _scope_token(lines[-1]) == "end" else len(lines)
+    return top_level_values(text, 0, last), last
+
+
+def weapon_def_from_text(weapon_id: int, text: str) -> WeaponDef:
+    """Read one weapon definition (header, body and ``end``) for the preview."""
+
+    values, last = _body_values(text)
+
+    def state(name: str, default: int) -> VisualRef:
+        return VisualRef(vp=script_int(values.get(f"vp_{name}"), default),
+                         mesh3ds=values.get(f"3ds_{name}", ""),
+                         base_path=values.get(f"base_{name}", ""))
+
+    from entity_designer.shape import visual_transform_point
+
+    scale = _positive_scale(values, "")
+    euler = tuple(
+        (lambda v: v if v is not None else 0.0)(_full_float(values.get(f"rotation_{axis}", "")))
+        for axis in "xyz")
+    columns = [visual_transform_point(axis, scale, euler)
+               for axis in ((1.0, 0.0, 0.0), (0.0, 1.0, 0.0), (0.0, 0.0, 1.0))]
+    transform = tuple(tuple(columns[col][row] for col in range(3)) for row in range(3))
+    unit = UnitPhases(
+        normal=state("normal", 0), dead=state("dead", 4),
+        megadeth=state("megadeth", 2), model=values.get("model", "").casefold(),
+        weapon=True, transform=transform, scale=scale, euler=euler,
+        **unit_look(values, weapon=True))
+    return WeaponDef(weapon_id, unit, extract_fx_document(text, 0, last))
+
+
+def cluster_chain(unit: "UnitPhases", weapons: dict) -> list[WeaponDef]:
+    """The weapons a cluster can spawn, children of children included."""
+
+    chain: list[WeaponDef] = []
+    seen: set[int] = set()
+    pending = [unit]
+    while pending:
+        cluster = pending.pop().cluster
+        child = weapons.get(cluster.weapon_id) if cluster is not None else None
+        if child is not None and child.weapon_id not in seen:
+            seen.add(child.weapon_id)
+            chain.append(child)
+            pending.append(child.unit)
+    return chain
+
+
+def weapon_vps(unit: "UnitPhases", document: "FxDocument", weapons: dict,
+               seen: set | None = None, debuffs: dict | None = None) -> set[int]:
+    """Every VP a weapon (and the weapons its cluster spawns) can show."""
+
+    debuffs = debuffs or {}
+
+    vps = {ref.vp for ref in (unit.normal, unit.dead, unit.megadeth, unit.launch)
+           if ref.vp > 0}
+    if unit.decoration is not None and unit.decoration.visual.vp > 0:
+        vps.add(unit.decoration.visual.vp)
+    for item in document.items:
+        if isinstance(item, FxBlock):
+            spec = interpret_block(item, CONTEXT_WEAPON)
+            vps.update(visual.vp for visual in spec.visuals if visual.vp > 0)
+            vps.update(vp for vp in spec.vp_models if vp > 0)
+            vps.update(vp for vp in spec.vp_impacts if vp > 0)
+    for debuff_id in (unit.debuff_id, unit.delay_debuff_id):
+        if debuff_id in debuffs:
+            vps.update(vp for vp in debuffs[debuff_id].vps if vp > 0)
+    cluster = unit.cluster
+    if cluster is not None:
+        if cluster.visual.vp > 0:
+            vps.add(cluster.visual.vp)
+        seen = set() if seen is None else seen
+        child = weapons.get(cluster.weapon_id)
+        if child is not None and cluster.weapon_id not in seen:
+            seen.add(cluster.weapon_id)
+            vps |= weapon_vps(child.unit, child.document, weapons, seen, debuffs)
+    return vps
+
+
 # Classes that fly: their preview starts in the air.
 FLYING_MODELS = frozenset({
     "plane", "heli", "flyer", "glider", "zeppelin", "cruiser", "ufo"})
@@ -1077,6 +1874,10 @@ class UnitPhases:
     class shows dead, falls as a wreck and switches to megadeth on ground
     contact. Weapons fly to the target and switch to dead (unit hit) or
     megadeth (ground hit).
+
+    ``transform`` (scale/rotation), ``spin`` and the particle trail values
+    belong to the main (normal) model only; ``tint`` colors every state.
+    Weapons use ``altitude`` as the height they fall from.
     """
 
     normal: VisualRef = VisualRef()
@@ -1088,6 +1889,37 @@ class UnitPhases:
     transform: Matrix3 = IDENTITY
     overeof: float = 0.0
     altitude: float = 0.0
+    # Main-model look read from the script.
+    tint: Tint | None = None
+    spin: tuple[float, float, float] = (0.0, 0.0, 0.0)
+    scale: tuple[float, float, float] = (1.0, 1.0, 1.0)
+    euler: tuple[float, float, float] = (0.0, 0.0, 0.0)
+    trail_tint: Tint | None = None
+    trail_scale: tuple[float, float, float] = (1.0, 1.0, 1.0)
+    tracer: TracerSpec | None = None
+    decoration: DecorationSpec | None = None
+    motion: MotionSpec | None = None
+    cluster: ClusterSpec | None = None
+    laser: LaserSpec | None = None
+    delay_time: int = 0
+    debuff_id: int = -1
+    delay_debuff_id: int = -1
+    fixed_speed: float = 0.0
+    start_speed: float = 0.0
+    launch: VisualRef = VisualRef()
+    launch_scale: float = 1.0
+    # snd_* packages of the definition, by event name.
+    sounds: dict = field(default_factory=dict)
+    # Genesis VP of the death plasma and the values that drive it.
+    genesis: VisualRef = VisualRef()
+    energy: float = 0.0
+    maxrot: float = 0.0
+
+    @property
+    def plasma_ms(self) -> float:
+        """GetPlasmaDurationMs: how long the plasma would last in game."""
+
+        return max(PLASMA_MIN_MS, min(PLASMA_MAX_MS, self.energy * 0.7))
 
     @property
     def skips_dead_phase(self) -> bool:
@@ -1097,6 +1929,41 @@ class UnitPhases:
     def flies(self) -> bool:
         return not self.weapon and self.model.casefold() in FLYING_MODELS
 
+    def visual_matrix(self, age_ms: float) -> Matrix3:
+        """Matrix of the main model: preview scale/rotation plus its spin.
+
+        Engine order is rotation, then spin, then scale (``ypabact`` render).
+        """
+
+        if not any(self.spin):
+            return self.transform
+        from entity_designer.shape import visual_transform_point
+
+        columns = [visual_transform_point(axis, (1.0, 1.0, 1.0), self.euler)
+                   for axis in ((1.0, 0.0, 0.0), (0.0, 1.0, 0.0), (0.0, 0.0, 1.0))]
+        rotation = tuple(tuple(columns[col][row] for col in range(3))
+                         for row in range(3))
+        scale = tuple(tuple(self.scale[row] if row == col else 0.0
+                            for col in range(3)) for row in range(3))
+        return _mat_mul(_mat_mul(rotation, spin_matrix(self.spin, age_ms)), scale)
+
+    def look_reach(self) -> float:
+        """Radius needed to see the tracer and the decorations around the unit."""
+
+        reach = 0.0
+        if self.tracer is not None:
+            reach = self.tracer.size_z * 0.6
+        deco = self.decoration
+        if deco is not None and deco.spawns:
+            reach = max(reach, math.hypot(*deco.offset)
+                        + deco.random_pos * 1.8 + 40.0 * max(deco.scale))
+        return reach
+
+    def particle_tint(self, main: bool) -> Tint | None:
+        """Tint of the VP particles: weapons use vp_trail_tint on the main model."""
+
+        return self.trail_tint if (self.weapon and main) else self.tint
+
 
 # Preview events of the Destruction FX tab.
 SEQUENCE_TRIGGER = "sequence"          # vehicle: full death
@@ -1105,9 +1972,9 @@ WEAPON_HIT_GROUND = "hit_ground"       # weapon: impact_world on terrain
 SEQUENCE_PREROLL_MS = 600.0
 # How long the preview keeps the final model after the last effect ends.
 MEGADETH_HOLD_MS = 1200.0
-# Weapon flight shown before the impact: from the upper left to the target.
+# Weapon flight shown before the impact: a vertical drop above the target.
 WEAPON_FLIGHT_MS = 900.0
-WEAPON_LAUNCH_OFFSET = (-1100.0, -550.0, -700.0)
+WEAPON_LAUNCH_HEIGHT = 550.0
 
 
 def _uniform(rng: random.Random, low: float, high: float) -> float:
@@ -1135,12 +2002,39 @@ def _look_rotation(direction) -> Matrix3:
              up[0] * forward[1] - up[1] * forward[0])
     norm = math.sqrt(sum(value * value for value in right))
     if norm < 1e-6:
-        return IDENTITY
+        # A vertical drop is parallel to the usual up axis.
+        up = (0.0, 0.0, 1.0)
+        right = (up[1] * forward[2] - up[2] * forward[1],
+                 up[2] * forward[0] - up[0] * forward[2],
+                 up[0] * forward[1] - up[1] * forward[0])
+        norm = math.sqrt(sum(value * value for value in right))
+        if norm < 1e-6:
+            return IDENTITY
     right = tuple(value / norm for value in right)
     down = (forward[1] * right[2] - forward[2] * right[1],
             forward[2] * right[0] - forward[0] * right[2],
             forward[0] * right[1] - forward[1] * right[0])
     return tuple((right[row], down[row], forward[row]) for row in range(3))
+
+
+def _cross(a, b) -> tuple[float, float, float]:
+    return (a[1] * b[2] - a[2] * b[1], a[2] * b[0] - a[0] * b[2],
+            a[0] * b[1] - a[1] * b[0])
+
+
+def _tracer_rotation(direction) -> Matrix3:
+    """WeaponTracerRotationFromDir: columns are the mesh X, Y and Z axes."""
+
+    hint = (0.0, 1.0, 0.0) if abs(direction[1]) < 0.9 else (1.0, 0.0, 0.0)
+    x = _cross(hint, direction)
+    norm = math.sqrt(sum(value * value for value in x))
+    if norm < 1e-6:
+        return IDENTITY
+    x = tuple(value / norm for value in x)
+    y = _cross(direction, x)
+    norm = math.sqrt(sum(value * value for value in y)) or 1.0
+    y = tuple(value / norm for value in y)
+    return tuple((x[row], y[row], direction[row]) for row in range(3))
 
 
 @dataclass
@@ -1166,6 +2060,19 @@ class _Fall:
                     self.velocity[axis] * dt_s * MOVE_POSITION_FACTOR)
 
 
+@dataclass
+class _Def:
+    """A weapon being simulated: the previewed one or a cluster child."""
+
+    unit: "UnitPhases"
+    document: "FxDocument"
+    specs: dict
+    enabled: set | None = None
+    # Source id of its events; None = the index of the item in the document.
+    source: int | None = None
+    salt: str = ""
+
+
 class PreviewSimulation:
     """Deterministic preview of one destruction, as the engine plays it.
 
@@ -1182,7 +2089,9 @@ class PreviewSimulation:
                  unit_radius: float = 0.0,
                  legacy_catalog: dict[int, LegacyFxVehicle] | None = None,
                  enabled: set[int] | None = None,
-                 unit: UnitPhases | None = None) -> None:
+                 unit: UnitPhases | None = None,
+                 weapons: dict[int, WeaponDef] | None = None,
+                 debuffs: dict[int, DebuffSpec] | None = None) -> None:
         self.document = document
         self.context = context
         self.trigger = trigger
@@ -1195,12 +2104,17 @@ class PreviewSimulation:
         self.unit = unit or UnitPhases(weapon=context == CONTEXT_WEAPON)
         self.notes: list[str] = []
         self._events: list[tuple] = []
+        self._sounds: list[SoundEvent] = []
         self._tracks: list[PreviewTrack] = []
         self._instances: list[VpInstance] | None = None
         self._specs = {
             index: interpret_block(item, context)
             for index, item in enumerate(document.items)
             if isinstance(item, FxBlock)}
+        self.weapons = weapons or {}
+        self.debuffs = debuffs or {}
+        self._root = _Def(self.unit, document, self._specs, enabled)
+        self._cluster_projectiles = 0
         if trigger == SEQUENCE_TRIGGER and context == CONTEXT_VEHICLE:
             self._build_vehicle_sequence()
         elif trigger in (WEAPON_HIT_UNIT, WEAPON_HIT_GROUND) \
@@ -1215,16 +2129,21 @@ class PreviewSimulation:
         return random.Random(hash((self.seed, source, salt)) & 0xFFFFFFFF)
 
     def _build_event(self, trigger: str, start: float, origin,
-                     prefix: str = "") -> None:
+                     prefix: str = "", decals_only: bool = False,
+                     definition: "_Def | None" = None) -> None:
         """Spawn every enabled item listening to ``trigger`` at ``start``."""
 
-        for source, item in enumerate(self.document.items):
-            if self.enabled is not None and source not in self.enabled:
+        definition = definition or self._root
+        for index, item in enumerate(definition.document.items):
+            if definition.enabled is not None and index not in definition.enabled:
                 continue
-            rng = self._rng(source, trigger)
+            source = index if definition.source is None else definition.source
+            rng = self._rng(source, trigger + definition.salt)
             if isinstance(item, FxBlock):
-                spec = self._specs[source]
+                spec = definition.specs[index]
                 if not spec.active or spec.trigger != trigger:
+                    continue
+                if decals_only and spec.mode != MODE_DECAL:
                     continue
                 if spec.mode == MODE_VISUAL:
                     self._build_visual(source, spec, rng, start, origin, prefix)
@@ -1232,7 +2151,7 @@ class PreviewSimulation:
                     self._build_physical(source, spec, rng, start, origin, prefix)
                 else:
                     self._build_decal(source, spec, rng, start, origin, prefix)
-            else:
+            elif not decals_only:
                 dest = item.parsed
                 if dest is None or dest.kind != trigger:
                     continue
@@ -1240,19 +2159,256 @@ class PreviewSimulation:
                                    prefix=prefix)
 
     def _unit_event(self, ref: VisualRef, start: float, end: float, path,
-                    label: str, rotation: Matrix3 | None = None) -> None:
+                    label: str, heading: Matrix3 = IDENTITY,
+                    main: bool = False, *, motion: MotionSpec | None = None,
+                    speed: float = 0.0, frozen_at: float | None = None,
+                    unit: "UnitPhases | None" = None) -> None:
+        """One phase of the unit. Only the main (normal) model carries the
+        preview scale, rotation and spin; every state gets the tint."""
+
         if ref.vp <= 0 and not _external_paths(ref):
             return
-        rotation = self.unit.transform if rotation is None else rotation
-        self._events.append((-1, "unit", start, end, (ref, path, label, rotation)))
+        flight = _Flight(path, heading, motion, speed, frozen_at)
+        self._events.append((-1, "unit", start, end,
+                             (ref, flight, label, main, unit or self.unit)))
+
+    # -- sounds ------------------------------------------------------------------------
+
+    def _add_sound(self, sounds: dict, event: str, start: float,
+                   end: float | None = None, label: str = "",
+                   salt: str = "") -> None:
+        """Queue ``event`` of ``sounds``: a loop when ``end`` is given."""
+
+        spec = sounds.get(event)
+        if spec is None:
+            return
+        rng = self._rng(hash((event, label, salt)) & 0xFFFF, "sound")
+        self._sounds.append(SoundEvent(
+            start, end, spec, event, _randint(rng, *spec.pitch), label))
+
+    @property
+    def sound_events(self) -> list[SoundEvent]:
+        """Every sound of the preview, in start order."""
+
+        return sorted(self._sounds, key=lambda sound: sound.start)
+
+    def palette_effects_at(self, time_ms: float) -> list[tuple[int, float]]:
+        """[(palette slot, strength)] of the flashes active at ``time_ms``."""
+
+        palettes: list[tuple[int, float]] = []
+        for sound in self._sounds:
+            fx = sound.spec.palette
+            if fx is None:
+                continue
+            strength = _screen_fx_strength(sound, fx, time_ms)
+            if strength is not None:
+                palettes.append((fx.slot, strength))
+        return palettes
+
+    # -- decoration_fx, launch flash and weapon tracer ------------------------------------
+
+    def _decoration_window(self, unit: "UnitPhases | None" = None) -> float:
+        """Preview time the parent stays active so decorations can show up."""
+
+        deco = (unit or self.unit).decoration
+        if deco is None or not deco.spawns:
+            return 0.0
+        if deco.persistent:
+            return DECORATION_PERSISTENT_PREVIEW_MS
+        # Long enough for the first spawn (one interval in) to play out.
+        return min(DECORATION_PERIODIC_PREVIEW_MAX_MS,
+                   max(DECORATION_PERIODIC_PREVIEW_MIN_MS,
+                       1.2 * max(deco.interval) + deco.duration))
+
+    def _build_decoration(self, end: float, flight: _Flight,
+                          unit: "UnitPhases | None" = None,
+                          start: float = 0.0) -> None:
+        """UpdateDecorationFX: spawns follow the parent until it stops (``end``)."""
+
+        deco = (unit or self.unit).decoration
+        if deco is None or not deco.spawns or end <= start:
+            return
+        rng = self._rng(-2, f"decoration{start:.0f}")
+        if deco.persistent:
+            self._events.append((-2, "decoration", start, end + deco.fade_out,
+                                 (deco, deco.offset, flight, end, True)))
+            self._tracks.append(PreviewTrack(
+                -2, "Decoration · persistent", start, end + deco.fade_out,
+                float(deco.fade_in), float(deco.fade_out)))
+            return
+        # The first update only arms the timer: the first spawn comes one
+        # random interval after the parent appears.
+        spawn = start + float(_randint(rng, *deco.interval))
+        spawned = 0
+        while spawn < end and spawned < 256:
+            for _ in range(_randint(rng, *deco.count)):
+                offset = tuple(
+                    base + _uniform(rng, -deco.random_pos, deco.random_pos)
+                    for base in deco.offset)
+                self._events.append((
+                    -2, "decoration", spawn, min(spawn + deco.duration, end),
+                    (deco, offset, flight, end, False)))
+                spawned += 1
+            spawn += float(_randint(rng, *deco.interval))
+        if spawned:
+            self._tracks.append(PreviewTrack(
+                -2, f"Decoration × {spawned}", start, end,
+                float(deco.fade_in), float(deco.fade_out)))
+
+    def _build_launch_flash(self, position, heading: Matrix3,
+                            unit: "UnitPhases | None" = None,
+                            start: float = 0.0) -> None:
+        """vp_launch: a transient visual at the muzzle, alive for one second."""
+
+        unit = unit or self.unit
+        if unit.launch.vp <= 0 and not _external_paths(unit.launch):
+            return
+        self._events.append((-3, "launch", start, start + LAUNCH_FLASH_MS,
+                             (unit.launch, tuple(position), heading,
+                              unit.launch_scale)))
+
+    def _build_tracer(self, end: float, flight: _Flight,
+                      unit: "UnitPhases | None" = None,
+                      start: float = 0.0) -> None:
+        """The mesh tracer exists only while the projectile flies."""
+
+        tracer = (unit or self.unit).tracer
+        if tracer is not None and end > start:
+            self._events.append((-3, "tracer", start, end, (tracer, flight)))
+
+    def _tracer_items(self, payload, time_ms: float) -> list[PreviewItem]:
+        """RenderWeaponTracer: the last ``size_z`` of the head's path, in pieces."""
+
+        spec, flight = payload
+
+        def head_at(moment: float):
+            position, rotation = flight.pose(moment)
+            return tuple(a + b for a, b in zip(
+                position, _rotate_vector(rotation, spec.pos)))
+
+        # Head positions, newest first. A straight flight needs only its two
+        # ends; spiral/chaos motion is sampled like the engine (every 16 ms).
+        chain = [head_at(time_ms)]
+        step = 16.0 if flight.motion is not None else max(time_ms, 1.0)
+        moment, length = time_ms, 0.0
+        while moment > 0 and length < spec.size_z and len(chain) < 321:
+            moment = max(0.0, moment - step)
+            chain.append(head_at(moment))
+            length += math.dist(chain[-1], chain[-2])
+        segments = []
+        remaining = spec.size_z
+        for newer, older in zip(chain, chain[1:]):
+            span = math.dist(newer, older)
+            if span <= 0.01:
+                continue
+            take = min(span, remaining)
+            direction = tuple((n - o) / span for n, o in zip(newer, older))
+            segments.append((tuple(n - d * take for n, d in zip(newer, direction)),
+                             newer, take, direction))
+            remaining -= take
+            if remaining <= 0.01:
+                break
+        visible = sum(segment[2] for segment in segments)
+        if visible <= 0.01:
+            return []
+        head_x = spec.size_x if spec.head_size is None else spec.head_size
+        head_y = spec.size_y if spec.head_size is None else spec.head_size
+        tail_x = spec.size_x if spec.tail_size is None else spec.tail_size
+        tail_y = spec.size_y if spec.tail_size is None else spec.tail_size
+        tint_head = spec.tint_head or spec.tint
+        tint_tail = spec.tint_tail or spec.tint
+        tapered = (abs(head_x - tail_x) > 1e-4 or abs(head_y - tail_y) > 1e-4
+                   or tint_head != tint_tail)
+        pulse = 1.0
+        if spec.pulse_rate > 0 and spec.pulse_speed > 0:
+            pulse = max(0.1, 1.0 + math.sin(
+                time_ms * 0.001 * spec.pulse_speed * 2.0 * math.pi)
+                * min(0.9, spec.pulse_rate * 0.1))
+        glow = min(1.0, spec.glow_rate * 0.1)
+        label = "tracer " + spec.mesh.replace("\\", "/").rsplit("/", 1)[-1]
+        items = []
+        done = 0.0
+        for start, end, take, direction in segments:
+            head_factor = 1.0 - done / visible
+            tail_factor = 1.0 - (done + take) / visible
+            done += take
+            pieces = (max(1, min(8, math.ceil(12.0 * (head_factor - tail_factor))))
+                      if tapered else 1)
+            basis = _tracer_rotation(direction)
+            for index in range(pieces):
+                low, high = index / pieces, (index + 1) / pieces
+                factor = tail_factor + (head_factor - tail_factor) * (low + high) * 0.5
+                size_x = (tail_x + (head_x - tail_x) * factor) * pulse
+                size_y = (tail_y + (head_y - tail_y) * factor) * pulse
+                if size_x <= 0.01 and size_y <= 0.01:
+                    continue
+                center = tuple(a + (b - a) * (low + high) * 0.5
+                               for a, b in zip(start, end))
+                tint = tuple(round(a + (b - a) * factor)
+                             for a, b in zip(tint_tail, tint_head))
+                for additive, alpha in ((False, 1.0), (True, glow)):
+                    if alpha <= 0:
+                        continue
+                    items.append(PreviewItem(
+                        -3, "tracer", 0, center, basis,
+                        (size_x, size_y, take / pieces), alpha, tint, label,
+                        (spec.mesh,), additive))
+        return items
+
+    def _build_plasma(self, start: float, position) -> None:
+        """DEATH2 of a vehicle: the genesis VP appears and shrinks away."""
+
+        unit = self.unit
+        if unit.weapon or (unit.genesis.vp <= 0 and not _external_paths(unit.genesis)):
+            return
+        end = start + min(unit.plasma_ms, PLASMA_PREVIEW_MS)
+        self._events.append((-1, "plasma", start, end,
+                             (unit.genesis, tuple(position), unit.plasma_ms,
+                              unit.maxrot)))
+        self._tracks.append(PreviewTrack(
+            -1, "Unit · genesis plasma", start, end, approximate=True))
+
+    def _laser_mesh_items(self, payload, time_ms: float) -> list[PreviewItem]:
+        """Mesh laser: one beam from the muzzle to the contact, with a glow."""
+
+        spec, launch, target = payload
+        length = math.dist(launch, target)
+        if length <= 0.01:
+            return []
+        direction = tuple((t - l) / length for l, t in zip(launch, target))
+        basis = _tracer_rotation(direction)
+        label = "laser " + spec.mesh.replace("\\", "/").rsplit("/", 1)[-1]
+        pieces = 8 if spec.impact_fade > 0 else 1
+        fade = min(spec.impact_fade, length)
+        items = []
+        for index in range(pieces):
+            low, high = index / pieces, (index + 1) / pieces
+            middle = (low + high) * 0.5
+            alpha = 1.0
+            if pieces > 1 and fade > 0 and middle * length > length - fade:
+                ratio = (middle * length - (length - fade)) / fade
+                alpha = 1.0 + (0.02 - 1.0) * min(1.0, ratio)
+            center = tuple(l + (t - l) * middle for l, t in zip(launch, target))
+            for additive, power in ((False, 1.0), (True, min(1.0, spec.glow_rate * 0.1))):
+                if power <= 0:
+                    continue
+                tint = (*spec.tint[:3], round(spec.tint[3] * alpha))
+                items.append(PreviewItem(
+                    -3, "tracer", 0, center, basis,
+                    (spec.size_x, spec.size_y, length / pieces), power, tint,
+                    label, (spec.mesh,), additive))
+        return items
 
     def _build_vehicle_sequence(self) -> None:
         unit = self.unit
-        death = SEQUENCE_PREROLL_MS
+        death = max(SEQUENCE_PREROLL_MS, self._decoration_window())
         altitude = max(0.0, unit.altitude) if not unit.skips_dead_phase else 0.0
         kill = (self.origin[0], self.origin[1] - altitude, self.origin[2])
         self._unit_event(unit.normal, 0.0, death, [(0.0, kill, False)],
-                         "normal")
+                         "normal", main=True)
+        self._build_decoration(death, _Flight([(0.0, kill, False)]))
+        sounds = unit.sounds
+        self._add_sound(sounds, "normal", 0.0, death, "unit")
         if unit.skips_dead_phase:
             # Tank/car: SetState(DEAD) becomes DEATH2 immediately.
             land_ms, landed = death, kill
@@ -1262,6 +2418,8 @@ class PreviewSimulation:
         else:
             self._build_event("air_destroyed", death, kill, "Air · ")
             self._build_event("death", death, kill, "Death · ")
+            if unit.flies and altitude > 0:
+                self._add_sound(sounds, "airexplode", death, label="unit")
             # Dead wrecks fall without air resistance: CrashOrLand sets
             # _airconst = 0 for non-inline dead vehicles.
             fall = _Fall(list(kill), [0.0, 0.0, 0.0], 1.0, 0.0)
@@ -1270,6 +2428,8 @@ class PreviewSimulation:
             shifted = [(death + ms, position, flag)
                        for ms, position, flag in path]
             land_ms, landed = shifted[-1][0], shifted[-1][1]
+            self._add_sound(sounds, "goingdown", death, land_ms, "unit")
+            self._add_sound(sounds, "crashland", land_ms, label="unit")
             self._unit_event(unit.dead, death, land_ms, shifted, "dead")
             if land_ms > death + 1.0:
                 self._tracks.append(PreviewTrack(
@@ -1277,6 +2437,8 @@ class PreviewSimulation:
         ground = (landed[0], self.origin[1], landed[2])
         self._build_event("destroyed", land_ms, ground, "Ground · ")
         self._build_event("megadeth", land_ms, ground, "Mega · ")
+        self._add_sound(sounds, "explode", land_ms, label="unit")
+        self._build_plasma(land_ms, landed)
         hold_end = max(self.duration, land_ms) + MEGADETH_HOLD_MS
         self._unit_event(unit.megadeth, land_ms, hold_end,
                          [(land_ms, landed, True)], "megadeth")
@@ -1286,30 +2448,305 @@ class PreviewSimulation:
 
     def _build_weapon_sequence(self, hit_ground: bool) -> None:
         unit = self.unit
+        height = unit.altitude if unit.altitude > 0 else WEAPON_LAUNCH_HEIGHT
         target = (self.origin[0],
                   self.ground_y if hit_ground else self.origin[1],
                   self.origin[2])
-        launch = tuple(t + o for t, o in zip(target, WEAPON_LAUNCH_OFFSET))
+        launch = (target[0], target[1] - height, target[2])
+        # Constant speed: a higher launch point takes proportionally longer.
+        impact = max(WEAPON_FLIGHT_MS * height / WEAPON_LAUNCH_HEIGHT,
+                     self._decoration_window())
+        if unit.fixed_speed > 0:
+            impact = max(height / (unit.fixed_speed * 0.001), 300.0,
+                         self._decoration_window())
+        cluster = unit.cluster
+        if cluster is not None and cluster.trigger_time > 0:
+            # A cluster that splits in flight needs a flight long enough.
+            impact = max(impact, cluster.trigger_time * 1.3)
+        stop = self._build_flight(self._root, 0.0, launch, target, impact,
+                                  hit_ground=hit_ground, generation=0, root=True)
+        self._tracks.insert(0, PreviewTrack(
+            -1, "Projectile flight", 0.0, stop, marks=(stop,)))
+        if unit.tracer is not None:
+            self._tracks.insert(1, PreviewTrack(-3, "Mesh tracer", 0.0, stop))
+
+    def _build_flight(self, definition: "_Def", start: float, launch, target,
+                      end: float, *, hit_ground: bool, generation: int,
+                      root: bool) -> float:
+        """One projectile from ``launch`` (at ``start``) to ``target`` (at ``end``).
+
+        Returns the time it stops: its split time when a cluster splits it in
+        flight, else its impact time.
+        """
+
+        unit = definition.unit
         heading = tuple(t - l for t, l in zip(target, launch))
-        rotation = _mat_mul(_look_rotation(heading), unit.transform)
-        impact = WEAPON_FLIGHT_MS
-        self._unit_event(unit.normal, 0.0, impact,
-                         [(0.0, launch, False), (impact, target, True)],
-                         "normal", rotation)
+        look = _look_rotation(heading)
+        speed = math.dist(launch, target) / max((end - start) * 0.001, 1e-3)
+        path = [(start, launch, False), (end, target, True)]
+        flight = _Flight(path, look, unit.motion, speed)
+        cluster = self._cluster_of(definition, generation)
+        split = (start + cluster.trigger_time
+                 if cluster is not None and 0 < cluster.trigger_time
+                 and start + cluster.trigger_time < end else None)
+        stop = end if split is None else split
+        who = "weapon" if root else f"cluster{definition.salt}"
+        if unit.laser is not None:
+            # A laser is a beam from the muzzle to the contact, not a projectile.
+            self._build_laser(unit, launch, target, look, start, end)
+        else:
+            self._unit_event(unit.normal, start, stop, path, "normal", look,
+                             main=True, motion=unit.motion, speed=speed,
+                             unit=unit)
+        self._build_launch_flash(launch, look, unit, start)
+        self._add_sound(unit.sounds, "launch", start, label=who, salt=definition.salt)
+        self._add_sound(unit.sounds, "normal", start, stop, who, definition.salt)
+        self._build_decoration(stop, flight, unit, start)
+        self._build_tracer(stop, flight, unit, start)
+        if split is not None:
+            # The projectile is replaced by its children: no impact effects.
+            position, _rotation = flight.pose(split)
+            self._spawn_cluster(cluster, definition, position, look, split,
+                                speed, generation)
+            return stop
+        blast = end
+        if not hit_ground:
+            self._hit_unit_effects(unit, target, end)
+            if unit.delay_time > 0 and unit.laser is None:
+                # delay_time: the projectile sticks to the unit and explodes later.
+                blast = end + min(float(unit.delay_time), DELAY_PREVIEW_MAX_MS)
+                self._unit_event(unit.normal, end, blast, [(end, target, True)],
+                                 "attached", look, main=True, unit=unit)
+                if root:
+                    self.notes.append(
+                        f"delay_time: the weapon sticks to the unit and "
+                        f"detonates {unit.delay_time} ms after the hit.")
+        self._add_sound(unit.sounds, "hit", blast, label=who, salt=definition.salt)
+        end = blast
         if hit_ground:
             # DEATH2: vp_megadeth, impact_world chain, dest_fx megadeth.
-            self._build_event("impact_world", impact, target, "Ground hit · ")
-            self._build_event("megadeth", impact, target, "Mega · ")
+            self._build_event("impact_world", end, target, "Ground hit · ",
+                              definition=definition)
+            self._build_event("megadeth", end, target, "Mega · ",
+                              definition=definition)
             final, label = unit.megadeth, "megadeth"
         else:
             # DEAD: vp_dead, detonate chain, dest_fx death.
-            self._build_event("detonate", impact, target, "Unit hit · ")
-            self._build_event("death", impact, target, "Death · ")
+            self._build_event("detonate", end, target, "Unit hit · ",
+                              definition=definition)
+            self._build_event("death", end, target, "Death · ",
+                              definition=definition)
+            if root:
+                # The engine spawns ground decals only on terrain hits. They
+                # are previewed here too so they can be checked without
+                # switching mode.
+                before = len(self._events)
+                self._build_event("impact_world", end,
+                                  (target[0], self.ground_y, target[2]),
+                                  "Preview · ", decals_only=True)
+                if len(self._events) > before:
+                    self.notes.append(
+                        "Hits a unit: the ground decal is shown for preview "
+                        "only. The engine spawns it when the weapon hits the "
+                        "terrain.")
             final, label = unit.dead, "dead"
-        self._unit_event(final, impact, impact + IMPACT_PREVIEW_MS,
-                         [(impact, target, True)], label, rotation)
-        self._tracks.insert(0, PreviewTrack(
-            -1, "Projectile flight", 0.0, impact, marks=(impact,)))
+        # The projectile's visual motion stays frozen on its last pose.
+        self._unit_event(final, end, end + IMPACT_PREVIEW_MS,
+                         [(end, target, True)], label, look,
+                         motion=unit.motion, speed=speed, frozen_at=end,
+                         unit=unit)
+        if cluster is not None and cluster.trigger_time <= 0:
+            # trigger_time 0: the split happens on impact.
+            self._spawn_cluster(cluster, definition, target, look, end, speed,
+                                generation)
+        return stop
+
+    # -- laser beam and debuffs --------------------------------------------------------------
+
+    def _build_laser(self, unit: "UnitPhases", launch, target, look: Matrix3,
+                     start: float, end: float) -> None:
+        """Beam from the muzzle to the contact, for the whole flight time."""
+
+        spec = unit.laser
+        length = math.dist(launch, target)
+        if length <= 0.01:
+            return
+        if spec.mesh:
+            self._events.append((-3, "laser_mesh", start, end,
+                                 (spec, tuple(launch), tuple(target))))
+            return
+        # Legacy beam: normal-state models every ``spacing`` units.
+        count = min(120, int(length // spec.spacing) + 1)
+        positions = [tuple(l + (t - l) * ((index + 0.5) * spec.spacing / length)
+                           for l, t in zip(launch, target))
+                     for index in range(count)
+                     if (index + 0.5) * spec.spacing <= length]
+        if positions and (unit.normal.vp > 0 or _external_paths(unit.normal)):
+            self._events.append((-1, "laser", start, end,
+                                 (unit.normal, positions, look, unit)))
+
+    def _hit_unit_effects(self, unit: "UnitPhases", position, at: float) -> None:
+        """Debuffs a hit unit shows (debuff_id, delay_time_debuff_id)."""
+
+        for debuff_id in dict.fromkeys((unit.debuff_id, unit.delay_debuff_id)):
+            if debuff_id < 0:
+                continue
+            spec = self.debuffs.get(debuff_id)
+            if spec is None:
+                note = f"debuff {debuff_id} is not in the loaded game scripts."
+                if note not in self.notes:
+                    self.notes.append(note)
+                continue
+            self._spawn_debuff(spec, position, at)
+
+    def _spawn_debuff(self, spec: DebuffSpec, position, at: float) -> None:
+        """Debuff visuals: once on the hit and again at every tick."""
+
+        window = min(float(spec.duration) if spec.duration > 0 else DEBUFF_PREVIEW_MS,
+                     DEBUFF_PREVIEW_MS)
+        lifetime = float(max(1000, min(5000, spec.tick_time + 100)))
+        rng = self._rng(-5, f"debuff{spec.debuff_id}{at:.0f}")
+        radius = spec.max_offset * (DEBUFF_UNIT_SIZE / 100.0
+                                    if spec.offset_percent else 1.0)
+        times = [0.0]
+        while spec.tick_time > 0 and times[-1] + spec.tick_time < window and len(times) < 40:
+            times.append(times[-1] + spec.tick_time)
+        visuals = [VisualRef(vp=vp) for vp in spec.vps]
+        if spec.mesh3ds:
+            visuals.append(VisualRef(mesh3ds=spec.mesh3ds))
+        for tick in times:
+            for ref in visuals:
+                offset = tuple(_uniform(rng, -radius, radius) for _ in range(3))
+                self._events.append((-5, "debuff", at + tick, at + tick + lifetime,
+                                     (ref, tuple(p + o for p, o in zip(position, offset)),
+                                      spec)))
+        if visuals:
+            self._tracks.append(PreviewTrack(
+                -5, f"Debuff {spec.debuff_id} · {spec.tick_time or 'once'} ms",
+                at, at + window))
+        if spec.sound is not None:
+            loop_end = at + window if spec.tick_time <= 0 else None
+            for tick in ([0.0] if loop_end else times):
+                self._add_sound({"debuff": spec.sound}, "debuff", at + tick, loop_end,
+                                "debuff", f"{spec.debuff_id}")
+
+    # -- weapon clusters ------------------------------------------------------------------
+
+    def _cluster_of(self, definition: "_Def", generation: int):
+        """The cluster ``definition`` may split with at this generation."""
+
+        spec = definition.unit.cluster
+        if spec is None:
+            return None
+        if generation > 0 and (spec.generations <= 0
+                               or generation + 1 > spec.generations):
+            return None
+        if spec.weapon_id not in self.weapons:
+            note = (f"cluster_weapon_id {spec.weapon_id} is not in the loaded "
+                    "game catalog.")
+            if note not in self.notes:
+                self.notes.append(note)
+            return None
+        return spec
+
+    def _cluster_direction(self, rng, look: Matrix3, spec: ClusterSpec,
+                           index: int, total: int):
+        """Direction of one child: parent heading, cluster angles, then spread."""
+
+        forward = tuple(look[row][2] for row in range(3))
+        direction = forward
+        if spec.horizontal is not None or spec.vertical is not None:
+            h_low, h_high = sorted(spec.horizontal or (0.0, 0.0))
+            v_low, v_high = sorted(spec.vertical or (0.0, 0.0))
+            if spec.horizontal is not None and abs(h_high - h_low - 360.0) <= 0.001:
+                yaw = h_low + index / total * 360.0
+            elif spec.horizontal is not None:
+                yaw = rng.uniform(h_low, h_high)
+            else:
+                yaw = 0.0
+            pitch = rng.uniform(v_low, v_high) if spec.vertical is not None else 0.0
+            yaw, pitch = math.radians(yaw), math.radians(pitch)
+            local = (math.sin(yaw) * math.cos(pitch), math.sin(pitch),
+                     math.cos(yaw) * math.cos(pitch))
+            direction = _rotate_vector(look, local)
+        spread_x, spread_y = spec.spread
+        if spread_x > 0 or spread_y > 0:
+            length = math.sqrt(sum(v * v for v in direction)) or 1.0
+            aim = tuple(v / length for v in direction)
+            right = tuple(look[row][0] for row in range(3))
+            dot = sum(a * r for a, r in zip(aim, right))
+            right = tuple(r - a * dot for r, a in zip(right, aim))
+            norm = math.sqrt(sum(v * v for v in right))
+            if norm > 1e-3:
+                right = tuple(v / norm for v in right)
+                up = _cross(aim, right)
+                shift_x = rng.uniform(-1.0, 1.0) * math.tan(math.radians(spread_x))
+                shift_y = rng.uniform(-1.0, 1.0) * math.tan(math.radians(spread_y))
+                aim = tuple(a + r * shift_x + u * shift_y
+                            for a, r, u in zip(aim, right, up))
+                length = math.sqrt(sum(v * v for v in aim)) or 1.0
+                direction = tuple(v / length for v in aim)
+        length = math.sqrt(sum(v * v for v in direction)) or 1.0
+        return tuple(v / length for v in direction)
+
+    def _spawn_cluster(self, spec: ClusterSpec, parent: "_Def", position,
+                       look: Matrix3, at: float, speed: float,
+                       generation: int) -> None:
+        """TryClusterSplit: the flash, the sound and the child projectiles."""
+
+        child = self.weapons.get(spec.weapon_id)
+        if child is None:
+            return
+        rng = self._rng(-4 - generation, f"cluster{at:.0f}{parent.salt}")
+        total = _randint(rng, *spec.count)
+        position = tuple(position)
+        if spec.visual.vp > 0 or _external_paths(spec.visual):
+            self._events.append((-3, "cluster", at, at + CLUSTER_FLASH_MS,
+                                 (spec.visual, position, look)))
+        if spec.sound is not None:
+            self._add_sound({"cluster": spec.sound}, "cluster", at,
+                            label="cluster", salt=parent.salt)
+        specs = {index: interpret_block(item, CONTEXT_WEAPON)
+                 for index, item in enumerate(child.document.items)
+                 if isinstance(item, FxBlock)}
+        # Children use the speed of the previewed projectile, scaled by how
+        # much faster or slower their weapon is.
+        ratio = (child.unit.start_speed / parent.unit.start_speed
+                 if child.unit.start_speed > 0 and parent.unit.start_speed > 0
+                 else 1.0)
+        child_speed = max(speed * ratio, 1.0)
+        saved_tracks, self._tracks = self._tracks, []
+        last = at
+        spawned = 0
+        for index in range(total):
+            if self._cluster_projectiles >= CLUSTER_PREVIEW_LIMIT:
+                break
+            self._cluster_projectiles += 1
+            spawned += 1
+            direction = self._cluster_direction(rng, look, spec, index, total)
+            # Descending children fall to the ground; others are followed
+            # for a short while and burst in the air.
+            hit_ground = direction[1] > 0.05 and position[1] < self.ground_y - 1.0
+            distance = ((self.ground_y - position[1]) / direction[1] if hit_ground
+                        else child_speed * CLUSTER_FREE_FLIGHT_MS * 0.001)
+            flight_ms = min(distance / child_speed * 1000.0, CLUSTER_MAX_FLIGHT_MS)
+            if flight_ms < distance / child_speed * 1000.0:
+                distance, hit_ground = child_speed * flight_ms * 0.001, False
+            target = tuple(p + d * distance for p, d in zip(position, direction))
+            if hit_ground:
+                target = (target[0], self.ground_y, target[2])
+            definition = _Def(child.unit, child.document, specs, None, -4,
+                              f"-{generation}-{index}-{at:.0f}")
+            last = max(last, self._build_flight(
+                definition, at, position, target, at + max(flight_ms, 50.0),
+                hit_ground=hit_ground, generation=generation + 1, root=False))
+        # Rows of clusters that split again stay; the children's own effect
+        # rows would only clutter the timeline.
+        nested = [track for track in self._tracks if track.source == -4]
+        self._tracks = saved_tracks + nested
+        if spawned:
+            self._tracks.append(PreviewTrack(
+                -4, f"Cluster × {spawned} · weapon {spec.weapon_id}", at, last))
 
     def _build_visual(self, source, spec, rng, start, origin, prefix) -> None:
         count = _randint(rng, *spec.count)
@@ -1366,6 +2803,15 @@ class PreviewSimulation:
             land_ms, final = start + path[-1][0], path[-1][1]
             self._events.append((source, MODE_PHYSICAL, start, land_ms,
                                  (spec, vp, path, rotation)))
+            # Fragments are born dead: normal once, goingdown while they fly,
+            # explode when they end.
+            fragment = f"fragment {source}"
+            salt = f"{start:.0f}-{len(self._events)}"
+            self._add_sound(spec.sounds, "normal", start, label=fragment, salt=salt)
+            self._add_sound(spec.sounds, "goingdown", start, land_ms,
+                            fragment, salt)
+            self._add_sound(spec.sounds, "explode", land_ms, label=fragment,
+                            salt=salt)
             end = land_ms
             if impact > 0:
                 self._events.append((
@@ -1450,6 +2896,10 @@ class PreviewSimulation:
                                  start + scale_fx.duration,
                                  (scale_fx, tuple(position), rotation,
                                   vehicle.maxrot)))
+            fx_end = start + scale_fx.duration
+            salt = f"{start:.0f}-{len(self._events)}"
+            self._add_sound(vehicle.sounds, "goingdown", start, fx_end, label, salt)
+            self._add_sound(vehicle.sounds, "explode", fx_end, label=label, salt=salt)
             marks = tuple(start + scale_fx.duration * index / len(scale_fx.vps)
                           for index in range(1, len(scale_fx.vps)))
             self._tracks.append(PreviewTrack(
@@ -1469,6 +2919,9 @@ class PreviewSimulation:
         land_ms = start + path[-1][0]
         final = path[-1][1]
         shifted = [(start + ms, pos, landed) for ms, pos, landed in path]
+        salt = f"{start:.0f}-{len(self._events)}"
+        self._add_sound(vehicle.sounds, "goingdown", start, land_ms, label, salt)
+        self._add_sound(vehicle.sounds, "explode", land_ms, label=label, salt=salt)
         self._events.append((source, "legacy", start, land_ms,
                              (vehicle.vp_dead, shifted, rotation)))
         end = land_ms
@@ -1550,11 +3003,67 @@ class PreviewSimulation:
                     source, "legacy", vp, position, rotation,
                     (1.0, 1.0, 1.0), 1.0, None, f"vp_dead {vp}"))
             elif kind == "unit":
-                ref, path, label, rotation = payload
+                ref, flight, label, main, owner = payload
+                position, heading = flight.pose(time_ms)
+                rotation = (_mat_mul(heading, owner.visual_matrix(time_ms))
+                            if main else heading)
+                tint = owner.tint
                 items.append(PreviewItem(
-                    -1, "unit", ref.vp, _path_position(path, time_ms),
-                    rotation, (1.0, 1.0, 1.0), 1.0, None,
+                    -1, "unit", ref.vp, position,
+                    rotation, (1.0, 1.0, 1.0), 1.0,
+                    None if tint in (None, WHITE) else tint,
                     f"{label} · {ref.label}", _external_paths(ref)))
+            elif kind == "plasma":
+                ref, position, total, maxrot = payload
+                size = _plasma_scale(total, age)
+                tint = self.unit.tint
+                items.append(PreviewItem(
+                    -1, "plasma", ref.vp, position,
+                    _rot_y(maxrot * 2.0 * age * 0.001), (size, size, size), 1.0,
+                    None if tint in (None, WHITE) else tint,
+                    f"genesis plasma · {ref.label}", _external_paths(ref)))
+            elif kind == "decoration":
+                deco = payload[0]
+                alpha = _decoration_alpha(payload, start, time_ms, trail=False)
+                position, heading = _decoration_pose(payload, time_ms)
+                items.append(PreviewItem(
+                    -2, "decoration", deco.visual.vp, position,
+                    _mat_mul(heading, spin_matrix(deco.spin, age)),
+                    deco.scale, alpha,
+                    None if deco.tint == WHITE else deco.tint,
+                    f"decoration · {deco.visual.label}",
+                    _external_paths(deco.visual)))
+            elif kind == "laser":
+                ref, positions, heading, owner = payload
+                tint = owner.tint
+                rotation = _mat_mul(heading, owner.visual_matrix(time_ms))
+                items.extend(PreviewItem(
+                    -1, "laser", ref.vp, position, rotation, (1.0, 1.0, 1.0), 1.0,
+                    None if tint in (None, WHITE) else tint, "laser beam",
+                    _external_paths(ref)) for position in positions)
+            elif kind == "laser_mesh":
+                items.extend(self._laser_mesh_items(payload, time_ms))
+            elif kind == "debuff":
+                ref, position, spec = payload
+                age = time_ms - start
+                items.append(PreviewItem(
+                    -5, "debuff", ref.vp, position, IDENTITY,
+                    (spec.scale,) * 3, 1.0,
+                    None if spec.tint == WHITE else spec.tint,
+                    f"debuff {spec.debuff_id} · {ref.label}", _external_paths(ref)))
+            elif kind == "cluster":
+                ref, position, heading = payload
+                items.append(PreviewItem(
+                    -4, "cluster", ref.vp, position, heading, (1.0, 1.0, 1.0),
+                    1.0, None, f"cluster · {ref.label}", _external_paths(ref)))
+            elif kind == "launch":
+                ref, position, heading, scale = payload
+                items.append(PreviewItem(
+                    -3, "launch", ref.vp, position, heading,
+                    (scale, scale, scale), 1.0, None,
+                    f"launch · {ref.label}", _external_paths(ref)))
+            elif kind == "tracer":
+                items.extend(self._tracer_items(payload, time_ms))
             elif kind == MODE_DECAL:
                 spec, position, angle, width, depth, edge = payload
                 alpha = temporal_envelope(
@@ -1589,8 +3098,12 @@ class PreviewSimulation:
         for step in range(samples + 1):
             time_ms = length * step / samples if length > 0 else 0.0
             for item in self.items_at(time_ms):
-                reach = 60.0 * max(item.scale) if item.kind != MODE_DECAL \
-                    else 0.5 * max(item.decal_size)
+                if item.kind == MODE_DECAL:
+                    reach = 0.5 * max(item.decal_size)
+                elif item.kind == "tracer":
+                    reach = 0.5 * item.scale[2]
+                else:
+                    reach = 60.0 * max(item.scale)
                 points.append((item.position, reach))
         if not points:
             return None
@@ -1613,8 +3126,8 @@ class PreviewSimulation:
         if self._instances is None:
             self._instances = []
             for source, kind, start, end, payload in self._events:
-                self._instances.extend(
-                    _instances_for_event(source, kind, start, end, payload))
+                self._instances.extend(_instances_for_event(
+                    source, kind, start, end, payload, self.unit))
         return self._instances
 
     def particles_at(self, time_ms: float,
@@ -1627,6 +3140,9 @@ class PreviewSimulation:
             if instance.start > time_ms:
                 continue
             for emitter_index, emitter in enumerate(emitters.get(instance.vp, ())):
+                if instance.trail[2] != 1.0:
+                    emitter = replace(emitter, lifetime=max(
+                        1, int(emitter.lifetime * instance.trail[2])))
                 _emit_particles(sprites, instance, index, emitter_index,
                                 emitter, time_ms, self.seed, limit)
                 if len(sprites) >= limit:
@@ -1699,8 +3215,10 @@ class VpInstance:
 
     def __init__(self, source: int, vp: int, start: float, end: float, *,
                  position, scale, rotation: Matrix3 = IDENTITY,
-                 tint=None, alpha=None) -> None:
+                 tint=None, alpha=None, trail=(1.0, 1.0, 1.0)) -> None:
         self.source = source
+        # vp_trail_scale: X/Y size of the particles, Z their lifetime.
+        self.trail = trail
         self.vp = vp
         self.start = start
         self.end = end
@@ -1720,7 +3238,83 @@ class VpInstance:
         return self._alpha(time_ms) if callable(self._alpha) else 1.0
 
 
-def _instances_for_event(source, kind, start, end, payload):
+def _plasma_scale(total_ms: float, age_ms: float) -> float:
+    """sb_0x4874c4: scale follows the square root of the remaining plasma time."""
+
+    return math.sqrt(max(0.0, total_ms - age_ms) / max(total_ms, 1.0)) * PLASMA_SCALE
+
+
+def _screen_fx_strength(sound: SoundEvent, fx: ScreenFx, time_ms: float):
+    """Strength of a palette package at ``time_ms``, None when over."""
+
+    age = time_ms - sound.start
+    if age < 0:
+        return None
+    if sound.loops:
+        return fx.mag0 if time_ms < sound.end else None
+    if fx.time <= 0 or age > fx.time:
+        return None
+    return fx.mag0 + (fx.mag1 - fx.mag0) * age / fx.time
+
+
+def _decoration_pose(payload, time_ms: float):
+    """(position, rotation): the parent pose plus the rotated local offset.
+
+    Once the parent stopped the decoration stays where it was left.
+    """
+
+    _deco, local, flight, window_end, _persistent = payload
+    position, rotation = flight.pose(min(time_ms, window_end))
+    offset = _rotate_vector(rotation, local)
+    return tuple(p + o for p, o in zip(position, offset)), rotation
+
+
+def _decoration_alpha(payload, start: float, time_ms: float, *, trail: bool) -> float:
+    """Fade of the model (or of its VP particles when ``trail``)."""
+
+    deco, _local, _flight, window_end, persistent = payload
+    fade_in = deco.trail_fade_in if trail else deco.fade_in
+    fade_out = deco.trail_fade_out if trail else deco.fade_out
+    if not persistent:
+        return temporal_envelope(time_ms - start, deco.duration, fade_in, fade_out)
+    # Persistent: fades in once, then out when the parent stops.
+    alpha = temporal_envelope(time_ms - start, 0.0, fade_in, 0.0)
+    if time_ms > window_end and fade_out > 0:
+        alpha *= max(0.0, 1.0 - (time_ms - window_end) / fade_out)
+    return alpha
+
+
+def _instances_for_event(source, kind, start, end, payload, unit=None):
+    if kind == "decoration":
+        deco = payload[0]
+        if deco.visual.vp <= 0:
+            return []
+        return [VpInstance(
+            source, deco.visual.vp, start, end,
+            position=lambda time_ms, payload=payload:
+                _decoration_pose(payload, time_ms)[0],
+            scale=deco.scale, rotation=payload[2].heading,
+            tint=None if deco.trail_tint == WHITE else deco.trail_tint,
+            alpha=lambda time_ms, payload=payload, start=start:
+                _decoration_alpha(payload, start, time_ms, trail=True),
+            trail=deco.trail_scale)]
+    if kind == "cluster":
+        ref, position, heading = payload
+        return [VpInstance(source, ref.vp, start, end, position=position,
+                           scale=(1.0, 1.0, 1.0), rotation=heading)] if ref.vp > 0 else []
+    if kind == "launch":
+        ref, position, heading, scale = payload
+        return [VpInstance(source, ref.vp, start, end, position=position,
+                           scale=(scale,) * 3, rotation=heading)] if ref.vp > 0 else []
+    if kind == "plasma":
+        ref, position, total, _maxrot = payload
+        if ref.vp <= 0:
+            return []
+        return [VpInstance(
+            source, ref.vp, start, end, position=position,
+            scale=lambda time_ms, total=total, start=start:
+                (_plasma_scale(total, time_ms - start),) * 3,
+            tint=None if unit is None or unit.tint in (None, WHITE) else unit.tint)]
     if kind == MODE_VISUAL:
         spec, position, rotation = payload
         count = len(spec.visuals)
@@ -1764,16 +3358,29 @@ def _instances_for_event(source, kind, start, end, payload):
                            scale=scale_at, rotation=rotation)
                 for index, vp in enumerate(scale_fx.vps)]
     if kind in ("legacy", "unit"):
+        tint, trail = None, (1.0, 1.0, 1.0)
         if kind == "unit":
-            # The unit transform already carries its preview scale.
-            ref, path, _label, rotation = payload
+            # The main model's matrix already carries its preview scale.
+            ref, flight, _label, main, owner = payload
+            unit = owner
             vp = ref.vp
+            path, heading = flight.path, flight.heading
+            rotation = (_mat_mul(heading, unit.transform)
+                        if main and unit is not None else heading)
+            if unit is not None:
+                tint = unit.particle_tint(main)
+                tint = None if tint in (None, WHITE) else tint
+                if unit.weapon and main:
+                    trail = unit.trail_scale
         else:
             vp, path, rotation = payload
+        position = ((lambda time_ms, flight=flight: flight.pose(time_ms)[0])
+                    if kind == "unit" else
+                    (lambda time_ms, path=path: _path_position(path, time_ms)))
         return [VpInstance(
-            source, vp, start, end,
-            position=lambda time_ms, path=path: _path_position(path, time_ms),
-            scale=(1.0, 1.0, 1.0), rotation=rotation)] if vp > 0 else []
+            source, vp, start, end, position=position,
+            scale=(1.0, 1.0, 1.0), rotation=rotation, tint=tint,
+            trail=trail)] if vp > 0 else []
     return []
 
 
@@ -1863,7 +3470,8 @@ def _add_particle(sprites, instance, index, emitter_index, emitter, time_ms,
     size = emitter.start_size + (emitter.end_size - emitter.start_size) \
         * age / emitter.lifetime
     size *= max(scale) if max(scale) > 0 else 1.0
-    stage = min(int(age / (emitter.lifetime / emitter.stages)), emitter.stages - 1)
+    size *= math.sqrt(instance.trail[0] * instance.trail[1])
+    stage =min(int(age / (emitter.lifetime / emitter.stages)), emitter.stages - 1)
     sprites.append(ParticleSprite(
         instance.source, instance.vp, emitter_index, position, size, stage,
         instance.tint, instance.alpha(min(time_ms, instance.end - 1e-6))))

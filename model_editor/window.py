@@ -11,7 +11,7 @@ from PySide6.QtWidgets import QComboBox, QHBoxLayout, QLabel, QPushButton, QMess
 from map_editor import bootstrap
 
 from assembly_window import AssemblyWindow, _BAS_KIND_ROLE, _BAS_NAME_ROLE
-from set_tabs import SetBasMixin, build_set_tabs, bind_entity_set_selector
+from set_tabs import SetBasMixin
 from entity_list import EntityListMixin
 
 
@@ -55,18 +55,10 @@ class ModelEditorWindow(EntityListMixin, SetBasMixin, AssemblyWindow):
             resources_tabs.addTab(textures_panel, "Asset Textures")
             self._asset_textures_panel = textures_panel
 
-        # The set selector sits right under the sub-tab bar because it drives both
-        # the Entity List and the Bas Manager. The new tabs replace the old ones
-        # in every attribute other code already uses.
-        old_index = self._right_tabs.indexOf(resources_tabs)
-        if old_index >= 0:
-            self._right_tabs.removeTab(old_index)
+        # The set drives both the Entity List and the Bas Manager and is chosen
+        # from the Change Set menu; ``_set_combo`` only holds the current one.
+        resources_panel = resources_tabs
         self._set_combo = self.entity_browser.set_combo
-        resources_panel = build_set_tabs(resources_tabs, self._set_combo)
-        self._detached_resources_tabs = resources_tabs
-        self._resources_tabs = resources_panel
-        self._setbas_panel = resources_panel
-        bind_entity_set_selector(resources_panel, resources_panel._row, self._entity_panel, self._entity_controls, self._set_combo)
 
         visuals_index = self._right_tabs.indexOf(visuals_tabs)
         if visuals_index >= 0:

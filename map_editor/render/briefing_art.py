@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import copy
 import re
+import zlib
 from pathlib import Path
 
 import numpy as np
@@ -13,6 +14,14 @@ from ..core.ldf_model import DEFAULT_HGT, SECTOR_SIZE
 from .camera import IsoCamera
 from .terrain_mesh import HEIGHT_UNIT, TerrainMesh
 from .map_scene import scene_polygons, render_scene
+
+BRIEFING_SEED = 1977
+# Share of the map's own color kept in the MB: the painted retail art is
+# paler than the game textures.
+BRIEFING_SATURATION = .8
+# The DB is the same artwork, duller and darker.
+DEBRIEFING_SATURATION = .7
+DEBRIEFING_BRIGHTNESS = .8
 
 
 def briefing_camera(doc):
@@ -27,13 +36,42 @@ def briefing_camera(doc):
 
 
 def _smooth_noise(rng, height, width, cells):
-    source = rng.random((cells + 1, cells + 1))
-    x = np.linspace(0, cells, width)
-    y = np.linspace(0, cells, height)
-    x0, y0 = np.minimum(x.astype(int), cells - 1), np.minimum(y.astype(int), cells - 1)
+    """Smooth random field in 0..1 with about ``cells`` blobs along the longer side."""
+
+    longest = max(height, width)
+    cells_y = max(1, round(cells * height / longest))
+    cells_x = max(1, round(cells * width / longest))
+    source = rng.random((cells_y + 2, cells_x + 2))
+    x = np.linspace(0, cells_x, width, endpoint=False)
+    y = np.linspace(0, cells_y, height, endpoint=False)
+    x0, y0 = x.astype(int), y.astype(int)
     tx, ty = x - x0, y - y0
-    return ((source[y0[:, None], x0] * (1-tx) + source[y0[:, None], x0+1] * tx) * (1-ty[:, None])
-            + (source[(y0+1)[:, None], x0] * (1-tx) + source[(y0+1)[:, None], x0+1] * tx) * ty[:, None])
+    tx, ty = tx * tx * (3 - 2 * tx), ty * ty * (3 - 2 * ty)
+    top = source[y0[:, None], x0] * (1 - tx) + source[y0[:, None], x0 + 1] * tx
+    bottom = source[(y0 + 1)[:, None], x0] * (1 - tx) + source[(y0 + 1)[:, None], x0 + 1] * tx
+    return top * (1 - ty[:, None]) + bottom * ty[:, None]
+
+
+def _fractal(rng, height, width, cells, octaves, gain=.55):
+    """Several noise layers of growing detail, normalised to 0..1."""
+
+    total = 0.0
+    amplitude = 1.0
+    field = np.zeros((height, width))
+    for octave in range(octaves):
+        field += amplitude * _smooth_noise(rng, height, width, cells * 2 ** octave)
+        total += amplitude
+        amplitude *= gain
+    return field / total
+
+
+def _streaks(field, length):
+    """Smear a field along one diagonal: the scratched look of the retail art."""
+
+    smeared = np.zeros_like(field)
+    for step in range(-length, length + 1):
+        smeared += np.roll(np.roll(field, step, 0), -step, 1)
+    return smeared / (2 * length + 1)
 
 
 def _soften(field, radius):
@@ -49,7 +87,76 @@ def _soften(field, radius):
     return output
 
 
+def _has_building(value):
+    return str(value).strip().lstrip('0') != ''
+
+
+def _building_marks(luminance, inside, doc, camera, cell_pixels):
+    """Pixel centers of the building squares.
+
+    Retail MB mark buildings on a lattice of a third of a sector: the busiest
+    lattice cells of the rendered map get a square, and so does the middle of
+    every sector that holds a building.
+    """
+
+    if cell_pixels < 8:
+        return []  # too small for squares with a halo
+    height, width = luminance.shape
+    centers = set()
+    for row in range(1, doc.mh - 1):
+        for column in range(1, doc.mw - 1):
+            if _has_building(doc.grids['blg'][row][column]):
+                centers.add((
+                    int(round(width / 2 - ((column + .5) * SECTOR_SIZE - camera.center[0]) * camera.zoom)),
+                    int(round(height / 2 + (-(row + .5) * SECTOR_SIZE - camera.center[2]) * camera.zoom))))
+    pitch = cell_pixels / 3
+    if pitch >= 4:
+        detail = np.abs(_soften(luminance, 1) - _soften(luminance, 3))
+        columns, rows = int(width // pitch), int(height // pitch)
+        energy = np.zeros((rows, columns))
+        for j in range(rows):
+            for i in range(columns):
+                y0, x0 = int(j * pitch), int(i * pitch)
+                energy[j, i] = detail[y0:int((j + 1) * pitch), x0:int((i + 1) * pitch)].mean()
+        allowed = np.zeros((rows, columns), bool)
+        for j in range(rows):
+            for i in range(columns):
+                allowed[j, i] = inside[int((j + .5) * pitch), int((i + .5) * pitch)]
+        if allowed.any() and energy[allowed].max() > 0:
+            limit = np.percentile(energy[allowed], 92)
+            for j, i in zip(*np.nonzero(allowed & (energy > max(limit, 1e-6)))):
+                centers.add((int((i + .5) * pitch), int((j + .5) * pitch)))
+    return sorted(centers)
+
+
+def _draw_building_marks(color, centers, cell_pixels):
+    """Bright squares with a dark halo; the square takes the light of its ground."""
+
+    height, width = color.shape[:2]
+    size = int(np.clip(round(cell_pixels * .15), 3, 5))
+    low, high = size // 2, size - size // 2
+    for px, py in centers:
+        x0, x1, y0, y1 = px - low, px + high, py - low, py + high
+        if x0 < 1 or y0 < 1 or x1 > width - 1 or y1 > height - 1:
+            continue
+        tile = color[y0:y1, x0:x1].mean(axis=(0, 1))
+        color[y0 - 1:y1 + 1, x0 - 1:x1 + 1] *= .5
+        color[y0:y1, x0:x1] = np.clip(tile * 1.2 + 55, 0, 255)
+        # The retail squares are barely visible: soften the edges.
+        patch = color[y0 - 2:y1 + 2, x0 - 2:x1 + 2]
+        if patch.shape[0] == size + 4 and patch.shape[1] == size + 4:
+            color[y0 - 2:y1 + 2, x0 - 2:x1 + 2] = patch * .45 + _soften(patch, 1) * .55
+
+
 def style_briefing(image, doc, camera):
+    """Turn the rendered map into the dark, grainy planet surface of the retail MB.
+
+    The retail artwork is a painted backdrop rather than a literal top view:
+    a dark, speckled ground with bright crystalline patches, a faint sector
+    grid, small bright squares for the buildings and a ragged black margin.
+    The rendered map still decides the hue and the light/dark layout.
+    """
+
     image = image.convertToFormat(QImage.Format.Format_RGBA8888)
     height, width = image.height(), image.width()
     rgba = np.frombuffer(image.bits(), np.uint8).reshape(height, image.bytesPerLine())[:, :width * 4].reshape(height, width, 4)
@@ -70,33 +177,60 @@ def style_briefing(image, doc, camera):
              + (heights[z1, x0]*(1-tx) + heights[z1, x1]*tx)*tz)
     dy, dx = np.gradient(field)
     cell_pixels = camera.zoom * SECTOR_SIZE
-    relief = np.clip(1 + (dx-dy)*cell_pixels*.12, .25, 2.6)
-    rng = np.random.default_rng(1977)
-    grain = rng.random((height, width))
-    mottling = _smooth_noise(rng, height, width, 12)
+    relief = _soften(np.clip(1 + (dx-dy)*cell_pixels*.12, .6, 1.6), 2)
+
+    # Every map gets its own surface: the seed comes from its terrain.
+    seed = zlib.crc32(np.ascontiguousarray(heights, np.float64).tobytes()) ^ (doc.mw << 8) ^ doc.mh
+    rng = np.random.default_rng(BRIEFING_SEED + seed)
+    ground = _fractal(rng, height, width, 5, 6, .62)
+    fine = _fractal(rng, height, width, 60, 2, .6)
+    grit = _fractal(rng, height, width, 110, 2, .8)
+    blotch = _fractal(rng, height, width, 8, 4, .5)
+    scratches = _streaks(_fractal(rng, height, width, 16, 5, .68), 4)
+    patches = np.clip((scratches - .6) / .08, 0, 1) ** 1.4 * np.clip((ground - .4) / .2, 0, 1)
+    # Dark pits and bright crystals: the painted contrast of the retail art.
+    dark = np.clip((.5 - ground) / .3, 0, 1) ** 1.5
+
     scale = max(1, float(np.percentile(luminance[inside], 95))) if inside.any() else 255
-    fine = _soften(luminance, 1)
-    broad = _soften(luminance, 2)
-    detail = np.maximum(0, fine-broad) / scale
-    # Original MBPIX combine painted relief with crisp urban accents. The
-    # relief follows authored heights; texture detail supplies the buildings.
-    tone = np.clip((luminance*.42 + fine*.48 + broad*.10) / scale, 0, 1) ** 1.65 * .82
-    tone *= _soften(relief, 2) * (.95 + grain*.10) * (.82 + mottling*.32)
-    tone += detail*.32
+    # Painted art has no tile edges: hue and brightness come from a wide blur.
+    wide = _soften(_soften(color, 5), 5)
+    wide_luma = wide @ np.array((.299, .587, .114))
+    broad_map = wide_luma / scale
+    mean_map = float(np.mean(luminance[inside])) / 255 if inside.any() else .3
+    tone = (.05 + .4 * ground ** 2.4 * (.55 + .45 * fine)) * (1 - .6 * dark)
+    tone *= .7 + .6 * np.clip(broad_map, 0, 1.2)
+    tone *= relief * (.8 + .4 * blotch)
+    # Crinkled, embossed paint: light from one side on the noise itself.
+    slope_y, slope_x = np.gradient(_soften(ground * .7 + fine * .3, 1))
+    tone *= np.clip(1 + (slope_x - slope_y) * 9, .6, 1.6) * (.85 + .3 * grit)
+    tone += patches * (.35 + .45 * fine)
+    # Fine detail of the map (buildings, roads) shows through as light speckle.
+    tone += np.maximum(0, _soften(luminance, 1) - _soften(luminance, 2)) / scale * .22
+    tone *= 1 + (rng.random((height, width)) - .5) * .45
+    # Brightness follows the level: a pale set gives a lighter surface.
+    if inside.any():
+        tone *= np.clip((.09 + .18 * mean_map) / max(float(np.median(tone[inside])), 1e-3), .5, 2)
     tone = np.clip(tone, 0, 1)
-    # The edited map supplies the hue of every pixel. The MBPIX treatment
-    # changes luminance/relief, without borrowing a tint from unrelated art.
-    chroma = color / np.maximum(luminance[:, :, None], 1.0)
-    color = chroma * (tone * 170.0)[:, :, None]
+
+    # The hue comes from the map, less saturated like the painted art; the
+    # brightest crystals turn white.
+    chroma = 1 + (wide / np.maximum(wide_luma[:, :, None], 1.0) - 1) * BRIEFING_SATURATION
+    chroma = chroma * (1 + (rng.random((height, width, 3)) - .5) * .24)
+    chroma = chroma * (1 - .5 * patches[:, :, None]) + .5 * patches[:, :, None]
+    color = chroma * (tone * 255.0)[:, :, None]
+
     if cell_pixels >= 4:
-        line = ((np.minimum(wx % SECTOR_SIZE, SECTOR_SIZE-wx % SECTOR_SIZE) < .4/camera.zoom)
-                | (np.minimum((-wz) % SECTOR_SIZE, SECTOR_SIZE-(-wz) % SECTOR_SIZE) < .4/camera.zoom))
-        color[line & inside] = color[line & inside]*.65 + np.array((45, 52, 55))*.35
-    # Keep the rectangular retail footprint, with a ragged dark margin rather than a round vignette.
-    edge = np.minimum.reduce((gx-.5, doc.mw-1.5-gx, gz-.5, doc.mh-1.5-gz))*cell_pixels
-    fade = np.clip((edge + (mottling-.5)*10) / max(8, cell_pixels*.75), 0, 1)
+        line = ((np.minimum(wx % SECTOR_SIZE, SECTOR_SIZE-wx % SECTOR_SIZE) < .5/camera.zoom)
+                | (np.minimum((-wz) % SECTOR_SIZE, SECTOR_SIZE-(-wz) % SECTOR_SIZE) < .5/camera.zoom))
+        grid = line & (rgba[:, :, 3] > 0)
+        color[grid] = color[grid] * .8 + np.array((90, 92, 90)) * (.1 + .14 * fine[grid])[:, None]
+        _draw_building_marks(color, _building_marks(luminance, inside, doc, camera, cell_pixels), cell_pixels)
+
+    # Keep the rectangular retail footprint, with a ragged black margin.
+    edge = np.minimum.reduce((xx + .5, width - xx - .5, yy + .5, height - yy - .5))
+    fade = np.clip((edge - 8 + (blotch - .5) * 22) / 14, 0, 1) ** 1.3
     color *= fade[:, :, None]
-    color[~inside] = 0
+    color[rgba[:, :, 3] == 0] = 0
     result = np.full((height, width, 4), 255, np.uint8)
     result[:, :, :3] = np.clip(np.rint(color), 0, 255).astype(np.uint8)
     return QImage(result.data, width, height, width*4, QImage.Format.Format_RGBA8888).copy()
@@ -156,6 +290,20 @@ def available_stem(directory, preferred):
     return candidate
 
 
+def debriefing_variant(image):
+    """The DB of an MB: less saturated and darker, same shapes and margins."""
+
+    db_image = image.convertToFormat(QImage.Format.Format_RGBA8888).copy()
+    height, width = db_image.height(), db_image.width()
+    pixels = np.frombuffer(db_image.bits(), np.uint8).reshape(
+        height, db_image.bytesPerLine())[:, :width * 4].reshape(height, width, 4)
+    color = pixels[:, :, :3].astype(float)
+    luma = (color @ np.array((.299, .587, .114)))[:, :, None]
+    color = (luma + (color - luma) * DEBRIEFING_SATURATION) * DEBRIEFING_BRIGHTNESS
+    pixels[:, :, :3] = np.clip(np.rint(color), 0, 255).astype(np.uint8)
+    return db_image
+
+
 def write_briefing_pair(image, directory, stem):
     if not stem or stem.strip(' .') != stem or re.search(r'[<>:"/\\|?*\x00-\x1f]', stem):
         raise ValueError('Choose a filename without path separators or reserved characters.')
@@ -165,9 +313,7 @@ def write_briefing_pair(image, directory, stem):
     paths = tuple(directory / f'{prefix}_{stem}.png' for prefix in ('Mb', 'Db'))
     if any(path.exists() for path in paths):
         raise FileExistsError('That MB/DB name already exists. Choose a new name to preserve the existing artwork.')
-    db_image = image.convertToFormat(QImage.Format.Format_RGBA8888)
-    pixels = np.frombuffer(db_image.bits(), np.uint8).reshape(db_image.height(), db_image.bytesPerLine())[:, :db_image.width()*4].reshape(db_image.height(), db_image.width(), 4)
-    pixels[:, :, :3] = np.rint(pixels[:, :, :3].astype(float)*.72).astype(np.uint8)
+    db_image = debriefing_variant(image)
     payloads = []
     for artwork in (image, db_image):
         buffer = QBuffer()

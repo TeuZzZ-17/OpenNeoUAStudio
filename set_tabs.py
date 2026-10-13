@@ -1,69 +1,10 @@
-"""Tab widget with the shared game-set selector directly under its tab bar."""
+"""Set helpers shared by the Model Editor, Entity Designer and Snapshot Studio."""
 
 from pathlib import Path
 
-from PySide6.QtCore import QEvent, QSignalBlocker, QTimer
-from PySide6.QtWidgets import QHBoxLayout, QLabel, QTabWidget, QWidget
+from PySide6.QtCore import QSignalBlocker
 
 from map_editor import bootstrap
-
-_ROW_HEIGHT = 30
-
-
-class SetSelectorTabs(QTabWidget):
-    """A QTabWidget whose pane starts below a "Set:" row.
-
-    The row sits between the tab bar and the pages, so the set that drives
-    every page is visible on all of them. Everything else is plain QTabWidget,
-    which keeps existing ``addTab`` / ``setCurrentWidget`` callers unchanged.
-    """
-
-    def __init__(self, set_combo, parent=None):
-        super().__init__(parent)
-        self.set_combo = set_combo
-        self._row = QWidget(self)
-        layout = QHBoxLayout(self._row)
-        layout.setContentsMargins(0, 3, 0, 3)
-        layout.addWidget(QLabel("Set:"))
-        layout.addWidget(set_combo, 1)
-        # Leave room for the row: the pane is pushed down by its height.
-        self.setStyleSheet(f"QTabWidget::pane {{ margin-top: {_ROW_HEIGHT}px; border: none; }}")
-        self.tabBar().installEventFilter(self)
-        self._place_row()
-
-    def _place_row(self):
-        # Inside a flat Studio palette the own tab bar is hidden: the row
-        # then starts at the top of the pane area.
-        bar = self.tabBar()
-        top = 0 if bar.isHidden() else bar.geometry().bottom() + 1
-        self._row.setGeometry(0, top, self.width(), _ROW_HEIGHT)
-        self._row.raise_()
-
-    def resizeEvent(self, event):
-        super().resizeEvent(event)
-        self._place_row()
-
-    def eventFilter(self, watched, event):
-        if watched is self.tabBar() and event.type() in (QEvent.Type.Resize, QEvent.Type.Move):
-            self._place_row()
-        elif watched is self.tabBar() and event.type() in (QEvent.Type.Hide, QEvent.Type.HideToParent):
-            # The hidden state is final only after the event: place next.
-            QTimer.singleShot(0, self._place_row)
-        return super().eventFilter(watched, event)
-
-
-def build_set_tabs(old_tabs, set_combo):
-    """Copy ``old_tabs`` into a SetSelectorTabs with the same look and pages."""
-    tabs = SetSelectorTabs(set_combo)
-    tabs.setDocumentMode(old_tabs.documentMode())
-    tabs.setUsesScrollButtons(old_tabs.usesScrollButtons())
-    tabs.tabBar().setExpanding(old_tabs.tabBar().expanding())
-    tabs.tabBar().setStyleSheet(old_tabs.tabBar().styleSheet())
-    while old_tabs.count():
-        title, page = old_tabs.tabText(0), old_tabs.widget(0)
-        old_tabs.removeTab(0)
-        tabs.addTab(page, title)
-    return tabs
 
 
 def fill_set_combo(combo, install, selected=1):
@@ -74,25 +15,6 @@ def fill_set_combo(combo, install, selected=1):
             combo.addItem(f"Set {number}", number)
         index = combo.findData(selected)
         combo.setCurrentIndex(index if index >= 0 else 0)
-
-
-def bind_entity_set_selector(tabs, global_row, entity_panel, controls, combo):
-    """Move the same selector between the compact entity row and BAS context."""
-    def route(*_args):
-        if tabs.currentWidget() is entity_panel:
-            global_row.layout().removeWidget(combo)
-            controls.insertWidget(1, combo)
-            global_row.hide()
-            if isinstance(tabs, SetSelectorTabs):
-                tabs.setStyleSheet('QTabWidget::pane { margin-top: 0px; border: none; }')
-        else:
-            controls.removeWidget(combo)
-            global_row.layout().addWidget(combo, 1)
-            global_row.show()
-            if isinstance(tabs, SetSelectorTabs):
-                tabs.setStyleSheet(f'QTabWidget::pane {{ margin-top: {_ROW_HEIGHT}px; border: none; }}')
-    tabs.currentChanged.connect(route)
-    route()
 
 
 def sync_archive_set_selector(combo, path):
@@ -115,8 +37,9 @@ def sync_archive_set_selector(combo, path):
 class SetBasMixin:
     """Keeps the Bas Manager on the SET.BAS of the set chosen in ``_set_combo``.
 
-    The host window sets ``_set_combo`` and calls ``_set_selector_changed`` when
-    the selection changes. The first load always uses set 1.
+    ``_set_combo`` is the hidden combo driven by the Change Set menu; the host
+    window calls ``_set_selector_changed`` when it changes. The first load
+    always uses set 1.
     """
 
     _set_combo = None

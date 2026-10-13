@@ -11,7 +11,9 @@ from PySide6.QtWidgets import QApplication
 from map_editor.core.asset_bridge import SetAssets
 from map_editor.core.ldf_model import LdfDocument
 from map_editor.render.briefing_art import (
+    BRIEFING_SATURATION,
     briefing_camera,
+    debriefing_variant,
     render_briefing,
     style_briefing,
     write_briefing_pair,
@@ -40,6 +42,15 @@ def _image_bytes(image: QImage) -> bytes:
     return bytes(rgba.bits())
 
 
+def _painted_chroma(rgb):
+    """Share of each channel once the hue is paler like the painted retail art."""
+
+    rgb = np.array(rgb, float)
+    luma = rgb @ np.array((.299, .587, .114))
+    chroma = 1 + (rgb / luma - 1) * BRIEFING_SATURATION
+    return chroma / chroma.sum()
+
+
 def test_briefing_camera_matches_retail_full_map_aspect():
     doc = _document()
     camera = briefing_camera(doc)
@@ -65,6 +76,27 @@ def test_briefing_style_is_deterministic():
     assert first.format() == QImage.Format.Format_RGBA8888
     assert (first.width(), first.height()) == (camera.width, camera.height)
     assert _image_bytes(first) == _image_bytes(second)
+
+
+def test_briefing_style_is_a_dark_grainy_surface_with_a_ragged_margin_and_marks():
+    doc = _document()
+    doc.grids["blg"][3][5] = "11"
+    camera = briefing_camera(doc)
+    source = QImage(camera.width, camera.height, QImage.Format.Format_RGBA8888)
+    source.fill(0xff808080)
+    pixels = np.frombuffer(_image_bytes(style_briefing(source, doc, camera)),
+                           np.uint8).reshape(camera.height, camera.width, 4)
+    luma = pixels[:, :, :3].astype(float).mean(axis=2)
+    core = luma[camera.height // 4:3 * camera.height // 4,
+                camera.width // 4:3 * camera.width // 4]
+
+    assert (pixels[:, :, 3] == 255).all()
+    assert core.mean() < 90 and core.std() > 12  # dark, with grain and crystal
+    assert luma[:3].max() == 0 and luma[:, :3].max() == 0  # black edge
+    # The building of sector (5, 3) is a bright square with a dark halo.
+    px = round(camera.width / 2 - ((5 + .5) * 1200 - camera.center[0]) * camera.zoom)
+    py = round(camera.height / 2 + (-(3 + .5) * 1200 - camera.center[2]) * camera.zoom)
+    assert luma[py - 1:py + 2, px - 1:px + 2].min() > luma[py - 6:py + 7, px - 6:px + 7].mean()
 
 
 def test_briefing_style_preserves_source_hues_and_ignores_level_info_art_names():
@@ -96,8 +128,8 @@ def test_briefing_style_preserves_source_hues_and_ignores_level_info_art_names()
 
     assert blue[2] > blue[1] > blue[0]
     assert brown[0] > brown[1] > brown[2]
-    assert np.allclose(blue / blue.sum(), np.array((40, 80, 140)) / 260, atol=.025)
-    assert np.allclose(brown / brown.sum(), np.array((140, 90, 40)) / 270, atol=.025)
+    assert np.allclose(blue / blue.sum(), _painted_chroma((40, 80, 140)), atol=.02)
+    assert np.allclose(brown / brown.sum(), _painted_chroma((140, 90, 40)), atol=.02)
     assert _image_bytes(source) == source_bytes
     assert doc.snapshot() == before
 
@@ -136,10 +168,13 @@ def test_write_briefing_pair_keeps_geometry_and_darkens_debriefing(library, tmp_
     assert _image_bytes(image) == source
     mb_pixels = np.frombuffer(_image_bytes(mb), np.uint8).reshape(mb.height(), mb.width(), 4)
     db_pixels = np.frombuffer(_image_bytes(db), np.uint8).reshape(db.height(), db.width(), 4)
-    expected_db = np.rint(mb_pixels[:, :, :3].astype(float) * .72).astype(np.uint8)
-    assert np.array_equal(db_pixels[:, :, :3], expected_db)
+    assert np.array_equal(db_pixels, np.frombuffer(
+        _image_bytes(debriefing_variant(image)), np.uint8).reshape(db.height(), db.width(), 4))
     assert np.array_equal(db_pixels[:, :, 3], mb_pixels[:, :, 3])
     assert db_pixels[:, :, :3].mean() < mb_pixels[:, :, :3].mean()
+    spread = lambda pixels: (pixels[:, :, :3].max(axis=2).astype(int)
+                             - pixels[:, :, :3].min(axis=2)).mean()
+    assert spread(db_pixels) < spread(mb_pixels)  # duller as well as darker
 
 
 def test_briefing_render_excludes_hosts_without_mutating_source(library):

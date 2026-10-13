@@ -2,12 +2,12 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from PySide6.QtCore import QObject, QRunnable, QSize, Qt, QThreadPool, QTimer, Signal
+from PySide6.QtCore import QEvent, QObject, QRunnable, QSize, Qt, QThreadPool, QTimer, Signal
 from PySide6.QtGui import QIcon, QImage, QPixmap
 from PySide6.QtWidgets import (QCheckBox, QComboBox, QDialog, QDialogButtonBox,
                                QFileDialog, QFormLayout, QHBoxLayout, QLabel,
                                QLineEdit, QListWidget, QListWidgetItem, QMessageBox, QPushButton, QSpinBox,
-                               QVBoxLayout, QWidget)
+                               QStyle, QVBoxLayout, QWidget)
 
 from .. import bootstrap
 from ..core.ldf_model import LdfDocument, briefing_for_export, movie_filename
@@ -219,6 +219,9 @@ class LevelInfoPanel(QWidget):
             if name == current_name:
                 self.sky_list.setCurrentItem(item)
         self.sky_list.currentItemChanged.connect(self._select_sky)
+        # The grid depends on the list's own width, which changes when the
+        # scroll bar appears or the panel is laid out after loading a map.
+        self.sky_list.installEventFilter(self)
         layout.addWidget(self.sky_list)
         self.no_skies_label = QLabel("No sky archives found in the selected Skies folder.")
         self.no_skies_label.setVisible(not self.catalog.skies)
@@ -368,11 +371,21 @@ class LevelInfoPanel(QWidget):
         if not self._disposed:
             QTimer.singleShot(0, self._layout_sky_grid)
 
+    def eventFilter(self, watched, event):
+        if watched is self.sky_list and event.type() == QEvent.Type.Resize:
+            self._schedule_sky_grid_layout()
+        return super().eventFilter(watched, event)
+
     def _layout_sky_grid(self):
         if self._disposed or self.sky_list.viewport().width() <= 0:
             return
         self._layout_artwork()
-        width = self.sky_list.viewport().width()
+        # Width without the scroll bar, always reserved: the column count must
+        # not flip when the bar appears and shrinks the viewport.
+        bar = self.sky_list.verticalScrollBar()
+        width = (self.sky_list.viewport().width()
+                 + (bar.width() if bar.isVisible() else 0)
+                 - self.style().pixelMetric(QStyle.PixelMetric.PM_ScrollBarExtent))
         spacing = self.sky_list.spacing()
         columns = 2 if width >= 2 * 135 + spacing * 3 else 1
         cell_width = max(1, (width - spacing * (columns + 1)) // columns)
