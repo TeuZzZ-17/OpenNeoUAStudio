@@ -1,13 +1,13 @@
 from __future__ import annotations
 
 import os
-from pathlib import Path
 import unittest
 from unittest.mock import patch
 
-from onua3d_import import Onua3dImportError, import_onua3d, prepare_onua3d
+from studio.exchange.portable import Onua3dImportError
+from studio.exchange.onua3d import import_onua3d, prepare_onua3d
 from tests import test_onua3d_export as fixture
-from onua3d_export import write_onua3d
+from studio.exchange.onua3d import write_onua3d
 
 
 class Onua3dDestinationTests(unittest.TestCase):
@@ -81,7 +81,7 @@ class Onua3dDestinationTests(unittest.TestCase):
         def mocked_reparse(path, _info):
             return path.name in {"direct-reparse", "ancestor-reparse"}
 
-        with patch("onua3d_import._is_reparse_or_link", side_effect=mocked_reparse):
+        with patch("studio.exchange.onua3d._is_reparse_or_link", side_effect=mocked_reparse):
             with self.assertRaisesRegex(Onua3dImportError, "reparse"):
                 import_onua3d(self.package, direct)
             with self.assertRaisesRegex(Onua3dImportError, "reparse"):
@@ -95,7 +95,7 @@ class Onua3dDestinationTests(unittest.TestCase):
         with self.assertRaisesRegex(Onua3dImportError, "forced final validation"):
             with prepare_onua3d(self.package) as prepared:
                 with patch(
-                        "onua3d_import._verify_materialized",
+                        "studio.exchange.onua3d._verify_materialized",
                         side_effect=Onua3dImportError("forced final validation")):
                     prepared.materialize(destination)
         self.assertTrue(destination.is_dir())
@@ -115,7 +115,7 @@ class Onua3dDestinationTests(unittest.TestCase):
 
         with self.assertRaisesRegex(Onua3dImportError, "mid-publish"):
             with prepare_onua3d(self.package) as prepared:
-                with patch("verified_io.os.link", side_effect=fail_second_link):
+                with patch("studio.exchange.portable.os.link", side_effect=fail_second_link):
                     prepared.materialize(destination)
         self.assertFalse(destination.exists())
 

@@ -1,3 +1,9 @@
+"""The LDF level model: ``LdfDocument`` and everything needed to load, edit and save a level.
+
+Covers the sector grids (type/own/hgt/blg), host stations, squads, gates, items, gems, tech
+upgrades, level info and the exact text format of the original ``.ldf`` files.
+"""
+
 from __future__ import annotations
 
 import copy

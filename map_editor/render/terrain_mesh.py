@@ -1,3 +1,5 @@
+"""Terrain height mesh: 900-unit planes and 300-unit slurps, as in the game."""
+
 from __future__ import annotations
 
 import numpy as np

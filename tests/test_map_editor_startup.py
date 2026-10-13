@@ -23,7 +23,7 @@ def app():
 
 def _fake_editor_ui(monkeypatch, window_type, new_map_type, install_type=None):
     monkeypatch.setattr(map_editor_entry.bootstrap, "installation", lambda: None)
-    monkeypatch.setattr("studio_shell.install_workspace_shell", lambda *_args: None)
+    monkeypatch.setattr("studio.ui.shell.install_workspace_shell", lambda *_args: None)
     ui_package = ModuleType("map_editor.ui")
     ui_package.__path__ = []
     dialogs = ModuleType("map_editor.ui.dialogs")
@@ -199,7 +199,7 @@ def test_selector_routes_optional_ldf_to_integrated_map_editor(
             return "map_editor"
 
     monkeypatch.setattr("PySide6.QtWidgets.QApplication", Application)
-    monkeypatch.setattr("startup_selector.StartupToolSelector", Selector)
+    monkeypatch.setattr("studio.ui.shell.StartupToolSelector", Selector)
     monkeypatch.setattr(sys, "argv", ["main.py", level_path])
     monkeypatch.setattr(
         map_editor_entry, "main",
@@ -251,7 +251,7 @@ def test_editor_main_reuses_application_and_runs_its_event_loop(
 
 
 def test_assembly_menu_opens_and_retains_map_editor_window(monkeypatch):
-    from assembly_window import AssemblyWindow
+    from studio.workbench.window import AssemblyWindow
 
     calls = []
     owner = SimpleNamespace(_map_editor_windows=[])

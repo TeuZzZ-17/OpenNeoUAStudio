@@ -8,9 +8,9 @@ os.environ.setdefault('QT_QPA_PLATFORM', 'offscreen')
 import numpy as np
 from PySide6.QtCore import QPointF, QSize
 from PySide6.QtWidgets import QApplication
-from assembly_viewer import AssetViewport, ViewFace, ViewMaterial
+from studio.rendering.asset_viewport import AssetViewport, ViewFace, ViewMaterial
 from model_editor.wireframe_generator import generate_wireframe, _mask_contours, _simplify
-from sklt_parser import parse_sklt_file
+from studio.formats.sklt import parse_sklt_file
 
 
 def quad(x0, x1, y0=-1, y1=1, z=0, poly_id=0, owner='root'):

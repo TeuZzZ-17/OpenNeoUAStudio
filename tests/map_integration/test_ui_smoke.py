@@ -7,7 +7,7 @@ import numpy as np
 from types import SimpleNamespace
 
 pytest.importorskip("PySide6")
-from PySide6.QtCore import QObject, QPoint, Qt, Signal
+from PySide6.QtCore import QPoint, Qt
 from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication, QLabel, QToolBar
 
@@ -453,11 +453,11 @@ def test_music_preview_toggle_and_cancel_restores_level_track(app, monkeypatch):
     original_sky = doc.lvl_info['sky']
     win.sky_action.setChecked(False)
     assert not win.view.show_sky and doc.lvl_info['sky'] == original_sky
-    assert win.music_action.isChecked()
+    assert not win.music_action.isChecked()  # the action is "Mute Music": unchecked = playing
     assert win.music_preview._path.name == '2.ogg'
-    win.music_action.setChecked(False)
-    assert not win.music_preview.enabled
     win.music_action.setChecked(True)
+    assert not win.music_preview.enabled
+    win.music_action.setChecked(False)
 
     win.map_level_info()
     box = win.level_panel.music_box

@@ -10,8 +10,8 @@ from PySide6.QtCore import QRectF
 from PySide6.QtGui import QColor, QImage, QPainter
 from PySide6.QtWidgets import QApplication
 
-from assembly_viewer import AssetViewport
-from indexed_renderer import IndexedTables
+from studio.rendering.asset_viewport import AssetViewport
+from studio.rendering.indexed import IndexedTables
 
 
 class IndexedSceneBackgroundTests(unittest.TestCase):

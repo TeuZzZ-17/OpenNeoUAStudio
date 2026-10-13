@@ -22,7 +22,7 @@ from PySide6.QtWidgets import (
 
 from entity_designer import destruction_fx as fx
 from entity_designer.fx_audio import FxSoundPlayer
-from resource_status import LIST_BASE, LIST_ALTERNATE, LIST_SELECTED, LIST_HOVER
+from studio.ui.widgets import LIST_BASE, LIST_ALTERNATE, LIST_SELECTED, LIST_HOVER
 
 SPEEDS = (0.1, 0.25, 0.5, 1.0, 2.0, 4.0)
 MODE_COLORS = {

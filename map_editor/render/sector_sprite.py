@@ -1,3 +1,5 @@
+"""Preview sprites of sectors and buildings drawn with the indexed software rasteriser."""
+
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -9,10 +11,17 @@ from ..core.sector_resolver import SECTOR_SIZE
 import numpy as np
 from PySide6.QtGui import QImage
 
-from depth_renderer import (CameraPolygon, clip_camera_polygon_near,
-                            order_camera_polygons, order_camera_polygons_fast)
-from indexed_renderer import (IndexedPiece, IndexedRasterizer,
-                              retail_source_face_front_facing)
+from studio.rendering.depth import (
+    CameraPolygon,
+    clip_camera_polygon_near,
+    order_camera_polygons,
+    order_camera_polygons_fast,
+)
+from studio.rendering.indexed import (
+    IndexedPiece,
+    IndexedRasterizer,
+    retail_source_face_front_facing,
+)
 
 EYE_DISTANCE = 4.0
 NEAR = 0.2
@@ -110,6 +119,3 @@ def rasterize_sprite(data, tables, ppu) -> Sprite | None:
     return Sprite(image, origin, ppu)
 
 
-def render_sprite(lib: SectorMeshLibrary, mesh: SectorMesh, yaw: float,
-                  pitch: float, ppu: float, fast: bool = False) -> Sprite | None:
-    return rasterize_sprite(sprite_input(lib, mesh, yaw, pitch, ppu, fast), lib.tables, ppu)

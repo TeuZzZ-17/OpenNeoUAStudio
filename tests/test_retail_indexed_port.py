@@ -8,15 +8,12 @@ from types import SimpleNamespace
 import unittest
 from unittest.mock import patch
 
-import indexed_renderer
-from asset_family import AssetFamily, FamilyObject, MaterialGroup
-from base_parser import AmeshBlock, BaseObject, BaseTransform, TextureRef
-from ilbm_parser import IlbmImage
-from indexed_family_adapter import (
-    IndexedFamilyAdapter,
-    UnsupportedIndexedMaterialError,
-)
-from indexed_renderer import (
+import studio.rendering.indexed as indexed_renderer
+from studio.assets.family import AssetFamily, FamilyObject, MaterialGroup
+from studio.formats.base_format import AmeshBlock, BaseObject, BaseTransform, TextureRef
+from studio.formats.images import IlbmImage
+from studio.rendering.indexed import IndexedFamilyAdapter, UnsupportedIndexedMaterialError
+from studio.rendering.indexed import (
     IndexedPiece,
     IndexedRasterizer,
     IndexedSurface,
@@ -123,7 +120,7 @@ def _ua_tracy() -> bytes:
 class IndexedViewerPolicySourceTests(unittest.TestCase):
     @classmethod
     def _method_source(cls, name: str) -> str:
-        path = Path(__file__).resolve().parents[1] / "assembly_viewer.py"
+        path = Path(__file__).resolve().parents[1] / "studio/rendering/asset_viewport.py"
         source = path.read_text(encoding="utf-8")
         tree = ast.parse(source)
         for node in ast.walk(tree):
@@ -133,7 +130,7 @@ class IndexedViewerPolicySourceTests(unittest.TestCase):
                 if segment is None:
                     break
                 return segment
-        raise AssertionError(f"method {name!r} not found in assembly_viewer.py")
+        raise AssertionError(f"method {name!r} not found in studio/rendering/asset_viewport.py")
 
     def test_textured_mode_is_single_retail_full_resolution_path(self):
         render_scene = self._method_source("_render_scene")
@@ -150,8 +147,8 @@ class IndexedViewerPolicySourceTests(unittest.TestCase):
 
     def test_old_rgb_textured_renderer_and_ui_choice_are_removed(self):
         root = Path(__file__).resolve().parents[1]
-        viewer = (root / "assembly_viewer.py").read_text(encoding="utf-8")
-        window = (root / "assembly_window.py").read_text(encoding="utf-8")
+        viewer = (root / "studio/rendering/asset_viewport.py").read_text(encoding="utf-8")
+        window = (root / "studio/workbench/window.py").read_text(encoding="utf-8")
         batch = (root / "snapshot_studio" / "batch_export.py").read_text(
             encoding="utf-8")
         self.assertNotIn("def _draw_textured", viewer)

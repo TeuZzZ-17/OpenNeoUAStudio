@@ -9,9 +9,9 @@ import numpy as np
 from PySide6.QtCore import QPointF, QRectF, QSize, Qt
 from PySide6.QtGui import QColor, QImage, QPainter, QPen, QPolygonF
 
-from depth_renderer import CameraPolygon, clip_camera_polygon_near
-from indexed_renderer import IndexedRasterizer
-from sklt_parser import create_minimal_sklt_model, save_sklt_with_poo2_pol2_structure
+from studio.rendering.depth import CameraPolygon, clip_camera_polygon_near
+from studio.rendering.indexed import IndexedRasterizer
+from studio.formats.sklt import create_minimal_sklt_model, save_sklt_with_poo2_pol2_structure
 
 SOURCE_SIZE = QSize(1024, 1024)
 
@@ -165,7 +165,7 @@ def generate_wireframe(viewport, preset: str = "Current View", *,
     original_camera = viewport._camera_state()
     try:
         if preset != "Current View":
-            from assembly_viewer import VIEW_PRESET_ANGLES
+            from studio.rendering.asset_viewport import VIEW_PRESET_ANGLES
             if preset not in VIEW_PRESET_ANGLES:
                 raise ValueError("Unknown camera preset.")
             viewport.apply_view_preset(preset, SOURCE_SIZE, 100)

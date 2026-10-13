@@ -7,11 +7,12 @@ from PySide6.QtCore import Qt, QSignalBlocker
 from PySide6.QtGui import QColor
 from PySide6.QtWidgets import QApplication, QDialog, QLabel, QTreeWidgetItem, QMainWindow
 from model_editor.window import ModelEditorWindow
-from entity_designer.editor import CollisionEditorWindow, CollisionProject, WEAPON, validate_project
-from game_object_catalog import GameObject
-from game_visuals import VisualChoice
-from resource_status import MODIFIED_ROLE, MODIFIED_COLOR
-from loading_feedback import loading_resources
+from entity_designer.editor import CollisionEditorWindow
+from entity_designer.script_model import CollisionProject, WEAPON, validate_project
+from studio.assets.catalog import GameObject
+from studio.assets.catalog import VisualChoice
+from studio.ui.widgets import MODIFIED_ROLE, MODIFIED_COLOR
+from studio.ui.widgets import loading_resources
 
 
 @pytest.fixture(scope='module')
@@ -44,8 +45,8 @@ def test_entity_state_control_precedes_tree_and_state_column_tracks_selection(ap
 
 def test_geometry_edit_colors_both_browsers_and_undo_restores_color(app):
     from tests.test_selection_runtime_v3 import _selection_family
-    from base_mapping_editor import MappingIndex
-    from assembly_window import _BAS_NAME_ROLE, _BAS_KIND_ROLE
+    from studio.assets.mapping import MappingIndex
+    from studio.workbench.window import _BAS_NAME_ROLE, _BAS_KIND_ROLE
     window = ModelEditorWindow()
     try:
         family, obj, model = _selection_family()
@@ -134,7 +135,7 @@ def test_loading_feedback_is_visible_and_closes_after_failure(app):
 
 
 def test_change_editor_opens_maximized(app):
-    from studio_shell import switch_workspace
+    from studio.ui.shell import switch_workspace
     source, target = QMainWindow(), QMainWindow()
     with patch('main.create_workspace', return_value=target):
         switch_workspace(source, 'model_editor')
@@ -143,7 +144,7 @@ def test_change_editor_opens_maximized(app):
 
 
 def test_unselected_wireframe_vertex_is_yellow(app):
-    from outline_editor import OutlineCanvas
+    from studio.workbench.outline import OutlineCanvas
     canvas = OutlineCanvas()
     canvas.resize(300, 300)
     canvas._points = [(0., 0.)]
@@ -156,7 +157,7 @@ def test_unselected_wireframe_vertex_is_yellow(app):
 
 def test_snapshot_uses_the_same_compact_entity_list_as_model(app):
     from snapshot_studio.window import SnapshotStudioWindow
-    from entity_list import EntityListMixin
+    from studio.ui.browsers import EntityListMixin
     window = SnapshotStudioWindow()
     try:
         window._right_tabs.setCurrentWidget(window._entity_panel)
@@ -171,7 +172,7 @@ def test_snapshot_uses_the_same_compact_entity_list_as_model(app):
 
 
 def test_imported_archive_syncs_the_installed_set_without_reloading(app, tmp_path):
-    from set_tabs import sync_archive_set_selector, fill_set_combo
+    from studio.ui.tabs import sync_archive_set_selector, fill_set_combo
     from map_editor import bootstrap
     from map_editor.core.game_installation import GameInstallation
     from PySide6.QtWidgets import QComboBox
@@ -197,7 +198,7 @@ def test_imported_archive_syncs_the_installed_set_without_reloading(app, tmp_pat
 
 def test_wireframe_new_and_unlisted_file_clear_the_browser_selection(app, tmp_path):
     from wireframe_editor.window import WireframeEditorWindow
-    from sklt_parser import create_minimal_sklt_model
+    from studio.formats.sklt import create_minimal_sklt_model
     window = WireframeEditorWindow()
     try:
         listed = tmp_path / 'listed.skl'
@@ -219,7 +220,7 @@ def test_wireframe_new_and_unlisted_file_clear_the_browser_selection(app, tmp_pa
 
 
 def test_manual_bas_import_clears_entity_selection_but_entity_workflow_preserves_it(app):
-    from game_browser import GAME_OBJECT_ROLE
+    from studio.ui.browsers import GAME_OBJECT_ROLE
     window = ModelEditorWindow()
     try:
         obj = GameObject('vehicle', 1, Path('Vehicles.cfg'), {'name': 'Entity', 'vp_normal': '1'})
@@ -251,14 +252,14 @@ def _two_set_install(tmp_path):
 def test_change_set_menu_lists_the_sets_and_drives_the_hidden_combo(app, tmp_path):
     from PySide6.QtWidgets import QComboBox
     from map_editor import bootstrap
-    from set_menu import install_set_menu
+    from studio.ui.shell import install_set_menu
     install, _sets = _two_set_install(tmp_path)
     old = bootstrap.installation()
     bootstrap.set_installation(install)
     window = QMainWindow()
     window._set_combo = QComboBox(window)
     try:
-        from set_tabs import fill_set_combo
+        from studio.ui.tabs import fill_set_combo
         fill_set_combo(window._set_combo, install, selected=1)
         menu = install_set_menu(window, window.menuBar())
         menu.aboutToShow.emit()
@@ -279,8 +280,8 @@ def test_change_set_menu_lists_the_sets_and_drives_the_hidden_combo(app, tmp_pat
 def test_browse_adds_a_hand_picked_set_and_switches_to_it(app, tmp_path):
     from PySide6.QtWidgets import QComboBox
     from map_editor import bootstrap
-    from set_menu import browse_for_set, install_set_menu
-    from set_tabs import fill_set_combo
+    from studio.ui.shell import browse_for_set, install_set_menu
+    from studio.ui.tabs import fill_set_combo
     install, _sets = _two_set_install(tmp_path)
     outside = tmp_path / 'elsewhere' / 'Set7'
     (outside / 'Objects').mkdir(parents=True)
@@ -294,7 +295,7 @@ def test_browse_adds_a_hand_picked_set_and_switches_to_it(app, tmp_path):
     try:
         fill_set_combo(window._set_combo, install, selected=1)
         install_set_menu(window, window.menuBar())
-        with patch('set_menu.QFileDialog.getExistingDirectory', return_value=str(outside)):
+        with patch('studio.ui.shell.QFileDialog.getExistingDirectory', return_value=str(outside)):
             browse_for_set(window)
         assert install.available_sets() == [1, 2, 7]
         assert window._set_combo.currentData() == 7
@@ -303,8 +304,8 @@ def test_browse_adds_a_hand_picked_set_and_switches_to_it(app, tmp_path):
         # A folder that is not a set is refused with a reason and nothing changes.
         bad = tmp_path / 'NotASet'
         bad.mkdir()
-        with patch('set_menu.QFileDialog.getExistingDirectory', return_value=str(bad)), \
-                patch('set_menu.QMessageBox.warning') as warned:
+        with patch('studio.ui.shell.QFileDialog.getExistingDirectory', return_value=str(bad)), \
+                patch('studio.ui.shell.QMessageBox.warning') as warned:
             browse_for_set(window)
         warned.assert_called_once()
         assert window._set_combo.currentData() == 7 and install.available_sets() == [1, 2, 7]
@@ -333,8 +334,8 @@ def test_register_set_validates_the_folder_and_replaces_an_installed_number(tmp_
 
 @pytest.mark.parametrize('key', ['model_editor', 'snapshot_studio', 'map_editor', 'entity_designer', 'wireframe_editor'])
 def test_checker_is_between_resources_and_change_editor(app, key):
-    from studio_shell import install_workspace_shell
-    from studio_compat import CompatibilityDialog
+    from studio.ui.shell import install_workspace_shell
+    from studio.ui.shell import CompatibilityDialog
     from PySide6.QtWidgets import QTabWidget, QWidget
     window = QMainWindow()
     tabs = QTabWidget(window)
@@ -350,8 +351,9 @@ def test_checker_is_between_resources_and_change_editor(app, key):
         with_set = key in ('model_editor', 'snapshot_studio', 'entity_designer')
         assert actions == ['Resources', 'Vanilla Compatibility Checker',
                            *(['Change Set'] if with_set else []), 'Change Editor']
-        with patch('studio_compat.CompatibilityDialog.exec', return_value=0) as opened:
+        with patch('studio.ui.shell.CompatibilityDialog.exec', return_value=0) as opened:
             window.studio_compat_action.trigger()
+            app.processEvents()
             opened.assert_called_once()
         dialog = CompatibilityDialog(window, key)
         assert dialog.entries and all(note for _, _, note in dialog.entries)
@@ -365,7 +367,6 @@ def test_checker_is_between_resources_and_change_editor(app, key):
 
 def test_fx_transport_fits_and_ground_survives_empty_loop_tail(app):
     from tests.test_selection_runtime_v3 import _selection_family
-    from PySide6.QtCore import QRectF
     from PySide6.QtGui import QImage, QPainter
     window = CollisionEditorWindow()
     try:
@@ -406,7 +407,7 @@ def test_fx_transport_fits_and_ground_survives_empty_loop_tail(app):
 def test_resource_bands_are_visible_and_modified_selection_stays_red(app):
     from PySide6.QtWidgets import QTreeWidget, QStyle, QStyleOptionViewItem
     from PySide6.QtGui import QImage, QPainter
-    from resource_status import use_resource_delegate, mark_resource_modified
+    from studio.ui.widgets import use_resource_delegate, mark_resource_modified
     tree = QTreeWidget()
     tree.setHeaderLabels(['Entity'])
     row = QTreeWidgetItem(['Modified vehicle'])
@@ -439,9 +440,8 @@ def test_resource_bands_are_visible_and_modified_selection_stays_red(app):
 
 @pytest.mark.parametrize('key', ['model_editor', 'snapshot_studio', 'map_editor', 'entity_designer'])
 def test_all_workspace_tabs_use_checker_marker_colors(app, key):
-    from studio_shell import install_workspace_shell
-    from studio_compat import compatibility_entries, compat_color, PREVIEW
-    from studio_tabs import PaletteTabStrip
+    from studio.ui.shell import install_workspace_shell
+    from studio.ui.shell import compatibility_entries, compat_color, PREVIEW
     from snapshot_studio.window import SnapshotStudioWindow
     from map_editor.editor import create_window
     factories = {'model_editor': ModelEditorWindow,
@@ -526,8 +526,8 @@ def test_fx_reset_view_restores_scene_camera_without_changing_models(app):
 
 
 def test_fx_unit_vanm_uses_toolbar_frames_and_effects_use_scene_clock(app):
-    from assembly_viewer import AssetViewport, ViewMaterial
-    from entity_designer.editor import CollisionViewport
+    from studio.rendering.asset_viewport import AssetViewport, ViewMaterial
+    from entity_designer.viewport import CollisionViewport
     from tests.test_selection_runtime_v3 import _selection_family
     from PySide6.QtGui import QImage, QPainter
     family, _, _ = _selection_family()
@@ -569,7 +569,6 @@ def test_fx_unit_vanm_uses_toolbar_frames_and_effects_use_scene_clock(app):
 
 def test_fx_context_menu_only_contains_preview_actions_and_routes_click(app):
     from PySide6.QtCore import QPoint
-    from PySide6.QtWidgets import QMenu
     window = CollisionEditorWindow()
     try:
         window.properties_tabs.setCurrentIndex(window.fx_tab_index)
@@ -633,7 +632,7 @@ def test_effect_list_drag_visibility_ctrl_selection_and_space(app):
 def test_follow_camera_tracks_falling_unit_and_reset_keeps_current_target(app):
     from dataclasses import replace
     from entity_designer import destruction_fx as fx
-    from entity_designer.editor import CollisionViewport
+    from entity_designer.viewport import CollisionViewport
     from tests.test_selection_runtime_v3 import _selection_family
     from PySide6.QtCore import QPointF
     family, _, _ = _selection_family()
@@ -672,7 +671,7 @@ def test_transport_has_classic_icons_and_follow_is_default(app):
 
 def test_fx_scale_controls_update_current_unit_without_rewinding(app, tmp_path):
     from tests.test_destruction_fx import UNIT
-    from entity_designer.editor import VehicleModelReference, find_script_blocks
+    from entity_designer.script_model import VehicleModelReference, find_script_blocks
     script = tmp_path / 'Vehicles.cfg'
     script.write_text(UNIT, encoding='utf-8')
     window = CollisionEditorWindow()
@@ -700,7 +699,7 @@ def test_fx_scale_controls_update_current_unit_without_rewinding(app, tmp_path):
 
 def test_fx_auto_reload_handles_atomic_script_save_and_texture_update(app, tmp_path):
     from tests.test_destruction_fx import UNIT
-    from entity_designer.editor import VehicleModelReference, find_script_blocks
+    from entity_designer.script_model import VehicleModelReference, find_script_blocks
     from PySide6.QtTest import QTest
     from PySide6.QtGui import QImage
     script_dir = tmp_path / 'Data' / 'Scripts'

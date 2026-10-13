@@ -8,13 +8,13 @@ from unittest.mock import patch
 
 from PySide6.QtCore import Qt, QPoint
 from PySide6.QtTest import QTest
-from PySide6.QtWidgets import QApplication, QDialog, QMessageBox
+from PySide6.QtWidgets import QApplication, QMessageBox
 
-from assembly_window import AssemblyWindow, AddFxElementDialog
-from base_mapping_editor import MappingIndex, MappingEditError, rewrite_model_base_structure
-from base_parser import parse_base_bytes
-from fx_authoring import prepare_fx_clipboard, stage_fx_clipboard
-from fx_element_editor import detect_fx_elements, build_fx_element_clipboard
+from studio.workbench.window import AssemblyWindow
+from studio.assets.mapping import MappingIndex, MappingEditError, rewrite_model_base_structure
+from studio.formats.base_format import parse_base_bytes
+from studio.rendering.geometry import prepare_fx_clipboard, stage_fx_clipboard
+from studio.rendering.geometry import detect_fx_elements, build_fx_element_clipboard
 from tests.test_fx_clipboard_v3 import _writable_family, _image
 
 
@@ -202,7 +202,7 @@ class FxAuthoringTests(unittest.TestCase):
             element = detect_fx_elements(source, source_family.animations)[0]
             clipboard = prepare_fx_clipboard(obj, source_family, source, element)
             before = copy.deepcopy(obj.skeleton.points)
-            from geometry_editor import GeometryClipboardError
+            from studio.rendering.geometry import GeometryClipboardError
             with self.assertRaisesRegex(GeometryClipboardError, "0x88"):
                 stage_fx_clipboard(family, obj, clipboard)
             self.assertEqual(obj.skeleton.points, before)
@@ -247,7 +247,7 @@ class FxAuthoringTests(unittest.TestCase):
                 self.assertEqual(parse_base_bytes(saved).root.ades[key[1]].olpl[0], updated)
                 # Delete an earlier AREA: the edited FX's block/ATTS address moves.
                 before = window._capture_topology_state('root')
-                from geometry_editor import plan_delete_geometry
+                from studio.rendering.geometry import plan_delete_geometry
                 plan = plan_delete_geometry(obj, {15}, MappingIndex(obj))
                 window._apply_delete_plan('root', obj, plan, label='Delete earlier AREA')
                 self.assertTrue(window._uv_original)

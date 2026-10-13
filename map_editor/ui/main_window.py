@@ -1,3 +1,9 @@
+"""The Map Editor main window (``MainWindow``): palette tabs, tools, level editing and file handling.
+
+Panels live in ``squad_panel``, ``host_panel``, ``tech_panel``, ``special_panel`` and ``dialogs``;
+drawing lives in ``map_editor.render`` and the overlay modules.
+"""
+
 from __future__ import annotations
 
 import os
@@ -5,7 +11,7 @@ import time
 import copy
 import math
 import re
-from loading_feedback import loading_set
+from studio.ui.widgets import loading_set
 
 from PySide6.QtCore import QEvent, QObject, QRunnable, QSize, Qt, QThreadPool, QTimer, Signal
 from PySide6.QtGui import (QAction, QActionGroup, QColor, QIcon, QImage, QKeySequence,
@@ -14,25 +20,25 @@ from PySide6.QtWidgets import (QApplication, QAbstractItemView, QComboBox, QDock
                                QAbstractSpinBox, QFormLayout, QHBoxLayout, QLabel, QLineEdit, QListView, QListWidget,
                                QListWidgetItem, QMainWindow, QMessageBox, QPushButton, QInputDialog,
                                QSlider, QVBoxLayout,
-                               QWidget, QToolButton, QGroupBox, QSpinBox, QCheckBox,
+                               QWidget, QToolButton, QSpinBox, QCheckBox,
                                QPlainTextEdit, QScrollArea, QDialog, QDialogButtonBox, QMenu)
 
 from ..core.asset_bridge import SetAssets
 from ..core.actor_placement import actors_fit, host_copy_preview
 from ..core.building_defs import load_building_files
-from ..core.game_installation import GameInstallation, load_remembered
+from ..core.game_installation import GameInstallation
 from ..core.factions import load_owner_colors
 from ..core.script_catalog import script_texts
 from ..core.history import History
 from ..core.ldf_model import (DEFAULT_HGT, FACTIONS, HGT_MIN, HGT_MAX,
-                              LdfDocument, load_ldf, save_ldf, grid_to_world, world_to_grid, decode_ldf_bytes, SECTOR_SIZE)
+                              LdfDocument, load_ldf, save_ldf, world_to_grid, decode_ldf_bytes, SECTOR_SIZE)
 from ..render.map_viewport import create_viewport
 from ..render.terrain_mesh import HEIGHT_UNIT
 from ..render.sector_mesh import SectorMeshLibrary
 from ..render.sector_sprite import rasterize_sprite, sprite_input
 from ..tools.brush import BrushMode, BrushShape, TerrainBrush
 from ..tools.paint import paint_cells
-from .dialogs import GameInstallationDialog, LevelInfoPanel, NewMapDialog, ResizeDialog
+from .dialogs import LevelInfoPanel, NewMapDialog, ResizeDialog
 from .music_preview import MusicPreview
 from .building_overlay import BuildingOverlay, CapabilityPreview
 from .thumbnail_delegate import ThumbnailDelegate, PaletteCardDelegate
@@ -49,7 +55,7 @@ from .squad_overlay import SquadOverlay
 from .colored_tabs import PaletteTabs, TAB_COLORS
 from ..render.squad_scene import squad_xz, centered_squad_position, host_position, MAX_PREVIEW_MEMBERS
 from .. import bootstrap
-from assembly_viewer import VIEW_PRESET_ANGLES
+from studio.rendering.asset_viewport import VIEW_PRESET_ANGLES
 
 TOOLS = (("select", "Select"), ("sector", "Sector"), ("building", "Building"),
          ("owner", "Faction"), ("terrain", "Terrain"), ("squad", "Squad"))
@@ -205,7 +211,7 @@ class MainWindow(QMainWindow):
         self._build_palette()
         self.info = QLabel("")
         self.statusBar().addPermanentWidget(self.info)
-        from render_status import add_renderer_badge
+        from studio.rendering.gpu import add_renderer_badge
         self.renderer_badge = add_renderer_badge(self, self.view)
         self.statusBar().showMessage("Left drag: paint / move squad · Shift: select sectors · Ctrl+click: multi-select · right: menu / drag rotate · middle: pan", 8000)
         self._new_doc(doc if doc is not None else LdfDocument(mw=15, mh=15), path)
@@ -374,7 +380,7 @@ class MainWindow(QMainWindow):
         self.building_zoom_in.setEnabled(False)
         buildings_layout.addLayout(building_zoom_row)
         self.building_list = QListWidget()
-        from resource_status import use_standard_list_style
+        from studio.ui.widgets import use_standard_list_style
         use_standard_list_style(self.building_list)
         self.building_list.setItemDelegate(PaletteCardDelegate(self.building_list))
         self.building_list.setViewMode(QListWidget.ViewMode.ListMode)
@@ -551,7 +557,7 @@ class MainWindow(QMainWindow):
     @staticmethod
     def _make_list(icons: bool) -> QListWidget:
         widget = QListWidget()
-        from resource_status import use_standard_list_style
+        from studio.ui.widgets import use_standard_list_style
         use_standard_list_style(widget)
         if icons:
             widget.setViewMode(QListWidget.ViewMode.IconMode)
@@ -588,7 +594,6 @@ class MainWindow(QMainWindow):
 
     def _layout_sector_icons(self):
         columns = SECTOR_PREVIEW_COLUMNS[self._icon_level]
-        style = self.sector_list.style()
         # The viewport already excludes the scrollbar; subtracting it twice
         # left the single-column selection card visibly off centre.
         available = max(60, self.sector_list.viewport().width())
@@ -1567,7 +1572,6 @@ class MainWindow(QMainWindow):
         selected = self.squad_panel.selected_indices()
         self._draft_previous_selection = selected.copy()
         col, row = self.view.hover or (self.doc.mw // 2, self.doc.mh // 2)
-        vehicles = self._lib().vehicles if self._lib() else {}
         try:
             values = self.squad_panel.placement_values()
         except ValueError as error:
@@ -2162,7 +2166,6 @@ class MainWindow(QMainWindow):
             self._context_menu = menu
             return
         self._released(-1, -1, Qt.KeyboardModifier.NoModifier)
-        terrain_active = self.palette_tabs.currentIndex() == 3
         painting = self.tool in ('owner', 'terrain')
         squad = None if painting else self.view.pick_squad(position.x(), position.y())
         host = None if painting else self.view.pick_host(position.x(), position.y())
@@ -2618,13 +2621,6 @@ class MainWindow(QMainWindow):
             return
         self._fill_palettes(lib)
 
-    def file_game_folders(self):
-        dialog = GameInstallationDialog(bootstrap.installation() or load_remembered(), self)
-        if not dialog.exec():
-            return
-        new = dialog.installation()
-        bootstrap.set_installation(new)
-        self.reload_game_resources()
 
     def reload_game_resources(self):
         self.view.set_library(None)
@@ -2886,7 +2882,7 @@ class MainWindow(QMainWindow):
                 return
         self.history.push(self.doc)
         self.doc.set_number = number
-        from studio_session import remember_set
+        from studio.ui.shell import remember_set
         remember_set(number)
         self.dirty = True
         self._refresh_map_set_assets()

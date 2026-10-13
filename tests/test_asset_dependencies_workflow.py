@@ -11,16 +11,16 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import QApplication, QDialogButtonBox, QLineEdit
 
-from assembly_window import AssemblyWindow
-from asset_family import AssetFamily, FamilyObject
-from asset_resolver import ResolvedFile
-from base_dependency_resolver import AssetDependency
-from base_mapping_editor import (
+from studio.workbench.window import AssemblyWindow
+from studio.assets.family import AssetFamily, FamilyObject
+from studio.exchange.portable import ResolvedFile
+from studio.assets.dependencies import AssetDependency
+from studio.assets.mapping import (
     MappingEditError,
     TextureNameEdit,
     apply_texture_name_edits_to_bytes,
 )
-from base_parser import AmeshBlock, BaseObject, TextureRef, parse_base_bytes
+from studio.formats.base_format import AmeshBlock, BaseObject, TextureRef, parse_base_bytes
 from tests.test_fx_clipboard_v3 import _fx_base_bytes, _memory_family, _writable_family
 
 
@@ -107,7 +107,7 @@ class AssetDependenciesWorkflowTests(unittest.TestCase):
             texture = _find_kind(window.asset_tree.topLevelItem(0), "texture")
             window.asset_tree.setCurrentItem(texture)
             with patch(
-                    "assembly_window.QInputDialog.getItem",
+                    "studio.workbench.window.QInputDialog.getItem",
                     return_value=(f"Loose: {candidate}", True)), patch.object(
                         window, "_apply_dependency_candidate") as apply_choice:
                 window._select_dependency_resource()
@@ -116,7 +116,7 @@ class AssetDependenciesWorkflowTests(unittest.TestCase):
             family.texture_refs["FX1.ILBM"].candidates = []
             family.dependencies[0].candidates = []
             with patch(
-                    "assembly_window.QInputDialog.getItem",
+                    "studio.workbench.window.QInputDialog.getItem",
                     return_value=("Browse for a compatible file", True)), \
                     patch.object(window, "_assign_manual_file") as browse:
                 window._select_dependency_resource()
@@ -188,7 +188,7 @@ class AssetDependenciesWorkflowTests(unittest.TestCase):
                 self.assertFalse(skeleton["editable"])
 
                 with patch.object(window, "open_base"), patch(
-                        "assembly_window.QMessageBox.critical"):
+                        "studio.workbench.window.QMessageBox.critical"):
                     self.assertTrue(window._save_base_dependency_edits(
                         "root", [TextureNameEdit(
                             "root", 0, "A.ILBM", "texture")]))
@@ -388,7 +388,7 @@ class AssetDependenciesWorkflowTests(unittest.TestCase):
         try:
             window._family = family
             with patch(
-                    "assembly_window.build_texture_catalog",
+                    "studio.workbench.window.build_texture_catalog",
                     return_value=entries), patch.object(
                         window, "_active_model_texture_names",
                         return_value={"used.ilbm"}):
@@ -424,14 +424,14 @@ class AssetDependenciesWorkflowTests(unittest.TestCase):
             self.assertEqual(
                 window.texture_list.item(1).background().style(),
                 Qt.BrushStyle.NoBrush)
-            self.assertIn("rgba(74, 112, 84, 180)",
+            self.assertIn("#31483a",
                           window.asset_tree.styleSheet())
         finally:
             window.close()
 
     def test_asset_dependencies_context_menu_has_no_obsolete_actions(self):
         source = (Path(__file__).resolve().parents[1] /
-                  "assembly_window.py").read_text(encoding="utf-8")
+                  "studio/workbench/window.py").read_text(encoding="utf-8")
         start = source.index("    def _show_asset_context_menu")
         end = source.index("    def _selected_texture_names", start)
         context_source = source[start:end]
@@ -441,7 +441,7 @@ class AssetDependenciesWorkflowTests(unittest.TestCase):
 
     def test_export_asset_family_is_available_from_resource_contexts(self):
         source = (Path(__file__).resolve().parents[1] /
-                  "assembly_window.py").read_text(encoding="utf-8")
+                  "studio/workbench/window.py").read_text(encoding="utf-8")
         setbas_start = source.index("    def _show_setbas_context_menu")
         setbas_end = source.index("    def _asset_item_path", setbas_start)
         self.assertIn(
@@ -459,7 +459,7 @@ class AssetDependenciesWorkflowTests(unittest.TestCase):
 
     def test_asset_textures_suppresses_expected_missing_cmap_noise(self):
         source = (Path(__file__).resolve().parents[1] /
-                  "assembly_window.py").read_text(encoding="utf-8")
+                  "studio/workbench/window.py").read_text(encoding="utf-8")
         self.assertIn('"no cmap palette in file"', source.casefold())
         self.assertIn("ScrollBarAlwaysOff", source)
 
@@ -486,7 +486,7 @@ class AssetDependenciesWorkflowTests(unittest.TestCase):
             window._last_component_selection = ("texture", "SHARED.ILBM")
             expected_label = "KID.BASE [root/kid[0]]"
             with patch(
-                    "assembly_window.QInputDialog.getItem",
+                    "studio.workbench.window.QInputDialog.getItem",
                     return_value=(expected_label, True)) as chooser:
                 owner = window._export_owner_for_selection()
             self.assertEqual(owner, "root/kid[0]")

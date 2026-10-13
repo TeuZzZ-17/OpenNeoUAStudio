@@ -6,9 +6,9 @@ from PySide6.QtCore import QPoint, QPointF, QRectF, Qt
 from PySide6.QtGui import QImage, QPainter
 from PySide6.QtTest import QSignalSpy, QTest
 
-from .test_special_objects import app, win
+from .test_special_objects import app, win  # noqa: F401 - pytest fixtures defined in that file
 from map_editor import bootstrap
-from map_editor.core.ldf_model import LdfDocument, loads_ldf, dumps_ldf, ensure_host_defaults, HGT_MIN
+from map_editor.core.ldf_model import loads_ldf, dumps_ldf, ensure_host_defaults, HGT_MIN
 from map_editor.core.special_objects import add_special, update_special
 from map_editor.render.camera import IsoCamera
 from map_editor.render.gpu_renderer import camera_matrix

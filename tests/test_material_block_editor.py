@@ -10,8 +10,8 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 from PySide6.QtWidgets import QApplication
 
-from assembly_window import AssemblyWindow
-from base_mapping_editor import (
+from studio.workbench.window import AssemblyWindow
+from studio.assets.mapping import (
     MappingEditError,
     build_material_block_clipboard,
     delete_material_block,
@@ -19,7 +19,7 @@ from base_mapping_editor import (
     rewrite_model_base_structure,
     verify_model_base_structure,
 )
-from ilbm_parser import IlbmImage
+from studio.formats.images import IlbmImage
 from tests.test_area_fx_structural import _family as _area_family
 from tests.test_asset_family_package import _make_package
 

@@ -26,8 +26,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import numpy as np
 from PySide6.QtWidgets import QApplication
 
-from entity_designer.editor import (
-    CollisionEditorWindow,
+from entity_designer.editor import CollisionEditorWindow
+from entity_designer.script_model import (
     CollisionSphere,
     OPENNEOUA,
     import_collision_block,
@@ -82,7 +82,7 @@ def comparison_metrics(manual, automatic, spacing=None):
 
 
 def run_comparison(script, set_bas, ids, output, baseline=None, verify=False):
-    app = QApplication.instance() or QApplication([])
+    app = QApplication.instance() or QApplication([])  # noqa: F841 - keeps the Qt application alive
     text, _, _ = read_script_file(script)
     refs = {
         r.block.object_id: r

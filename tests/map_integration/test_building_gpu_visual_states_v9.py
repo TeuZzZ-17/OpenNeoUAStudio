@@ -1,7 +1,6 @@
 """Check that building visuals use separate normal, selected and drag states."""
 from pathlib import Path
 
-from map_editor.render.building_outline import building_outline_pixels
 
 ROOT = Path(__file__).resolve().parents[2] / 'map_editor'
 

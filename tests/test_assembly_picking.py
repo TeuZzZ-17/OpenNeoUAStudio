@@ -9,7 +9,7 @@ from PySide6.QtCore import QPoint, QPointF, QRect, QRectF
 from PySide6.QtGui import QColor, QImage, QPainter, QPolygonF
 from PySide6.QtWidgets import QApplication
 
-from assembly_viewer import (
+from studio.rendering.asset_viewport import (
     AssetViewport,
     PickShape,
     ViewFace,
@@ -17,8 +17,8 @@ from assembly_viewer import (
     resolve_pick_shape,
     resolve_visible_edit_vertices,
 )
-from geometry_editor import GeometryEditSession
-from sklt_parser import SkltModel
+from studio.rendering.geometry import GeometryEditSession
+from studio.formats.sklt import SkltModel
 
 
 def _shape(poly_id, screen, depths, draw_order, *, owner="root",

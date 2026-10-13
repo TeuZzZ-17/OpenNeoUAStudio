@@ -7,7 +7,7 @@ from PySide6.QtCore import Qt
 from PySide6.QtWidgets import QApplication
 
 from entity_designer import destruction_fx as fx
-from entity_designer.editor import find_script_blocks
+from entity_designer.script_model import find_script_blocks
 
 UNIT = (
     "new_vehicle 5\n"
@@ -742,7 +742,6 @@ def _wav_file(folder, name="tone.wav", rate=22050, frames=200):
 
 
 def test_wav_files_of_the_game_are_converted_to_16_bit():
-    import wave
     from pathlib import Path
 
     from entity_designer import fx_audio
@@ -808,7 +807,6 @@ def test_player_reports_missing_samples(tmp_path):
 
 
 def test_panel_has_a_mute_button_and_plays_sounds_while_running(app, tmp_path):
-    from entity_designer import fx_audio
     from entity_designer.fx_panel import DestructionFxPanel
 
     _wav_file(tmp_path)
@@ -1159,17 +1157,17 @@ def test_very_slow_sounds_are_stretched_to_a_rate_the_devices_play(tmp_path):
 # -- grid clipping ------------------------------------------------------------------------
 
 def test_near_plane_clipping_keeps_only_what_is_in_front_of_the_camera():
-    from entity_designer import editor
+    from entity_designer import viewport
 
-    near = editor._NEAR_CAMERA_Z
-    kept = editor._near_clip_segment((0, 0, near - 1), (0, 0, near + 1))
+    near = viewport._NEAR_CAMERA_Z
+    kept = viewport._near_clip_segment((0, 0, near - 1), (0, 0, near + 1))
     assert kept[0] == (0, 0, near - 1) and kept[1][2] == pytest.approx(near)
-    assert editor._near_clip_segment((0, 0, near + 1), (1, 0, near + 2)) is None
+    assert viewport._near_clip_segment((0, 0, near + 1), (1, 0, near + 2)) is None
     square = [(-1, 0, near - 1), (1, 0, near - 1), (1, 0, near + 1),
               (-1, 0, near + 1)]
-    clipped = editor._near_clip_polygon(square)
+    clipped = viewport._near_clip_polygon(square)
     assert len(clipped) == 4 and all(point[2] <= near + 1e-9 for point in clipped)
-    assert editor._near_clip_polygon([(0, 0, near + 1)] * 3) == []
+    assert viewport._near_clip_polygon([(0, 0, near + 1)] * 3) == []
 
 
 # -- workspace -------------------------------------------------------------------------
@@ -1180,7 +1178,8 @@ def app():
 
 
 def test_preview_tab_shows_effects_and_reloads_from_file(app, tmp_path):
-    from entity_designer.editor import CollisionEditorWindow, VehicleModelReference
+    from entity_designer.editor import CollisionEditorWindow
+    from entity_designer.script_model import VehicleModelReference
 
     script = tmp_path / "Vehicles.cfg"
     script.write_text(UNIT, encoding="utf-8")
