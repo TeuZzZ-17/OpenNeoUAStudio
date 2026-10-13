@@ -12,43 +12,38 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 from PySide6.QtGui import QImage
 from PySide6.QtWidgets import QApplication, QDialog, QMessageBox
 
-from anm_parser import (
-    VanmData, VanmFrame, export_anm_bytes, parse_anm_bytes,
-)
-from assembly_viewer import AssetViewport
-from assembly_window import AddFxElementDialog, AssemblyWindow
-from asset_family import (
-    AssetFamily, FamilyObject, MaterialGroup, rebuild_materials,
-)
-from base_mapping_editor import (
+from studio.formats.animation import VanmData, VanmFrame, export_anm_bytes, parse_anm_bytes
+from studio.rendering.asset_viewport import AssetViewport
+from studio.workbench.window import AddFxElementDialog, AssemblyWindow
+from studio.assets.family import AssetFamily, FamilyObject, MaterialGroup, rebuild_materials
+from studio.assets.mapping import (
     MappingEditError,
     MappingIndex,
     TextureNameEdit,
     apply_texture_name_edits_to_bytes,
     verify_texture_name_edits,
 )
-from base_parser import (
+from studio.formats.base_format import (
     AmeshBlock,
     AttsEntry,
     BaseObject,
     TextureRef,
     parse_base_bytes,
 )
-from fx_element_editor import (
+from studio.rendering.geometry import (
     FxElementClipboard,
     append_fx_element_clipboard,
     build_fx_element_clipboard,
     detach_shared_fx_vertices,
     detect_fx_elements,
-    validate_fx_element_clipboard,
 )
-from geometry_editor import (
+from studio.rendering.geometry import (
     GeometryClipboardError,
     apply_delete_geometry,
     plan_delete_geometry,
 )
-from ilbm_parser import IlbmImage
-from sklt_parser import (
+from studio.formats.images import IlbmImage
+from studio.formats.sklt import (
     SkltModel,
     create_minimal_sklt_model,
     parse_sklt_file,
@@ -1018,9 +1013,9 @@ class FxClipboardV3Tests(unittest.TestCase):
                 expected_clone = build_fx_element_clipboard(
                     obj, template, family.animations)
                 with patch(
-                        "assembly_window.AddFxElementDialog.exec",
+                        "studio.workbench.window.AddFxElementDialog.exec",
                         return_value=QDialog.DialogCode.Accepted), patch(
-                        "assembly_window.AddFxElementDialog.selected_template",
+                        "studio.workbench.window.AddFxElementDialog.selected_template",
                         return_value=template):
                     window._add_fx_element()
                 self.assertTrue(window.viewport.paste_preview_active)
@@ -1278,9 +1273,9 @@ class FxClipboardV3Tests(unittest.TestCase):
             expected_clone = build_fx_element_clipboard(
                 obj, selected, family.animations)
             with patch(
-                    "assembly_window.AddFxElementDialog.exec",
+                    "studio.workbench.window.AddFxElementDialog.exec",
                     return_value=QDialog.DialogCode.Accepted), patch(
-                    "assembly_window.AddFxElementDialog.selected_template",
+                    "studio.workbench.window.AddFxElementDialog.selected_template",
                     return_value=selected):
                 window._add_fx_element()
             self.assertTrue(window.viewport.paste_preview_active)

@@ -10,28 +10,24 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 from PySide6.QtWidgets import QApplication, QMenu, QMessageBox
 
-from assembly_window import AssemblyWindow
-from asset_family import AssetFamily, FamilyObject, MaterialGroup
-from base_parser import (
+from studio.workbench.window import AssemblyWindow
+from studio.assets.family import AssetFamily, FamilyObject, MaterialGroup
+from studio.formats.base_format import (
     AmeshBlock,
     AttsEntry,
     BaseObject,
     TextureRef,
     parse_base_bytes,
 )
-from sklt_parser import (
+from studio.formats.sklt import (
     SkltModel,
     create_minimal_sklt_model,
     parse_sklt_file,
     save_sklt_with_poo2_pol2_structure,
 )
-from ilbm_parser import IlbmImage
-from uv_editor_widget import UVEditorWidget, UVLoop
-from uv_topology_editor import (
-    UVTopologyError,
-    apply_uv_vertex_deletion,
-    plan_uv_vertex_deletion,
-)
+from studio.formats.images import IlbmImage
+from studio.ui.uv_editor import UVEditorWidget, UVLoop
+from studio.ui.uv_editor import UVTopologyError, apply_uv_vertex_deletion, plan_uv_vertex_deletion
 from tests.synthetic_indexed_profile import attach_synthetic_indexed_profile
 
 
@@ -166,7 +162,7 @@ class UVPhase3Tests(unittest.TestCase):
         window = _open_memory_window(family, obj)
         try:
             with patch(
-                    "assembly_window.decode_texture", return_value=image):
+                    "studio.workbench.window.decode_texture", return_value=image):
                 window._update_uv_editor(0)
             self.assertIsNotNone(window.uv_editor._image)
             self.assertFalse(window.uv_editor._image.isNull())
@@ -397,7 +393,7 @@ class UVPhase3Tests(unittest.TestCase):
                 raise RuntimeError("simulated writer failure")
 
             with patch(
-                    "assembly_window.apply_uv_vertex_deletion",
+                    "studio.workbench.window.apply_uv_vertex_deletion",
                     fail_after_mutation):
                 window._delete_uv_vertex()
 
@@ -446,7 +442,7 @@ class UVPhase3Tests(unittest.TestCase):
         try:
             window._on_polygon_picked(0)
             key = ("root", 0, 0)
-            with patch("assembly_window.QMenu", CapturingMenu):
+            with patch("studio.workbench.window.QMenu", CapturingMenu):
                 window._show_uv_handle_context_menu(key, 1, window.pos())
             menu = CapturingMenu.captured
             labels = [

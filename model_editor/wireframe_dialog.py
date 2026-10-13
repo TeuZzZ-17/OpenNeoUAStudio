@@ -19,7 +19,7 @@ from PySide6.QtWidgets import (
     QVBoxLayout,
 )
 
-from assembly_viewer import VIEW_PRESET_ANGLES
+from studio.rendering.asset_viewport import VIEW_PRESET_ANGLES
 
 
 def _load_wireframe_generator():

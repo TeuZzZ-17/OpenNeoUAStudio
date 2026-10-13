@@ -9,15 +9,11 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 from PySide6.QtWidgets import QApplication, QTreeWidget, QTreeWidgetItem
 
-from asset_family import (
-    AssetFamily,
-    _find_external_palette,
-    _resolve_with_setbas,
-)
-from asset_resolver import AssetResolver, DirectoryIndex
-from asset_tree_filter import filter_tree
-from texture_assignment import classify_texture_assignment
-from texture_catalog import build_texture_catalog
+from studio.assets.family import AssetFamily, _find_external_palette, _resolve_with_setbas
+from studio.exchange.portable import AssetResolver, DirectoryIndex
+from studio.assets.dependencies import filter_tree
+from studio.assets.catalog import classify_texture_assignment
+from studio.assets.catalog import build_texture_catalog
 
 
 class AssetTreeFilterTests(unittest.TestCase):

@@ -1,3 +1,5 @@
+"""Terrain brush: step 1, limits 0x61-0x9D, border cells are recomputed (flatten/smooth weights included)."""
+
 from __future__ import annotations
 
 import math

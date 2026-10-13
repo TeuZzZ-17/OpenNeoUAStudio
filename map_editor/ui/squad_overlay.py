@@ -1,8 +1,8 @@
 """Faction silhouettes and click targets for the real squad meshes."""
 import math
 import numpy as np
-from PySide6.QtCore import QPointF, QRectF, Qt
-from PySide6.QtGui import QColor, QPen, QPainter, QImage
+from PySide6.QtCore import QRectF, Qt
+from PySide6.QtGui import QColor, QPainter, QImage
 from ..render.squad_scene import squad_members
 from ..render.special_scene import scene_object_styles
 

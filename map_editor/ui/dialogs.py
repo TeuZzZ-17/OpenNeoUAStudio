@@ -1,20 +1,21 @@
+"""Map Editor dialogs: new map, resize, and the Level Info panel (title, briefing art, sky, music, movie)."""
+
 from __future__ import annotations
 
 from pathlib import Path
 
 from PySide6.QtCore import QEvent, QObject, QRunnable, QSize, Qt, QThreadPool, QTimer, Signal
 from PySide6.QtGui import QIcon, QImage, QPixmap
-from PySide6.QtWidgets import (QCheckBox, QComboBox, QDialog, QDialogButtonBox,
-                               QFileDialog, QFormLayout, QHBoxLayout, QLabel,
+from PySide6.QtWidgets import (QComboBox, QDialog, QDialogButtonBox,
+                               QFormLayout, QHBoxLayout, QLabel,
                                QLineEdit, QListWidget, QListWidgetItem, QMessageBox, QPushButton, QSpinBox,
                                QStyle, QVBoxLayout, QWidget)
 
 from .. import bootstrap
 from ..core.ldf_model import LdfDocument, briefing_for_export, movie_filename
-from ..core.game_installation import (FOLDERS, GameInstallation,
-                                      forget_remembered, load_remembered,
-                                      save_remembered)
+from ..core.game_installation import (GameInstallation)
 from ..core.resource_catalog import ResourceCatalog, preview_image
+from studio.ui.shell import ResourcesDialog as GameInstallationDialog  # noqa: F401 - used by map_editor.editor, replaced by tests
 from .thumbnail_delegate import ThumbnailDelegate
 
 MIN_SIZE, MAX_SIZE = 5, 255
@@ -58,7 +59,6 @@ class NewMapDialog(_Form):
                 self.set_box.currentData())
 
 
-from studio_resources import ResourcesDialog as GameInstallationDialog
 
 
 class ResizeDialog(_Form):
@@ -197,7 +197,7 @@ class LevelInfoPanel(QWidget):
         sky_label.setAlignment(Qt.AlignmentFlag.AlignHCenter)
         layout.addWidget(sky_label)
         self.sky_list = QListWidget()
-        from resource_status import use_standard_list_style
+        from studio.ui.widgets import use_standard_list_style
         use_standard_list_style(self.sky_list)
         self.sky_list.setViewMode(QListWidget.ViewMode.IconMode)
         self.sky_list.setFlow(QListWidget.Flow.LeftToRight)

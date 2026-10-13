@@ -21,7 +21,7 @@ from PySide6.QtGui import (
     QColor, QImage, QPainter, QPen, QPolygonF, QTransform,
 )
 
-from assembly_viewer import AssetViewport, ViewFace, _apply, _rotation_matrix
+from studio.rendering.asset_viewport import AssetViewport, ViewFace, _apply, _rotation_matrix
 from entity_designer.destruction_fx import EmitterSpec
 
 try:  # numpy is already required by the indexed renderer.
@@ -566,13 +566,8 @@ class FxPreviewViewportMixin:
             return
         canvas = getattr(self, "_gpu_canvas", None)
         if canvas is not None and painter.device() is canvas:
-            # GPU: painting the scene into an image would drop the textured
-            # renderer to the slow software path, so the finished frame is
-            # read back from the canvas and tinted instead.
             self._paint_fx_scene(painter)
-            frame = self._fx_read_canvas(painter, canvas)
-            if frame is not None:
-                painter.drawImage(QRectF(self.rect()), apply_palette(frame, *self._fx_palette))
+            self._fx_apply_gpu_palette(painter, canvas)
             return
         image = QImage(self.size(), QImage.Format.Format_RGBA8888)
         image.fill(QColor(24, 26, 32))
@@ -583,31 +578,78 @@ class FxPreviewViewportMixin:
             layer.end()
         painter.drawImage(0, 0, apply_palette(image, *self._fx_palette))
 
-    @staticmethod
-    def _fx_read_canvas(painter: QPainter, canvas) -> QImage | None:
-        """The frame painted so far on the GPU canvas, or None if unreadable."""
+    def _fx_apply_gpu_palette(self, painter: QPainter, canvas) -> None:
+        """Apply PAL colors on the GPU without downloading the frame."""
+        from OpenGL import GL as gl
+        from OpenGL.GL.shaders import compileProgram, compileShader
 
+        painter.beginNativePainting()
         try:
-            from OpenGL import GL as gl
+            resources = getattr(self, "_fx_palette_gpu", None)
+            if resources is None:
+                vertex = """#version 330 core
+                out vec2 uv;
+                void main() {
+                    vec2 p = vec2((gl_VertexID << 1) & 2, gl_VertexID & 2);
+                    uv = p;
+                    gl_Position = vec4(p * 2.0 - 1.0, 0.0, 1.0);
+                }"""
+                fragment = """#version 330 core
+                in vec2 uv;
+                uniform sampler2D scene;
+                uniform vec3 normColor;
+                uniform vec3 invColor;
+                out vec4 color;
+                void main() {
+                    vec3 c = texture(scene, uv).rgb;
+                    color = vec4(clamp(c * normColor + (1.0 - c) * invColor,
+                                       0.0, 1.0), 1.0);
+                }"""
+                program = compileProgram(compileShader(vertex, gl.GL_VERTEX_SHADER),
+                                         compileShader(fragment, gl.GL_FRAGMENT_SHADER))
+                resources = (program, int(gl.glGenTextures(1)), int(gl.glGenVertexArrays(1)))
+                self._fx_palette_gpu = resources
+            program, texture, vao = resources
             ratio = canvas.devicePixelRatioF()
             width, height = round(canvas.width() * ratio), round(canvas.height() * ratio)
-            painter.beginNativePainting()
-            try:
-                gl.glBindFramebuffer(gl.GL_FRAMEBUFFER, canvas.defaultFramebufferObject())
-                alignment = int(gl.glGetIntegerv(gl.GL_PACK_ALIGNMENT))
-                gl.glPixelStorei(gl.GL_PACK_ALIGNMENT, 1)
-                try:
-                    data = gl.glReadPixels(0, 0, width, height, gl.GL_RGBA, gl.GL_UNSIGNED_BYTE)
-                finally:
-                    gl.glPixelStorei(gl.GL_PACK_ALIGNMENT, alignment)
-            finally:
-                painter.endNativePainting()
-            raw = data.tobytes() if hasattr(data, "tobytes") else bytes(data)
-            # OpenGL rows run bottom-up; the alpha of the frame is ignored.
-            return QImage(raw, width, height, width * 4,
-                          QImage.Format.Format_RGBX8888).mirrored(False, True)
-        except Exception:
-            return None
+            gl.glBindFramebuffer(gl.GL_FRAMEBUFFER, canvas.defaultFramebufferObject())
+            gl.glActiveTexture(gl.GL_TEXTURE0)
+            gl.glBindTexture(gl.GL_TEXTURE_2D, texture)
+            gl.glTexParameteri(gl.GL_TEXTURE_2D, gl.GL_TEXTURE_MIN_FILTER, gl.GL_NEAREST)
+            gl.glTexParameteri(gl.GL_TEXTURE_2D, gl.GL_TEXTURE_MAG_FILTER, gl.GL_NEAREST)
+            if getattr(self, "_fx_palette_gpu_size", None) != (width, height):
+                gl.glCopyTexImage2D(gl.GL_TEXTURE_2D, 0, gl.GL_RGBA8, 0, 0, width, height, 0)
+                self._fx_palette_gpu_size = (width, height)
+            else:
+                gl.glCopyTexSubImage2D(gl.GL_TEXTURE_2D, 0, 0, 0, 0, 0, width, height)
+            gl.glViewport(0, 0, width, height)
+            for capability in (gl.GL_BLEND, gl.GL_DEPTH_TEST, gl.GL_STENCIL_TEST, gl.GL_SCISSOR_TEST):
+                gl.glDisable(capability)
+            gl.glColorMask(True, True, True, True)
+            gl.glUseProgram(program)
+            gl.glUniform1i(gl.glGetUniformLocation(program, "scene"), 0)
+            norm, inv = self._fx_palette
+            gl.glUniform3f(gl.glGetUniformLocation(program, "normColor"), *norm)
+            gl.glUniform3f(gl.glGetUniformLocation(program, "invColor"), *inv)
+            gl.glBindVertexArray(vao)
+            gl.glDrawArrays(gl.GL_TRIANGLES, 0, 3)
+            gl.glBindVertexArray(0)
+            gl.glUseProgram(0)
+            gl.glBindTexture(gl.GL_TEXTURE_2D, 0)
+        finally:
+            painter.endNativePainting()
+
+    def _cleanup_gpu(self):
+        resources = getattr(self, "_fx_palette_gpu", None)
+        if resources is not None:
+            from OpenGL import GL as gl
+            program, texture, vao = resources
+            gl.glDeleteProgram(program)
+            gl.glDeleteTextures([texture])
+            gl.glDeleteVertexArrays(1, [vao])
+            self._fx_palette_gpu = None
+            self._fx_palette_gpu_size = None
+        super()._cleanup_gpu()
 
     def _paint_fx_scene(self, painter: QPainter) -> None:
         target = QRectF(self.rect())

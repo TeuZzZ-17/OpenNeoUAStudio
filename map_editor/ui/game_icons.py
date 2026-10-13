@@ -3,7 +3,7 @@ from functools import lru_cache
 from pathlib import Path
 
 import numpy as np
-from PySide6.QtCore import QPointF, QRectF
+from PySide6.QtCore import QRectF
 from PySide6.QtGui import QImage, QColor
 
 from .. import bootstrap

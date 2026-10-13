@@ -9,14 +9,13 @@ from PySide6.QtCore import QPoint, QPointF, QRect, Qt
 from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication, QMessageBox
 
-from assembly_viewer import AssetViewport
-from assembly_window import AssemblyWindow
-from asset_family import (
-    AssetFamily, FamilyObject, MaterialGroup, rebuild_materials)
-from base_mapping_editor import MappingIndex
-from base_parser import AmeshBlock, AttsEntry, BaseObject, TextureRef
-from geometry_editor import GeometryEditSession
-from sklt_parser import SkltModel
+from studio.rendering.asset_viewport import AssetViewport
+from studio.workbench.window import AssemblyWindow
+from studio.assets.family import AssetFamily, FamilyObject, MaterialGroup, rebuild_materials
+from studio.assets.mapping import MappingIndex
+from studio.formats.base_format import AmeshBlock, AttsEntry, BaseObject, TextureRef
+from studio.rendering.geometry import GeometryEditSession
+from studio.formats.sklt import SkltModel
 
 
 def _selection_family():

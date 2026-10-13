@@ -9,18 +9,10 @@ from PySide6.QtCore import QRectF
 from PySide6.QtGui import QColor, QImage, QPainter
 from PySide6.QtWidgets import QApplication
 
-from assembly_viewer import (
-    AssetViewport,
-    PrecisionGuide,
-)
-from geometry_editor import GeometryEditSession
-from indexed_renderer import (
-    IndexedPiece,
-    IndexedRasterizer,
-    IndexedSurface,
-    IndexedTables,
-)
-from sklt_parser import SkltModel
+from studio.rendering.asset_viewport import AssetViewport, PrecisionGuide
+from studio.rendering.geometry import GeometryEditSession
+from studio.rendering.indexed import IndexedPiece, IndexedRasterizer, IndexedSurface, IndexedTables
+from studio.formats.sklt import SkltModel
 
 
 def _indexed_tables(color=(220, 45, 30)):

@@ -9,7 +9,7 @@ from PySide6.QtWidgets import QApplication
 
 from map_editor.core.asset_bridge import SetAssets
 from map_editor.core.factions import load_owner_colors
-from map_editor.core.ldf_model import DEFAULT_HGT, LdfDocument, load_ldf, save_ldf
+from map_editor.core.ldf_model import LdfDocument, load_ldf, save_ldf
 from map_editor.render.camera import IsoCamera
 from map_editor.render.map_scene import ground_regions, render_scene, scene_polygons
 from map_editor.render.sector_mesh import SectorMeshLibrary

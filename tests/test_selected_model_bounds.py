@@ -5,8 +5,8 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 from PySide6.QtWidgets import QApplication
 
-from assembly_viewer import AssetViewport
-from assembly_window import AssemblyWindow
+from studio.rendering.asset_viewport import AssetViewport
+from studio.workbench.window import AssemblyWindow
 
 
 class SelectedModelBoundsTests(unittest.TestCase):

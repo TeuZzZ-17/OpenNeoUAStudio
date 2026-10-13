@@ -8,9 +8,10 @@ from PySide6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QFormLayout, Q
                               QListWidget, QListWidgetItem, QPushButton, QSpinBox,
                               QComboBox, QCheckBox, QLabel, QGroupBox, QDialog, QDialogButtonBox)
 
+from studio.ui.widgets import use_standard_list_style
 from ..core.ldf_model import GEM_ACTION_PARAMS_BY_TARGET, MAX_SPECIAL_SLOTS
 from .preview_cards import PreviewList, set_card, RESOURCE_ROLE
-from .special_overlay import COLORS
+from ..render.special_scene import SPECIAL_COLORS as COLORS
 from ..core.special_objects import SPECIAL_KINDS, special_store, special_slots, special_cell
 
 
@@ -187,7 +188,6 @@ class SpecialPanel(QWidget):
         self.keys_group = group
         layout = QVBoxLayout(group)
         self.keys = QListWidget()
-        from resource_status import use_standard_list_style
         use_standard_list_style(self.keys)
         self.keys.setMaximumHeight(105)
         self.keys.currentRowChanged.connect(self._key_selected)

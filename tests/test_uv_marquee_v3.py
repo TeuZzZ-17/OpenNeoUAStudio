@@ -8,7 +8,7 @@ from PySide6.QtGui import QMouseEvent
 from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication
 
-from uv_editor_widget import UVEditorWidget, UVLoop
+from studio.ui.uv_editor import UVEditorWidget, UVLoop
 
 
 class UVMarqueeV3Tests(unittest.TestCase):

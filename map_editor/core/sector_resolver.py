@@ -1,3 +1,5 @@
+"""Resolves a sector type (``typ``) to its 9 sub-sectors, buildings and surfaces."""
+
 from __future__ import annotations
 
 from dataclasses import dataclass, field

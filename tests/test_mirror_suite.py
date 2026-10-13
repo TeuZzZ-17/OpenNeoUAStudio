@@ -10,17 +10,13 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 from PySide6.QtWidgets import QApplication
 from PySide6.QtWidgets import QMessageBox
 
-from anm_parser import VanmData, VanmFrame
-from assembly_window import AssemblyWindow
-from asset_family import AssetFamily, FamilyObject, MaterialGroup
-from base_parser import AmeshBlock, AttsEntry, BaseObject, TextureRef
-from geometry_editor import match_mirror_points, match_mirror_polygons
-from fx_element_editor import (
-    build_fx_elements_clipboard,
-    detect_fx_elements,
-    validate_fx_element_clipboard,
-)
-from sklt_parser import SkltModel
+from studio.formats.animation import VanmData, VanmFrame
+from studio.workbench.window import AssemblyWindow
+from studio.assets.family import AssetFamily, FamilyObject, MaterialGroup
+from studio.formats.base_format import AmeshBlock, AttsEntry, BaseObject, TextureRef
+from studio.rendering.geometry import match_mirror_points, match_mirror_polygons
+from studio.rendering.geometry import build_fx_elements_clipboard, validate_fx_element_clipboard
+from studio.formats.sklt import SkltModel
 
 
 def _octants():
