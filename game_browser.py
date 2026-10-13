@@ -165,7 +165,7 @@ class GameObjectBrowser(QWidget):
     selected = Signal(object)
     setChanged = Signal(int)
 
-    def __init__(self, parent=None, tree=None, inline_set_selector=True, kinds=None):
+    def __init__(self, parent=None, tree=None, kinds=None):
         super().__init__(parent)
         # ``kinds`` limits the list to some game-object kinds; None shows all of them.
         self.kinds = tuple(kinds) if kinds else None
@@ -179,12 +179,11 @@ class GameObjectBrowser(QWidget):
         for label, kind in (("All", ""), ("Vehicles", "vehicle"), ("Weapons", "weapon"), ("Buildings", "building")):
             if kind == "" or self.kinds is None or kind in self.kinds:
                 self.category.addItem(label, kind)
-        self.set_combo = QComboBox()
+        # The set is chosen from the window's Change Set menu. This combo is
+        # never shown: it only holds the current set and its change signal.
+        self.set_combo = QComboBox(self)
+        self.set_combo.hide()
         controls.addWidget(self.category, 1)
-        # A host that shares the set between several panels passes
-        # inline_set_selector=False and places ``set_combo`` itself.
-        if inline_set_selector:
-            controls.addWidget(self.set_combo)
         layout.addLayout(controls)
         self.search = QLineEdit()
         self.search.setPlaceholderText("Search name or ID")

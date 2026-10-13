@@ -40,6 +40,8 @@ class GameInstallation:
     data: Path
     folders: dict[str, Path] = field(default_factory=dict)
     preview_backgrounds: dict[str, Path] = field(default_factory=dict)
+    # SetN folders picked by hand (Change Set > Browse), kept for the session.
+    custom_sets: dict[int, Path] = field(default_factory=dict)
 
     @classmethod
     def suggest(cls, chosen: str | Path) -> "GameInstallation":
@@ -91,8 +93,36 @@ class GameInstallation:
 
         The "sets" folder may hold SetN subfolders (modern), be the game root
         holding loose SetN folders (vanilla), or be a single SetN folder.
-        Only sets with both sector data and a VP archive are returned.
+        Only sets with both sector data and a VP archive are returned. Sets
+        added by hand replace an installed set with the same number.
         """
+        found = self._installed_set_directories()
+        found.update(self.custom_sets)
+        return found
+
+    def register_set(self, folder) -> int:
+        """Add a hand-picked ``SetN`` folder and return its number.
+
+        Raises ValueError with a readable reason when it is not a usable set.
+        """
+        path = Path(folder).expanduser().resolve()
+        match = _SET_NAME.fullmatch(path.name)
+        if match is None or not 1 <= int(match[1]) <= 255:
+            raise ValueError(
+                "The folder must be named Set<number>, for example Set5.")
+        if not (_child(path, "Objects", "SET.BAS").is_file()
+                and _child(path, "Scripts", "set.sdf").is_file()):
+            raise ValueError(
+                "A set folder needs Objects/SET.BAS and Scripts/set.sdf.")
+        number = int(match[1])
+        installed = self._installed_set_directories().get(number)
+        if installed is not None and installed.resolve() == path:
+            self.custom_sets.pop(number, None)
+        else:
+            self.custom_sets[number] = path
+        return number
+
+    def _installed_set_directories(self) -> dict[int, Path]:
         sets = self.folder("sets")
         candidates = []
         for root in (sets, self.data):
