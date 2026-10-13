@@ -71,7 +71,9 @@ def test_change_editor_menu_follows_resources_in_every_tool():
         window.menuBar().addMenu("File")
         install_workspace_shell(window, option.key)
         titles = [action.text() for action in window.menuBar().actions()]
-        assert titles == ["File", "Resources", "Vanilla Compatibility Checker", "Change Editor"]
+        # Change Set (only in the editors that use a set) sits before Change Editor.
+        assert titles[:3] == ["File", "Resources", "Vanilla Compatibility Checker"]
+        assert titles[3:] in (["Change Editor"], ["Change Set", "Change Editor"])
         current = [a for a in window.studio_change_menu.actions() if a.isChecked()]
         assert [a.text() for a in current] == [option.title]
         assert not current[0].isEnabled()

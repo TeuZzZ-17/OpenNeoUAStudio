@@ -152,22 +152,19 @@ def test_game_file_browser_folder_mode_and_header(tmp_path):
                    (browser.tree.topLevelItem(i).text(0) for i in range(browser.tree.topLevelItemCount())))
 
 
-def test_object_browser_set_selector_can_live_outside():
+def test_object_browser_keeps_the_set_in_a_hidden_combo():
     app = QApplication.instance() or QApplication([])
-    from PySide6.QtWidgets import QLayout
-    inline = GameObjectBrowser()
-    outside = GameObjectBrowser(inline_set_selector=False)
+    browser = GameObjectBrowser()
 
-    def in_layout(browser):
-        def walk(layout):
-            for i in range(layout.count()):
-                item = layout.itemAt(i)
-                if item.widget() is browser.set_combo or (item.layout() and walk(item.layout())):
-                    return True
-            return False
-        return walk(browser.layout())
-    assert in_layout(inline) and not in_layout(outside)
-    assert hasattr(outside, "setChanged") and hasattr(outside, "set_number")
+    def in_layout(layout):
+        for i in range(layout.count()):
+            item = layout.itemAt(i)
+            if item.widget() is browser.set_combo or (item.layout() and in_layout(item.layout())):
+                return True
+        return False
+    # The set is chosen from the window menu: the combo is never shown.
+    assert not in_layout(browser.layout()) and not browser.set_combo.isVisible()
+    assert hasattr(browser, "setChanged") and hasattr(browser, "set_number")
 
 
 def test_model_editor_set_selector_is_shared_and_bas_follows_set(tmp_path):
@@ -198,8 +195,7 @@ def test_model_editor_set_selector_is_shared_and_bas_follows_set(tmp_path):
             assert [tabs.tabText(i) for i in range(tabs.count())][:3] == [
                 "Bas Manager", "Entity List", "Asset Dependencies"]
             combo = window.entity_browser.set_combo
-            assert window._resources_tabs.isAncestorOf(combo)
-            assert not window.entity_browser.isAncestorOf(combo)
+            assert not combo.isVisible()
             assert loaded == [sets / "Set1" / "Objects" / "SET.BAS"]
             combo.setCurrentIndex(combo.findData(2))
             assert loaded[-1] == sets / "Set2" / "Objects" / "SET.BAS"
@@ -233,7 +229,7 @@ def test_snapshot_studio_loads_set_1_and_follows_the_set_selector(tmp_path):
             window = SnapshotStudioWindow()
             assert loaded == [sets / "Set1" / "Objects" / "SET.BAS"]
             assert window._right_tabs.currentWidget() is window._snapshot_scroll
-            assert window._bas_panel.isAncestorOf(window._set_combo)
+            assert not window._set_combo.isVisible()
             window._set_combo.setCurrentIndex(window._set_combo.findData(2))
             assert loaded[-1] == sets / "Set2" / "Objects" / "SET.BAS"
             window.close()
