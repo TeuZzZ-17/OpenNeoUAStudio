@@ -187,6 +187,8 @@ class SpecialPanel(QWidget):
         self.keys_group = group
         layout = QVBoxLayout(group)
         self.keys = QListWidget()
+        from resource_status import use_standard_list_style
+        use_standard_list_style(self.keys)
         self.keys.setMaximumHeight(105)
         self.keys.currentRowChanged.connect(self._key_selected)
         layout.addWidget(self.keys)
@@ -216,6 +218,7 @@ class SpecialPanel(QWidget):
         group = QGroupBox('Effects on Capture')
         layout = QVBoxLayout(group)
         self.actions = QListWidget()
+        use_standard_list_style(self.actions)
         self.actions.setMaximumHeight(110)
         self.actions.currentRowChanged.connect(self._action_selected)
         layout.addWidget(self.actions)
