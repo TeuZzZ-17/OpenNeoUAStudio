@@ -3,7 +3,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from sklt_parser import (
+from studio.formats.sklt import (
     parse_sklt_bytes,
     parse_sklt_file,
     save_sklt_with_poo2_points,

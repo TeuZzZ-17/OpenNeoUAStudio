@@ -17,10 +17,12 @@ from PySide6.QtWidgets import (
     QTreeWidgetItem,
 )
 
-from asset_family import AssetFamily, FamilyObject
-from base_parser import BaseObject
-from indexed_renderer import IndexedSurface
+from studio.assets.family import AssetFamily, FamilyObject
+from studio.formats.base_format import BaseObject
+from studio.rendering.indexed import IndexedSurface
 import entity_designer.editor as editor_module
+import entity_designer.script_model as script_module
+import entity_designer.viewport as viewport_module
 from entity_designer import (
     ApplyScriptDialog,
     CollisionEditorWindow,
@@ -63,7 +65,7 @@ from entity_designer import (
     write_script_file,
 )
 from entity_designer.shape import CollisionHull, CollisionShape
-from sklt_parser import SkltModel
+from studio.formats.sklt import SkltModel
 
 
 def _family():
@@ -454,7 +456,7 @@ class CollisionEditorTests(unittest.TestCase):
         self.assertTrue(any("distante" in warning for warning in warnings))
 
     def test_28_tools_menu_exposes_entity_designer(self):
-        from assembly_window import AssemblyWindow
+        from studio.workbench.window import AssemblyWindow
         window = AssemblyWindow()
         self.addCleanup(window.close)
         labels = []
@@ -650,7 +652,7 @@ class CollisionEditorTests(unittest.TestCase):
         viewport.close()
 
     def test_38_tools_menu_places_mapping_repair_after_map_editor(self):
-        from assembly_window import AssemblyWindow
+        from studio.workbench.window import AssemblyWindow
         window = AssemblyWindow()
         self.addCleanup(window.close)
         labels = []
@@ -706,7 +708,7 @@ class CollisionEditorTests(unittest.TestCase):
             legacy=CollisionSphere(LEGACY, radius=89.1251),
             compound=[CollisionSphere(
                 OPENNEOUA, 1.23456, -0.0004, -2.34567, 78.379051)])
-        data = editor_module.collision_data_lines(project)
+        data = script_module.collision_data_lines(project)
         self.assertIn("radius = 89", data)
         self.assertIn("coll_x = 1.23456", data)
         self.assertIn("coll_y = -0.0004", data)
@@ -1608,7 +1610,7 @@ class CollisionEditorTests(unittest.TestCase):
     def test_58_collision_compatibility_is_explained_in_the_box(self):
         window = self._window()
         window.properties_tabs.setCurrentIndex(window.collision_tab_index)
-        from studio_compat import compatibility_entries
+        from studio.ui.shell import compatibility_entries
         _, level, note = compatibility_entries(window, "entity_designer")[0]
         self.assertEqual(level, "mixed")
         self.assertIn("vanilla Urban Assault", note)
@@ -1981,7 +1983,8 @@ class CollisionEditorTests(unittest.TestCase):
         self.assertFalse(viewport._ground_alignment_source_loaded)
 
     def test_83_ground_simulation_is_enabled_after_family_load(self):
-        source = Path(editor_module.__file__).read_text(encoding="utf-8")
+        source = (Path(editor_module.__file__).read_text(encoding="utf-8")
+                  + Path(viewport_module.__file__).read_text(encoding="utf-8"))
         self.assertIn("self._ground_alignment_source_loaded = True", source)
         self.assertIn("and self._ground_alignment_source_loaded", source)
 
@@ -2393,7 +2396,7 @@ class CollisionEditorTests(unittest.TestCase):
         self.assertFalse(window.save_loaded_script_action.isEnabled())
 
     def test_93_runtime_vp_table_prefers_loose_visproto_base(self):
-        from vp_manager import EmbeddedVPEntry, EmbeddedVPSet
+        from studio.assets.visproto import EmbeddedVPEntry, EmbeddedVPSet
 
         def chunk(tag: bytes, payload: bytes) -> bytes:
             result = tag + struct.pack(">I", len(payload)) + payload
@@ -2647,6 +2650,8 @@ class CollisionEditorTests(unittest.TestCase):
     def test_104_gun_points_are_purple_listed_and_selectable(self):
         self.assertEqual(GUN_POINT_COLOR, QColor(178, 78, 238))
         window = self._window()
+        # The gun point list is refreshed lazily, only while its tab is shown.
+        window.properties_tabs.setCurrentIndex(window.gun_points_tab_index)
         window.project.gun_points_enabled = True
         window.project.gun_points = [
             GunPoint(scheme="unit", x=4, y=5, z=6, dir_z=1, gun_type=9)]
@@ -2756,6 +2761,7 @@ class CollisionEditorTests(unittest.TestCase):
         window.project.target_category = VEHICLE
         window.project.gun_points_enabled = True
         window.project.gun_points = points
+        window.properties_tabs.setCurrentIndex(window.gun_points_tab_index)
         window._sync_all()
         self.assertEqual(window.gun_point_tree.topLevelItem(0).text(0), "G1")
         self.assertIn(
@@ -2842,7 +2848,7 @@ class CollisionEditorTests(unittest.TestCase):
             Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         self.assertEqual(
             window.properties_scroll.verticalScrollBarPolicy(),
-            Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+            Qt.ScrollBarPolicy.ScrollBarAlwaysOn)  # always visible, disabled without overflow
         # The outer pane must be free to scroll. Qt uses this same scrollbar
         # for mouse-wheel navigation and to keep focused tab controls visible.
         vertical_bar = window.properties_scroll.verticalScrollBar()
@@ -4165,7 +4171,7 @@ class CollisionEditorTests(unittest.TestCase):
             self, *, object_id, object_kind, script_text=None):
         """Import one definition on a fake SET.BAS exposing two VP models."""
 
-        from vp_manager import EmbeddedVPEntry, EmbeddedVPSet, VPEntry, VPTable
+        from studio.assets.visproto import EmbeddedVPEntry, EmbeddedVPSet, VPEntry, VPTable
 
         window = self._window()
         family = _family()
@@ -4239,7 +4245,7 @@ class CollisionEditorTests(unittest.TestCase):
             [False, False, False])
 
     def test_invalid_3ds_fallback_binds_active_unit_and_bake_to_vp_subtree(self):
-        from vp_manager import EmbeddedVPEntry, EmbeddedVPSet, VPEntry, VPTable
+        from studio.assets.visproto import EmbeddedVPEntry, EmbeddedVPSet, VPEntry, VPTable
 
         window = self._window()
         window.family = _family()
@@ -4273,7 +4279,7 @@ class CollisionEditorTests(unittest.TestCase):
         window._fill_models(window.family)
 
         with patch.object(
-                editor_module, "read_3ds",
+                script_module, "read_3ds",
                 side_effect=ValueError("invalid 3DS mesh")):
             self.assertTrue(window.open_vehicle_script(
                 script_path, object_id=77, object_kind="new_vehicle"))

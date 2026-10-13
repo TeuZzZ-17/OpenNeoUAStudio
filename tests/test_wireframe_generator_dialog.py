@@ -8,7 +8,7 @@ from PySide6.QtGui import QColor
 from PySide6.QtGui import QImage
 from PySide6.QtWidgets import QApplication, QDialog
 
-from assembly_viewer import VIEW_PRESET_ANGLES
+from studio.rendering.asset_viewport import VIEW_PRESET_ANGLES
 from model_editor import ModelEditorWindow
 from model_editor.wireframe_dialog import WireframeGeneratorDialog
 

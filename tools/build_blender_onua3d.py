@@ -1,34 +1,41 @@
 """Build a self-contained Blender add-on ZIP from the canonical shared sources.
 
-Only intra-package imports are made relative; no copies of core code are kept
-in the repository. The bundle includes no Qt or native UA parser/writer.
+The add-on is ``studio/exchange/blender_addon.py`` (its ``__init__``) plus the Qt-free core
+``studio/exchange/portable.py``. Only the import of that core is made relative; no copy of
+core code is kept in the repository. The bundle includes no Qt or native UA parser/writer.
 """
 import argparse
 import ast
 from pathlib import Path
 import zipfile
 
-MODULES = ('onua3d_package', 'onua3d_contract', 'onua3d_identity',
-           'asset_package_paths', 'asset_resolver', 'verified_io')
+CORE_MODULE = 'studio.exchange.portable'
+# file inside the add-on -> source file of the repository
+BUNDLE = (
+    ('__init__.py', 'studio/exchange/blender_addon.py'),
+    ('portable.py', 'studio/exchange/portable.py'),
+)
+
+
+class RelativeCore(ast.NodeTransformer):
+    """``from studio.exchange.portable import x`` -> ``from .portable import x``."""
+
+    def visit_ImportFrom(self, node):
+        if node.module == CORE_MODULE and node.level == 0:
+            node.module, node.level = 'portable', 1
+        return node
 
 
 def build_addon(target):
     root = Path(__file__).resolve().parents[1]
     target = Path(target)
     target.parent.mkdir(parents=True, exist_ok=True)
-    class RelativeImports(ast.NodeTransformer):
-        def visit_ImportFrom(self, node):
-            if node.module in MODULES and node.level == 0:
-                node.level = 1
-            return node
     with zipfile.ZipFile(target, 'w', compression=zipfile.ZIP_DEFLATED) as archive:
-        for name in ('blender_onua3d', *MODULES):
-            tree = RelativeImports().visit(ast.parse((root/(name+'.py')).read_text(encoding='utf-8')))
-            source = ast.unparse(tree)+'\n'
-            filename = '__init__.py' if name == 'blender_onua3d' else name+'.py'
-            info = zipfile.ZipInfo('openneoua_onua3d/'+filename, date_time=(1980, 1, 1, 0, 0, 0))
+        for filename, source_path in BUNDLE:
+            tree = RelativeCore().visit(ast.parse((root / source_path).read_text(encoding='utf-8')))
+            info = zipfile.ZipInfo('openneoua_onua3d/' + filename, date_time=(1980, 1, 1, 0, 0, 0))
             info.compress_type = zipfile.ZIP_DEFLATED
-            archive.writestr(info, source.encode('utf-8'))
+            archive.writestr(info, (ast.unparse(tree) + '\n').encode('utf-8'))
     return target
 
 

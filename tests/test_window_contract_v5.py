@@ -9,13 +9,13 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 from PySide6.QtCore import QPoint, Qt
 from PySide6.QtTest import QTest
 from PySide6.QtWidgets import (
-    QApplication, QHeaderView, QMessageBox, QTreeWidgetItem,
+    QApplication, QHeaderView, QTreeWidgetItem,
 )
 
-import assembly_window as assembly_window_module
-from assembly_viewer import VIEW_MODES
-from assembly_window import AssemblyWindow
-from vp_manager import parse_visproto_text
+import studio.workbench.window as assembly_window_module
+from studio.rendering.asset_viewport import VIEW_MODES
+from studio.workbench.window import AssemblyWindow
+from studio.assets.visproto import parse_visproto_text
 
 
 class _FakeSignal:
@@ -192,7 +192,7 @@ class WindowContractV5Tests(unittest.TestCase):
             self.assertEqual(
                 window.statusBar().objectName(), "operationStatusBar")
             source = (Path(__file__).resolve().parents[1] /
-                      "assembly_window.py").read_text(encoding="utf-8")
+                      "studio/workbench/window.py").read_text(encoding="utf-8")
             self.assertNotIn("Source (always read-only):", source)
             self.assertNotIn("Dry run / validate only (write no files)", source)
             self.assertNotIn(
@@ -936,7 +936,7 @@ class WindowContractV5Tests(unittest.TestCase):
             window._selected_polys = {0, 1}
             window._selected_poly = 0
             with patch(
-                    "assembly_window.classify_texture_assignment") as classify:
+                    "studio.workbench.window.classify_texture_assignment") as classify:
                 window._load_model_texture()
             classify.assert_not_called()
             self.assertFalse(window._editing_allowed())
@@ -951,7 +951,7 @@ class WindowContractV5Tests(unittest.TestCase):
                 entries=[], as_table=lambda: embedded_table)
             archive = SimpleNamespace(path=Path("/tmp/Set1/SET.BAS"))
             with patch(
-                    "assembly_window.reconstruct_embedded_vps",
+                    "studio.workbench.window.reconstruct_embedded_vps",
                     return_value=embedded):
                 window._load_vp_table(archive)
             self.assertEqual(window._vp_source, "embedded visproto.base")

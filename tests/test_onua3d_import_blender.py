@@ -8,11 +8,13 @@ import unittest
 from unittest.mock import patch
 import zipfile
 
-from assembly_window import AssemblyWindow
-from onua3d_export import MANIFEST, write_onua3d
-from onua3d_identity import vertex_identity_mapping
-from onua3d_import import Onua3dImportError, import_onua3d
-from sklt_parser import parse_sklt_file
+from studio.workbench.window import AssemblyWindow
+from studio.exchange.portable import MANIFEST
+from studio.exchange.onua3d import write_onua3d
+from studio.exchange.portable import vertex_identity_mapping
+from studio.exchange.portable import Onua3dImportError
+from studio.exchange.onua3d import import_onua3d
+from studio.formats.sklt import parse_sklt_file
 from tests import test_onua3d_export as fixtures
 from tests import test_onua3d_identity_blender as blender_fixture
 from tests import test_onua3d_import as import_fixture
@@ -90,7 +92,7 @@ class BlenderImportTests(unittest.TestCase):
 
     def test_synthetic_nontrivial_native_transform_noop_and_edit(self):
         # STRC layout comes from the existing BASE parser/writer contract.
-        from base_parser import parse_base_bytes
+        from studio.formats.base_format import parse_base_bytes
         path = self.source / 'TEST.BASE'
         data = bytearray(path.read_bytes())
         parsed = parse_base_bytes(data)
@@ -126,8 +128,8 @@ class BlenderImportTests(unittest.TestCase):
             window.open_setbas(str(source))
             self.assertIsNotNone(window._activate_setbas_base('VP_HUBI4.base'))
             package = self.root / 'VP_HUBI4.onua3d'
-            with patch('assembly_window.QFileDialog.getSaveFileName', return_value=(str(package), '')), \
-                    patch('assembly_window.QMessageBox.critical') as errors:
+            with patch('studio.workbench.window.QFileDialog.getSaveFileName', return_value=(str(package), '')), \
+                    patch('studio.workbench.window.QMessageBox.critical') as errors:
                 window._export_to_blender(); errors.assert_not_called()
             self.verify_roundtrip(package, 'VP_HUBI4', require_normal_split=True)
         finally:

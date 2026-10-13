@@ -1,7 +1,6 @@
 import math
 import os
 import unittest
-from types import SimpleNamespace
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
@@ -9,18 +8,18 @@ from PySide6.QtWidgets import QApplication
 from PySide6.QtCore import Qt
 from PySide6.QtTest import QTest
 
-from assembly_viewer import AssetViewport
-from assembly_window import AssemblyWindow
-from geometry_editor import GeometryEditSession
-from asset_family import AssetFamily, FamilyObject
-from base_parser import BaseObject
-from model_space_gizmo import (
+from studio.rendering.asset_viewport import AssetViewport
+from studio.workbench.window import AssemblyWindow
+from studio.rendering.geometry import GeometryEditSession
+from studio.assets.family import AssetFamily, FamilyObject
+from studio.formats.base_format import BaseObject
+from studio.rendering.gizmo import (
     AXIS_DIRECTIONS,
     DIRECTIONS_26,
     SCALE_DIRECTIONS,
     ModelSpaceGizmo,
 )
-from sklt_parser import SkltModel
+from studio.formats.sklt import SkltModel
 
 
 def _install_edit_session(viewport, points, selection):

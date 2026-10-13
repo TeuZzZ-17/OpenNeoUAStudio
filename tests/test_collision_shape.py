@@ -15,22 +15,25 @@ from PySide6.QtCore import Qt, QPointF, QTimer
 from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication, QMessageBox
 
-from asset_family import AssetFamily, FamilyObject
-from base_parser import BaseObject
+from studio.assets.family import AssetFamily, FamilyObject
+from studio.formats.base_format import BaseObject
 import entity_designer.editor as editor_module
+import entity_designer.script_model as script_module
+import entity_designer.viewport as viewport_module
+import entity_designer.widgets as widgets_module
 import entity_designer.shape as shape_module
-from entity_designer.editor import (
-    CollisionEditorWindow,
+from entity_designer.editor import CollisionEditorWindow
+from entity_designer.script_model import (
     CollisionProject,
     CollisionScriptError,
     CollisionSphere,
-    GeometryPartSelectionWidget,
     LEGACY,
     OPENNEOUA,
     VEHICLE,
     plan_script_update,
     script_model_references,
 )
+from entity_designer.widgets import GeometryPartSelectionWidget
 from entity_designer.shape import (
     CollisionHull,
     CollisionShape,
@@ -42,7 +45,6 @@ from entity_designer.shape import (
     parse_collision_shape,
     sampled_surface_metrics,
     validate_hull,
-    validate_shape,
     write_collision_shape,
 )
 
@@ -456,7 +458,7 @@ class CollisionShapeTests(unittest.TestCase):
                       for _ in range(257)])
         before = project.snapshot()
         with self.assertRaisesRegex(CollisionScriptError, "256"):
-            editor_module._collision_tab_data_lines(project)
+            script_module._collision_tab_data_lines(project)
         self.assertEqual(project.snapshot(), before)
 
     def test_shape_tab_reset_is_scoped_and_undoable(self):
@@ -643,7 +645,7 @@ class CollisionShapeTests(unittest.TestCase):
         self.assertEqual(previews[-1], (body_triangle, wing_triangle))
 
     def test_sync_uses_cached_geometry_instead_of_reextracting_triangles(self):
-        from sklt_parser import SkltModel
+        from studio.formats.sklt import SkltModel
 
         window = CollisionEditorWindow()
         self.addCleanup(lambda: (window._set_modified(False), window.close()))
@@ -890,12 +892,12 @@ class CollisionShapeTests(unittest.TestCase):
         self.addCleanup(lambda: (window._set_modified(False), window.close()))
         window.project.name = "Fox / Hunter?"
         self.assertEqual(
-            editor_module._collision_shape_export_filename(window.project),
+            script_module._collision_shape_export_filename(window.project),
             "Fox_Hunter.collision")
         window.project.name = "Model"
         window.project.source_model = "Data/Models/VP_FOX.SKLT"
         self.assertEqual(
-            editor_module._collision_shape_export_filename(window.project),
+            script_module._collision_shape_export_filename(window.project),
             "VP_FOX.collision")
 
         window.project.name = "Fox"
@@ -927,8 +929,8 @@ class CollisionShapeTests(unittest.TestCase):
 
     def test_script_shape_from_set1_keeps_source_set_and_transform_warnings(self):
         from tempfile import TemporaryDirectory
-        from sklt_parser import SkltModel
-        from vp_manager import EmbeddedVPEntry, EmbeddedVPSet, VPEntry, VPTable
+        from studio.formats.sklt import SkltModel
+        from studio.assets.visproto import EmbeddedVPEntry, EmbeddedVPSet, VPEntry, VPTable
 
         window = CollisionEditorWindow()
         self.addCleanup(lambda: (window._set_modified(False), window.close()))
@@ -1056,7 +1058,7 @@ class CollisionShapeTests(unittest.TestCase):
                 owner_path="root")
             family = AssetFamily(root_object=root)
             kind, resolved, value, warnings = (
-                editor_module._resolve_script_visual_source(
+                script_module._resolve_script_visual_source(
                     reference, script_path, None, None,
                     family_loader=lambda _path: family))
         self.assertEqual(kind, "base_normal")
@@ -1083,10 +1085,10 @@ class CollisionShapeTests(unittest.TestCase):
             broken_3ds = models / "Broken.3ds"
             broken_3ds.touch()
             with patch.object(
-                    editor_module, "read_3ds",
+                    script_module, "read_3ds",
                     side_effect=ValueError("invalid 3DS mesh")):
                 kind, resolved, value, warnings = (
-                    editor_module._resolve_script_visual_source(
+                    script_module._resolve_script_visual_source(
                         reference, script_path, None, None))
         self.assertEqual(kind, "vp_normal")
         self.assertIsNone(resolved)
@@ -1098,8 +1100,8 @@ class CollisionShapeTests(unittest.TestCase):
             vertices=[(0, 0, 0), (1, 0, 0), (0, 1, 0)],
             faces=[(0, 1, 2)],
         )
-        with patch.object(editor_module, "read_3ds", return_value=([mesh], {})):
-            family = editor_module._load_3ds_family(Path("Pilot.3ds"))
+        with patch.object(script_module, "read_3ds", return_value=([mesh], {})):
+            family = script_module._load_3ds_family(Path("Pilot.3ds"))
         child = family.root_object.kids[0]
         self.assertEqual(child.owner_path, "root/kid[0]")
         self.assertEqual(child.skeleton.polygons, [[0, 1, 2]])
@@ -1112,7 +1114,7 @@ class CollisionShapeTests(unittest.TestCase):
         )
         window = CollisionEditorWindow()
         self.addCleanup(lambda: (window._set_modified(False), window.close()))
-        with patch.object(editor_module, "read_3ds", return_value=([mesh], {})):
+        with patch.object(script_module, "read_3ds", return_value=([mesh], {})):
             self.assertTrue(window.open_base("Pilot.3ds"))
         self.assertIsNotNone(window.family)
         self.assertEqual(len(window.viewport.local_owner_triangles(None)), 1)
@@ -1410,7 +1412,7 @@ class CollisionShapeTests(unittest.TestCase):
         self.assertTrue(window.project.collision_shape.hulls[0].enabled)
 
     def test_shape_render_keeps_cyan_and_never_draws_disabled_parts(self):
-        viewport = editor_module.CollisionViewport()
+        viewport = viewport_module.CollisionViewport()
         self.addCleanup(viewport.close)
         hull = _tetrahedron()
         viewport.set_collision_shape(CollisionShape(
@@ -1642,7 +1644,7 @@ class CollisionShapeTests(unittest.TestCase):
         self.assertEqual(chosen, ["Disable"])
         self.assertEqual([h.enabled for h in window.project.collision_shape.hulls], [False, True])
         self.assertEqual(window.collision_geometry_widget.tree.currentItem().data(
-            0, editor_module._GEOMETRY_COMPONENT_ROLE), "@hull:0")
+            0, widgets_module._GEOMETRY_COMPONENT_ROLE), "@hull:0")
         self.assertEqual(len(_runtime_shape(collision_shape_text(
             window.project.collision_shape)).hulls), 1)
         menu = window._create_collision_shape_context_menu("@hull:0")

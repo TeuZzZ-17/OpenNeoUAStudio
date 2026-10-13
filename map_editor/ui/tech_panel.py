@@ -31,7 +31,7 @@ class TechPanel(QWidget):
         self.status = QLabel()
         self.status.setFixedHeight(18)
         self.summary = QTreeWidget()
-        from resource_status import use_standard_list_style
+        from studio.ui.widgets import use_standard_list_style
         use_standard_list_style(self.summary)
         self.summary.setHeaderLabels(['ID', 'Name'])
         self.summary.setRootIsDecorated(False)

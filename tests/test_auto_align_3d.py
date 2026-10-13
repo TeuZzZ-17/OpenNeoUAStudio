@@ -8,9 +8,9 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 from PySide6.QtCore import QRectF, Qt
 from PySide6.QtWidgets import QApplication
 
-from assembly_viewer import AssetViewport
-from geometry_editor import GeometryEditSession
-from sklt_parser import SkltModel
+from studio.rendering.asset_viewport import AssetViewport
+from studio.rendering.geometry import GeometryEditSession
+from studio.formats.sklt import SkltModel
 
 
 def _viewport(points, selection):
@@ -58,7 +58,7 @@ class AutoAlign3DTests(unittest.TestCase):
         status = []
         viewport.statusMessage.connect(status.append)
         with patch(
-                "assembly_viewer.QApplication.keyboardModifiers",
+                "studio.rendering.asset_viewport.QApplication.keyboardModifiers",
                 return_value=Qt.KeyboardModifier.NoModifier):
             delta = viewport._snap_translation(
                 [(0.04, 0.0, 0.0)], (-0.02, 0.0, 0.0))
@@ -73,7 +73,7 @@ class AutoAlign3DTests(unittest.TestCase):
             {0, 1})
         selected = [(0.0, 0.0, 0.0), (0.2, 0.0, 0.0)]
         with patch(
-                "assembly_viewer.QApplication.keyboardModifiers",
+                "studio.rendering.asset_viewport.QApplication.keyboardModifiers",
                 return_value=Qt.KeyboardModifier.NoModifier):
             delta = viewport._snap_translation(
                 selected, (0.77, 0.0, 0.0))
@@ -85,7 +85,7 @@ class AutoAlign3DTests(unittest.TestCase):
         viewport, _model = _viewport(
             [(0.04, 0.0, 0.0), (1.0, 0.0, 0.0)], {0})
         with patch(
-                "assembly_viewer.QApplication.keyboardModifiers",
+                "studio.rendering.asset_viewport.QApplication.keyboardModifiers",
                 return_value=Qt.KeyboardModifier.NoModifier):
             viewport._snap_translation(
                 [(0.04, 0.0, 0.0)], (-0.02, 0.0, 0.0))
@@ -103,7 +103,7 @@ class AutoAlign3DTests(unittest.TestCase):
             {0, 1})
         selected = [(0.0, 0.0, 0.0), (0.2, 0.0, 0.0)]
         with patch(
-                "assembly_viewer.QApplication.keyboardModifiers",
+                "studio.rendering.asset_viewport.QApplication.keyboardModifiers",
                 return_value=Qt.KeyboardModifier.AltModifier):
             delta = viewport._snap_translation(
                 selected, (0.77, 0.13, -0.21),
@@ -112,7 +112,7 @@ class AutoAlign3DTests(unittest.TestCase):
         self.assertEqual(viewport._precision_guides, ())
 
         with patch(
-                "assembly_viewer.QApplication.keyboardModifiers",
+                "studio.rendering.asset_viewport.QApplication.keyboardModifiers",
                 return_value=Qt.KeyboardModifier.NoModifier):
             delta = viewport._snap_translation(
                 selected, (0.3, 0.4, 0.5), axis_name="Y")
@@ -126,7 +126,7 @@ class AutoAlign3DTests(unittest.TestCase):
             {0, 1})
         selected = [(0.0, 0.0, 0.0), (0.2, 0.2, 0.2)]
         with patch(
-                "assembly_viewer.QApplication.keyboardModifiers",
+                "studio.rendering.asset_viewport.QApplication.keyboardModifiers",
                 return_value=Qt.KeyboardModifier.NoModifier):
             first = viewport._snap_translation(
                 selected, (1.0, 0.01, 0.01),
@@ -149,7 +149,7 @@ class AutoAlign3DTests(unittest.TestCase):
         viewport._prepare_alignment_targets(
             [model.points[0], model.points[1]], {0, 1})
         with patch(
-                "assembly_viewer.QApplication.keyboardModifiers",
+                "studio.rendering.asset_viewport.QApplication.keyboardModifiers",
                 return_value=Qt.KeyboardModifier.NoModifier):
             factor = viewport._snap_scale_factor(8.5, "X")
         self.assertAlmostEqual(factor, 9.0)
@@ -238,7 +238,7 @@ class AutoAlign3DTests(unittest.TestCase):
         viewport, _model = _viewport(
             [(1.0, 0.0, 0.0), (2.0, 0.0, 0.0)], {0})
         with patch(
-                "assembly_viewer.QApplication.keyboardModifiers",
+                "studio.rendering.asset_viewport.QApplication.keyboardModifiers",
                 return_value=Qt.KeyboardModifier.NoModifier):
             delta = viewport._snap_translation(
                 [(1.0, 0.0, 0.0)], (-2.97, 0.0, 0.0),
@@ -252,7 +252,7 @@ class AutoAlign3DTests(unittest.TestCase):
              (10.0, 0.0, 0.0)],
             {0})
         with patch(
-                "assembly_viewer.QApplication.keyboardModifiers",
+                "studio.rendering.asset_viewport.QApplication.keyboardModifiers",
                 return_value=Qt.KeyboardModifier.NoModifier):
             delta = viewport._snap_translation(
                 [(0.0, 0.0, 0.0)], (7.97, 0.0, 0.0),
@@ -277,7 +277,7 @@ class AutoAlign3DTests(unittest.TestCase):
             round(target.value, 6) == 0.0 and target.label == "X origin"
             for target in targets))
         with patch(
-                "assembly_viewer.QApplication.keyboardModifiers",
+                "studio.rendering.asset_viewport.QApplication.keyboardModifiers",
                 return_value=Qt.KeyboardModifier.NoModifier):
             delta = viewport._snap_translation(
                 [(0.3, 0.0, 0.0)], (3.66, 0.0, 0.0),
@@ -298,7 +298,7 @@ class AutoAlign3DTests(unittest.TestCase):
         viewport, _model = _viewport(
             [(0.0, 0.0, 0.0), (1.0, 0.0, 0.0)], {0})
         with patch(
-                "assembly_viewer.QApplication.keyboardModifiers",
+                "studio.rendering.asset_viewport.QApplication.keyboardModifiers",
                 return_value=Qt.KeyboardModifier.NoModifier):
             delta = viewport._snap_translation(
                 [(0.0, 0.0, 0.0)], (0.90, 0.0, 0.0),
@@ -328,7 +328,7 @@ class AutoAlign3DTests(unittest.TestCase):
         with patch.object(
                 viewport, "_prepare_alignment_targets",
                 side_effect=AssertionError("target cache rebuilt")), patch(
-                "assembly_viewer.QApplication.keyboardModifiers",
+                "studio.rendering.asset_viewport.QApplication.keyboardModifiers",
                 return_value=Qt.KeyboardModifier.NoModifier):
             for raw_delta in (10.0, 20.0, 30.0, 40.0):
                 viewport._snap_translation(

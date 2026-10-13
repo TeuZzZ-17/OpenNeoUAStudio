@@ -10,11 +10,10 @@ import pytest
 from PySide6.QtCore import QPointF
 from PySide6.QtWidgets import QApplication, QMainWindow, QWidget
 
-import gpu_widget
-from assembly_viewer import AssetViewport
+from studio.rendering.asset_viewport import AssetViewport
 from map_editor.core.ldf_model import LdfDocument
 import map_editor.render.gpu_viewport as map_gpu
-from render_status import add_renderer_badge
+from studio.rendering.gpu import add_renderer_badge
 
 
 @pytest.fixture(scope="module")
@@ -98,8 +97,8 @@ def _assert_map_state(view, doc, camera_ref, camera, selection, selected):
 
 def test_renderer_badge_clicks_toggle_generic_backend_with_state_intact(app):
     with (
-        patch("gpu_widget._use_opengl_canvas", return_value=True),
-        patch("gpu_widget.Canvas", FakeCanvas),
+        patch("studio.rendering.gpu._use_opengl_canvas", return_value=True),
+        patch("studio.rendering.gpu.Canvas", FakeCanvas),
     ):
         view = AssetViewport()
         window, badge = _window_with_badge(view)
@@ -131,7 +130,7 @@ def test_renderer_badge_clicks_toggle_generic_backend_with_state_intact(app):
 
 
 def test_unavailable_gpu_keeps_generic_state_and_reports_status(app):
-    with patch("gpu_widget._use_opengl_canvas", return_value=False):
+    with patch("studio.rendering.gpu._use_opengl_canvas", return_value=False):
         view = AssetViewport()
         window, badge = _window_with_badge(view)
         family, camera = _set_asset_state(view)
@@ -207,7 +206,7 @@ def test_map_software_picking_uses_the_software_frame(app):
 
 
 def test_badge_switches_active_preview_and_main_view_together(app):
-    with patch("gpu_widget._use_opengl_canvas", return_value=True), patch("gpu_widget.Canvas", FakeCanvas):
+    with patch("studio.rendering.gpu._use_opengl_canvas", return_value=True), patch("studio.rendering.gpu.Canvas", FakeCanvas):
         main = AssetViewport()
         preview = AssetViewport()
         window, badge = _window_with_badge(main)

@@ -37,12 +37,9 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from editor_widgets import (
-    configure_operation_status_bar,
-    install_standard_file_menu_tail,
-)
-from outline_editor import OutlineEditor
-from sklt_parser import (
+from studio.ui.widgets import configure_operation_status_bar, install_standard_file_menu_tail
+from studio.workbench.outline import OutlineEditor
+from studio.formats.sklt import (
     SkltModel,
     SkltParseError,
     create_minimal_sklt_model,
@@ -353,7 +350,7 @@ class WireframeEditorWindow(QMainWindow):
         side_layout.setContentsMargins(10, 8, 8, 8)
         side_layout.setSpacing(6)
 
-        from game_browser import GameFileBrowser
+        from studio.ui.browsers import GameFileBrowser
         self.game_file_browser = GameFileBrowser({".skl", ".sklt"}, self, allow_folder=True)
         self.game_file_browser.selected.connect(self._open_game_file)
         side_layout.addWidget(self.game_file_browser, 4)
@@ -415,7 +412,7 @@ class WireframeEditorWindow(QMainWindow):
         selected_elements_layout.setContentsMargins(8, 6, 8, 8)
         selected_elements_layout.setSpacing(4)
         self.selected_elements_list.setAlternatingRowColors(True)
-        from resource_status import use_standard_list_style
+        from studio.ui.widgets import use_standard_list_style
         use_standard_list_style(self.selected_elements_list)
         self.selected_elements_list.setMinimumHeight(150)
         self.selected_elements_list.setSizePolicy(
@@ -447,7 +444,7 @@ class WireframeEditorWindow(QMainWindow):
         self.warning_status_label.setStyleSheet("color: #efb86c;")
         self.statusBar().addPermanentWidget(self.warning_status_label, 1)
         self.warning_status_label.hide()
-        from render_status import add_renderer_badge
+        from studio.rendering.gpu import add_renderer_badge
         self.renderer_badge = add_renderer_badge(self, self.outline_editor.canvas)
 
         splitter = QSplitter(Qt.Orientation.Horizontal)

@@ -33,14 +33,11 @@ from PySide6.QtWidgets import (
     QVBoxLayout,
 )
 
-from assembly_viewer import (
-    AssetViewport,
-    VIEW_PRESET_ANGLES,
-)
-from asset_family import AssetFamily, FamilyObject, load_asset_family
-from base_parser import BaseObject
-from setbas_reader import decode_skeleton
-from vp_manager import normalize_base_name, normalize_skeleton_name
+from studio.rendering.asset_viewport import AssetViewport, VIEW_PRESET_ANGLES
+from studio.assets.family import AssetFamily, FamilyObject, load_asset_family
+from studio.formats.base_format import BaseObject
+from studio.formats.setbas import decode_skeleton
+from studio.assets.visproto import normalize_skeleton_name
 
 
 _INVALID_FILENAME = re.compile(r'[<>:"/\\|?*\x00-\x1f]+')

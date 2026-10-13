@@ -14,9 +14,9 @@ import zipfile
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 from PySide6.QtWidgets import QApplication
-from assembly_window import AssemblyWindow
-from asset_family_package import validate_family_package
-from onua3d_export import write_onua3d
+from studio.workbench.window import AssemblyWindow
+from studio.assets.family import validate_family_package
+from studio.exchange.onua3d import write_onua3d
 from tests.test_onua3d_export import decode_glb, values
 
 
@@ -81,8 +81,8 @@ class Onua3dRetailTests(unittest.TestCase):
                         obj = window._activate_setbas_base(name + ".base")
                         self.assertIsNotNone(obj)
                         target = Path(temp) / (name + ".onua3d")
-                        with patch("assembly_window.QFileDialog.getSaveFileName", return_value=(str(target), "")), \
-                                patch("assembly_window.QMessageBox.critical") as errors, \
+                        with patch("studio.workbench.window.QFileDialog.getSaveFileName", return_value=(str(target), "")), \
+                                patch("studio.workbench.window.QMessageBox.critical") as errors, \
                                 patch.object(window, "_notify"):
                             window._export_to_blender()
                             errors.assert_not_called()

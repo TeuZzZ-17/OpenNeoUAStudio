@@ -8,16 +8,16 @@ from PySide6.QtCore import QEvent, QPoint, QRectF, Qt
 from PySide6.QtGui import QColor, QImage, QKeyEvent, QPainter
 from PySide6.QtWidgets import QApplication
 
-from assembly_viewer import (
+from studio.rendering.asset_viewport import (
     PASTE_GHOST_OPACITY,
     AssetViewport,
     ViewFace,
     ViewMaterial,
 )
-from base_mapping_editor import MappingIndex
-from base_parser import AmeshBlock, AttsEntry
-from geometry_editor import GeometryEditSession, build_geometry_clipboard
-from sklt_parser import SkltModel
+from studio.assets.mapping import MappingIndex
+from studio.formats.base_format import AmeshBlock, AttsEntry
+from studio.rendering.geometry import GeometryEditSession, build_geometry_clipboard
+from studio.formats.sklt import SkltModel
 
 
 def _fixture():

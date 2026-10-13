@@ -1,3 +1,5 @@
+"""The map viewport widget (CPU path); picks cells, draws overlays and creates the GPU viewport when available."""
+
 from __future__ import annotations
 
 import copy

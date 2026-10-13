@@ -5,14 +5,13 @@ from __future__ import annotations
 from pathlib import Path
 
 from PySide6.QtGui import QAction
-from PySide6.QtCore import Qt, QSignalBlocker
-from PySide6.QtWidgets import QComboBox, QHBoxLayout, QLabel, QPushButton, QMessageBox, QVBoxLayout, QWidget
+from PySide6.QtCore import Qt
+from PySide6.QtWidgets import QHBoxLayout, QPushButton, QMessageBox
 
-from map_editor import bootstrap
 
-from assembly_window import AssemblyWindow, _BAS_KIND_ROLE, _BAS_NAME_ROLE
-from set_tabs import SetBasMixin
-from entity_list import EntityListMixin
+from studio.workbench.window import AssemblyWindow, _BAS_KIND_ROLE, _BAS_NAME_ROLE
+from studio.ui.tabs import SetBasMixin
+from studio.ui.browsers import EntityListMixin
 
 
 WINDOW_TITLE = "OpenNeoUA Studio - Model Editor"
@@ -122,7 +121,7 @@ class ModelEditorWindow(EntityListMixin, SetBasMixin, AssemblyWindow):
             name, show_preview=show_preview, switch_tabs=False)
 
     def reload_game_resources(self):
-        from game_visuals import clear_visual_cache
+        from studio.assets.catalog import clear_visual_cache
         clear_visual_cache()
         self.entity_browser.reload()
         self.entity_browser.enable_state_column()

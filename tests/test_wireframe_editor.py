@@ -11,9 +11,9 @@ from PySide6.QtCore import QEvent, QPoint, QPointF, Qt
 from PySide6.QtGui import QColor, QImage, QMouseEvent, QPainter, QWheelEvent
 from PySide6.QtWidgets import QApplication, QMenu, QMessageBox
 
-from editor_widgets import MODEL_EDIT_SELECTION_RED
-from outline_editor import OutlineCanvas, OutlineEditor
-from sklt_parser import create_minimal_sklt_model
+from studio.rendering.asset_viewport import MODEL_EDIT_SELECTION_RED
+from studio.workbench.outline import OutlineCanvas, OutlineEditor
+from studio.formats.sklt import create_minimal_sklt_model
 from wireframe_editor.window import WireframeEditorWindow
 
 
@@ -277,13 +277,13 @@ class WireframeEditorUiTests(unittest.TestCase):
         self.assertIn("Connection 1 ↔ 2", items)
 
     def test_selection_context_menus_expose_copy(self):
-        source = Path(__file__).resolve().parents[1].joinpath("outline_editor.py").read_text(encoding="utf-8")
+        source = Path(__file__).resolve().parents[1].joinpath("studio/workbench/outline.py").read_text(encoding="utf-8")
         self.assertGreaterEqual(source.count('menu.addAction("Copy")'), 3)
         self.assertIn("selectionContextMenuRequested.emit", source)
 
     def test_wireframe_selected_vertices_use_model_editor_selection_red(self):
         self.assertEqual(MODEL_EDIT_SELECTION_RED, QColor(255, 32, 48))
-        source = Path(__file__).resolve().parents[1].joinpath("outline_editor.py").read_text(encoding="utf-8")
+        source = Path(__file__).resolve().parents[1].joinpath("studio/workbench/outline.py").read_text(encoding="utf-8")
         self.assertIn("painter.setBrush(MODEL_EDIT_SELECTION_RED)", source)
 
     def test_canvas_keeps_view_scale_while_points_move(self):
@@ -393,7 +393,7 @@ class WireframeEditorUiTests(unittest.TestCase):
                 captured["menu"] = self
                 return None
 
-        with patch("outline_editor.QMenu", CapturingMenu):
+        with patch("studio.workbench.outline.QMenu", CapturingMenu):
             handler(*args)
         return captured["menu"]
 

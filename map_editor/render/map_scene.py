@@ -1,3 +1,7 @@
+"""CPU scene of the map: real sectors and slurps with the same heights and layout as the game,
+clipped per sector and rasterised in software.
+"""
+
 from __future__ import annotations
 
 from dataclasses import dataclass, replace
@@ -6,10 +10,18 @@ import math
 import numpy as np
 from PySide6.QtGui import QImage
 
-from .sector_mesh import SectorMeshLibrary
 
-from depth_renderer import CameraPolygon, order_camera_polygons, order_camera_polygons_fast, clip_camera_polygon_near
-from indexed_renderer import IndexedPiece, IndexedRasterizer, retail_source_face_front_facing
+from studio.rendering.depth import (
+    CameraPolygon,
+    order_camera_polygons,
+    order_camera_polygons_fast,
+    clip_camera_polygon_near,
+)
+from studio.rendering.indexed import (
+    IndexedPiece,
+    IndexedRasterizer,
+    retail_source_face_front_facing,
+)
 
 from ..core.ldf_model import DEFAULT_HGT, SECTOR_SIZE
 from .special_scene import special_cells, actor_code, key_building_sector

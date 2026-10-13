@@ -1,3 +1,10 @@
+"""Where the Map Editor finds the game installation and the Studio libraries.
+
+``set_installation`` / ``installation`` hold the chosen game folders for the whole process,
+``game_data_dir`` / ``set_dir`` resolve paths inside them, ``find_ci`` looks files up
+case-insensitively and ``ensure_studio_on_path`` makes the ``studio`` package importable.
+"""
+
 import os
 import sys
 from pathlib import Path
@@ -31,7 +38,7 @@ def game_data_dir() -> Path:
 
 def ensure_studio_on_path() -> Path:
     path = studio_dir()
-    if not getattr(sys, "frozen", False) and not (path / "setbas_reader.py").is_file():
+    if not getattr(sys, "frozen", False) and not (path / "studio" / "formats" / "setbas.py").is_file():
         raise RuntimeError(
             f"OpenNeoUA Studio resource readers not found in {path}.")
     text = str(path)

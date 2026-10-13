@@ -7,30 +7,23 @@ from unittest.mock import patch
 
 from PySide6.QtWidgets import QApplication
 
-from assembly_window import (
-    AssemblyWindow,
-    _BundleCommitError,
-    _commit_verified_files,
-)
-from asset_family import (
-    AssetFamily,
-    FamilyObject,
-    MaterialGroup,
-    load_asset_family,
-)
-from base_mapping_editor import (
+from studio.workbench.window import AssemblyWindow
+from studio.exchange.portable import VerifiedCommitError as _BundleCommitError
+from studio.exchange.portable import commit_verified_files as _commit_verified_files
+from studio.assets.family import AssetFamily, FamilyObject, MaterialGroup, load_asset_family
+from studio.assets.mapping import (
     MappingIndex,
     RepairPlan,
     StructuralBlockState,
     save_model_base_copy,
 )
-from base_parser import AttsEntry, parse_base_bytes
-from geometry_editor import (
+from studio.formats.base_format import AttsEntry, parse_base_bytes
+from studio.rendering.geometry import (
     append_geometry_clipboard,
     build_geometry_clipboard,
     plan_delete_geometry,
 )
-from sklt_parser import (
+from studio.formats.sklt import (
     create_minimal_sklt_model,
     parse_sklt_file,
     save_sklt_with_poo2_pol2_structure,
@@ -160,7 +153,7 @@ class StructuralSaveTests(unittest.TestCase):
                     raise OSError("simulated second-file failure")
                 return real_replace(source, target)
 
-            with patch("assembly_window.os.replace", failing_replace):
+            with patch("studio.workbench.window.os.replace", failing_replace):
                 with self.assertRaises(_BundleCommitError) as raised:
                     _commit_verified_files([
                         (source_a, target_a),

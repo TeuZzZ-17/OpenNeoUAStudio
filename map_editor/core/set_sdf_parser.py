@@ -1,3 +1,5 @@
+"""Parser of a Set's ``.sdf`` file: building models, building states and sector definitions."""
+
 from __future__ import annotations
 
 from dataclasses import dataclass, field
@@ -14,13 +16,7 @@ class SdfBuildingModel:
     effects: tuple[tuple[int, int, int, int], ...]
     comment: str = ""
 
-    @property
-    def collision_sklt(self) -> str:
-        return self.sklt
 
-    @property
-    def hp(self) -> int:
-        return self.numbers[2] if len(self.numbers) > 2 else 0
 
 
 @dataclass

@@ -13,6 +13,59 @@ class SnapshotStudioTests(unittest.TestCase):
     def setUpClass(cls):
         cls.app = QApplication.instance() or QApplication([])
 
+    def test_custom_background_is_opaque_and_snapshot_cursor_is_a_hand(self):
+        from PySide6.QtCore import Qt
+        from PySide6.QtGui import QColor
+        from PySide6.QtTest import QTest
+
+        window = SnapshotStudioWindow()
+        try:
+            window._snapshot_custom_color = QColor(100, 20, 30, 74)
+            self.assertEqual(window._snapshot_background().alpha(), 255)
+            window.viewport.begin_snapshot_mode(window._snapshot_background())
+            self.assertEqual(window.viewport.cursor().shape(), Qt.CursorShape.OpenHandCursor)
+            QTest.mousePress(window.viewport, Qt.MouseButton.LeftButton)
+            self.assertEqual(window.viewport.cursor().shape(), Qt.CursorShape.ClosedHandCursor)
+            QTest.mouseRelease(window.viewport, Qt.MouseButton.LeftButton)
+            self.assertEqual(window.viewport.cursor().shape(), Qt.CursorShape.OpenHandCursor)
+            window._clear_snapshot_color()
+            self.assertIsNone(window._snapshot_background())
+        finally:
+            window.close()
+
+    def test_compatibility_dialog_clears_menu_selection(self):
+        from PySide6.QtCore import QTimer, Qt
+        from PySide6.QtGui import QCursor
+        from PySide6.QtTest import QTest
+        from studio.ui import shell
+
+        window = SnapshotStudioWindow()
+        try:
+            shell.install_workspace_shell(window, "snapshot_studio")
+            window.show()
+            self.app.processEvents()
+            menu = window.menuBar()
+            action = window.studio_compat_action
+            opened = []
+
+            def close_dialog():
+                dialog = self.app.activeModalWidget()
+                opened.append(isinstance(dialog, shell.CompatibilityDialog))
+                QCursor.setPos(window.viewport.mapToGlobal(window.viewport.rect().center()))
+                QTest.mouseRelease(dialog, Qt.MouseButton.LeftButton)
+                dialog.close()
+
+            QTimer.singleShot(50, close_dialog)
+            QTest.mouseClick(menu, Qt.MouseButton.LeftButton,
+                             pos=menu.actionGeometry(action).center())
+            self.assertEqual(opened, [])
+            self.app.processEvents()
+            self.assertEqual(opened, [True])
+            self.assertIsNone(menu.activeAction())
+            self.assertFalse(menu.hasFocus())
+        finally:
+            window.close()
+
     def test_close_bas_archive_uses_shared_action(self):
         window = SnapshotStudioWindow()
         try:
@@ -113,7 +166,8 @@ class SnapshotStudioTests(unittest.TestCase):
             self.assertEqual(window.snapshot_next_frame_button.text(),
                              "Next Frame >>")
             self.assertTrue(hasattr(window, "snapshot_figurine_button"))
-            self.assertTrue(hasattr(window, "snapshot_opacity_spin"))
+            self.assertFalse(hasattr(window, "snapshot_opacity_spin"))
+            self.assertEqual(window.snapshot_clear_color_button.text(), "Remove Color")
         finally:
             window.close()
 

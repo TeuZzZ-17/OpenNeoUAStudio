@@ -3,7 +3,7 @@ from PySide6.QtCore import QPointF, QRect, QSize, Qt, Signal
 from PySide6.QtGui import QColor, QFont, QPen, QTextLayout, QTextOption
 from PySide6.QtWidgets import (QAbstractItemView, QHBoxLayout, QLabel, QListWidget, QLayout, QScrollArea,
                               QPushButton, QStyledItemDelegate, QStyle, QStyleOptionButton)
-from resource_status import LIST_BASE, LIST_SELECTED, LIST_HOVER
+from studio.ui.widgets import LIST_BASE, LIST_SELECTED, LIST_HOVER
 
 DETAIL_ROLE = int(Qt.ItemDataRole.UserRole) + 1
 COLOR_ROLE = DETAIL_ROLE + 1

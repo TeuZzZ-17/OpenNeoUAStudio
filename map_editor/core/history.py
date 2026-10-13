@@ -1,3 +1,5 @@
+"""Snapshot undo/redo of a level (at most 100 steps, like the original Sektor2 editor)."""
+
 from __future__ import annotations
 
 from .ldf_model import MAX_HISTORY, LdfDocument

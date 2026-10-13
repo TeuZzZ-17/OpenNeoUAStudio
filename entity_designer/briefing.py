@@ -6,8 +6,8 @@ import time
 from pathlib import Path
 from functools import lru_cache
 
-from PySide6.QtCore import QPointF, QRectF, QSize, Qt, QSignalBlocker, QTimer
-from PySide6.QtGui import QImage, QPainter, QColor
+from PySide6.QtCore import QRectF, QSize, Qt, QSignalBlocker, QTimer
+from PySide6.QtGui import QImage, QColor
 from PySide6.QtWidgets import (
     QCheckBox, QComboBox, QFileDialog, QGroupBox, QLabel, QPushButton,
     QSizePolicy, QSlider, QSpinBox, QVBoxLayout, QWidget,
@@ -16,7 +16,7 @@ from PySide6.QtWidgets import (
 from map_editor import bootstrap
 from map_editor.core.game_installation import IMAGE_SUFFIXES, save_remembered
 from map_editor.core.resource_catalog import preview_image
-from game_browser import game_files
+from studio.ui.browsers import game_files
 
 
 # The engine frames the briefing model at a camera distance of 7 * radius, so the
@@ -85,7 +85,7 @@ def _search_background(data, folders, stem):
     return candidates[0] if candidates else None
 
 
-from gpu_widget import AcceleratedWidget
+from studio.rendering.gpu import AcceleratedWidget
 
 
 class BriefingPreview(AcceleratedWidget):

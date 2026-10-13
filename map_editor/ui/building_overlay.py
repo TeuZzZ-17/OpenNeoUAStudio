@@ -4,9 +4,8 @@ from __future__ import annotations
 import math
 import time
 
-import numpy as np
 from PySide6.QtCore import QObject, QPointF, Qt, QTimer
-from PySide6.QtGui import QBrush, QColor, QPainter, QPen, QPolygonF, QImage
+from PySide6.QtGui import QBrush, QColor, QImage, QPainter, QPainterPath, QPen, QPolygonF
 from PySide6.QtWidgets import QWidget
 
 from ..core.ldf_model import SECTOR_SIZE

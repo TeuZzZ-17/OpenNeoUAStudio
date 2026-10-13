@@ -2,13 +2,12 @@ import os
 os.environ.setdefault('QT_QPA_PLATFORM', 'offscreen')
 
 import struct
-from pathlib import Path
 from types import SimpleNamespace
 import numpy as np
 import pytest
-from PySide6.QtCore import QPoint, Qt
-from PySide6.QtGui import QIcon, QImage, QPainter, QPixmap
-from PySide6.QtTest import QTest, QSignalSpy
+from PySide6.QtCore import Qt
+from PySide6.QtGui import QImage, QPainter, QPixmap
+from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication, QStyle, QStyleOptionViewItem
 
 from map_editor import bootstrap
@@ -24,7 +23,7 @@ from map_editor.render.terrain_mesh import TerrainMesh
 from map_editor.render.map_scene import scene_polygons, render_scene
 from map_editor.render.camera import IsoCamera
 from map_editor.ui.main_window import MainWindow
-from map_editor.ui.preview_cards import COLOR_ROLE, RESOURCE_ROLE, PreviewList, set_card
+from map_editor.ui.preview_cards import RESOURCE_ROLE, PreviewList, set_card
 from map_editor.ui.tech_panel import TechPanel
 
 

@@ -1,3 +1,5 @@
+"""Isometric camera of the map view (yaw, pitch, zoom) and its world/screen transforms."""
+
 from __future__ import annotations
 
 import math

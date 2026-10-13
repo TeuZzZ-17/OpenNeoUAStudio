@@ -8,21 +8,21 @@ from PySide6.QtCore import QPointF, QRectF
 from PySide6.QtGui import QColor, QImage, QPainter
 from PySide6.QtWidgets import QApplication
 
-from asset_family import AssetFamily, FamilyObject
-from assembly_viewer import (
+from studio.assets.family import AssetFamily, FamilyObject
+from studio.rendering.asset_viewport import (
     AssetViewport,
     ViewFace,
     ViewMaterial,
     resolve_visible_edit_vertices,
 )
-from base_parser import BaseObject
-from depth_renderer import (
+from studio.formats.base_format import BaseObject
+from studio.rendering.depth import (
     CameraPolygon,
     clip_camera_polygon_near,
     order_camera_polygons,
     order_camera_polygons_fast,
 )
-from sklt_parser import SkltModel
+from studio.formats.sklt import SkltModel
 
 
 class DepthRendererTests(unittest.TestCase):
@@ -106,7 +106,7 @@ class DepthRendererTests(unittest.TestCase):
         viewport = self._editable_triangle_viewport()
         try:
             with patch(
-                    "assembly_viewer.order_camera_polygons",
+                    "studio.rendering.asset_viewport.order_camera_polygons",
                     wraps=order_camera_polygons) as exact:
                 self._render(viewport)
                 self.assertEqual(exact.call_count, 1)
@@ -164,7 +164,7 @@ class DepthRendererTests(unittest.TestCase):
         try:
             self.assertTrue(viewport.enter_edit_mode("root"))
             with patch(
-                    "assembly_viewer.resolve_visible_edit_vertices",
+                    "studio.rendering.asset_viewport.resolve_visible_edit_vertices",
                     wraps=resolve_visible_edit_vertices) as resolve:
                 self._render(viewport)
                 self._render(viewport)

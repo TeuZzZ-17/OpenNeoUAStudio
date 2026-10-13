@@ -10,8 +10,8 @@ from OpenGL import GL as gl
 from PySide6.QtGui import QOffscreenSurface, QOpenGLContext
 from PySide6.QtWidgets import QApplication
 
-from gpu_indexed_backend import StudioGpuRenderer
-from indexed_renderer import IndexedPiece, IndexedRasterizer, IndexedSurface, IndexedTables
+from studio.rendering.indexed import StudioGpuRenderer
+from studio.rendering.indexed import IndexedPiece, IndexedRasterizer, IndexedSurface, IndexedTables
 from map_editor.render.gpu_viewport import gl_format
 
 

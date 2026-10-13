@@ -12,15 +12,15 @@ from PySide6.QtWidgets import QApplication, QMenu, QTreeWidgetItem
 from PySide6.QtCore import Qt
 import pytest
 
-from anm_parser import export_anm_bytes, parse_anm_bytes
-from asset_family import AssetFamily, FamilyObject
-from base_mapping_editor import MappingEditError
-from base_parser import BaseObject
-from assembly_window import _BAS_KIND_ROLE, AssemblyWindow
+from studio.formats.animation import export_anm_bytes, parse_anm_bytes
+from studio.assets.family import AssetFamily, FamilyObject
+from studio.assets.mapping import MappingEditError
+from studio.formats.base_format import BaseObject
+from studio.workbench.window import _BAS_KIND_ROLE, AssemblyWindow
 from model_editor.genesis_generator import generate_genesis
 from model_editor import genesis_reference
 from model_editor.window import ModelEditorWindow
-from sklt_parser import create_minimal_sklt_model
+from studio.formats.sklt import create_minimal_sklt_model
 
 
 def model():
@@ -72,7 +72,7 @@ def test_invalid_polygon_refuses_before_resources_or_materials_change():
 
 
 def test_existing_fx_atlas_case_is_kept_and_animation_exports_that_name():
-    from ilbm_parser import parse_ilbm_bytes
+    from studio.formats.images import parse_ilbm_bytes
     family, obj = model()
     atlas = parse_ilbm_bytes(genesis_reference.FX_TEXTURE)
     family.textures["fx2.ilbm"] = atlas
@@ -195,7 +195,7 @@ def test_real_family_genesis_undo_redo_and_export_roundtrip(app):
     archive = Path(r"C:\Users\proto\Desktop\ProgettoUA\UA Rising\Data\Sets\Set3\Objects\SET.BAS")
     if not archive.exists():
         pytest.skip("Local game reference is unavailable")
-    from asset_family import load_asset_family
+    from studio.assets.family import load_asset_family
     family = load_asset_family(archive, setbas=archive)
     obj = next(o for o in family.all_objects()
                if o.base_object.skeleton_name.casefold().endswith("/vp_hubi5.sklt"))

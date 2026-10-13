@@ -4,7 +4,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 import pytest
-from PySide6.QtCore import Qt, QPoint
+from PySide6.QtCore import QPoint
 from PySide6.QtWidgets import QApplication, QLabel, QTreeWidget
 from map_editor import bootstrap
 from map_editor.core.game_installation import GameInstallation
@@ -31,7 +31,7 @@ def test_snapshot_set_change_preserves_page_and_model_starts_on_shared_set(app, 
         loaded.append(Path(path))
         self._raise_setbas_tab()
     try:
-        with patch('assembly_window.AssemblyWindow.open_setbas', fake_open):
+        with patch('studio.workbench.window.AssemblyWindow.open_setbas', fake_open):
             snapshot = SnapshotStudioWindow()
             snapshot._right_tabs.setCurrentWidget(snapshot._entity_panel)
             snapshot._set_combo.setCurrentIndex(snapshot._set_combo.findData(4))
@@ -40,7 +40,7 @@ def test_snapshot_set_change_preserves_page_and_model_starts_on_shared_set(app, 
             model = ModelEditorWindow()
             assert model._set_combo.currentData() == 4
             assert loaded[before:] == [tmp_path / 'Set4/Objects/SET.BAS']
-            from game_browser import GameObjectBrowser
+            from studio.ui.browsers import GameObjectBrowser
             browser = GameObjectBrowser()
             assert browser.set_number == 4
             browser.close()
@@ -51,8 +51,8 @@ def test_snapshot_set_change_preserves_page_and_model_starts_on_shared_set(app, 
 
 
 def test_entity_context_menu_only_copies_and_never_opens_on_right_click(app):
-    from game_browser import GameObjectBrowser
-    from game_object_catalog import GameObject
+    from studio.ui.browsers import GameObjectBrowser
+    from studio.assets.catalog import GameObject
     browser = GameObjectBrowser()
     obj = GameObject('weapon', 7, Path('Weapons.cfg'), {'name': 'Rocket'})
     browser.objects = [obj]
@@ -73,8 +73,8 @@ def test_entity_context_menu_only_copies_and_never_opens_on_right_click(app):
 
 def test_entity_designer_dirty_script_row_clears_after_save_or_reset(app, tmp_path):
     from entity_designer.editor import CollisionEditorWindow
-    from game_object_catalog import GameObject
-    from resource_status import MODIFIED_ROLE
+    from studio.assets.catalog import GameObject
+    from studio.ui.widgets import MODIFIED_ROLE
     window = CollisionEditorWindow()
     try:
         obj = GameObject('weapon', 7, tmp_path / 'Weapons.cfg', {'name': 'Rocket'})
@@ -93,8 +93,8 @@ def test_entity_designer_dirty_script_row_clears_after_save_or_reset(app, tmp_pa
 
 
 def test_modified_selected_row_uses_dark_background_instead_of_purple(app):
-    from game_browser import configure_resource_tree
-    from resource_status import mark_resource_modified
+    from studio.ui.browsers import configure_resource_tree
+    from studio.ui.widgets import mark_resource_modified
     from PySide6.QtWidgets import QTreeWidgetItem
     tree = QTreeWidget()
     tree.setHeaderLabels(['Resource'])
@@ -109,18 +109,19 @@ def test_modified_selected_row_uses_dark_background_instead_of_purple(app):
     app.processEvents()
     rectangle = tree.visualItemRect(item)
     pixel = tree.viewport().grab().toImage().pixelColor(QPoint(rectangle.right() - 15, rectangle.center().y()))
-    assert max(pixel.red(), pixel.green(), pixel.blue()) < 60
+    # The selection color of the standard list style (dark blue), not the purple of the stylesheet.
+    assert pixel.red() < 60 and pixel.blue() > pixel.red()
     tree.close()
 
 
 def test_actual_import_bas_archive_command_displays_loading_feedback(app):
-    from assembly_window import AssemblyWindow
+    from studio.workbench.window import AssemblyWindow
     window = AssemblyWindow()
     try:
         observed = []
         def load(path):
             observed.append(any(label.isVisible() and 'Loading BAS' in label.text() for label in window.findChildren(QLabel)))
-        with patch('assembly_window.choose_bas_archive', return_value='SET.BAS'), patch.object(window, 'open_setbas', side_effect=load):
+        with patch('studio.workbench.window.choose_bas_archive', return_value='SET.BAS'), patch.object(window, 'open_setbas', side_effect=load):
             window.open_bas_archive_dialog()
         assert observed == [True]
     finally:

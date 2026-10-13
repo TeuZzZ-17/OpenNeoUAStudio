@@ -4,13 +4,9 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from base_parser import parse_base_file
-from setbas_export import (
-    SetBasExportError,
-    export_runtime_loose,
-    validate_runtime_loose_layout,
-)
-from setbas_reader import read_setbas
+from studio.formats.base_format import parse_base_file
+from studio.assets.setbas_export import SetBasExportError, export_runtime_loose, validate_runtime_loose_layout
+from studio.formats.setbas import read_setbas
 
 
 def _chunk(tag: bytes, payload: bytes) -> bytes:
@@ -133,7 +129,7 @@ class RuntimeLooseExportTests(unittest.TestCase):
             self.assertEqual(
                 (loose / "ILBM" / "MTL.ILBM").read_bytes(), _vbmp())
             self.assertEqual((loose / "ANM" / "FLASH.ANM").read_bytes(), _vanm())
-            from vp_manager import load_visproto
+            from studio.assets.visproto import load_visproto
             visproto = load_visproto(
                 loose / "VISPROTO.LST", require_terminator=True)
             self.assertEqual(
@@ -211,7 +207,7 @@ class RuntimeLooseExportTests(unittest.TestCase):
             self.assertEqual(
                 sorted(row["status"] for row in base_rows),
                 ["exported", "skipped_identical"])
-            from vp_manager import load_visproto
+            from studio.assets.visproto import load_visproto
             table = load_visproto(
                 set_root / "Loose" / "VISPROTO.LST",
                 require_terminator=True)
@@ -300,7 +296,7 @@ class RuntimeLooseExportTests(unittest.TestCase):
             source_before = setbas.read_bytes()
 
             with patch(
-                    "setbas_export._resolver_check",
+                    "studio.assets.setbas_export._resolver_check",
                     return_value="simulated final resolver failure"):
                 with self.assertRaises(SetBasExportError):
                     export_runtime_loose(

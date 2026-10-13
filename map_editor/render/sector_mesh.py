@@ -1,3 +1,5 @@
+"""Faces of every sector type and building, in sector-local coordinates (``SectorMeshLibrary``)."""
+
 from __future__ import annotations
 
 from dataclasses import dataclass, field, replace
@@ -39,7 +41,7 @@ class SectorMeshLibrary:
     """
 
     def __init__(self, assets: SetAssets):
-        import assembly_viewer as av
+        import studio.rendering.asset_viewport as av
         self.assets = assets
         self.resolver = SectorResolver(assets.sdf)
         self._loader = av.AssetViewport()
@@ -57,7 +59,7 @@ class SectorMeshLibrary:
         self.vehicles = load_vehicle_files(scripts)
         self.scripts = scripts
         self._external_surfaces = {}
-        from vp_manager import parse_visproto
+        from studio.assets.visproto import parse_visproto
         directory = bootstrap.find_ci(assets.set_dir, 'scripts')
         path = bootstrap.find_ci(directory, 'visproto.lst') if directory else None
         self._vp_names = ([entry.base_name for entry in parse_visproto(path).entries]
@@ -77,7 +79,7 @@ class SectorMeshLibrary:
         """Read the SDF collision SKLT, independent of the visible BASE faces."""
         key = name.casefold()
         if key not in self._collision_skeletons:
-            from sklt_parser import parse_sklt_bytes
+            from studio.formats.sklt import parse_sklt_bytes
             skeleton = None
             path = self.assets.set_dir
             for part in name.replace('\\', '/').split('/'):
@@ -211,7 +213,7 @@ class SectorMeshLibrary:
                 path = self._visual_path(base)
                 if path is not None:
                     # Exact paths win over same-named files elsewhere in a set.
-                    from asset_family import load_asset_family
+                    from studio.assets.family import load_asset_family
                     obj = load_asset_family(path, [self.assets.set_dir], {}, self.assets.archive)
                     faces = self._family_faces(obj.root_object, obj)
                 else:
@@ -254,8 +256,8 @@ class SectorMeshLibrary:
 
     def _three_ds_faces(self, path):
         from PIL import Image, ImageChops
-        from assembly_viewer import ViewFace
-        from indexed_renderer import IndexedSurface
+        from studio.rendering.asset_viewport import ViewFace
+        from studio.rendering.indexed import IndexedSurface
         from ..core.three_ds import read_3ds, Material3DS
         meshes, materials = read_3ds(path)
         palette = np.asarray(self.tables.palette, dtype=np.int32)
@@ -305,7 +307,7 @@ class SectorMeshLibrary:
     def _family_faces(self, root, family):
         if root is None:
             return None
-        from indexed_family_adapter import IndexedFamilyAdapter
+        from studio.rendering.indexed import IndexedFamilyAdapter
         adapter = IndexedFamilyAdapter(family)
         self._loader._faces = []
         material_index = {}

@@ -3,7 +3,6 @@
 from PySide6.QtCore import Signal
 from PySide6.QtWidgets import (
     QGridLayout,
-    QPushButton,
     QSizePolicy,
     QStackedWidget,
     QVBoxLayout,
@@ -12,7 +11,7 @@ from PySide6.QtWidgets import (
 
 # Colors and button style are shared with every Studio workspace palette;
 # TAB_COLORS stays importable from here for the Map Editor.
-from studio_tabs import TAB_COLORS, _PaletteButton, palette_columns
+from studio.ui.tabs import TAB_COLORS, _PaletteButton, palette_columns
 
 
 class PaletteTabs(QWidget):

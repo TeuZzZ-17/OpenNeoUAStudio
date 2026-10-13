@@ -1,6 +1,6 @@
 import unittest
 
-from screen_label_layout import _segment_intersects_rect, choose_screen_label_rect
+from studio.rendering.gizmo import _segment_intersects_rect, choose_screen_label_rect
 
 
 class ScreenLabelLayoutTests(unittest.TestCase):

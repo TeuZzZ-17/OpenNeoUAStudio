@@ -1,10 +1,8 @@
 """Run these Qt integration tests on Windows with PySide6 installed."""
 import os
 os.environ.setdefault('QT_QPA_PLATFORM', 'offscreen')
-import copy
 import pytest
 pytest.importorskip('PySide6')
-from PySide6.QtCore import Qt
 from PySide6.QtWidgets import QApplication
 
 from map_editor.core.ldf_model import LdfDocument, ensure_host_defaults

@@ -14,10 +14,11 @@ import unittest
 from unittest.mock import patch
 import zipfile
 
-from assembly_window import AssemblyWindow
-from asset_family import rebuild_materials
-from onua3d_export import MANIFEST, build_scene, write_onua3d
-from onua3d_identity import ATTRIBUTE, canonical_vertex_positions, vertex_identity_mapping
+from studio.workbench.window import AssemblyWindow
+from studio.assets.family import rebuild_materials
+from studio.exchange.portable import MANIFEST
+from studio.exchange.onua3d import write_onua3d
+from studio.exchange.portable import ATTRIBUTE, canonical_vertex_positions, vertex_identity_mapping
 from tests import test_onua3d_export as fixtures
 from tests import test_onua3d_identity as identity_fixtures
 
@@ -44,7 +45,7 @@ def triangles_and_copies(scene):
 
 def reorder_scene(scene):
     """Reindex nodes and reverse primitive/vertex arrays, preserving references."""
-    from onua3d_export import _Glb
+    from studio.exchange.onua3d import _Glb
     doc, binary = fixtures.decode_glb(scene)
     g = _Glb(); g.doc = copy.deepcopy(doc); g.binary = bytearray(binary)
     remap = {i: len(doc["nodes"]) - 1 - i for i in range(len(doc["nodes"]))}
@@ -152,8 +153,8 @@ class BlenderIdentityTests(unittest.TestCase):
             window.open_setbas(str(source))
             self.assertIsNotNone(window._activate_setbas_base("VP_HUBI4.base"))
             target = self.root / "VP_HUBI4.onua3d"
-            with patch("assembly_window.QFileDialog.getSaveFileName", return_value=(str(target), "")), \
-                    patch("assembly_window.QMessageBox.critical") as errors:
+            with patch("studio.workbench.window.QFileDialog.getSaveFileName", return_value=(str(target), "")), \
+                    patch("studio.workbench.window.QMessageBox.critical") as errors:
                 window._export_to_blender(); errors.assert_not_called()
             with zipfile.ZipFile(target) as archive:
                 self._roundtrip(archive.read("scene.glb"), json.loads(archive.read(MANIFEST)), "VP_HUBI4")

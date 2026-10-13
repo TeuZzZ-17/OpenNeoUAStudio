@@ -13,20 +13,13 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 from PySide6.QtWidgets import QApplication
 
-from assembly_window import AssemblyWindow
-from asset_family import load_asset_family
-from asset_family_package import (
-    MANIFEST_NAME,
-    AssetFamilyPackageError,
-    PackageEntry,
-    package_relative_path,
-    validate_family_package,
-    write_package_manifest,
-)
-from sklt_parser import (
-    create_minimal_sklt_model,
-    save_sklt_with_poo2_pol2_structure,
-)
+from studio.workbench.window import AssemblyWindow
+from studio.assets.family import load_asset_family
+from studio.exchange.portable import MANIFEST_NAME
+from studio.exchange.portable import AssetFamilyPackageError
+from studio.assets.family import PackageEntry, validate_family_package, write_package_manifest
+from studio.exchange.portable import package_relative_path
+from studio.formats.sklt import create_minimal_sklt_model, save_sklt_with_poo2_pol2_structure
 
 
 def _chunk(tag: bytes, payload: bytes) -> bytes:
@@ -254,7 +247,7 @@ class CompleteAssetFamilyPackageTests(unittest.TestCase):
             try:
                 window._set_family(family)
                 with patch.object(window, "_notify"), \
-                        patch("assembly_window.QMessageBox.critical") as critical:
+                        patch("studio.workbench.window.QMessageBox.critical") as critical:
                     exported = window._write_model_files(
                         "root", family, family.root_object,
                         output / "Skeleton" / "TEST.SKLT",
@@ -290,7 +283,7 @@ class CompleteAssetFamilyPackageTests(unittest.TestCase):
             try:
                 window._set_family(family)
                 with patch.object(window, "_notify"), \
-                        patch("assembly_window.QMessageBox.critical") as critical:
+                        patch("studio.workbench.window.QMessageBox.critical") as critical:
                     exported = window._write_model_files(
                         "root", family, obj,
                         output / "Skeleton" / "TEST.SKLT",
@@ -331,9 +324,9 @@ class CompleteAssetFamilyPackageTests(unittest.TestCase):
             try:
                 window._set_family(family)
                 with patch.object(window, "_notify"), patch(
-                        "assembly_window.QMessageBox.critical") as critical, \
+                        "studio.workbench.window.QMessageBox.critical") as critical, \
                         patch(
-                            "assembly_window.load_asset_family",
+                            "studio.workbench.window.load_asset_family",
                             side_effect=fail_destination):
                     exported = window._write_model_files(
                         "root", family, family.root_object,

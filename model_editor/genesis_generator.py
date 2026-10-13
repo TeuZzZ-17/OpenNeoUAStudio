@@ -6,10 +6,10 @@ import copy
 import math
 import struct
 
-from anm_parser import parse_anm_bytes
-from base_mapping_editor import MappingEditError, _wrap_ades_objt, rewrite_block_texture_template
-from base_parser import AttsEntry, parse_base_bytes
-from ilbm_parser import parse_ilbm_bytes
+from studio.formats.animation import parse_anm_bytes
+from studio.assets.mapping import MappingEditError, _wrap_ades_objt, rewrite_block_texture_template
+from studio.formats.base_format import AttsEntry, parse_base_bytes
+from studio.formats.images import parse_ilbm_bytes
 from . import genesis_reference as reference
 
 
@@ -135,8 +135,8 @@ def generate_genesis(family, obj):
         raise MappingEditError("This model contains no polygon surfaces.")
     # FX2 belongs to the active SET palette. Prefer that SET's existing atlas.
     if not any(name.casefold() == "fx2.ilbm" for name in family.textures):
-        from asset_family import _load_texture, SETBAS_OVERRIDE_PREFIX
-        from asset_resolver import AssetResolver
+        from studio.assets.family import _load_texture, SETBAS_OVERRIDE_PREFIX
+        from studio.exchange.portable import AssetResolver
         staged = copy.copy(family)
         staged.textures = dict(family.textures)
         staged.texture_refs = {}

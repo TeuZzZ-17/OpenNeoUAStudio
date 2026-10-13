@@ -7,16 +7,24 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 from PySide6.QtWidgets import QApplication
 from PySide6.QtTest import QTest
-from PySide6.QtCore import Qt, QSignalBlocker
+from PySide6.QtCore import QSignalBlocker
 
 from map_editor import bootstrap
 from map_editor.core.game_installation import GameInstallation
-from game_object_catalog import load_game_objects
-from game_browser import GameObjectBrowser, game_files
-from entity_designer.editor import (
-    CollisionProject, CollisionSphere, CollisionEditorWindow, VEHICLE, WEAPON, LEGACY,
-    find_script_blocks, import_briefing_size_block, export_collision_text,
-    plan_script_update, build_editable_overwrite_preview, apply_editable_overwrite_preview,
+from studio.assets.catalog import load_game_objects
+from studio.ui.browsers import GameObjectBrowser, game_files
+from entity_designer.script_model import (
+    CollisionProject,
+    CollisionSphere,
+    VEHICLE,
+    WEAPON,
+    LEGACY,
+    find_script_blocks,
+    import_briefing_size_block,
+    export_collision_text,
+    plan_script_update,
+    build_editable_overwrite_preview,
+    apply_editable_overwrite_preview,
 )
 from entity_designer.briefing import find_background, briefing_layout
 
@@ -89,7 +97,7 @@ def test_wireframe_inventory_includes_overrides_and_excludes_builds(tmp_path):
 
 def test_resource_path_typing_does_not_trigger_tool_shortcuts():
     app = QApplication.instance() or QApplication([])
-    from startup_selector import StartupToolSelector
+    from studio.ui.shell import StartupToolSelector
     window = StartupToolSelector()
     window.show()
     window.resources_panel.root.setFocus()
@@ -103,9 +111,9 @@ def test_resource_path_typing_does_not_trigger_tool_shortcuts():
 def test_cancelled_entity_switch_restores_model_browser_and_state(tmp_path):
     app = QApplication.instance() or QApplication([])
     from model_editor import ModelEditorWindow
-    from game_object_catalog import GameObject
-    from game_visuals import VisualChoice
-    from game_browser import GAME_OBJECT_ROLE
+    from studio.assets.catalog import GameObject
+    from studio.assets.catalog import VisualChoice
+    from studio.ui.browsers import GAME_OBJECT_ROLE
     window = ModelEditorWindow()
     old = GameObject("vehicle", 1, tmp_path / "old.cfg", {"name": "Old"})
     new = GameObject("vehicle", 2, tmp_path / "new.cfg", {"name": "New"})
@@ -117,7 +125,7 @@ def test_cancelled_entity_switch_restores_model_browser_and_state(tmp_path):
         window.entity_state.addItem("Normal", VisualChoice("Normal", tmp_path / "old.base"))
         window.entity_state.addItem("Dead", VisualChoice("Dead", tmp_path / "dead.base"))
         window.entity_state.setCurrentIndex(1)
-    with patch("game_visuals.visual_choices", return_value=[VisualChoice("Normal", tmp_path / "new.base")]), \
+    with patch("studio.assets.catalog.visual_choices", return_value=[VisualChoice("Normal", tmp_path / "new.base")]), \
             patch.object(window, "_confirm_discard_geometry", return_value=False):
         window._entity_selected(new)
     assert window._current_entity is old
@@ -128,7 +136,7 @@ def test_cancelled_entity_switch_restores_model_browser_and_state(tmp_path):
 
 def test_game_file_browser_folder_mode_and_header(tmp_path):
     app = QApplication.instance() or QApplication([])
-    from game_browser import GameFileBrowser
+    from studio.ui.browsers import GameFileBrowser
     folder = tmp_path / "pick"
     (folder / "sub").mkdir(parents=True)
     (folder / "a.skl").touch()
@@ -139,7 +147,7 @@ def test_game_file_browser_folder_mode_and_header(tmp_path):
     assert plain.folder_button is None
     browser = GameFileBrowser({".skl", ".sklt"}, allow_folder=True)
     assert not browser.game_button.isEnabled()
-    with patch("game_browser.QFileDialog.getExistingDirectory", return_value=str(folder)):
+    with patch("studio.ui.browsers.QFileDialog.getExistingDirectory", return_value=str(folder)):
         browser.folder_button.click()
     labels = {browser.tree.topLevelItem(i).text(0) for i in range(browser.tree.topLevelItemCount())}
     assert labels == {"a.skl", str(Path("sub") / "b.SKLT")}
@@ -188,8 +196,8 @@ def test_model_editor_set_selector_is_shared_and_bas_follows_set(tmp_path):
     bootstrap.set_installation(install)
     try:
         with patch("model_editor.window.ModelEditorWindow.open_setbas", fake_open), \
-                patch("game_object_catalog.load_game_objects", return_value=[]), \
-                patch("game_browser.load_game_objects", return_value=[]):
+                patch("studio.assets.catalog.load_game_objects", return_value=[]), \
+                patch("studio.ui.browsers.load_game_objects", return_value=[]):
             window = ModelEditorWindow()
             tabs = window._resources_tabs
             assert [tabs.tabText(i) for i in range(tabs.count())][:3] == [
@@ -247,11 +255,11 @@ def test_briefing_size_is_an_integer_and_larger_means_larger():
 
 
 def test_entity_designer_list_has_no_buildings(tmp_path):
-    from game_object_catalog import GameObject
+    from studio.assets.catalog import GameObject
     app = QApplication.instance() or QApplication([])
     objects = [GameObject(kind, number, tmp_path / "s.cfg", {"name": kind})
                for number, kind in enumerate(("vehicle", "weapon", "building"), 1)]
-    with patch("game_browser.load_game_objects", return_value=objects), \
+    with patch("studio.ui.browsers.load_game_objects", return_value=objects), \
             patch.object(bootstrap, "installation",
                          return_value=SimpleNamespace(available_sets=lambda: [1])):
         browser = GameObjectBrowser(kinds=("vehicle", "weapon"))

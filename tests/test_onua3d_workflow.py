@@ -9,11 +9,11 @@ import unittest
 from unittest.mock import patch
 import zipfile
 
-from assembly_window import AssemblyWindow
-from asset_family_package import validate_family_package
-from onua3d_export import write_onua3d
-from onua3d_import import import_onua3d
-from onua3d_package import read_onua3d
+from studio.workbench.window import AssemblyWindow
+from studio.assets.family import validate_family_package
+from studio.exchange.onua3d import write_onua3d
+from studio.exchange.onua3d import import_onua3d
+from studio.exchange.portable import read_onua3d
 from tests import test_onua3d_export as fixtures
 from tools.build_blender_onua3d import build_addon
 
@@ -72,9 +72,9 @@ class Onua3dWorkflowTests(unittest.TestCase):
         destination = output/'native_edited'; destination.mkdir()
         window = AssemblyWindow()
         try:
-            with patch('assembly_window.QFileDialog.getOpenFileName', return_value=(result['edited'], '')), \
-                 patch('assembly_window.QFileDialog.getExistingDirectory', return_value=str(destination)), \
-                 patch('assembly_window.QMessageBox.critical') as errors:
+            with patch('studio.workbench.window.QFileDialog.getOpenFileName', return_value=(result['edited'], '')), \
+                 patch('studio.workbench.window.QFileDialog.getExistingDirectory', return_value=str(destination)), \
+                 patch('studio.workbench.window.QMessageBox.critical') as errors:
                 window._import_onua3d()
                 errors.assert_not_called()
             self.assertIsNotNone(window._family)
@@ -125,8 +125,8 @@ class Onua3dWorkflowTests(unittest.TestCase):
             window.open_setbas(str(source))
             self.assertIsNotNone(window._activate_setbas_base('VP_HUBI4.base'))
             package = self.root/'VP_HUBI4.onua3d'
-            with patch('assembly_window.QFileDialog.getSaveFileName', return_value=(str(package), '')), \
-                 patch('assembly_window.QMessageBox.critical') as errors:
+            with patch('studio.workbench.window.QFileDialog.getSaveFileName', return_value=(str(package), '')), \
+                 patch('studio.workbench.window.QMessageBox.critical') as errors:
                 window._export_to_blender(); errors.assert_not_called()
             self.verify_workflow(package, 'VP_HUBI4', retail=True)
         finally:

@@ -4,7 +4,7 @@ from PySide6.QtCore import QPoint, QPointF, Qt
 from PySide6.QtGui import QWheelEvent
 from PySide6.QtWidgets import QApplication
 
-from uv_editor_widget import UVEditorWidget, UVLoop
+from studio.ui.uv_editor import UVEditorWidget, UVLoop
 
 
 class UVEditorToolsTests(unittest.TestCase):

@@ -5,8 +5,9 @@ import unittest
 from unittest.mock import patch
 import zipfile
 
-from onua3d_export import MANIFEST, write_onua3d
-from onua3d_package import read_onua3d, repack_onua3d, Onua3dImportError
+from studio.exchange.portable import MANIFEST
+from studio.exchange.onua3d import write_onua3d
+from studio.exchange.portable import read_onua3d, repack_onua3d, Onua3dImportError
 from tests import test_onua3d_export as fixture
 from tests.test_onua3d_import import move_ids, edit_glb
 from tools.build_blender_onua3d import build_addon
@@ -77,7 +78,7 @@ class Onua3dPackageTests(unittest.TestCase):
         def validate(path):
             if path == self.target: raise Onua3dImportError('injected readback failure')
             return read_onua3d(path)
-        with patch('onua3d_package.read_onua3d', side_effect=validate):
+        with patch('studio.exchange.portable.read_onua3d', side_effect=validate):
             with self.assertRaisesRegex(OSError, 'injected readback failure'):
                 repack_onua3d(self.source_package, self.members['scene.glb'], self.target, source_sha256=self.sha)
         self.assertFalse(self.target.exists())

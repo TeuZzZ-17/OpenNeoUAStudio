@@ -101,7 +101,7 @@ def create_workspace(tool: str, startup_path: str | None = None):
     else:
         return None
 
-    from studio_shell import install_workspace_shell
+    from studio.ui.shell import install_workspace_shell
     install_workspace_shell(window, tool)
     window.showMaximized()
     _active_window = window
@@ -137,7 +137,7 @@ def main() -> int:
         return _run_map_editor(args)
 
     from PySide6.QtWidgets import QApplication
-    from startup_selector import StartupToolSelector
+    from studio.ui.shell import StartupToolSelector
 
     app = QApplication(sys.argv)
     app.setApplicationName(APP_TITLE)

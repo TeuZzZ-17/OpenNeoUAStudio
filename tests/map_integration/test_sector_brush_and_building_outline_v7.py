@@ -96,7 +96,6 @@ def test_edit_menu_has_no_delete_selected_entry():
 
 def test_mouse_drag_paints_existing_sectors_instead_of_grabbing_them():
     """Exercise the real mouse handlers without starting the Qt renderer."""
-    import sys
     from types import SimpleNamespace as Obj
 
     source = ROOT / 'render' / 'map_viewport.py'
