@@ -100,7 +100,11 @@ class FxCodeDrawer(QFrame):
         self.index = -1
         self._expanded = False
         self._reveal = 0.0
-        self._sync_pending = False
+        # Placement waits for the layout to settle. A timer of the drawer is
+        # dropped with it, so nothing runs after the window is gone.
+        self._sync_timer = QTimer(self)
+        self._sync_timer.setSingleShot(True)
+        self._sync_timer.timeout.connect(self._sync)
         self.setObjectName("FxCodeDrawer")
         self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
         window_color = host.palette().color(QPalette.ColorRole.Window).name()
@@ -119,12 +123,6 @@ class FxCodeDrawer(QFrame):
         self.code = ScriptCodeEditor(self)
         layout.addWidget(self.code, 1)
         buttons = QHBoxLayout()
-        self.play_button = QPushButton("Play Preview")
-        self.play_button.clicked.connect(panel.play_button.click)
-        panel.play_button.toggled.connect(
-            lambda playing: self.play_button.setText("Pause Preview" if playing else "Play Preview"))
-        buttons.addWidget(self.play_button)
-        buttons.addStretch(1)
         self.revert_button = QPushButton("Revert Effect")
         self.revert_button.clicked.connect(self._revert)
         buttons.addWidget(self.revert_button)
@@ -134,9 +132,13 @@ class FxCodeDrawer(QFrame):
         self.save_all_button = QPushButton("Save All Effects")
         self.save_all_button.clicked.connect(lambda: self._save(all_effects=True))
         buttons.addWidget(self.save_all_button)
-        close = QPushButton("Close")
-        close.clicked.connect(lambda: self.set_expanded(False))
-        buttons.addWidget(close)
+        buttons.addStretch(1)
+        # Same Play / Pause and speed as the transport bar. The tab closes the editor.
+        buttons.addWidget(QLabel("Speed"))
+        self.speed_combo = panel.create_speed_combo(self)
+        buttons.addWidget(self.speed_combo)
+        self.play_button = panel.create_play_button(self)
+        buttons.addWidget(self.play_button)
         layout.addLayout(buttons)
 
         self.tab = FxDrawerTab(host)
@@ -183,12 +185,10 @@ class FxCodeDrawer(QFrame):
         return False
 
     def schedule_sync(self) -> None:
-        if not self._sync_pending:
-            self._sync_pending = True
-            QTimer.singleShot(0, self._sync)
+        if not self._sync_timer.isActive():
+            self._sync_timer.start(0)
 
     def _sync(self) -> None:
-        self._sync_pending = False
         host = self.parentWidget()
         anchor = self.anchor
         shown = host is not None and anchor.isVisible()
@@ -311,7 +311,6 @@ class FxCodeDrawer(QFrame):
                   if len(session.sources) > self.index else "Preview draft")
         self.source_label.setText(source + ("\n" + session.source_error if session.source_error else ""))
         self.revert_button.setEnabled(session.is_dirty(self.index))
-        self.play_button.setText("Pause Preview" if self.panel.is_playing() else "Play Preview")
 
     def _save(self, _checked=False, *, all_effects=False):
         self.timer.stop()
