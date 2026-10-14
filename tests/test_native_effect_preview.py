@@ -282,10 +282,9 @@ def test_smoke_does_not_move_or_resize_the_model_it_comes_from(app, tmp_path):
         assert viewport._owner_bounds["root"] == (0.0, 0.0, 0.0, 100.0, 100.0, 0.0)
         assert viewport._center[1] == pytest.approx(50.0)
         assert viewport._scale == pytest.approx(2.0 / 100.0)
-        # The ground is the lowest point of everything, so nothing hangs below it.
-        lowest = max(point[1] for point in viewport._framing_points()
-                     + viewport._particle_bounds_points)
-        assert viewport._effect_ground_y == pytest.approx(lowest) == pytest.approx(100.0)
+        # The ground is the bottom of the model, whatever the smoke does.
+        lowest = max(point[1] for point in viewport._framing_points())
+        assert viewport._ground_y == pytest.approx(lowest) == pytest.approx(100.0)
     finally:
         viewport.close()
 
@@ -301,7 +300,7 @@ def test_effect_only_vp_is_framed_and_grounded_on_its_particles(app, tmp_path):
         high = max(point[1] for point in envelope)
         assert viewport._center[1] == pytest.approx((low + high) / 2)
         # The explosion rises from the grid: no particle is ever below it.
-        assert viewport._effect_ground_y == pytest.approx(high)
-        assert all(point[1] <= viewport._effect_ground_y + 1e-9 for point in envelope)
+        assert viewport._ground_y == pytest.approx(high)
+        assert all(point[1] <= viewport._ground_y + 1e-9 for point in envelope)
     finally:
         viewport.close()
