@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 from dataclasses import asdict, dataclass, field
+import copy
 import hashlib
 import json
 from pathlib import Path
@@ -21,7 +22,9 @@ from studio.exchange.portable import (
     ResolvedFile,
 )
 from studio.formats.animation import parse_anm_file, VanmData
-from studio.formats.base_format import AmeshBlock, BaseAsset, BaseObject, parse_base_file
+from studio.formats.base_format import (
+    AmeshBlock, AttsEntry, BaseAsset, BaseObject, TextureRef, parse_base_file,
+)
 from studio.formats.images import IlbmImage, Palette, parse_ilbm_file, parse_pal_file
 from studio.formats.setbas import (
     decode_animation,
@@ -353,6 +356,62 @@ def _build_materials(fam_obj: FamilyObject, family: AssetFamily) -> None:
 
         fam_obj.materials.append(group)
         family.warnings.extend(f"{label}: {w}" for w in group.warnings)
+
+
+def family_object_has_animation(family: AssetFamily, obj: FamilyObject) -> bool:
+    """Use the same animation availability rule in both resource browsers."""
+    for child in obj.iter_tree():
+        for block in child.base_object.ades:
+            a = block.particle_attributes
+            if (a is not None and a.birth_rate > 0 and a.lifetime > 0
+                    and a.context_stop_generation > a.context_start_generation
+                    and any(s.texture for s in block.particle_stages)):
+                return True
+            if block.class_id == "particle.class":
+                continue
+            for stage in block.iter_visual_blocks():
+                texture = stage.texture
+                animation = (family.animations.get(texture.name)
+                             if texture and texture.kind == "bmpanim" else None)
+                if animation is not None and animation.frames:
+                    return True
+    return False
+
+
+def animation_preview_family(family: AssetFamily, name: str) -> AssetFamily:
+    """Show an unassigned VANM on a preview-only quad using its own UVs."""
+    animation = family.animations[name]
+    if (not animation.frames or not animation.texcoord_groups
+            or any(not 0 <= frame.frame_id < len(animation.bitmap_names)
+                   or not 0 <= frame.texcoords_id < len(animation.texcoord_groups)
+                   for frame in animation.frames)):
+        raise ValueError(f"{name}: animation has no complete frames or UV groups.")
+    preview = copy.copy(family)
+    preview.base_path = None
+    preview.base_asset = None
+    preview.warnings = []
+    preview.textured_diagnostics = []
+    preview.checks = []
+    texture = TextureRef(class_id="bmpanim.class", kind="bmpanim", name=name)
+    block = AmeshBlock(
+        class_id="area.class", polflags=0x7A,
+        texture=texture, atts=[AttsEntry(0, 0, 0, 0, 0)])
+    uv = animation.texcoord_groups[animation.frames[0].texcoords_id]
+    if len(uv) not in (3, 4):
+        raise ValueError(f"{name}: standalone preview requires 3 or 4 UV corners.")
+    width = max((u for u, _ in uv), default=255) - min(
+        (u for u, _ in uv), default=0)
+    height = max((v for _, v in uv), default=255) - min(
+        (v for _, v in uv), default=0)
+    aspect = max(1, width) / max(1, height)
+    skeleton = SkltModel(source_name=name)
+    skeleton.points = [(-aspect, -1.0, 0.0), (-aspect, 1.0, 0.0),
+                       (aspect, 1.0, 0.0), (aspect, -1.0, 0.0)]
+    skeleton.polygons = [list(range(len(uv)))]
+    obj = FamilyObject(BaseObject(name=name, ades=[block]), skeleton=skeleton)
+    preview.root_object = obj
+    _build_materials(obj, preview)
+    return preview
 
 
 def rebuild_materials(fam_obj: FamilyObject, family: AssetFamily) -> None:
