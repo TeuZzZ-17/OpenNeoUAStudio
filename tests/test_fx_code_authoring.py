@@ -259,3 +259,149 @@ def test_editor_keys_do_not_trigger_window_shortcuts(app):
         assert drawer.code.toPlainText().count(chr(10)) == lines + 1
     finally:
         window.close()
+
+
+# -- deleting effects and the cross-check that every change reaches the script ----------------
+
+THREE = "\n".join(
+    "begin_fx\n    trigger = destroyed\n    mode = visual\n    vp_model = %d\n    duration = %d\nend" % (vp, ms)
+    for vp, ms in ((129, 400), (130, 500), (131, 600)))
+
+
+def _three_effects(tmp_path, newline="\n"):
+    text = ("; keep me\nnew_vehicle 1\nname = A\n" + THREE + "\nend\n\nnew_vehicle 2\nenergy = 9\nend\n")
+    path = tmp_path / "vehicles.cfg"
+    path.write_bytes(text.replace("\n", newline).encode("latin-1"))
+    document, block = _document(text)
+    return path, text, document, block
+
+
+def test_session_delete_removes_only_the_chosen_effects_and_keeps_drafts(tmp_path):
+    for newline in ("\n", "\r\n"):
+        path, text, document, block = _three_effects(tmp_path, newline)
+        session = FxTextSession(document, fx.CONTEXT_VEHICLE, [(path, 0, block.end_line)])
+        assert not session.source_error
+        # An unsaved edit of the last effect must survive the deletion of the first.
+        session.set_draft(2, session.drafts[2].replace("600", "650"))
+        assert session.delete([0]) == {path}
+        written = path.read_bytes().decode("latin-1").replace("\r\n", "\n")
+        assert written == text.replace(effect_text(document.items[0]) + "\n", "", 1)
+        assert "vp_model = 129" not in written and "energy = 9" in written and "; keep me" in written
+        assert len(session.originals) == 2 and session.drafts[1].count("650") == 1
+        assert session.is_dirty(1) and not session.is_dirty(0)
+        # Later saves and deletes still land on the right lines.
+        session.save([1])
+        assert "duration = 650" in path.read_text(encoding="latin-1")
+        session.delete([0])
+        final = path.read_bytes().decode("latin-1").replace("\r\n", "\n")
+        assert "vp_model = 130" not in final and "vp_model = 131" in final
+        session.delete([0])
+        assert "begin_fx" not in path.read_text(encoding="latin-1")
+        assert "name = A" in path.read_text(encoding="latin-1") and not session.originals
+        assert path.read_bytes().count(b"\r\n") == (path.read_bytes().count(b"\n") if newline == "\r\n" else 0)
+
+
+def test_session_delete_refuses_files_changed_outside_and_detects_wrong_spans(tmp_path):
+    path, text, document, block = _three_effects(tmp_path)
+    session = FxTextSession(document, fx.CONTEXT_VEHICLE, [(path, 0, block.end_line)])
+    path.write_text(text + "; external\n", encoding="latin-1")
+    with pytest.raises(ValueError, match="changed outside"):
+        session.delete([1])
+    assert path.read_text(encoding="latin-1") == text + "; external\n"
+    # The read-back check notices an effect that is not where the session believes.
+    path.write_text(text, encoding="latin-1")
+    fresh = FxTextSession(document, fx.CONTEXT_VEHICLE, [(path, 0, block.end_line)])
+    fresh.sources[1].first += 1
+    fresh.sources[1].last += 1
+    with pytest.raises(RuntimeError, match="does not contain the effects"):
+        fresh._check_spans(fresh.sources, fresh.originals)
+
+
+def test_delete_button_and_menu_remove_effects_from_the_script_and_the_preview(app, tmp_path):
+    path, text, document, block = _three_effects(tmp_path)
+    panel = DestructionFxPanel()
+    window = _in_wide_window(panel, app)
+    try:
+        panel.set_context(fx.CONTEXT_VEHICLE, document)
+        panel.set_script_sources([(path, 0, block.end_line)])
+        view = panel.effects_view
+        assert not view.delete_button.isEnabled()
+        # The list keeps its room: the five buttons are small.
+        assert view.delete_button.height() >= 2 * view.show_all_button.height() - 4
+        panel.hide_all_button.click()
+        panel.effects_list.setCurrentRow(1)
+        panel.edit_effect_code(2)
+        _open_drawer(panel, app)
+        panel.effects_list.setCurrentRow(1)
+        assert view.delete_button.isEnabled()
+        # Cancel: nothing changes.
+        with patch.object(QMessageBox, "question", return_value=QMessageBox.StandardButton.Cancel):
+            view.delete_button.click()
+        assert path.read_text(encoding="latin-1") == text and len(panel.document.items) == 3
+        # Yes: effect 1 leaves the file and the list; the others keep their marks and editor.
+        panel.show_all_button.click()
+        panel.set_hidden_items({2})
+        with patch.object(QMessageBox, "question", return_value=QMessageBox.StandardButton.Yes):
+            view.delete_button.click()
+        written = path.read_text(encoding="latin-1")
+        assert "vp_model = 130" not in written and written.count("begin_fx") == 2
+        assert panel.effects_list.count() == 2 and len(panel.document.items) == 2
+        assert panel.hidden_items == {1}
+        assert panel.code_drawer.index == 1 and "vp_model = 131" in panel.code_drawer.code.toPlainText()
+        assert not panel.has_unsaved_text
+        # The editor and the effect list stay in step with the file afterwards.
+        panel.code_drawer.code.setPlainText(panel.code_drawer.code.toPlainText().replace("600", "620"))
+        QTest.qWait(300)
+        assert QTest.keyClick(panel.code_drawer.code.editor, Qt.Key.Key_S,
+                              Qt.KeyboardModifier.ControlModifier) is None
+        assert "duration = 620" in path.read_text(encoding="latin-1")
+        # Menu: the deleted effect that is open in the editor folds the editor away.
+        panel.effects_list.setCurrentRow(1)
+        menu = panel._create_effects_context_menu()
+        delete = next(action for action in menu.actions() if action.text() == "Delete Effect")
+        assert delete.isEnabled()
+        with patch.object(QMessageBox, "question", return_value=QMessageBox.StandardButton.Yes):
+            delete.trigger()
+        assert path.read_text(encoding="latin-1").count("begin_fx") == 1
+        assert panel.code_drawer.index == -1 and not panel.code_drawer.expanded
+        assert "energy = 9" in path.read_text(encoding="latin-1")
+    finally:
+        window.close()
+
+
+def test_delete_without_a_script_source_changes_nothing(app):
+    document, _ = _document("new_vehicle 1\n" + THREE + "\nend\n")
+    panel = DestructionFxPanel()
+    try:
+        panel.set_context(fx.CONTEXT_VEHICLE, document)
+        with patch.object(QMessageBox, "warning") as warned, \
+                patch.object(QMessageBox, "question") as asked:
+            assert not panel.delete_effects([0])
+        assert warned.called and not asked.called and len(panel.document.items) == 3
+    finally:
+        panel.close()
+
+
+def test_editor_play_and_speed_controls_follow_the_transport_bar(app):
+    document, _ = _document("new_vehicle 1\n" + THREE + "\nend\n")
+    panel = DestructionFxPanel()
+    window = _in_wide_window(panel, app)
+    try:
+        panel.set_context(fx.CONTEXT_VEHICLE, document)
+        panel.edit_effect_code(0)
+        drawer = _open_drawer(panel, app)
+        play, speed = drawer.play_button, drawer.speed_combo
+        # Same look as the transport bar: icon button, no text, and no Close button.
+        assert play.text() == "" and not play.icon().isNull()
+        assert play.styleSheet() == panel.play_button.styleSheet()
+        assert not any(b.text() == "Close" for b in drawer.findChildren(type(play)))
+        play.click()
+        assert panel.play_button.isChecked() and play.isChecked()
+        panel.play_button.setChecked(False)
+        assert not play.isChecked()
+        speed.setCurrentIndex(speed.findData(0.25))
+        assert panel.speed == 0.25 and panel.speed_combo.currentData() == 0.25
+        panel.speed_combo.setCurrentIndex(panel.speed_combo.findData(2.0))
+        assert speed.currentData() == 2.0
+    finally:
+        window.close()

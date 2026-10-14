@@ -23,7 +23,6 @@ from PySide6.QtGui import (
 )
 from PySide6.QtWidgets import (
     QCheckBox,
-    QComboBox,
     QHBoxLayout,
     QLabel,
     QLineEdit,
@@ -38,39 +37,13 @@ from PySide6.QtWidgets import (
 )
 
 
-_THEMES = {
-    "Studio Dark": {
-        "background": "#20242a", "foreground": "#e2e6eb",
-        "gutter": "#181b20", "line_number": "#77818d",
-        "current_line": "#2a3038", "selection": "#40566b",
-        "error": "#542c32", "key": "#82c9ff",
-        "function": "#e5bc70", "number": "#b6dc8b",
-        "string": "#d99a88", "comment": "#83918a",
-    },
-    "Dark+": {
-        "background": "#1e1e1e", "foreground": "#d4d4d4",
-        "gutter": "#252526", "line_number": "#858585",
-        "current_line": "#2a2d2e", "selection": "#264f78",
-        "error": "#5b292e", "key": "#9cdcfe",
-        "function": "#dcdcaa", "number": "#b5cea8",
-        "string": "#ce9178", "comment": "#6a9955",
-    },
-    "Light": {
-        "background": "#ffffff", "foreground": "#242424",
-        "gutter": "#f1f2f3", "line_number": "#777777",
-        "current_line": "#f3f6f8", "selection": "#b9d7f2",
-        "error": "#f7dadd", "key": "#005f9e",
-        "function": "#795e26", "number": "#098658",
-        "string": "#a31515", "comment": "#56814b",
-    },
-    "Monokai": {
-        "background": "#272822", "foreground": "#f8f8f2",
-        "gutter": "#20211c", "line_number": "#909184",
-        "current_line": "#34352f", "selection": "#49483e",
-        "error": "#63373d", "key": "#66d9ef",
-        "function": "#a6e22e", "number": "#ae81ff",
-        "string": "#e6db74", "comment": "#8a8d7a",
-    },
+_THEME = {
+    "background": "#20242a", "foreground": "#e2e6eb",
+    "gutter": "#181b20", "line_number": "#77818d",
+    "current_line": "#2a3038", "selection": "#40566b",
+    "error": "#542c32", "key": "#82c9ff",
+    "function": "#e5bc70", "number": "#b6dc8b",
+    "string": "#d99a88", "comment": "#83918a",
 }
 
 _KEY_PATTERN = re.compile(r"^[ \t]*([A-Za-z_][A-Za-z0-9_.-]*)(?=\s*=)")
@@ -129,10 +102,13 @@ class _ScriptHighlighter(QSyntaxHighlighter):
         comment_start = self._comment_start(text)
         code = text if comment_start < 0 else text[:comment_start]
 
-        match = _KEY_PATTERN.search(code)
-        if match:
-            self._set_format(text, match.start(1), match.end(1), "key")
+        key = _KEY_PATTERN.search(code)
+        if key:
+            self._set_format(text, key.start(1), key.end(1), "key")
         for match in _FUNCTION_PATTERN.finditer(code):
+            # end_size, begin_x ... before "=" are keys, not block keywords.
+            if key and match.start() == key.start(1):
+                continue
             self._set_format(text, match.start(), match.end(), "function")
         for pattern, name in ((_RANGE_PATTERN, "number"),
                               (_NUMBER_PATTERN, "number"),
@@ -262,7 +238,7 @@ class ScriptCodeEditor(QWidget):
         super().__init__(parent)
         self.setSizePolicy(QSizePolicy.Policy.Expanding,
                            QSizePolicy.Policy.Expanding)
-        self._theme = _THEMES["Studio Dark"]
+        self._theme = _THEME
         self._zoom = 10
         self._error_message = ""
         self._error_line: int | None = None
@@ -292,13 +268,6 @@ class ScriptCodeEditor(QWidget):
         self.save_button.clicked.connect(self.saveRequested.emit)
         toolbar.addWidget(self.save_button)
         toolbar.addStretch(1)
-        toolbar.addWidget(QLabel("Theme:"))
-        self.theme_combo = QComboBox()
-        self.theme_combo.addItems(_THEMES)
-        self.theme_combo.setCurrentText("Studio Dark")
-        self.theme_combo.setMaximumWidth(140)
-        self.theme_combo.currentTextChanged.connect(self.setTheme)
-        toolbar.addWidget(self.theme_combo)
         root.addLayout(toolbar)
 
         self.search_row = QWidget(self)
@@ -389,17 +358,6 @@ class ScriptCodeEditor(QWidget):
 
     def toPlainText(self) -> str:
         return self.editor.toPlainText()
-
-    def setTheme(self, name: str) -> None:
-        if name not in _THEMES:
-            return
-        self._theme = _THEMES[name]
-        self._apply_theme()
-        self._update_cursor_state()
-        self.editor.line_number_area.update()
-
-    def theme(self) -> str:
-        return self.theme_combo.currentText()
 
     def set_error(self, message: str, line: int | None = None) -> None:
         self._error_message = str(message or "")
