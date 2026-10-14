@@ -21,7 +21,7 @@ from studio.formats.animation import ParticleAttributes, VanmData, VanmFrame
 from studio.formats.base_format import AmeshBlock, BaseObject, TextureRef
 from studio.formats.images import IlbmImage
 from studio.formats.sklt import SkltModel
-from studio.rendering.asset_viewport import AssetViewport
+from studio.rendering.asset_viewport import PREVIEW_SCALE, AssetViewport
 from tests.synthetic_indexed_profile import attach_synthetic_indexed_profile
 
 
@@ -281,7 +281,7 @@ def test_smoke_does_not_move_or_resize_the_model_it_comes_from(app, tmp_path):
         # The model alone decides the bounds and the framing center.
         assert viewport._owner_bounds["root"] == (0.0, 0.0, 0.0, 100.0, 100.0, 0.0)
         assert viewport._center[1] == pytest.approx(50.0)
-        assert viewport._scale == pytest.approx(2.0 / 100.0)
+        assert viewport._scale == pytest.approx(PREVIEW_SCALE)
         # The ground is the bottom of the model, whatever the smoke does.
         lowest = max(point[1] for point in viewport._framing_points())
         assert viewport._ground_y == pytest.approx(lowest) == pytest.approx(100.0)
@@ -302,5 +302,20 @@ def test_effect_only_vp_is_framed_and_grounded_on_its_particles(app, tmp_path):
         # The explosion rises from the grid: no particle is ever below it.
         assert viewport._ground_y == pytest.approx(high)
         assert all(point[1] <= viewport._ground_y + 1e-9 for point in envelope)
+    finally:
+        viewport.close()
+
+
+def test_every_preview_uses_the_same_scale_whatever_the_size(app, tmp_path):
+    """A small effect and a model keep their real proportions between VPs."""
+    viewport = AssetViewport()
+    try:
+        viewport.load_family(_smoke_family(tmp_path, with_mesh=True))
+        with_model = viewport._scale
+        viewport.load_family(_smoke_family(tmp_path, with_mesh=False))
+        effect_only = viewport._scale
+        viewport.frame_all()
+        framed_all = viewport._scale
+        assert with_model == effect_only == framed_all == PREVIEW_SCALE
     finally:
         viewport.close()
