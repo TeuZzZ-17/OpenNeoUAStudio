@@ -18,7 +18,7 @@ from pathlib import Path
 
 from PySide6.QtCore import QPointF, QRectF, Qt
 from PySide6.QtGui import (
-    QColor, QImage, QPainter, QPen, QPolygonF, QTransform,
+    QBrush, QColor, QImage, QPainter, QPen, QPolygonF, QRadialGradient, QTransform,
 )
 
 from studio.rendering.asset_viewport import AssetViewport, ViewFace, _apply, _rotation_matrix
@@ -671,6 +671,7 @@ class FxPreviewViewportMixin:
         layers: dict[tuple, list[ViewFace]] = {}
         markers = []
         decals = []
+        smokes = []
         # External models are grouped by tint, fade and blending so each group
         # is one layer: (helper id, rgb, opacity step, additive) -> items.
         externals: dict[tuple, tuple[AssetViewport, list]] = {}
@@ -678,6 +679,9 @@ class FxPreviewViewportMixin:
         for item in self._fx_items:
             if item.kind == "ground_decal":
                 decals.append(item)
+                continue
+            if item.kind == "decal_smoke":
+                smokes.append(item)
                 continue
             helper = self._fx_external_for(item)
             if helper is not None:
@@ -752,6 +756,7 @@ class FxPreviewViewportMixin:
         finally:
             self._faces = saved_faces
             self._anim_states = saved_anim
+        self._draw_fx_smoke(painter, target, camera, smokes)
         self._draw_fx_particles(painter, target, camera)
         self._draw_fx_boxes(painter, target, camera)
         self._draw_fx_markers(painter, target, camera, markers)
@@ -850,6 +855,41 @@ class FxPreviewViewportMixin:
                 painter.setBrush(QColor(tint[0], tint[1], tint[2], 70))
                 painter.drawPolygon(polygon)
             painter.restore()
+
+    def _draw_fx_smoke(self, painter, target, camera, puffs) -> None:
+        """Ground decal smoke: soft camera-facing discs, far to near.
+
+        Same falloff as the engine's disc mesh (opaque centre, transparent rim).
+        ``item.scale[0]`` is the puff diameter and ``item.alpha`` its opacity.
+        """
+
+        if not puffs:
+            return
+        scale = float(camera["scale"])
+        drawn = []
+        for item in puffs:
+            center = self._camera_vertex(item.position, camera)
+            if self._camera_point_is_projectable(center):
+                drawn.append((center[2], item, center))
+        drawn.sort(key=lambda entry: entry[0])
+        painter.save()
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+        painter.setPen(Qt.PenStyle.NoPen)
+        for _depth, item, center in drawn:
+            middle = self._project(center, target, camera)
+            edge = self._project((center[0] + item.scale[0] * 0.5 * scale,
+                                  center[1], center[2]), target, camera)
+            half = math.hypot(edge.x() - middle.x(), edge.y() - middle.y())
+            if half < 0.3 or half > target.width() * 4:
+                continue
+            red, green, blue = item.tint[:3]
+            opacity = max(0.0, min(1.0, item.alpha))
+            gradient = QRadialGradient(middle, half)
+            for position, weight in ((0.0, 1.0), (0.4, 0.85), (0.7, 0.45), (1.0, 0.0)):
+                gradient.setColorAt(position, QColor(red, green, blue, int(round(255 * opacity * weight))))
+            painter.setBrush(QBrush(gradient))
+            painter.drawEllipse(middle, half, half)
+        painter.restore()
 
     def _draw_fx_boxes(self, painter, target, camera) -> None:
         if not self._fx_boxes:
