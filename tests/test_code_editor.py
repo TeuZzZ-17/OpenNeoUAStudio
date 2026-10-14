@@ -161,12 +161,9 @@ class ScriptCodeEditorTests(unittest.TestCase):
             self.assertEqual(color_at(3, 9), "#d99a88")
             self.assertEqual(color_at(3, 12), "#83918a")
 
-            studio_dark = widget.editor.styleSheet()
-            widget.theme_combo.setCurrentText("Light")
-            self.assertEqual(widget.theme(), "Light")
-            self.assertNotEqual(widget.editor.styleSheet(), studio_dark)
-            self.assertIn("background-color: #ffffff", widget.editor.styleSheet())
-            self.assertEqual(color_at(0, 0), "#795e26")
+            # The editor has one look, the Studio theme: no theme selector.
+            self.assertFalse(hasattr(widget, "theme_combo"))
+            self.assertIn("background-color: #20242a", widget.editor.styleSheet())
             self.assertGreater(widget.editor.line_number_area.width(), 0)
             self.assertEqual(widget.sizePolicy().horizontalPolicy(),
                              QSizePolicy.Policy.Expanding)
@@ -179,6 +176,24 @@ class ScriptCodeEditorTests(unittest.TestCase):
             widget.clear_error()
             self.assertIn("Line", widget.status_label.text())
             self.assertEqual(len(widget.editor.extraSelections()), 1)
+        finally:
+            widget.close()
+
+    def test_keys_starting_with_end_or_begin_keep_the_key_color(self):
+        widget = self.make_editor("begin_fx\n    end_size = 0.0\n    start_size = 1.0\nend")
+        try:
+            document = widget.editor.document()
+
+            def color_at(line, column):
+                for item in document.findBlockByNumber(line).layout().formats():
+                    if item.start <= column < item.start + item.length:
+                        return item.format.foreground().color().name()
+                self.fail(f"No syntax color at line {line + 1}, col {column + 1}")
+
+            self.assertEqual(color_at(0, 0), "#e5bc70")      # begin_fx: keyword
+            self.assertEqual(color_at(1, 5), "#82c9ff")      # end_size: key
+            self.assertEqual(color_at(2, 5), "#82c9ff")      # start_size: key
+            self.assertEqual(color_at(3, 0), "#e5bc70")      # end: keyword
         finally:
             widget.close()
 
