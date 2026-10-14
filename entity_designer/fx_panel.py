@@ -345,10 +345,9 @@ class FxEffectsList(QListWidget):
 class FxEffectsView(QWidget):
     """Effects list with its four visibility buttons.
 
-    The tab's Effects box and the code dialog each hold one view: a click on
-    an effect's text opens its code, a click on its checkbox shows or hides
-    it. Which effects are hidden lives in the panel, so every view always
-    shows the same checkboxes.
+    A click on an effect's text opens its code in the editor that slides out
+    of the box, a click on its checkbox shows or hides it. Which effects are
+    hidden lives in the panel.
     """
 
     HINT = "Click text to edit code · Checkboxes show/hide · Ctrl/Shift select rows"
@@ -578,7 +577,7 @@ class DestructionFxPanel(QWidget):
         self.context = fx.CONTEXT_VEHICLE
         self.document = fx.FxDocument()
         self.text_session = FxTextSession(self.document, self.context)
-        self.code_dialog = None
+        self.code_drawer = None
         self._pending_code_index = None
         self.catalog: dict[int, fx.LegacyFxVehicle] = {}
         self.weapons: dict[int, fx.WeaponDef] = {}
@@ -682,8 +681,7 @@ class DestructionFxPanel(QWidget):
         layout.addWidget(self.reload_note)
         self.effects_view = FxEffectsView(
             self, menu_source=lambda: self._create_effects_context_menu())
-        self._effect_views = [self.effects_view]
-        # The tab's own list and buttons stay reachable under their old names.
+        # The list and its buttons stay reachable under their old names.
         self.effects_list = self.effects_view.list
         self._visibility_actions = self.effects_view.actions
         self.show_all_button = self.effects_view.show_all_button
@@ -794,12 +792,10 @@ class DestructionFxPanel(QWidget):
         self.context = context
         self.document = document
         self.text_session = FxTextSession(document, context)
-        if self.code_dialog is not None:
-            self._pending_code_index = (self.code_dialog.index
-                                        if keep_view and self.code_dialog.isVisible() else None)
-            self.code_dialog.timer.stop()
-            self.code_dialog.index = -1
-            self.code_dialog.hide()
+        if self.code_drawer is not None:
+            self._pending_code_index = (self.code_drawer.index
+                                        if keep_view and self.code_drawer.expanded else None)
+            self.code_drawer.reset()
         self.catalog = dict(catalog or {})
         self.weapons = dict(weapons or {})
         self.debuffs = dict(debuffs or {})
@@ -881,12 +877,9 @@ class DestructionFxPanel(QWidget):
     # -- effects list --------------------------------------------------------------------
 
     def _fill_list(self, **options) -> None:
-        for view in self._effect_views:
-            view.fill(**options)
-
-    def add_effects_view(self, view) -> None:
-        """Register another list (the code dialog's) so it follows every change."""
-        self._effect_views.append(view)
+        self.effects_view.fill(**options)
+        if self.code_drawer is not None:
+            self.code_drawer.schedule_sync()
 
     def _create_effects_context_menu(self):
         return self.effects_view.create_menu()
@@ -909,10 +902,18 @@ class DestructionFxPanel(QWidget):
     def edit_effect_code(self, index) -> None:
         if index is None or not 0 <= index < len(self.document.items):
             return
-        if self.code_dialog is None:
-            from entity_designer.fx_code_dialog import FxCodeDialog
-            self.code_dialog = FxCodeDialog(self)
-        self.code_dialog.load_effect(index)
+        self._ensure_code_drawer().load_effect(index)
+
+    def _ensure_code_drawer(self):
+        """Create the editor and its tab once the panel sits in its final window."""
+        if self.code_drawer is None:
+            from entity_designer.fx_code_drawer import FxCodeDrawer
+            self.code_drawer = FxCodeDrawer(self, self.window(), self.effects_box)
+        return self.code_drawer
+
+    def showEvent(self, event) -> None:  # noqa: N802
+        super().showEvent(event)
+        self._ensure_code_drawer()
 
     def apply_text_item(self, index, item) -> None:
         if effect_text(self.document.items[index]) != effect_text(item):
@@ -926,8 +927,7 @@ class DestructionFxPanel(QWidget):
         self.reload_note.setText(
             "Unsaved effect code · preview updates live · Ctrl+S to save" if self.has_unsaved_text
             else "Auto reload enabled · source files are watched")
-        for view in self._effect_views:
-            view.mark_dirty()
+        self.effects_view.mark_dirty()
         self.draftStateChanged.emit()
 
     def confirm_text_changes(self) -> bool:
@@ -951,15 +951,13 @@ class DestructionFxPanel(QWidget):
                 self.document.items[index] = self.text_session.revert(index)
             self._fill_list()
             self._rebuild_simulation()
-        if self.code_dialog is not None:
-            self.code_dialog.timer.stop()
-            self.code_dialog.index = -1
-            self.code_dialog.hide()
+        if self.code_drawer is not None:
+            self.code_drawer.reset()
         self.update_text_status()
         return True
 
     def set_hidden_items(self, hidden) -> None:
-        """Single place where effect visibility changes, whichever view edited it."""
+        """Single place where effect visibility changes."""
         if hidden != self.hidden_items:
             self.hidden_items = set(hidden)
             self._sync_checks()
@@ -982,8 +980,7 @@ class DestructionFxPanel(QWidget):
         self.set_hidden_items(set())
 
     def _sync_checks(self) -> None:
-        for view in self._effect_views:
-            view.sync_checks()
+        self.effects_view.sync_checks()
 
     # -- simulation and clock -----------------------------------------------------------------
 
@@ -1046,9 +1043,9 @@ class DestructionFxPanel(QWidget):
         return QIcon(pixmap)
 
     def _play_toggled(self, playing: bool) -> None:
-        if playing and self.code_dialog is not None and self.code_dialog.timer.isActive():
-            self.code_dialog.timer.stop()
-            self.code_dialog._apply()
+        if playing and self.code_drawer is not None and self.code_drawer.timer.isActive():
+            self.code_drawer.timer.stop()
+            self.code_drawer._apply()
         self.play_button.setIcon(self._transport_icon(
             QStyle.StandardPixmap.SP_MediaPause if playing else QStyle.StandardPixmap.SP_MediaPlay))
         self.play_button.setToolTip("Pause destruction preview" if playing else "Play destruction preview")

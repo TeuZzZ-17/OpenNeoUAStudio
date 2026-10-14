@@ -50,6 +50,8 @@ class FxAuthoringTests(unittest.TestCase):
                 window.show()
                 self.app.processEvents()
                 view = window.viewport
+                # The fixture is a few units wide; enlarge it so the click can hit it.
+                view._scale = 1.0
                 QTest.qWait(100)
                 view.repaint()
                 self.app.processEvents()

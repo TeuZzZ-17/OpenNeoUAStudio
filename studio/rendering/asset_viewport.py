@@ -68,6 +68,12 @@ VIEW_PRESET_ANGLES = {
 VIEW_PRESETS = ("Current View", *VIEW_PRESET_ANGLES)
 
 
+# One scale for every preview, so a tank, a missile and an explosion keep their
+# real proportions when you switch VP. 240 model units fill the view; larger
+# objects are reached by zooming out, smaller ones simply stay small.
+PREVIEW_REFERENCE_EXTENT = 240.0
+PREVIEW_SCALE = 2.0 / PREVIEW_REFERENCE_EXTENT
+
 _PICK_CAMERA_DISTANCE = 4.0
 
 
@@ -715,12 +721,10 @@ class AssetViewport(AcceleratedWidget):
                     (min(ys) + max(ys)) / 2,
                     (min(zs) + max(zs)) / 2,
                 )
-                extent = max(max(xs) - min(xs), max(ys) - min(ys),
-                             max(zs) - min(zs), 1e-6)
-                self._scale = 2.0 / extent
+                self._scale = PREVIEW_SCALE
             else:
                 self._center = (0.0, 0.0, 0.0)
-                self._scale = 1.0
+                self._scale = PREVIEW_SCALE
         if preserved_camera is not None:
             # A geometry/material refresh of the same visible object is not a
             # camera command. Keep its exact framing even if a moved/copied
@@ -815,8 +819,7 @@ class AssetViewport(AcceleratedWidget):
             return
         x0, y0, z0, x1, y1, z1 = bounds
         self._center = ((x0 + x1) / 2, (y0 + y1) / 2, (z0 + z1) / 2)
-        extent = max(x1 - x0, y1 - y0, z1 - z0, 1e-6)
-        self._scale = 2.0 / extent
+        self._scale = PREVIEW_SCALE
         self._zoom = 1.0
         self._pan = QPointF(0.0, 0.0)
         self.update()
@@ -831,9 +834,7 @@ class AssetViewport(AcceleratedWidget):
         self._center = ((min(xs0) + max(xs1)) / 2,
                         (min(ys0) + max(ys1)) / 2,
                         (min(zs0) + max(zs1)) / 2)
-        extent = max(max(xs1) - min(xs0), max(ys1) - min(ys0),
-                     max(zs1) - min(zs0), 1e-6)
-        self._scale = 2.0 / extent
+        self._scale = PREVIEW_SCALE
         self._zoom = 1.0
         self._pan = QPointF(0.0, 0.0)
         self.update()
