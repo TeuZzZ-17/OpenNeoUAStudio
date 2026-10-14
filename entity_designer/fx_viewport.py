@@ -255,7 +255,7 @@ class FxPreviewViewportMixin:
         if len(base_faces) != len(self._faces):
             return templates
         for face, vertices in zip(self._faces, base_faces):
-            if face.owner in fx_owners:
+            if face.owner in fx_owners and face.billboard_center is None:
                 templates.setdefault(face.owner, []).append((face, vertices))
         return templates
 
@@ -663,7 +663,8 @@ class FxPreviewViewportMixin:
         unit_owners = self._fx_unit_owners
         unit_faces = [
             face for face in saved_faces
-            if (face.owner in unit_owners if unit_owners
+            if face.billboard_center is None
+            and (face.owner in unit_owners if unit_owners
                 else face.owner not in fx_owners)
         ] if self._fx_show_unit and self._collision_show_model else []
 

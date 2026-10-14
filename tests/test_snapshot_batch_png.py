@@ -23,6 +23,8 @@ class BatchPngTests(unittest.TestCase):
             progress=Mock(), status_label=Mock(), _root=root,
             _load_source=Mock(), skip_existing_check=Mock(),
             _batch_viewport=Mock(), _target_size=QSize(8, 8), _zoom=1,
+            _format_id="png", _quality=95, _fps=25, _speed=1.0,
+            _duration_seconds=None, _background=None,
             _record=Mock(), _warnings=[], _failed=0, _written=0,
             _step=Mock(),
         )
@@ -56,7 +58,9 @@ class BatchPngTests(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
-            with patch("snapshot_studio.batch_export.QImageWriter", FailedWriter):
+            with patch(
+                    "studio.rendering.snapshot_export.QImageWriter",
+                    FailedWriter):
                 panel = self.run_step(root)
             self.assertEqual(panel._failed, 1)
             self.assertEqual(panel._written, 0)

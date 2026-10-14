@@ -14,7 +14,7 @@ import subprocess
 import sys
 import tempfile
 
-from PySide6.QtCore import QIODevice, QSaveFile, QSize, Qt, QTimer, QUrl
+from PySide6.QtCore import QEvent, QIODevice, QSaveFile, QSize, Qt, QTimer, QUrl
 from PySide6.QtGui import (
     QAction,
     QBrush,
@@ -51,6 +51,7 @@ from PySide6.QtWidgets import (
     QMainWindow,
     QMenu,
     QMessageBox,
+    QProgressDialog,
     QPushButton,
     QScrollArea,
     QSizePolicy,
@@ -73,6 +74,7 @@ from studio.assets.family import (
     load_manual_family,
     PackageEntry,
     rebuild_materials,
+    family_object_has_animation,
     SETBAS_OVERRIDE_PREFIX,
     validate_family_package,
     write_package_manifest,
@@ -131,6 +133,16 @@ from studio.rendering.asset_viewport import (
     VIEW_PRESET_ANGLES,
     VIEW_PRESETS,
 )
+from studio.rendering.snapshot_export import (
+    AnimationExportCancelled,
+    animation_frame_count,
+    export_animation_atomic,
+    is_animated_format,
+    pillow_supports_animated_webp,
+    pillow_supports_static_webp,
+    output_extension,
+    write_static_image_atomic,
+)
 from studio.rendering.gizmo import ModelSpaceGizmo
 from studio.rendering.indexed import IndexedFamilyAdapter
 from studio.ui.tabs import PaletteTabStrip
@@ -144,6 +156,8 @@ from studio.ui.uv_editor import (
     UVTopologyError,
 )
 from studio.ui.widgets import (
+    CollapsibleSection,
+    PresetNumberBox,
     checker_thumbnail as _checker_thumbnail,
     choose_bas_archive,
     configure_operation_status_bar,
@@ -703,6 +717,7 @@ class AssemblyWindow(QMainWindow):
             self._on_setbas_item_double_clicked)
         self.setbas_tree.currentItemChanged.connect(
             self._on_setbas_item_selected)
+        self.setbas_tree.installEventFilter(self)
         self.setbas_tree.itemSelectionChanged.connect(
             self._sync_vp_controls)
         self.setbas_tree.setContextMenuPolicy(
@@ -897,6 +912,12 @@ class AssemblyWindow(QMainWindow):
             "Preview", lambda: self._preview_setbas_resource(item))
         preview.setEnabled(kind in (
             "base", "sklt.class", "ilbm.class", "bmpanim.class"))
+        playing = (item is self.setbas_tree.currentItem()
+                   and self.viewport._anim_playing)
+        playback = menu.addAction(
+            "Pause" if playing else "Play",
+            lambda: self._play_setbas_item(item))
+        playback.setEnabled(self._setbas_item_has_animation(item))
         menu.addSeparator()
         extract = menu.addAction(
             f"Extract selected ({len(resources)})" if len(resources) > 1
@@ -1527,7 +1548,7 @@ class AssemblyWindow(QMainWindow):
         self.addToolBar(Qt.ToolBarArea.TopToolBarArea, anim_bar)
         self.animation_toolbar = anim_bar
 
-        anim_bar.addWidget(QLabel(" VANM preview: "))
+        anim_bar.addWidget(QLabel(" Animation: "))
         self.play_button = QPushButton("Play")
         self.play_button.setCheckable(True)
         self.play_button.setEnabled(False)
@@ -2143,29 +2164,85 @@ class AssemblyWindow(QMainWindow):
         if "jpeg" in supported or "jpg" in supported:
             self._snapshot_formats.add("jpg")
             self.snapshot_format_combo.addItem("JPEG", "jpg")
-        if "webp" in supported:
+        if "webp" in supported or pillow_supports_static_webp():
             self._snapshot_formats.add("webp")
-            self.snapshot_format_combo.addItem("WebP", "webp")
+            self.snapshot_format_combo.addItem("WebP (Static)", "webp")
+        self.snapshot_format_combo.addItem("GIF (Animated)", "gif")
+        if pillow_supports_animated_webp():
+            self.snapshot_format_combo.addItem(
+                "WebP (Animated)", "webp_anim")
         self.snapshot_format_combo.currentIndexChanged.connect(
             self._on_snapshot_format_changed)
         export_layout.addWidget(self.snapshot_format_combo, 1, 1)
         export_layout.addWidget(QLabel("Quality:"), 2, 0)
-        self.snapshot_quality_spin = QSpinBox()
-        self.snapshot_quality_spin.setRange(1, 100)
-        self.snapshot_quality_spin.setValue(95)
-        self.snapshot_quality_spin.setEnabled(False)
-        export_layout.addWidget(self.snapshot_quality_spin, 2, 1)
-        self.snapshot_export_button = QPushButton("Export Image As")
+        self.snapshot_quality_box = PresetNumberBox(
+            (100, 95, 90, 85, 80, 75, 70, 60, 50), minimum=1, maximum=100, value=95)
+        self.snapshot_quality_box.setToolTip(
+            "Pick a template or type any value from 1 to 100.")
+        self.snapshot_quality_box.setEnabled(False)
+        export_layout.addWidget(self.snapshot_quality_box, 2, 1)
+        export_layout.addWidget(QLabel("Name:"), 3, 0)
+        self.snapshot_naming_combo = QComboBox()
+        self.snapshot_naming_combo.addItem("Resource Name", "resource")
+        self.snapshot_naming_combo.addItem("VP ID", "vp_id")
+        self.snapshot_naming_combo.setToolTip(
+            "Use the selected model's resource name or its VP ID when one "
+            "is available. Duplicate batch resource names receive an ID.")
+        export_layout.addWidget(self.snapshot_naming_combo, 3, 1)
+        # The three animation rows open and close as one block, with a short
+        # animation: hiding them one by one made the panel jump.
+        self.snapshot_animation_rows = CollapsibleSection(export_box)
+        animation_grid = self.snapshot_animation_rows.grid
+        animation_grid.addWidget(QLabel("Animation FPS:"), 0, 0)
+        self.snapshot_fps_box = PresetNumberBox(
+            (60, 50, 30, 25, 24, 15, 12, 10), minimum=1, maximum=60, value=25)
+        self.snapshot_fps_box.setToolTip(
+            "Output frame rate; pick a template or type 1 to 60. "
+            "This does not change animation speed.")
+        animation_grid.addWidget(self.snapshot_fps_box, 0, 1)
+        animation_grid.addWidget(QLabel("Animation Speed:"), 1, 0)
+        self.snapshot_export_speed_box = PresetNumberBox(
+            (0.25, 0.5, 0.75, 1.0, 1.5, 2.0, 3.0, 4.0), minimum=0.05, maximum=8.0,
+            decimals=2, value=1.0)
+        self.snapshot_export_speed_box.setToolTip(
+            "Animation playback speed used while capturing frames; "
+            "pick a template or type 0,05 to 8.")
+        animation_grid.addWidget(self.snapshot_export_speed_box, 1, 1)
+        self.snapshot_duration_check = QCheckBox("Fixed duration:")
+        self.snapshot_duration_check.setToolTip(
+            "Off: export one cycle using the duration reported by the "
+            "viewport. On: export for a fixed number of seconds.")
+        self.snapshot_duration_box = PresetNumberBox(
+            (1, 2, 3, 5, 10, 15, 30, 60), minimum=0.1, maximum=3600.0, decimals=1,
+            suffix=" s", value=5.0)
+        self.snapshot_duration_box.setToolTip(
+            "Pick a template or type the seconds (0,1 to 3600).")
+        self.snapshot_duration_box.setEnabled(False)
+        self.snapshot_duration_check.toggled.connect(
+            self.snapshot_duration_box.setEnabled)
+        animation_grid.addWidget(self.snapshot_duration_check, 2, 0)
+        animation_grid.addWidget(self.snapshot_duration_box, 2, 1)
+        # Same equal columns as the rows around the block, so labels align.
+        for grid in (animation_grid, export_layout):
+            grid.setColumnStretch(0, 1)
+            grid.setColumnStretch(1, 1)
+        export_layout.addWidget(self.snapshot_animation_rows, 4, 0, 3, 2)
+        self.snapshot_export_button = QPushButton("Export Image")
         self.snapshot_export_button.clicked.connect(self._export_snapshot)
-        export_layout.addWidget(self.snapshot_export_button, 3, 0, 1, 2)
+        export_layout.addWidget(self.snapshot_export_button, 7, 0, 1, 2)
         self.snapshot_figurine_button = QPushButton("Export Image Set")
         self.snapshot_figurine_button.setToolTip(
-            "Export the current model as PNG from every canonical angle. "
+            "Export the current model in the selected format from every "
+            "canonical angle. "
             "Uses the selected background color, or transparent "
             "alpha when no background is selected.")
         self.snapshot_figurine_button.clicked.connect(
             self._export_figurine_set)
-        export_layout.addWidget(self.snapshot_figurine_button, 4, 0, 1, 2)
+        export_layout.addWidget(self.snapshot_figurine_button, 8, 0, 1, 2)
+        self._snapshot_export_layout = export_layout
+        self._snapshot_export_box = export_box
+        self._on_snapshot_format_changed(
+            self.snapshot_format_combo.currentIndex())
         studio_layout.addWidget(export_box)
         studio_layout.addStretch(1)
         snapshot_layout.addWidget(studio_box)
@@ -2709,6 +2786,7 @@ class AssemblyWindow(QMainWindow):
 
         self._family = None
         self._setbas = None
+        self._setbas_preview_cache = None
         self._vp_embedded = None
         self._vp_source_path = None
         self._overrides.clear()
@@ -2805,6 +2883,7 @@ class AssemblyWindow(QMainWindow):
             return
         self._texture_preview_cache.clear()
         self._setbas = archive
+        self._setbas_preview_cache = None
         self._sync_close_archive_action()
         self._set_document_title(archive.path)
         self._load_vp_table(archive)
@@ -2829,7 +2908,7 @@ class AssemblyWindow(QMainWindow):
             # The archive is the file the user just opened, so keep its path
             # visible after the internal family refresh.
             self._set_document_title(archive.path)
-        self._preview_first_setbas_skeleton(confirm_discard=False)
+        self._preview_first_setbas_base()
         synchronize = getattr(self, '_sync_imported_set', None)
         if synchronize is not None:
             synchronize(archive.path)
@@ -3152,6 +3231,9 @@ class AssemblyWindow(QMainWindow):
         if self._family is not None \
                 and self._family.base_path == archive_path:
             return self._family
+        cached = getattr(self, "_setbas_preview_cache", None)
+        if cached is not None and cached[0] is self._setbas:
+            return cached[1]
         return load_asset_family(
             archive_path, self._extra_roots, {}, self._setbas)
 
@@ -3159,7 +3241,8 @@ class AssemblyWindow(QMainWindow):
         owners: list[str] = []
         for fam_obj in family.all_objects():
             base_object = getattr(fam_obj, "base_object", None)
-            for block in getattr(base_object, "ades", ()):
+            for block in (visual for ade in getattr(base_object, "ades", ())
+                          for visual in ade.iter_visual_blocks()):
                 for texture in (getattr(block, "texture", None),
                                 getattr(block, "tracy_texture", None)):
                     if texture is None \
@@ -3174,7 +3257,7 @@ class AssemblyWindow(QMainWindow):
         return owners
 
     def _preview_setbas_animation(self, resource) -> None:
-        """Select the model using one embedded VANM and start playback."""
+        """Preview a VANM on its model, including nested particle stages."""
 
         if self._setbas is None or resource is None:
             return
@@ -3193,11 +3276,23 @@ class AssemblyWindow(QMainWindow):
             if self._resource_names_match(name, resource.resource_name)
         ), None)
         owners = self._animation_owners(family, resource.resource_name)
-        if animation_name is None or not owners:
+        if animation_name is None:
             QMessageBox.information(
                 self, "Animation preview unavailable",
                 f"{resource.resource_name} is embedded in SET.BAS, but no "
-                "resolved BASE object in this archive uses it.")
+                "valid animation could be decoded from it.")
+            self._raise_setbas_tab()
+            return
+
+        if not owners:
+            from studio.assets.family import animation_preview_family
+            try:
+                preview = animation_preview_family(family, animation_name)
+            except ValueError as exc:
+                self.statusBar().showMessage(str(exc), 8000)
+                return
+            self._setbas_preview_cache = self._setbas, family
+            self._set_family(preview)
             self._raise_setbas_tab()
             return
 
@@ -3214,10 +3309,9 @@ class AssemblyWindow(QMainWindow):
                 "selected model preview.", 8000)
             self._raise_setbas_tab()
             return
-        self.play_button.setChecked(True)
         self._raise_setbas_tab()
         self.statusBar().showMessage(
-            f"Playing {animation_name} on {owner}", 8000)
+            f"Previewing {animation_name} on {owner}", 8000)
 
     def _on_setbas_item_selected(self, current, _previous=None) -> None:
         """Preview every supported BAS row selected by mouse or keyboard."""
@@ -3231,6 +3325,7 @@ class AssemblyWindow(QMainWindow):
             return
         self._setbas_preview_active = True
         try:
+            self.play_button.setChecked(False)
             self._preview_setbas_resource(current)
         finally:
             self._setbas_preview_active = False
@@ -3248,37 +3343,65 @@ class AssemblyWindow(QMainWindow):
         # Class/group rows keep QTreeWidget's normal expand/collapse.
         self._sync_vp_controls()
 
-    def _preview_first_setbas_skeleton(
-            self, *, confirm_discard: bool = True) -> None:
-        """Load the first embedded SKLT, using archive mappings for textures."""
-
-        if self._setbas is None:
-            return
-        resource = next(
-            (entry for entry in self._setbas.resources
-             if entry.class_id.lower() == "sklt.class" and not entry.error),
-            None)
-        if resource is None:
-            return
+    def _preview_first_setbas_base(self) -> None:
+        """Open the BASE group and preview its first complete model."""
         for group_index in range(self.setbas_tree.topLevelItemCount()):
             group = self.setbas_tree.topLevelItem(group_index)
-            for child_index in range(group.childCount()):
-                item = group.child(child_index)
-                if item.data(0, Qt.ItemDataRole.UserRole) == resource.index:
-                    group.setExpanded(True)
-                    changed = self.setbas_tree.currentItem() is not item
-                    if changed and not confirm_discard:
-                        self._setbas_preview_active = True
-                    try:
-                        self.setbas_tree.setCurrentItem(item)
-                    finally:
-                        if changed and not confirm_discard:
-                            self._setbas_preview_active = False
-                    self.setbas_tree.scrollToItem(item)
-                    if not changed or not confirm_discard:
-                        self._preview_setbas_skeleton(
-                            confirm_discard=confirm_discard)
-                    return
+            if group.text(0).casefold() == "base.class" and group.childCount():
+                group.setExpanded(True)
+                item = group.child(0)
+                self.setbas_tree.setCurrentItem(item)
+                self.setbas_tree.scrollToItem(item)
+                return
+
+    def eventFilter(self, watched, event) -> bool:  # noqa: N802
+        browser = getattr(self, "entity_browser", None)
+        trees = (self.setbas_tree, getattr(browser, "tree", None))
+        if (watched in trees and event.type() == QEvent.Type.KeyPress
+                and event.key() in (Qt.Key.Key_Return, Qt.Key.Key_Enter)
+                and event.modifiers() == Qt.KeyboardModifier.NoModifier
+                and watched.state() != QAbstractItemView.State.EditingState):
+            item = watched.currentItem()
+            if item is None or (watched is self.setbas_tree and item.data(
+                    0, _BAS_KIND_ROLE) not in ("base", "sklt.class", "bmpanim.class")):
+                return super().eventFilter(watched, event)
+            if not event.isAutoRepeat():
+                self._toggle_list_animation()
+            return True
+        return super().eventFilter(watched, event)
+
+    def _toggle_list_animation(self) -> None:
+        """Use the same Play/Pause command from both resource lists."""
+        if self.viewport.has_animation:
+            self.play_button.setChecked(not self.play_button.isChecked())
+
+    def _play_setbas_item(self, item) -> None:
+        if item is None:
+            return
+        self.setbas_tree.setCurrentItem(item)
+        self._toggle_list_animation()
+
+    def _setbas_item_has_animation(self, item) -> bool:
+        if item is None or self._setbas is None:
+            return False
+        kind = item.data(0, _BAS_KIND_ROLE)
+        if kind not in ("base", "sklt.class", "bmpanim.class"):
+            return False
+        family = self._setbas_preview_family()
+        if family is None:
+            return False
+        name = item.data(0, _BAS_NAME_ROLE) or item.text(0)
+        if kind == "bmpanim.class":
+            return any(self._resource_names_match(key, name) and value.frames
+                       for key, value in family.animations.items())
+        if kind == "base":
+            _family, target, _offset = self._resolve_setbas_base(name)
+            objects = [target] if target is not None else []
+        else:
+            objects = [obj for obj in family.all_objects()
+                       if obj.skeleton is not None and self._resource_names_match(
+                           obj.base_object.skeleton_name, name)]
+        return any(family_object_has_animation(family, obj) for obj in objects)
 
     def _setbas_palette(self):
         """Palette for embedded VBMP previews and conversions."""
@@ -4863,56 +4986,116 @@ class AssemblyWindow(QMainWindow):
             self._update_uv_editor(poly_id)
 
     def _on_snapshot_format_changed(self, _index: int) -> None:
-        self.snapshot_quality_spin.setEnabled(
-            self.snapshot_format_combo.currentData() != "png")
+        format_id = self.snapshot_format_combo.currentData()
+        self.snapshot_quality_box.setEnabled(
+            format_id in ("jpg", "webp", "webp_anim"))
+        animated = is_animated_format(format_id)
+        self.snapshot_animation_rows.set_expanded(animated)
+        self.snapshot_fps_box.setEnabled(animated)
+        self.snapshot_export_speed_box.setEnabled(animated)
+        self.snapshot_duration_check.setEnabled(animated)
+        self.snapshot_duration_box.setEnabled(
+            animated and self.snapshot_duration_check.isChecked())
 
-    def _snapshot_name(self) -> str:
+    def _snapshot_export_options(self) -> dict[str, object]:
+        return {
+            "format_id": self.snapshot_format_combo.currentData(),
+            "quality": self.snapshot_quality_box.value(),
+            "fps": self.snapshot_fps_box.value(),
+            "speed": self.snapshot_export_speed_box.value(),
+            "duration_seconds": (
+                self.snapshot_duration_box.value()
+                if self.snapshot_duration_check.isChecked() else None),
+            "name_mode": self.snapshot_naming_combo.currentData(),
+        }
+
+    def _snapshot_source_info(self) -> tuple[int | None, str]:
         obj = self._owner_to_obj.get(self._selected_owner)
-        if obj is not None:
-            name = getattr(obj, "display_name", "")
-        elif self._family is not None and self._family.base_path:
-            name = self._family.base_path.stem
-        elif self._family is not None and self._family.setbas_path:
-            name = self._family.setbas_path.stem
-        else:
-            name = "Snapshot"
-        name = Path(str(name).replace("\\", "/")).stem
-        name = re.sub(r'[<>:"/\\|?*\x00-\x1f]+', "_", name).strip(" ._")
-        return name or "Snapshot"
+        base_object = getattr(obj, "base_object", None)
+        resource_name = str(
+            self._base_entry_names.get(self._selected_owner)
+            or getattr(base_object, "name", "")
+            or getattr(base_object, "skeleton_name", "") or "")
+        if not resource_name:
+            display_name = str(getattr(obj, "display_name", "") or "")
+            if not display_name and self._family is not None:
+                source_path = (self._family.base_path
+                               or self._family.setbas_path)
+                display_name = source_path.stem if source_path else ""
+            resource_name = display_name or "Snapshot"
+
+        resource_stem = Path(resource_name.replace("\\", "/")).stem
+        resource_stem = re.sub(
+            r'[<>:"/\\|?*\x00-\x1f]+', "_", resource_stem).strip(" ._")
+        resource_stem = resource_stem or "Snapshot"
+        vp_id = None
+        table = getattr(self, "_vp_table", None)
+        if resource_name and table is not None:
+            key = normalize_base_name(resource_name)
+            entry = next((
+                item for item in table.entries
+                if normalize_base_name(item.base_name) == key
+            ), None)
+            if entry is not None:
+                vp_id = int(entry.index)
+        return vp_id, resource_stem
+
+    def _snapshot_name(self, name_mode: str | None = None) -> str:
+        vp_id, resource_name = self._snapshot_source_info()
+        if name_mode is None:
+            combo = getattr(self, "snapshot_naming_combo", None)
+            name_mode = combo.currentData() if combo is not None else "resource"
+        if name_mode == "vp_id" and vp_id is not None:
+            return f"VP_{vp_id:04d}"
+        return resource_name
+
+    def _restore_snapshot_export_state(
+            self, camera_state: dict,
+            animation_state: dict | None = None) -> None:
+        """Restore the viewport even if camera or animation cleanup fails."""
+
+        try:
+            self.viewport._set_camera_state(camera_state)
+        finally:
+            try:
+                if animation_state is not None:
+                    self.viewport.restore_animation_state(animation_state)
+            finally:
+                self.viewport.update()
 
     def _export_snapshot(self) -> None:
         if not self.viewport.has_model:
             QMessageBox.information(self, "No model loaded",
                                     "Load a model before exporting an image.")
             return
-        selected_format = self.snapshot_format_combo.currentData()
+        options = self._snapshot_export_options()
+        format_id = str(options["format_id"])
+        animated = is_animated_format(format_id)
+        if animated and not self.viewport.has_animation:
+            QMessageBox.warning(
+                self, "No animation to export",
+                "The selected animated format requires an animated model.")
+            return
+        extension = output_extension(format_id)
         preset = self.snapshot_view_combo.currentText().replace(" ", "")
         suggested = self._last_directory / (
-            f"{self._snapshot_name()}_{preset}.{selected_format}")
-        labels = {"png": "PNG (*.png)", "jpg": "JPEG (*.jpg *.jpeg)",
-                  "webp": "WebP (*.webp)"}
-        formats = [selected_format] + sorted(
-            self._snapshot_formats - {selected_format})
-        filters = ";;".join(labels[fmt] for fmt in formats)
+            f"{self._snapshot_name(str(options['name_mode']))}_"
+            f"{preset}.{extension}")
+        labels = {
+            "png": "PNG (*.png)",
+            "jpg": "JPEG (*.jpg)",
+            "webp": "WebP (*.webp)",
+            "gif": "GIF animation (*.gif)",
+            "webp_anim": "WebP animation (*.webp)",
+        }
         path_text, _selected_filter = QFileDialog.getSaveFileName(
-            self, "Export Snapshot", str(suggested), filters,
+            self, "Export Snapshot", str(suggested), labels[format_id],
             options=QFileDialog.Option.DontConfirmOverwrite)
         if not path_text:
             return
         path = Path(path_text)
-        if not path.suffix:
-            dialog_format = next(
-                (fmt for fmt, label in labels.items()
-                 if label == _selected_filter), selected_format)
-            path = path.with_suffix(f".{dialog_format}")
-        suffix = path.suffix.lower().lstrip(".")
-        image_format = {"png": "png", "jpg": "jpg", "jpeg": "jpg",
-                        "webp": "webp"}.get(suffix)
-        if image_format not in self._snapshot_formats:
-            QMessageBox.warning(self, "Unsupported format",
-                                f"The format '.{suffix}' is not supported by "
-                                "this Qt runtime.")
-            return
+        if path.suffix.lower() != f".{extension}":
+            path = path.with_suffix(f".{extension}")
         if path.exists():
             answer = QMessageBox.question(
                 self, "Replace existing file?",
@@ -4922,45 +5105,73 @@ class AssemblyWindow(QMainWindow):
             if answer != QMessageBox.StandardButton.Yes:
                 return
         background = self._snapshot_background()
-        if image_format == "jpg" and background is None:
+        if format_id == "jpg" and background is None:
             background = QColor(96, 96, 96)
-        image = self.viewport.render_snapshot(
-            self._snapshot_output_size(), background,
-            include_guides=self._snapshot_include_guides())
-        if image.isNull():
-            QMessageBox.warning(self, "Export failed",
-                                "The snapshot image could not be rendered.")
-            return
-        writer_format = "jpeg" if image_format == "jpg" else image_format
-        writer = QImageWriter(str(path), writer_format.encode("ascii"))
-        if image_format != "png":
-            writer.setQuality(self.snapshot_quality_spin.value())
-        if not writer.write(image):
-            QMessageBox.warning(
-                self, "Export failed",
-                writer.errorString() or f"Could not write {path}.")
-            return
+        size = self._snapshot_output_size()
+        if animated:
+            progress = QProgressDialog(
+                "Rendering animation frames...", "Cancel", 0, 1, self)
+            progress.setWindowModality(Qt.WindowModality.WindowModal)
+            progress.setMinimumDuration(0)
+            camera = self.viewport._camera_state()
+            animation_state = self.viewport.capture_animation_state()
+
+            def cancelled() -> bool:
+                QApplication.processEvents()
+                return progress.wasCanceled()
+
+            def update_progress(current: int, total: int) -> None:
+                progress.setRange(0, total)
+                progress.setValue(current)
+                progress.setLabelText(
+                    f"Rendering animation frame {current}/{total}...")
+
+            try:
+                progress.show()
+                self.viewport.play_animation(False)
+                frame_count = export_animation_atomic(
+                    self.viewport, path, format_id, size, background,
+                    self._snapshot_include_guides(),
+                    fps=int(options["fps"]),
+                    speed=float(options["speed"]),
+                    quality=int(options["quality"]),
+                    duration_seconds=options["duration_seconds"],
+                    cancelled=cancelled,
+                    progress=update_progress)
+            except AnimationExportCancelled:
+                self.statusBar().showMessage(
+                    "Animation export cancelled; no file was written.", 8000)
+                return
+            except Exception as exc:
+                QMessageBox.warning(self, "Export failed", str(exc))
+                return
+            finally:
+                try:
+                    self._restore_snapshot_export_state(
+                        camera, animation_state)
+                finally:
+                    progress.close()
+        else:
+            try:
+                image = self.viewport.render_snapshot(
+                    size, background,
+                    include_guides=self._snapshot_include_guides())
+                write_static_image_atomic(
+                    image, path, format_id, int(options["quality"]))
+                frame_count = 1
+            except Exception as exc:
+                QMessageBox.warning(self, "Export failed", str(exc))
+                return
         self._last_directory = path.parent
         self.statusBar().showMessage(
-            f"Snapshot written to {path} ({image.width()} x {image.height()})")
+            f"Snapshot written to {path} ({size.width()} x {size.height()}, "
+            f"{frame_count} frame(s)).")
 
     @staticmethod
     def _write_snapshot_png_atomic(image: QImage, path: Path) -> None:
-        """Write one PNG atomically without leaving a Windows-locked .part."""
+        """Write one PNG atomically through the shared still-image writer."""
 
-        target = QSaveFile(str(path))
-        if not target.open(QIODevice.OpenModeFlag.WriteOnly):
-            raise OSError(target.errorString() or f"Could not open {path}")
-        writer = QImageWriter(target, b"png")
-        if not writer.write(image):
-            error = writer.errorString() or f"Could not write {path}"
-            target.cancelWriting()
-            raise OSError(error)
-        # QSaveFile owns the device until commit, so Windows never sees a
-        # second os.replace() racing an open QImageWriter file handle.
-        del writer
-        if not target.commit():
-            raise OSError(target.errorString() or f"Could not commit {path}")
+        write_static_image_atomic(image, path, "png")
 
     def _export_figurine_set(self) -> None:
         """Export the current model from every canonical Snapshot angle."""
@@ -4970,6 +5181,15 @@ class AssemblyWindow(QMainWindow):
                 self, "No model loaded",
                 "Load a model before exporting an Image Set.")
             return
+        options = self._snapshot_export_options()
+        format_id = str(options["format_id"])
+        animated = is_animated_format(format_id)
+        if animated and not self.viewport.has_animation:
+            QMessageBox.warning(
+                self, "No animation to export",
+                "The selected animated format requires an animated model.")
+            return
+        extension = output_extension(format_id)
         output = QFileDialog.getExistingDirectory(
             self, "Choose Image Set destination folder",
             str(self._last_directory))
@@ -4977,12 +5197,12 @@ class AssemblyWindow(QMainWindow):
             return
         root = Path(output)
         root.mkdir(parents=True, exist_ok=True)
-        model_name = self._snapshot_name()
+        model_name = self._snapshot_name(str(options["name_mode"]))
         targets = []
         for index, view in enumerate(VIEW_PRESET_ANGLES, 1):
             slug = re.sub(r"[^A-Za-z0-9_.-]+", "_", view).strip("._")
             targets.append((
-                view, root / f"{model_name}_{index:02d}_{slug}.png"))
+                view, root / f"{model_name}_{index:02d}_{slug}.{extension}"))
         existing = [path for _view, path in targets if path.exists()]
         if existing:
             answer = QMessageBox.question(
@@ -5000,43 +5220,98 @@ class AssemblyWindow(QMainWindow):
         zoom_reference = self._snapshot_zoom_reference
         size = self._snapshot_output_size()
         background = self._snapshot_background()
+        if format_id == "jpg" and background is None:
+            background = QColor(96, 96, 96)
         include_guides = self._snapshot_include_guides()
         written = []
+        progress = None
+        animation_state = None
+        frames_per_view = 1
+        if animated:
+            try:
+                frames_per_view = animation_frame_count(
+                    self.viewport.animation_duration_ms,
+                    int(options["fps"]),
+                    float(options["speed"]),
+                    options["duration_seconds"])
+            except (TypeError, ValueError) as exc:
+                QMessageBox.warning(self, "Image Set export failed", str(exc))
+                return
+            progress = QProgressDialog(
+                "Rendering Image Set animation...", "Cancel", 0,
+                frames_per_view * len(targets), self)
+            progress.setWindowModality(Qt.WindowModality.WindowModal)
+            progress.setMinimumDuration(0)
+            animation_state = self.viewport.capture_animation_state()
         try:
-            for view, path in targets:
+            if animated:
+                progress.show()
+                self.viewport.play_animation(False)
+            for view_index, (view, path) in enumerate(targets):
                 self.viewport.apply_snapshot_preset(
                     view, size, zoom_percent)
-                image = self.viewport.render_snapshot(
-                    size, background, include_guides=include_guides)
-                if image.isNull():
-                    raise OSError(f"Could not render {view}")
-                self._write_snapshot_png_atomic(image, path)
+                if animated:
+                    offset = view_index * frames_per_view
+
+                    def cancelled() -> bool:
+                        QApplication.processEvents()
+                        return progress.wasCanceled()
+
+                    def update_progress(current: int, total: int) -> None:
+                        progress.setValue(offset + current)
+                        progress.setLabelText(
+                            f"{view}: frame {current}/{total}")
+
+                    export_animation_atomic(
+                        self.viewport, path, format_id, size, background,
+                        include_guides,
+                        fps=int(options["fps"]),
+                        speed=float(options["speed"]),
+                        quality=int(options["quality"]),
+                        duration_seconds=options["duration_seconds"],
+                        cancelled=cancelled,
+                        progress=update_progress)
+                else:
+                    image = self.viewport.render_snapshot(
+                        size, background, include_guides=include_guides)
+                    write_static_image_atomic(
+                        image, path, format_id, int(options["quality"]))
                 written.append(path)
-        except (OSError, RuntimeError) as exc:
+        except AnimationExportCancelled:
+            self.statusBar().showMessage(
+                f"Image Set export cancelled; {len(written)} completed file(s) "
+                "were kept.", 8000)
+            return
+        except Exception as exc:
             QMessageBox.warning(
                 self, "Image Set export failed",
                 f"{exc}\n\n{len(written)} image(s) were written before "
                 "the failure.")
             return
         finally:
-            self.viewport._set_camera_state(camera)
-            self.viewport.update()
-            self.snapshot_view_combo.blockSignals(True)
-            self.snapshot_view_combo.setCurrentText(preset)
-            self.snapshot_view_combo.blockSignals(False)
-            self._snapshot_zoom_percent = zoom_percent
-            self._snapshot_zoom_reference = zoom_reference
-            for widget in (self.snapshot_zoom_spin, self.snapshot_zoom_slider):
-                widget.blockSignals(True)
-                widget.setValue(zoom_percent)
-                widget.blockSignals(False)
+            try:
+                self._restore_snapshot_export_state(
+                    camera, animation_state)
+            finally:
+                if progress is not None:
+                    progress.close()
+                self.snapshot_view_combo.blockSignals(True)
+                self.snapshot_view_combo.setCurrentText(preset)
+                self.snapshot_view_combo.blockSignals(False)
+                self._snapshot_zoom_percent = zoom_percent
+                self._snapshot_zoom_reference = zoom_reference
+                for widget in (
+                        self.snapshot_zoom_spin, self.snapshot_zoom_slider):
+                    widget.blockSignals(True)
+                    widget.setValue(zoom_percent)
+                    widget.blockSignals(False)
 
         self._last_directory = root
         background_label = (
             "transparent" if background is None
             else f"background {background.name()}")
         self.statusBar().showMessage(
-            f"Image Set exported: {len(written)} PNG, "
+            f"Image Set exported: {len(written)} {extension.upper()} file(s), "
             f"{background_label}.", 10000)
 
     # -- texture resolution (session-only overrides) -----------------------------

@@ -6,7 +6,9 @@ from __future__ import annotations
 from contextlib import contextmanager
 from functools import wraps
 
-from PySide6.QtCore import QEventLoop, QPointF, QSize, Qt, QTimer, Signal
+from PySide6.QtCore import (
+    QEasingCurve, QEventLoop, QLocale, QPointF, QPropertyAnimation, QSize, Qt, QTimer, Signal,
+)
 from PySide6.QtGui import (
     QAction,
     QBrush,
@@ -362,6 +364,126 @@ class ViewportWidthScrollArea(QScrollArea):
         if page.width() != width:
             page.resize(width, page.height())
         page.updateGeometry()
+
+
+class PresetNumberBox(QComboBox):
+    """Number field with a list of ready-made values that can still be typed over.
+
+    Pick a template from the drop-down, or type any value inside the range.
+    It offers the small spin-box API (``value``, ``setValue``, ``valueChanged``)
+    so it replaces a spin box without changes in the code that reads it.
+    """
+
+    valueChanged = Signal(float)
+
+    def __init__(self, presets, *, minimum: float, maximum: float, decimals: int = 0,
+                 suffix: str = "", value: float | None = None, parent=None) -> None:
+        super().__init__(parent)
+        self._minimum, self._maximum = float(minimum), float(maximum)
+        self._decimals = decimals
+        self._suffix = suffix
+        self._value = self._clamp(presets[0] if value is None else value)
+        self.setEditable(True)
+        self.setInsertPolicy(QComboBox.InsertPolicy.NoInsert)
+        self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
+        for preset in presets:
+            self.addItem(self._format(preset), float(preset))
+        self.lineEdit().setPlaceholderText(self._format(self._value))
+        self.activated.connect(self._preset_chosen)
+        self.lineEdit().editingFinished.connect(self._commit_text)
+        self._show(self._value)
+
+    def _clamp(self, value: float) -> float:
+        value = max(self._minimum, min(self._maximum, float(value)))
+        return round(value, self._decimals)
+
+    def _format(self, value: float) -> str:
+        return QLocale().toString(float(value), "f", self._decimals) + self._suffix
+
+    def _show(self, value: float) -> None:
+        self.setEditText(self._format(value))
+
+    def value(self):
+        return int(self._value) if self._decimals == 0 else self._value
+
+    def setValue(self, value: float) -> None:  # noqa: N802
+        value = self._clamp(value)
+        self._show(value)
+        if value != self._value:
+            self._value = value
+            self.valueChanged.emit(value)
+
+    def setSuffix(self, suffix: str) -> None:  # noqa: N802
+        self._suffix = suffix
+        self._show(self._value)
+
+    def _preset_chosen(self, index: int) -> None:
+        self.setValue(self.itemData(index))
+
+    def _commit_text(self) -> None:
+        """Accept typed text; anything that is not a number restores the last value."""
+
+        text = self.currentText().replace(self._suffix.strip(), "").strip()
+        number, ok = QLocale().toDouble(text)
+        if not ok:
+            number, ok = QLocale.c().toDouble(text)
+        self.setValue(number if ok else self._value)
+        self._show(self._value)
+
+    def wheelEvent(self, event) -> None:  # noqa: N802
+        # Scrolling a panel over the field must not change the value.
+        if self.hasFocus():
+            super().wheelEvent(event)
+        else:
+            event.ignore()
+
+
+class CollapsibleSection(QWidget):
+    """Group of rows that open and close with a short animation.
+
+    Showing or hiding many widgets one by one makes everything below jump.
+    The rows live in one container whose height is animated instead, so the
+    layout moves smoothly in a single motion.
+    """
+
+    DURATION_MS = 140
+
+    def __init__(self, parent=None) -> None:
+        super().__init__(parent)
+        self.grid = QGridLayout(self)
+        self.grid.setContentsMargins(0, 0, 0, 0)
+        self._expanded = True
+        self._animation = QPropertyAnimation(self, b"maximumHeight", self)
+        self._animation.setDuration(self.DURATION_MS)
+        self._animation.setEasingCurve(QEasingCurve.Type.OutCubic)
+        self._animation.finished.connect(self._animation_finished)
+
+    @property
+    def expanded(self) -> bool:
+        return self._expanded
+
+    def set_expanded(self, expanded: bool, *, animate: bool = True) -> None:
+        if expanded == self._expanded and not self._animation.state():
+            return
+        self._expanded = expanded
+        self._animation.stop()
+        full = self.sizeHint().height()
+        parent = self.parentWidget()
+        if not animate or parent is None or not parent.isVisible():
+            self.setMaximumHeight(16777215)
+            self.setVisible(expanded)
+            return
+        start = self.height() if self.isVisible() else 0
+        self.setVisible(True)
+        self._animation.setStartValue(start)
+        self._animation.setEndValue(full if expanded else 0)
+        self._animation.start()
+
+    def _animation_finished(self) -> None:
+        if self._expanded:
+            self.setMaximumHeight(16777215)
+        else:
+            self.setVisible(False)
 
 
 def status_icon(status: str) -> QPixmap:

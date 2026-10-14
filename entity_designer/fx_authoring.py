@@ -1,0 +1,164 @@
+"""Effect text drafts and verified, source-scoped script replacement."""
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+import copy
+from pathlib import Path
+import tempfile
+
+from entity_designer import destruction_fx as fx
+from entity_designer.script_model import find_script_blocks, read_script_file, write_script_file
+from studio.exchange.portable import commit_verified_files
+
+
+def effect_text(item) -> str:
+    return "\n".join(item.lines) if isinstance(item, fx.FxBlock) else item.line
+
+
+def parse_effect_text(text: str, context: str):
+    """Validate one complete effect with the existing grammar and interpreter."""
+    kind = "weapon" if context == fx.CONTEXT_WEAPON else "vehicle"
+    wrapped = f"new_{kind} 1\n{text}\nend\n"
+    blocks = find_script_blocks(wrapped)
+    if len(blocks) != 1 or not blocks[0].complete:
+        raise ValueError("Complete the effect's begin_fx / end block before previewing.")
+    block = blocks[0]
+    lines = wrapped.splitlines()
+    if block.end_line != len(lines) - 1:
+        raise ValueError("Edit one effect at a time; extra closing blocks are not allowed.")
+    ranges = list(fx._fx_item_ranges(lines, block.start_line, block.end_line))
+    if len(ranges) != 1:
+        raise ValueError("Enter one begin_fx block or one dest_fx line.")
+    first, last, _kind = ranges[0]
+    if any(fx.engine_tokens(lines[index]) is not None
+           for index in range(1, len(lines) - 1) if not first <= index <= last):
+        raise ValueError("Only this effect and its comments belong in this editor.")
+    item = fx.extract_fx_document(wrapped, block.start_line, block.end_line).items[0]
+    issues = (fx.interpret_block(item, context).issues
+              if isinstance(item, fx.FxBlock) else fx.dest_fx_issues(item))
+    errors = [issue.message for issue in issues
+              if issue.severity in (fx.SEVERITY_FATAL, fx.SEVERITY_IGNORED)]
+    if errors:
+        raise ValueError("\n".join(errors))
+    return item, issues
+
+
+@dataclass
+class EffectSource:
+    path: Path
+    first: int
+    last: int
+
+
+class FxTextSession:
+    """Keep drafts separate from files and from the last valid preview."""
+
+    def __init__(self, document, context, origins=()):
+        self.context = context
+        self.original_items = copy.deepcopy(document.items)
+        self.originals = [effect_text(item) for item in document.items]
+        self.drafts = dict(enumerate(self.originals))
+        self.sources: list[EffectSource] = []
+        self.snapshots: dict[Path, bytes] = {}
+        self.encodings = {}
+        self.source_error = ""
+        source_texts = []
+        try:
+            for path, first, last in origins:
+                path = Path(path)
+                text, encoding, bom = read_script_file(path)
+                self.snapshots[path] = path.read_bytes()
+                self.encodings[path] = encoding, bom
+                lines = text.splitlines()
+                for start, end, _kind in fx._fx_item_ranges(lines, first, last):
+                    self.sources.append(EffectSource(path, start, end))
+                    source_texts.append("\n".join(lines[start:end + 1]))
+            if source_texts != self.originals:
+                self.sources.clear()
+                self.source_error = (
+                    "The loaded effects do not match their current source files. "
+                    "Reload the definition before saving.")
+        except (OSError, UnicodeError, IndexError) as exc:
+            self.sources.clear()
+            self.source_error = str(exc)
+
+    @property
+    def dirty(self) -> bool:
+        return any(self.drafts[index] != text for index, text in enumerate(self.originals))
+
+    def is_dirty(self, index) -> bool:
+        return self.drafts[index] != self.originals[index]
+
+    def set_draft(self, index, text):
+        self.drafts[index] = text
+        return parse_effect_text(text, self.context)
+
+    def revert(self, index):
+        self.drafts[index] = self.originals[index]
+        return copy.deepcopy(self.original_items[index])
+
+    def save(self, indexes) -> set[Path]:
+        """Save only edited effects, preserving encoding and all other bytes."""
+        indexes = [index for index in indexes if self.is_dirty(index)]
+        if not indexes:
+            return set()
+        if self.source_error or len(self.sources) != len(self.originals):
+            raise ValueError(self.source_error or "No script source is attached to this effect.")
+        for index in indexes:
+            parse_effect_text(self.drafts[index], self.context)
+        paths = {self.sources[index].path for index in indexes}
+        for path in paths:
+            if path.read_bytes() != self.snapshots[path]:
+                raise ValueError(
+                    f"{path.name} changed outside the editor. No file was overwritten. "
+                    "Keep a copy of your draft, then reload the definition.")
+        updated = {}
+        for path in paths:
+            encoding, bom = self.encodings[path]
+            raw = self.snapshots[path]
+            text = raw.decode("utf-8-sig" if encoding == "utf-8" and bom else encoding)
+            lines = text.splitlines(keepends=True)
+            newline = "\r\n" if "\r\n" in text else "\n"
+            for index in sorted((i for i in indexes if self.sources[i].path == path),
+                                key=lambda i: self.sources[i].first, reverse=True):
+                source = self.sources[index]
+                trailing = (newline if lines[source.last].endswith(("\n", "\r")) else "")
+                replacement = newline.join(self.drafts[index].splitlines()) + trailing
+                lines[source.first:source.last + 1] = [replacement]
+            updated[path] = "".join(lines)
+        with tempfile.TemporaryDirectory(prefix="onua_fx_") as directory:
+            files = []
+            expected = {}
+            for number, (path, text) in enumerate(updated.items()):
+                stage = Path(directory) / f"effect_{number}.cfg"
+                encoding, bom = self.encodings[path]
+                write_script_file(stage, text, encoding, bom)
+                expected[path] = stage.read_bytes()
+                files.append((stage, path))
+
+            def verify():
+                for path, data in expected.items():
+                    if path.read_bytes() != data:
+                        raise ValueError(f"Saved script verification failed: {path.name}")
+
+            commit_verified_files(files, verify=verify)
+        # Every later source span moves by exactly the changed line count.
+        for path in paths:
+            changes = [(self.sources[index].first, self.sources[index].last,
+                        len(self.drafts[index].splitlines()))
+                       for index in indexes if self.sources[index].path == path]
+            for source in self.sources:
+                if source.path != path:
+                    continue
+                offset = sum(count - (last - first + 1)
+                             for first, last, count in changes if last < source.first)
+                own = next((count for first, last, count in changes
+                            if first == source.first and last == source.last), None)
+                source.first += offset
+                source.last = (source.first + own - 1 if own is not None else source.last + offset)
+            self.snapshots[path] = path.read_bytes()
+        for index in indexes:
+            self.originals[index] = self.drafts[index]
+            self.original_items[index] = parse_effect_text(self.drafts[index], self.context)[0]
+        return paths

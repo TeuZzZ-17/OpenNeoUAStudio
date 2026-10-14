@@ -212,7 +212,7 @@ class SnapshotStudioWindow(EntityListMixin, SetBasMixin, AssemblyWindow):
         if animation_box is not None:
             vanm_row = QHBoxLayout()
             vanm_row.setSpacing(4)
-            vanm_row.addWidget(QLabel("VANM preview:"))
+            vanm_row.addWidget(QLabel("Animation:"))
             vanm_row.addWidget(self.play_button)
             vanm_row.addWidget(self.step_button)
             vanm_row.addWidget(QLabel("Speed:"))
@@ -233,14 +233,11 @@ class SnapshotStudioWindow(EntityListMixin, SetBasMixin, AssemblyWindow):
         self._sync_animation_controls()
 
     def _install_batch_panel(self) -> None:
-        """Add the compact complete-model batch controller."""
+        """Add batch controls inside the shared Export group."""
 
         self.vp_batch_panel = VPSnapshotBatchPanel(self)
-        snapshot_layout = self._snapshot_panel.layout()
-        snapshot_layout.insertWidget(1, self.vp_batch_panel)
-        # Recompute the page minimum after the batch controls are inserted.
-        # The surrounding QScrollArea will then provide vertical scrolling
-        # whenever the window is not tall enough.
+        self._snapshot_export_layout.addWidget(
+            self.vp_batch_panel, 9, 0, 1, 2)
         self._snapshot_panel.adjustSize()
 
     def open_setbas(self, path: str | Path) -> None:

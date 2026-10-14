@@ -16,13 +16,13 @@ import zipfile
 from dataclasses import asdict, dataclass
 from pathlib import Path
 
-from PySide6.QtCore import QSize, QTimer
-from PySide6.QtGui import QImageWriter
+from PySide6.QtCore import QSize, Qt, QTimer
+from PySide6.QtGui import QColor
 from PySide6.QtWidgets import (
     QApplication,
     QCheckBox,
+    QComboBox,
     QFileDialog,
-    QGroupBox,
     QHBoxLayout,
     QLabel,
     QLineEdit,
@@ -30,9 +30,20 @@ from PySide6.QtWidgets import (
     QProgressBar,
     QPushButton,
     QSizePolicy,
+    QSlider,
     QVBoxLayout,
+    QWidget,
 )
 
+from studio.exchange.sevenzip import write_7z
+from studio.ui.widgets import CollapsibleSection
+from studio.rendering.snapshot_export import (
+    AnimationExportCancelled,
+    export_animation_atomic,
+    is_animated_format,
+    output_extension,
+    write_static_image_atomic,
+)
 from studio.rendering.asset_viewport import AssetViewport, VIEW_PRESET_ANGLES
 from studio.assets.family import AssetFamily, FamilyObject, load_asset_family
 from studio.formats.base_format import BaseObject
@@ -100,6 +111,56 @@ def view_slug(value: str) -> str:
     return safe_component(value.lower().replace(" ", "_"), "view", 48)
 
 
+def assign_source_folder_names(
+        sources: list[SnapshotSource], mode: str) -> None:
+    """Use the selected source name and add IDs only for collisions."""
+
+    candidates = []
+    for source in sources:
+        if mode == "vp_id" and source.vp_id >= 0:
+            candidate = f"VP_{source.vp_id:04d}"
+        elif mode == "vp_id" and source.source_kind == "SKLT":
+            candidate = f"SKLT_{source.source_id:04d}"
+        else:
+            resource = str(source.base_name or source.resource_name or "").replace("\\", "/")
+            candidate = safe_component(
+                Path(resource).stem or source.base_name or source.folder_name,
+                f"{source.source_kind}_{source.source_id:04d}")
+        candidates.append(safe_component(candidate, "snapshot"))
+
+    counts: dict[str, int] = {}
+    for candidate in candidates:
+        key = candidate.casefold()
+        counts[key] = counts.get(key, 0) + 1
+
+    used = set()
+    for source, candidate in zip(sources, candidates):
+        base_candidate = candidate
+        if counts[candidate.casefold()] > 1 \
+                or candidate.casefold() in used:
+            suffix = f"{source.source_kind}_{source.source_id:04d}"
+            candidate = _append_name_suffix(candidate, suffix)
+        key = candidate.casefold()
+        counter = 2
+        while key in used:
+            candidate = _append_name_suffix(
+                base_candidate, f"{suffix}_{counter}")
+            key = candidate.casefold()
+            counter += 1
+        source.folder_name = candidate
+        used.add(key)
+
+
+def _append_name_suffix(candidate: str, suffix: str,
+                        limit: int = 80) -> str:
+    """Reserve path length for a collision suffix and its counter."""
+
+    suffix = safe_component(suffix, "2", limit)
+    prefix = candidate[:max(0, limit - len(suffix) - 1)].rstrip(" ._")
+    value = f"{prefix}_{suffix}" if prefix else suffix
+    return safe_component(value, "snapshot", limit)
+
+
 def drawable_polygon_count(skeleton) -> int:
     """Count polygons that the static Snapshot renderer can actually draw."""
 
@@ -108,19 +169,42 @@ def drawable_polygon_count(skeleton) -> int:
     return sum(1 for polygon in skeleton.polygons if len(polygon) >= 3)
 
 
-class VPSnapshotBatchPanel(QGroupBox):
-    """Compact controller embedded below the normal Snapshot tools."""
+def batch_renderable_sources(
+        sources: list[SnapshotSource]) -> list[SnapshotSource]:
+    """Include mapped particle-only models supported by AssetViewport."""
+
+    return [
+        source for source in sources
+        if not source.skip_status
+        or (source.skip_status == "PARTICLE_ONLY"
+            and source.mapped_object is not None)
+    ]
+
+
+DEFAULT_COMPRESSION_LEVEL = 1
+COMPRESSION_LEVEL_NAMES = {
+    1: "Fastest", 2: "Fast", 3: "Fast", 4: "Normal", 5: "Normal",
+    6: "Balanced", 7: "Strong", 8: "Strong", 9: "Maximum"}
+SEVENZIP_METHODS = (
+    ("LZMA2 (7-Zip default)", "lzma2"), ("LZMA", "lzma"),
+    ("BZip2", "bzip2"), ("Deflate", "deflate"), ("Store (no compression)", "store"))
+
+
+class VPSnapshotBatchPanel(QWidget):
+    """Compact batch controls embedded in the shared Export group."""
 
     def __init__(self, window) -> None:
-        super().__init__("Batch VP Snapshots", window._snapshot_panel)
+        super().__init__(window._snapshot_export_box)
         self.window = window
         self.setSizePolicy(
             QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
         self.setToolTip(
-            "All models in SET.BAS • transparent PNG • selected size/zoom.")
+            "Export all renderable models in the active SET.BAS using the "
+            "shared export settings.")
 
         self._running = False
         self._cancel_requested = False
+        self._temporarily_disabled_widgets = None
         self._sources: list[SnapshotSource] = []
         self._queue: list[tuple[SnapshotSource, int, str]] = []
         self._queue_index = 0
@@ -130,9 +214,17 @@ class VPSnapshotBatchPanel(QGroupBox):
         self._root: Path | None = None
         self._target_size = QSize(1024, 1024)
         self._zoom = 100
+        self._format_id = "png"
+        self._quality = 95
+        self._fps = 25
+        self._speed = 1.0
+        self._duration_seconds: float | None = None
+        self._name_mode = "resource"
+        self._background = None
         self._written = 0
         self._existing = 0
         self._skipped_models = 0
+        self._skipped_animations = 0
         self._failed = 0
         self._started_at = 0.0
         self._last_setbas_path = ""
@@ -141,8 +233,12 @@ class VPSnapshotBatchPanel(QGroupBox):
         self._active_source_key: tuple[str, int] | None = None
 
         layout = QVBoxLayout(self)
-        layout.setContentsMargins(8, 8, 8, 8)
-        layout.setSpacing(7)
+        layout.setContentsMargins(0, 5, 0, 0)
+        layout.setSpacing(6)
+
+        heading = QLabel("Batch VP Snapshots")
+        heading.setStyleSheet("font-weight: 600;")
+        layout.addWidget(heading)
 
         output_row = QHBoxLayout()
         output_row.setSpacing(5)
@@ -162,13 +258,50 @@ class VPSnapshotBatchPanel(QGroupBox):
         self.skip_existing_check = QCheckBox("Skip Existing")
         self.skip_existing_check.setChecked(True)
         self.skip_existing_check.setToolTip(
-            "Keep existing non-empty PNG files, allowing safe resume.")
+            "Keep existing non-empty image files, allowing safe resume.")
         options_row.addWidget(self.skip_existing_check)
         self.zip_check = QCheckBox("Create ZIP")
         self.zip_check.setChecked(True)
         options_row.addWidget(self.zip_check)
+        self.sevenzip_check = QCheckBox("Create 7z")
+        self.sevenzip_check.setToolTip(
+            "Also write a 7z archive next to the folder (smaller than ZIP).")
+        options_row.addWidget(self.sevenzip_check)
         options_row.addStretch(1)
         layout.addLayout(options_row)
+
+        # Compression settings appear only while an archive is requested.
+        self.compression_rows = CollapsibleSection(self)
+        compression_grid = self.compression_rows.grid
+        compression_grid.setHorizontalSpacing(8)
+        compression_grid.addWidget(QLabel("Compression level:"), 0, 0)
+        self.level_slider = QSlider(Qt.Orientation.Horizontal)
+        self.level_slider.setRange(1, 9)
+        self.level_slider.setValue(DEFAULT_COMPRESSION_LEVEL)
+        self.level_slider.setTickPosition(QSlider.TickPosition.TicksBelow)
+        self.level_slider.setTickInterval(1)
+        self.level_slider.setToolTip(
+            "1 is the fastest, 9 gives the smallest archive. Images are already "
+            "compressed, so high levels are slow and save little.")
+        compression_grid.addWidget(self.level_slider, 0, 1)
+        self.level_label = QLabel()
+        self.level_label.setMinimumWidth(78)
+        compression_grid.addWidget(self.level_label, 0, 2)
+        compression_grid.addWidget(QLabel("7z algorithm:"), 1, 0)
+        self.method_combo = QComboBox()
+        for label, method in SEVENZIP_METHODS:
+            self.method_combo.addItem(label, method)
+        self.method_combo.setToolTip(
+            "LZMA2 is the 7-Zip default. The ZIP archive always uses Deflate "
+            "so it opens everywhere.")
+        compression_grid.addWidget(self.method_combo, 1, 1, 1, 2)
+        compression_grid.setColumnStretch(1, 1)
+        layout.addWidget(self.compression_rows)
+        self.level_slider.valueChanged.connect(self._level_changed)
+        self.zip_check.toggled.connect(self._archive_options_changed)
+        self.sevenzip_check.toggled.connect(self._archive_options_changed)
+        self._level_changed(self.level_slider.value())
+        self._archive_options_changed()
 
         buttons_row = QHBoxLayout()
         buttons_row.setSpacing(5)
@@ -236,9 +369,12 @@ class VPSnapshotBatchPanel(QGroupBox):
         views = len(VIEW_PRESET_ANGLES)
 
         self.export_button.setEnabled(bool(entries or extra_count))
+        format_id = self.window.snapshot_format_combo.currentData()
+        extension = output_extension(format_id)
         self.export_button.setToolTip(
             f"Export {potential_sources} models, up to "
-            f"{potential_sources * views:,} transparent PNGs.")
+            f"{potential_sources * views:,} {extension} image(s) using "
+            "the shared settings.")
 
         archive_path = str(Path(archive.path).resolve())
         if archive_path != self._last_setbas_path:
@@ -251,6 +387,15 @@ class VPSnapshotBatchPanel(QGroupBox):
                 getattr(self.window, "_last_directory", Path.home()))
             self.output_edit.setText(
                 str(base_dir / f"{set_name}_All_Models_Snapshot_Corpus"))
+
+    def _level_changed(self, level: int) -> None:
+        self.level_label.setText(f"{level} · {COMPRESSION_LEVEL_NAMES[level]}")
+
+    def _archive_options_changed(self, *_args) -> None:
+        wanted = self.zip_check.isChecked() or self.sevenzip_check.isChecked()
+        self.compression_rows.set_expanded(wanted)
+        self.method_combo.setEnabled(
+            self.sevenzip_check.isChecked() and not self._running)
 
     def _choose_output(self) -> None:
         current = self.output_edit.text().strip()
@@ -271,15 +416,41 @@ class VPSnapshotBatchPanel(QGroupBox):
         self.output_button.setEnabled(not running)
         self.skip_existing_check.setEnabled(not running)
         self.zip_check.setEnabled(not running)
+        self.sevenzip_check.setEnabled(not running)
+        self.level_slider.setEnabled(not running)
+        self.method_combo.setEnabled(
+            not running and self.sevenzip_check.isChecked())
         self.cancel_button.setEnabled(running)
         self.cancel_button.setVisible(running)
 
-        bas_panel = getattr(self.window, "_bas_panel", None)
-        if bas_panel is not None:
-            bas_panel.setEnabled(not running)
-        photo_box = getattr(self.window, "_snapshot_studio_box", None)
-        if photo_box is not None:
-            photo_box.setEnabled(not running)
+        if running:
+            if self._temporarily_disabled_widgets is None:
+                widgets = []
+                photo_box = getattr(
+                    self.window, "_snapshot_studio_box", None)
+                export_box = getattr(
+                    self.window, "_snapshot_export_box", None)
+                if photo_box is not None:
+                    widgets.extend(
+                        widget for widget in photo_box.findChildren(QWidget)
+                        if widget.parentWidget() is photo_box
+                        and widget is not export_box)
+                if export_box is not None:
+                    widgets.extend(
+                        widget for widget in export_box.findChildren(QWidget)
+                        if widget.parentWidget() is export_box
+                        and widget is not self)
+                bas_panel = getattr(self.window, "_bas_panel", None)
+                if bas_panel is not None:
+                    widgets.append(bas_panel)
+                self._temporarily_disabled_widgets = [
+                    (widget, widget.isEnabled()) for widget in widgets]
+                for widget, _was_enabled in self._temporarily_disabled_widgets:
+                    widget.setEnabled(False)
+        elif self._temporarily_disabled_widgets is not None:
+            for widget, was_enabled in self._temporarily_disabled_widgets:
+                widget.setEnabled(was_enabled)
+            self._temporarily_disabled_widgets = None
 
     def request_cancel(self) -> None:
         if not self._running:
@@ -319,12 +490,21 @@ class VPSnapshotBatchPanel(QGroupBox):
         self._written = 0
         self._existing = 0
         self._skipped_models = 0
+        self._skipped_animations = 0
         self._failed = 0
         self._started_at = time.time()
         self._root = Path(output_text).expanduser().resolve()
         self._root.mkdir(parents=True, exist_ok=True)
         self._target_size = self.window._snapshot_output_size()
         self._zoom = int(self.window.snapshot_zoom_spin.value())
+        options = self.window._snapshot_export_options()
+        self._format_id = str(options["format_id"])
+        self._quality = int(options["quality"])
+        self._fps = int(options["fps"])
+        self._speed = float(options["speed"])
+        self._duration_seconds = options["duration_seconds"]
+        self._name_mode = str(options["name_mode"])
+        self._background = self.window._snapshot_background()
         self._renderer_mode = "textured"
 
         self._set_running(True)
@@ -347,6 +527,7 @@ class VPSnapshotBatchPanel(QGroupBox):
 
             self._sources = self._build_sources(
                 entries, archive, self._family)
+            assign_source_folder_names(self._sources, self._name_mode)
         except Exception as exc:
             self._set_running(False)
             QMessageBox.critical(
@@ -357,13 +538,11 @@ class VPSnapshotBatchPanel(QGroupBox):
             self.status_label.setText("Preparation failed.")
             return
 
-        renderable = [
-            source for source in self._sources
-            if not source.skip_status
-        ]
+        renderable = batch_renderable_sources(self._sources)
+        renderable_ids = {id(source) for source in renderable}
         skipped = [
             source for source in self._sources
-            if source.skip_status
+            if id(source) not in renderable_ids
         ]
         self._skipped_models = len(skipped)
         for source in skipped:
@@ -384,8 +563,8 @@ class VPSnapshotBatchPanel(QGroupBox):
             QMessageBox.information(
                 self,
                 "Nothing renderable",
-                "The archive contains no polygonal models that the static "
-                "Snapshot renderer can draw.",
+                "The archive contains no polygonal models or mapped effects "
+                "that the Snapshot renderer can draw.",
             )
             self.status_label.setText("Nothing renderable.")
             return
@@ -394,7 +573,7 @@ class VPSnapshotBatchPanel(QGroupBox):
         self.progress.setValue(0)
 
         self._batch_viewport = AssetViewport(self)
-        self._batch_viewport.begin_snapshot_mode(None)
+        self._batch_viewport.begin_snapshot_mode(self._background)
         self._batch_viewport.set_mode(self._renderer_mode)
         self._batch_viewport.play_animation(False)
         self._batch_viewport.set_snapshot_guides_visible(False)
@@ -469,7 +648,7 @@ class VPSnapshotBatchPanel(QGroupBox):
                 return (
                     "PARTICLE_ONLY",
                     "Point/particle-only VP: no static polygon mesh exists. "
-                    "Dynamic particle simulation is not part of the Snapshot renderer.",
+                    "A mapped effect source is required for rendering.",
                 )
             return (
                 "NON_MESH",
@@ -624,14 +803,14 @@ class VPSnapshotBatchPanel(QGroupBox):
             )
             viewport.set_selected_owner("root")
 
-        viewport.begin_snapshot_mode(None)
+        viewport.begin_snapshot_mode(self._background)
         viewport.set_mode(self._renderer_mode)
         viewport.play_animation(False)
         viewport.reset_animation()
         viewport.set_snapshot_guides_visible(False)
         if not viewport.has_model:
             raise RuntimeError(
-                "The selected source produced no renderable polygon faces")
+                "The selected source produced no renderable geometry or effects")
 
     def _step(self) -> None:
         if not self._running:
@@ -651,7 +830,9 @@ class VPSnapshotBatchPanel(QGroupBox):
 
         folder = self._root / source.folder_name
         folder.mkdir(parents=True, exist_ok=True)
-        output_path = folder / f"{view_index:02d}_{view_slug(view)}.png"
+        extension = output_extension(self._format_id)
+        output_path = folder / (
+            f"{view_index:02d}_{view_slug(view)}.{extension}")
         relative = str(
             output_path.relative_to(self._root)).replace("\\", "/")
 
@@ -666,12 +847,21 @@ class VPSnapshotBatchPanel(QGroupBox):
             QTimer.singleShot(0, self._step)
             return
 
+        if is_animated_format(self._format_id) \
+                and not self._batch_viewport.has_animation:
+            self._record(
+                source, view, "", "SKIPPED_NO_ANIMATION",
+                "This source has no animated material to export")
+            self._skipped_animations += 1
+            QTimer.singleShot(0, self._step)
+            return
+
         if self.skip_existing_check.isChecked() \
                 and output_path.is_file() \
                 and output_path.stat().st_size > 0:
             self._record(
                 source, view, relative,
-                "EXISTS", "Existing non-empty PNG retained")
+                "EXISTS", "Existing non-empty image retained")
             self._existing += 1
             QTimer.singleShot(0, self._step)
             return
@@ -679,32 +869,51 @@ class VPSnapshotBatchPanel(QGroupBox):
         try:
             self._batch_viewport.apply_snapshot_preset(
                 view, self._target_size, self._zoom)
-            image = self._batch_viewport.render_snapshot(
-                self._target_size,
-                None,
-                include_guides=False,
-            )
-            if image.isNull():
-                raise RuntimeError(
-                    "Snapshot renderer returned a null image")
-            partial_path = output_path.with_suffix(output_path.suffix + ".part")
-            if partial_path.exists():
-                partial_path.unlink()
-            writer = QImageWriter(str(partial_path), b"png")
-            try:
-                try:
-                    if not writer.write(image):
-                        raise OSError(
-                            writer.errorString()
-                            or f"Could not write {output_path}")
-                finally:
-                    # Release the Windows file handle before rename or cleanup.
-                    writer.device().close()
-                os.replace(partial_path, output_path)
-            except Exception:
-                if partial_path.exists():
-                    partial_path.unlink()
-                raise
+            if is_animated_format(self._format_id):
+                def cancelled() -> bool:
+                    QApplication.processEvents()
+                    return self._cancel_requested
+
+                frame_count = export_animation_atomic(
+                    self._batch_viewport,
+                    output_path,
+                    self._format_id,
+                    self._target_size,
+                    self._background,
+                    include_guides=False,
+                    fps=self._fps,
+                    speed=self._speed,
+                    quality=self._quality,
+                    duration_seconds=self._duration_seconds,
+                    cancelled=cancelled,
+                    progress=lambda current, total: self.status_label.setText(
+                        f"{source.folder_name} • {view_index}/"
+                        f"{len(VIEW_PRESET_ANGLES)} • "
+                        f"frame {current}/{total}"),
+                )
+                width = self._target_size.width()
+                height = self._target_size.height()
+            else:
+                background = self._background
+                if self._format_id == "jpg" and background is None:
+                    background = QColor(96, 96, 96)
+                image = self._batch_viewport.render_snapshot(
+                    self._target_size,
+                    background,
+                    include_guides=False,
+                )
+                write_static_image_atomic(
+                    image, output_path, self._format_id, self._quality)
+                width = image.width()
+                height = image.height()
+                frame_count = 1
+        except AnimationExportCancelled:
+            self._record(
+                source, view, "", "CANCELLED",
+                "Animation export cancelled before the file was written",
+                include_renderer=True)
+            QTimer.singleShot(0, self._step)
+            return
         except Exception as exc:
             message = str(exc)
             self._record(
@@ -714,9 +923,13 @@ class VPSnapshotBatchPanel(QGroupBox):
             self._failed += 1
         else:
             mode = "geometry-only" if source.geometry_only else "retail-indexed"
+            animation = (
+                f", {frame_count} frames at {self._fps} FPS, "
+                f"speed {self._speed:g}x"
+                if is_animated_format(self._format_id) else "")
             self._record(
                 source, view, relative, "WRITTEN",
-                f"{image.width()}x{image.height()} transparent PNG ({mode})",
+                f"{width}x{height} {extension.upper()}{animation} ({mode})",
                 include_renderer=True)
             self._written += 1
 
@@ -768,6 +981,9 @@ class VPSnapshotBatchPanel(QGroupBox):
     def _write_manifests(self, cancelled: bool) -> None:
         if self._root is None:
             return
+        effective_background = self._background
+        if self._format_id == "jpg" and effective_background is None:
+            effective_background = QColor(96, 96, 96)
         rows = [asdict(row) for row in self._rows]
         (self._root / "manifest.json").write_text(
             json.dumps(rows, ensure_ascii=False, indent=2),
@@ -809,10 +1025,30 @@ class VPSnapshotBatchPanel(QGroupBox):
             "width": self._target_size.width(),
             "height": self._target_size.height(),
             "zoom_percent": self._zoom,
-            "format": "PNG",
-            "transparent_background": True,
+            "format": output_extension(self._format_id).upper(),
+            "format_id": self._format_id,
+            "animated": is_animated_format(self._format_id),
+            "quality": self._quality,
+            "name_mode": self._name_mode,
+            "background": (
+                "transparent" if effective_background is None
+                else effective_background.name()),
+            "transparent_background": effective_background is None,
             "guides": False,
-            "animation_frame": "initial/reset",
+            "animation_fps": (
+                self._fps if is_animated_format(self._format_id) else None),
+            "animation_speed": (
+                self._speed if is_animated_format(self._format_id) else None),
+            "animation_duration_seconds": (
+                self._duration_seconds
+                if is_animated_format(self._format_id) else None),
+            "animation_duration_source": (
+                "fixed seconds" if self._duration_seconds is not None
+                else "viewport cycle")
+            if is_animated_format(self._format_id) else None,
+            "animation_frame": (
+                "deterministic playback from time zero"
+                if is_animated_format(self._format_id) else "initial/reset"),
             "renderer_mode": self._renderer_mode,
             "renderer_requested": "retail_indexed_reconstructed",
             "retail_indexed_policy": (
@@ -820,6 +1056,7 @@ class VPSnapshotBatchPanel(QGroupBox):
             "written": self._written,
             "existing": self._existing,
             "skipped_models": self._skipped_models,
+            "skipped_animations": self._skipped_animations,
             "failed_images": self._failed,
             "cancelled": cancelled,
             "elapsed_seconds": round(
@@ -829,8 +1066,8 @@ class VPSnapshotBatchPanel(QGroupBox):
                 "SKLT resource not assigned to VISPROTO"
             ),
             "non_mesh_policy": (
-                "Point/particle-only resources are documented but not "
-                "rendered because Snapshot is a static polygon renderer"
+                "Mapped effect sources use the viewport particle renderer; "
+                "unmapped point-only resources are skipped"
             ),
         }
         (self._root / "run_info.json").write_text(
@@ -839,47 +1076,68 @@ class VPSnapshotBatchPanel(QGroupBox):
             encoding="utf-8",
         )
 
-    def _create_zip(self) -> Path | None:
+    def _archive_members(self) -> list[tuple[Path, str]]:
+        """Files that belong to the corpus, with their names inside an archive."""
+
+        authorized = {
+            (self._root / row.relative_file).resolve()
+            for row in self._rows
+            if row.relative_file and row.status in ("WRITTEN", "EXISTS")
+        }
+        authorized.update(
+            (self._root / name).resolve()
+            for name in (
+                "manifest.json", "manifest.csv", "warnings.log",
+                "run_info.json"))
+        return [
+            (path, f"{self._root.name}/{path.relative_to(self._root)}")
+            for path in sorted(authorized)
+            if path.is_file() and self._root in path.parents]
+
+    def _tick(self) -> None:
+        """Keep the window responsive while an archive is written."""
+
+        if self._cancel_requested:
+            raise InterruptedError
+        QApplication.processEvents()
+
+    def _write_archive(self, suffix: str, write) -> Path | None:
+        """Write to a .part file and rename it, so a cancel leaves nothing half-made."""
+
         if self._root is None:
             return None
-        zip_path = self._root.with_suffix(".zip")
-        partial = zip_path.with_suffix(".zip.part")
+        target = self._root.parent / f"{self._root.name}{suffix}"
+        partial = target.with_name(target.name + ".part")
         if partial.exists():
             partial.unlink()
         try:
-            authorized = {
-                (self._root / row.relative_file).resolve()
-                for row in self._rows
-                if row.relative_file and row.status in ("WRITTEN", "EXISTS")
-            }
-            authorized.update(
-                (self._root / name).resolve()
-                for name in (
-                    "manifest.json", "manifest.csv", "warnings.log",
-                    "run_info.json")
-            )
-            with zipfile.ZipFile(
-                    partial, "w",
-                    compression=zipfile.ZIP_DEFLATED,
-                    compresslevel=1,
-                    allowZip64=True) as archive:
-                for path in sorted(authorized):
-                    if self._cancel_requested:
-                        raise InterruptedError
-                    if path.is_file() and self._root in path.parents:
-                        archive.write(
-                            path,
-                            arcname=(
-                                f"{self._root.name}/"
-                                f"{path.relative_to(self._root)}"),
-                        )
-                        QApplication.processEvents()
-            os.replace(partial, zip_path)
+            write(partial)
+            os.replace(partial, target)
         except InterruptedError:
             if partial.exists():
                 partial.unlink()
             return None
-        return zip_path
+        return target
+
+    def _create_zip(self) -> Path | None:
+        members = self._archive_members()
+
+        def write(partial: Path) -> None:
+            with zipfile.ZipFile(
+                    partial, "w", compression=zipfile.ZIP_DEFLATED,
+                    compresslevel=self.level_slider.value(),
+                    allowZip64=True) as archive:
+                for path, name in members:
+                    self._tick()
+                    archive.write(path, arcname=name)
+
+        return self._write_archive(".zip", write)
+
+    def _create_7z(self) -> Path | None:
+        members = self._archive_members()
+        return self._write_archive(".7z", lambda partial: write_7z(
+            partial, members, method=self.method_combo.currentData(),
+            level=self.level_slider.value(), progress=self._tick))
 
     def _dispose_batch_viewport(self) -> None:
         viewport = self._batch_viewport
@@ -896,11 +1154,16 @@ class VPSnapshotBatchPanel(QGroupBox):
 
     def _finish(self, cancelled: bool) -> None:
         self._write_manifests(cancelled)
-        zip_path = None
+        zip_path = sevenzip_path = None
         if not cancelled and self.zip_check.isChecked():
             self.status_label.setText("Creating ZIP")
             QApplication.processEvents()
             zip_path = self._create_zip()
+            cancelled = self._cancel_requested
+        if not cancelled and self.sevenzip_check.isChecked():
+            self.status_label.setText("Creating 7z")
+            QApplication.processEvents()
+            sevenzip_path = self._create_7z()
             cancelled = self._cancel_requested
 
         self._dispose_batch_viewport()
@@ -911,17 +1174,20 @@ class VPSnapshotBatchPanel(QGroupBox):
         if cancelled:
             self.status_label.setText("Cancelled safely.")
             self.window.statusBar().showMessage(
-                "Snapshot batch cancelled; completed PNG files were kept.",
+                "Snapshot batch cancelled; completed image files were kept.",
                 8000)
             return
 
         self.status_label.setText(
             f"{self._written} new • {self._existing} existing • "
+            f"{self._skipped_animations} static skipped • "
             f"{self._failed} errors")
         self.window.statusBar().showMessage(
             f"Complete snapshot batch: {self._written} written, "
             f"{self._existing} existing, {self._skipped_models} "
-            f"non-mesh/empty models documented, {self._failed} failed images.",
+            f"non-mesh/empty models documented, "
+            f"{self._skipped_animations} static sources skipped for animation, "
+            f"{self._failed} failed images.",
             12000,
         )
         message = (
@@ -929,9 +1195,13 @@ class VPSnapshotBatchPanel(QGroupBox):
             f"Written: {self._written}\n"
             f"Existing: {self._existing}\n"
             f"Non-mesh/empty models documented: {self._skipped_models}\n"
+            f"Static sources skipped for animation: "
+            f"{self._skipped_animations}\n"
             f"Failed images: {self._failed}"
         )
         if zip_path is not None:
             message += f"\n\nZIP:\n{zip_path}"
+        if sevenzip_path is not None:
+            message += f"\n\n7z:\n{sevenzip_path}"
         QMessageBox.information(
             self, "Snapshot batch complete", message)
