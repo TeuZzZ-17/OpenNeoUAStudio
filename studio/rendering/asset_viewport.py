@@ -565,7 +565,7 @@ class AssetViewport(AcceleratedWidget):
         self._particle_emitters: list[ParticleEmitter] = []
         self._particle_bounds_points = []
         self._particle_owner_bounds: dict[str, tuple] = {}
-        self._effect_ground_y: float | None = None
+        self._ground_y: float | None = None
         self._anim_states: dict[int, tuple[int, int]] = {}  # mat -> (frame, dir)
         self._anim_left_ms: dict[int, float] = {}
 
@@ -601,7 +601,7 @@ class AssetViewport(AcceleratedWidget):
         self._particle_emitters = []
         self._particle_bounds_points = []
         self._particle_owner_bounds = {}
-        self._effect_ground_y = None
+        self._ground_y = None
         self._materials = []
         self._block_material_ids = {}
         self._sen_boxes = []
@@ -2822,7 +2822,7 @@ class AssetViewport(AcceleratedWidget):
         self._invalidate_indexed_view_cache()
 
     def _build_particle_bounds(self) -> None:
-        """Measure one full effect burst so framing and ground stay fixed.
+        """Measure one full effect burst and the ground, so both stay fixed.
 
         The envelope is kept apart from ``_owner_bounds``: those are the
         bounds of the model itself and also drive selection framing,
@@ -2847,11 +2847,11 @@ class AssetViewport(AcceleratedWidget):
                         max(old[4], y + radius), max(old[5], z + radius))
         self._particle_bounds_points = points
         self._particle_owner_bounds = owner_bounds
-        # UA +Y points down: the lowest point of the model and of every
-        # particle is the ground the whole effect has to stand on.
-        low = [point[1] for point in self._static_points()] + [
-            point[1] for point in points]
-        self._effect_ground_y = max(low) if self._particle_emitters and low else None
+        # UA +Y points down, so the largest Y is the lowest point. Every VP
+        # stands on the same ground: the bottom of its model. Only an effect
+        # without any surface (an explosion) stands on its lowest particle.
+        low = [point[1] for point in (self._static_points() or points)]
+        self._ground_y = max(low) if low else None
 
     def _static_points(self):
         return [v for face in self._faces if face.billboard_center is None
@@ -4671,9 +4671,8 @@ class AssetViewport(AcceleratedWidget):
         painter.setPen(QPen(QColor(55, 60, 70), 0.8))
         steps = 8
         size = 1.4 / self._scale
-        # Models keep the grid through their center; an effect stands on it.
-        height = (self._center[1] if self._effect_ground_y is None
-                  else self._effect_ground_y)
+        # The grid is the shared ground: the bottom of the shown model.
+        height = self._center[1] if self._ground_y is None else self._ground_y
         for i in range(-steps, steps + 1):
             offset = i * size / steps
             for start, end in (
