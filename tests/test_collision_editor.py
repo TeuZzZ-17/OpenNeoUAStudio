@@ -19,6 +19,7 @@ from PySide6.QtWidgets import (
 
 from studio.assets.family import AssetFamily, FamilyObject
 from studio.formats.base_format import BaseObject
+from studio.rendering.asset_viewport import PREVIEW_SCALE
 from studio.rendering.indexed import IndexedSurface
 import entity_designer.editor as editor_module
 import entity_designer.script_model as script_module
@@ -4458,9 +4459,9 @@ class CollisionEditorTests(unittest.TestCase):
                     window._current_owner]
                 expected_center = ((x0 + x1) / 2, (y0 + y1) / 2,
                                    (z0 + z1) / 2)
-                expected_scale = 2.0 / max(x1 - x0, y1 - y0, z1 - z0)
                 self.assertEqual(viewport._center, expected_center)
-                self.assertAlmostEqual(viewport._scale, expected_scale)
+                # Every unit is framed with the shared preview scale.
+                self.assertAlmostEqual(viewport._scale, PREVIEW_SCALE)
                 self.assertEqual(viewport._yaw, viewport.RESET_YAW)
                 self.assertEqual(viewport._pitch, viewport.RESET_PITCH)
                 self.assertEqual(viewport._pan, QPointF())

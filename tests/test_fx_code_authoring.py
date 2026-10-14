@@ -10,7 +10,7 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 import pytest
 from PySide6.QtCore import Qt
 from PySide6.QtTest import QTest
-from PySide6.QtWidgets import QApplication, QMessageBox
+from PySide6.QtWidgets import QApplication, QHBoxLayout, QMessageBox, QWidget
 
 from entity_designer import destruction_fx as fx
 from entity_designer.fx_authoring import FxTextSession, effect_text, parse_effect_text
@@ -29,6 +29,30 @@ def _document(text):
 @pytest.fixture(scope="module")
 def app():
     return QApplication.instance() or QApplication([])
+
+
+def _in_wide_window(panel, app):
+    """Put the panel at the right of a wide window, like the Entity Designer does.
+
+    The editor slides out to the left of the panel, over the free area.
+    """
+    window = QWidget()
+    row = QHBoxLayout(window)
+    row.setContentsMargins(0, 0, 0, 0)
+    row.addStretch(1)
+    panel.setFixedWidth(420)
+    row.addWidget(panel)
+    window.resize(1300, 760)
+    window.show()
+    app.processEvents()
+    return window
+
+
+def _open_drawer(panel, app):
+    """Wait for the slide animation to end."""
+    QTest.qWait(260)
+    app.processEvents()
+    return panel.code_drawer
 
 
 def test_invalid_or_extra_code_does_not_become_an_effect():
@@ -94,51 +118,53 @@ def test_catalog_tracks_effects_from_new_and_modify_files(tmp_path):
     assert (tmp_path / "second.cfg").read_text() == second.replace("400", "750")
 
 
-def test_click_opens_large_editor_and_live_drafts_keep_last_valid_preview(app, tmp_path):
+def test_click_opens_attached_editor_and_live_drafts_keep_last_valid_preview(app, tmp_path):
     text = "new_vehicle 1\n" + EFFECT + "\nend\n"
     path = tmp_path / "vehicle.cfg"
     path.write_text(text, encoding="utf-8")
     document, block = _document(text)
     panel = DestructionFxPanel()
+    window = _in_wide_window(panel, app)
     try:
         panel.set_context(fx.CONTEXT_VEHICLE, document)
         panel.set_script_sources([(path, 0, block.end_line)])
-        panel.resize(600, 650)
-        panel.show()
         app.processEvents()
         row = panel.effects_list.item(0)
         checkbox = panel.effects_list.checkbox_rect(row).center()
         QTest.mouseClick(panel.effects_list.viewport(), Qt.MouseButton.LeftButton, pos=checkbox)
-        assert panel.code_dialog is None
+        assert not panel.code_drawer.expanded
         assert panel.hidden_items == {0}
         point = panel.effects_list.visualItemRect(row).center()
         QTest.mouseClick(panel.effects_list.viewport(), Qt.MouseButton.LeftButton, pos=point)
-        dialog = panel.code_dialog
-        assert dialog is not None and dialog.isVisible()
-        assert dialog.width() >= 900
-        dialog.code.setPlainText(EFFECT.replace("400", "850"))
+        drawer = _open_drawer(panel, app)
+        assert drawer.expanded and drawer.isVisible()
+        # Attached: same height as the Effects box, ending where the box begins.
+        box = panel.effects_box
+        corner = box.mapTo(window, box.rect().topLeft())
+        assert drawer.height() == box.height() and drawer.y() == corner.y()
+        assert drawer.x() + drawer.width() == corner.x()
+        assert drawer.width() >= 600
+        drawer.code.setPlainText(EFFECT.replace("400", "850"))
         panel.play_button.setChecked(True)
         panel.play_button.setChecked(False)
         assert panel.document.items[0].value("duration") == "850"
         assert panel.hidden_items == {0}
         assert panel.has_unsaved_text
         assert path.read_text() == text
-        dialog.code.setPlainText(EFFECT.removesuffix("end"))
+        drawer.code.setPlainText(EFFECT.removesuffix("end"))
         QTest.qWait(300)
         assert panel.document.items[0].value("duration") == "850"
-        assert not dialog.save_button.isEnabled()
-        dialog.code.setPlainText(EFFECT.replace("400", "650"))
+        assert not drawer.save_button.isEnabled()
+        drawer.code.setPlainText(EFFECT.replace("400", "650"))
         QTest.qWait(300)
-        dialog.activateWindow()
-        dialog.code.editor.setFocus()
+        window.activateWindow()
+        drawer.code.editor.setFocus()
         app.processEvents()
-        QTest.keyClick(dialog.code.editor, Qt.Key.Key_S, Qt.KeyboardModifier.ControlModifier)
+        QTest.keyClick(drawer.code.editor, Qt.Key.Key_S, Qt.KeyboardModifier.ControlModifier)
         assert "duration = 650" in path.read_text()
         assert not panel.has_unsaved_text
     finally:
-        if panel.code_dialog is not None:
-            panel.code_dialog.close()
-        panel.close()
+        window.close()
 
 
 def test_discard_confirmation_preserves_cancelled_draft(app):
@@ -160,40 +186,76 @@ def test_discard_confirmation_preserves_cancelled_draft(app):
         panel.close()
 
 
-def test_dialog_list_text_opens_the_effect_and_checkbox_toggles_it(app):
-    from entity_designer.fx_panel import FxEffectsView
+def test_tab_opens_and_collapses_the_editor_and_text_click_opens_the_effect(app):
     other = EFFECT.replace("400", "777")
     document, block = _document("new_vehicle 1" + chr(10) + EFFECT + chr(10) + other + chr(10) + "end" + chr(10))
     panel = DestructionFxPanel()
+    window = _in_wide_window(panel, app)
     try:
         panel.set_context(fx.CONTEXT_VEHICLE, document)
-        panel.resize(600, 650)
-        panel.show()
-        panel.edit_effect_code(0)
-        dialog = panel.code_dialog
-        view = dialog.effects_view
         app.processEvents()
-        assert isinstance(view, FxEffectsView)
-        assert view.list.count() == panel.effects_list.count() == 2
-        assert dialog.width() >= 900 and view.width() >= 300
-        # Text click: the effect opens in the dialog's own editor, nothing is hidden.
-        text_point = view.list.visualItemRect(view.list.item(1)).center()
-        QTest.mouseClick(view.list.viewport(), Qt.MouseButton.LeftButton, pos=text_point)
-        assert dialog.index == 1 and "777" in dialog.code.toPlainText()
-        assert panel.hidden_items == set()
-        # Checkbox click: only the visibility changes, the editor keeps its effect.
-        box = view.list.checkbox_rect(view.list.item(0)).center()
-        QTest.mouseClick(view.list.viewport(), Qt.MouseButton.LeftButton, pos=box)
-        assert panel.hidden_items == {0} and dialog.index == 1
-        assert panel.effects_list.item(0).checkState() == Qt.CheckState.Unchecked
+        drawer = panel.code_drawer
+        tab = drawer.tab
+        # One list only, with the small tab sticking out of the box on its left.
+        assert panel.effects_list.count() == 2
+        box = panel.effects_box
+        corner = box.mapTo(window, box.rect().topLeft())
+        assert tab.isVisible() and tab.x() < corner.x() < tab.x() + tab.width()
+        assert abs(tab.geometry().center().y() - (corner.y() + box.height() // 2)) <= 1
+        assert not drawer.isVisible()
+        # The tab opens the editor on the selected effect ...
+        panel.effects_list.setCurrentRow(1)
+        QTest.mouseClick(tab, Qt.MouseButton.LeftButton)
+        _open_drawer(panel, app)
+        assert drawer.expanded and drawer.isVisible() and drawer.index == 1
+        assert "777" in drawer.code.toPlainText()
+        # ... a text click changes the effect, a checkbox only toggles visibility ...
+        view = panel.effects_view
+        QTest.mouseClick(view.list.viewport(), Qt.MouseButton.LeftButton,
+                         pos=view.list.visualItemRect(view.list.item(0)).center())
+        assert drawer.index == 0 and panel.hidden_items == set()
+        box_point = view.list.checkbox_rect(view.list.item(1)).center()
+        QTest.mouseClick(view.list.viewport(), Qt.MouseButton.LeftButton, pos=box_point)
+        assert panel.hidden_items == {1} and drawer.index == 0
         view.hide_all_button.click()
         assert panel.hidden_items == {0, 1}
         panel.show_all_button.click()
         assert view.list.item(0).checkState() == Qt.CheckState.Checked
-        dialog.code.setPlainText(other.replace("777", "850"))
+        drawer.code.setPlainText(EFFECT.replace("400", "850"))
         QTest.qWait(300)
-        assert view.list.item(1).text().split(chr(10))[0].endswith(" *")
+        assert view.list.item(0).text().split(chr(10))[0].endswith(" *")
+        # ... and the tab folds it away again, keeping the edit.
+        QTest.mouseClick(tab, Qt.MouseButton.LeftButton)
+        _open_drawer(panel, app)
+        assert not drawer.expanded and not drawer.isVisible()
+        assert panel.document.items[0].value("duration") == "850"
+        QTest.mouseClick(tab, Qt.MouseButton.LeftButton)
+        _open_drawer(panel, app)
+        assert drawer.expanded and drawer.index == 0
     finally:
-        if panel.code_dialog is not None:
-            panel.code_dialog.close()
-        panel.close()
+        window.close()
+
+
+def test_editor_keys_do_not_trigger_window_shortcuts(app):
+    from PySide6.QtGui import QAction, QKeySequence
+    document, _ = _document("new_vehicle 1" + chr(10) + EFFECT + chr(10) + "end" + chr(10))
+    panel = DestructionFxPanel()
+    window = _in_wide_window(panel, app)
+    try:
+        panel.set_context(fx.CONTEXT_VEHICLE, document)
+        triggered = []
+        action = QAction("Duplicate", window)
+        action.setShortcut(QKeySequence("Ctrl+D"))
+        action.triggered.connect(lambda: triggered.append(True))
+        window.addAction(action)
+        panel.edit_effect_code(0)
+        drawer = _open_drawer(panel, app)
+        window.activateWindow()
+        drawer.code.editor.setFocus()
+        app.processEvents()
+        lines = drawer.code.toPlainText().count(chr(10))
+        QTest.keyClick(drawer.code.editor, Qt.Key.Key_D, Qt.KeyboardModifier.ControlModifier)
+        assert not triggered
+        assert drawer.code.toPlainText().count(chr(10)) == lines + 1
+    finally:
+        window.close()
