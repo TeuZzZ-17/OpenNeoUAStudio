@@ -54,6 +54,14 @@ QPushButton:checked:hover { background: #178bac; }
 """
 
 # Icon-only transport buttons: narrow enough for seven of them in a small window.
+_DELETE_BUTTON = """
+QPushButton {
+    background: #3a2a2e; color: #ffd9d9; border: 1px solid #b06a6a;
+    border-radius: 4px; padding: 1px 8px; font-size: 11px; min-height: 18px;
+}
+QPushButton:hover { background: #5a3036; border-color: #ff9a9a; }
+QPushButton:disabled { background: #2a2c31; color: #6b6f78; border-color: #4a4f58; }
+"""
 _ICON_BUTTON = """
 QPushButton {
     background: #252e3a; color: #eef0f4; border: 1px solid #8190a4;
@@ -399,11 +407,25 @@ class FxEffectsView(QWidget):
             action.triggered.connect(callback)
             self.actions.append(action)
             button = QPushButton(text, self)
+            button.setStyleSheet(_SMALL_BUTTON)
             button.clicked.connect(action.trigger)
             action.changed.connect(lambda a=action, b=button: b.setEnabled(a.isEnabled()))
             setattr(self, name, button)
             buttons.addWidget(button, index // 2, index % 2)
         self.show_selected_button.setToolTip("Show only the selected effects and hide all others.")
+        # Delete is not a visibility action: it has its own action, shared with the menu.
+        self.delete_action = QAction("Delete Effect", self)
+        self.delete_action.setToolTip(
+            "Remove the selected effects from the script file (asks first).")
+        self.delete_action.triggered.connect(self.delete_selected)
+        self.delete_button = QPushButton("Delete", self)
+        self.delete_button.setStyleSheet(_DELETE_BUTTON)
+        self.delete_button.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Expanding)
+        self.delete_button.setToolTip(self.delete_action.toolTip())
+        self.delete_button.clicked.connect(self.delete_action.trigger)
+        self.delete_action.changed.connect(
+            lambda: self.delete_button.setEnabled(self.delete_action.isEnabled()))
+        buttons.addWidget(self.delete_button, 0, 2, 2, 1)
         layout.addLayout(buttons)
         self.list.itemSelectionChanged.connect(self.update_actions)
         self.list.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
@@ -500,15 +522,24 @@ class FxEffectsView(QWidget):
                        for row in self.list.selectedItems())
         for index, action in enumerate(self.actions):
             action.setEnabled(available and (index < 2 or selected))
+        self.delete_action.setEnabled(available and selected)
+
+    def selected_indexes(self) -> list[int]:
+        return sorted(row.data(Qt.ItemDataRole.UserRole) for row in self.list.selectedItems()
+                      if row.data(Qt.ItemDataRole.UserRole) is not None)
+
+    def delete_selected(self) -> None:
+        self.panel.delete_effects(self.selected_indexes())
 
     def create_menu(self):
-        """Reuse the four visibility actions shared with the buttons."""
+        """Reuse the actions shared with the buttons: Delete and the four visibility ones."""
         menu = QMenu(self)
         edit = menu.addAction("Edit Effect Code")
         current = self.list.currentItem()
         index = current.data(Qt.ItemDataRole.UserRole) if current else None
         edit.setEnabled(index is not None)
         edit.triggered.connect(lambda: self.panel.edit_effect_code(index))
+        menu.addAction(self.delete_action)
         menu.addSeparator()
         for action in self.actions:
             menu.addAction(action)
@@ -914,6 +945,96 @@ class DestructionFxPanel(QWidget):
     def showEvent(self, event) -> None:  # noqa: N802
         super().showEvent(event)
         self._ensure_code_drawer()
+
+    def delete_effects(self, indexes) -> bool:
+        """Remove effects from their script file and from the preview, after asking."""
+
+        indexes = sorted({i for i in indexes if 0 <= i < len(self.document.items)})
+        if not indexes:
+            return False
+        session = self.text_session
+        if session.source_error or len(session.sources) != len(self.document.items):
+            QMessageBox.warning(
+                self, "Effects were not deleted",
+                session.source_error or "No script source is attached to these effects.")
+            return False
+        files = ", ".join(sorted({session.sources[i].path.name for i in indexes}))
+        count = len(indexes)
+        answer = QMessageBox.question(
+            self, "Delete effects",
+            f"Delete {count} effect{'s' if count > 1 else ''} from {files}?\n"
+            "The script file is changed right away.",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.Cancel,
+            QMessageBox.StandardButton.Cancel)
+        if answer != QMessageBox.StandardButton.Yes:
+            return False
+        drawer = self.code_drawer
+        if drawer is not None:
+            drawer.timer.stop()      # an edit waiting for the timer must not revive a deleted effect
+        total = len(self.document.items)
+        try:
+            paths = session.delete(indexes)
+        except (OSError, ValueError, RuntimeError, UnicodeError) as exc:
+            QMessageBox.warning(self, "Effects were not deleted", str(exc))
+            return False
+        gone = set(indexes)
+        for index in reversed(indexes):
+            del self.document.items[index]
+        # Effects after a deleted one shift up: hidden marks, highlight and the
+        # open editor follow them.
+        position = {old: new for new, old in enumerate(
+            i for i in range(total) if i not in gone)}
+        self.hidden_items = {position[i] for i in self.hidden_items if i in position}
+        self.highlight = position.get(self.highlight)
+        self.timeline.highlight = self.highlight
+        if drawer is not None:
+            if drawer.index in position:
+                drawer.index = position[drawer.index]
+            else:
+                drawer.reset()
+        self._fill_list()
+        self._rebuild_simulation()
+        self.update_text_status()
+        self.sourceSaved.emit(paths)
+        self.documentEdited.emit()
+        return True
+
+    def create_play_button(self, parent) -> QPushButton:
+        """A Play / Pause button that looks and works like the transport bar's."""
+
+        mirror = QPushButton(parent)
+        mirror.setCheckable(True)
+        mirror.setStyleSheet(_ICON_BUTTON)
+        mirror.setIconSize(QSize(20, 20))
+        mirror.setMinimumWidth(32)
+        mirror.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        mirror.setAccessibleName("Play / pause")
+
+        def follow(playing: bool) -> None:
+            with QSignalBlocker(mirror):
+                mirror.setChecked(playing)
+            mirror.setIcon(self.play_button.icon())
+            mirror.setToolTip(self.play_button.toolTip())
+
+        mirror.toggled.connect(self.play_button.setChecked)
+        self.play_button.toggled.connect(follow)
+        follow(self.play_button.isChecked())
+        return mirror
+
+    def create_speed_combo(self, parent) -> QComboBox:
+        """A playback speed list that always shows the transport bar's speed."""
+
+        combo = QComboBox(parent)
+        combo.setToolTip("Playback speed")
+        for speed in SPEEDS:
+            combo.addItem(f"{speed:g}×", speed)
+        combo.setCurrentIndex(self.speed_combo.currentIndex())
+        combo.setSizeAdjustPolicy(
+            QComboBox.SizeAdjustPolicy.AdjustToMinimumContentsLengthWithIcon)
+        combo.setMinimumContentsLength(3)
+        combo.currentIndexChanged.connect(self.speed_combo.setCurrentIndex)
+        self.speed_combo.currentIndexChanged.connect(combo.setCurrentIndex)
+        return combo
 
     def apply_text_item(self, index, item) -> None:
         if effect_text(self.document.items[index]) != effect_text(item):

@@ -871,8 +871,9 @@ def test_four_effect_visibility_buttons_and_menu_share_actions(app):
         assert panel.hidden_items == {0, 1, 2, 3}
         menu = panel._create_effects_context_menu()
         assert menu.actions()[0].text() == 'Edit Effect Code'
-        assert menu.actions()[2:] == panel._visibility_actions
-        menu.actions()[5].trigger()
+        assert menu.actions()[1] is panel.effects_view.delete_action
+        assert menu.actions()[3:] == panel._visibility_actions
+        menu.actions()[6].trigger()
         assert panel.hidden_items == {1, 3}
         with patch.object(panel, '_create_effects_context_menu') as created:
             panel._show_effects_context_menu(tree.visualItemRect(tree.item(0)).center())

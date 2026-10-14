@@ -108,16 +108,10 @@ class FxTextSession:
         for index in indexes:
             parse_effect_text(self.drafts[index], self.context)
         paths = {self.sources[index].path for index in indexes}
-        for path in paths:
-            if path.read_bytes() != self.snapshots[path]:
-                raise ValueError(
-                    f"{path.name} changed outside the editor. No file was overwritten. "
-                    "Keep a copy of your draft, then reload the definition.")
+        self._check_unchanged(paths)
         updated = {}
         for path in paths:
-            encoding, bom = self.encodings[path]
-            raw = self.snapshots[path]
-            text = raw.decode("utf-8-sig" if encoding == "utf-8" and bom else encoding)
+            text = self._decode(path)
             lines = text.splitlines(keepends=True)
             newline = "\r\n" if "\r\n" in text else "\n"
             for index in sorted((i for i in indexes if self.sources[i].path == path),
@@ -127,22 +121,7 @@ class FxTextSession:
                 replacement = newline.join(self.drafts[index].splitlines()) + trailing
                 lines[source.first:source.last + 1] = [replacement]
             updated[path] = "".join(lines)
-        with tempfile.TemporaryDirectory(prefix="onua_fx_") as directory:
-            files = []
-            expected = {}
-            for number, (path, text) in enumerate(updated.items()):
-                stage = Path(directory) / f"effect_{number}.cfg"
-                encoding, bom = self.encodings[path]
-                write_script_file(stage, text, encoding, bom)
-                expected[path] = stage.read_bytes()
-                files.append((stage, path))
-
-            def verify():
-                for path, data in expected.items():
-                    if path.read_bytes() != data:
-                        raise ValueError(f"Saved script verification failed: {path.name}")
-
-            commit_verified_files(files, verify=verify)
+        self._write_files(updated)
         # Every later source span moves by exactly the changed line count.
         for path in paths:
             changes = [(self.sources[index].first, self.sources[index].last,
@@ -161,4 +140,93 @@ class FxTextSession:
         for index in indexes:
             self.originals[index] = self.drafts[index]
             self.original_items[index] = parse_effect_text(self.drafts[index], self.context)[0]
+        self._check_spans(self.sources, self.originals)
         return paths
+
+    def delete(self, indexes) -> set[Path]:
+        """Remove effects from their script files and from this session.
+
+        Only the lines of the chosen effects leave the files. Drafts of the
+        other effects stay as they are, under their new positions.
+        """
+        removed = sorted(set(indexes))
+        if not removed:
+            return set()
+        if self.source_error or len(self.sources) != len(self.originals):
+            raise ValueError(self.source_error or "No script source is attached to this effect.")
+        gone = set(removed)
+        paths = {self.sources[index].path for index in removed}
+        self._check_unchanged(paths)
+        updated = {}
+        for path in paths:
+            lines = self._decode(path).splitlines(keepends=True)
+            for index in sorted((i for i in removed if self.sources[i].path == path),
+                                key=lambda i: self.sources[i].first, reverse=True):
+                del lines[self.sources[index].first:self.sources[index].last + 1]
+            updated[path] = "".join(lines)
+        self._write_files(updated)
+        # Later effects of the same file move up by the number of removed lines.
+        kept = [index for index in range(len(self.originals)) if index not in gone]
+        sources = []
+        for index in kept:
+            source = self.sources[index]
+            moved = sum(self.sources[i].last - self.sources[i].first + 1 for i in removed
+                        if self.sources[i].path == source.path
+                        and self.sources[i].last < source.first)
+            sources.append(EffectSource(source.path, source.first - moved, source.last - moved))
+        originals = [self.originals[index] for index in kept]
+        # The file is already written. The session switches to its new state only
+        # after a re-read confirms every remaining effect sits where it should.
+        self._check_spans(sources, originals)
+        self.sources = sources
+        self.originals = originals
+        self.original_items = [self.original_items[index] for index in kept]
+        self.drafts = {new: self.drafts[old] for new, old in enumerate(kept)}
+        for path in paths:
+            self.snapshots[path] = path.read_bytes()
+        return paths
+
+    # -- shared file steps --------------------------------------------------------------
+
+    def _check_unchanged(self, paths) -> None:
+        for path in paths:
+            if path.read_bytes() != self.snapshots[path]:
+                raise ValueError(
+                    f"{path.name} changed outside the editor. No file was overwritten. "
+                    "Keep a copy of your draft, then reload the definition.")
+
+    def _decode(self, path: Path) -> str:
+        encoding, bom = self.encodings[path]
+        return self.snapshots[path].decode("utf-8-sig" if encoding == "utf-8" and bom else encoding)
+
+    def _write_files(self, updated: dict) -> None:
+        """Stage the new texts, replace the files and read them back."""
+        with tempfile.TemporaryDirectory(prefix="onua_fx_") as directory:
+            files = []
+            expected = {}
+            for number, (path, text) in enumerate(updated.items()):
+                stage = Path(directory) / f"effect_{number}.cfg"
+                encoding, bom = self.encodings[path]
+                write_script_file(stage, text, encoding, bom)
+                expected[path] = stage.read_bytes()
+                files.append((stage, path))
+
+            def verify():
+                for path, data in expected.items():
+                    if path.read_bytes() != data:
+                        raise ValueError(f"Saved script verification failed: {path.name}")
+
+            commit_verified_files(files, verify=verify)
+
+    def _check_spans(self, sources, originals) -> None:
+        """Cross-check: every effect must be in its file exactly as the session believes."""
+        texts = {}
+        for source, expected in zip(sources, originals):
+            if source.path not in texts:
+                text, _encoding, _bom = read_script_file(source.path)
+                texts[source.path] = text.splitlines()
+            found = "\n".join(texts[source.path][source.first:source.last + 1])
+            if found != expected:
+                raise RuntimeError(
+                    f"{source.path.name} does not contain the effects the editor expects. "
+                    "Reload the definition before saving again.")
