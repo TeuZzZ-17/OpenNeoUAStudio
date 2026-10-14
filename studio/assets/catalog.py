@@ -28,6 +28,7 @@ class GameObject:
     source: Path
     values: dict[str, str] = field(default_factory=dict)
     bodies: list[str] = field(default_factory=list)
+    body_sources: list[tuple[Path, int, int]] = field(default_factory=list)
 
     @property
     def name(self):
@@ -51,7 +52,7 @@ def load_game_objects(installation):
         active = None
         depth = 0
         body = []
-        for raw in text.splitlines():
+        for line_number, raw in enumerate(text.splitlines()):
             code = re.split(r";|//|#", raw, maxsplit=1)[0].strip()
             header = _HEADER.fullmatch(code)
             if header and active is None:
@@ -62,12 +63,14 @@ def load_game_objects(installation):
                     objects[key] = GameObject(kind, key[1], scripts / source)
                 active = objects[key]
                 depth, body = 0, []
+                body_start = line_number
                 continue
             if active is None:
                 continue
             token = code.split(None, 1)[0].casefold() if code else ""
             if token == "end" and depth == 0:
                 active.bodies.append("\n".join(body))
+                active.body_sources.append((scripts / source, body_start, line_number))
                 active = None
                 continue
             body.append(raw)

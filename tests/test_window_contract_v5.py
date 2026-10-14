@@ -204,7 +204,8 @@ class WindowContractV5Tests(unittest.TestCase):
             self.assertIn("target_edit.setMinimumWidth(500)", source)
             self.assertNotIn("Please wait until completion.", source)
             self.assertNotIn("runtimeLooseWaitDialog", source)
-            self.assertNotIn("QProgressDialog", source)
+            self.assertEqual(
+                window.findChildren(assembly_window_module.QProgressDialog), [])
             self.assertFalse(hasattr(window, "import_vp_package_action"))
             self.assertEqual(
                 window.save_asset_family_action.text(), "Export Asset Family")
@@ -598,6 +599,7 @@ class WindowContractV5Tests(unittest.TestCase):
                     patch.object(
                         assembly_window_module, "QMenu",
                         return_value=fake_menu), \
+                    patch.object(window, "_setbas_item_has_animation", return_value=False), \
                     patch.object(window, "_copy_text") as copied:
                 window._show_setbas_context_menu(QPoint())
                 action = next(
@@ -769,7 +771,8 @@ class WindowContractV5Tests(unittest.TestCase):
         try:
             animation = SimpleNamespace(
                 kind="bmpanim", name="Effects/PROP1.ANM")
-            block = SimpleNamespace(texture=animation, tracy_texture=None)
+            from studio.formats.base_format import AmeshBlock
+            block = AmeshBlock(texture=animation)
             base_object = SimpleNamespace(ades=[block])
             owner = SimpleNamespace(
                 owner_path="root/kid[2]", base_object=base_object)

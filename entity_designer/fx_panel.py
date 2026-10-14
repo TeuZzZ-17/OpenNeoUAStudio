@@ -1,6 +1,6 @@
 """Destruction FX preview of the Entity Designer.
 
-Preview only: effects are edited in the script files and reloaded here.
+Effects can be edited as script text, previewed live and explicitly saved.
 ``DestructionFxPanel`` is the tab page (which effects to show) and owns the
 preview clock; ``transport_bar`` is the wide bar the editor places under
 the viewport (playback, speed and the visual timeline).
@@ -17,11 +17,12 @@ from PySide6.QtGui import QAction, QColor, QIcon, QPainter, QPainterPath, QPen, 
 from PySide6.QtWidgets import (
     QAbstractItemView, QButtonGroup, QCheckBox, QComboBox, QFrame, QGridLayout, QGroupBox, QHBoxLayout, QLabel, QListWidget, QMenu,
     QListWidgetItem, QPushButton, QScrollArea, QSizePolicy, QSlider, QSpinBox, QStyle, QStyledItemDelegate, QStyleOptionButton, QStyleOptionViewItem,
-    QVBoxLayout, QWidget,
+    QVBoxLayout, QWidget, QMessageBox,
 )
 
 from entity_designer import destruction_fx as fx
 from entity_designer.fx_audio import FxSoundPlayer
+from entity_designer.fx_authoring import FxTextSession, effect_text
 from studio.ui.widgets import LIST_BASE, LIST_ALTERNATE, LIST_SELECTED, LIST_HOVER
 
 SPEEDS = (0.1, 0.25, 0.5, 1.0, 2.0, 4.0)
@@ -250,6 +251,7 @@ class FxEffectsList(QListWidget):
 
     visibilityEdited = Signal()
     toggleSelectionRequested = Signal()
+    editRequested = Signal(int)
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -310,6 +312,12 @@ class FxEffectsList(QListWidget):
         self._drag_state = None
         if state is None:
             super().mouseReleaseEvent(event)
+            row = self.itemAt(event.position().toPoint())
+            if (event.button() == Qt.MouseButton.LeftButton
+                    and event.modifiers() == Qt.KeyboardModifier.NoModifier
+                    and row is not None and row.data(Qt.ItemDataRole.UserRole) is not None
+                    and not self.checkbox_rect(row).contains(event.position().toPoint())):
+                self.editRequested.emit(row.data(Qt.ItemDataRole.UserRole))
             return
         # Native checkbox handling on release must not undo the painted state.
         with QSignalBlocker(self):
@@ -321,6 +329,12 @@ class FxEffectsList(QListWidget):
         self.visibilityEdited.emit()
 
     def keyPressEvent(self, event):
+        if event.key() in (Qt.Key.Key_Return, Qt.Key.Key_Enter):
+            row = self.currentItem()
+            if row is not None and row.data(Qt.ItemDataRole.UserRole) is not None:
+                self.editRequested.emit(row.data(Qt.ItemDataRole.UserRole))
+            event.accept()
+            return
         if event.key() == Qt.Key.Key_Space:
             self.toggleSelectionRequested.emit()
             event.accept()
@@ -328,16 +342,244 @@ class FxEffectsList(QListWidget):
         super().keyPressEvent(event)
 
 
+class FxEffectsView(QWidget):
+    """Effects list with its four visibility buttons.
+
+    The tab's Effects box and the code dialog each hold one view: a click on
+    an effect's text opens its code, a click on its checkbox shows or hides
+    it. Which effects are hidden lives in the panel, so every view always
+    shows the same checkboxes.
+    """
+
+    HINT = "Click text to edit code · Checkboxes show/hide · Ctrl/Shift select rows"
+
+    def __init__(self, panel, *, menu_source=None, parent=None):
+        super().__init__(parent)
+        self.panel = panel
+        self._menu_source = menu_source or self.create_menu
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(4)
+        hint = QLabel(self.HINT, self)
+        hint.setWordWrap(True)
+        hint.setStyleSheet("color: #9aa0aa; font-size: 11px;")
+        layout.addWidget(hint)
+        self.list = FxEffectsList(self)
+        self.list.setItemDelegate(FxEffectDelegate(self.list))
+        self.list.setAlternatingRowColors(True)
+        self.list.setStyleSheet(
+            f"QListWidget {{ font-size: 12px; background: {LIST_BASE}; alternate-background-color: {LIST_ALTERNATE}; border: 1px solid #343b46; border-radius: 5px; }}"
+            "QListWidget::indicator { width: 20px; height: 20px; }"
+            "QListWidget::item { padding: 8px 5px; border-bottom: 1px solid #303743; color: #edf1f7; }"
+            f"QListWidget::item:hover:!selected {{ background: {LIST_HOVER}; color: #ffffff; }}"
+            f"QListWidget::item:selected {{ background: {LIST_SELECTED}; color: #ffffff; }}"
+            f"QListWidget::item:selected:!active {{ background: {LIST_SELECTED}; color: #ffffff; }}")
+        self.list.setToolTip("Click text to edit code. Click or drag over checkboxes to show/hide. "
+                             "Ctrl/Shift selects multiple effects; Space toggles their visibility.")
+        self.list.setMouseTracking(True)
+        self.list.setWordWrap(True)
+        self.list.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
+        self.list.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self.list.setVerticalScrollMode(QListWidget.ScrollMode.ScrollPerPixel)
+        self.list.visibilityEdited.connect(self.visibility_edited)
+        self.list.toggleSelectionRequested.connect(self.toggle_selected_visibility)
+        self.list.editRequested.connect(self.panel.edit_effect_code)
+        self.list.itemChanged.connect(self._item_toggled)
+        self.list.currentRowChanged.connect(self._row_selected)
+        layout.addWidget(self.list, 1)
+        buttons = QGridLayout()
+        self.actions = []
+        definitions = (
+            ("Show All", "show_all_button", panel.show_all),
+            ("Hide All", "hide_all_button", panel.hide_all),
+            ("Hide Selected", "hide_selected_button", lambda: self.set_selected_visibility(False)),
+            ("Show Selected", "show_selected_button", self.show_selected),
+        )
+        for index, (text, name, callback) in enumerate(definitions):
+            action = QAction(text, self)
+            action.triggered.connect(callback)
+            self.actions.append(action)
+            button = QPushButton(text, self)
+            button.clicked.connect(action.trigger)
+            action.changed.connect(lambda a=action, b=button: b.setEnabled(a.isEnabled()))
+            setattr(self, name, button)
+            buttons.addWidget(button, index // 2, index % 2)
+        self.show_selected_button.setToolTip("Show only the selected effects and hide all others.")
+        layout.addLayout(buttons)
+        self.list.itemSelectionChanged.connect(self.update_actions)
+        self.list.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self.list.customContextMenuRequested.connect(self.show_context_menu)
+        self.fill()
+
+    # -- rows ---------------------------------------------------------------------------
+
+    def fill(self, *, keep_selection=False, current=None) -> None:
+        panel = self.panel
+        selected = {row.data(Qt.ItemDataRole.UserRole) for row in self.list.selectedItems()}
+        with QSignalBlocker(self.list):
+            self.list.clear()
+            for index, item in enumerate(panel.document.items):
+                if isinstance(item, fx.FxBlock):
+                    color = MODE_COLORS.get(item.mode, "#a0a0a0")
+                    text = (f"{item.trigger or 'no trigger'}  ·  "
+                            f"{fx.block_summary(item, panel.context)}")
+                    issues = fx.interpret_block(item, panel.context).issues
+                else:
+                    color = MODE_COLORS["dest"]
+                    parsed = item.parsed
+                    text = (f"{parsed.kind if parsed else '?'}  ·  "
+                            f"{fx.dest_summary(item, panel.catalog)}")
+                    issues = fx.dest_fx_issues(item)
+                glyph, meaning = STATUS_GLYPHS.get(_issues_status(issues), ("", ""))
+                parts = text.replace("Vanilla ", "", 1).split("  ·  ", 1)
+                trigger = parts[0]
+                summary = parts[1] if len(parts) > 1 else ""
+                mode, _, detail = summary.partition(" · ")
+                title = f"{mode} · {trigger}"
+                row = QListWidgetItem(title + (" · Warning" if glyph else "") + "\n" + detail)
+                row.setFlags(row.flags() | Qt.ItemFlag.ItemIsUserCheckable)
+                row.setCheckState(Qt.CheckState.Unchecked if index in panel.hidden_items
+                                  else Qt.CheckState.Checked)
+                dot = QPixmap(12, 12)
+                dot.fill(Qt.GlobalColor.transparent)
+                painter = QPainter(dot)
+                painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+                painter.setPen(Qt.PenStyle.NoPen)
+                painter.setBrush(QColor(color))
+                painter.drawEllipse(2, 2, 8, 8)
+                painter.end()
+                row.setIcon(QIcon(dot))
+                row.setForeground(QColor("#edf1f7"))
+                row.setToolTip("\n".join(
+                    [meaning] + [issue.message for issue in issues]).strip())
+                row.setData(Qt.ItemDataRole.UserRole, index)
+                self.list.addItem(row)
+                if keep_selection and index in selected:
+                    row.setSelected(True)
+            if not panel.document.items:
+                placeholder = QListWidgetItem(
+                    "No destruction effects in this definition.")
+                placeholder.setFlags(Qt.ItemFlag.NoItemFlags)
+                self.list.addItem(placeholder)
+            if current is not None:
+                self.list.setCurrentRow(current, QItemSelectionModel.SelectionFlag.NoUpdate)
+        self.update_actions()
+
+    def mark_dirty(self) -> None:
+        """Append a star to the effects with unsaved code."""
+        with QSignalBlocker(self.list):
+            for position in range(self.list.count()):
+                row = self.list.item(position)
+                index = row.data(Qt.ItemDataRole.UserRole)
+                if index is not None:
+                    lines = row.text().split("\n", 1)
+                    lines[0] = lines[0].removesuffix(" *") + (
+                        " *" if self.panel.text_session.is_dirty(index) else "")
+                    row.setText("\n".join(lines))
+
+    def sync_checks(self) -> None:
+        with QSignalBlocker(self.list):
+            for position in range(self.list.count()):
+                row = self.list.item(position)
+                index = row.data(Qt.ItemDataRole.UserRole)
+                if index is not None:
+                    row.setCheckState(Qt.CheckState.Unchecked
+                                      if index in self.panel.hidden_items
+                                      else Qt.CheckState.Checked)
+
+    def select_effect(self, index) -> None:
+        for position in range(self.list.count()):
+            if self.list.item(position).data(Qt.ItemDataRole.UserRole) == index:
+                self.list.setCurrentRow(position)
+                return
+
+    # -- actions ------------------------------------------------------------------------
+
+    def update_actions(self) -> None:
+        available = bool(self.panel.document.items)
+        selected = any(row.data(Qt.ItemDataRole.UserRole) is not None
+                       for row in self.list.selectedItems())
+        for index, action in enumerate(self.actions):
+            action.setEnabled(available and (index < 2 or selected))
+
+    def create_menu(self):
+        """Reuse the four visibility actions shared with the buttons."""
+        menu = QMenu(self)
+        edit = menu.addAction("Edit Effect Code")
+        current = self.list.currentItem()
+        index = current.data(Qt.ItemDataRole.UserRole) if current else None
+        edit.setEnabled(index is not None)
+        edit.triggered.connect(lambda: self.panel.edit_effect_code(index))
+        menu.addSeparator()
+        for action in self.actions:
+            menu.addAction(action)
+        return menu
+
+    def show_context_menu(self, position) -> None:
+        row = self.list.itemAt(position)
+        if row is not None and row.data(Qt.ItemDataRole.UserRole) is not None:
+            if not row.isSelected():
+                self.list.setCurrentItem(row, QItemSelectionModel.SelectionFlag.ClearAndSelect)
+            else:
+                self.list.setCurrentItem(row, QItemSelectionModel.SelectionFlag.NoUpdate)
+        self._menu_source().exec(self.list.viewport().mapToGlobal(position))
+
+    def visibility_edited(self) -> None:
+        current = self.list.currentItem()
+        self.panel.set_highlight(current.data(Qt.ItemDataRole.UserRole) if current is not None else None)
+        self.update_actions()
+        self.panel.set_hidden_items({
+            row.data(Qt.ItemDataRole.UserRole) for position in range(self.list.count())
+            if (row := self.list.item(position)).data(Qt.ItemDataRole.UserRole) is not None
+            and row.checkState() != Qt.CheckState.Checked})
+
+    def set_selected_visibility(self, visible) -> None:
+        with QSignalBlocker(self.list):
+            for row in self.list.selectedItems():
+                if row.data(Qt.ItemDataRole.UserRole) is not None:
+                    row.setCheckState(Qt.CheckState.Checked if visible else Qt.CheckState.Unchecked)
+        self.visibility_edited()
+
+    def toggle_selected_visibility(self) -> None:
+        rows = self.list.selectedItems()
+        if rows:
+            self.set_selected_visibility(any(row.checkState() != Qt.CheckState.Checked for row in rows))
+
+    def show_selected(self) -> None:
+        selected = {row.data(Qt.ItemDataRole.UserRole) for row in self.list.selectedItems()
+                    if row.data(Qt.ItemDataRole.UserRole) is not None}
+        if selected:
+            self.panel.set_hidden_items(set(range(len(self.panel.document.items))) - selected)
+
+    def _item_toggled(self, row: QListWidgetItem) -> None:
+        index = row.data(Qt.ItemDataRole.UserRole)
+        if index is None:
+            return
+        hidden = set(self.panel.hidden_items)
+        (hidden.discard if row.checkState() == Qt.CheckState.Checked else hidden.add)(index)
+        self.panel.set_hidden_items(hidden)
+
+    def _row_selected(self, position: int) -> None:
+        row = self.list.item(position) if position >= 0 else None
+        self.panel.set_highlight(row.data(Qt.ItemDataRole.UserRole) if row else None)
+
+
 class DestructionFxPanel(QWidget):
     """Tab page and preview clock of the Destruction FX preview."""
 
     frameChanged = Signal()
     fitRequested = Signal()
+    documentEdited = Signal()
+    draftStateChanged = Signal()
+    sourceSaved = Signal(object)
 
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
         self.context = fx.CONTEXT_VEHICLE
         self.document = fx.FxDocument()
+        self.text_session = FxTextSession(self.document, self.context)
+        self.code_dialog = None
+        self._pending_code_index = None
         self.catalog: dict[int, fx.LegacyFxVehicle] = {}
         self.weapons: dict[int, fx.WeaponDef] = {}
         self.debuffs: dict[int, fx.DebuffSpec] = {}
@@ -438,56 +680,17 @@ class DestructionFxPanel(QWidget):
         self.reload_note.setWordWrap(True)
         self.reload_note.setStyleSheet("color: #9fc3ad; font-size: 11px;")
         layout.addWidget(self.reload_note)
-        hint = QLabel("Checkboxes show/hide · Ctrl/Shift select rows", self)
-        hint.setWordWrap(True)
-        hint.setStyleSheet("color: #9aa0aa; font-size: 11px;")
-        layout.addWidget(hint)
-        self.effects_list = FxEffectsList(self)
-        self.effects_list.setItemDelegate(FxEffectDelegate(self.effects_list))
-        self.effects_list.setAlternatingRowColors(True)
-        self.effects_list.setStyleSheet(
-            f"QListWidget {{ font-size: 12px; background: {LIST_BASE}; alternate-background-color: {LIST_ALTERNATE}; border: 1px solid #343b46; border-radius: 5px; }}"
-            "QListWidget::indicator { width: 20px; height: 20px; }"
-            "QListWidget::item { padding: 8px 5px; border-bottom: 1px solid #303743; color: #edf1f7; }"
-            f"QListWidget::item:hover:!selected {{ background: {LIST_HOVER}; color: #ffffff; }}"
-            f"QListWidget::item:selected {{ background: {LIST_SELECTED}; color: #ffffff; }}"
-            f"QListWidget::item:selected:!active {{ background: {LIST_SELECTED}; color: #ffffff; }}")
-        self.effects_list.setToolTip("Click text to select. Click or drag over checkboxes to show/hide. "
-                                     "Ctrl/Shift selects multiple effects; Space toggles their visibility.")
-        self.effects_list.setMouseTracking(True)
-        self.effects_list.setWordWrap(True)
-        self.effects_list.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
-        self.effects_list.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
-        self.effects_list.visibilityEdited.connect(self._visibility_edited)
-        self.effects_list.toggleSelectionRequested.connect(self.toggle_selected_visibility)
-        self.effects_list.setVerticalScrollMode(
-            QListWidget.ScrollMode.ScrollPerPixel)
-        self.effects_list.itemChanged.connect(self._item_toggled)
-        self.effects_list.currentRowChanged.connect(self._row_selected)
-        layout.addWidget(self.effects_list, 1)
-        buttons = QGridLayout()
-        self._visibility_actions = []
-        definitions = (
-            ("Show All", "show_all_button", self.show_all),
-            ("Hide All", "hide_all_button", self.hide_all),
-            ("Hide Selected", "hide_selected_button", lambda: self.set_selected_visibility(False)),
-            ("Show Selected", "show_selected_button", self.show_selected),
-        )
-        for index, (text, name, callback) in enumerate(definitions):
-            action = QAction(text, self)
-            action.triggered.connect(callback)
-            self._visibility_actions.append(action)
-            button = QPushButton(text, self)
-            button.clicked.connect(action.trigger)
-            action.changed.connect(lambda a=action, b=button: b.setEnabled(a.isEnabled()))
-            setattr(self, name, button)
-            buttons.addWidget(button, index // 2, index % 2)
-        self.show_selected_button.setToolTip("Show only the selected effects and hide all others.")
-        layout.addLayout(buttons)
-        self.effects_list.itemSelectionChanged.connect(self._update_visibility_actions)
-        self.effects_list.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
-        self.effects_list.customContextMenuRequested.connect(self._show_effects_context_menu)
-        self._update_visibility_actions()
+        self.effects_view = FxEffectsView(
+            self, menu_source=lambda: self._create_effects_context_menu())
+        self._effect_views = [self.effects_view]
+        # The tab's own list and buttons stay reachable under their old names.
+        self.effects_list = self.effects_view.list
+        self._visibility_actions = self.effects_view.actions
+        self.show_all_button = self.effects_view.show_all_button
+        self.hide_all_button = self.effects_view.hide_all_button
+        self.hide_selected_button = self.effects_view.hide_selected_button
+        self.show_selected_button = self.effects_view.show_selected_button
+        layout.addWidget(self.effects_view, 1)
         self.notes_label = QLabel(self)
         self.notes_label.setWordWrap(True)
         self.notes_label.setStyleSheet("color: #9aa0aa;")
@@ -590,6 +793,13 @@ class DestructionFxPanel(QWidget):
 
         self.context = context
         self.document = document
+        self.text_session = FxTextSession(document, context)
+        if self.code_dialog is not None:
+            self._pending_code_index = (self.code_dialog.index
+                                        if keep_view and self.code_dialog.isVisible() else None)
+            self.code_dialog.timer.stop()
+            self.code_dialog.index = -1
+            self.code_dialog.hide()
         self.catalog = dict(catalog or {})
         self.weapons = dict(weapons or {})
         self.debuffs = dict(debuffs or {})
@@ -670,149 +880,110 @@ class DestructionFxPanel(QWidget):
 
     # -- effects list --------------------------------------------------------------------
 
-    def _fill_list(self) -> None:
-        with QSignalBlocker(self.effects_list):
-            self.effects_list.clear()
-            for index, item in enumerate(self.document.items):
-                if isinstance(item, fx.FxBlock):
-                    color = MODE_COLORS.get(item.mode, "#a0a0a0")
-                    text = (f"{item.trigger or 'no trigger'}  ·  "
-                            f"{fx.block_summary(item, self.context)}")
-                    issues = fx.interpret_block(item, self.context).issues
-                else:
-                    color = MODE_COLORS["dest"]
-                    parsed = item.parsed
-                    text = (f"{parsed.kind if parsed else '?'}  ·  "
-                            f"{fx.dest_summary(item, self.catalog)}")
-                    issues = fx.dest_fx_issues(item)
-                glyph, meaning = STATUS_GLYPHS.get(_issues_status(issues), ("", ""))
-                parts = text.replace("Vanilla ", "", 1).split("  ·  ", 1)
-                trigger = parts[0]
-                summary = parts[1] if len(parts) > 1 else ""
-                mode, _, detail = summary.partition(" · ")
-                title = f"{mode} · {trigger}"
-                row = QListWidgetItem(title + (" · Warning" if glyph else "") + "\n" + detail)
-                row.setFlags(row.flags() | Qt.ItemFlag.ItemIsUserCheckable)
-                row.setCheckState(Qt.CheckState.Unchecked if index in self.hidden_items
-                                  else Qt.CheckState.Checked)
-                dot = QPixmap(12, 12)
-                dot.fill(Qt.GlobalColor.transparent)
-                painter = QPainter(dot)
-                painter.setRenderHint(QPainter.RenderHint.Antialiasing)
-                painter.setPen(Qt.PenStyle.NoPen)
-                painter.setBrush(QColor(color))
-                painter.drawEllipse(2, 2, 8, 8)
-                painter.end()
-                row.setIcon(QIcon(dot))
-                row.setForeground(QColor("#edf1f7"))
-                row.setToolTip("\n".join(
-                    [meaning] + [issue.message for issue in issues]).strip())
-                row.setData(Qt.ItemDataRole.UserRole, index)
-                self.effects_list.addItem(row)
-            if not self.document.items:
-                placeholder = QListWidgetItem(
-                    "No destruction effects in this definition.")
-                placeholder.setFlags(Qt.ItemFlag.NoItemFlags)
-                self.effects_list.addItem(placeholder)
+    def _fill_list(self, **options) -> None:
+        for view in self._effect_views:
+            view.fill(**options)
 
-        self._update_visibility_actions()
-
-    def _update_visibility_actions(self):
-        available = bool(self.document.items)
-        selected = any(row.data(Qt.ItemDataRole.UserRole) is not None
-                       for row in self.effects_list.selectedItems())
-        for index, action in enumerate(self._visibility_actions):
-            action.setEnabled(available and (index < 2 or selected))
+    def add_effects_view(self, view) -> None:
+        """Register another list (the code dialog's) so it follows every change."""
+        self._effect_views.append(view)
 
     def _create_effects_context_menu(self):
-        """Reuse the four visibility actions shared with the buttons."""
-        menu = QMenu(self)
-        for action in self._visibility_actions:
-            menu.addAction(action)
-        return menu
+        return self.effects_view.create_menu()
 
     def _show_effects_context_menu(self, position):
-        row = self.effects_list.itemAt(position)
-        if row is not None and row.data(Qt.ItemDataRole.UserRole) is not None:
-            if not row.isSelected():
-                self.effects_list.setCurrentItem(row, QItemSelectionModel.SelectionFlag.ClearAndSelect)
-            else:
-                self.effects_list.setCurrentItem(row, QItemSelectionModel.SelectionFlag.NoUpdate)
-        self._create_effects_context_menu().exec(self.effects_list.viewport().mapToGlobal(position))
+        self.effects_view.show_context_menu(position)
 
-    def _visibility_edited(self):
-        current = self.effects_list.currentItem()
-        self.highlight = current.data(Qt.ItemDataRole.UserRole) if current is not None else None
-        self.timeline.highlight = self.highlight
-        self._update_visibility_actions()
-        hidden = {row.data(Qt.ItemDataRole.UserRole)
-                             for index in range(self.effects_list.count())
-                             if (row := self.effects_list.item(index)).data(Qt.ItemDataRole.UserRole) is not None
-                             and row.checkState() != Qt.CheckState.Checked}
+    def set_script_sources(self, origins) -> None:
+        self.text_session = FxTextSession(self.document, self.context, origins)
+        self.update_text_status()
+        if self._pending_code_index is not None and self.document.items:
+            index = min(self._pending_code_index, len(self.document.items) - 1)
+            self._pending_code_index = None
+            self.edit_effect_code(index)
+
+    @property
+    def has_unsaved_text(self) -> bool:
+        return self.text_session.dirty
+
+    def edit_effect_code(self, index) -> None:
+        if index is None or not 0 <= index < len(self.document.items):
+            return
+        if self.code_dialog is None:
+            from entity_designer.fx_code_dialog import FxCodeDialog
+            self.code_dialog = FxCodeDialog(self)
+        self.code_dialog.load_effect(index)
+
+    def apply_text_item(self, index, item) -> None:
+        if effect_text(self.document.items[index]) != effect_text(item):
+            self.document.items[index] = item
+            self._fill_list(keep_selection=True, current=index)
+            self._rebuild_simulation()
+            self.documentEdited.emit()
+        self.update_text_status()
+
+    def update_text_status(self) -> None:
+        self.reload_note.setText(
+            "Unsaved effect code · preview updates live · Ctrl+S to save" if self.has_unsaved_text
+            else "Auto reload enabled · source files are watched")
+        for view in self._effect_views:
+            view.mark_dirty()
+        self.draftStateChanged.emit()
+
+    def confirm_text_changes(self) -> bool:
+        if not self.has_unsaved_text:
+            return True
+        answer = QMessageBox.question(
+            self, "Unsaved effect code", "Save the edited effects before leaving this definition?",
+            QMessageBox.StandardButton.Save | QMessageBox.StandardButton.Discard
+            | QMessageBox.StandardButton.Cancel, QMessageBox.StandardButton.Cancel)
+        if answer == QMessageBox.StandardButton.Cancel:
+            return False
+        if answer == QMessageBox.StandardButton.Save:
+            try:
+                paths = self.text_session.save(range(len(self.document.items)))
+                self.sourceSaved.emit(paths)
+            except (OSError, ValueError, RuntimeError, UnicodeError) as exc:
+                QMessageBox.warning(self, "Effects were not saved", str(exc))
+                return False
+        else:
+            for index in range(len(self.document.items)):
+                self.document.items[index] = self.text_session.revert(index)
+            self._fill_list()
+            self._rebuild_simulation()
+        if self.code_dialog is not None:
+            self.code_dialog.timer.stop()
+            self.code_dialog.index = -1
+            self.code_dialog.hide()
+        self.update_text_status()
+        return True
+
+    def set_hidden_items(self, hidden) -> None:
+        """Single place where effect visibility changes, whichever view edited it."""
         if hidden != self.hidden_items:
-            self.hidden_items = hidden
+            self.hidden_items = set(hidden)
+            self._sync_checks()
             self._rebuild_simulation()
         else:
             self.timeline.update()
             self.frameChanged.emit()
 
-    def set_selected_visibility(self, visible):
-        with QSignalBlocker(self.effects_list):
-            for row in self.effects_list.selectedItems():
-                if row.data(Qt.ItemDataRole.UserRole) is not None:
-                    row.setCheckState(Qt.CheckState.Checked if visible else Qt.CheckState.Unchecked)
-        self._visibility_edited()
-
-    def toggle_selected_visibility(self):
-        rows = self.effects_list.selectedItems()
-        if rows:
-            self.set_selected_visibility(any(row.checkState() != Qt.CheckState.Checked for row in rows))
-
-    def show_selected(self):
-        selected = {row.data(Qt.ItemDataRole.UserRole) for row in self.effects_list.selectedItems()
-                    if row.data(Qt.ItemDataRole.UserRole) is not None}
-        if selected:
-            self.hidden_items = set(range(len(self.document.items))) - selected
-            self._sync_checks()
-            self._rebuild_simulation()
-
-    def _item_toggled(self, row: QListWidgetItem) -> None:
-        index = row.data(Qt.ItemDataRole.UserRole)
-        if index is None:
-            return
-        if row.checkState() == Qt.CheckState.Checked:
-            self.hidden_items.discard(index)
-        else:
-            self.hidden_items.add(index)
-        self._rebuild_simulation()
+    def set_highlight(self, index) -> None:
+        self.highlight = index
+        self.timeline.highlight = index
+        self.timeline.update()
+        self.frameChanged.emit()
 
     def hide_all(self):
         """Disable every effect while keeping the current row selection."""
-        self.hidden_items = set(range(len(self.document.items)))
-        self._sync_checks()
-        self._rebuild_simulation()
+        self.set_hidden_items(set(range(len(self.document.items))))
 
     def show_all(self) -> None:
-        self.hidden_items.clear()
-        self._sync_checks()
-        self._rebuild_simulation()
+        self.set_hidden_items(set())
 
     def _sync_checks(self) -> None:
-        with QSignalBlocker(self.effects_list):
-            for position in range(self.effects_list.count()):
-                row = self.effects_list.item(position)
-                index = row.data(Qt.ItemDataRole.UserRole)
-                if index is not None:
-                    row.setCheckState(Qt.CheckState.Unchecked
-                                      if index in self.hidden_items
-                                      else Qt.CheckState.Checked)
-
-    def _row_selected(self, position: int) -> None:
-        row = self.effects_list.item(position) if position >= 0 else None
-        self.highlight = row.data(Qt.ItemDataRole.UserRole) if row else None
-        self.timeline.highlight = self.highlight
-        self.timeline.update()
-        self.frameChanged.emit()
+        for view in self._effect_views:
+            view.sync_checks()
 
     # -- simulation and clock -----------------------------------------------------------------
 
@@ -875,6 +1046,9 @@ class DestructionFxPanel(QWidget):
         return QIcon(pixmap)
 
     def _play_toggled(self, playing: bool) -> None:
+        if playing and self.code_dialog is not None and self.code_dialog.timer.isActive():
+            self.code_dialog.timer.stop()
+            self.code_dialog._apply()
         self.play_button.setIcon(self._transport_icon(
             QStyle.StandardPixmap.SP_MediaPause if playing else QStyle.StandardPixmap.SP_MediaPlay))
         self.play_button.setToolTip("Pause destruction preview" if playing else "Play destruction preview")

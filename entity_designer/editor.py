@@ -814,6 +814,9 @@ class CollisionEditorWindow(QMainWindow):
         self.fx_panel.sound.resolver = self._resolve_fx_sound
         self.fx_panel.frameChanged.connect(self._push_fx_frame)
         self.fx_panel.fitRequested.connect(self._fit_fx_view)
+        self.fx_panel.documentEdited.connect(self._fx_document_edited)
+        self.fx_panel.draftStateChanged.connect(self._fx_draft_state_changed)
+        self.fx_panel.sourceSaved.connect(self._fx_sources_saved)
         # The playback bar uses the full width under the viewport.
         self.viewport_layout.addWidget(self.fx_panel.transport_bar, 1, 0)
         # The bar keeps its natural height; the viewport takes the rest.
@@ -854,7 +857,7 @@ class CollisionEditorWindow(QMainWindow):
             self.briefing_tab: (
                 COMPAT_OPENNEOUA, "briefing_size exists only in OpenNeoUA."),
             self.fx_panel: (
-                MIXED, "Preview only: it never changes game data. Vanilla "
+                MIXED, "Code edits update the preview; Save writes the source script. Vanilla "
                 "dest_fx/scale_fx effects work everywhere; begin_fx effects "
                 "and the OpenNeoUA weapon/vehicle FX (tracers, decorations, "
                 "clusters, lasers, debuffs, palette flashes) need OpenNeoUA, "
@@ -2242,6 +2245,8 @@ class CollisionEditorWindow(QMainWindow):
         shape, Fire Points, Gun Points, cockpit data and undo/redo history too.
         """
 
+        if not self.fx_panel.confirm_text_changes():
+            return
         if not self._current_visual_resource_is_open():
             self._sync_close_archive_action()
             return
@@ -2319,6 +2324,8 @@ class CollisionEditorWindow(QMainWindow):
 
     def _clear_script_link(self) -> None:
         self._active_script_path = None
+        if hasattr(self, "fx_panel"):
+            self.fx_panel.set_context(fx.CONTEXT_VEHICLE, fx.FxDocument())
         self._active_script_kind = ""
         self._active_script_id = None
         self._active_model_reference = None
@@ -2388,6 +2395,8 @@ class CollisionEditorWindow(QMainWindow):
         """
 
         script_path = Path(path)
+        if not self.fx_panel.confirm_text_changes():
+            return False
         try:
             text, _encoding, _bom = read_script_file(script_path)
             if resolved_text is not None:
@@ -3366,6 +3375,8 @@ class CollisionEditorWindow(QMainWindow):
 
 
     def open_base(self, path: str | Path):
+        if not self.fx_panel.confirm_text_changes():
+            return False
         self._clear_script_link()
         path = Path(path)
         embedded = None
@@ -3450,6 +3461,8 @@ class CollisionEditorWindow(QMainWindow):
             self.open_sklt(path)
 
     def open_sklt(self, path: str | Path):
+        if not self.fx_panel.confirm_text_changes():
+            return False
         self._clear_script_link()
         try:
             family = _public_dependency(
@@ -5018,6 +5031,14 @@ class CollisionEditorWindow(QMainWindow):
             catalog=self._fx_catalog, unit=unit, keep_view=keep_view,
             weapons=self._build_fx_weapons(text, objects),
             debuffs=self._build_fx_debuffs(text))
+        origins = [(self._active_script_path, block.start_line, block.end_line)]
+        if self._fx_source_from_catalog:
+            candidates = objects if objects is not None else self.game_object_browser.objects
+            source = next((obj for obj in candidates
+                           if obj.object_id == block.object_id
+                           and f"new_{obj.kind}" == block.kind), None)
+            origins = getattr(source, "body_sources", ())
+        self.fx_panel.set_script_sources(origins if self._active_script_path else ())
         self._fx_update_watcher()
         if not keep_view:
             # A fresh definition: what is on disk now is what the tab shows.
@@ -5078,6 +5099,12 @@ class CollisionEditorWindow(QMainWindow):
 
     def reload_fx_from_file(self) -> None:
         """Read the definition again from disk and refresh the preview."""
+
+        if self.fx_panel.has_unsaved_text:
+            self._fx_failed_signatures = self._fx_signatures(self._fx_tracked)
+            self.statusBar().showMessage(
+                "Source files changed. Save or revert the effect-code drafts before reloading.", 6000)
+            return
 
         if (self._active_script_path is None or self._active_script_id is None
                 or self._active_model_reference is None):
@@ -5297,6 +5324,24 @@ class CollisionEditorWindow(QMainWindow):
         self.viewport._fx_emitter_cache.clear()
         self.viewport._fx_tinted_stage_cache.clear()
         self._fx_changed_assets.clear()
+
+    def _fx_document_edited(self) -> None:
+        """Resolve newly referenced VP models through the normal preview path."""
+        self._sync_fx_preview()
+
+    def _fx_draft_state_changed(self) -> None:
+        if not self.fx_panel.has_unsaved_text:
+            self._fx_failed_signatures = None
+
+    def _fx_sources_saved(self, paths) -> None:
+        # Our own save is already in the preview. Reloading it would erase
+        # the text editor's undo history and move its cursor unnecessarily.
+        for path in paths:
+            key = str(Path(path).resolve())
+            signature = self._fx_file_signature(path)
+            self._fx_loaded_signatures[key] = signature
+            self._fx_watch_signatures[key] = signature
+        self._fx_failed_signatures = None
 
     def _sync_fx_preview(self) -> None:
         """Enter/leave the FX viewport mode and load the effect VP owners."""
@@ -7656,6 +7701,9 @@ class CollisionEditorWindow(QMainWindow):
                     10000)
 
     def closeEvent(self, event: QCloseEvent) -> None:  # noqa: N802
+        if not self.fx_panel.confirm_text_changes():
+            event.ignore()
+            return
         if self._modified:
             answer = QMessageBox.question(
                 self, "Unsaved Entity Designer changes",
