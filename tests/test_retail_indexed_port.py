@@ -165,7 +165,7 @@ class IndexedViewerPolicySourceTests(unittest.TestCase):
         snapshot = self._method_source("render_snapshot")
         self.assertIn("force_textured=True", snapshot)
         self.assertNotIn('self._mode == "textured"', snapshot)
-        self.assertIn('self._last_effective_renderer != "retail_indexed_reconstructed"',
+        self.assertIn('self._last_effective_renderer not in (',
                       snapshot)
 
 

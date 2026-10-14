@@ -7,6 +7,7 @@ import bisect
 from dataclasses import dataclass, field
 import math
 import time
+import zlib
 
 from PySide6.QtCore import QEvent, QPoint, QPointF, QRect, QRectF, Qt, QTimer, Signal
 from PySide6.QtGui import (
@@ -18,6 +19,7 @@ from PySide6.QtGui import (
     QPainterPath,
     QPen,
     QPolygonF,
+    QTransform,
     QWheelEvent,
 )
 from PySide6.QtWidgets import QApplication
@@ -36,6 +38,7 @@ from studio.rendering.indexed import (
     VANILLA_GAMEPLAY_VIS_LIMIT,
 )
 from studio.rendering.geometry import AXIS_VECTORS, GeometryEditSession, mat_apply
+from studio.rendering.particles import ParticleEmitter
 
 MATERIAL_COLORS = [
     QColor(96, 170, 255), QColor(255, 170, 80), QColor(120, 220, 120),
@@ -123,6 +126,7 @@ class ViewFace:
     owner: str = "root"             # FamilyObject.owner_path for object
                                     # selection / isolation
     block_index: int = -1           # structural ADES material identity
+    billboard_center: tuple[float, float, float] | None = None
 
 
 @dataclass(frozen=True)
@@ -558,6 +562,10 @@ class AssetViewport(AcceleratedWidget):
         self._anim_playing = False
         self._anim_speed = 1.0
         self._anim_clock_ms = 0.0
+        self._particle_emitters: list[ParticleEmitter] = []
+        self._particle_bounds_points = []
+        self._particle_owner_bounds: dict[str, tuple] = {}
+        self._effect_ground_y: float | None = None
         self._anim_states: dict[int, tuple[int, int]] = {}  # mat -> (frame, dir)
         self._anim_left_ms: dict[int, float] = {}
 
@@ -590,6 +598,10 @@ class AssetViewport(AcceleratedWidget):
         self._marquee_candidate = False
         self._vertex_press = None
         self._faces = []
+        self._particle_emitters = []
+        self._particle_bounds_points = []
+        self._particle_owner_bounds = {}
+        self._effect_ground_y = None
         self._materials = []
         self._block_material_ids = {}
         self._sen_boxes = []
@@ -689,7 +701,9 @@ class AssetViewport(AcceleratedWidget):
                               primary=fam_obj is primary_obj,
                               owner=owner, build_faces=visible)
 
-        points = [v for face in self._faces for v in face.vertices]
+        self._refresh_particle_faces()
+        self._build_particle_bounds()
+        points = self._framing_points()
         points.extend(p for box in self._sen_boxes for p in box)
         if preserved_camera is None:
             if points:
@@ -796,7 +810,7 @@ class AssetViewport(AcceleratedWidget):
         self.update()
 
     def frame_owner(self, owner: str) -> None:
-        bounds = self._owner_bounds.get(owner)
+        bounds = self._framing_bounds(owner)
         if bounds is None:
             return
         x0, y0, z0, x1, y1, z1 = bounds
@@ -808,9 +822,12 @@ class AssetViewport(AcceleratedWidget):
         self.update()
 
     def frame_all(self) -> None:
-        if not self._owner_bounds:
+        all_bounds = [bounds for bounds in (
+            self._framing_bounds(owner) for owner in self._owner_bounds)
+            if bounds is not None]
+        if not all_bounds:
             return
-        xs0, ys0, zs0, xs1, ys1, zs1 = zip(*self._owner_bounds.values())
+        xs0, ys0, zs0, xs1, ys1, zs1 = zip(*all_bounds)
         self._center = ((min(xs0) + max(xs1)) / 2,
                         (min(ys0) + max(ys1)) / 2,
                         (min(zs0) + max(zs1)) / 2)
@@ -2638,6 +2655,10 @@ class AssetViewport(AcceleratedWidget):
         world_points = [_apply(matrix, p, pos) for p in skeleton.points]
         polygons = skeleton.polygons
 
+        if build_faces:
+            self._load_particle_emitters(
+                fam_obj, family, material_index, world_points, matrix, owner)
+
         if world_points:
             xs = [p[0] for p in world_points]
             ys = [p[1] for p in world_points]
@@ -2674,8 +2695,14 @@ class AssetViewport(AcceleratedWidget):
                 for poly_id, _uvs, _shade in group.faces:
                     covered[poly_id] = covered.get(poly_id, 0) + 1
             self._duplicate_polys = {p for p, n in covered.items() if n > 1}
+            emitter_polys = {
+                block.ade_poly_id for block in fam_obj.base_object.ades
+                if block.particle_attributes is not None}
+            # Native BASE mesh generation skips particle ADEs. Their polygon
+            # selectors are emitter metadata, not missing static surfaces.
             unmapped = [p for p in range(len(polygons))
-                        if p not in covered and len(polygons[p]) >= 3]
+                        if p not in covered and p not in emitter_polys
+                        and len(polygons[p]) >= 3]
             if unmapped:
                 unmapped_mat = self._ensure_material(
                     "__unmapped__", "UNMAPPED (no ATTS entry)", "", family,
@@ -2720,6 +2747,134 @@ class AssetViewport(AcceleratedWidget):
                     owner=owner,
                     block_index=block_index,
                 ))
+
+    def _load_particle_emitters(self, fam_obj, family, material_index,
+                                world_points, matrix, owner) -> None:
+        """Reuse the normal texture/material path for native PTCL life stages."""
+        stage_id = len(fam_obj.materials)
+        for block_index, block in enumerate(fam_obj.base_object.ades):
+            attributes = block.particle_attributes
+            if attributes is None:
+                continue
+            if (attributes.birth_rate <= 0 or attributes.lifetime <= 0
+                    or attributes.context_stop_generation
+                    <= attributes.context_start_generation):
+                self._diagnostics.append(
+                    f"{owner}: particle emitter has no active generation window.")
+                continue
+            if not 0 <= block.ade_point_id < len(world_points):
+                self._diagnostics.append(
+                    f"{owner}: particle emitter has an invalid source point.")
+                continue
+            stages = []
+            for stage in block.particle_stages[:8]:
+                texture = stage.texture
+                if stage.class_id == "particle.class" or texture is None:
+                    self._diagnostics.append(
+                        f"{owner}: particle life stage has no drawable texture.")
+                    stages.append((-1, stage_id, stage))
+                    stage_id += 1
+                    continue
+                name, kind = texture.name, texture.kind
+                mat_id = self._ensure_material(
+                    f"{owner}|particle|{stage_id}", name, kind, family,
+                    material_index, anim_name=name if kind == "bmpanim" else "",
+                    block=stage)
+                if self._indexed_adapter is not None:
+                    self._indexed_adapter.block_map[(owner, stage_id)] = stage
+                stages.append((mat_id, stage_id, stage))
+                stage_id += 1
+            if stages:
+                self._particle_emitters.append(ParticleEmitter(
+                    attributes, world_points[block.ade_point_id], matrix,
+                    stages, owner,
+                    zlib.crc32(f"{owner}:{block_index}".encode("utf-8"))))
+
+    @property
+    def _particle_duration_ms(self) -> float:
+        return max((emitter.duration_ticks for emitter in self._particle_emitters),
+                   default=0.0) * 1000.0 / 1024.0
+
+    def _particle_faces_at(self, time_ms):
+        period = self._particle_duration_ms
+        ticks = (time_ms % period if period > 0 else 0) * 1024.0 / 1000.0
+        for emitter in self._particle_emitters:
+            for position, size, (mat_id, stage_id, stage) in emitter.samples(ticks):
+                if mat_id < 0:
+                    continue
+                radius = size * 0.5
+                x, y, z = position
+                vertices = [(x - radius, y - radius, z),
+                            (x - radius, y + radius, z),
+                            (x + radius, y + radius, z),
+                            (x + radius, y - radius, z)]
+                uvs = (stage.texture.outline_uvs if stage.texture else [])
+                yield ViewFace(
+                    vertices, list(uvs), mat_id, shade=stage.shade_val,
+                    animated=bool(self._materials[mat_id].anim_frames),
+                    primary=False, owner=emitter.owner, block_index=stage_id,
+                    billboard_center=position)
+
+    def _refresh_particle_faces(self) -> None:
+        self._faces = [face for face in self._faces
+                       if face.billboard_center is None]
+        self._faces.extend(self._particle_faces_at(self._anim_clock_ms))
+        self._invalidate_indexed_view_cache()
+
+    def _build_particle_bounds(self) -> None:
+        """Measure one full effect burst so framing and ground stay fixed.
+
+        The envelope is kept apart from ``_owner_bounds``: those are the
+        bounds of the model itself and also drive selection framing,
+        collision generation and Follow unit. A smoke column rising from a
+        wreck must not move or resize the wreck's own bounds.
+        """
+
+        points = []
+        owner_bounds: dict[str, tuple] = {}
+        duration = self._particle_duration_ms
+        if duration > 0:
+            for index in range(17):
+                for face in self._particle_faces_at(duration * index / 17):
+                    points.extend(face.vertices)
+                    x, y, z = face.billboard_center
+                    radius = abs(face.vertices[0][0] - x)
+                    points.extend(((x, y, z - radius), (x, y, z + radius)))
+                    old = owner_bounds.get(face.owner, (x, y, z, x, y, z))
+                    owner_bounds[face.owner] = (
+                        min(old[0], x - radius), min(old[1], y - radius),
+                        min(old[2], z - radius), max(old[3], x + radius),
+                        max(old[4], y + radius), max(old[5], z + radius))
+        self._particle_bounds_points = points
+        self._particle_owner_bounds = owner_bounds
+        # UA +Y points down: the lowest point of the model and of every
+        # particle is the ground the whole effect has to stand on.
+        low = [point[1] for point in self._static_points()] + [
+            point[1] for point in points]
+        self._effect_ground_y = max(low) if self._particle_emitters and low else None
+
+    def _static_points(self):
+        return [v for face in self._faces if face.billboard_center is None
+                for v in face.vertices]
+
+    def _framing_points(self):
+        """Points the camera frames: the model, or the effect if that is all.
+
+        A VP made only of emitters (an explosion) has no surface, so its
+        particle envelope is framed. A model that merely emits smoke is
+        framed on its own geometry; the smoke may leave the view.
+        """
+
+        return self._static_points() or list(self._particle_bounds_points)
+
+    def _framing_bounds(self, owner: str):
+        """Bounds used to frame one owner (see ``_framing_points``)."""
+
+        has_surface = any(face.owner == owner and face.billboard_center is None
+                          for face in self._faces)
+        if not has_surface and owner in self._particle_owner_bounds:
+            return self._particle_owner_bounds[owner]
+        return self._owner_bounds.get(owner)
 
     def _ensure_material(self, key: str, label: str, kind: str,
                          family: AssetFamily, material_index: dict[str, int],
@@ -2908,7 +3063,7 @@ class AssetViewport(AcceleratedWidget):
 
     @property
     def has_model(self) -> bool:
-        return bool(self._faces)
+        return bool(self._faces or self._particle_emitters)
 
     def _camera_state(self) -> dict:
         return {
@@ -3043,7 +3198,7 @@ class AssetViewport(AcceleratedWidget):
                            zoom_percent: int = 100) -> None:
         """Center canonical presets on all visible geometry."""
 
-        points = [vertex for face in self._faces for vertex in face.vertices]
+        points = self._framing_points()
         width = max(1, int(target_size.width()))
         height = max(1, int(target_size.height()))
         if not points:
@@ -3084,7 +3239,7 @@ class AssetViewport(AcceleratedWidget):
 
         width = int(target_size.width())
         height = int(target_size.height())
-        if not self._faces or width <= 0 or height <= 0:
+        if not self.has_model or width <= 0 or height <= 0:
             return QImage()
         image = QImage(width, height,
                        QImage.Format.Format_ARGB32_Premultiplied)
@@ -3096,7 +3251,8 @@ class AssetViewport(AcceleratedWidget):
                            allow_transparent_background=True,
                            force_textured=True)
         painter.end()
-        if self._last_effective_renderer != "retail_indexed_reconstructed":
+        if self._last_effective_renderer not in (
+                "retail_indexed_reconstructed", "retail_indexed_with_particle_overrides"):
             reason = self._last_render_error or self.indexed_rendering_reason
             raise RuntimeError(
                 "Retail indexed export failed closed: " + (reason or "unknown reason"))
@@ -3136,11 +3292,63 @@ class AssetViewport(AcceleratedWidget):
 
     @property
     def has_animation(self) -> bool:
-        return any(m.anim_frames for m in self._materials)
+        return bool(self._particle_emitters) or any(
+            m.anim_frames for m in self._materials)
+
+    @property
+    def animation_duration_ms(self) -> float:
+        """Return one visible effect burst or the longest material cycle."""
+        static_materials = {face.material for face in self._faces
+                            if face.billboard_center is None}
+        return max([self._particle_duration_ms, *(
+            sum(max(0, frame[0]) for frame in mat.anim_frames)
+            * (2 if mat.anim_type else 1) * 1000.0 / 1024.0
+            for index, mat in enumerate(self._materials)
+            if index in static_materials)])
+
+    def capture_animation_state(self) -> dict:
+        """Save the displayed frame and playback for a temporary export."""
+        return dict(clock=self._anim_clock_ms, states=dict(self._anim_states),
+                    left=dict(self._anim_left_ms), speed=self._anim_speed,
+                    playing=self._anim_playing)
+
+    def restore_animation_state(self, state: dict) -> None:
+        self._anim_clock_ms = state["clock"]
+        self._anim_states = dict(state["states"])
+        self._anim_left_ms = dict(state["left"])
+        self._anim_speed = state["speed"]
+        self._refresh_particle_faces()
+        self.play_animation(state["playing"])
+        self.animationFrameChanged.emit(self.current_frame_text())
+
+    def seek_animation(self, time_ms: float) -> None:
+        """Sample the same timeline for interactive playback and image export."""
+        self._anim_clock_ms = max(0.0, float(time_ms))
+        for mat_id, mat in enumerate(self._materials):
+            if not mat.anim_frames:
+                continue
+            sequence = [(i, 1) for i in range(len(mat.anim_frames))]
+            if mat.anim_type:
+                sequence += [(i, -1) for i in reversed(range(len(mat.anim_frames)))]
+            durations = [mat.anim_frames[i][0] * 1000.0 / 1024.0
+                         for i, _ in sequence]
+            remaining = self._anim_clock_ms
+            if all(duration > 0 for duration in durations):
+                remaining %= sum(durations)
+            for (frame, direction), duration in zip(sequence, durations):
+                if duration <= 0 or remaining < duration:
+                    self._anim_states[mat_id] = frame, direction
+                    self._anim_left_ms[mat_id] = remaining
+                    break
+                remaining -= duration
+        self._refresh_particle_faces()
+        self.update()
+        self.animationFrameChanged.emit(self.current_frame_text())
 
     def play_animation(self, playing: bool) -> None:
         self._anim_playing = playing and self.has_animation
         if self._anim_playing:
+            self._anim_last_time = time.perf_counter()
             self._anim_timer.start()
         else:
             self._anim_timer.stop()
@@ -3155,6 +3363,9 @@ class AssetViewport(AcceleratedWidget):
         self._anim_speed = max(0.05, min(8.0, speed))
 
     def step_animation(self) -> None:
+        if self._particle_emitters:
+            self.seek_animation(self._anim_clock_ms + 40.0)
+            return
         for mat_id, mat in enumerate(self._materials):
             if not mat.anim_frames:
                 continue
@@ -3167,6 +3378,10 @@ class AssetViewport(AcceleratedWidget):
 
     def step_animation_backward(self) -> None:
         """Move every active animation to the previous visible frame."""
+
+        if self._particle_emitters:
+            self.seek_animation(max(0.0, self._anim_clock_ms - 40.0))
+            return
 
         for mat_id, mat in enumerate(self._materials):
             if not mat.anim_frames:
@@ -3187,8 +3402,15 @@ class AssetViewport(AcceleratedWidget):
 
     def current_frame_text(self) -> str:
         parts = []
+        if self._particle_emitters:
+            live = sum(face.billboard_center is not None for face in self._faces)
+            parts.append(
+                f"Particles: {self._anim_clock_ms % self._particle_duration_ms:.0f} ms, "
+                f"{live} live")
+        static_materials = {face.material for face in self._faces
+                            if face.billboard_center is None}
         for mat_id, mat in enumerate(self._materials):
-            if mat.anim_frames:
+            if mat.anim_frames and mat_id in static_materials:
                 frame, _ = self._anim_states.get(mat_id, (0, 1))
                 parts.append(f"{mat.label}: frame {frame + 1}/{len(mat.anim_frames)}")
         return "; ".join(parts)
@@ -3258,6 +3480,7 @@ class AssetViewport(AcceleratedWidget):
             if mat.anim_frames:
                 self._anim_states[mat_id] = (0, 1)
                 self._anim_left_ms[mat_id] = 0.0
+        self._refresh_particle_faces()
 
     def _next_frame(self, mat: ViewMaterial, frame: int, direction: int):
         # Mirrors NC_STACK_bmpanim::SetTime (CONFIRMED): loop wraps to 0,
@@ -3277,28 +3500,29 @@ class AssetViewport(AcceleratedWidget):
     def _advance_animation(self) -> None:
         if not self._anim_playing:
             return
-        delta_ms = self._anim_timer.interval() * self._anim_speed
-        changed = False
+        now = time.perf_counter()
+        delta_ms = (now - self._anim_last_time) * 1000.0 * self._anim_speed
+        self._anim_last_time = now
+        self._anim_clock_ms += delta_ms
         for mat_id, mat in enumerate(self._materials):
             if not mat.anim_frames:
                 continue
             frame, direction = self._anim_states.get(mat_id, (0, 1))
-            left = self._anim_left_ms.get(mat_id, 0.0) + delta_ms
-            # frame_time is in 1024 Hz game ticks (CONFIRMED)
+            elapsed = self._anim_left_ms.get(mat_id, 0.0) + delta_ms
+            period = sum(max(0, f[0]) for f in mat.anim_frames)
+            if period and all(f[0] > 0 for f in mat.anim_frames):
+                elapsed %= period * (2 if mat.anim_type else 1) * 1000.0 / 1024.0
             while True:
-                duration_ms = mat.anim_frames[frame][0] * 1000.0 / 1024.0
-                if left < duration_ms or duration_ms <= 0:
+                duration = mat.anim_frames[frame][0] * 1000.0 / 1024.0
+                if duration <= 0 or elapsed < duration:
                     break
-                left -= duration_ms
+                elapsed -= duration
                 frame, direction = self._next_frame(mat, frame, direction)
-                changed = True
-            self._anim_states[mat_id] = (frame, direction)
-            self._anim_left_ms[mat_id] = left
-        if changed:
-            self.update()
-            text = self.current_frame_text()
-            self.statusMessage.emit(text)
-            self.animationFrameChanged.emit(text)
+            self._anim_states[mat_id] = frame, direction
+            self._anim_left_ms[mat_id] = elapsed
+        self._refresh_particle_faces()
+        self.update()
+        self.animationFrameChanged.emit(self.current_frame_text())
 
     # -- projection --------------------------------------------------------------
 
@@ -3385,6 +3609,8 @@ class AssetViewport(AcceleratedWidget):
             return 'OpenGL indexed renderer'
         if effective == 'retail_indexed_reconstructed':
             return f'Software indexed rasterizer; presentation: {super().renderer_name}'
+        if effective == 'retail_indexed_with_particle_overrides':
+            return 'Indexed renderer with native particle textures'
         if effective == 'retail_indexed_error':
             return f'Software renderer error: {self._indexed_runtime_error}'
         return super().renderer_name
@@ -3415,6 +3641,11 @@ class AssetViewport(AcceleratedWidget):
             painter.fillRect(target, QColor(24, 26, 32))
 
         if not self._faces:
+            if self._particle_emitters:
+                # A frame after the last particle dies is a valid empty frame.
+                self._last_effective_renderer = "retail_indexed_reconstructed"
+                self._last_render_error = ""
+                return
             if not clean and not self._empty_hint_suppressed:
                 painter.setPen(QColor(180, 185, 192))
                 painter.drawText(target, Qt.AlignmentFlag.AlignCenter,
@@ -3548,9 +3779,16 @@ class AssetViewport(AcceleratedWidget):
             if (not clean and not face.mapped
                     and not self._mapping_diagnostics):
                 continue
-            cam = tuple(
-                self._camera_vertex(vertex, camera)
-                for vertex in face.vertices)
+            if face.billboard_center is None:
+                cam = tuple(self._camera_vertex(vertex, camera)
+                            for vertex in face.vertices)
+            else:
+                center = self._camera_vertex(face.billboard_center, camera)
+                x, y, _ = face.billboard_center
+                # Particle quads face the camera, as in ParticleSystem::Render.
+                cam = tuple((center[0] + (v[0] - x) * camera["scale"],
+                             center[1] - (v[1] - y) * camera["scale"], center[2])
+                            for v in face.vertices)
             source_front_facing = retail_source_face_front_facing(cam)
             retail_source_cull = self._uses_retail_source_face_culling()
             if retail_source_cull:
@@ -3624,6 +3862,17 @@ class AssetViewport(AcceleratedWidget):
         if geometry_capture is not None:
             geometry_capture.extend(ordered)
             return
+        particle_layers = bool(
+            self._family_ref and any(
+                face.billboard_center is not None
+                and self._materials[face.material].additive
+                and any(name.casefold() in self._family_ref.effect_override_paths
+                        for name in (self._materials[face.material].anim_bitmap_names
+                                     or [self._materials[face.material].label]))
+                for face in self._faces))
+        indexed_ordered = (
+            [piece for piece in ordered if piece.payload.face.billboard_center is None]
+            if particle_layers else ordered)
         if mode == "textured":
             previous_error = self._indexed_runtime_error
             try:
@@ -3655,7 +3904,7 @@ class AssetViewport(AcceleratedWidget):
                                   self._show_grid, self._show_axes, camera_preview,
                                   allow_transparent_background)
                 gpu_rendered = self._draw_gpu_indexed(
-                    painter, target, ordered, camera, backdrop=backdrop)
+                    painter, target, indexed_ordered, camera, backdrop=backdrop)
                 if gpu_rendered:
                     indexed_image = None
                 elif (use_view_cache
@@ -3664,7 +3913,7 @@ class AssetViewport(AcceleratedWidget):
                     indexed_image = QImage(self._indexed_view_cache_image)
                 else:
                     indexed_image = self._render_indexed_model(
-                        render_target, ordered, camera,
+                        render_target, indexed_ordered, camera,
                         collect_diagnostics=clean,
                         background_indices=self._indexed_background_bytes(backdrop))
                     self._last_indexed_stats.update({
@@ -3694,6 +3943,10 @@ class AssetViewport(AcceleratedWidget):
                 self._last_render_error = ""
                 self._last_effective_renderer = (
                     "retail_indexed_gpu" if gpu_rendered else "retail_indexed_reconstructed")
+                if particle_layers:
+                    self._draw_particle_layers(painter, source_polygons, camera)
+                    self._last_effective_renderer = "retail_indexed_with_particle_overrides"
+                    self._last_indexed_stats["particle_rendering"] = "native_rgba"
 
         for piece in ordered:
             payload = piece.payload
@@ -3832,6 +4085,41 @@ class AssetViewport(AcceleratedWidget):
         width, stride = indexed.width(), indexed.bytesPerLine()
         return b"".join(data[y * stride:y * stride + width]
                         for y in range(indexed.height()))
+
+    def _draw_particle_layers(self, painter, polygons, camera) -> None:
+        """Use the engine's RGBA FX overrides with the usual particle blending."""
+        faces = sorted(
+            (face for face in self._faces if face.billboard_center is not None
+             and id(face) in polygons),
+            key=lambda face: self._camera_vertex(face.billboard_center, camera)[2])
+        for face in faces:
+            material = self._materials[face.material]
+            image = material.image
+            if material.anim_frames:
+                frame, _ = self._anim_states.get(face.material, (0, 1))
+                image_id = material.anim_frames[frame][1]
+                image = (material.anim_images[image_id]
+                         if 0 <= image_id < len(material.anim_images) else None)
+            uvs = self._face_uvs(face, material)
+            target = polygons[id(face)]
+            if image is None or image.isNull() or len(uvs) != 4 or len(target) != 4:
+                continue
+            source = QPolygonF([QPointF(u * image.width() / 256.0,
+                                       v * image.height() / 256.0) for u, v in uvs])
+            transform = QTransform()
+            if not QTransform.quadToQuad(source, target, transform):
+                continue
+            painter.save()
+            painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform, True)
+            clip = QPainterPath()
+            clip.addPolygon(target)
+            painter.setClipPath(clip, Qt.ClipOperation.IntersectClip)
+            painter.setCompositionMode(
+                QPainter.CompositionMode.CompositionMode_Plus if material.additive
+                else QPainter.CompositionMode.CompositionMode_SourceOver)
+            painter.setWorldTransform(transform, True)
+            painter.drawImage(QPointF(0, 0), image)
+            painter.restore()
 
     def _render_indexed_model(
             self, target: QRectF, ordered, camera: dict, *,
@@ -4383,6 +4671,9 @@ class AssetViewport(AcceleratedWidget):
         painter.setPen(QPen(QColor(55, 60, 70), 0.8))
         steps = 8
         size = 1.4 / self._scale
+        # Models keep the grid through their center; an effect stands on it.
+        height = (self._center[1] if self._effect_ground_y is None
+                  else self._effect_ground_y)
         for i in range(-steps, steps + 1):
             offset = i * size / steps
             for start, end in (
@@ -4390,10 +4681,10 @@ class AssetViewport(AcceleratedWidget):
                 ((-size, 0, offset), (size, 0, offset)),
             ):
                 a = self._project(self._camera_vertex((
-                    self._center[0] + start[0], self._center[1] + start[1],
+                    self._center[0] + start[0], height,
                     self._center[2] + start[2]), camera), target, camera)
                 b = self._project(self._camera_vertex((
-                    self._center[0] + end[0], self._center[1] + end[1],
+                    self._center[0] + end[0], height,
                     self._center[2] + end[2]), camera), target, camera)
                 painter.drawLine(a, b)
 

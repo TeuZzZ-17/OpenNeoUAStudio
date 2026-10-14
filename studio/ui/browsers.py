@@ -4,7 +4,7 @@
 import os
 from pathlib import Path
 
-from PySide6.QtCore import QSignalBlocker, Qt, Signal
+from PySide6.QtCore import QEvent, QSignalBlocker, Qt, Signal
 from PySide6.QtWidgets import (
     QApplication,
     QComboBox,
@@ -66,6 +66,7 @@ class EntityListMixin:
         self._entity_loading = False
         self._set_combo = self.entity_browser.set_combo
         self.entity_browser.selected.connect(self._entity_selected)
+        self.entity_browser.tree.installEventFilter(self)
         self.entity_browser.setChanged.connect(self._entity_set_changed)
         self.entity_state.currentIndexChanged.connect(self._open_entity_state)
         return panel
@@ -107,6 +108,7 @@ class EntityListMixin:
             self.entity_browser.select_object(self._current_entity)
             return
         previous = self._current_entity
+        self.play_button.setChecked(False)
         previous_choices = [(self.entity_state.itemText(i), self.entity_state.itemData(i))
                             for i in range(self.entity_state.count())]
         previous_index = self.entity_state.currentIndex()
@@ -366,15 +368,72 @@ class GameObjectBrowser(QWidget):
         self.tree.currentItemChanged.connect(self._selected)
         self.tree.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self.tree.customContextMenuRequested.connect(self._show_context_menu)
+        self.tree.installEventFilter(self)
         self.reload()
 
     def _context_menu(self, item):
         menu = QMenu(self)
         obj = item.data(0, GAME_OBJECT_ROLE) if item is not None else None
+        window = self.window()
+        if obj is not None and hasattr(window, "viewport") and hasattr(window, "play_button"):
+            button, current_available = self._playback_control(window)
+            playing = item is self.tree.currentItem() and button.isChecked()
+            action = menu.addAction("Pause" if playing else "Play")
+            # A right click only inspects the row; loading starts on activation.
+            if item is self.tree.currentItem():
+                available = current_available
+            elif hasattr(window, "_resolve_setbas_base"):
+                from studio.assets.catalog import visual_choices
+                from studio.assets.family import family_object_has_animation
+                choices = visual_choices(obj, self.set_number)
+                available = False
+                for choice in choices:
+                    if not choice.base_name or window._setbas is None:
+                        continue
+                    family, target, _offset = window._resolve_setbas_base(choice.base_name)
+                    if target is not None:
+                        available = family_object_has_animation(family, target)
+                        break
+            else:
+                available = False
+            action.setEnabled(bool(available))
+            action.triggered.connect(
+                lambda: self._play_item(item, window))
+            menu.addSeparator()
         if obj is not None:
             for label, value in (('Copy Name', obj.name), ('Copy ID', str(obj.object_id)), ('Copy Script Path', str(obj.source))):
                 menu.addAction(label, lambda _checked=False, text=value, what=label: self._copy(what, text))
         return menu
+
+    def _play_item(self, item, window):
+        self.tree.setCurrentItem(item)
+        self._toggle_playback(window)
+
+    @staticmethod
+    def _playback_control(window):
+        panel = getattr(window, "fx_panel", None)
+        if panel is not None and window._is_fx_tab_active():
+            return panel.play_button, bool(panel.document.items)
+        return window.play_button, window.viewport.has_animation
+
+    def _toggle_playback(self, window):
+        if hasattr(window, "_toggle_list_animation"):
+            window._toggle_list_animation()
+        elif hasattr(window, "viewport") and hasattr(window, "play_button"):
+            button, available = self._playback_control(window)
+            if available:
+                button.setChecked(not button.isChecked())
+
+    def eventFilter(self, watched, event):  # noqa: N802
+        if (watched is self.tree and event.type() == QEvent.Type.KeyPress
+                and event.key() in (Qt.Key.Key_Return, Qt.Key.Key_Enter)
+                and event.modifiers() == Qt.KeyboardModifier.NoModifier
+                and self.tree.state() != self.tree.State.EditingState
+                and self.tree.currentItem() is not None):
+            if not event.isAutoRepeat():
+                self._toggle_playback(self.window())
+            return True
+        return super().eventFilter(watched, event)
 
     def _copy(self, what, text):
         QApplication.clipboard().setText(text)

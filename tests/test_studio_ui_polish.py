@@ -544,6 +544,8 @@ def test_fx_unit_vanm_uses_toolbar_frames_and_effects_use_scene_clock(app):
                             unit_owners={'root'}, time_ms=0.)
     viewport.play_animation(True)
     viewport._anim_timer.stop()
+    # Playback follows the real clock: pretend 20 ms passed since the last tick.
+    viewport._anim_last_time -= 0.02
     viewport._advance_animation()
     assert viewport._anim_states[0] == (1, 1)
     rendered = []
@@ -868,8 +870,9 @@ def test_four_effect_visibility_buttons_and_menu_share_actions(app):
         panel.hide_all_button.click()
         assert panel.hidden_items == {0, 1, 2, 3}
         menu = panel._create_effects_context_menu()
-        assert menu.actions() == panel._visibility_actions
-        menu.actions()[3].trigger()
+        assert menu.actions()[0].text() == 'Edit Effect Code'
+        assert menu.actions()[2:] == panel._visibility_actions
+        menu.actions()[5].trigger()
         assert panel.hidden_items == {1, 3}
         with patch.object(panel, '_create_effects_context_menu') as created:
             panel._show_effects_context_menu(tree.visualItemRect(tree.item(0)).center())
