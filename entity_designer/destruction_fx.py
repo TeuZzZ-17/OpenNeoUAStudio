@@ -24,6 +24,8 @@ import random
 import re
 from dataclasses import dataclass, field, replace
 
+from entity_designer import decal_smoke
+
 CONTEXT_VEHICLE = "vehicle"
 CONTEXT_WEAPON = "weapon"
 
@@ -53,6 +55,9 @@ LEGACY_DEAD_LIFETIME_MS = 5000
 # The engine shows the impact/megadeth VP on the terminal frame of a dead
 # vehicle. The preview keeps it visible briefly so it can be inspected.
 IMPACT_PREVIEW_MS = 600
+# Decal smoke lasts minutes in the engine; the preview plays only its first part
+# so the timeline stays usable.
+SMOKE_PREVIEW_MS = 20000.0
 SIMULATION_STEP_MS = 10.0
 LEGACY_NESTING_LIMIT = 3
 
@@ -618,6 +623,8 @@ class FxSpec:
     decal_tint: tuple[int, int, int, int] = (255, 255, 255, 255)
     edge_fade: tuple[float, float] = (0.0, 0.0)
     permanent: bool = False
+    # Smoke rising from the decal (None = the block has no smoke).
+    smoke: decal_smoke.SmokeSpec | None = None
     # Physical fragments: normal / goingdown / explode sounds.
     sounds: dict = field(default_factory=dict)
 
@@ -631,6 +638,81 @@ def _nonnegative_ms(text: str) -> int:
     if not math.isfinite(value) or value <= 0:
         return 0
     return int(value)
+
+
+def _interpret_smoke(rows: dict[str, str], issue) -> decal_smoke.SmokeSpec:
+    """The smoke_* keys of a ground_decal block, with the engine's fallbacks.
+
+    Mirrors ``ParseGroundDecalSmokeParam``: a bad value keeps the default of
+    that key (with a warning), so a typo never removes the whole smoke.
+    """
+
+    defaults = decal_smoke.SmokeSpec()
+
+    def bounded_int(key: str, low: int, high: int, default: int) -> int:
+        if key not in rows:
+            return default
+        text = rows[key]
+        if not re.fullmatch(r"[+-]?\d+", text):
+            issue(SEVERITY_WARNING, f"Invalid {key} '{text}': using {default}.")
+            return default
+        return max(low, min(int(text), high))
+
+    def int_range(key: str, low: int, high: int,
+                  default: tuple[int, int]) -> tuple[int, int]:
+        if key not in rows:
+            return default
+        parsed = parse_int_range(rows[key])
+        if parsed is None:
+            issue(SEVERITY_WARNING, f"Invalid {key} '{rows[key]}': "
+                  f"using {default[0]}_{default[1]}.")
+            return default
+        return (max(low, min(parsed[0], high)), max(low, min(parsed[1], high)))
+
+    def number(key: str, low: float, high: float, default: float) -> float:
+        if key not in rows:
+            return default
+        parsed = _full_float(rows[key])
+        if parsed is None:
+            issue(SEVERITY_WARNING, f"Invalid {key} '{rows[key]}': "
+                  f"using {format_number(default)}.")
+            return default
+        return max(low, min(parsed, high))
+
+    size = defaults.size
+    if "smoke_size" in rows:
+        parsed = parse_float_range(rows["smoke_size"])
+        if parsed and parsed[0] > 0 and parsed[1] > 0:
+            size = (max(0.5, min(parsed[0], 200.0)), max(0.5, min(parsed[1], 200.0)))
+        else:
+            issue(SEVERITY_WARNING, f"Invalid smoke_size '{rows['smoke_size']}': "
+                  f"using {format_range(*defaults.size)}.")
+
+    tint = defaults.tint
+    if "smoke_tint" in rows:
+        parsed_tint = parse_tint(rows["smoke_tint"])
+        if parsed_tint is None:
+            issue(SEVERITY_WARNING, f"Invalid smoke_tint '{rows['smoke_tint']}': "
+                  "using 255_255_255_255.")
+            tint = (255, 255, 255, 255)
+        else:
+            tint = parsed_tint
+
+    return decal_smoke.SmokeSpec(
+        enabled=rows.get("smoke") == "1",
+        chance=bounded_int("smoke_chance", 0, 100, defaults.chance),
+        duration=int_range("smoke_duration", 0, 3600000, defaults.duration),
+        fade_in=bounded_int("smoke_fade_in", 0, 3600000, defaults.fade_in),
+        fade_out=bounded_int("smoke_fade_out", 0, 3600000, defaults.fade_out),
+        count=int_range("smoke_count", 0, decal_smoke.MAX_PUFFS, defaults.count),
+        size=size,
+        growth=number("smoke_growth", 1.0, 10.0, defaults.growth),
+        rise_speed=number("smoke_rise_speed", 0.0, 200.0, defaults.rise_speed),
+        puff_time=int_range("smoke_puff_time", 200, 60000, defaults.puff_time),
+        drift=number("smoke_drift", 0.0, 300.0, defaults.drift),
+        spread=number("smoke_spread", 0.0, 100.0, defaults.spread),
+        intensity=number("smoke_intensity", 0.0, 300.0, defaults.intensity),
+        tint=tint)
 
 
 def interpret_block(block: FxBlock, context: str) -> FxSpec:
@@ -673,6 +755,7 @@ def interpret_block(block: FxBlock, context: str) -> FxSpec:
     decal_tint = (255, 255, 255, 255)
     random_rotation = False
     edge_fade = (0.0, 0.0)
+    smoke_rows: dict[str, str] = {}
     sound_values: dict[str, str] = {}
 
     if not block.lines or _key(block.lines[-1]) != "end":
@@ -848,6 +931,8 @@ def interpret_block(block: FxBlock, context: str) -> FxSpec:
         elif key == "physical_vehicle":
             has_physical_vehicle_key = True
             physical_vehicle = _stol(value)[0]
+        elif key in decal_smoke.SMOKE_KEYS:
+            smoke_rows[key] = value
         elif key == "texture":
             texture = value
         elif key == "size":
@@ -888,6 +973,15 @@ def interpret_block(block: FxBlock, context: str) -> FxSpec:
                   "OpenNeoUA version does not support it either, the engine "
                   "stops loading the whole script file (PARSE ERROR unknown "
                   "keyword).")
+
+    smoke = None
+    if smoke_rows:
+        if mode != MODE_DECAL:
+            issue(SEVERITY_WARNING,
+                  "smoke_* keys only work with mode = ground_decal: the smoke "
+                  "is ignored.")
+        else:
+            smoke = _interpret_smoke(smoke_rows, issue)
 
     def build(active: bool, **values) -> FxSpec:
         if mode == MODE_PHYSICAL:
@@ -990,7 +1084,8 @@ def interpret_block(block: FxBlock, context: str) -> FxSpec:
         True, duration=duration, fade_in=decal_fade_in,
         fade_out=decal_fade_out, texture=texture, size=size,
         stretch_x=stretch_x, stretch_z=stretch_z, decal_tint=decal_tint,
-        edge_fade=edge_fade, permanent=permanent, **common)
+        edge_fade=edge_fade, permanent=permanent,
+        smoke=smoke if smoke is not None and smoke.enabled else None, **common)
 
 
 def dest_fx_issues(line: DestFxLine) -> tuple[FxIssue, ...]:
@@ -1187,7 +1282,7 @@ class PreviewItem:
     """One model to draw at the current preview time."""
 
     source: int                 # item index in the FxDocument, -1 = the unit
-    kind: str                   # visual | physical | impact | legacy | ground_decal | unit | decoration | tracer
+    kind: str                   # visual | physical | impact | legacy | ground_decal | decal_smoke | unit | decoration | tracer
     vp: int                     # VP id to draw (0 = marker only)
     position: tuple[float, float, float]
     rotation: Matrix3
@@ -2866,6 +2961,31 @@ class PreviewSimulation:
         self._tracks.append(PreviewTrack(
             source, f"{prefix}Ground decal", start, shown_end,
             float(spec.fade_in), float(spec.fade_out)))
+        if spec.smoke is not None:
+            self._build_decal_smoke(source, spec.smoke, rng, start, position,
+                                    0.5 * math.hypot(size * stretch_x, size * stretch_z),
+                                    prefix)
+
+    def _build_decal_smoke(self, source, smoke, rng, start, position, radius,
+                           prefix) -> None:
+        seed = rng.getrandbits(24)
+        if not decal_smoke.rolls_smoke(smoke, seed):
+            return
+        count = decal_smoke.scaled_count(decal_smoke.emitter_count(smoke, seed), radius)
+        real = decal_smoke.emitter_duration(smoke, seed)
+        if count <= 0 or real <= 0:
+            return
+        shown = min(float(real), SMOKE_PREVIEW_MS)
+        self._events.append((source, "decal_smoke", start, start + shown,
+                             (smoke, position, radius, seed, count, real)))
+        self._tracks.append(PreviewTrack(
+            source, f"{prefix}Decal smoke", start, start + shown,
+            float(smoke.fade_in), float(smoke.fade_out) if real <= shown else 0.0,
+            approximate=real > shown))
+        if real > shown:
+            self.notes.append(
+                f"Decal smoke lasts {real / 1000:.0f} s in the engine; the "
+                f"preview plays its first {shown / 1000:.0f} s.")
 
     def _build_legacy(self, source, dest, origin, rng, start, depth, *,
                       random_rotation: bool = False,
@@ -3074,6 +3194,23 @@ class PreviewSimulation:
                     (1.0, 1.0, 1.0), alpha, spec.decal_tint, "decal",
                     texture=spec.texture, decal_size=(width, depth),
                     decal_edge_fade=edge))
+            elif kind == "decal_smoke":
+                smoke, position, radius, seed, count, real = payload
+                gain = smoke.intensity * 0.01 * smoke.tint[3] / 255.0
+                for slot in range(count):
+                    puff = decal_smoke.evaluate(
+                        smoke, radius, seed, count, real, slot, age)
+                    if puff is None:
+                        continue
+                    shade = min(1.0, (0.85 + 0.5 * puff.phase) * puff.shade)
+                    rgb = tuple(int(round(min(255.0, value * shade)))
+                                for value in smoke.tint[:3])
+                    items.append(PreviewItem(
+                        source, "decal_smoke", 0,
+                        tuple(base + offset for base, offset
+                              in zip(position, puff.offset)),
+                        IDENTITY, (puff.size,) * 3,
+                        min(1.0, puff.alpha * gain), (*rgb, 255), "smoke"))
         return items
 
     def offset_boxes(self) -> list[tuple[int, tuple, tuple]]:
@@ -3102,6 +3239,8 @@ class PreviewSimulation:
                     reach = 0.5 * max(item.decal_size)
                 elif item.kind == "tracer":
                     reach = 0.5 * item.scale[2]
+                elif item.kind == "decal_smoke":
+                    reach = 0.5 * item.scale[0]
                 else:
                     reach = 60.0 * max(item.scale)
                 points.append((item.position, reach))
