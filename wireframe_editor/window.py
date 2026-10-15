@@ -810,11 +810,12 @@ class WireframeEditorWindow(QMainWindow):
         QMessageBox.information(self, "Outline exported", message)
 
         self._last_directory = output_path.parent
-        # Export is a copy: the loaded file and its pending edits stay as they
-        # are. Only a session without a file yet adopts the exported one.
-        if self._current_file_path is None:
-            self._current_file_path = output_path
-            self._show_model(saved_model, output_path)
+        # The editor continues on the exported file (new or overwritten). The
+        # previous file is left untouched on disk; the list is reloaded so a
+        # brand-new file shows up and gets selected.
+        self._current_file_path = output_path
+        self.game_file_browser.reload()
+        self._show_model(saved_model, output_path)
 
     def _write_edited_file(self, output_path: Path) -> Path | None:
         if not self._current_model:
