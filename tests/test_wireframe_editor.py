@@ -62,7 +62,7 @@ class WireframeEditorUiTests(unittest.TestCase):
         self.assertTrue(box.setText.call_args.args[0].startswith("Overwrite changes to"))
         box.button.return_value.setText.assert_called_with("Overwrite")
 
-    def test_export_saves_a_copy_and_keeps_the_loaded_file(self):
+    def test_export_saves_a_copy_and_switches_to_it(self):
         window = self._window()
         with tempfile.TemporaryDirectory() as directory:
             source = Path(directory) / "source.SKL"
@@ -78,9 +78,10 @@ class WireframeEditorUiTests(unittest.TestCase):
                 dialog.getSaveFileName.return_value = (str(copy), "")
                 window.save_outline_as()
             self.assertTrue(copy.exists())
-            self.assertEqual(window._current_file_path, source)
-            self.assertTrue(window.outline_editor.is_dirty)
-            window.outline_editor.mark_clean()
+            # The editor continues on the exported file, freshly loaded and clean.
+            self.assertEqual(window._current_file_path, copy)
+            self.assertFalse(window.outline_editor.is_dirty)
+            self.assertEqual(window.file_value.text(), "copy.SKL")
 
     def test_wireframe_editor_has_no_mode_menu(self):
         window = self._window()

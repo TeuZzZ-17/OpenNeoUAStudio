@@ -128,8 +128,26 @@ class WireframeTransformTests(unittest.TestCase):
         self.assertFalse(self.editor.can_undo)
         self.assertIsNone(self.editor._drag_start_state)
 
+    def test_lone_vertex_cannot_use_rotate_or_scale(self):
+        self.editor.select_point(0)
+        for mode in ("rotate", "scale"):
+            self.window.transform_buttons[mode].click()
+            self.assertEqual(self.canvas.transform_mode, "move")
+            self.assertTrue(self.window.transform_buttons["move"].isChecked())
+        self.editor.select_box({0, 1}, set(), False)
+        self.window.transform_buttons["rotate"].click()
+        self.assertEqual(self.canvas.transform_mode, "rotate")
+
+    def test_clicking_a_new_vertex_returns_to_move(self):
+        self.editor.select_box({0, 1}, set(), False)
+        self.editor.set_transform_mode("rotate")
+        self.begin((200, 100))
+        self.release((200, 100))
+        self.assertEqual(self.canvas.transform_mode, "move")
+
     def test_modes_panel_edit_context_and_shortcuts_are_synchronized(self):
         before = self.editor.projected_points
+        self.editor.select_box({0, 1}, set(), False)
         self.window.transform_buttons["rotate"].click()
         self.assertEqual(self.canvas.transform_mode, "rotate")
         self.assertIn(self.editor.transform_actions["rotate"], self.window.edit_menu.actions())

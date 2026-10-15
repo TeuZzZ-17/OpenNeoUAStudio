@@ -212,6 +212,16 @@ _GUN_POINT_INDEX_ROLE = int(Qt.ItemDataRole.UserRole) + 5
 _SCRIPT_REFERENCE_ROLE = int(Qt.ItemDataRole.UserRole) + 6
 
 
+def _fx_item_state(item) -> str | None:
+    """The model state a preview item belongs to (None = a plain effect)."""
+
+    if item.kind == "unit":
+        state = item.label.split(" · ", 1)[0]
+        return "normal" if state == "attached" else state
+    return {"plasma": "genesis", "launch": "launch", "decoration": "normal",
+            "tracer": "normal", "cluster": "normal", "laser": "normal"}.get(item.kind)
+
+
 class CollisionEditorWindow(QMainWindow):
     """Manual collision editor built on OpenNeoUAStudio's existing systems."""
 
@@ -222,6 +232,8 @@ class CollisionEditorWindow(QMainWindow):
         self.setWindowTitle(WINDOW_TITLE)
         self.resize(1100, 720)
         self.project = CollisionProject()
+        self._hide_splitter_grip = False
+        self._splitter_grip_filtered = False
         self.family: AssetFamily | None = None
         self._vp_embedded: EmbeddedVPSet | None = None
         self._vp_table: VPTable | None = None
@@ -805,15 +817,25 @@ class CollisionEditorWindow(QMainWindow):
         self.renderer_badge.add_viewport(self.briefing_preview)
         self.viewport_layout.addWidget(self.briefing_preview, 0, 0)
         self.briefing_preview.hide()
+        # Al posto dell'anteprima, nella tab Collision Shape delle armi.
+        self.shape_weapon_notice = QLabel(
+            "Collision Shape mode is not intended for, or available on, "
+            "weapons.\nIt is available only for vehicles.")
+        self.shape_weapon_notice.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.shape_weapon_notice.setWordWrap(True)
+        self.shape_weapon_notice.setMinimumSize(0, 0)
+        self.viewport_layout.addWidget(self.shape_weapon_notice, 0, 0)
+        self.shape_weapon_notice.hide()
         self.fx_panel = DestructionFxPanel(self)
         self.fx_tab_index = self.properties_tabs.addTab(
-            self.fx_panel, "Destruction FX")
+            self.fx_panel, "Visuals && FX")
         self.fx_panel.sound.resolver = self._resolve_fx_sound
         self.fx_panel.frameChanged.connect(self._push_fx_frame)
         self.fx_panel.fitRequested.connect(self._fit_fx_view)
         self.fx_panel.documentEdited.connect(self._fx_document_edited)
         self.fx_panel.draftStateChanged.connect(self._fx_draft_state_changed)
         self.fx_panel.sourceSaved.connect(self._fx_sources_saved)
+        self.fx_panel.visualsSaved.connect(self.reload_fx_from_file)
         # The playback bar uses the full width under the viewport.
         self.viewport_layout.addWidget(self.fx_panel.transport_bar, 1, 0)
         # The bar keeps its natural height; the viewport takes the rest.
@@ -1817,6 +1839,10 @@ class CollisionEditorWindow(QMainWindow):
         splitter.setSizes([230, 850, 430])
 
     def eventFilter(self, watched, event):
+        if (self._hide_splitter_grip
+                and event.type() == QEvent.Type.Paint
+                and watched is self.main_splitter.handle(2)):
+            return True
         if (hasattr(self, "gun_point_tree")
                 and watched is self.gun_point_tree.viewport()
                 and event.type() == QEvent.Type.Resize):
@@ -2096,7 +2122,11 @@ class CollisionEditorWindow(QMainWindow):
             f"Animation speed set to {speed:.2f}x.", 3000)
 
     def _on_animation_frame_changed(self, text: str) -> None:
-        if text:
+        # While playing, the per-frame detail only floods the status bar.
+        if self.viewport._anim_playing:
+            if self.statusBar().currentMessage() != "Animation playing.":
+                self.statusBar().showMessage("Animation playing.")
+        elif text:
             self.statusBar().showMessage(text, 2500)
 
     def _sync_animation_controls(self) -> None:
@@ -2112,6 +2142,17 @@ class CollisionEditorWindow(QMainWindow):
             owners.add(self._current_owner)
             has_anim = any(self.viewport._materials[face.material].anim_frames
                            for face in self.viewport._faces if face.owner in owners)
+        # Destruction FX: the animation starts playing by itself on entering
+        # the tab or switching unit; the user may still pause it afterwards.
+        if not self._is_fx_tab_active():
+            self._fx_autoplay_key = None
+        elif has_anim:
+            key = (self._active_script_path, self._active_script_kind,
+                   self._active_script_id, self._current_owner)
+            if key != getattr(self, "_fx_autoplay_key", None):
+                self._fx_autoplay_key = key
+                with QSignalBlocker(self.play_button):
+                    self.play_button.setChecked(True)
         self.play_button.setEnabled(has_anim)
         self.step_button.setEnabled(has_anim)
         self.speed_spin.setEnabled(has_anim)
@@ -2120,6 +2161,8 @@ class CollisionEditorWindow(QMainWindow):
                 self.play_button.setChecked(False)
             self.play_button.setText("Play")
             self.viewport.play_animation(False)
+            if self.statusBar().currentMessage() == "Animation playing.":
+                self.statusBar().clearMessage()
             return
         self.play_button.setText(
             "Pause" if self.play_button.isChecked() else "Play")
@@ -2995,7 +3038,49 @@ class CollisionEditorWindow(QMainWindow):
             if widget is not None:
                 widget.setEnabled(not process_running)
 
+    def _collision_shape_blocked_for_weapon(self, warn: bool = False) -> bool:
+        """Collision Shape is a vehicle-only tool: weapons never get one."""
+
+        blocked = self.project.target_category == WEAPON
+        if blocked and warn:
+            QMessageBox.warning(
+                self, "Collision Shape not available for weapons",
+                "Collision Shape is intended exclusively for creating "
+                "shapes for vehicles, not weapons.")
+        return blocked
+
+    def _sync_collision_shape_weapon_block(self) -> None:
+        """In the Collision Shape tab of a weapon, hide the model and the panel."""
+
+        if not hasattr(self, "shape_weapon_notice"):
+            return
+        blocked = self._collision_shape_blocked_for_weapon()
+        on_tab = (self.properties_tabs.currentIndex()
+                  == self.collision_shape_tab_index)
+        self.collision_shape_box.setVisible(not blocked)
+        self.collision_geometry_widget.setVisible(not blocked)
+        self.export_collision_shape_action.setEnabled(
+            not blocked and self.export_collision_shape_button.isEnabled())
+        show_notice = blocked and on_tab
+        # No resize grip next to the empty weapon panel. QSplitter re-shows
+        # its handles on every layout, so the handle is made inert and its
+        # painting is suppressed (see eventFilter) instead of hiding it.
+        handle = self.main_splitter.handle(2)
+        if not self._splitter_grip_filtered:
+            handle.installEventFilter(self)
+            self._splitter_grip_filtered = True
+        handle.setEnabled(not show_notice)
+        self._hide_splitter_grip = show_notice
+        handle.update()
+        self.shape_weapon_notice.setVisible(show_notice)
+        if show_notice:
+            self.viewport.setVisible(False)
+        elif self.properties_tabs.currentIndex() != self.briefing_tab_index:
+            self.viewport.setVisible(True)
+
     def generate_collision_shape(self) -> None:
+        if self._collision_shape_blocked_for_weapon(warn=True):
+            return
         if self._collision_bake_process is not None:
             return
         self._refresh_collision_geometry_widget()
@@ -3242,6 +3327,8 @@ class CollisionEditorWindow(QMainWindow):
         self.statusBar().showMessage("Collision shape deleted.", 4500)
 
     def import_collision_shape(self) -> None:
+        if self._collision_shape_blocked_for_weapon(warn=True):
+            return
         if self._current_set_bas_path() is None:
             QMessageBox.information(
                 self, "SET required",
@@ -3289,6 +3376,8 @@ class CollisionEditorWindow(QMainWindow):
                 9000)
 
     def export_collision_shape(self) -> None:
+        if self._collision_shape_blocked_for_weapon(warn=True):
+            return
         if self.collision_geometry_widget._selection_timer.isActive():
             self.collision_geometry_widget._flush_selection_changed()
         shape = self.project.collision_shape
@@ -4879,6 +4968,7 @@ class CollisionEditorWindow(QMainWindow):
             self.viewport.setFocus(Qt.FocusReason.OtherFocusReason)
         if not self._syncing:
             self._sync_all()
+        self._sync_collision_shape_weapon_block()
         tree = {
             self.fire_points_tab_index: self.fire_point_tree,
             self.gun_points_tab_index: self.gun_point_tree,
@@ -4906,6 +4996,14 @@ class CollisionEditorWindow(QMainWindow):
                  self.project.model_scale_z),
                 (self.project.model_rotation_x, self.project.model_rotation_y,
                  self.project.model_rotation_z))
+
+    def _fx_model_diameter(self, scale) -> float:
+        """Diameter of the bounding sphere of the unit's normal model, scale applied.
+
+        It sizes the ground decal (size_by_model_%). 0 while no model is loaded.
+        """
+
+        return self.viewport.owner_model_sphere_diameter(self._current_owner, scale)
 
     def _fx_unit_transform(self):
         """Preview scale/rotation of the unit as a matrix (static preview)."""
@@ -4967,6 +5065,22 @@ class CollisionEditorWindow(QMainWindow):
             pass
         debuffs.update(fx.debuff_profiles_from_text(text))
         return debuffs
+
+    def _build_fx_decals(self, text: str):
+        """Ground decal profiles (new_decal) of the game scripts plus this script."""
+
+        decals: dict[int, fx.DecalProfile] = {}
+        try:
+            from map_editor import bootstrap
+            from map_editor.core.script_catalog import script_texts
+            install = bootstrap.installation()
+            if install is not None:
+                for body in script_texts(install.folder("scripts")):
+                    decals.update(fx.decal_profiles_from_text(body))
+        except (OSError, ValueError, RuntimeError, TypeError):
+            pass
+        decals.update(fx.decal_profiles_from_text(text))
+        return decals
 
     def _fx_unit_phases(self, text: str, block: ScriptBlock,
                         reference: VehicleModelReference) -> fx.UnitPhases:
@@ -5030,7 +5144,9 @@ class CollisionEditorWindow(QMainWindow):
             fx.extract_fx_document(text, block.start_line, block.end_line),
             catalog=self._fx_catalog, unit=unit, keep_view=keep_view,
             weapons=self._build_fx_weapons(text, objects),
-            debuffs=self._build_fx_debuffs(text))
+            debuffs=self._build_fx_debuffs(text),
+            decals=self._build_fx_decals(text),
+            settings=self._fx_effect_settings())
         origins = [(self._active_script_path, block.start_line, block.end_line)]
         if self._fx_source_from_catalog:
             candidates = objects if objects is not None else self.game_object_browser.objects
@@ -5157,7 +5273,7 @@ class CollisionEditorWindow(QMainWindow):
             path: snapshot[path] if path in snapshot else self._fx_file_signature(path)
             for path in self._fx_tracked}
         self.statusBar().showMessage(
-            f"Destruction FX reloaded from {self._active_script_path.name}.", 4000)
+            f"Visuals & FX reloaded from {self._active_script_path.name}.", 4000)
 
     def _fx_dependency_paths(self):
         """Collect loaded model, animation and texture sources plus external FX assets."""
@@ -5182,8 +5298,12 @@ class CollisionEditorWindow(QMainWindow):
                 visuals.extend(spec.visuals)
                 if spec.physical_model is not None:
                     visuals.append(spec.physical_model)
-                if spec.texture:
-                    values.append(spec.texture)
+        # Ground decal textures come from the linked new_decal profiles.
+        for owner in (unit, *(child.unit for child in
+                              fx.cluster_chain(unit, self.fx_panel.weapons))):
+            profile = self.fx_panel.decals.get(owner.ground_decal_id)
+            if profile is not None and profile.spec.texture:
+                values.append(profile.spec.texture)
         if unit.decoration is not None:
             visuals.append(unit.decoration.visual)
         if unit.tracer is not None:
@@ -5193,7 +5313,7 @@ class CollisionEditorWindow(QMainWindow):
             if isinstance(item, fx.FxBlock):
                 samples.extend(spec.sample for spec in fx.interpret_block(
                     item, self.fx_panel.context).sounds.values() if spec.sample)
-            elif item.parsed is not None:
+            elif isinstance(item, fx.DestFxLine) and item.parsed is not None:
                 vehicle = self.fx_panel.catalog.get(item.parsed.vehicle_id)
                 if vehicle is not None:
                     samples.extend(spec.sample for spec in vehicle.sounds.values()
@@ -5379,7 +5499,7 @@ class CollisionEditorWindow(QMainWindow):
             (0.0, self.viewport.overeof_preview_offset, 0.0), 0.0,
             self._fx_unit_radius(), transform=self._fx_unit_transform(),
             overeof=self.project.overeof if self.project.overeof_enabled else 0.,
-            scale=scale, euler=euler)
+            scale=scale, euler=euler, model_diameter=self._fx_model_diameter(scale))
         self._fx_update_watcher()
         definition = (self._active_script_path, self._active_script_kind,
                       self._active_script_id)
@@ -5440,8 +5560,8 @@ class CollisionEditorWindow(QMainWindow):
         custom, powers = self._fx_color_settings()
         return fx.palette_colors(palettes, custom, powers)
 
-    def _fx_color_settings(self):
-        """Custom palette slots and slot powers of the game's OpenNeoUA.ini."""
+    def _fx_ini_settings(self):
+        """(custom palette, slot powers, effect settings) of the game's OpenNeoUA.ini."""
 
         from map_editor import bootstrap
         install = bootstrap.installation()
@@ -5452,16 +5572,28 @@ class CollisionEditorWindow(QMainWindow):
             root = _data_root_for_path(self._active_script_path, self._active_base_path)
             ini = bootstrap.find_ci(root, "OpenNeoUA.ini") if root is not None else None
         signature = (str(ini), self._fx_file_signature(ini)) if ini is not None else None
-        if getattr(self, "_fx_color_cache", (None,))[0] != signature:
-            settings = ({}, {})
+        cache = getattr(self, "_fx_color_cache", None)
+        if cache is None or cache[0] != signature:
+            settings = (({}, {}), fx.EffectSettings())
             if ini is not None:
                 try:
-                    settings = fx.parse_color_settings(
-                        Path(ini).read_text(encoding="utf-8", errors="replace"))
+                    text = Path(ini).read_text(encoding="utf-8", errors="replace")
+                    settings = (fx.parse_color_settings(text),
+                                fx.parse_effect_settings(text))
                 except OSError:
                     pass
             self._fx_color_cache = (signature, settings)
         return self._fx_color_cache[1]
+
+    def _fx_color_settings(self):
+        """Custom palette slots and slot powers of the game's OpenNeoUA.ini."""
+
+        return self._fx_ini_settings()[0]
+
+    def _fx_effect_settings(self):
+        """Global fades, palette limits and master volume of OpenNeoUA.ini."""
+
+        return self._fx_ini_settings()[1]
 
     def _resolve_fx_sound(self, name: str) -> Path | None:
         """Sound sample named by a script, relative to the game Data folder."""
@@ -5513,12 +5645,12 @@ class CollisionEditorWindow(QMainWindow):
         panel = self.fx_panel
         items = panel.preview_items()
         tracked_unit = next((item for item in items if item.kind == "unit"), None)
-        show_unit = panel.show_unit.isChecked()
-        if not show_unit:
-            # Decorations and the tracer belong to the unit and hide with it.
+        # A model state whose row is unchecked in the list is not drawn.
+        hidden_states = panel.hidden_states
+        show_unit = "normal" not in hidden_states
+        if hidden_states:
             items = [item for item in items
-                     if item.kind not in ("unit", "plasma", "decoration", "tracer",
-                                          "launch", "cluster", "laser")]
+                     if _fx_item_state(item) not in hidden_states]
         # The unit is drawn by its phase items (normal -> dead -> megadeth)
         # instead of the static model whenever the preview plays a sequence.
         phased = panel.simulation is not None and panel.simulation.shows_unit
@@ -5529,6 +5661,7 @@ class CollisionEditorWindow(QMainWindow):
                 for vp, owner in self._fx_owner_map.items()}
             particles = panel.simulation.particles_at(panel.time_ms, emitters)
             if not show_unit:
+                # Decorations and the tracer belong to the normal model and hide with it.
                 particles = [sprite for sprite in particles if sprite.source >= 0]
         self.viewport.set_fx_preview(
             active=True, items=items, owner_by_vp=self._fx_owner_map,
@@ -5540,7 +5673,7 @@ class CollisionEditorWindow(QMainWindow):
                 self._active_script_path, self._active_base_path),
             highlight=panel.highlight, particles=particles,
             external_loader=self._load_fx_external_model,
-            palette=self._fx_palette())
+            palette=self._fx_palette(), shake=panel.shake_angles())
         self.viewport.set_fx_follow_unit(
             panel.follow_unit.isChecked(), tracked_unit, self._current_owner)
 
@@ -7533,6 +7666,7 @@ class CollisionEditorWindow(QMainWindow):
         self.briefing_tab.sync()
         if self.briefing_preview.isVisible():
             self.briefing_preview.refresh()
+        self._sync_collision_shape_weapon_block()
 
     def _validate_for_output(self) -> bool:
         errors, warnings = validate_project(
