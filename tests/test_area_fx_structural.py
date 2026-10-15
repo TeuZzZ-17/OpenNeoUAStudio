@@ -454,7 +454,6 @@ class AreaFxStructuralTests(unittest.TestCase):
                     for poly_id in element.poly_ids}
                 self.assertTrue(fx_polys)
                 self.assertTrue(window.select_all_fx_action.isEnabled())
-                self.assertTrue(window.select_all_fx_button.isEnabled())
                 self.assertIn(
                     "Select All FX",
                     [action.text() for action in window.edit_menu.actions()])

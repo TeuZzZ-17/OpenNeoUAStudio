@@ -506,10 +506,8 @@ def install_workspace_shell(window, key):
     menu_bar = window.menuBar()
     resources = menu_bar.addMenu("Resources")
     resources.addAction("Game Folders", lambda: _edit_resources(window))
-    window.studio_compat_action = menu_bar.addAction("Vanilla Compatibility Checker")
-    window.studio_compat_action.triggered.connect(
-        # Finish the menu click before opening a modal window.
-        lambda: QTimer.singleShot(0, window, lambda: _show_compatibility(window, key)))
+    from studio.ui.style import install_theme_menu
+    install_theme_menu(window)
     if key in SET_MENU_TOOLS:
         install_set_menu(window, menu_bar)
     change = menu_bar.addMenu("Change Editor")
@@ -521,6 +519,10 @@ def install_workspace_shell(window, key):
         action.setEnabled(not current)
         action.triggered.connect(lambda _checked=False, target=option.key: switch_workspace(window, target))
     window.studio_change_menu = change
+    window.studio_compat_action = menu_bar.addAction("Vanilla Compatibility Checker")
+    window.studio_compat_action.triggered.connect(
+        # Finish the menu click before opening a modal window.
+        lambda: QTimer.singleShot(0, window, lambda: _show_compatibility(window, key)))
     install_compatibility_markers(window, key)
 
 

@@ -1,6 +1,6 @@
 """Fitted thumbnails and selection cards shared by map resource palettes."""
 from PySide6.QtCore import QRect, Qt
-from PySide6.QtGui import QColor
+from PySide6.QtGui import QColor, QPalette
 from PySide6.QtWidgets import QStyledItemDelegate, QStyle
 from .preview_cards import COLOR_ROLE, paint_card_background
 
@@ -30,7 +30,9 @@ class ThumbnailDelegate(QStyledItemDelegate):
             painter.drawPixmap(image_rect.center().x() - pix.width() // 2,
                                image_rect.center().y() - pix.height() // 2, pix)
         text_rect = QRect(card.left() + 6, card.bottom() - 26, card.width() - 12, 24)
-        painter.setPen(option.palette.text().color())
+        selected = bool(option.state & QStyle.StateFlag.State_Selected)
+        painter.setPen(option.palette.color(
+            QPalette.ColorRole.HighlightedText if selected else QPalette.ColorRole.Text))
         text = option.fontMetrics.elidedText(str(index.data() or ''),
                                              Qt.TextElideMode.ElideRight, text_rect.width())
         painter.drawText(text_rect, Qt.AlignmentFlag.AlignCenter, text)
@@ -48,6 +50,8 @@ class PaletteCardDelegate(QStyledItemDelegate):
         if self.parent().itemWidget(self.parent().item(index.row())) is None:
             content = type(option)(option)
             content.rect = option.rect.adjusted(10, 5, -10, -5)
+            if option.state & QStyle.StateFlag.State_Selected:
+                content.palette.setColor(QPalette.ColorRole.Text, option.palette.highlightedText().color())
             content.state &= ~(QStyle.StateFlag.State_Selected | QStyle.StateFlag.State_HasFocus)
             super().paint(painter, content, index)
         painter.restore()

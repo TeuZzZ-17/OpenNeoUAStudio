@@ -64,9 +64,6 @@ MODIFIED_COLOR = QColor(255, 80, 80)
 LIST_BASE = "#2d2d2d"
 
 
-LIST_ALTERNATE = "#383838"
-
-
 LIST_SELECTED = "#006d96"
 
 
@@ -80,7 +77,7 @@ LIST_DEPENDENCY_SELECTED = "#31483a"
 # entity lists). Without it some lists took the Windows accent color and
 # others the native grey.
 SELECTION_STYLE = (
-    f"QTreeView, QListView {{ background-color: {LIST_BASE}; alternate-background-color: {LIST_ALTERNATE}; }}"
+    f"QTreeView, QListView {{ background-color: {LIST_BASE}; alternate-background-color: {LIST_BASE}; }}"
     f"QTreeView::item:selected, QListView::item:selected, QTreeView::item:selected:!active, QListView::item:selected:!active {{ background-color: {LIST_SELECTED}; color: #ffffff; }}"
     f"QTreeView::item:hover:!selected, QListView::item:hover:!selected {{ background-color: {LIST_HOVER}; color: #ffffff; }}"
 )
@@ -89,9 +86,9 @@ SELECTION_STYLE = (
 def use_standard_list_style(view, *, selected_color: str | None = None) -> None:
     """Apply the shared list colors, with an optional selection accent."""
 
-    view.setAlternatingRowColors(True)
+    view.setAlternatingRowColors(False)
     view.setMouseTracking(True)
-    if SELECTION_STYLE not in view.styleSheet():
+    if not QApplication.instance().property("studioStyleLoaded") and SELECTION_STYLE not in view.styleSheet():
         view.setStyleSheet(view.styleSheet() + SELECTION_STYLE)
     if selected_color is not None:
         view.setStyleSheet(

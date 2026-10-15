@@ -42,6 +42,8 @@ class SnapshotStudioTests(unittest.TestCase):
         window = SnapshotStudioWindow()
         try:
             shell.install_workspace_shell(window, "snapshot_studio")
+            # The checker is the last menu: keep the bar wide enough to show it.
+            window.resize(1800, 700)
             window.show()
             self.app.processEvents()
             menu = window.menuBar()

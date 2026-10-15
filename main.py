@@ -140,6 +140,8 @@ def main() -> int:
     from studio.ui.shell import StartupToolSelector
 
     app = QApplication(sys.argv)
+    from studio.ui.style import apply_studio_style
+    apply_studio_style()
     app.setApplicationName(APP_TITLE)
     # Each window composes its own full title. Keep the platform from
     # appending a second "OpenNeoUA Studio" label to document titles.

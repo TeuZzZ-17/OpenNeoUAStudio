@@ -522,6 +522,8 @@ class AssetViewport(AcceleratedWidget):
         self._model_transform_factors = (1.0, 1.0, 1.0)
         self._suppress_next_context_menu = False
         self._direct_grab_active = False
+        self._gizmo_drag_axis: str | None = None
+        self._gizmo_hover_axis: str | None = None
         self._direct_transform_mode = "move"
         self._direct_transform_intensity = 0.5
         self._move_nudge_step = 0.5
@@ -1748,6 +1750,8 @@ class AssetViewport(AcceleratedWidget):
             pos = (0.0, 0.0, 0.0)
         self._edit_session = GeometryEditSession(fam_obj, matrix, pos)
         self._edit_owner = target
+        # Axis handles highlight on hover, so move events are needed.
+        self.setMouseTracking(True)
         self._edit_visible_vertices.clear()
         self._edit_visibility_ready = False
         self._edit_visibility_view_key = None
@@ -1768,6 +1772,7 @@ class AssetViewport(AcceleratedWidget):
         self.editModeChanged.emit(True)
         self.editHint.emit(
             f"Edit Mode [{target}]: drag selected vertex move | "
+            "drag an axis arrow to lock the axis | "
             "Ctrl+click add | Ctrl+drag empty space box-select | "
             "A all | Alt+A none | G move | "
             "R rotate | S scale | X/Y/Z axis | Ctrl+Z undo | Tab exit")
@@ -1826,6 +1831,10 @@ class AssetViewport(AcceleratedWidget):
         self._modal_axis = None
         self._modal_numeric = ""
         self._direct_grab_active = False
+        self._gizmo_drag_axis = None
+        self._gizmo_hover_axis = None
+        self.unsetCursor()
+        self.setMouseTracking(False)
         self._active_edit_vertex = None
         self._direct_grab_selected_only = False
         self._edit_pick_polygons = False
@@ -2226,6 +2235,42 @@ class AssetViewport(AcceleratedWidget):
         self.update()
         return True
 
+    def center_edit_model_at_origin(self) -> bool:
+        """Move the whole edited skeleton so its bounding-box center is (0,0,0).
+
+        Every vertex gets the same offset, so shape, polygon indices and FX
+        mapping stay identical. Only vertices used by a polygon define the
+        bounds: leftovers of deleted parts must not shift the center.
+        """
+
+        session = self._edit_session
+        if session is None or session.modal_active:
+            return False
+        model = session.model
+        points = model.points
+        used = {
+            index for polygon in model.polygons for index in polygon
+            if 0 <= index < len(points)
+        } or set(range(len(points)))
+        if not used:
+            return False
+        offset = tuple(
+            -(min(points[i][axis] for i in used)
+              + max(points[i][axis] for i in used)) / 2.0
+            for axis in range(3))
+        if all(abs(value) < 1e-6 for value in offset):
+            return False
+        before = [tuple(point) for point in points]
+        points[:] = [
+            (x + offset[0], y + offset[1], z + offset[2])
+            for x, y, z in before
+        ]
+        session.dirty = True
+        self._refresh_edit_faces()
+        self._emit_geometry_command(before)
+        self.update()
+        return True
+
     def _emit_geometry_command(self, before) -> None:
         owner = self._edit_owner or ""
         session = self._edit_session
@@ -2444,6 +2489,7 @@ class AssetViewport(AcceleratedWidget):
         self._modal_numeric = ""
         self._modal_keyboard_delta = (0.0, 0.0, 0.0)
         self._direct_grab_active = False
+        self._gizmo_drag_axis = None
         self._refresh_edit_faces()
         if changed:
             self._emit_geometry_command(before)
@@ -2464,10 +2510,160 @@ class AssetViewport(AcceleratedWidget):
         self._modal_numeric = ""
         self._modal_keyboard_delta = (0.0, 0.0, 0.0)
         self._direct_grab_active = False
+        self._gizmo_drag_axis = None
         self._refresh_edit_faces()
         self.editHint.emit("")
         self._clear_precision_guides()
         self.update()
+
+    # -- in-viewport axis handles ----------------------------------------------
+
+    _GIZMO_LENGTH = 64.0
+    _GIZMO_DEAD_ZONE = 14.0
+    _GIZMO_GRAB_RADIUS = 7.0
+    _GIZMO_COLORS = {
+        "X": QColor(240, 100, 100),
+        "Y": QColor(110, 230, 110),
+        "Z": QColor(110, 160, 250),
+    }
+
+    def _axis_screen_vector(self, axis: str, pivot) -> tuple[float, float]:
+        """Screen pixels covered by one model unit along ``axis`` at ``pivot``."""
+
+        session = self._edit_session
+        world = _apply(session.matrix, pivot, session.position)
+        axis_world = mat_apply(session.matrix, AXIS_VECTORS[axis])
+        end = tuple(world[index] + axis_world[index] for index in range(3))
+        a = self._project(self._camera_vertex(world))
+        b = self._project(self._camera_vertex(end))
+        return b.x() - a.x(), b.y() - a.y()
+
+    def _gizmo_handles(self):
+        """Axis handles as ``{axis: (center, tip)}`` in widget pixels.
+
+        Empty while nothing is selected or another operation owns the mouse.
+        An axis pointing straight at the camera has no usable direction and
+        gets no handle.
+        """
+
+        session = self._edit_session
+        if (session is None or self._snapshot_active
+                or not session.selection or self._modal_op is not None
+                or session.modal_active or self._paste_preview is not None):
+            return {}
+        pivot = session.selection_pivot()
+        if pivot is None:
+            return {}
+        world = _apply(session.matrix, pivot, session.position)
+        center = self._project(self._camera_vertex(world))
+        handles = {}
+        for axis in "XYZ":
+            dx, dy = self._axis_screen_vector(axis, pivot)
+            length = math.hypot(dx, dy)
+            if length < 1e-6:
+                continue
+            tip = QPointF(
+                center.x() + dx / length * self._GIZMO_LENGTH,
+                center.y() + dy / length * self._GIZMO_LENGTH)
+            handles[axis] = (center, tip)
+        return handles
+
+    @staticmethod
+    def _distance_along_segment(point, start, end) -> tuple[float, float]:
+        """Distance of ``point`` to the segment and how far along it (pixels)."""
+
+        sx, sy = end.x() - start.x(), end.y() - start.y()
+        length = math.hypot(sx, sy)
+        if length < 1e-9:
+            return math.inf, 0.0
+        along = ((point.x() - start.x()) * sx
+                 + (point.y() - start.y()) * sy) / length
+        along_clamped = max(0.0, min(length, along))
+        px = start.x() + sx / length * along_clamped
+        py = start.y() + sy / length * along_clamped
+        return math.hypot(point.x() - px, point.y() - py), along
+
+    def _gizmo_axis_at(self, position: QPoint) -> str | None:
+        """Axis handle under ``position``; the part near the pivot is skipped."""
+
+        best = None
+        point = QPointF(position)
+        for axis, (center, tip) in self._gizmo_handles().items():
+            distance, along = self._distance_along_segment(point, center, tip)
+            if along < self._GIZMO_DEAD_ZONE \
+                    or distance > self._GIZMO_GRAB_RADIUS:
+                continue
+            if best is None or distance < best[0]:
+                best = (distance, axis)
+        return best[1] if best is not None else None
+
+    def _begin_gizmo_drag(self, axis: str, position: QPoint) -> None:
+        """Start the active direct transform locked to one model axis."""
+
+        op = ("grab" if self._direct_transform_mode == "move"
+              else self._direct_transform_mode)
+        self._begin_modal(op, position, direct_grab=True)
+        if self._modal_op is None:
+            return
+        self._modal_axis = axis
+        self._gizmo_drag_axis = axis
+        self._gizmo_hover_axis = None
+        self._modal_last_mouse = position
+        self._update_modal(position)
+
+    def _gizmo_drag_delta(self, position: QPoint):
+        """Model-space move along the dragged axis, following the mouse."""
+
+        session = self._edit_session
+        axis = self._gizmo_drag_axis
+        pivot = session.selection_pivot() if session is not None else None
+        if axis is None or pivot is None:
+            return None
+        dx, dy = self._axis_screen_vector(axis, pivot)
+        pixels_per_unit = math.hypot(dx, dy)
+        if pixels_per_unit < 1e-6:
+            return (0.0, 0.0, 0.0)
+        moved = ((position.x() - self._modal_start.x()) * dx
+                 + (position.y() - self._modal_start.y()) * dy
+                 ) / (pixels_per_unit * pixels_per_unit)
+        unit = AXIS_VECTORS[axis]
+        return (unit[0] * moved, unit[1] * moved, unit[2] * moved)
+
+    def _draw_gizmo_handles(self, painter: QPainter, target: QRectF) -> None:
+        handles = self._gizmo_handles()
+        if not handles:
+            return
+        scale_x = target.width() / max(1, self.width())
+        scale_y = target.height() / max(1, self.height())
+
+        def to_target(point: QPointF) -> QPointF:
+            return QPointF(target.left() + point.x() * scale_x,
+                           target.top() + point.y() * scale_y)
+
+        for axis, (center, tip) in handles.items():
+            color = self._GIZMO_COLORS[axis]
+            hovered = axis == self._gizmo_hover_axis
+            start, end = to_target(center), to_target(tip)
+            painter.setPen(QPen(
+                color.lighter(130) if hovered else color,
+                3.4 if hovered else 2.2))
+            painter.drawLine(start, end)
+            direction = end - start
+            length = math.hypot(direction.x(), direction.y())
+            if length < 1e-9:
+                continue
+            ux, uy = direction.x() / length, direction.y() / length
+            head = 11.0 if hovered else 9.0
+            base = QPointF(end.x() - ux * head, end.y() - uy * head)
+            painter.setPen(Qt.PenStyle.NoPen)
+            painter.setBrush(color.lighter(130) if hovered else color)
+            painter.drawPolygon([
+                end,
+                QPointF(base.x() - uy * head * 0.45,
+                        base.y() + ux * head * 0.45),
+                QPointF(base.x() + uy * head * 0.45,
+                        base.y() - ux * head * 0.45),
+            ])
 
     def _numeric_value(self) -> float | None:
         if not self._modal_numeric:
@@ -2552,10 +2748,14 @@ class AssetViewport(AcceleratedWidget):
             suffix += f" | typed: {self._modal_numeric}"
 
         if self._modal_op == "grab":
+            axis_drag = (self._gizmo_drag_delta(pos)
+                         if self._gizmo_drag_axis is not None else None)
             if numeric is not None and self._modal_axis is not None:
                 unit = AXIS_VECTORS[self._modal_axis]
                 delta = (unit[0] * numeric, unit[1] * numeric,
                          unit[2] * numeric)
+            elif axis_drag is not None:
+                delta = axis_drag
             else:
                 world = self._screen_delta_to_world(
                     pos.x() - self._modal_start.x(),
@@ -4340,6 +4540,8 @@ class AssetViewport(AcceleratedWidget):
             painter.drawLine(QPointF(center.x(), center.y() - 6),
                              QPointF(center.x(), center.y() + 6))
 
+        self._draw_gizmo_handles(painter, target)
+
         if self._box_rect is not None:
             painter.setPen(QPen(QColor(90, 230, 255), 1.0,
                                 Qt.PenStyle.DashLine))
@@ -4755,9 +4957,16 @@ class AssetViewport(AcceleratedWidget):
                 event.accept()
                 return
             if event.button() == Qt.MouseButton.LeftButton:
-                vertex = self._nearest_edit_vertex(pos)
                 additive = bool(event.modifiers()
                                 & Qt.KeyboardModifier.ControlModifier)
+                axis = (None if additive
+                        else self._gizmo_axis_at(pos))
+                if axis is not None:
+                    self._begin_gizmo_drag(axis, pos)
+                    self._last_mouse = pos
+                    event.accept()
+                    return
+                vertex = self._nearest_edit_vertex(pos)
                 if additive:
                     self._marquee_candidate = True
                     self._last_mouse = pos
@@ -5086,6 +5295,15 @@ class AssetViewport(AcceleratedWidget):
                 self._update_modal(current)
                 event.accept()
                 return
+            if not event.buttons():
+                hovered = self._gizmo_axis_at(current)
+                if hovered != self._gizmo_hover_axis:
+                    self._gizmo_hover_axis = hovered
+                    if hovered:
+                        self.setCursor(Qt.CursorShape.PointingHandCursor)
+                    else:
+                        self.unsetCursor()
+                    self.update()
             if self._box_start is not None:
                 self._box_rect = QRect(self._box_start, current).normalized()
                 self._last_mouse = current

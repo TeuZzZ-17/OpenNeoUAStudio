@@ -217,6 +217,8 @@ class CollisionEditorWindow(QMainWindow):
 
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
+        from studio.ui.style import apply_studio_style
+        apply_studio_style()
         self.setWindowTitle(WINDOW_TITLE)
         self.resize(1100, 720)
         self.project = CollisionProject()
@@ -304,6 +306,7 @@ class CollisionEditorWindow(QMainWindow):
         self._fx_scope: set[str] | None = None
         self._fx_owner_map: dict[int, str] = {}
         self._fx_fitted_definition = None
+        self._fx_edit_camera = None
         self._fx_source_from_catalog = False
         self._fx_script_sources = set()
         self._fx_asset_paths = set()
@@ -567,12 +570,6 @@ class CollisionEditorWindow(QMainWindow):
             self.viewpoint_actions[text] = action
 
         self.project_summary_menu = self.menuBar().addMenu("Project Summary")
-        self.project_summary_menu.setStyleSheet("""
-            QMenu::item { color: #69c9e8; padding: 5px 12px; }
-            QMenu::item:disabled { color: #69c9e8; }
-            QMenu::separator { background: #397f96; height: 1px;
-                               margin: 4px 8px; }
-        """)
         self.reset_view_action = QAction("Reset View", self)
         self.reset_view_action.triggered.connect(self._reset_view)
         self._build_model_preview_toolbar()
@@ -1185,7 +1182,7 @@ class CollisionEditorWindow(QMainWindow):
             self._finish_radius_spin_edit)
         # Reserve enough room for the largest displayed radius and spin
         # arrows; the slider uses the remaining space.
-        self.radius_spin.setFixedWidth(self.radius_spin.sizeHint().width())
+        self.radius_spin.setMinimumWidth(self.radius_spin.sizeHint().width())
         radius_layout.addWidget(self.radius_spin)
         spheres_layout.addLayout(radius_layout)
 
@@ -1658,8 +1655,8 @@ class CollisionEditorWindow(QMainWindow):
             spin.setSizePolicy(
                 QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
             spin.setToolTip(
-                f"OpenNeoUA cockpit_camera_offset_{axis.lower()} in vehicle-local "
-                "coordinates.")
+                f"{axis} of OpenNeoUA cockpit_camera_offset_xyz in "
+                "vehicle-local coordinates.")
             field = axis.lower()
             spin.valueChanged.connect(
                 lambda value, name=field:
@@ -1687,7 +1684,7 @@ class CollisionEditorWindow(QMainWindow):
         self.restore_script_cockpit_button.setToolTip(
             "Restore the cockpit X/Y/Z coordinates read from the last loaded "
             "or imported vehicle script. Disabled when that script did not "
-            "contain cockpit_camera_offset_x/y/z.")
+            "contain cockpit_camera_offset_xyz.")
         self.restore_script_cockpit_button.clicked.connect(
             self._restore_loaded_cockpit_camera)
         cockpit_buttons.addWidget(self.restore_script_cockpit_button)
@@ -1717,34 +1714,15 @@ class CollisionEditorWindow(QMainWindow):
             QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
         self.cockpit_tab_layout.addWidget(self.cockpit_box, 1)
 
-        selected_box = QGroupBox("Selected Element")
-        self.selected_box = selected_box
-        selected_layout = QHBoxLayout(selected_box)
-        selected_layout.setContentsMargins(6, 4, 6, 4)
-        selected_layout.setSpacing(5)
-        # Kept as non-visible compatibility attributes for integrations that
-        # queried them before Index moved into the Spheres table.
-        self.type_value = QLabel("None")
-        self.index_value = QLabel("None")
-        self.type_value.hide()
-        self.index_value.hide()
-        self.selected_element_label = QLabel("None")
-        self.visible_check = QCheckBox("Active / Visible")
+        self.type_value = QLabel("None", self)
+        self.index_value = QLabel("None", self)
+        self.selected_element_label = QLabel("None", self)
+        self.visible_check = QCheckBox("Active / Visible", self)
         self.visible_check.toggled.connect(self._visibility_changed)
-        self.runtime_radius_value = QLabel("")
-        self.runtime_radius_value.setAlignment(
-            Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
-        self.runtime_radius_value.setStyleSheet("color: #d9a35f;")
-        self.runtime_radius_value.hide()
-        selected_layout.addWidget(self.selected_element_label)
-        selected_layout.addStretch(1)
-        selected_layout.addWidget(self.visible_check)
-        selected_layout.addWidget(self.runtime_radius_value)
-        selected_box.setMaximumHeight(70)
-        selected_box.setMinimumWidth(290)
-        selected_box.setMaximumWidth(430)
-        selected_box.setSizePolicy(
-            QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Fixed)
+        self.runtime_radius_value = QLabel("", self)
+        for control in (self.type_value, self.index_value, self.selected_element_label,
+                        self.visible_check, self.runtime_radius_value):
+            control.hide()
 
         transform_box = QGroupBox("Move Element")
         self.transform_box = transform_box
@@ -1766,8 +1744,7 @@ class CollisionEditorWindow(QMainWindow):
             "Drag empty gizmo space to rotate its controls only. "
             "Double-click empty space to realign.")
         self.gizmo_view_hint.setWordWrap(True)
-        self.gizmo_view_hint.setStyleSheet(
-            "font-size: 10px; color: #aeb6c2;")
+        self.gizmo_view_hint.setProperty("studioRole", "hint")
         transform_layout.addWidget(self.gizmo_view_hint)
         strength_row = QHBoxLayout()
         strength_row.addWidget(QLabel("Move strength"))
@@ -1798,14 +1775,6 @@ class CollisionEditorWindow(QMainWindow):
         # below the tabs avoids four duplicate widgets and uses the newly freed
         # lower-right area for a much larger, easier-to-read control.
         right.addWidget(transform_box, 0)
-        # Selected Element stays at the same lower viewport height but moves
-        # to the left.  This frees the bottom-right corner for AssetViewport's
-        # existing XYZ orientation indicator without adding a duplicate overlay.
-        self.viewport_layout.addWidget(
-            selected_box, 0, 0,
-            Qt.AlignmentFlag.AlignBottom | Qt.AlignmentFlag.AlignLeft)
-        selected_box.raise_()
-
         properties_scroll = QScrollArea()
         properties_scroll.setWidgetResizable(True)
         properties_scroll.setFrameShape(QFrame.Shape.NoFrame)
@@ -1821,12 +1790,6 @@ class CollisionEditorWindow(QMainWindow):
         # interaction and mouse-wheel navigation.
         properties_scroll.setVerticalScrollBarPolicy(
             Qt.ScrollBarPolicy.ScrollBarAlwaysOn)
-        properties_scroll.verticalScrollBar().setStyleSheet(
-            "QScrollBar:vertical { width: 12px; background: transparent; border: none; margin: 0; }"
-            "QScrollBar::handle:vertical { min-height: 22px; background: #58616b; border-radius: 5px; }"
-            "QScrollBar::handle:vertical:disabled { background: transparent; }"
-            "QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical { height: 0; }"
-            "QScrollBar::add-page:vertical, QScrollBar::sub-page:vertical { background: transparent; }")
         properties_scroll_bar = properties_scroll.verticalScrollBar()
         properties_scroll_bar.setEnabled(
             properties_scroll_bar.maximum() > properties_scroll_bar.minimum())
@@ -3774,6 +3737,9 @@ class CollisionEditorWindow(QMainWindow):
         # Same contract as Model Editor: Reset View restores the exact camera
         # first presented for this selected model, not a later re-fit.
         self.viewport.capture_reset_view()
+        # A model selected inside FX needs its own normal editing view.
+        self._fx_edit_camera = (self.viewport._camera_state()
+                                if self._is_fx_tab_active() else None)
         self.project.source_model = item.data(0, _MODEL_NAME_ROLE)
         self._refresh_collision_geometry_widget()
         with QSignalBlocker(self.toolbar_view_preset_combo):
@@ -4612,6 +4578,37 @@ class CollisionEditorWindow(QMainWindow):
             return None
         return self.project.turret_limits.get(int(gun.gun_type))
 
+    def _resolve_referenced_turret_limits(self, vehicle_id: int) -> TurretLimits | None:
+        """Resolve a mount's Vehicle through the same catalog as the browser."""
+        existing = self.project.turret_limits.get(vehicle_id)
+        if existing is not None:
+            return existing
+        obj = next((item for item in self.game_object_browser.objects
+                    if item.kind == "vehicle" and item.object_id == vehicle_id), None)
+        if obj is None:
+            return None
+        try:
+            limits = import_turret_limits(obj.effective_text).get(vehicle_id)
+            if limits is None:
+                return None
+            # Effective catalog text is a synthetic new_* block. Saving must
+            # retain the actual new/modify block kind in the source file.
+            source_text, _encoding, _bom = read_script_file(obj.source)
+            source_limits = import_turret_limits(source_text).get(vehicle_id)
+            if source_limits is not None:
+                limits.source_kind = source_limits.source_kind
+        except (OSError, UnicodeError, CollisionScriptError):
+            return None
+        self.project.turret_limits[vehicle_id] = limits
+        self._loaded_turret_limits[vehicle_id] = limits.clone()
+        # Reading a referenced definition is not an authored change.
+        if self._tab_reset_baseline is not None:
+            baseline = CollisionProject()
+            baseline.restore(self._tab_reset_baseline)
+            baseline.turret_limits[vehicle_id] = limits.clone()
+            self._tab_reset_baseline = baseline.snapshot()
+        return limits
+
     def _select_gun_point(self, index: int):
         self._radius_spin_active = False
         self._vehicle_preview_active_edits.clear()
@@ -4863,10 +4860,6 @@ class CollisionEditorWindow(QMainWindow):
         if hasattr(self, "toolbar_view_preset_combo"):
             self.toolbar_view_preset_combo.setEnabled(not cockpit_active)
         self._update_reset_view_controls()
-        if hasattr(self, "selected_box"):
-            self.selected_box.setVisible(
-                not cockpit_active and not shape_tab_active and not briefing_active
-                and not self._is_fx_tab_active())
         if hasattr(self, "transform_box"):
             self.transform_box.setVisible(
                 not shape_tab_active and not briefing_active
@@ -4886,6 +4879,13 @@ class CollisionEditorWindow(QMainWindow):
             self.viewport.setFocus(Qt.FocusReason.OtherFocusReason)
         if not self._syncing:
             self._sync_all()
+        tree = {
+            self.fire_points_tab_index: self.fire_point_tree,
+            self.gun_points_tab_index: self.gun_point_tree,
+        }.get(_index)
+        if tree is not None and tree.topLevelItemCount():
+            tree.clearSelection()
+            tree.setCurrentItem(tree.topLevelItem(0))
 
     # -- Destruction FX preview -------------------------------------------------------
 
@@ -5349,6 +5349,8 @@ class CollisionEditorWindow(QMainWindow):
         if not hasattr(self, "fx_panel"):
             return
         active = self._is_fx_tab_active()
+        if active and self._fx_edit_camera is None:
+            self._fx_edit_camera = self.viewport._camera_state()
         self.fx_panel.transport_bar.setVisible(active)
         self._fx_owner_map = {
             vp: owner for vp in self.fx_panel.required_vps()
@@ -5367,6 +5369,11 @@ class CollisionEditorWindow(QMainWindow):
                 self._fx_scope = None
                 self._load_viewport_scope(
                     {self._current_owner} if self._current_owner else None)
+        if not active and self._fx_edit_camera is not None:
+            self.viewport._set_camera_state(self._fx_edit_camera)
+            self._fx_edit_camera = None
+            self._fx_fitted_definition = None
+            self.viewport.update()
         scale, euler = self._fx_unit_scale_rotation()
         self.fx_panel.set_scene(
             (0.0, self.viewport.overeof_preview_offset, 0.0), 0.0,
@@ -5379,7 +5386,7 @@ class CollisionEditorWindow(QMainWindow):
         if (active and self.family is not None
                 and definition != self._fx_fitted_definition):
             # Effects are usually far larger than the unit: frame them once
-            # per definition, later camera moves are left to the user.
+            # on entry or a definition change; later camera moves stay manual.
             self._fx_fitted_definition = definition
             self._fit_fx_view()
         self._push_fx_frame()
@@ -7055,14 +7062,12 @@ class CollisionEditorWindow(QMainWindow):
                 f"Z {_number(source_z)}.")
         else:
             self.restore_script_cockpit_button.setToolTip(
-                "No cockpit_camera_offset_x/y/z coordinates were found in "
+                "No cockpit_camera_offset_xyz coordinates were found in "
                 "the last loaded or imported vehicle script.")
         cockpit_lines = [
-            f"cockpit_camera_offset_x = "
-            f"{_number(self.project.cockpit_camera_offset_x)}",
-            f"cockpit_camera_offset_y = "
-            f"{_number(self.project.cockpit_camera_offset_y)}",
-            f"cockpit_camera_offset_z = "
+            "cockpit_camera_offset_xyz = "
+            f"{_number(self.project.cockpit_camera_offset_x)}_"
+            f"{_number(self.project.cockpit_camera_offset_y)}_"
             f"{_number(self.project.cockpit_camera_offset_z)}",
         ]
         if not vehicle_mode:
@@ -7087,9 +7092,6 @@ class CollisionEditorWindow(QMainWindow):
             self.properties_tabs.currentIndex()
             == self.collision_shape_tab_index)
         briefing_active = self.properties_tabs.currentIndex() == self.briefing_tab_index
-        self.selected_box.setVisible(
-            not cockpit_active and not shape_tab_active and not briefing_active
-                and not self._is_fx_tab_active())
         self.transform_box.setVisible(
             not shape_tab_active and not briefing_active
             and self.properties_tabs.currentIndex() != self.ground_tab_index
@@ -7142,7 +7144,7 @@ class CollisionEditorWindow(QMainWindow):
         self.reset_gun_point_button.setEnabled(gun is not None)
         self.reset_all_gun_points_button.setEnabled(vehicle_mode)
         referenced_vehicle = (
-            self.project.turret_limits.get(int(gun.gun_type))
+            self._resolve_referenced_turret_limits(int(gun.gun_type))
             if gun is not None else None)
         direction_index = None
         if gun is None:
@@ -7203,7 +7205,7 @@ class CollisionEditorWindow(QMainWindow):
             self.turret_limits_source.setText("Select a Gun Point")
         elif limits is None:
             self.turret_limits_source.setText(
-                f"Vehicle {int(gun.gun_type)} not found in loaded script")
+                f"Vehicle {int(gun.gun_type)} not found in game catalog or loaded script")
         else:
             suffix = f" - {limits.source_name}" if limits.source_name else ""
             self.turret_limits_source.setText(
@@ -7364,7 +7366,7 @@ class CollisionEditorWindow(QMainWindow):
                     "Runtime Radius: disabled by OpenNeoUA Collision"
                     if self.project.compound else
                     f"Runtime Radius: {_radius_number(sphere.radius)}")
-                self.runtime_radius_value.show()
+                self.runtime_radius_value.hide()
             if selected_sphere_count == 1:
                 self.radius_spin.setToolTip(
                     "Explicit radius remains active alongside OpenNeoUA "

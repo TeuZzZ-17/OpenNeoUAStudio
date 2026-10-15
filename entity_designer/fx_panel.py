@@ -23,7 +23,7 @@ from PySide6.QtWidgets import (
 from entity_designer import destruction_fx as fx
 from entity_designer.fx_audio import FxSoundPlayer
 from entity_designer.fx_authoring import FxTextSession, effect_text
-from studio.ui.widgets import LIST_BASE, LIST_ALTERNATE, LIST_SELECTED, LIST_HOVER
+from studio.ui.widgets import LIST_BASE, LIST_SELECTED, LIST_HOVER, use_standard_list_style
 
 SPEEDS = (0.1, 0.25, 0.5, 1.0, 2.0, 4.0)
 MODE_COLORS = {
@@ -41,50 +41,6 @@ STATUS_GLYPHS = {
 # Preview tail after the last effect before a loop restarts.
 LOOP_TAIL_MS = 400.0
 EMPTY_TIMELINE_MS = 2000.0
-
-# Compact version for the "Hits a unit / Hits the ground" choice.
-_SMALL_BUTTON = """
-QPushButton {
-    background: #252e3a; color: #eef0f4; border: 1px solid #8190a4;
-    border-radius: 4px; padding: 1px 8px; font-size: 11px; min-height: 18px;
-}
-QPushButton:hover:!checked { background: #394759; border-color: #bdd3e7; }
-QPushButton:checked { background: #11799e; border: 2px solid #a9edff; color: #ffffff; padding: 0px 7px; }
-QPushButton:checked:hover { background: #178bac; }
-"""
-
-# Icon-only transport buttons: narrow enough for seven of them in a small window.
-_DELETE_BUTTON = """
-QPushButton {
-    background: #3a2a2e; color: #ffd9d9; border: 1px solid #b06a6a;
-    border-radius: 4px; padding: 1px 8px; font-size: 11px; min-height: 18px;
-}
-QPushButton:hover { background: #5a3036; border-color: #ff9a9a; }
-QPushButton:disabled { background: #2a2c31; color: #6b6f78; border-color: #4a4f58; }
-"""
-_ICON_BUTTON = """
-QPushButton {
-    background: #252e3a; color: #eef0f4; border: 1px solid #8190a4;
-    border-radius: 5px; padding: 3px 4px; font-size: 13px; min-height: 24px;
-}
-QPushButton:hover:!checked { background: #394759; border-color: #bdd3e7; }
-QPushButton:checked { background: #11799e; border: 2px solid #a9edff; color: #ffffff; padding: 2px 3px; }
-QPushButton:checked:hover { background: #178bac; }
-QPushButton:disabled { color: #6b6f78; }
-"""
-
-_BIG_BUTTON = """
-QPushButton {
-    background: #252e3a; color: #eef0f4; border: 1px solid #8190a4;
-    border-radius: 5px; padding: 3px 11px; font-size: 13px; min-height: 24px;
-}
-QPushButton:hover:!checked { background: #394759; border-color: #bdd3e7; }
-QPushButton:checked { background: #11799e; border: 2px solid #a9edff; color: #ffffff; padding: 2px 10px; }
-QPushButton:checked:hover { background: #178bac; }
-QPushButton:disabled { color: #6b6f78; }
-"""
-
-
 
 def _palette_icon(muted: bool) -> QIcon:
     """Palette glyph (three color dots); a white slash when switched off."""
@@ -116,51 +72,12 @@ def _issues_status(issues) -> str:
     return ""
 
 
-def _draw_fx_checkbox(painter, rect, checked, enabled=True):
-    """Draw the same clear on/off indicator for FX options and effect rows."""
-    painter.save()
-    painter.setRenderHint(QPainter.RenderHint.Antialiasing)
-    box = QRectF(rect).adjusted(1., 1., -1., -1.)
-    border = "#b4f0ff" if checked else "#d0d7e2"
-    fill = "#39b8d9" if checked else "#151b23"
-    if not enabled:
-        border, fill = "#7f8b9b", "#566675" if checked else "#252e3a"
-    painter.setPen(QPen(QColor(border), 1.5))
-    painter.setBrush(QColor(fill))
-    painter.drawRoundedRect(box, 2., 2.)
-    if checked:
-        tick = QPainterPath()
-        tick.moveTo(box.left() + box.width() * .2, box.top() + box.height() * .5)
-        tick.lineTo(box.left() + box.width() * .43, box.top() + box.height() * .74)
-        tick.lineTo(box.left() + box.width() * .82, box.top() + box.height() * .25)
-        painter.setPen(QPen(QColor("#071b25"), 2., Qt.PenStyle.SolidLine,
-                            Qt.PenCapStyle.RoundCap, Qt.PenJoinStyle.RoundJoin))
-        painter.drawPath(tick)
-    painter.restore()
-
-
 class FxCheckBox(QCheckBox):
-    def paintEvent(self, event):
-        super().paintEvent(event)
-        option = QStyleOptionButton()
-        self.initStyleOption(option)
-        rect = self.style().subElementRect(QStyle.SubElement.SE_CheckBoxIndicator, option, self)
-        painter = QPainter(self)
-        _draw_fx_checkbox(painter, rect, self.isChecked(), self.isEnabled())
-        painter.end()
+    """Use the same native indicator as the other editor tabs."""
 
 
 class FxEffectDelegate(QStyledItemDelegate):
-    def paint(self, painter, option, index):
-        super().paint(painter, option, index)
-        if index.data(Qt.ItemDataRole.CheckStateRole) is None:
-            return
-        visible = QStyleOptionViewItem(option)
-        self.initStyleOption(visible, index)
-        rect = visible.widget.style().subElementRect(
-            QStyle.SubElement.SE_ItemViewItemCheckIndicator, visible, visible.widget)
-        _draw_fx_checkbox(painter, rect, visible.checkState == Qt.CheckState.Checked,
-                          bool(visible.state & QStyle.StateFlag.State_Enabled))
+    """Keep Qt's standard list checkbox and selection painting."""
 
 
 class FxTimeline(QWidget):
@@ -373,14 +290,8 @@ class FxEffectsView(QWidget):
         layout.addWidget(hint)
         self.list = FxEffectsList(self)
         self.list.setItemDelegate(FxEffectDelegate(self.list))
-        self.list.setAlternatingRowColors(True)
-        self.list.setStyleSheet(
-            f"QListWidget {{ font-size: 12px; background: {LIST_BASE}; alternate-background-color: {LIST_ALTERNATE}; border: 1px solid #343b46; border-radius: 5px; }}"
-            "QListWidget::indicator { width: 20px; height: 20px; }"
-            "QListWidget::item { padding: 8px 5px; border-bottom: 1px solid #303743; color: #edf1f7; }"
-            f"QListWidget::item:hover:!selected {{ background: {LIST_HOVER}; color: #ffffff; }}"
-            f"QListWidget::item:selected {{ background: {LIST_SELECTED}; color: #ffffff; }}"
-            f"QListWidget::item:selected:!active {{ background: {LIST_SELECTED}; color: #ffffff; }}")
+        self.list.setAlternatingRowColors(False)
+        use_standard_list_style(self.list)
         self.list.setToolTip("Click text to edit code. Click or drag over checkboxes to show/hide. "
                              "Ctrl/Shift selects multiple effects; Space toggles their visibility.")
         self.list.setMouseTracking(True)
@@ -407,7 +318,7 @@ class FxEffectsView(QWidget):
             action.triggered.connect(callback)
             self.actions.append(action)
             button = QPushButton(text, self)
-            button.setStyleSheet(_SMALL_BUTTON)
+
             button.clicked.connect(action.trigger)
             action.changed.connect(lambda a=action, b=button: b.setEnabled(a.isEnabled()))
             setattr(self, name, button)
@@ -419,7 +330,6 @@ class FxEffectsView(QWidget):
             "Remove the selected effects from the script file (asks first).")
         self.delete_action.triggered.connect(self.delete_selected)
         self.delete_button = QPushButton("Delete", self)
-        self.delete_button.setStyleSheet(_DELETE_BUTTON)
         self.delete_button.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Expanding)
         self.delete_button.setToolTip(self.delete_action.toolTip())
         self.delete_button.clicked.connect(self.delete_action.trigger)
@@ -663,7 +573,7 @@ class DestructionFxPanel(QWidget):
             button = QPushButton(text, self.weapon_box)
             button.setCheckable(True)
             button.setToolTip(tip)
-            button.setStyleSheet(_SMALL_BUTTON)
+
             button.setProperty("trigger", trigger)
             self.weapon_group.addButton(button)
             weapon_row.addWidget(button)
@@ -730,8 +640,6 @@ class DestructionFxPanel(QWidget):
     def _build_transport_bar(self) -> QWidget:
         bar = QFrame()
         bar.setObjectName("fxTransport")
-        bar.setStyleSheet("QFrame#fxTransport { background: #1b1d22;"
-                          " border-top: 1px solid #343842; }")
         bar.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Maximum)
         layout = QVBoxLayout(bar)
         layout.setContentsMargins(8, 5, 8, 5)
@@ -743,7 +651,7 @@ class DestructionFxPanel(QWidget):
             widget = QPushButton(text, bar)
             widget.setToolTip(tip)
             widget.setCheckable(checkable)
-            widget.setStyleSheet(_BIG_BUTTON)
+
             widget.setFocusPolicy(Qt.FocusPolicy.NoFocus)
             controls.addWidget(widget)
             return widget
@@ -764,7 +672,7 @@ class DestructionFxPanel(QWidget):
             widget.setText("")
             widget.setIcon(self._transport_icon(symbol))
             widget.setIconSize(QSize(20, 20))
-            widget.setStyleSheet(_ICON_BUTTON)
+
             widget.setMinimumWidth(32)
         self.restart_button.setAccessibleName("Restart")
         self.play_button.setAccessibleName("Play / pause")
@@ -775,7 +683,6 @@ class DestructionFxPanel(QWidget):
         self.pal_button.setText("")
         self.pal_button.setIcon(_palette_icon(False))
         self.pal_button.setIconSize(QSize(20, 20))
-        self.pal_button.setStyleSheet(_ICON_BUTTON)
         self.pal_button.setMinimumWidth(32)
         self.pal_button.toggled.connect(self._palette_toggled)
         self.pal_button.setAccessibleName("Mute palette flashes")
@@ -1004,7 +911,7 @@ class DestructionFxPanel(QWidget):
 
         mirror = QPushButton(parent)
         mirror.setCheckable(True)
-        mirror.setStyleSheet(_ICON_BUTTON)
+
         mirror.setIconSize(QSize(20, 20))
         mirror.setMinimumWidth(32)
         mirror.setFocusPolicy(Qt.FocusPolicy.NoFocus)

@@ -433,9 +433,7 @@ class CollisionShapeTests(unittest.TestCase):
             "    radius = 45\n"
             "    coll_num = 2\n"
             "    coll_act = 0\n"
-            "    coll_x = 1\n"
-            "    coll_y = 2\n"
-            "    coll_z = 3\n"
+            "    coll_xyz = 1_2_3\n"
             "    coll_radius = 4\n"
             "    collision_shape = Data/Models/Collision/Old.collision\n"
             "end\n")
@@ -513,7 +511,7 @@ class CollisionShapeTests(unittest.TestCase):
 
         window.properties_tabs.setCurrentIndex(window.collision_shape_tab_index)
         self.assertTrue(window.transform_box.isHidden())
-        self.assertTrue(window.selected_box.isHidden())
+        self.assertFalse(hasattr(window, "selected_box"))
         self.assertEqual(window._selected_sphere_indices(), selected)
 
         for tab_index in (
@@ -521,12 +519,12 @@ class CollisionShapeTests(unittest.TestCase):
                 window.gun_points_tab_index):
             window.properties_tabs.setCurrentIndex(tab_index)
             self.assertFalse(window.transform_box.isHidden())
-            self.assertFalse(window.selected_box.isHidden())
+            self.assertFalse(hasattr(window, "selected_box"))
             self.assertEqual(window._selected_sphere_indices(), selected)
 
         window.properties_tabs.setCurrentIndex(window.cockpit_tab_index)
         self.assertFalse(window.transform_box.isHidden())
-        self.assertTrue(window.selected_box.isHidden())
+        self.assertFalse(hasattr(window, "selected_box"))
         self.assertEqual(window._selected_sphere_indices(), selected)
 
     def test_geometry_widget_exposes_only_selected_owner_subtree(self):
@@ -951,10 +949,8 @@ class CollisionShapeTests(unittest.TestCase):
                 "new_vehicle 77\n"
                 "    name = Set Mismatch Test\n"
                 "    vp_normal = 1\n"
-                "    scale_x = 2\n"
-                "    scale_y = 3\n"
-                "    scale_z = 4\n"
-                "    rotation_y = 15\n"
+                "    scale_xyz = 2_3_4\n"
+                "    rotation_xyz = 0_15_0\n"
                 "    collision_shape = Data/Sets/Set1/Collision/SourceSet2.collision\n"
                 "end\n",
                 encoding="utf-8")
@@ -1021,7 +1017,7 @@ class CollisionShapeTests(unittest.TestCase):
         text = (
             "new_vehicle 3\n"
             "    3ds_normal = Data/Models/3ds/Test.3ds\n"
-            "    rotation_x = 90\n"
+            "    rotation_xyz = 90_0_0\n"
             "    collision_shape = Data/Models/Collision/Test.collision\n"
             "end\n")
         reference = script_model_references(text)[0]

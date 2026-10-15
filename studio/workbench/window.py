@@ -166,6 +166,7 @@ from studio.ui.widgets import (
     crop_uv_region,
     draw_uv_polygon as _draw_uv_polygon,
     install_standard_file_menu_tail,
+    LIST_DEPENDENCY_SELECTED,
     LiveRotateDialog,
     LiveScaleDialog,
     qimage_from_ilbm as _qimage_from_ilbm,
@@ -494,6 +495,8 @@ class AddFxElementDialog(QDialog):
 class AssemblyWindow(QMainWindow):
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
+        from studio.ui.style import apply_studio_style
+        apply_studio_style()
         self.setWindowTitle(WINDOW_TITLE)
         self.resize(1320, 800)
         self._fx_aliases = {}
@@ -634,7 +637,7 @@ class AssemblyWindow(QMainWindow):
             self._show_viewport_context_menu)
 
         self.asset_tree = QTreeWidget()
-        from studio.ui.widgets import LIST_DEPENDENCY_SELECTED, use_standard_list_style
+        from studio.ui.widgets import use_standard_list_style
         use_standard_list_style(
             self.asset_tree, selected_color=LIST_DEPENDENCY_SELECTED)
         self.asset_tree.setSelectionMode(
@@ -649,20 +652,21 @@ class AssemblyWindow(QMainWindow):
             + "QTreeWidget::item { padding-top: 0px; padding-bottom: 0px; "
             "padding-left: 1px; padding-right: 1px; }"
         )
+        # The path column stays in the model (tooltips, filter) but is hidden:
+        # Asset + Status always fit the panel without a scrollbar.
         asset_header = self.asset_tree.header()
         asset_header.setSectionsMovable(False)
         asset_header.setStretchLastSection(False)
         asset_header.setMinimumSectionSize(40)
         asset_header.setDefaultAlignment(
             Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
-        for column in range(3):
-            asset_header.setSectionResizeMode(
-                column, QHeaderView.ResizeMode.Interactive)
-        self.asset_tree.setColumnWidth(0, 300)
-        self.asset_tree.setColumnWidth(1, 105)
-        self.asset_tree.setColumnWidth(2, 190)
+        asset_header.setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
+        asset_header.setSectionResizeMode(
+            1, QHeaderView.ResizeMode.ResizeToContents)
+        self.asset_tree.setColumnHidden(2, True)
+        self.asset_tree.setTextElideMode(Qt.TextElideMode.ElideMiddle)
         self.asset_tree.setHorizontalScrollBarPolicy(
-            Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+            Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         self.asset_tree.currentItemChanged.connect(self._on_tree_node_selected)
         self.asset_tree.itemSelectionChanged.connect(
             self._restore_asset_dependency_focus)
@@ -1371,6 +1375,12 @@ class AssemblyWindow(QMainWindow):
         self.edit_rotate_action.triggered.connect(
             self._rotate_selected_geometry)
         edit_menu.addAction(self.edit_rotate_action)
+        self.edit_center_action = QAction("Center Model at Origin", self)
+        self.edit_center_action.setStatusTip(
+            "Move the whole model so the center of its bounding box sits at "
+            "the model origin (0, 0, 0). Undo restores it.")
+        self.edit_center_action.triggered.connect(self._center_model_at_origin)
+        edit_menu.addAction(self.edit_center_action)
 
         view_menu = self.menuBar().addMenu("&View")
         self.view_menu = view_menu
@@ -1471,12 +1481,6 @@ class AssemblyWindow(QMainWindow):
         diagnostics_menu.addAction(self.clear_log_action)
 
         self.object_info_menu = self.menuBar().addMenu("Object Info")
-        self.object_info_menu.setStyleSheet("""
-            QMenu::item { color: #69c9e8; padding: 5px 12px; }
-            QMenu::item:disabled { color: #69c9e8; }
-            QMenu::separator { background: #397f96; height: 1px;
-                               margin: 4px 8px; }
-        """)
         self._set_object_info(["No asset selected."])
 
         # --- toolbar: essentials only ---
@@ -1651,11 +1655,6 @@ class AssemblyWindow(QMainWindow):
         asset_layout = QVBoxLayout(asset_panel)
         asset_layout.setContentsMargins(2, 2, 2, 2)
         asset_layout.setSpacing(2)
-        asset_help = QLabel(
-            "Family graph, resolver status and source provenance. "
-            "Right-click a dependency to assign, keep or revert its source.")
-        asset_help.setWordWrap(True)
-        asset_layout.addWidget(asset_help)
         asset_layout.addWidget(self.tree_search)
         asset_layout.addWidget(self.asset_tree, 1)
 
@@ -1672,14 +1671,7 @@ class AssemblyWindow(QMainWindow):
         model_layout = QVBoxLayout(model_panel)
         model_layout.setContentsMargins(5, 5, 5, 5)
         model_layout.setSpacing(6)
-        model_box = QGroupBox("Model and Texture Editing")
-        model_box_layout = QVBoxLayout(model_box)
-        model_box_layout.setSpacing(5)
 
-        # Give polygon selection the same visual hierarchy as Transform:
-        # a normal QGroupBox using the application's existing group-box style.
-        # Keeping the title in the frame removes the need for any special-case
-        # label spacing while still making the selector read as one compact unit.
         self.poly_id_box = QGroupBox("Poly ID")
         self.poly_id_box.setSizePolicy(
             QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
@@ -1689,10 +1681,7 @@ class AssemblyWindow(QMainWindow):
         self.poly_id_spin.setRange(0, 0)
         self.poly_id_spin.setEnabled(False)
         self.poly_id_spin.setKeyboardTracking(False)
-        # Keep the Poly ID strip usable when the Model Editor is not
-        # maximized.  The old row let the two navigation buttons consume the
-        # same horizontal space as full text buttons, which could squeeze the
-        # spin value and clip Select/Deselect labels in a narrow right pane.
+        self.poly_id_spin.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.poly_id_spin.setMinimumWidth(72)
         self.poly_id_spin.setMaximumWidth(96)
         self.poly_id_spin.setToolTip(
@@ -1700,42 +1689,25 @@ class AssemblyWindow(QMainWindow):
         self.poly_id_spin.valueChanged.connect(self._on_poly_id_changed)
         self.poly_id_spin.editingFinished.connect(
             lambda: self._on_poly_id_changed(self.poly_id_spin.value()))
-        poly_id_row.addWidget(self.poly_id_spin)
         self.poly_id_previous_button = QPushButton("<")
         self.poly_id_previous_button.setEnabled(False)
         self.poly_id_previous_button.setFixedWidth(36)
         self.poly_id_previous_button.setToolTip("Previous polygon")
         self.poly_id_previous_button.clicked.connect(
             lambda: self._step_poly_id(-1))
-        poly_id_row.addWidget(self.poly_id_previous_button)
         self.poly_id_next_button = QPushButton(">")
         self.poly_id_next_button.setEnabled(False)
         self.poly_id_next_button.setFixedWidth(36)
         self.poly_id_next_button.setToolTip("Next polygon")
         self.poly_id_next_button.clicked.connect(
             lambda: self._step_poly_id(1))
+        # "<" value ">" centered in the group, arrows on either side.
+        poly_id_row.addStretch(1)
+        poly_id_row.addWidget(self.poly_id_previous_button)
+        poly_id_row.addWidget(self.poly_id_spin)
         poly_id_row.addWidget(self.poly_id_next_button)
-        self.poly_select_all_button = QPushButton("Select All")
-        self.poly_select_all_button.setEnabled(False)
-        self.poly_select_all_button.setMinimumWidth(max(
-            72,
-            self.poly_select_all_button.fontMetrics().horizontalAdvance(
-                self.poly_select_all_button.text()) + 18,
-        ))
-        self.poly_select_all_button.clicked.connect(
-            self.viewport.select_all_edit_vertices)
-        poly_id_row.addWidget(self.poly_select_all_button)
-        self.poly_deselect_all_button = QPushButton("Deselect All")
-        self.poly_deselect_all_button.setEnabled(False)
-        self.poly_deselect_all_button.setMinimumWidth(max(
-            84,
-            self.poly_deselect_all_button.fontMetrics().horizontalAdvance(
-                self.poly_deselect_all_button.text()) + 18,
-        ))
-        self.poly_deselect_all_button.clicked.connect(
-            self.viewport.select_no_edit_vertices)
-        poly_id_row.addWidget(self.poly_deselect_all_button)
-        model_box_layout.addWidget(self.poly_id_box)
+        poly_id_row.addStretch(1)
+        model_layout.addWidget(self.poly_id_box)
 
         gizmo_box = QGroupBox("Transform")
         self.transform_box = gizmo_box
@@ -1772,13 +1744,6 @@ class AssemblyWindow(QMainWindow):
         self.model_gizmo.nudgeFinished.connect(self._finish_gizmo_nudge)
         self._sync_gizmo_camera()
         gizmo_layout.addWidget(self.model_gizmo)
-        self.transform_help_label = QLabel(
-            "UA axes: -Y = Up, +Y = Down. "
-            "Diagonal handles apply the full step on every active axis.")
-        self.transform_help_label.setWordWrap(True)
-        self.transform_help_label.setStyleSheet(
-            "color: #b9c1ca; font-size: 9px;")
-        gizmo_layout.addWidget(self.transform_help_label)
         intensity_row = QHBoxLayout()
         intensity_row.setSpacing(4)
         self.transform_step_label = QLabel("Move step")
@@ -1831,84 +1796,64 @@ class AssemblyWindow(QMainWindow):
         for column in range(3):
             transform_options.setColumnStretch(column, 1)
         gizmo_layout.addLayout(transform_options)
-        self.transform_presets = QWidget()
-        preset_layout = QHBoxLayout(self.transform_presets)
-        preset_layout.setContentsMargins(0, 0, 0, 0)
-        self.transform_preset_axis = QComboBox()
-        self.transform_preset_axis.addItems(["X", "Y", "Z"])
-        preset_layout.addWidget(self.transform_preset_axis)
-        self.transform_preset_buttons = []
-        for index in range(5):
-            button = QPushButton()
-            button.clicked.connect(lambda _checked=False, i=index: self._apply_transform_preset(i))
-            self.transform_preset_buttons.append(button)
-            preset_layout.addWidget(button)
-        self.transform_presets.hide()
-        gizmo_layout.addWidget(self.transform_presets)
+        self.center_origin_button = QPushButton("Center at Origin")
+        self.center_origin_button.setEnabled(False)
+        self.center_origin_button.setToolTip(
+            "Move the whole model so the center of its bounding box sits at "
+            "the model origin (0, 0, 0). Undo restores it.")
+        self.center_origin_button.clicked.connect(
+            self.edit_center_action.trigger)
+        gizmo_layout.addWidget(self.center_origin_button)
         self.viewport.set_direct_transform("move", 0.50)
         self._apply_transform_mode_colors()
-        model_box_layout.addWidget(gizmo_box)
+        model_layout.addWidget(gizmo_box)
 
+        fx_box = QGroupBox("FX")
+        fx_layout = QVBoxLayout(fx_box)
+        fx_layout.setContentsMargins(5, 4, 5, 5)
+        fx_layout.setSpacing(4)
         self.model_texture_label = QLabel("Current FX Texture: -")
-        self.model_texture_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.model_texture_label.setWordWrap(True)
-        model_box_layout.addWidget(self.model_texture_label)
-
-        fx_row = QHBoxLayout()
-        fx_row.addWidget(QLabel("FX element list:"))
+        fx_layout.addWidget(self.model_texture_label)
         self.fx_combo.setMinimumWidth(0)
         self.fx_combo.setSizePolicy(
             QSizePolicy.Policy.Ignored,
             QSizePolicy.Policy.Fixed,
         )
-        fx_row.addWidget(self.fx_combo, 1)
-        model_box_layout.addLayout(fx_row)
+        fx_layout.addWidget(self.fx_combo)
         self.fx_combo.setContextMenuPolicy(
             Qt.ContextMenuPolicy.CustomContextMenu)
         self.fx_combo.customContextMenuRequested.connect(
             self._show_fx_combo_context_menu)
-        fx_buttons = QHBoxLayout()
-        self.select_all_fx_button = QPushButton("Select All FX")
-        self.select_all_fx_button.setEnabled(False)
-        self.select_all_fx_button.setToolTip(
-            "Select every FX element of the current model and no other "
-            "geometry.")
-        self.select_all_fx_button.clicked.connect(
-            self.select_all_fx_action.trigger)
-        fx_buttons.addWidget(self.select_all_fx_button)
         self.add_fx_button = QPushButton("Add FX")
         self.add_fx_button.setEnabled(False)
         self.add_fx_button.setToolTip(
             "Add an FX from the current model, another model, or a VP-defined "
             "model in a BAS archive.")
         self.add_fx_button.clicked.connect(self.add_fx_action.trigger)
-        fx_buttons.addWidget(self.add_fx_button)
         self.clone_fx_button = QPushButton("Clone FX")
         self.clone_fx_button.setEnabled(False)
         self.clone_fx_button.clicked.connect(self.clone_fx_action.trigger)
-        fx_buttons.addWidget(self.clone_fx_button)
-        self.delete_fx_button = QPushButton("Delete Selected FX")
+        self.delete_fx_button = QPushButton("Delete FX")
         self.delete_fx_button.setEnabled(False)
         self.delete_fx_button.setToolTip(
             "Delete the complete editable FX element selected in the list. "
             "The operation can be undone.")
         self.delete_fx_button.clicked.connect(
             self._delete_selected_fx_element)
-        fx_buttons.addWidget(self.delete_fx_button)
-
-        self.rename_fx_button = QPushButton("Rename FX")
-        self.rename_fx_button.clicked.connect(self.rename_fx_action.trigger)
-        # Rename occupies the former Replace FX Texture slot, directly below the
-        # FX selection.  Replace FX Texture moves to Rename's former lower slot.
-        model_box_layout.addWidget(self.rename_fx_button)
-        model_box_layout.addLayout(fx_buttons)
-        self.load_texture_button = QPushButton("Replace FX Texture")
+        self.load_texture_button = QPushButton("Replace Texture")
         self.load_texture_button.setEnabled(False)
         self.load_texture_button.setToolTip(
             "Replace the texture only on the selected polygon segments. "
             "Select multiple segments to update them together.")
         self.load_texture_button.clicked.connect(self._load_model_texture)
-        model_box_layout.addWidget(self.load_texture_button)
+        fx_layout.addWidget(_ResponsiveButtonGrid([
+            self.add_fx_button,
+            self.clone_fx_button,
+            self.delete_fx_button,
+            self.load_texture_button,
+        ]))
+        model_layout.addWidget(fx_box)
 
         uv_box = QGroupBox("Texture and FX Editor")
         uv_layout = QVBoxLayout(uv_box)
@@ -1934,42 +1879,32 @@ class AssemblyWindow(QMainWindow):
         self.uv_auto_align_check.toggled.connect(
             self.uv_editor.set_auto_align_enabled)
         uv_layout.addWidget(self.uv_auto_align_check)
-        self.uv_select_all_button = QPushButton("Select All UVs")
-        self.uv_select_all_button.clicked.connect(self.uv_editor.select_all)
-        self.uv_clear_selection_button = QPushButton("Clear Selection")
-        self.uv_clear_selection_button.clicked.connect(
-            self.uv_editor.select_none)
         self.uv_add_vertex_button = QPushButton("Add Vertex")
         self.uv_add_vertex_button.setEnabled(False)
         self.uv_add_vertex_button.clicked.connect(self._add_uv_vertex)
         self.uv_delete_vertex_button = QPushButton("Delete Vertex")
         self.uv_delete_vertex_button.setEnabled(False)
         self.uv_delete_vertex_button.clicked.connect(self._delete_uv_vertex)
-        uv_tools = _ResponsiveButtonGrid([
-            self.uv_select_all_button,
-            self.uv_clear_selection_button,
-            self.uv_add_vertex_button,
-            self.uv_delete_vertex_button,
-        ])
-        uv_layout.addWidget(uv_tools)
-        uv_buttons = QHBoxLayout()
         self.uv_revert_button = QPushButton("Revert Selected UV")
         self.uv_revert_button.setEnabled(False)
         self.uv_revert_button.clicked.connect(self._revert_selected_uv)
-        uv_buttons.addWidget(self.uv_revert_button)
         self.uv_reset_all_button = QPushButton("Reset All UVs")
         self.uv_reset_all_button.setEnabled(False)
         self.uv_reset_all_button.clicked.connect(self._reset_all_uvs)
-        uv_buttons.addWidget(self.uv_reset_all_button)
-        uv_layout.addLayout(uv_buttons)
-        model_box_layout.addWidget(uv_box, 1)
+        uv_layout.addWidget(_ResponsiveButtonGrid([
+            self.uv_add_vertex_button,
+            self.uv_delete_vertex_button,
+            self.uv_revert_button,
+            self.uv_reset_all_button,
+        ]))
+        model_layout.addWidget(uv_box, 1)
 
-        save_buttons = QGridLayout()
-        save_buttons.setHorizontalSpacing(5)
+        save_buttons = QHBoxLayout()
+        save_buttons.setSpacing(5)
         self.model_save_button = QPushButton("Overwrite")
         self.model_save_button.setEnabled(False)
         self.model_save_button.clicked.connect(self._overwrite_model)
-        save_buttons.addWidget(self.model_save_button, 0, 0)
+        save_buttons.addWidget(self.model_save_button, 1)
         self.model_save_as_button = QPushButton(
             "Export Asset Family")
         self.model_save_as_button.setEnabled(False)
@@ -1977,20 +1912,8 @@ class AssemblyWindow(QMainWindow):
             "Export a portable BASE package with SKLT, ILBM, VANM, SET "
             "palette/remaps, manifest and isolated round-trip validation.")
         self.model_save_as_button.clicked.connect(self._save_model_as)
-        save_buttons.addWidget(self.model_save_as_button, 0, 1)
-        self.model_onua3d_button = QPushButton(
-            "Export OpenNeoUA 3D")
-        self.model_onua3d_button.setToolTip(
-            "Export the loaded BASE family as an OpenNeoUA 3D (.onua3d) "
-            "package for compatible 3D tools.")
-        self.model_onua3d_button.setEnabled(False)
-        self.model_onua3d_button.clicked.connect(self._export_to_blender)
-        save_buttons.addWidget(self.model_onua3d_button, 1, 0, 1, 2)
-        save_buttons.setColumnStretch(0, 1)
-        save_buttons.setColumnStretch(1, 1)
-        model_box_layout.addLayout(save_buttons)
-
-        model_layout.addWidget(model_box, 1)
+        save_buttons.addWidget(self.model_save_as_button, 1)
+        model_layout.addLayout(save_buttons)
 
         # Mapping repair reuses the existing MappingIndex, material blocks,
         # preview and repair controls; only their UI container changes.
@@ -7713,16 +7636,8 @@ class AssemblyWindow(QMainWindow):
             },
         }[mode]
         self.transform_step_label.setText(settings["label"])
-        self.transform_help_label.setText(settings["help"])
+        self.model_gizmo.setToolTip(settings["help"])
         self.auto_align_check.setVisible(mode == "move")
-        self.transform_presets.setVisible(mode == "rotate")
-        self.transform_preset_axis.setVisible(mode == "rotate")
-        if mode == "rotate":
-            for button, value in zip(
-                    self.transform_preset_buttons, (-90, -45, 45, 90, 180)):
-                button.setText(f"{value}°")
-                button.setToolTip(
-                    "Apply to the current selection; Undo restores it.")
         self._transform_options_layout.removeWidget(
             self.mirror_select_check)
         self._transform_options_layout.addWidget(
@@ -7750,22 +7665,6 @@ class AssemblyWindow(QMainWindow):
         slider.setToolTip(settings["tip"])
         slider.blockSignals(False)
         self.viewport.set_direct_transform(mode, spin.value())
-
-    def _apply_transform_preset(self, index):
-        if not self._editing_allowed() or self.viewport.paste_preview_active:
-            return
-        session = self.viewport.edit_session
-        if session is None or not session.selection or session.modal_active:
-            self._notify("Select geometry before applying a preset.", 4000)
-            return
-        if self._transform_mode == "rotate":
-            direction = tuple(
-                int(i == self.transform_preset_axis.currentIndex())
-                for i in range(3))
-            if self.viewport.begin_model_transform("rotate", direction):
-                self.viewport.rotate_edit_selection_model(
-                    math.radians((-90, -45, 45, 90, 180)[index]))
-                self.viewport.end_model_transform()
 
     def _mirror_axes(self) -> tuple[int, ...]:
         return (0, 1, 2)
@@ -9214,6 +9113,25 @@ class AssemblyWindow(QMainWindow):
         self._notify(
             f"Cut {descriptor}. The copy is ready for Paste.", 8000)
 
+    def _center_model_at_origin(self) -> None:
+        if not self._require_editing("Center Model at Origin"):
+            return
+        if self.viewport.paste_preview_active:
+            self._notify(
+                "Center refused: finish or cancel the active placement first.",
+                7000)
+            return
+        owner = self.viewport.edit_owner
+        fam_obj = self._owner_to_obj.get(owner) if owner else None
+        if not self.viewport.center_edit_model_at_origin():
+            self._notify("The model is already centered at the origin.", 4500)
+            return
+        children = bool(fam_obj is not None and fam_obj.kids)
+        self._notify(
+            "Model centered at the origin. Undo restores it."
+            + (" Child BASE objects keep their own offset." if children
+               else ""), 7000)
+
     def _move_selected_geometry(self) -> None:
         if not self._require_editing("Move"):
             return
@@ -9576,11 +9494,6 @@ class AssemblyWindow(QMainWindow):
             action = getattr(self, name, None)
             if action is not None:
                 action.setEnabled(active and not paste_preview)
-        for name in ("poly_select_all_button", "poly_deselect_all_button"):
-            button = getattr(self, name, None)
-            if button is not None:
-                button.setEnabled(
-                    editing and active and not paste_preview)
         if hasattr(self, "edit_undo_action"):
             self.edit_undo_action.setEnabled(
                 editing and bool(self._edit_undo_stack)
@@ -9661,8 +9574,6 @@ class AssemblyWindow(QMainWindow):
         can_select_all_fx = bool(self._fx_elements) and not paste_preview
         if hasattr(self, "select_all_fx_action"):
             self.select_all_fx_action.setEnabled(can_select_all_fx)
-        if hasattr(self, "select_all_fx_button"):
-            self.select_all_fx_button.setEnabled(can_select_all_fx)
         can_add_fx = editing and self._can_add_fx_element()
         if hasattr(self, "add_fx_action"):
             self.add_fx_action.setEnabled(can_add_fx)
@@ -9674,7 +9585,6 @@ class AssemblyWindow(QMainWindow):
             self.clone_fx_button.setEnabled(can_clone)
             can_rename = editing and self._selected_fx_element() is not None and not paste_preview
             self.rename_fx_action.setEnabled(can_rename)
-            self.rename_fx_button.setEnabled(can_rename)
         if hasattr(self, "delete_fx_button"):
             element = self._selected_fx_element()
             multi_fx = self._active_fx_elements()
@@ -9720,6 +9630,13 @@ class AssemblyWindow(QMainWindow):
         if hasattr(self, "edit_scale_action"):
             self.edit_scale_action.setEnabled(
                 editing and self._family is not None and not paste_preview)
+        if hasattr(self, "edit_center_action"):
+            can_center = bool(
+                editing and session is not None
+                and not session.modal_active and not paste_preview)
+            self.edit_center_action.setEnabled(can_center)
+            if hasattr(self, "center_origin_button"):
+                self.center_origin_button.setEnabled(can_center)
         if hasattr(self, "edit_rotate_action"):
             self.edit_rotate_action.setEnabled(
                 editing and self._family is not None and not paste_preview)
@@ -9753,7 +9670,6 @@ class AssemblyWindow(QMainWindow):
             self._blender_export_object() is not None
             and not self.viewport.paste_preview_active)
         self.export_blender_action.setEnabled(onua3d_enabled)
-        self.model_onua3d_button.setEnabled(onua3d_enabled)
         self.overwrite_action.setEnabled(overwrite_enabled)
         owner = self._selected_owner
         can_reset = bool(
@@ -11512,12 +11428,6 @@ class AssemblyWindow(QMainWindow):
                 "Restore every changed editable UV loop in the active model."
                 if changed else
                 "No changed editable UV loop is available to reset.")
-        select_all = getattr(self, "uv_select_all_button", None)
-        if select_all is not None:
-            select_all.setEnabled(self.uv_editor.loop_count() > 0)
-        clear = getattr(self, "uv_clear_selection_button", None)
-        if clear is not None:
-            clear.setEnabled(bool(self.uv_editor.selected_handles()))
 
     @staticmethod
     def _configure_uv_menu_action(action, reason: str,
@@ -12994,33 +12904,36 @@ class AssemblyWindow(QMainWindow):
             location = f"{dep.resolution_source}: {location}"
         item.setText(2, location)
         provenance = (
+            f"{location}\n"
             f"source={dep.resolution_source or '-'}\n"
             f"rule={dep.resolution_rule or '-'}")
         for column in range(3):
             item.setToolTip(column, provenance)
 
-        if dep.resolution_source or dep.resolution_rule:
-            rule_row = self._tree_item(
-                "Resolution provenance", dep.resolution_source or "-",
-                ("dependency_info", (dep.raw_ref, None)),
-                dep.resolution_rule or "-")
-            item.addChild(rule_row)
-
+        # Alternative sources are listed only when there is something to
+        # choose from; a clean single match is described by the tooltip.
         ref = self._dependency_reference(family, dep.raw_ref)
-        for candidate in dep.candidates:
-            child = self._tree_item(
-                "Loose candidate",
-                "current" if dep.resolved_path == candidate else "available",
-                ("dependency_candidate", (dep.raw_ref, str(candidate))),
-                str(candidate))
-            item.addChild(child)
-        for embedded in getattr(ref, "embedded_candidates", ()):
-            child = self._tree_item(
-                "SET.BAS fallback",
-                "current" if getattr(ref, "status", "") in (
-                    "setbas", "manual (SET.BAS)") else "available",
-                ("dependency_candidate", (dep.raw_ref, embedded)), embedded)
-            item.addChild(child)
+        embedded_candidates = list(getattr(ref, "embedded_candidates", ()))
+        needs_choice = (
+            status_key in ("ambiguous", "missing", "decode failed")
+            or len(dep.candidates) + len(embedded_candidates) > 1)
+        if needs_choice:
+            for candidate in dep.candidates:
+                child = self._tree_item(
+                    "Loose candidate",
+                    "current" if dep.resolved_path == candidate
+                    else "available",
+                    ("dependency_candidate", (dep.raw_ref, str(candidate))),
+                    str(candidate))
+                item.addChild(child)
+            for embedded in embedded_candidates:
+                child = self._tree_item(
+                    "SET.BAS fallback",
+                    "current" if getattr(ref, "status", "") in (
+                        "setbas", "manual (SET.BAS)") else "available",
+                    ("dependency_candidate", (dep.raw_ref, embedded)),
+                    embedded)
+                item.addChild(child)
 
         bare = dep.raw_ref.replace("\\", "/").split("/")[-1]
         override = (family.overrides.get(dep.raw_ref)
@@ -13056,35 +12969,6 @@ class AssemblyWindow(QMainWindow):
         offset = getattr(fam_obj.base_object, "source_objt_offset", -1)
         return (f"BASE object at 0x{offset:X}" if offset >= 0 else
                 f"BASE object [{owner}]")
-
-    def _fit_asset_dependency_columns(self) -> None:
-        """Fit the three dependency columns inside the current viewport.
-
-        The sections remain Interactive: a user can deliberately drag them
-        wider and Qt will then expose the horizontal scrollbar.  This helper
-        only establishes a compact default after a tree rebuild.
-        """
-
-        width = self.asset_tree.viewport().width()
-        if width <= 0:
-            return
-        usable = max(240, width - 6)
-        # 46/17/37 keeps the status compact while giving Source / Path enough
-        # room to be useful.  At the minimum supported width the three minima
-        # still sum exactly to the available space, so no scrollbar is created
-        # by our default sizing.
-        asset_width = max(110, int(usable * 0.46))
-        status_width = max(70, int(usable * 0.17))
-        source_width = usable - asset_width - status_width
-        if source_width < 60:
-            deficit = 60 - source_width
-            reducible = max(0, asset_width - 110)
-            reduction = min(deficit, reducible)
-            asset_width -= reduction
-            source_width += reduction
-        self.asset_tree.setColumnWidth(0, asset_width)
-        self.asset_tree.setColumnWidth(1, status_width)
-        self.asset_tree.setColumnWidth(2, source_width)
 
     def _fill_asset_tree(self, family: AssetFamily) -> None:
         self._asset_filter_expansion = None
@@ -13252,9 +13136,6 @@ class AssemblyWindow(QMainWindow):
                 group.addChild(node)
 
         self.asset_tree.expandAll()
-        # Defer one event-loop turn so the tab/layout has its real viewport
-        # width; users can still resize the Interactive sections afterwards.
-        QTimer.singleShot(0, self._fit_asset_dependency_columns)
         if self.tree_search.text().strip():
             self._filter_asset_tree(self.tree_search.text())
 
@@ -13666,9 +13547,10 @@ class AssemblyWindow(QMainWindow):
         """
 
         used = self._active_model_texture_names()
-        active_brush = QBrush(QColor(72, 118, 84, 54))
+        # Same green as the active model rows of Asset Dependencies.
+        active_brush = QBrush(QColor(LIST_DEPENDENCY_SELECTED))
         clear_brush = QBrush()
-        text_brush = QBrush(QColor(238, 238, 238))
+        text_brush = QBrush()
 
         current = self.texture_list.currentItem()
         current_name = (
@@ -13794,7 +13676,7 @@ class AssemblyWindow(QMainWindow):
             item.setData(Qt.ItemDataRole.UserRole, name)
             # Status remains visible in the label/icon; valid/error rows do not
             # compete with the model-usage background through colored text.
-            item.setForeground(QBrush(QColor(238, 238, 238)))
+            item.setForeground(QBrush())
             qimage = self._texture_qimage(img_name) if img_name else None
             if qimage is not None and not qimage.isNull():
                 item.setIcon(_checker_thumbnail(qimage))

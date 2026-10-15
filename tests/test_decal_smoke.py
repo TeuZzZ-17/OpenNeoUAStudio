@@ -116,7 +116,7 @@ def test_block_without_smoke_keys_stays_vanilla():
 
 def test_smoke_keys_are_read_and_known_to_studio():
     spec = _spec(DECAL + "    smoke = 1\n    smoke_chance = 80\n    smoke_duration = 5000_3000\n"
-                 "    smoke_fade_in = 100\n    smoke_fade_out = 200\n    smoke_count = 30\n"
+                 "    smoke_fade_inout = 100_200\n    smoke_count = 30\n"
                  "    smoke_size = 16_30\n    smoke_growth = 4\n    smoke_rise_speed = 10\n"
                  "    smoke_puff_time = 4000_7500\n    smoke_drift = 5\n    smoke_spread = 60\n"
                  "    smoke_intensity = 120\n    smoke_tint = 10_20_30_40\n")
@@ -200,7 +200,7 @@ def test_preview_plays_only_the_first_part_of_a_long_smoke():
 
 def test_short_smoke_is_previewed_to_its_end():
     short = WEAPON.replace("60000_90000", "6000_6000").replace("smoke_count = 30\n",
-                                                               "smoke_count = 30\n    smoke_fade_out = 2000\n")
+                                                               "smoke_count = 30\n    smoke_fade_inout = 3000_2000\n")
     simulation = _simulation(short)
     track = next(t for t in simulation.tracks if t.label.endswith("Decal smoke"))
     assert track.end - track.start == pytest.approx(6000)

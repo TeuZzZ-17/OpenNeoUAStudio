@@ -112,6 +112,8 @@ def crop_transparent(image: QImage, margin: int = 3) -> QImage:
 class MainWindow(QMainWindow):
     def __init__(self, doc: LdfDocument | None = None, path: str | None = None):
         super().__init__()
+        from studio.ui.style import apply_studio_style
+        apply_studio_style()
         self.setWindowTitle("OpenNeoUA Studio - Map Editor")
         self.resize(1500, 900)
         self.doc: LdfDocument | None = None
@@ -285,7 +287,9 @@ class MainWindow(QMainWindow):
         self.palette_menu = view_menu
 
     def _build_palette(self):
-        dock = QDockWidget("Menu", self)
+        dock = QDockWidget(self)
+        dock.setFeatures(QDockWidget.DockWidgetFeature.NoDockWidgetFeatures)
+        dock.setTitleBarWidget(QWidget(dock))
         self.palette_dock = dock
         dock.setAllowedAreas(Qt.DockWidgetArea.LeftDockWidgetArea
                              | Qt.DockWidgetArea.RightDockWidgetArea)
@@ -311,7 +315,6 @@ class MainWindow(QMainWindow):
             history_row.addWidget(button)
         history_row.addStretch()
         panel_layout.addLayout(history_row)
-        preset_form = QFormLayout()
         self.view_preset = QComboBox()
         self.view_preset.addItem('Current View', None)
         for name, angles in VIEW_PRESET_ANGLES.items():
@@ -319,11 +322,10 @@ class MainWindow(QMainWindow):
                 self.view_preset.addItem(name, angles)
         self.view_preset.activated.connect(self._set_view_preset)
         self.view.cameraChanged.connect(lambda: self.view_preset.setCurrentIndex(0))
-        preset_form.addRow('View Preset', self.view_preset)
-        panel_layout.addLayout(preset_form)
+        panel_layout.addWidget(self.view_preset)
         self.hover_height = QLabel('Sector under mouse: —')
         self.hover_height.setWordWrap(True)
-        self.hover_height.setStyleSheet('QLabel { padding: 5px; color: #ddd; background: #292929; border-radius: 4px; }')
+        self.hover_height.setObjectName("mapHoverHeight")
         panel_layout.addWidget(self.hover_height)
         panel_layout.addWidget(tabs, 1)
         self.sector_list = self._make_list(True)
@@ -544,7 +546,6 @@ class MainWindow(QMainWindow):
         dock.setWidget(panel)
         self.addDockWidget(Qt.DockWidgetArea.LeftDockWidgetArea, dock)
         dock.setMinimumWidth(400)
-        self.palette_menu.addAction(dock.toggleViewAction())
         tabs.currentChanged.connect(self._palette_changed)
         for widget in (self.sector_list,self.building_list,self.owner_list,terrain,
                        self.squad_panel.list,self.host_panel.list,self.script_edit,self.level_scroll,

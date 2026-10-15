@@ -320,7 +320,7 @@ class CollisionEditorTests(unittest.TestCase):
     def test_16_import_new_vehicle(self):
         text = (
             "new_vehicle 5\n name = Wasp\n radius = 35\n coll_num = 1\n"
-            " coll_act = 0\n coll_x = 1\n coll_y = 2\n coll_z = 3\n"
+            " coll_act = 0\n coll_xyz = 1_2_3\n"
             " coll_radius = 4\nend\n")
         block = find_script_blocks(text)[0]
         legacy, compound, warnings = import_collision_block(
@@ -333,7 +333,7 @@ class CollisionEditorTests(unittest.TestCase):
     def test_17_import_new_weapon_is_editor_blue_only(self):
         text = (
             "new_weapon 9\n coll_num = 1\n coll_act = 0\n"
-            " coll_x = 0\n coll_y = 0\n coll_z = 0\n"
+            " coll_xyz = 0_0_0\n"
             " coll_radius = 8\nend\n")
         block = find_script_blocks(text)[0]
         _legacy, compound, _warnings = import_collision_block(
@@ -367,7 +367,7 @@ class CollisionEditorTests(unittest.TestCase):
     def test_20_missing_collision_data_is_commented_not_deleted(self):
         text = (
             "modify_weapon 4\n radius = 9\n coll_num = 1\n"
-            " coll_act = 0\n coll_x = 1\n coll_y = 2\n coll_z = 3\n"
+            " coll_act = 0\n coll_xyz = 1_2_3\n"
             " coll_radius = 4\nend\n")
         project = CollisionProject(name="Empty", source_model="x.sklt")
         updated, _preview, _name = plan_script_update(
@@ -711,9 +711,7 @@ class CollisionEditorTests(unittest.TestCase):
                 OPENNEOUA, 1.23456, -0.0004, -2.34567, 78.379051)])
         data = script_module.collision_data_lines(project)
         self.assertIn("radius = 89", data)
-        self.assertIn("coll_x = 1.23456", data)
-        self.assertIn("coll_y = -0.0004", data)
-        self.assertIn("coll_z = -2.34567", data)
+        self.assertIn("coll_xyz = 1.23456_-0.0004_-2.34567", data)
         self.assertIn("coll_radius = 78.379051", data)
         script = "new_vehicle 7\n" + "\n".join(data) + "\nend\n"
         block = find_script_blocks(script)[0]
@@ -848,16 +846,12 @@ class CollisionEditorTests(unittest.TestCase):
             window.spheres_box.sizePolicy().verticalPolicy(),
             QSizePolicy.Policy.Expanding)
 
-    def test_selected_element_panel_is_bottom_left_viewport_overlay(self):
+    def test_selected_element_panel_is_removed_from_every_tab(self):
         window = self._window()
-        self.assertIs(window.selected_box.parentWidget(), window.viewport_panel)
-        index = window.viewport_layout.indexOf(window.selected_box)
-        self.assertGreaterEqual(index, 0)
-        alignment = window.viewport_layout.itemAt(index).alignment()
-        self.assertTrue(alignment & Qt.AlignmentFlag.AlignBottom)
-        self.assertTrue(alignment & Qt.AlignmentFlag.AlignLeft)
-        self.assertFalse(alignment & Qt.AlignmentFlag.AlignTop)
-        self.assertFalse(alignment & Qt.AlignmentFlag.AlignRight)
+        self.assertFalse(hasattr(window, "selected_box"))
+        for index in range(window.properties_tabs.count()):
+            window.properties_tabs.setCurrentIndex(index)
+            self.assertTrue(window.selected_element_label.isHidden())
 
     def test_48_identical_spheres_keep_distinct_dense_indices(self):
         window = self._window()
@@ -2138,9 +2132,7 @@ class CollisionEditorTests(unittest.TestCase):
             " name = Wasp\n"
             " vp_normal = 42\n"
             " vp_wait = 43\n"
-            " scale_x = 2\n"
-            " scale_y = 1.5\n"
-            " scale_z = 0.75\n"
+            " scale_xyz = 2_1.5_0.75\n"
             "end\n"
             "modify_vehicle 17\n vp_normal = 99\nend\n"
         )
@@ -2159,8 +2151,7 @@ class CollisionEditorTests(unittest.TestCase):
         text = (
             "new_vehicle 1\n name = Wasp\n vp_normal = 30\nend\n"
             "new_weapon 1\n name = Rocket\n vp_normal = 91\n"
-            " scale_x = 1.25\n scale_y = 0.5\n"
-            " scale_z = 3\nend\n"
+            " scale_xyz = 1.25_0.5_3\nend\n"
             "modify_weapon 1\n vp_normal = 999\nend\n"
         )
         references = script_model_references(text)
@@ -2176,16 +2167,14 @@ class CollisionEditorTests(unittest.TestCase):
             (1.25, 0.5, 3.0),
         )
 
-    def test_90b2_scale_precedes_legacy_vp_scale(self):
+    def test_90b2_obsolete_vp_scale_is_ignored(self):
         text = (
             "new_vehicle 9\n"
             " vp_normal = 11\n"
             " vp_scale_x = 9\n"
             " vp_scale_y = 9\n"
             " vp_scale_z = 9\n"
-            " scale_x = 2\n"
-            " scale_y = 3\n"
-            " scale_z = 4\n"
+            " scale_xyz = 2_3_4\n"
             "end\n"
         )
         reference = vehicle_model_references(text)[0]
@@ -2349,9 +2338,7 @@ class CollisionEditorTests(unittest.TestCase):
             " mgun_energy = 800\n"
             " coll_num = 1\n"
             " coll_act = 0\n"
-            " coll_x = 3\n"
-            " coll_y = 4\n"
-            " coll_z = 5\n"
+            " coll_xyz = 3_4_5\n"
             " coll_radius = 6\n"
             " ; radius = 777\n"
             " mass = 300\n"
@@ -2597,11 +2584,11 @@ class CollisionEditorTests(unittest.TestCase):
             " unit_num_guns = 2\n"
             " unit_gun_icon = default_icon.bmp\n"
             " unit_act_gun = 0\n"
-            " unit_gun_pos_x = -15\n"
+            " unit_gun_pos_xyz = -15_0_0\n"
             " unit_gun_type = 40\n"
             " unit_act_gun = 1\n"
-            " unit_gun_pos_x = 15\n"
-            " unit_gun_dir_y = 1\n"
+            " unit_gun_pos_xyz = 15_0_0\n"
+            " unit_gun_dir_xyz = 0_1_0\n"
             " unit_gun_type = 41\n"
             " unit_gun_name = SideGun\n"
             " unit_gun_icon = side.bmp\n"
@@ -2627,7 +2614,7 @@ class CollisionEditorTests(unittest.TestCase):
             " mgun_energy = 800\n"
             " unit_num_guns = 1\n"
             " unit_act_gun = 0\n"
-            " unit_gun_pos_x = 999\n"
+            " unit_gun_pos_xyz = 999_0_0\n"
             " unit_gun_type = 3\n"
             "end\n"
         )
@@ -2641,10 +2628,10 @@ class CollisionEditorTests(unittest.TestCase):
         updated, _preview, _name = plan_script_update(
             text, "new_vehicle", 17, project, replace_all_managed=True)
         self.assertIn("mgun_energy = 800", updated)
-        self.assertNotIn("unit_gun_pos_x = 999", updated)
+        self.assertNotIn("unit_gun_pos_xyz = 999_0_0", updated)
         self.assertIn("unit_num_guns = 1", updated)
-        self.assertIn("unit_gun_pos_x = 12", updated)
-        self.assertIn("unit_gun_dir_z = 1", updated)
+        self.assertIn("unit_gun_pos_xyz = 12_3_-5", updated)
+        self.assertIn("unit_gun_dir_xyz = 0_0_1", updated)
         self.assertIn("unit_gun_type = 44", updated)
         self.assertIn("unit_gun_name = Flak", updated)
 
@@ -2709,13 +2696,6 @@ class CollisionEditorTests(unittest.TestCase):
             window.properties_tabs),
             window.properties_scroll.widget().layout().indexOf(
                 window.transform_box))
-        self.assertIs(window.selected_box.parentWidget(), window.viewport_panel)
-        selected_index = window.viewport_layout.indexOf(window.selected_box)
-        self.assertGreaterEqual(selected_index, 0)
-        selected_alignment = window.viewport_layout.itemAt(selected_index).alignment()
-        self.assertTrue(selected_alignment & Qt.AlignmentFlag.AlignBottom)
-        self.assertTrue(selected_alignment & Qt.AlignmentFlag.AlignLeft)
-        self.assertFalse(selected_alignment & Qt.AlignmentFlag.AlignRight)
         self.assertEqual(window.transform_box.minimumHeight(), 248)
         self.assertEqual(window.transform_box.maximumHeight(), 248)
         self.assertGreaterEqual(window.gizmo.minimumHeight(), 150)
@@ -2917,8 +2897,7 @@ class CollisionEditorTests(unittest.TestCase):
     def test_114_cockpit_parser_reads_partial_axes_with_zero_fallback(self):
         text = (
             "new_vehicle 7\n"
-            " cockpit_camera_offset_x = 12.5\n"
-            " cockpit_camera_offset_z = -40\n"
+            " cockpit_camera_offset_xyz = 12.5_0_-40\n"
             "end\n"
         )
         block = find_script_blocks(text)[0]
@@ -2933,9 +2912,7 @@ class CollisionEditorTests(unittest.TestCase):
             cockpit_camera_offset_x=10, cockpit_camera_offset_y=-5,
             cockpit_camera_offset_z=30)
         output = export_collision_text(project)
-        self.assertIn("cockpit_camera_offset_x = 10", output)
-        self.assertIn("cockpit_camera_offset_y = -5", output)
-        self.assertIn("cockpit_camera_offset_z = 30", output)
+        self.assertIn("cockpit_camera_offset_xyz = 10_-5_30", output)
 
         project.cockpit_camera_enabled = False
         self.assertNotIn("cockpit_camera_offset", export_collision_text(project))
@@ -2947,9 +2924,7 @@ class CollisionEditorTests(unittest.TestCase):
         text = (
             "new_vehicle 17\n"
             " name = Wasp\n"
-            " cockpit_camera_offset_x = 999\n"
-            " cockpit_camera_offset_y = 888\n"
-            " cockpit_camera_offset_z = 777\n"
+            " cockpit_camera_offset_xyz = 999_888_777\n"
             " mgun_energy = 900\n"
             "end\n"
         )
@@ -2960,10 +2935,8 @@ class CollisionEditorTests(unittest.TestCase):
             cockpit_camera_offset_z=3)
         updated, _preview, _name = plan_script_update(
             text, "new_vehicle", 17, project, replace_all_managed=True)
-        self.assertIn("cockpit_camera_offset_x = 1", updated)
-        self.assertIn("cockpit_camera_offset_y = -2", updated)
-        self.assertIn("cockpit_camera_offset_z = 3", updated)
-        self.assertNotIn("cockpit_camera_offset_x = 999", updated)
+        self.assertIn("cockpit_camera_offset_xyz = 1_-2_3", updated)
+        self.assertNotIn("cockpit_camera_offset_xyz = 999_888_777", updated)
         self.assertIn("mgun_energy = 900", updated)
 
         project.cockpit_camera_enabled = False
@@ -2985,7 +2958,7 @@ class CollisionEditorTests(unittest.TestCase):
         self.assertTrue(window.viewport.cockpit_preview_active)
         self.assertEqual(window.transform_box.title(), "Move Cockpit Camera")
         self.assertFalse(window.toolbar_view_preset_combo.isEnabled())
-        self.assertTrue(window.selected_box.isHidden())
+        self.assertFalse(hasattr(window, "selected_box"))
 
         window.properties_tabs.setCurrentIndex(window.collision_tab_index)
         self.assertFalse(window.viewport.cockpit_preview_active)
@@ -3007,9 +2980,7 @@ class CollisionEditorTests(unittest.TestCase):
              window.project.cockpit_camera_offset_z),
             (5.0, -5.0, 5.0))
         output = window.cockpit_output.text()
-        self.assertIn("cockpit_camera_offset_x = 5", output)
-        self.assertIn("cockpit_camera_offset_y = -5", output)
-        self.assertIn("cockpit_camera_offset_z = 5", output)
+        self.assertIn("cockpit_camera_offset_xyz = 5_-5_5", output)
 
     def test_118b_cockpit_runtime_aspect_selector_defaults_to_4_3(self):
         window = CollisionEditorWindow()
@@ -3033,7 +3004,7 @@ class CollisionEditorTests(unittest.TestCase):
             Qt.AlignmentFlag.AlignHCenter | Qt.AlignmentFlag.AlignVCenter)
         self.assertEqual(
             window.cockpit_output.focusPolicy(), Qt.FocusPolicy.NoFocus)
-        self.assertIn("cockpit_camera_offset_y", window.cockpit_output.text())
+        self.assertIn("cockpit_camera_offset_xyz", window.cockpit_output.text())
 
     def test_118c_restore_script_cockpit_position_uses_imported_baseline(self):
         window = self._window()
@@ -3737,9 +3708,7 @@ class CollisionEditorTests(unittest.TestCase):
             "    fire_y = 20\r\n"
             "    fire_z = 30\r\n"
             "    num_weapons = 2\r\n"
-            "    cockpit_camera_offset_x = 1\r\n"
-            "    cockpit_camera_offset_y = 2\r\n"
-            "    cockpit_camera_offset_z = 3\r\n"
+            "    cockpit_camera_offset_xyz = 1_2_3\r\n"
             "    robo_num_guns = 1\r\n"
             "    robo_act_gun = 0\r\n"
             "    robo_gun_pos_x = 0\r\n"
@@ -3752,12 +3721,10 @@ class CollisionEditorTests(unittest.TestCase):
             "    robo_gun_name = Resistance_Hs_Flak_1\r\n"
             "    coll_num = 1\r\n"
             "    coll_act = 0\r\n"
-            "    coll_x = 1\r\n"
-            "    coll_y = 2\r\n"
-            "    coll_z = 3\r\n"
+            "    coll_xyz = 1_2_3\r\n"
             "    coll_radius = 100\r\n"
             "    begin_fx\r\n"
-            "        offset_x = 999\r\n"
+            "        offset_xyz = 999_0_0\r\n"
             "    end\r\n"
             "end\r\n"
             "new_vehicle 90\r\n"
@@ -3793,18 +3760,15 @@ class CollisionEditorTests(unittest.TestCase):
 
         self.assertIn("\r\n", updated)
         self.assertIn("mass = 10000", updated)
-        self.assertIn("begin_fx\r\n        offset_x = 999\r\n    end", updated)
+        self.assertIn("begin_fx\r\n        offset_xyz = 999_0_0\r\n    end", updated)
         for expected in (
                 "radius = 222", "overeof = 175", "fire_x = 40",
                 "fire_y = 50", "fire_z = 60", "num_weapons = 3_5",
-                "cockpit_camera_offset_x = 7",
-                "cockpit_camera_offset_y = 8",
-                "cockpit_camera_offset_z = 9",
+                "cockpit_camera_offset_xyz = 7_8_9",
                 "robo_gun_pos_x = 4", "robo_gun_pos_y = -210",
                 "robo_gun_pos_z = 65", "robo_gun_dir_x = 1",
                 "robo_gun_dir_z = 0", "robo_gun_type = 90",
-                "coll_num = 1", "coll_x = 11", "coll_y = 12",
-                "coll_z = 13", "coll_radius = 144",
+                "coll_num = 1", "coll_xyz = 11_12_13", "coll_radius = 144",
                 "gun_down_angle = 777"):
             self.assertIn(expected, updated)
 
@@ -3954,7 +3918,7 @@ class CollisionEditorTests(unittest.TestCase):
                 "    name = Carrier\n"
                 "    unit_num_guns = 1\n"
                 "    unit_act_gun = 0\n"
-                "    unit_gun_pos_x = 20\n"
+                "    unit_gun_pos_xyz = 20_0_0\n"
                 "    unit_gun_type = 90\n"
                 "end\n", encoding="utf-8")
             window._active_script_path = script
@@ -4078,9 +4042,7 @@ class CollisionEditorTests(unittest.TestCase):
             "    num_weapons = 2\n"
             "    coll_num = 1\n"
             "    coll_act = 0\n"
-            "    coll_x = 1\n"
-            "    coll_y = 2\n"
-            "    coll_z = 3\n"
+            "    coll_xyz = 1_2_3\n"
             "    coll_radius = 4\n"
             "end\n"
         )
@@ -4090,9 +4052,7 @@ class CollisionEditorTests(unittest.TestCase):
             "    radius = 31\n"
             "    coll_num = 1\n"
             "    coll_act = 0\n"
-            "    coll_x = 11\n"
-            "    coll_y = 12\n"
-            "    coll_z = 13\n"
+            "    coll_xyz = 11_12_13\n"
             "    coll_radius = 44\n"
             "end\n"
         )
@@ -4431,11 +4391,9 @@ class CollisionEditorTests(unittest.TestCase):
             with self.subTest(vp=next_vp, kind=next_kind, cockpit=cockpit):
                 text = (
                     "new_vehicle 1\n name = First\n vp_normal = 0\n"
-                    " scale_x = 4\n scale_y = 2\n"
-                    " scale_z = 3\n overeof = 100\nend\n"
+                    " scale_xyz = 4_2_3\n overeof = 100\nend\n"
                     f"{next_kind} 2\n name = Next\n vp_normal = {next_vp}\n"
-                    " scale_x = 0.5\n scale_y = 1.5\n"
-                    " scale_z = 2\n overeof = 7\nend\n")
+                    " scale_xyz = 0.5_1.5_2\n overeof = 7\nend\n")
                 window, _script = self._script_unit_window(
                     object_id=1, object_kind="new_vehicle", script_text=text)
                 viewport = window.viewport

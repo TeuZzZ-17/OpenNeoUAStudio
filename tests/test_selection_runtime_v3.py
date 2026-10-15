@@ -278,10 +278,10 @@ class SelectionRuntimeV3Tests(unittest.TestCase):
             self.assertEqual(window._edit_undo_stack, [marker])
 
             window.viewport.set_edit_read_only_vertices({3})
-            window.poly_select_all_button.click()
+            window.edit_select_all_action.trigger()
             self.assertEqual(
                 window.viewport.edit_session.selection, {0, 1, 2, 3})
-            window.poly_deselect_all_button.click()
+            window.edit_select_none_action.trigger()
             self.assertEqual(window.viewport.edit_session.selection, set())
             window._right_tabs.setCurrentWidget(window._resources_tabs)
             window._show_model_editor()

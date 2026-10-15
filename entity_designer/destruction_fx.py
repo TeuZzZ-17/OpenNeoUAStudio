@@ -165,10 +165,24 @@ def _full_int(text: str) -> int | None:
         return None
 
 
-def parse_float_range(text: str) -> tuple[float, float] | None:
-    """``ParseFloatRangeValue``: fixed ``v`` or ``min_max`` (order normalized)."""
+def split_tuple(text: str | None, count: int) -> list[str] | None:
+    """``SplitTupleValue``: exactly *count* non-empty ``a_b_c`` parts, else None."""
 
+    if text is None:
+        return None
     parts = text.split("_")
+    if len(parts) != count or not all(parts):
+        return None
+    return parts
+
+
+def parse_float_range(text: str, separator: str = "_") -> tuple[float, float] | None:
+    """``ParseFloatRangeValue``: fixed ``v`` or ``min_max`` (order normalized).
+
+    Inside a compact tuple such as ``offset_xyz`` the range separator is ``~``.
+    """
+
+    parts = text.split(separator)
     if len(parts) == 1:
         value = _full_float(text)
         return None if value is None else (value, value)
@@ -653,10 +667,12 @@ def _interpret_smoke(rows: dict[str, str], issue) -> decal_smoke.SmokeSpec:
 
     defaults = decal_smoke.SmokeSpec()
 
-    def bounded_int(key: str, low: int, high: int, default: int) -> int:
-        if key not in rows:
-            return default
-        text = rows[key]
+    def bounded_int(key: str, low: int, high: int, default: int,
+                    text: str | None = None) -> int:
+        if text is None:
+            if key not in rows:
+                return default
+            text = rows[key]
         if not re.fullmatch(r"[+-]?\d+", text):
             issue(SEVERITY_WARNING, f"Invalid {key} '{text}': using {default}.")
             return default
@@ -702,12 +718,24 @@ def _interpret_smoke(rows: dict[str, str], issue) -> decal_smoke.SmokeSpec:
         else:
             tint = parsed_tint
 
+    fade = (defaults.fade_in, defaults.fade_out)
+    if "smoke_fade_inout" in rows:
+        parts = split_tuple(rows["smoke_fade_inout"], 2)
+        if parts is None:
+            issue(SEVERITY_WARNING,
+                  f"Invalid smoke_fade_inout '{rows['smoke_fade_inout']}': "
+                  f"using {fade[0]}_{fade[1]}.")
+        else:
+            fade = tuple(
+                bounded_int("smoke_fade_inout", 0, 3600000, default, part)
+                for part, default in zip(parts, fade))
+
     return decal_smoke.SmokeSpec(
         enabled=rows.get("smoke") == "1",
         chance=bounded_int("smoke_chance", 0, 100, defaults.chance),
         duration=int_range("smoke_duration", 0, 3600000, defaults.duration),
-        fade_in=bounded_int("smoke_fade_in", 0, 3600000, defaults.fade_in),
-        fade_out=bounded_int("smoke_fade_out", 0, 3600000, defaults.fade_out),
+        fade_in=fade[0],
+        fade_out=fade[1],
         count=int_range("smoke_count", 0, decal_smoke.MAX_PUFFS, defaults.count),
         size=size,
         growth=number("smoke_growth", 1.0, 10.0, defaults.growth),
@@ -809,10 +837,13 @@ def interpret_block(block: FxBlock, context: str) -> FxSpec:
                 duration = parsed
                 permanent = False
                 decal_duration_valid = used == len(value) and parsed > 0
-        elif key == "fade_in":
-            fade_in = _nonnegative_ms(value)
-        elif key == "fade_out":
-            fade_out = _nonnegative_ms(value)
+        elif key == "fade_inout":
+            parts = split_tuple(value, 2)
+            if parts is None:
+                issue(SEVERITY_WARNING,
+                      f"Invalid fade_inout '{value}': expected in_out.")
+            else:
+                fade_in, fade_out = _nonnegative_ms(parts[0]), _nonnegative_ms(parts[1])
         elif key == "count":
             parsed = parse_int_range(value)
             if parsed is None or parsed[0] <= 0 or parsed[1] <= 0:
@@ -820,24 +851,32 @@ def interpret_block(block: FxBlock, context: str) -> FxSpec:
                 count = (1, 1)
             else:
                 count = (min(parsed[0], MAX_COUNT), min(parsed[1], MAX_COUNT))
-        elif key in ("offset_x", "offset_y", "offset_z",
-                     "launch_x", "launch_y", "launch_z"):
-            axis = "xyz".index(key[-1])
-            if key.startswith("offset"):
+        elif key in ("offset_xyz", "launch_xyz"):
+            if key == "offset_xyz":
                 has_offset = True
                 target_min, target_max = offset_min, offset_max
             else:
                 has_inline = True
                 target_min, target_max = launch_min, launch_max
-            parsed = parse_float_range(value)
-            if parsed is None:
-                issue(SEVERITY_WARNING, f"Invalid {key} '{value}': using 0.")
-                parsed = (0.0, 0.0)
-            target_min[axis], target_max[axis] = parsed
-        elif key in ("spin_x", "spin_y", "spin_z"):
-            raw = _stof(value)
-            spin["xyz".index(key[-1])] = (
-                0.0 if not math.isfinite(raw) or raw <= 0 else min(raw, SPIN_MAX))
+            # x_y_z where every axis is a fixed value or a "min~max" range.
+            parts = split_tuple(value, 3)
+            axes = ([parse_float_range(part, "~") for part in parts]
+                    if parts is not None else None)
+            if axes is None or any(axis is None for axis in axes):
+                issue(SEVERITY_WARNING, f"Invalid {key} '{value}': using 0_0_0.")
+                axes = [(0.0, 0.0)] * 3
+            for axis, (low, high) in enumerate(axes):
+                target_min[axis], target_max[axis] = low, high
+        elif key == "spin_xyz":
+            parts = split_tuple(value, 3)
+            if parts is None:
+                issue(SEVERITY_WARNING,
+                      f"Invalid spin_xyz '{value}': expected x_y_z.")
+            else:
+                for axis, part in enumerate(parts):
+                    raw = _stof(part)
+                    spin[axis] = (
+                        0.0 if not math.isfinite(raw) or raw <= 0 else min(raw, SPIN_MAX))
         elif key == "vp_model":
             has_inline = True
             if mode == MODE_PHYSICAL:
@@ -942,15 +981,21 @@ def interpret_block(block: FxBlock, context: str) -> FxSpec:
         elif key == "size":
             parsed = parse_float_range(value)
             size = parsed if parsed and parsed[0] > 0 and parsed[1] > 0 else (0.0, 0.0)
-        elif key in ("stretch_x", "stretch_z"):
-            parsed = parse_float_range(value)
-            if not parsed or parsed[0] <= 0 or parsed[1] <= 0:
-                issue(SEVERITY_WARNING, f"Invalid {key} '{value}': using 1.0.")
-                parsed = (1.0, 1.0)
-            if key == "stretch_x":
-                stretch_x = parsed
+        elif key == "stretch_xz":
+            parts = split_tuple(value, 2)
+            if parts is None:
+                issue(SEVERITY_WARNING,
+                      f"Invalid stretch_xz '{value}': expected x_z.")
             else:
-                stretch_z = parsed
+                axes = []
+                for part in parts:
+                    parsed = parse_float_range(part, "~")
+                    if not parsed or parsed[0] <= 0 or parsed[1] <= 0:
+                        issue(SEVERITY_WARNING,
+                              f"Invalid stretch_xz '{value}': using 1.0.")
+                        parsed = (1.0, 1.0)
+                    axes.append(parsed)
+                stretch_x, stretch_z = axes
         elif key == "tint":
             decal_tint = parse_tint(value) or (255, 255, 255, 255)
         elif key == "random_rotation":
@@ -1374,10 +1419,12 @@ def _tint_value(values: dict[str, str], key: str, default: Tint) -> Tint:
 def _positive_scale(values: dict[str, str], prefix: str) -> tuple[float, float, float]:
     """ParseVPScaleParam: finite and > 0, otherwise 1.0."""
 
+    parts = split_tuple(values.get(f"{prefix}scale_xyz"), 3)
+    if parts is None:
+        return (1.0, 1.0, 1.0)
     result = []
-    for axis in "xyz":
-        text = values.get(f"{prefix}scale_{axis}")
-        value = _stof(text) if text is not None else 1.0
+    for text in parts:
+        value = _stof(text)
         result.append(value if math.isfinite(value) and value > 0 else 1.0)
     return tuple(result)
 
@@ -1385,10 +1432,12 @@ def _positive_scale(values: dict[str, str], prefix: str) -> tuple[float, float, 
 def _spin_strength(values: dict[str, str], prefix: str) -> tuple[float, float, float]:
     """ParseVPSpinParam: Spin::ClampStrength, 0..10."""
 
+    parts = split_tuple(values.get(f"{prefix}spin_xyz"), 3)
+    if parts is None:
+        return (0.0, 0.0, 0.0)
     result = []
-    for axis in "xyz":
-        text = values.get(f"{prefix}spin_{axis}")
-        value = _stof(text) if text is not None else 0.0
+    for text in parts:
+        value = _stof(text)
         result.append(max(0.0, min(SPIN_MAX, value)) if math.isfinite(value) else 0.0)
     return tuple(result)
 
@@ -1423,8 +1472,7 @@ def parse_tracer(values: dict[str, str], prefix: str = "mesh_tracer_") -> Tracer
     if values.get(prefix + "enable") != "1" or not values.get(prefix + "path"):
         return None
 
-    def bounded(key: str, maximum: float, default: float) -> float:
-        text = values.get(prefix + key)
+    def bounded(text: str | None, maximum: float, default: float) -> float:
         if text is None:
             return default
         value = _full_float(text)
@@ -1439,14 +1487,19 @@ def parse_tracer(values: dict[str, str], prefix: str = "mesh_tracer_") -> Tracer
             return default
         return min(value, maximum)
 
-    def signed(key: str) -> float:
-        value = _full_float(values.get(prefix + key) or "")
+    def signed(text: str) -> float:
+        value = _full_float(text)
         return 0.0 if value is None else max(-6000.0, min(6000.0, value))
 
-    size_x = bounded("size_x", 100.0, 3.0)
-    size_z = bounded("size_z", 6000.0, 300.0)
+    # size_xyz / pos_xyz are x_y_z; a malformed tuple keeps the engine defaults.
+    size_parts = split_tuple(values.get(prefix + "size_xyz"), 3) or (None, None, None)
+    pos_parts = split_tuple(values.get(prefix + "pos_xyz"), 3) or ("", "", "")
+    size_x = bounded(size_parts[0], 100.0, 3.0)
+    size_z = bounded(size_parts[2], 6000.0, 300.0)
     tint = _tint_value(values, prefix + "tint", (255, 210, 80, 180))
-    size_y = non_negative("size_y", 100.0, None)
+    size_y_value = _full_float(size_parts[1]) if size_parts[1] is not None else None
+    size_y = (None if size_y_value is None or size_y_value < 0
+              else min(size_y_value, 100.0))
     if size_z <= 0.01 or size_x <= 0.01 or tint[3] <= 0:
         return None
     return TracerSpec(
@@ -1457,7 +1510,7 @@ def parse_tracer(values: dict[str, str], prefix: str = "mesh_tracer_") -> Tracer
                    if prefix + "tail_tint" in values else None),
         size_x=size_x, size_y=size_x if size_y is None else size_y,
         size_z=size_z,
-        pos=(signed("pos_x"), signed("pos_y"), signed("pos_z")),
+        pos=tuple(signed(part) for part in pos_parts),
         head_size=non_negative("head_size", 100.0, None),
         tail_size=non_negative("tail_size", 100.0, None),
         glow_rate=non_negative("glow_rate", 10.0, 0.0),
@@ -1514,8 +1567,20 @@ def parse_decoration(values: dict[str, str]) -> DecorationSpec | None:
             parsed = tuple(max(0, min(clamp, value)) for value in parsed)
         return parsed
 
-    def vector(prefix: str) -> tuple[float, float, float]:
-        return tuple(_stof(values.get(f"{prefix}_{axis}", "0")) for axis in "xyz")
+    def vector(key: str) -> tuple[float, float, float]:
+        parts = split_tuple(values.get(key), 3)
+        if parts is None:
+            return (0.0, 0.0, 0.0)
+        return tuple(_stof(part) for part in parts)
+
+    def fades(key: str) -> tuple[int, int]:
+        parts = split_tuple(values.get(key), 2)
+        if parts is None:
+            return (0, 0)
+        return (_non_negative_int(parts[0]), _non_negative_int(parts[1]))
+
+    fade = fades("decoration_fx_fade_inout")
+    trail_fade = fades("decoration_fx_vp_trail_fade_inout")
 
     random_pos = _stof(values.get("decoration_fx_random_pos", "0"))
     return DecorationSpec(
@@ -1527,16 +1592,16 @@ def parse_decoration(values: dict[str, str]) -> DecorationSpec | None:
         count=int_range("decoration_fx_count", MAX_COUNT),
         duration=_non_negative_int(values.get("decoration_fx_duration"), 1000) or 1000,
         random_pos=random_pos if math.isfinite(random_pos) and random_pos > 0 else 0.0,
-        offset=vector("decoration_fx_offset"),
+        offset=vector("decoration_fx_offset_xyz"),
         scale=_positive_scale(values, "decoration_fx_"),
         spin=_spin_strength(values, "decoration_fx_"),
         tint=_tint_value(values, "decoration_fx_tint", WHITE),
-        fade_in=_non_negative_int(values.get("decoration_fx_fade_in")),
-        fade_out=_non_negative_int(values.get("decoration_fx_fade_out")),
+        fade_in=fade[0],
+        fade_out=fade[1],
         trail_tint=_tint_value(values, "decoration_fx_vp_trail_tint", WHITE),
         trail_scale=_positive_scale(values, "decoration_fx_vp_trail_"),
-        trail_fade_in=_non_negative_int(values.get("decoration_fx_vp_trail_fade_in")),
-        trail_fade_out=_non_negative_int(values.get("decoration_fx_vp_trail_fade_out")))
+        trail_fade_in=trail_fade[0],
+        trail_fade_out=trail_fade[1])
 
 
 def unit_look(values: dict[str, str], *, weapon: bool) -> dict:
@@ -1758,8 +1823,9 @@ def parse_cluster(values: dict[str, str]) -> ClusterSpec | None:
         generations=_non_negative_int(values.get("cluster_generations")),
         horizontal=parse_float_range(values.get("cluster_horizontal_angle", "")),
         vertical=parse_float_range(values.get("cluster_vertical_angle", "")),
-        spread=tuple(max(0.0, _stof(values.get(f"cluster_spread_{axis}", "0")))
-                     for axis in "xy"),
+        spread=tuple(max(0.0, _stof(part))
+                     for part in (split_tuple(values.get("cluster_spread_xy"), 2)
+                                  or ("0", "0"))),
         visual=VisualRef(vp=_non_negative_int(values.get("cluster_vp")),
                          mesh3ds=values.get("cluster_3ds", ""),
                          base_path=values.get("cluster_base", "")),
@@ -1855,8 +1921,9 @@ def parse_laser(values: dict[str, str]) -> LaserSpec | None:
     if values.get("model", "").casefold() != "laser":
         return None
     spacing = _stof(values.get("laser_spacing", "40"))
-    size_x = _stof(values.get("laser_mesh_size_x", "5"))
-    size_y = _full_float(values.get("laser_mesh_size_y", ""))
+    size_parts = split_tuple(values.get("laser_mesh_size_xy"), 2) or ("5", "")
+    size_x = _stof(size_parts[0])
+    size_y = _full_float(size_parts[1])
     return LaserSpec(
         spacing=min(max(spacing, 5.0), 400.0) if math.isfinite(spacing) and spacing > 0 else 40.0,
         mesh=values.get("laser_mesh_path", "") if values.get("laser_mesh_enable") == "1" else "",
@@ -1898,8 +1965,8 @@ def weapon_def_from_text(weapon_id: int, text: str) -> WeaponDef:
 
     scale = _positive_scale(values, "")
     euler = tuple(
-        (lambda v: v if v is not None else 0.0)(_full_float(values.get(f"rotation_{axis}", "")))
-        for axis in "xyz")
+        (lambda v: v if v is not None else 0.0)(_full_float(part))
+        for part in (split_tuple(values.get("rotation_xyz"), 3) or ("0", "0", "0")))
     columns = [visual_transform_point(axis, scale, euler)
                for axis in ((1.0, 0.0, 0.0), (0.0, 1.0, 0.0), (0.0, 0.0, 1.0))]
     transform = tuple(tuple(columns[col][row] for col in range(3)) for row in range(3))

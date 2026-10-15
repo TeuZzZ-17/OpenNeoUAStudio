@@ -97,7 +97,7 @@ def test_dest_fx_and_scale_fx_parsing():
 
 def test_visual_chain_matches_engine_timeline():
     spec = _spec("trigger = destroyed\nmode = visual\nstart_size = 0\n"
-                 "mid_size = 4\nend_size = 2\nduration = 900\nfade_out = 300\n"
+                 "mid_size = 4\nend_size = 2\nduration = 900\nfade_inout = 0_300\n"
                  "vp_model = 1\nvp_model = 2\nvp_model = 3")
     index, size, _alpha, _spin = fx.visual_chain_state(spec, 450)
     assert index == 1 and math.isclose(size, 4.0)
@@ -229,23 +229,21 @@ def test_particles_follow_emitter_window_and_outlive_their_vp():
 LOOK = (
     "new_weapon 9\n"
     "    tint = 70_70_120_200\n"
-    "    spin_z = 2\n"
+    "    spin_xyz = 0_0_2\n"
     "    vp_trail_tint = 50_150_255_130\n"
-    "    vp_trail_scale_x = 2\n"
-    "    vp_trail_scale_z = 0.4\n"
+    "    vp_trail_scale_xyz = 2_1_0.4\n"
     "    mesh_tracer_enable = 1\n"
     "    mesh_tracer_path = Data/Models/3ds/Tracer.3ds\n"
     "    mesh_tracer_tint = 255_180_60_120\n"
-    "    mesh_tracer_size_z = 80\n"
-    "    mesh_tracer_size_x = 1\n"
+    "    mesh_tracer_size_xyz = 1_1_80\n"
     "    decoration_fx_mode = periodic\n"
     "    decoration_fx_vp = 224\n"
     "    decoration_fx_interval = 300_300\n"
     "    decoration_fx_count = 2\n"
     "    decoration_fx_duration = 500\n"
-    "    decoration_fx_offset_z = -40\n"
+    "    decoration_fx_offset_xyz = 0_0_-40\n"
     "    decoration_fx_tint = 255_95_70_200\n"
-    "    decoration_fx_spin_y = 1.5\n"
+    "    decoration_fx_spin_xyz = 0_1.5_0\n"
     "begin_fx\n    trigger = detonate\n    tint = 1_2_3\nend\n"
     "end\n")
 
@@ -281,7 +279,7 @@ def test_tracer_needs_enable_path_and_valid_sizes():
     assert fx.parse_tracer(base) is not None
     assert fx.parse_tracer({**base, "mesh_tracer_enable": "0"}) is None
     assert fx.parse_tracer({"mesh_tracer_enable": "1"}) is None
-    assert fx.parse_tracer({**base, "mesh_tracer_size_z": "0"}) is None
+    assert fx.parse_tracer({**base, "mesh_tracer_size_xyz": "3_3_0"}) is None
     assert fx.parse_tracer({**base, "mesh_tracer_tint": "1_2_3_0"}) is None
     spec = fx.parse_tracer({**base, "mesh_tracer_head_size": "9"})
     assert spec.head_size == 9.0 and spec.tail_size is None
@@ -340,7 +338,7 @@ def test_tracer_trails_behind_the_projectile_and_ends_at_impact():
 def test_tapered_tracer_is_split_and_glow_adds_additive_layers():
     spec = fx.parse_tracer({
         "mesh_tracer_enable": "1", "mesh_tracer_path": "Data/a.3ds",
-        "mesh_tracer_size_x": "4", "mesh_tracer_tail_size": "0",
+        "mesh_tracer_size_xyz": "4_4_300", "mesh_tracer_tail_size": "0",
         "mesh_tracer_glow_rate": "5"})
     unit = fx.UnitPhases(normal=fx.VisualRef(60), weapon=True, tracer=spec)
     pieces = [i for i in _weapon_simulation(unit).items_at(500)
@@ -356,8 +354,8 @@ def test_tapered_tracer_is_split_and_glow_adds_additive_layers():
 def test_persistent_decoration_follows_the_weapon_and_fades_when_it_stops():
     deco = fx.parse_decoration({
         "decoration_fx_vp": "224", "decoration_fx_mode": "persistent",
-        "decoration_fx_offset_z": "-40", "decoration_fx_fade_in": "200",
-        "decoration_fx_fade_out": "400", "decoration_fx_tint": "255_0_0_255"})
+        "decoration_fx_offset_xyz": "0_0_-40", "decoration_fx_fade_inout": "200_400",
+        "decoration_fx_tint": "255_0_0_255"})
     unit = fx.UnitPhases(normal=fx.VisualRef(60), weapon=True, decoration=deco)
     simulation = _weapon_simulation(unit)
     flight = simulation.tracks[0].end
@@ -408,7 +406,7 @@ def test_decoration_particles_use_the_trail_look():
     deco = fx.parse_decoration({
         "decoration_fx_vp": "7", "decoration_fx_mode": "persistent",
         "decoration_fx_vp_trail_tint": "70_220_255_255",
-        "decoration_fx_vp_trail_scale_z": "0.1"})
+        "decoration_fx_vp_trail_scale_xyz": "1_1_0.1"})
     unit = fx.UnitPhases(normal=fx.VisualRef(60), weapon=True, decoration=deco)
     simulation = _weapon_simulation(unit)
     emitter = fx.EmitterSpec(
@@ -585,7 +583,7 @@ def test_tracer_follows_a_spiral_instead_of_a_straight_line():
     motion = fx.parse_motion({"spiral_speed": "2", "spiral_radius": "30"})
     spec = fx.parse_tracer({"mesh_tracer_enable": "1",
                             "mesh_tracer_path": "Data/a.3ds",
-                            "mesh_tracer_size_z": "200"})
+                            "mesh_tracer_size_xyz": "3_3_200"})
     unit = fx.UnitPhases(normal=fx.VisualRef(60), weapon=True, tracer=spec,
                          motion=motion)
     simulation = _weapon_simulation(unit)
@@ -835,8 +833,8 @@ CLUSTER_PARENT = (
     "new_weapon 28\n"
     "    vp_normal = 113\n    vp_dead = 22\n    start_speed = 100\n"
     "    cluster_enable = 1\n    cluster_count = 2_5\n    cluster_weapon_id = 29\n"
-    "    cluster_trigger_time = 600\n    cluster_spread_x = 10\n"
-    "    cluster_spread_y = 10\n    cluster_vp = 112\n    cluster_generations = 1\n"
+    "    cluster_trigger_time = 600\n    cluster_spread_xy = 10_10\n"
+    "    cluster_vp = 112\n    cluster_generations = 1\n"
     "    snd_cluster_sample = sounds/Smex02.wav\n    snd_cluster_pitch = 0\n"
     "    snd_cluster_volume = 120\n"
     "end\n")
@@ -941,8 +939,9 @@ def test_cluster_models_are_loaded_with_the_weapon():
 
 def test_spread_and_angles_shape_the_child_directions():
     weapons = _cluster_weapons(CLUSTER_PARENT.replace(
-        "cluster_spread_x = 10", "cluster_horizontal_angle = 0_360\n    cluster_spread_x = 0")
-        .replace("cluster_spread_y = 10", "cluster_vertical_angle = 30_30\n    cluster_spread_y = 0")
+        "cluster_spread_xy = 10_10",
+        "cluster_horizontal_angle = 0_360\n    cluster_vertical_angle = 30_30\n"
+        "    cluster_spread_xy = 0_0")
         .replace("cluster_count = 2_5", "cluster_count = 4"))
     simulation = _cluster_simulation(weapons)
     units = [i for i in simulation.items_at(700) if i.kind == "unit"]
@@ -1019,7 +1018,7 @@ def test_mesh_laser_is_one_stretched_beam_with_a_glow():
     laser = fx.weapon_def_from_text(125, (
         "new_weapon 125\n    model = laser\n    vp_normal = 60\n"
         "    laser_mesh_enable = 1\n    laser_mesh_path = Data/Models/3ds/laser.3ds\n"
-        "    laser_mesh_size_x = 8\n    laser_mesh_glow_rate = 5\n"
+        "    laser_mesh_size_xy = 8_0\n    laser_mesh_glow_rate = 5\n"
         "    laser_mesh_tint = 10_20_30_200\nend\n"))
     simulation = _weapon_simulation(__import__("dataclasses").replace(laser.unit, altitude=800))
     pieces = [i for i in simulation.items_at(100) if i.kind == "tracer"]

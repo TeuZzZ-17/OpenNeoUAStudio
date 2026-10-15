@@ -21,7 +21,7 @@ _MASK = 0xFFFFFFFF
 
 # Every smoke key of the block. ``smoke`` switches the rest on.
 SMOKE_KEYS = (
-    "smoke", "smoke_chance", "smoke_duration", "smoke_fade_in", "smoke_fade_out",
+    "smoke", "smoke_chance", "smoke_duration", "smoke_fade_inout",
     "smoke_count", "smoke_size", "smoke_growth", "smoke_rise_speed",
     "smoke_puff_time", "smoke_drift", "smoke_spread", "smoke_intensity",
     "smoke_tint",
