@@ -1,0 +1,162 @@
+/* Shared OpenNeoUA Studio controls. Semantic tab and script colors stay separate.
+   Palette entries also style native Qt controls; role tokens use the matching entry.
+   Palette.Window = #1f1f1f
+   Palette.WindowText = #e0e0e0
+   Palette.Base = #2d2d2d
+   Palette.AlternateBase = #383838
+   Palette.Text = #e0e0e0
+   Palette.Button = #2d2d2d
+   Palette.ButtonText = #e0e0e0
+   Palette.Highlight = #006d96
+   Palette.HighlightedText = #ffffff
+   Palette.Mid = #555555
+   Palette.Midlight = #454545
+   Palette.Light = #656565
+   Palette.Dark = #151515
+   Palette.ToolTipBase = #2d2d2d
+   Palette.ToolTipText = #e0e0e0
+   Palette.Disabled.Text = #999999
+   Palette.Disabled.WindowText = #999999
+   Palette.Disabled.ButtonText = #999999
+   Light.Window = #e3e5e7
+   Light.WindowText = #202020
+   Light.Base = #d8dcdf
+   Light.AlternateBase = #cbd1d6
+   Light.Text = #202020
+   Light.Button = #e9edf0
+   Light.ButtonText = #202020
+   Light.Highlight = #006d96
+   Light.HighlightedText = #ffffff
+   Light.Mid = #a0a6ac
+   Light.Midlight = #c5cbd0
+   Light.Light = #ffffff
+   Light.Dark = #707780
+   Light.ToolTipBase = #ffffff
+   Light.ToolTipText = #202020
+   Light.Disabled.Text = #707780
+   Light.Disabled.WindowText = #707780
+   Light.Disabled.ButtonText = #707780
+   LightSyntax.key = #005f9e
+   LightSyntax.function = #8a5900
+   LightSyntax.number = #386600
+   LightSyntax.string = #9a4329
+   LightSyntax.comment = #56655c
+   LightSyntax.line_number = #687078
+   LightSyntax.error = #ffe0e0
+   Tone.Accent = #f1c66d
+   LightTone.Accent = #845800
+*/
+QWidget { background-color: @Window; color: @WindowText; }
+QLabel { background-color: transparent; }
+QLineEdit, QComboBox, QAbstractSpinBox {
+    background-color: @Base; color: @Text;
+}
+QLineEdit:disabled, QComboBox:disabled, QAbstractSpinBox:disabled {
+    color: @Disabled.Text;
+}
+QGroupBox {
+    border: 1px solid @Mid; border-radius: 4px;
+    margin-top: 10px; padding-top: 6px;
+}
+QGroupBox::title { subcontrol-origin: margin; left: 8px; padding: 0 3px; }
+
+QPushButton, QToolButton {
+    background-color: @Base;
+    color: @WindowText;
+    border: 1px solid @Mid;
+    border-radius: 4px;
+    padding: 3px 8px;
+}
+QPushButton:hover, QToolButton:hover {
+    border-color: @Highlight;
+}
+QPushButton:pressed, QToolButton:pressed,
+QPushButton:checked, QToolButton:checked {
+    background-color: @Highlight;
+    color: @HighlightedText;
+}
+QPushButton:disabled, QToolButton:disabled {
+    color: @Disabled.Text;
+    background-color: @Button;
+}
+QFrame#FxCodeDrawer {
+    background-color: @Window;
+    border: 1px solid @Mid;
+    border-radius: 4px;
+}
+QFrame#fxTransport {
+    background-color: @Window;
+    border-top: 1px solid @Mid;
+}
+QPlainTextEdit {
+    background-color: @Base;
+    color: @WindowText;
+    selection-background-color: @Highlight;
+    border: 1px solid @Mid;
+}
+
+/* Identical field spacing, menu feedback and scrollbars in every editor. */
+QLineEdit, QComboBox, QAbstractSpinBox {
+    border: 1px solid @Mid; border-radius: 4px; padding: 4px 8px;
+    selection-background-color: @Highlight; selection-color: @HighlightedText;
+}
+QComboBox { padding-right: 24px; }
+QComboBox QLineEdit { border: none; padding: 0; background: transparent; }
+QMenu { border: 1px solid @Mid; padding: 4px; }
+QMenu::item { padding: 5px 24px 5px 12px; background: transparent; }
+QMenu::item:selected:enabled { background: @Highlight; color: @HighlightedText; }
+QMenu::item:disabled { color: @Disabled.Text; }
+QMenu::separator { height: 1px; background: @Mid; margin: 4px 8px; }
+QMenuBar::item { padding: 5px 10px; background: transparent; }
+QMenuBar::item:selected, QMenuBar::item:pressed { background: @Highlight; color: @HighlightedText; }
+QAbstractItemView { background: @Base; alternate-background-color: @Base;
+    selection-background-color: @Highlight; selection-color: @HighlightedText; }
+QAbstractItemView::item:selected { background: @Highlight; color: @HighlightedText; }
+QAbstractItemView::item:hover:!selected { background: @AlternateBase; }
+QScrollBar:vertical { width: 12px; background: @Base; border: none; margin: 0; }
+QScrollBar:horizontal { height: 12px; background: @Base; border: none; margin: 0; }
+QScrollBar::handle { background: @Mid; border-radius: 5px; }
+QScrollBar::handle:vertical { min-height: 22px; }
+QScrollBar::handle:horizontal { min-width: 22px; }
+QScrollBar::handle:hover { background: @Highlight; }
+QScrollBar::handle:disabled { background: transparent; }
+QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical { height: 0; }
+QScrollBar::add-line:horizontal, QScrollBar::sub-line:horizontal { width: 0; }
+QScrollBar::add-page, QScrollBar::sub-page { background: transparent; }
+
+QComboBox::drop-down { subcontrol-origin: border; subcontrol-position: top right;
+    width: 22px; border: none; }
+QComboBox::down-arrow { image: url("@ArrowDown"); width: 10px; height: 10px; }
+QAbstractSpinBox { padding-right: 24px; }
+QSpinBox::up-button, QDoubleSpinBox::up-button {
+    subcontrol-origin: border; subcontrol-position: top right; width: 22px; border: none; }
+QSpinBox::down-button, QDoubleSpinBox::down-button {
+    subcontrol-origin: border; subcontrol-position: bottom right; width: 22px; border: none; }
+QSpinBox::up-arrow, QDoubleSpinBox::up-arrow { image: url("@ArrowUp"); width: 10px; height: 10px; }
+QSpinBox::down-arrow, QDoubleSpinBox::down-arrow { image: url("@ArrowDown"); width: 10px; height: 10px; }
+QCheckBox::indicator, QAbstractItemView::indicator {
+    width: 16px; height: 16px; border: 1px solid @Mid;
+    border-radius: 3px; background: @Base; }
+QCheckBox::indicator:checked, QAbstractItemView::indicator:checked {
+    background: @Highlight; border-color: @Highlight; image: url("@CheckMark"); }
+QCheckBox::indicator:indeterminate, QAbstractItemView::indicator:indeterminate {
+    background: @Highlight; border-color: @Highlight; image: url("@PartialMark"); }
+QCheckBox::indicator:hover, QAbstractItemView::indicator:hover { border-color: @Highlight; }
+QCheckBox::indicator:disabled, QAbstractItemView::indicator:disabled { background: @Midlight; border-color: @Mid; }
+
+QSlider::groove:horizontal { height: 4px; background: @Midlight; border-radius: 2px; }
+QSlider::handle:horizontal { width: 12px; margin: -5px 0; background: @ButtonText;
+    border: 1px solid @Mid; border-radius: 3px; }
+QSlider::sub-page:horizontal { background: @Highlight; border-radius: 2px; }
+QSlider::groove:vertical { width: 4px; background: @Midlight; border-radius: 2px; }
+QSlider::handle:vertical { height: 12px; margin: 0 -5px; background: @ButtonText;
+    border: 1px solid @Mid; border-radius: 3px; }
+QSlider::handle:disabled { background: @Disabled.Text; }
+QLabel[studioRole="hint"] { color: @Disabled.Text; font-size: 10px; }
+QLabel#mapHoverHeight { padding: 5px; color: @WindowText; background: @Base; border-radius: 4px; }
+
+QWidget#wireframeInfoPanel QLabel#panelTitle { font-size: 16px; font-weight: 600; }
+QWidget#wireframeInfoPanel QLabel#panelSubtitle,
+QWidget#wireframeInfoPanel QLabel#mutedValue { color: @Disabled.Text; }
+QWidget#wireframeInfoPanel QLabel#metricValue { color: @Accent; font-size: 16px; font-weight: 600; }
+QLabel[studioRole="warning"] { color: @Accent; }

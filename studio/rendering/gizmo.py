@@ -9,7 +9,7 @@ import math
 from math import inf
 
 from PySide6.QtCore import QPointF, QRectF, QSize, Qt, QTimer, Signal
-from PySide6.QtGui import QColor, QMouseEvent, QPainter, QPen, QPolygonF
+from PySide6.QtGui import QColor, QMouseEvent, QPainter, QPalette, QPen, QPolygonF
 from PySide6.QtWidgets import QSizePolicy, QToolTip, QWidget
 
 # ----------------------------------------------------------------------------
@@ -523,13 +523,13 @@ class ModelSpaceGizmo(QWidget):
             if self._mode == "rotate":
                 painter.drawEllipse(position, handle.radius + 2,
                                     handle.radius + 2)
-                painter.setPen(QPen(QColor(238, 240, 245), 1.0))
+                painter.setPen(QPen(self.palette().color(QPalette.ColorRole.WindowText), 1.0))
                 self._draw_label(painter, position, dx, dy, label)
             elif self._mode == "scale":
                 r = handle.radius + (3 if active_axes == 3 else 0)
                 painter.drawRect(QRectF(
                     position.x() - r, position.y() - r, r * 2, r * 2))
-                painter.setPen(QPen(QColor(238, 240, 245), 1.0))
+                painter.setPen(QPen(self.palette().color(QPalette.ColorRole.WindowText), 1.0))
                 display = (
                     "All +" if handle.direction == (1, 1, 1) else
                     "All -" if handle.direction == (-1, -1, -1) else label)
@@ -552,7 +552,7 @@ class ModelSpaceGizmo(QWidget):
                             base.y() - side_y * arrow_half_width),
                 ])
                 painter.drawPolygon(arrow)
-                painter.setPen(QPen(QColor(238, 240, 245), 1.0))
+                painter.setPen(QPen(self.palette().color(QPalette.ColorRole.WindowText), 1.0))
                 self._draw_label(painter, position, dx, dy, label)
             elif active_axes == 2:
                 painter.drawEllipse(position, handle.radius, handle.radius)

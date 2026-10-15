@@ -491,7 +491,7 @@ class CollisionViewport(FxPreviewViewportMixin, AssetViewport):
 
         The base viewport already resolves BASE/SKLT transforms, children and
         textures.  Entity Designer only adds one final global axis scale,
-        matching the visual effect of scale_x/y/z while leaving collision
+        matching the visual effect of scale_xyz while leaving collision
         sphere coordinates untouched.
         """
 

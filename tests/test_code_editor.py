@@ -4,7 +4,7 @@ import unittest
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 from PySide6.QtCore import Qt
-from PySide6.QtGui import QTextCursor
+from PySide6.QtGui import QPalette, QTextCursor
 from PySide6.QtTest import QSignalSpy, QTest
 from PySide6.QtWidgets import QApplication, QSizePolicy
 
@@ -163,7 +163,8 @@ class ScriptCodeEditorTests(unittest.TestCase):
 
             # The editor has one look, the Studio theme: no theme selector.
             self.assertFalse(hasattr(widget, "theme_combo"))
-            self.assertIn("background-color: #20242a", widget.editor.styleSheet())
+            self.assertEqual(widget.editor.palette().color(QPalette.ColorRole.Base),
+                             QApplication.instance().palette().color(QPalette.ColorRole.Base))
             self.assertGreater(widget.editor.line_number_area.width(), 0)
             self.assertEqual(widget.sizePolicy().horizontalPolicy(),
                              QSizePolicy.Policy.Expanding)

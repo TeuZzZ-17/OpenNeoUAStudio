@@ -5,7 +5,7 @@ from unittest.mock import patch
 import pytest
 from PySide6.QtCore import Qt, QSignalBlocker
 from PySide6.QtGui import QColor
-from PySide6.QtWidgets import QApplication, QDialog, QLabel, QTreeWidgetItem, QMainWindow
+from PySide6.QtWidgets import QApplication, QDialog, QLabel, QTreeWidgetItem, QMainWindow, QStyle
 from model_editor.window import ModelEditorWindow
 from entity_designer.editor import CollisionEditorWindow
 from entity_designer.script_model import CollisionProject, WEAPON, validate_project
@@ -349,8 +349,9 @@ def test_checker_is_between_resources_and_change_editor(app, key):
         actions = [action.text() for action in window.menuBar().actions()]
         # Change Set belongs to the three set-based tools only.
         with_set = key in ('model_editor', 'snapshot_studio', 'entity_designer')
-        assert actions == ['Resources', 'Vanilla Compatibility Checker',
-                           *(['Change Set'] if with_set else []), 'Change Editor']
+        assert actions == ['Resources', 'Theme',
+                           *(['Change Set'] if with_set else []), 'Change Editor',
+                           'Vanilla Compatibility Checker']
         with patch('studio.ui.shell.CompatibilityDialog.exec', return_value=0) as opened:
             window.studio_compat_action.trigger()
             app.processEvents()
@@ -626,7 +627,7 @@ def test_effect_list_drag_visibility_ctrl_selection_and_space(app):
         QTest.keyClick(tree, Qt.Key.Key_Space)
         assert panel.hidden_items == set()
         assert all('\n' in tree.item(index).text() for index in range(4))
-        assert '#006d96' in tree.styleSheet() and 'color: #ffffff' in tree.styleSheet()
+        assert tree.palette().highlight().color() == app.palette().highlight().color()
     finally:
         panel.close()
 
@@ -768,9 +769,8 @@ def test_fx_options_show_distinct_checked_and_unchecked_indicators(app):
             on = checkbox.grab().toImage()
             checkbox.setChecked(False)
             off = checkbox.grab().toImage()
-            cyan = QColor('#39b8d9').rgb()
-            assert any(on.pixel(x, y) == cyan for x in range(min(20, on.width())) for y in range(on.height()))
-            assert not any(off.pixel(x, y) == cyan for x in range(min(20, off.width())) for y in range(off.height()))
+            # FX uses the same native indicator as the other tabs.
+            assert on != off
     finally:
         panel.close()
 
@@ -833,7 +833,8 @@ def test_effect_row_click_double_click_and_drag_do_not_change_visibility(app):
         QTest.mouseRelease(tree.viewport(), Qt.MouseButton.LeftButton, pos=points[2])
         assert panel.hidden_items == {1}
         rect = tree.checkbox_rect(tree.item(1))
-        assert rect.width() >= 20 and rect.height() >= 20
+        assert rect.width() >= app.style().pixelMetric(QStyle.PixelMetric.PM_IndicatorWidth)
+        assert rect.height() >= app.style().pixelMetric(QStyle.PixelMetric.PM_IndicatorHeight)
         QTest.mouseClick(tree.viewport(), Qt.MouseButton.LeftButton, pos=rect.center())
         assert panel.hidden_items == set()
     finally:

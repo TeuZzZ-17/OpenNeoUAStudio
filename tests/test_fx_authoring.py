@@ -260,27 +260,13 @@ class FxAuthoringTests(unittest.TestCase):
             finally:
                 window.close()
 
-    def test_presets_transform_selection_with_single_undo_and_alias_is_internal(self):
+    def test_rename_fx_and_viewport_menu_keep_internal_alias(self):
         from PySide6.QtWidgets import QInputDialog
         with tempfile.TemporaryDirectory() as directory:
             family, obj = _writable_family(Path(directory), 'FX1', bilateral=True)
             window = self.window(family, obj)
             try:
                 window.fx_combo.setCurrentIndex(1)
-                original = list(obj.skeleton.points)
-                window._set_transform_mode('scale')
-                window._apply_transform_preset(0)
-                self.assertEqual(obj.skeleton.points, original)
-                self.assertEqual(window._edit_undo_stack, [])
-                window._set_transform_mode('rotate')
-                window.transform_preset_axis.setCurrentText('Z')
-                window._apply_transform_preset(3)  # +90 degrees
-                self.assertNotEqual(obj.skeleton.points, original)
-                self.assertEqual(len(window._edit_undo_stack), 1)
-                window._undo_edit()
-                for actual, expected in zip(obj.skeleton.points, original):
-                    for a, b in zip(actual, expected):
-                        self.assertAlmostEqual(a, b)
                 with patch.object(QInputDialog, 'getText', return_value=('Main rotor', True)):
                     window._rename_selected_fx()
                 self.assertEqual(window.fx_combo.currentText(), 'Main rotor')

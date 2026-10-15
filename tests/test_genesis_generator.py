@@ -108,15 +108,15 @@ def app():
     return QApplication.instance() or QApplication([])
 
 
-def test_button_tracks_model_and_opens_same_wireframe_command(app):
+def test_action_tracks_model_and_opens_wireframe_command(app):
     window = ModelEditorWindow()
     try:
-        assert not window.generate_wireframe_button.isEnabled()
+        assert not window.generate_wireframe_action.isEnabled()
         window.viewport._faces.append(object())
         window._sync_generator_actions()
-        assert window.generate_wireframe_button.isEnabled()
+        assert window.generate_wireframe_action.isEnabled()
         with patch("model_editor.wireframe_dialog.WireframeGeneratorDialog") as dialog:
-            window.generate_wireframe_button.click()
+            window.generate_wireframe_action.trigger()
             dialog.assert_called_once_with(window.viewport, window)
     finally:
         window.close()
@@ -153,7 +153,6 @@ def test_viewport_menu_reuses_generator_actions_and_labels_without_ellipsis(app)
         assert window.generate_wireframe_action in actions
         assert window.generate_genesis_action in actions
         assert window.generate_wireframe_action.text() == "Generate Wireframe"
-        assert window.generate_wireframe_button.text() == "Generate Wireframe"
         assert not window.generate_wireframe_action.isEnabled()
         assert not window.generate_genesis_action.isEnabled()
         window.viewport._faces.append(object())

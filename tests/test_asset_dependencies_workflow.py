@@ -401,8 +401,11 @@ class AssetDependenciesWorkflowTests(unittest.TestCase):
             highlighted = window.texture_list.item(0).background().color()
             self.assertGreater(highlighted.green(), highlighted.red())
             self.assertEqual(
-                window.texture_list.item(0).foreground().color().name(),
-                "#eeeeee")
+                window.texture_list.item(0).background().color().name(),
+                "#31483a")
+            self.assertEqual(
+                window.texture_list.item(0).foreground().style(),
+                Qt.BrushStyle.NoBrush)
             self.assertEqual(
                 window.texture_list.horizontalScrollBarPolicy(),
                 Qt.ScrollBarPolicy.ScrollBarAlwaysOff)

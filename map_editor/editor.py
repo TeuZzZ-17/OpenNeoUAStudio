@@ -27,6 +27,8 @@ def create_window(argv=None, parent=None):
     if app is None:
         app = QApplication(app_args)
     _active_app = app
+    from studio.ui.style import apply_studio_style
+    apply_studio_style()
 
     install = bootstrap.installation() or load_remembered()
     if install is None:

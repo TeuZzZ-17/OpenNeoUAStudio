@@ -8,7 +8,9 @@ import math
 from typing import Hashable, Iterable
 
 from PySide6.QtCore import QPoint, QPointF, QRectF, Qt, Signal
-from PySide6.QtGui import QColor, QImage, QPainter, QPen, QPolygonF
+from PySide6.QtGui import QColor, QImage, QPainter, QPalette, QPen, QPolygonF
+
+from PySide6.QtWidgets import QApplication
 
 from studio.rendering.gpu import AcceleratedWidget
 
@@ -786,7 +788,7 @@ class UVEditorWidget(AcceleratedWidget):
         return du, dv
 
     def _paint_viewport(self, painter: QPainter) -> None:
-        painter.fillRect(self.rect(), QColor(30, 32, 38))
+        painter.fillRect(self.rect(), QApplication.instance().palette().color(QPalette.ColorRole.Base))
         ox, oy, size = self._canvas_rect()
         cell = size / 16
         for row in range(16):
@@ -795,7 +797,8 @@ class UVEditorWidget(AcceleratedWidget):
                 painter.fillRect(
                     int(ox + col * cell), int(oy + row * cell),
                     int(cell) + 1, int(cell) + 1,
-                    QColor(70, 72, 80) if light else QColor(54, 56, 62),
+                    QApplication.instance().palette().color(QPalette.ColorRole.Base if light
+                                         else QPalette.ColorRole.AlternateBase),
                 )
         if self._image is not None and not self._image.isNull():
             painter.drawImage(

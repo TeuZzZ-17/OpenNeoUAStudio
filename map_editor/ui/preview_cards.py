@@ -1,7 +1,7 @@
 """Resource cards with a fitted model, faction accent and readable details."""
 from PySide6.QtCore import QPointF, QRect, QSize, Qt, Signal
-from PySide6.QtGui import QColor, QFont, QPen, QTextLayout, QTextOption
-from PySide6.QtWidgets import (QAbstractItemView, QHBoxLayout, QLabel, QListWidget, QLayout, QScrollArea,
+from PySide6.QtGui import QPalette, QColor, QFont, QPen, QTextLayout, QTextOption
+from PySide6.QtWidgets import (QApplication, QAbstractItemView, QHBoxLayout, QLabel, QListWidget, QLayout, QScrollArea,
                               QPushButton, QStyledItemDelegate, QStyle, QStyleOptionButton)
 from studio.ui.widgets import LIST_BASE, LIST_SELECTED, LIST_HOVER
 
@@ -22,14 +22,15 @@ def actor_scroll_area(panel):
 
 def paint_card_background(painter, card, color, selected, hovered=False):
     """Draw the shared resource card background and selection border."""
+    palette = QApplication.instance().palette()
     if selected:
-        background = QColor(LIST_SELECTED)
+        background = palette.color(QPalette.ColorRole.Highlight)
         painter.setPen(QPen(QColor(242, 247, 255), 2))
     elif hovered:
-        background = QColor(LIST_HOVER)
+        background = palette.color(QPalette.ColorRole.AlternateBase)
         painter.setPen(Qt.PenStyle.NoPen)
     else:
-        background = QColor(LIST_BASE)
+        background = palette.color(QPalette.ColorRole.Base)
         painter.setPen(Qt.PenStyle.NoPen)
     painter.setBrush(background)
     painter.drawRoundedRect(card, 5, 5)
@@ -110,7 +111,7 @@ class ResourceCardDelegate(QStyledItemDelegate):
         painter.setPen(color)
         top = card.center().y() - (title_height + detail_height + 8) // 2
         title_layout.draw(painter, QPointF(left, top))
-        painter.setPen(QColor(195, 195, 195))
+        painter.setPen(option.palette.color(QPalette.ColorRole.HighlightedText if selected else QPalette.ColorRole.Text))
         detail_layout.draw(painter, QPointF(left, top + title_height + 8))
         painter.restore()
 

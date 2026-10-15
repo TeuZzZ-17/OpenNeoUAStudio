@@ -220,6 +220,8 @@ class MirrorGuideOverlay(QWidget):
 class WireframeEditorWindow(QMainWindow):
     def __init__(self) -> None:
         super().__init__()
+        from studio.ui.style import apply_studio_style
+        apply_studio_style()
         self.setWindowTitle(APP_TITLE)
         self.resize(1100, 720)
         self._last_directory = Path.cwd()
@@ -314,38 +316,6 @@ class WireframeEditorWindow(QMainWindow):
         side_panel = QWidget()
         side_panel.setObjectName("wireframeInfoPanel")
         side_panel.setMinimumWidth(250)
-        side_panel.setStyleSheet(
-            """
-            QLabel#panelTitle {
-                color: #f2f4f7;
-                font-size: 16px;
-                font-weight: 600;
-            }
-            QLabel#panelSubtitle, QLabel#mutedValue {
-                color: #98a2ad;
-            }
-            QLabel#metricValue {
-                color: #f1c66d;
-                font-size: 16px;
-                font-weight: 600;
-            }
-            QGroupBox {
-                margin-top: 8px;
-                padding-top: 5px;
-                font-weight: 600;
-            }
-            QGroupBox::title {
-                subcontrol-origin: margin;
-                left: 8px;
-                padding: 0 4px;
-            }
-            QListWidget {
-                border: 1px solid #3a414a;
-                border-radius: 4px;
-                padding: 3px;
-            }
-            """
-        )
         side_layout = QVBoxLayout(side_panel)
         side_layout.setContentsMargins(10, 8, 8, 8)
         side_layout.setSpacing(6)
@@ -411,7 +381,7 @@ class WireframeEditorWindow(QMainWindow):
         selected_elements_layout = QVBoxLayout(selected_elements_box)
         selected_elements_layout.setContentsMargins(8, 6, 8, 8)
         selected_elements_layout.setSpacing(4)
-        self.selected_elements_list.setAlternatingRowColors(True)
+        self.selected_elements_list.setAlternatingRowColors(False)
         from studio.ui.widgets import use_standard_list_style
         use_standard_list_style(self.selected_elements_list)
         self.selected_elements_list.setMinimumHeight(150)
@@ -441,7 +411,7 @@ class WireframeEditorWindow(QMainWindow):
         self.warning_status_label.setTextFormat(Qt.TextFormat.PlainText)
         self.warning_status_label.setWordWrap(True)
         self.warning_status_label.setMaximumHeight(54)
-        self.warning_status_label.setStyleSheet("color: #efb86c;")
+        self.warning_status_label.setProperty("studioRole", "warning")
         self.statusBar().addPermanentWidget(self.warning_status_label, 1)
         self.warning_status_label.hide()
         from studio.rendering.gpu import add_renderer_badge
