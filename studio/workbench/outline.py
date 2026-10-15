@@ -80,6 +80,7 @@ class OutlineCanvas(AcceleratedWidget):
     pointMoved = Signal(int, float, float, bool)
     lineSelected = Signal(int, int)
     pointSelectionRequested = Signal(int, bool)
+    newVertexClicked = Signal()
     pointsMoved = Signal(object, bool)
     lineSelectionRequested = Signal(int, int, bool)
     emptySelectionRequested = Signal()
@@ -484,6 +485,8 @@ class OutlineCanvas(AcceleratedWidget):
                     self._selected_indices = {index}
                     self._selected_edges.clear()
                     self.pointSelectionRequested.emit(index, False)
+                    # Un nuovo vertice scelto con un click si sposta: torna a Move.
+                    self.newVertexClicked.emit()
                 self._selected_index = index
                 self._selected_edge = None
                 self._begin_selection_drag(event.position())
@@ -1070,6 +1073,7 @@ class OutlineEditor(QWidget):
             self.transform_actions[mode] = action
         self.transform_actions["move"].setChecked(True)
         self.canvas.pointSelectionRequested.connect(self.select_point)
+        self.canvas.newVertexClicked.connect(lambda: self.set_transform_mode("move"))
         self.canvas.pointsMoved.connect(self.move_projected_points)
         self.canvas.lineSelectionRequested.connect(self.select_link)
         self.canvas.emptySelectionRequested.connect(self.clear_selection)
@@ -1145,6 +1149,9 @@ class OutlineEditor(QWidget):
     def set_transform_mode(self, mode: str) -> None:
         if mode not in self.transform_actions:
             return
+        # A lone vertex cannot be rotated or scaled, so it can only be moved.
+        if mode != "move" and self.selected_vertex_count == 1 and not self.selected_edge_count:
+            mode = "move"
         if self.canvas._dragging_point:
             self.cancel_operation()
         self.canvas.transform_mode = mode
