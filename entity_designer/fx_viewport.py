@@ -186,15 +186,19 @@ class FxPreviewViewportMixin:
         self._fx_external_cache: dict[str, AssetViewport | None] = {}
         # Palette flash (normclr, invclr) of the whole view.
         self._fx_palette = None
+        # Turn of the view caused by shk_* (radians around X, Y, Z).
+        self._fx_shake = (0.0, 0.0, 0.0)
 
     def set_fx_preview(self, *, active: bool, items=(), owner_by_vp=None,
                        unit_owners=None, boxes=(), time_ms: float = 0.0,
                        show_unit: bool = True, data_root=None,
                        highlight: int | None = None, particles=(),
                        external_loader=None,
-                       weapon_context: bool = False, palette=None) -> None:
+                       weapon_context: bool = False, palette=None,
+                       shake=(0.0, 0.0, 0.0)) -> None:
         self._fx_active = bool(active)
         self._fx_palette = palette if active else None
+        self._fx_shake = tuple(shake) if active else (0.0, 0.0, 0.0)
         self._fx_weapon_context = bool(active and weapon_context)
         if external_loader is not None:
             self._fx_external_loader = external_loader
@@ -562,18 +566,18 @@ class FxPreviewViewportMixin:
         """The FX scene with the palette flash on top."""
 
         if self._fx_palette is None:
-            self._paint_fx_scene(painter)
+            self._paint_shaken_scene(painter)
             return
         canvas = getattr(self, "_gpu_canvas", None)
         if canvas is not None and painter.device() is canvas:
-            self._paint_fx_scene(painter)
+            self._paint_shaken_scene(painter)
             self._fx_apply_gpu_palette(painter, canvas)
             return
         image = QImage(self.size(), QImage.Format.Format_RGBA8888)
         image.fill(QColor(24, 26, 32))
         layer = QPainter(image)
         try:
-            self._paint_fx_scene(layer)
+            self._paint_shaken_scene(layer)
         finally:
             layer.end()
         painter.drawImage(0, 0, apply_palette(image, *self._fx_palette))
@@ -650,6 +654,30 @@ class FxPreviewViewportMixin:
             self._fx_palette_gpu = None
             self._fx_palette_gpu_size = None
         super()._cleanup_gpu()
+
+    def _paint_shaken_scene(self, painter: QPainter) -> None:
+        """The FX scene turned like the engine turns the camera for shk_* effects.
+
+        A small camera turn moves the picture sideways (Y), up and down (X) or
+        rolls it (Z), so the whole view shakes: terrain, models and decals.
+        """
+
+        turn_x, turn_y, turn_z = self._fx_shake
+        if not (turn_x or turn_y or turn_z):
+            self._paint_fx_scene(painter)
+            return
+        rect = QRectF(self.rect())
+        focal = min(rect.width(), rect.height()) * 1.5 * self._zoom
+        painter.fillRect(rect, QColor(24, 26, 32))
+        painter.save()
+        painter.translate(rect.center())
+        painter.rotate(math.degrees(turn_z))
+        painter.translate(turn_y * focal, turn_x * focal)
+        painter.translate(-rect.center())
+        try:
+            self._paint_fx_scene(painter)
+        finally:
+            painter.restore()
 
     def _paint_fx_scene(self, painter: QPainter) -> None:
         target = QRectF(self.rect())

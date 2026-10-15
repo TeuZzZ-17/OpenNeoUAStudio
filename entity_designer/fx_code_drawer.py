@@ -118,6 +118,26 @@ class FxCodeDrawer(QFrame):
         layout.addWidget(self.source_label)
         self.code = ScriptCodeEditor(self)
         layout.addWidget(self.code, 1)
+        # The same controls as the transport bar under the preview.
+        transport = QHBoxLayout()
+        transport.setSpacing(4)
+        self.restart_button = panel.create_mirror_button(self, panel.restart_button)
+        self.play_button = panel.create_play_button(self)
+        self.stop_button = panel.create_mirror_button(self, panel.stop_button)
+        self.loop_button = panel.create_mirror_button(self, panel.loop_button)
+        self.mute_button = panel.create_mirror_button(self, panel.mute_button)
+        self.shake_button = panel.create_mirror_button(self, panel.shake_button)
+        self.pal_button = panel.create_mirror_button(self, panel.pal_button)
+        for control in (self.restart_button, self.play_button, self.stop_button,
+                        self.loop_button, self.mute_button, self.shake_button,
+                        self.pal_button):
+            transport.addWidget(control)
+        transport.addSpacing(10)
+        transport.addWidget(QLabel("Speed"))
+        self.speed_combo = panel.create_speed_combo(self)
+        transport.addWidget(self.speed_combo)
+        transport.addStretch(1)
+        layout.addLayout(transport)
         buttons = QHBoxLayout()
         self.revert_button = QPushButton("Revert Effect")
         self.revert_button.clicked.connect(self._revert)
@@ -128,13 +148,11 @@ class FxCodeDrawer(QFrame):
         self.save_all_button = QPushButton("Save All Effects")
         self.save_all_button.clicked.connect(lambda: self._save(all_effects=True))
         buttons.addWidget(self.save_all_button)
+        # Nothing to save until the effect is edited.
+        self._set_save_enabled(False)
+        self.save_all_button.setEnabled(False)
+        self.revert_button.setEnabled(False)
         buttons.addStretch(1)
-        # Same Play / Pause and speed as the transport bar. The tab closes the editor.
-        buttons.addWidget(QLabel("Speed"))
-        self.speed_combo = panel.create_speed_combo(self)
-        buttons.addWidget(self.speed_combo)
-        self.play_button = panel.create_play_button(self)
-        buttons.addWidget(self.play_button)
         layout.addLayout(buttons)
 
         self.tab = FxDrawerTab(host)
@@ -189,7 +207,7 @@ class FxCodeDrawer(QFrame):
         anchor = self.anchor
         shown = host is not None and anchor.isVisible()
         self.tab.setVisible(shown)
-        self.tab.setEnabled(bool(self.panel.document.items))
+        self.tab.setEnabled(self.panel.has_rows())
         if not shown:
             self.hide()
             return
@@ -211,14 +229,18 @@ class FxCodeDrawer(QFrame):
         if self._expanded:
             self.set_expanded(False)
             return
-        items = self.panel.document.items
-        if not items:
+        panel = self.panel
+        if not panel.has_rows():
             return
-        if not 0 <= self.index < len(items):
-            current = self.panel.effects_list.currentItem()
+        if self.index == -1 or not panel.is_valid_index(self.index):
+            current = panel.effects_list.currentItem()
             row = current.data(Qt.ItemDataRole.UserRole) if current is not None else None
+            first = panel.effects_list.item(0)
             self.index = -1
-            self.load_effect(row if row is not None else 0)
+            if row is None and first is not None:
+                row = first.data(Qt.ItemDataRole.UserRole)
+            if row is not None:
+                self.load_effect(row)
         else:
             self.load_effect(self.index)
 
@@ -227,7 +249,7 @@ class FxCodeDrawer(QFrame):
 
         if not expanded:
             self.timer.stop()
-            if self.index >= 0:
+            if self.index != -1:
                 self._apply()
         self._expanded = expanded
         self.tab.set_open(expanded)
@@ -259,7 +281,7 @@ class FxCodeDrawer(QFrame):
 
     def load_effect(self, index):
         self.timer.stop()
-        if self.index >= 0 and self.index != index:
+        if self.index != -1 and self.index != index:
             self._apply()
         already_open = self.index == index and self._expanded
         self.set_expanded(True)
@@ -269,42 +291,47 @@ class FxCodeDrawer(QFrame):
         self.index = index
         self.panel.effects_view.select_effect(index)
         with QSignalBlocker(self.code):
-            self.code.setPlainText(self.panel.text_session.drafts[index])
+            self.code.setPlainText(self.panel.session_for(index).drafts[index])
         self._apply()
         self.code.editor.setFocus()
 
     def _edited(self, text):
-        if self.index < 0:
+        if self.index == -1:
             return
-        self.panel.text_session.drafts[self.index] = text
+        self.panel.session_for(self.index).drafts[self.index] = text
         self.panel.update_text_status()
         self.timer.start()
 
     def _apply(self):
-        if self.index < 0:
+        if self.index == -1:
             return False
-        session = self.panel.text_session
+        session = self.panel.session_for(self.index)
         try:
             item, issues = session.set_draft(self.index, self.code.toPlainText())
         except ValueError as exc:
             self.code.set_error(f"Preview keeps the last valid version. {exc}")
-            self.save_button.setEnabled(False)
+            self._set_save_enabled(False)
             self._sync_title()
             return False
         self.panel.apply_text_item(self.index, item)
         message = "; ".join(issue.message for issue in issues)
         self.code.set_error(message)
-        self.save_button.setEnabled(not session.source_error and session.is_dirty(self.index))
-        self.save_all_button.setEnabled(not session.source_error and session.dirty)
+        self._set_save_enabled(not session.source_error and session.is_dirty(self.index))
+        self.save_all_button.setEnabled(not session.source_error and self.panel.has_unsaved_text)
         self._sync_title()
         return True
 
+    def _set_save_enabled(self, enabled: bool) -> None:
+        """Both Save buttons (the drawer's and the editor toolbar's) share one state."""
+
+        self.save_button.setEnabled(enabled)
+        self.code.save_button.setEnabled(enabled)
+
     def _sync_title(self):
-        session = self.panel.text_session
+        session = self.panel.session_for(self.index)
         dirty = " *" if session.is_dirty(self.index) else ""
-        self.title_label.setText(f"Effect {self.index + 1}{dirty}")
-        source = (str(session.sources[self.index].path)
-                  if len(session.sources) > self.index else "Preview draft")
+        self.title_label.setText(f"{self.panel.edit_title(self.index)}{dirty}")
+        source = self.panel.edit_source(self.index)
         self.source_label.setText(source + ("\n" + session.source_error if session.source_error else ""))
         self.revert_button.setEnabled(session.is_dirty(self.index))
 
@@ -313,23 +340,22 @@ class FxCodeDrawer(QFrame):
         if not self._apply():
             return False
         try:
-            paths = self.panel.text_session.save(
-                range(len(self.panel.document.items)) if all_effects else [self.index])
+            if not self.panel.save_rows(None if all_effects else [self.index]):
+                return False
         except (OSError, ValueError, RuntimeError, UnicodeError) as exc:
             QMessageBox.warning(self, "Effect was not saved", str(exc))
             return False
-        self.panel.sourceSaved.emit(paths)
         self.panel.update_text_status()
         self._apply()
         return True
 
     def _revert(self):
         self.timer.stop()
-        session = self.panel.text_session
+        session = self.panel.session_for(self.index)
         item = session.revert(self.index)
         with QSignalBlocker(self.code):
             self.code.setPlainText(session.drafts[self.index])
         self.panel.apply_text_item(self.index, item)
         self._sync_title()
         self.code.set_error("")
-        self.save_button.setEnabled(False)
+        self._set_save_enabled(False)

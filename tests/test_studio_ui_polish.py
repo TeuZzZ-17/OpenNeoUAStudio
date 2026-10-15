@@ -713,8 +713,10 @@ def test_fx_auto_reload_handles_atomic_script_save_and_texture_update(app, tmp_p
     image = QImage(8, 8, QImage.Format.Format_ARGB32)
     image.fill(QColor('red'))
     assert image.save(str(texture))
-    text = UNIT.replace('    dest_fx = death_40_0_-20_0',
-        'begin_fx\ntrigger = destroyed\nmode = ground_decal\ntexture = Data/Textures/impact.png\nsize = 100\nduration = 1000\nend\n    dest_fx = death_40_0_-20_0')
+    # The decal comes from a reusable new_decal profile linked by ground_decal_id.
+    text = UNIT.replace('    name = Weasel\n', '    name = Weasel\n    ground_decal_id = 3\n') + (
+        'new_decal 3\n    texture = Data/Textures/impact.png\n    size_by_model_% = 100\n'
+        '    duration = 1000\nend\n')
     script = script_dir / 'Vehicles.cfg'
     script.write_text(text, encoding='utf-8')
     window = CollisionEditorWindow()
@@ -733,7 +735,8 @@ def test_fx_auto_reload_handles_atomic_script_save_and_texture_update(app, tmp_p
         assert not any(hasattr(panel, name) for name in
                        ('reload_button', 'auto_reload', 'reroll_button', 'fit_button'))
         panel.seek(100.)
-        panel.effects_list.item(0).setCheckState(Qt.CheckState.Unchecked)
+        # Model-state rows lead the list: the first effect is the row after them.
+        panel.effects_list.item(len(panel.state_session.originals)).setCheckState(Qt.CheckState.Unchecked)
         updated = text.replace('duration   = 800', 'duration   = 1600')
         replacement = script.with_suffix('.tmp')
         replacement.write_text(updated, encoding='utf-8')
@@ -764,7 +767,7 @@ def test_fx_options_show_distinct_checked_and_unchecked_indicators(app):
     app.processEvents()
     try:
         assert isinstance(panel.effects_list.itemDelegate(), FxEffectDelegate)
-        for checkbox in (panel.show_unit, panel.follow_unit):
+        for checkbox in (panel.follow_unit,):
             checkbox.setChecked(True)
             on = checkbox.grab().toImage()
             checkbox.setChecked(False)
