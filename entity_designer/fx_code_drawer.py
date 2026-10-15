@@ -65,14 +65,14 @@ class FxDrawerTab(QAbstractButton):
         path.lineTo(rect.right(), rect.bottom())
         path.closeSubpath()
         if not self.isEnabled():
-            fill = QColor("#2a303a")
+            fill = self.palette().color(QPalette.ColorGroup.Disabled, QPalette.ColorRole.Button)
         elif self.isDown():
-            fill = QColor("#2f3744")
+            fill = self.palette().color(QPalette.ColorRole.Highlight)
         elif self.underMouse():
-            fill = QColor("#4a5568")
+            fill = self.palette().color(QPalette.ColorRole.Midlight)
         else:
-            fill = QColor("#3a4352")
-        painter.setPen(QPen(QColor("#5a6678"), 1.0))
+            fill = self.palette().color(QPalette.ColorRole.Button)
+        painter.setPen(QPen(self.palette().color(QPalette.ColorRole.Mid), 1.0))
         painter.setBrush(fill)
         painter.drawPath(path)
         # The arrow is centred on the part of the tab that sticks out.
@@ -85,7 +85,7 @@ class FxDrawerTab(QAbstractButton):
         arrow.lineTo(center_x - 4.0 * direction, center_y + 7.0)
         arrow.closeSubpath()
         painter.setPen(Qt.PenStyle.NoPen)
-        painter.setBrush(QColor("#eef0f4") if self.isEnabled() else QColor("#6b7380"))
+        painter.setBrush(self.palette().color(QPalette.ColorRole.ButtonText))
         painter.drawPath(arrow)
         painter.end()
 
@@ -107,10 +107,6 @@ class FxCodeDrawer(QFrame):
         self._sync_timer.timeout.connect(self._sync)
         self.setObjectName("FxCodeDrawer")
         self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
-        window_color = host.palette().color(QPalette.ColorRole.Window).name()
-        self.setStyleSheet(
-            f"#FxCodeDrawer {{ background: {window_color}; border: 1px solid #4a5361;"
-            " border-radius: 6px; }")
         layout = QVBoxLayout(self)
         layout.setContentsMargins(8, 8, 8, 8)
         layout.setSpacing(4)

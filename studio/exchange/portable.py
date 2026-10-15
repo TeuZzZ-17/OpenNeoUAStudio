@@ -539,6 +539,10 @@ class AssetResolver:
                 exact = [
                     match for match in root_matches
                     if match.name.casefold() == file_name.casefold()]
+                # A file beside the BASE belongs to the family; same-named
+                # files in sub-folders (e.g. other exported families sharing
+                # the destination folder) must not make it ambiguous.
+                beside_base = [match for match in exact if match.parent == root]
                 if len(root_matches) == 1 or len(exact) == 1:
                     result.status = "found"
                     result.path = (exact or root_matches)[0]
@@ -549,6 +553,14 @@ class AssetResolver:
                         if len(exact) == 1 else
                         "unique filename or shared extension alias in "
                         "highest-priority root")
+                elif len(beside_base) == 1:
+                    result.status = "found"
+                    result.path = beside_base[0]
+                    result.source = "filesystem"
+                    result.source_root = root
+                    result.resolution_rule = (
+                        "unique exact filename beside the BASE; same-named "
+                        "files in sub-folders are ignored")
                 else:
                     result.status = "ambiguous"
                     result.path = None

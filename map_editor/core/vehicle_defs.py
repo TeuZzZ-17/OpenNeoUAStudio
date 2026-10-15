@@ -41,6 +41,18 @@ def _script_float(value: str, default: float = 0.0) -> float:
         return default
 
 
+def _script_tuple(value: str, default: tuple) -> tuple:
+    """Read an OpenNeoUA compact ``x_y_z`` value; a malformed one keeps the default."""
+    parts = value.strip().split()
+    pieces = parts[0].split('_') if parts else []
+    if len(pieces) != len(default):
+        return default
+    try:
+        return tuple(float(piece) for piece in pieces)
+    except ValueError:
+        return default
+
+
 @dataclass
 class VehicleVisual:
     vp_normal: int = 0
@@ -132,14 +144,18 @@ def parse_vehicle_text(text: str, result=None):
                     if key in ('unit_gun_type', 'robo_gun_type'):
                         vehicle = _script_int(value) & 0xFF
                         mount.vehicle = vehicle
-                    elif key.startswith(('unit_gun_pos_', 'robo_gun_pos_')):
+                    elif key == 'unit_gun_pos_xyz':
+                        mount.pos = _script_tuple(value, mount.pos)
+                    elif key == 'unit_gun_dir_xyz':
+                        mount.direction = _script_tuple(value, mount.direction)
+                    elif key.startswith('robo_gun_pos_'):
                         axis = key[-1]
                         if axis in 'xyz':
                             pos = list(mount.pos)
                             pos['xyz'.index(axis)] = _script_float(
                                 value, pos['xyz'.index(axis)])
                             mount.pos = tuple(pos)
-                    elif key.startswith(('unit_gun_dir_', 'robo_gun_dir_')):
+                    elif key.startswith('robo_gun_dir_'):
                         axis = key[-1]
                         if axis in 'xyz':
                             direction = list(mount.direction)

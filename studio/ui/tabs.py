@@ -6,8 +6,9 @@ from __future__ import annotations
 from pathlib import Path
 
 from PySide6.QtCore import QEvent, QObject, QRect, QSignalBlocker, Qt, QTimer, Signal
-from PySide6.QtGui import QColor, QPainter
+from PySide6.QtGui import QColor, QPainter, QPalette
 from PySide6.QtWidgets import (
+    QApplication,
     QGridLayout,
     QPushButton,
     QSizePolicy,
@@ -57,19 +58,26 @@ _REFRESH_MS = 400
 def palette_button_style(color: tuple[int, int, int]) -> str:
     """Style of one palette tab button (shared with the Map Editor)."""
 
+    light = QApplication.instance().property("studioTheme") == "light"
     red, green, blue = color
+    if light:
+        red, green, blue = (int(channel * 0.55) for channel in color)
+    palette = QApplication.instance().palette()
+    background = palette.color(QPalette.ColorRole.Button).name()
+    hover = palette.color(QPalette.ColorRole.AlternateBase).name()
+    checked_text = palette.color(QPalette.ColorRole.WindowText).name() if light else "#ffffff"
     return (
         "QPushButton {"
         f"color: rgb({red}, {green}, {blue});"
-        "background-color: #252525;"
+        f"background-color: {background};"
         f"border: 1px solid rgba({red}, {green}, {blue}, 105);"
         f"border-bottom: 2px solid rgba({red}, {green}, {blue}, 150);"
         "border-radius: 5px; padding: 4px 2px;"
         "}"
-        "QPushButton:hover { background-color: #303030; }"
+        f"QPushButton:hover {{ background-color: {hover}; }}"
         "QPushButton:checked {"
         f"background-color: rgba({red}, {green}, {blue}, 85);"
-        "color: #ffffff; padding: 3px 1px;"
+        f"color: {checked_text}; padding: 3px 1px;"
         f"border: 2px solid rgb({red}, {green}, {blue});"
         f"border-bottom: 3px solid rgb({red}, {green}, {blue});"
         "}"
@@ -92,12 +100,16 @@ class _PaletteButton(QPushButton):
 
     def __init__(self, text: str, color, marker: QColor | None, parent=None):
         super().__init__(text, parent)
+        self._tab_color = color
         self.marker = marker
         self.setCheckable(True)
         self.setMinimumWidth(0)
         self.setFixedHeight(_BUTTON_HEIGHT)
         self.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Fixed)
         self.setStyleSheet(palette_button_style(color))
+
+    def refresh_studio_theme(self) -> None:
+        self.setStyleSheet(palette_button_style(self._tab_color))
 
     def paintEvent(self, event) -> None:  # noqa: N802
         super().paintEvent(event)
@@ -213,6 +225,9 @@ class PaletteTabStrip(QWidget):
         self._leaves = leaves
         for button in self._buttons:
             self._grid.removeWidget(button)
+            # deleteLater() is deferred: hide now so the old button is never
+            # painted over the new one.
+            button.hide()
             button.deleteLater()
         self._buttons = []
         for position, leaf in enumerate(leaves):

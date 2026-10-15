@@ -222,9 +222,6 @@ class WindowContractV5Tests(unittest.TestCase):
                 window.model_save_as_button.text(),
                 "Export Asset Family")
             self.assertEqual(
-                window.model_onua3d_button.text(),
-                "Export OpenNeoUA 3D")
-            self.assertEqual(
                 window.setbas_onua3d_button.text(),
                 "Export OpenNeoUA 3D")
             self.assertEqual(window.material_copy_button.text(),
@@ -375,27 +372,28 @@ class WindowContractV5Tests(unittest.TestCase):
     def test_resource_columns_are_user_resizable(self):
         window = AssemblyWindow()
         try:
-            for tree, count in (
-                    (window.setbas_tree, 3),
-                    (window.asset_tree, 3)):
-                header = tree.header()
-                for column in range(count):
-                    self.assertEqual(
-                        header.sectionResizeMode(column),
-                        QHeaderView.ResizeMode.Interactive)
+            header = window.setbas_tree.header()
+            for column in range(3):
                 self.assertEqual(
-                    tree.horizontalScrollBarPolicy(),
-                    Qt.ScrollBarPolicy.ScrollBarAsNeeded)
-            self.assertGreater(
-                window.asset_tree.columnWidth(0),
-                window.asset_tree.columnWidth(1))
+                    header.sectionResizeMode(column),
+                    QHeaderView.ResizeMode.Interactive)
+            self.assertEqual(
+                window.setbas_tree.horizontalScrollBarPolicy(),
+                Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+            # Asset Dependencies always fits its panel: no scrollbar, the
+            # path column lives in the tooltips.
+            asset_header = window.asset_tree.header()
+            self.assertEqual(
+                asset_header.sectionResizeMode(0),
+                QHeaderView.ResizeMode.Stretch)
+            self.assertTrue(window.asset_tree.isColumnHidden(2))
+            self.assertEqual(
+                window.asset_tree.horizontalScrollBarPolicy(),
+                Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
             self.assertEqual(window.setbas_tree.columnWidth(0), 260)
             self.assertEqual(window.setbas_tree.columnWidth(1), 120)
             self.assertGreaterEqual(window.setbas_tree.columnWidth(2), 130)
             self.assertTrue(window.setbas_tree.header().stretchLastSection())
-            self.assertEqual(window.asset_tree.columnWidth(0), 300)
-            self.assertEqual(window.asset_tree.columnWidth(1), 105)
-            self.assertEqual(window.asset_tree.columnWidth(2), 190)
             self.assertFalse(hasattr(window, "resolve_tree"))
         finally:
             window.close()

@@ -28,7 +28,11 @@ def _document(text):
 
 @pytest.fixture(scope="module")
 def app():
-    return QApplication.instance() or QApplication([])
+    instance = QApplication.instance() or QApplication([])
+    yield instance
+    # QTest shortcuts must not leave Ctrl pressed for the next test module.
+    receiver = QWidget()
+    QTest.keyRelease(receiver, Qt.Key.Key_Control)
 
 
 def _in_wide_window(panel, app):

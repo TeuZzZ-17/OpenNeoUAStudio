@@ -46,17 +46,13 @@ class CollisionEditorOverwriteV2Tests(unittest.TestCase):
             "    coll_num = 1\n"
             "\n"
             "    coll_act = 0\n"
-            "    coll_x = 1\n"
-            "    coll_y = 2\n"
-            "    coll_z = 3\n"
+            "    coll_xyz = 1_2_3\n"
             "    coll_radius = 4\n"
             "\n"
             "    job_fightrobo = 9\n"
             "    coll_num = 1\n"
             "    coll_act = 0\n"
-            "    coll_x = 90\n"
-            "    coll_y = 91\n"
-            "    coll_z = 92\n"
+            "    coll_xyz = 90_91_92\n"
             "    coll_radius = 93\n"
             "end\n"
         )
@@ -66,15 +62,11 @@ class CollisionEditorOverwriteV2Tests(unittest.TestCase):
             "    coll_num = 2\n"
             "\n"
             "    coll_act = 0\n"
-            "    coll_x = 10\n"
-            "    coll_y = 20\n"
-            "    coll_z = 30\n"
+            "    coll_xyz = 10_20_30\n"
             "    coll_radius = 40\n"
             "\n"
             "    coll_act = 1\n"
-            "    coll_x = -10\n"
-            "    coll_y = -20\n"
-            "    coll_z = -30\n"
+            "    coll_xyz = -10_-20_-30\n"
             "    coll_radius = 14\n"
             "end\n"
         )
@@ -83,8 +75,8 @@ class CollisionEditorOverwriteV2Tests(unittest.TestCase):
                         updated.index("job_fightrobo = 9"))
         self.assertEqual(updated.count("coll_num ="), 1)
         self.assertEqual(updated.count("coll_act ="), 2)
-        self.assertNotIn("coll_x = 1\n", updated)
-        self.assertNotIn("coll_x = 90", updated)
+        self.assertNotIn("coll_xyz = 1_2_3\n", updated)
+        self.assertNotIn("coll_xyz = 90_91_92", updated)
         self.assertNotIn("Entity Designer disabled", updated)
         self.assertNotIn("\n\n\n", updated)
 
@@ -94,9 +86,7 @@ class CollisionEditorOverwriteV2Tests(unittest.TestCase):
             "    name = Many\n"
             "    coll_num = 1\n"
             "    coll_act = 0\n"
-            "    coll_x = 0\n"
-            "    coll_y = 0\n"
-            "    coll_z = 0\n"
+            "    coll_xyz = 0_0_0\n"
             "    coll_radius = 1\n"
             "    mass = 500\n"
             "end\n"
@@ -158,12 +148,8 @@ class CollisionEditorOverwriteV2Tests(unittest.TestCase):
             "    ; [Tab: Gun Points]\n"
             "    unit_num_guns = 1\n"
             "    unit_act_gun = 0\n"
-            "    unit_gun_pos_x = 1\n"
-            "    unit_gun_pos_y = 2\n"
-            "    unit_gun_pos_z = 3\n"
-            "    unit_gun_dir_x = 0\n"
-            "    unit_gun_dir_y = 0\n"
-            "    unit_gun_dir_z = 1\n"
+            "    unit_gun_pos_xyz = 1_2_3\n"
+            "    unit_gun_dir_xyz = 0_0_1\n"
             "    unit_gun_type = 9\n"
             "end\n"
         )
@@ -202,7 +188,7 @@ class CollisionEditorOverwriteV2Tests(unittest.TestCase):
             "    before = 1\n"
             "    unit_num_guns = 1\n"
             "    unit_act_gun = 0\n"
-            "    unit_gun_pos_x = 1\n"
+            "    unit_gun_pos_xyz = 1_0_0\n"
             "    unit_gun_type = 2\n"
             "    after = 2\n"
             "end\n"
@@ -225,24 +211,20 @@ class CollisionEditorOverwriteV2Tests(unittest.TestCase):
         source = (
             "new_vehicle 7\n"
             "    before = 1\n"
-            "    cockpit_camera_offset_x = 1\n"
-            "    cockpit_camera_offset_y = 2\n"
-            "    cockpit_camera_offset_z = 3\n"
+            "    cockpit_camera_offset_xyz = 1_2_3\n"
             "    after = 2\n"
             "end\n"
         )
         patch = (
             "new_vehicle 7\n"
             "    ; [Tab: Cockpit View]\n"
-            "    cockpit_camera_offset_x = 7\n"
-            "    cockpit_camera_offset_y = 8\n"
-            "    cockpit_camera_offset_z = 9\n"
+            "    cockpit_camera_offset_xyz = 7_8_9\n"
             "end\n"
         )
         updated = _apply(source, patch)
         self.assertLess(updated.index("before = 1"),
-                        updated.index("cockpit_camera_offset_x = 7"))
-        self.assertLess(updated.index("cockpit_camera_offset_z = 9"),
+                        updated.index("cockpit_camera_offset_xyz = 7_8_9"))
+        self.assertLess(updated.index("cockpit_camera_offset_xyz = 7_8_9"),
                         updated.index("after = 2"))
 
     def test_overwrite_is_byte_stable_on_second_application(self):
@@ -253,15 +235,11 @@ class CollisionEditorOverwriteV2Tests(unittest.TestCase):
             "    ; Entity Designer disabled: compound collisions\r\n"
             "    ; coll_num = 1\r\n"
             "    ; coll_act = 0\r\n"
-            "    ; coll_x = 1\r\n"
-            "    ; coll_y = 2\r\n"
-            "    ; coll_z = 3\r\n"
+            "    ; coll_xyz = 1_2_3\r\n"
             "    ; coll_radius = 4\r\n"
             "    coll_num = 1\r\n"
             "    coll_act = 0\r\n"
-            "    coll_x = 5\r\n"
-            "    coll_y = 6\r\n"
-            "    coll_z = 7\r\n"
+            "    coll_xyz = 5_6_7\r\n"
             "    coll_radius = 8\r\n"
             "end\r\n"
         )
@@ -270,9 +248,7 @@ class CollisionEditorOverwriteV2Tests(unittest.TestCase):
             "    ; [Tab: Collision]\n"
             "    coll_num = 1\n"
             "    coll_act = 0\n"
-            "    coll_x = 10\n"
-            "    coll_y = 20\n"
-            "    coll_z = 30\n"
+            "    coll_xyz = 10_20_30\n"
             "    coll_radius = 40\n"
             "end\n"
         )
@@ -287,14 +263,12 @@ class CollisionEditorOverwriteV2Tests(unittest.TestCase):
         patch = (
             "new_vehicle 7\n"
             " ; [Tab: Cockpit View]\n"
-            " cockpit_camera_offset_x = 1\n"
-            " cockpit_camera_offset_y = 2\n"
-            " cockpit_camera_offset_z = 3\n"
+            " cockpit_camera_offset_xyz = 1_2_3\n"
             "end\n"
         )
         updated = _apply(source, patch)
-        self.assertIn("\n cockpit_camera_offset_x = 1\n", updated)
-        self.assertNotIn("\n    cockpit_camera_offset_x", updated)
+        self.assertIn("\n cockpit_camera_offset_xyz = 1_2_3\n", updated)
+        self.assertNotIn("\n    cockpit_camera_offset_xyz", updated)
 
     def test_incomplete_editable_preview_is_rejected(self):
         source = "new_vehicle 7\n    radius = 20\nend\n"
@@ -311,17 +285,13 @@ class CollisionEditorOverwriteV2Tests(unittest.TestCase):
             "new_vehicle 7\n"
             "    coll_num = 1\n"
             "    coll_act = 0\n"
-            "    coll_x = 1\n"
-            "    coll_y = 2\n"
-            "    coll_z = 3\n"
+            "    coll_xyz = 1_2_3\n"
             "    coll_radius = 4\n"
             "end\n\n"
             "new_vehicle 8\n"
             "    coll_num = 1\n"
             "    coll_act = 0\n"
-            "    coll_x = 81\n"
-            "    coll_y = 82\n"
-            "    coll_z = 83\n"
+            "    coll_xyz = 81_82_83\n"
             "    coll_radius = 84\n"
             "end\n"
         )
@@ -330,9 +300,7 @@ class CollisionEditorOverwriteV2Tests(unittest.TestCase):
             "    ; [Tab: Collision]\n"
             "    coll_num = 1\n"
             "    coll_act = 0\n"
-            "    coll_x = 10\n"
-            "    coll_y = 20\n"
-            "    coll_z = 30\n"
+            "    coll_xyz = 10_20_30\n"
             "    coll_radius = 40\n"
             "end\n"
         )
@@ -347,9 +315,7 @@ class CollisionEditorOverwriteV2Tests(unittest.TestCase):
             "    ; Entity Designer disabled: compound collisions\n"
             "    ; coll_num = 1\n"
             "    ; coll_act = 0\n"
-            "    ; coll_x = 1\n"
-            "    ; coll_y = 2\n"
-            "    ; coll_z = 3\n"
+            "    ; coll_xyz = 1_2_3\n"
             "    ; coll_radius = 4\n"
             "end\n"
         )
@@ -358,9 +324,7 @@ class CollisionEditorOverwriteV2Tests(unittest.TestCase):
             "    ; [Tab: Collision]\n"
             "    coll_num = 1\n"
             "    coll_act = 0\n"
-            "    coll_x = 5\n"
-            "    coll_y = 6\n"
-            "    coll_z = 7\n"
+            "    coll_xyz = 5_6_7\n"
             "    coll_radius = 8\n"
             "end\n"
         )

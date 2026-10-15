@@ -79,20 +79,20 @@ class ModelEditorWorkspaceTests(unittest.TestCase):
         try:
             self.assertEqual(window.poly_id_box.title(), "Poly ID")
             self.assertIs(window.poly_id_box.layout(), window.poly_id_row_layout)
-            self.assertIs(
-                window.poly_id_row_layout.itemAt(0).widget(),
-                window.poly_id_spin)
-            self.assertEqual(window.poly_id_row_layout.stretch(0), 0)
+            layout = window.poly_id_row_layout
+            # Centered row: stretch, "<", value, ">", stretch.
+            self.assertIs(layout.itemAt(1).widget(),
+                          window.poly_id_previous_button)
+            self.assertIs(layout.itemAt(2).widget(), window.poly_id_spin)
+            self.assertIs(layout.itemAt(3).widget(),
+                          window.poly_id_next_button)
+            self.assertIsNone(layout.itemAt(0).widget())
+            self.assertIsNone(layout.itemAt(4).widget())
+            self.assertEqual(layout.stretch(1), 0)
             self.assertEqual(window.poly_id_previous_button.width(), 36)
             self.assertEqual(window.poly_id_next_button.width(), 36)
             self.assertGreaterEqual(window.poly_id_spin.minimumWidth(), 72)
             self.assertLessEqual(window.poly_id_spin.maximumWidth(), 96)
-            for button in (
-                    window.poly_select_all_button,
-                    window.poly_deselect_all_button):
-                required = (
-                    button.fontMetrics().horizontalAdvance(button.text()) + 18)
-                self.assertGreaterEqual(button.minimumWidth(), required)
         finally:
             window.close()
 

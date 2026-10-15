@@ -183,16 +183,14 @@ _HEADER_RE = re.compile(
 
 _PARAM_RE = re.compile(
     r"^(?P<indent>\s*)(?P<key>radius|overeof|fire_x|fire_y|fire_z|"
-    r"num_weapons|briefing_size|cockpit_camera_offset_x|cockpit_camera_offset_y|"
-    r"cockpit_camera_offset_z|"
+    r"num_weapons|briefing_size|cockpit_camera_offset_xyz|"
     r"robo_num_guns|robo_act_gun|robo_gun_pos_x|robo_gun_pos_y|"
     r"robo_gun_pos_z|robo_gun_dir_x|robo_gun_dir_y|robo_gun_dir_z|"
     r"robo_gun_type|robo_gun_name|"
-    r"unit_num_guns|unit_act_gun|unit_gun_pos_x|unit_gun_pos_y|"
-    r"unit_gun_pos_z|unit_gun_dir_x|unit_gun_dir_y|unit_gun_dir_z|"
+    r"unit_num_guns|unit_act_gun|unit_gun_pos_xyz|unit_gun_dir_xyz|"
     r"unit_gun_type|unit_gun_name|unit_gun_icon|"
     r"coll_num|coll_act|"
-    r"coll_x|coll_y|coll_z|coll_radius)\s*=\s*(?P<value>[^;#\r\n]+)",
+    r"coll_xyz|coll_radius)\s*=\s*(?P<value>[^;#\r\n]+)",
     re.IGNORECASE,
 )
 
@@ -208,6 +206,31 @@ def _number(value: float) -> str:
     if math.isfinite(value) and abs(value - round(value)) < 1e-9:
         return str(int(round(value)))
     return f"{value:.6f}".rstrip("0").rstrip(".")
+
+
+def _float_tuple(raw: str, count: int, key: str) -> tuple[float, ...]:
+    """Read an OpenNeoUA compact ``a_b_c`` value holding exactly *count* numbers."""
+
+    token = raw.strip().split(maxsplit=1)[0] if raw.strip() else ""
+    parts = token.split("_")
+    if len(parts) != count or not all(parts):
+        raise CollisionScriptError(
+            f"Valore non valido per {key}: {raw} "
+            f"(attesi {count} numeri separati da _).")
+    try:
+        values = tuple(float(part) for part in parts)
+    except ValueError as exc:
+        raise CollisionScriptError(
+            f"Valore non numerico per {key}: {raw}") from exc
+    if not all(math.isfinite(value) for value in values):
+        raise CollisionScriptError(f"Valore non finito per {key}: {raw}")
+    return values
+
+
+def _tuple_text(*values: float) -> str:
+    """Render numbers as an OpenNeoUA compact ``a_b_c`` value."""
+
+    return "_".join(_number(value) for value in values)
 
 
 def _data_root_for_path(*paths: str | Path | None) -> Path | None:
@@ -507,7 +530,7 @@ class CollisionProject:
     source_model: str = ""
     source_base: str = ""
     target_category: str = VEHICLE
-    # Visual-only preview of OpenNeoUA's scale_x/y/z. These values never
+    # Visual-only preview of OpenNeoUA's scale_xyz. These values never
     # modify the source model and are never emitted as collision parameters.
     model_scale_x: float = 1.0
     model_scale_y: float = 1.0
@@ -808,8 +831,8 @@ def script_model_references(text: str) -> list[VehicleModelReference]:
     excluded because resolving inherited visual prototypes would require the
     full include chain rather than one source file. ``vp_wait`` is retained so
     Cockpit View can preview the same stationary model used by the runtime.
-    OpenNeoUA's ``scale_x/y/z`` drive the preview scale; the older
-    ``vp_scale_x/y/z`` names are accepted only as a compatibility fallback.
+    OpenNeoUA's ``scale_xyz`` drives the preview scale and ``rotation_xyz``
+    the preview rotation.
     """
 
     lines = text.splitlines()
@@ -821,15 +844,10 @@ def script_model_references(text: str) -> list[VehicleModelReference]:
         values = {
             "vp_normal": None,
             "vp_wait": None,
-            "scale_x": None,
-            "scale_y": None,
-            "scale_z": None,
-            "vp_scale_x": None,
-            "vp_scale_y": None,
-            "vp_scale_z": None,
-            "rotation_x": None,
-            "rotation_y": None,
-            "rotation_z": None,
+        }
+        tuples: dict[str, tuple[float, ...] | None] = {
+            "scale_xyz": None,
+            "rotation_xyz": None,
         }
         visual_paths = {
             "base_normal": "",
@@ -839,6 +857,13 @@ def script_model_references(text: str) -> list[VehicleModelReference]:
         for _line, key, raw, _indent in _generic_parameter_rows(lines, block):
             if key in visual_paths:
                 visual_paths[key] = raw
+            elif key in tuples:
+                try:
+                    tuples[key] = _float_tuple(raw, 3, key)
+                except CollisionScriptError as exc:
+                    raise CollisionScriptError(
+                        f"Invalid {key} in {block.kind} "
+                        f"{block.object_id}: {raw}") from exc
             elif key in values:
                 try:
                     values[key] = float(raw)
@@ -872,29 +897,12 @@ def script_model_references(text: str) -> list[VehicleModelReference]:
                 raise CollisionScriptError(
                     f"Invalid vp_wait in {block.kind} "
                     f"{block.object_id}: {raw_wait}")
-        scales = tuple(
-            float(values[f"scale_{axis}"])
-            if values[f"scale_{axis}"] is not None
-            else (
-                float(values[f"vp_scale_{axis}"])
-                if values[f"vp_scale_{axis}"] is not None
-                else 1.0
-            )
-            for axis in ("x", "y", "z")
-        )
+        scales = tuples["scale_xyz"] or (1.0, 1.0, 1.0)
         if not all(math.isfinite(value) and value >= 0.0 for value in scales):
             raise CollisionScriptError(
-                f"Invalid scale_x/y/z in {block.kind} "
+                f"Invalid scale_xyz in {block.kind} "
                 f"{block.object_id}: {scales}")
-        rotations = tuple(
-            float(values[f"rotation_{axis}"])
-            if values[f"rotation_{axis}"] is not None else 0.0
-            for axis in ("x", "y", "z")
-        )
-        if not all(math.isfinite(value) for value in rotations):
-            raise CollisionScriptError(
-                f"Invalid rotation_x/y/z in {block.kind} "
-                f"{block.object_id}: {rotations}")
+        rotations = tuples["rotation_xyz"] or (0.0, 0.0, 0.0)
         shape_path = visual_paths["collision_shape"].strip()
         if shape_path.casefold() == "0":
             shape_path = ""
@@ -993,11 +1001,16 @@ def import_collision_block(
     warnings: list[str] = []
 
     collision_keys = {
-        "radius", "coll_num", "coll_act",
-        "coll_x", "coll_y", "coll_z", "coll_radius",
+        "radius", "coll_num", "coll_act", "coll_xyz", "coll_radius",
     }
     for _line, key, raw, _indent in rows:
         if key not in collision_keys:
+            continue
+        if key == "coll_xyz":
+            if current is None:
+                raise CollisionScriptError(
+                    f"{key} compare prima del primo coll_act.")
+            current.x, current.y, current.z = _float_tuple(raw, 3, key)
             continue
         try:
             value = float(raw)
@@ -1018,12 +1031,8 @@ def import_collision_block(
             if current is None:
                 raise CollisionScriptError(
                     f"{key} compare prima del primo coll_act.")
-            attr = {
-                "coll_x": "x", "coll_y": "y", "coll_z": "z",
-                "coll_radius": "radius",
-            }.get(key)
-            if attr is not None:
-                setattr(current, attr, value)
+            if key == "coll_radius":
+                current.radius = value
 
     if expected is not None and expected != len(compounds):
         warnings.append(
@@ -1248,32 +1257,15 @@ def import_cockpit_camera_block(
         raise CollisionScriptError(
             f"Parsing incompleto: manca end per {block.kind} "
             f"{block.object_id}.")
-    values = {
-        "cockpit_camera_offset_x": 0.0,
-        "cockpit_camera_offset_y": 0.0,
-        "cockpit_camera_offset_z": 0.0,
-    }
+    offset = (0.0, 0.0, 0.0)
     enabled = False
     for _line, key, raw, _indent in _parameter_rows(
             text.splitlines(), block):
-        if key not in values:
+        if key != "cockpit_camera_offset_xyz":
             continue
-        try:
-            value = float(raw)
-        except ValueError as exc:
-            raise CollisionScriptError(
-                f"Valore non numerico per {key}: {raw}") from exc
-        if not math.isfinite(value):
-            raise CollisionScriptError(
-                f"Valore non finito per {key}: {raw}")
-        values[key] = value
+        offset = _float_tuple(raw, 3, key)
         enabled = True
-    return (
-        enabled,
-        values["cockpit_camera_offset_x"],
-        values["cockpit_camera_offset_y"],
-        values["cockpit_camera_offset_z"],
-    )
+    return (enabled, *offset)
 
 
 _GUN_POINT_KEYS = {
@@ -1282,8 +1274,7 @@ _GUN_POINT_KEYS = {
     "robo_gun_dir_x", "robo_gun_dir_y", "robo_gun_dir_z",
     "robo_gun_type", "robo_gun_name",
     "unit_num_guns", "unit_act_gun",
-    "unit_gun_pos_x", "unit_gun_pos_y", "unit_gun_pos_z",
-    "unit_gun_dir_x", "unit_gun_dir_y", "unit_gun_dir_z",
+    "unit_gun_pos_xyz", "unit_gun_dir_xyz",
     "unit_gun_type", "unit_gun_name", "unit_gun_icon",
 }
 
@@ -1292,14 +1283,11 @@ _SCRIPT_TAB_KEYS = {
     _SCRIPT_TAB_BRIEFING: {"briefing_size"},
     _SCRIPT_TAB_COLLISION: {
         "radius", "overeof", "coll_num", "coll_act", "collision_shape",
-        "coll_x", "coll_y", "coll_z", "coll_radius",
+        "coll_xyz", "coll_radius",
     },
     _SCRIPT_TAB_FIRE: {"fire_x", "fire_y", "fire_z", "num_weapons"},
     _SCRIPT_TAB_GUN: set(_GUN_POINT_KEYS),
-    _SCRIPT_TAB_COCKPIT: {
-        "cockpit_camera_offset_x", "cockpit_camera_offset_y",
-        "cockpit_camera_offset_z",
-    },
+    _SCRIPT_TAB_COCKPIT: {"cockpit_camera_offset_xyz"},
 }
 
 
@@ -1327,7 +1315,7 @@ _MANAGED_SCRIPT_FAMILIES = (
     _ManagedScriptFamily(
         "OpenNeoUA collision",
         frozenset({
-            "coll_num", "coll_act", "coll_x", "coll_y", "coll_z",
+            "coll_num", "coll_act", "coll_xyz",
             "coll_radius", "collision_shape",
         }),
         frozenset({"compound collisions", "openneoua collision"})),
@@ -1340,10 +1328,7 @@ _MANAGED_SCRIPT_FAMILIES = (
         frozenset({"gun points"})),
     _ManagedScriptFamily(
         "cockpit view",
-        frozenset({
-            "cockpit_camera_offset_x", "cockpit_camera_offset_y",
-            "cockpit_camera_offset_z",
-        }),
+        frozenset({"cockpit_camera_offset_xyz"}),
         frozenset({"cockpit camera offset", "cockpit view"})),
     _ManagedScriptFamily("briefing size", frozenset({"briefing_size"})),
     _ManagedScriptFamily(
@@ -1489,7 +1474,14 @@ def import_gun_points_block(
             # Generic unit_* data is a runtime no-op in this state; avoiding
             # legacy robo_* index -1 also keeps the editor defensive.
             continue
-        if leaf in {
+        if leaf in {"gun_pos_xyz", "gun_dir_xyz"}:
+            # OpenNeoUA unit_* mounts use the compact x_y_z form.
+            values = _float_tuple(raw, 3, key)
+            if leaf == "gun_pos_xyz":
+                point.x, point.y, point.z = values
+            else:
+                point.dir_x, point.dir_y, point.dir_z = values
+        elif leaf in {
                 "gun_pos_x", "gun_pos_y", "gun_pos_z",
                 "gun_dir_x", "gun_dir_y", "gun_dir_z"}:
             try:
@@ -1628,17 +1620,26 @@ def gun_point_data_lines(project: CollisionProject) -> list[str]:
         if scheme == "unit" and default_icon:
             lines.append(f"unit_gun_icon = {default_icon}")
         for index, point in enumerate(points):
-            lines.extend([
-                "",
-                f"{scheme}_act_gun = {index}",
-                f"{scheme}_gun_pos_x = {_number(point.x)}",
-                f"{scheme}_gun_pos_y = {_number(point.y)}",
-                f"{scheme}_gun_pos_z = {_number(point.z)}",
-                f"{scheme}_gun_dir_x = {_number(point.dir_x)}",
-                f"{scheme}_gun_dir_y = {_number(point.dir_y)}",
-                f"{scheme}_gun_dir_z = {_number(point.dir_z)}",
-                f"{scheme}_gun_type = {max(0, min(255, int(point.gun_type)))}",
-            ])
+            lines.extend(["", f"{scheme}_act_gun = {index}"])
+            if scheme == "unit":
+                lines.extend([
+                    f"unit_gun_pos_xyz = "
+                    f"{_tuple_text(point.x, point.y, point.z)}",
+                    f"unit_gun_dir_xyz = "
+                    f"{_tuple_text(point.dir_x, point.dir_y, point.dir_z)}",
+                ])
+            else:
+                # Host Station mounts keep the original separate robo_* keys.
+                lines.extend([
+                    f"{scheme}_gun_pos_x = {_number(point.x)}",
+                    f"{scheme}_gun_pos_y = {_number(point.y)}",
+                    f"{scheme}_gun_pos_z = {_number(point.z)}",
+                    f"{scheme}_gun_dir_x = {_number(point.dir_x)}",
+                    f"{scheme}_gun_dir_y = {_number(point.dir_y)}",
+                    f"{scheme}_gun_dir_z = {_number(point.dir_z)}",
+                ])
+            lines.append(
+                f"{scheme}_gun_type = {max(0, min(255, int(point.gun_type)))}")
             if point.name:
                 lines.append(f"{scheme}_gun_name = {point.name}")
             if scheme == "unit" and point.icon:
@@ -1652,9 +1653,10 @@ def cockpit_camera_data_lines(project: CollisionProject) -> list[str]:
     if project.target_category != VEHICLE or not project.cockpit_camera_enabled:
         return []
     return [
-        f"cockpit_camera_offset_x = {_number(project.cockpit_camera_offset_x)}",
-        f"cockpit_camera_offset_y = {_number(project.cockpit_camera_offset_y)}",
-        f"cockpit_camera_offset_z = {_number(project.cockpit_camera_offset_z)}",
+        "cockpit_camera_offset_xyz = " + _tuple_text(
+            project.cockpit_camera_offset_x,
+            project.cockpit_camera_offset_y,
+            project.cockpit_camera_offset_z),
     ]
 
 
@@ -1693,9 +1695,7 @@ def collision_data_lines(project: CollisionProject) -> list[str]:
             lines.extend([
                 "",
                 f"coll_act = {index}",
-                f"coll_x = {_number(sphere.x)}",
-                f"coll_y = {_number(sphere.y)}",
-                f"coll_z = {_number(sphere.z)}",
+                f"coll_xyz = {_tuple_text(sphere.x, sphere.y, sphere.z)}",
                 f"coll_radius = {_number(sphere.radius)}",
             ])
     return lines
@@ -1809,9 +1809,7 @@ def _collision_tab_data_lines(project: CollisionProject) -> list[str]:
             lines.extend([
                 "",
                 f"coll_act = {index}",
-                f"coll_x = {_number(sphere.x)}",
-                f"coll_y = {_number(sphere.y)}",
-                f"coll_z = {_number(sphere.z)}",
+                f"coll_xyz = {_tuple_text(sphere.x, sphere.y, sphere.z)}",
                 f"coll_radius = {_number(sphere.radius)}",
             ])
     if project.collision_shape_path:
@@ -2336,10 +2334,7 @@ def plan_script_update(
         if row[1] in ("fire_x", "fire_y", "fire_z", "num_weapons")
     ]
     cockpit_rows = [
-        row for row in rows
-        if row[1] in (
-            "cockpit_camera_offset_x", "cockpit_camera_offset_y",
-            "cockpit_camera_offset_z")
+        row for row in rows if row[1] == "cockpit_camera_offset_xyz"
     ]
     gun_rows = [row for row in rows if row[1] in _GUN_POINT_KEYS]
     coll_rows = [row for row in rows if row[1].startswith("coll_")]
@@ -2416,9 +2411,7 @@ def plan_script_update(
             compound_lines.extend([
                 "",
                 f"coll_act = {index}",
-                f"coll_x = {_number(sphere.x)}",
-                f"coll_y = {_number(sphere.y)}",
-                f"coll_z = {_number(sphere.z)}",
+                f"coll_xyz = {_tuple_text(sphere.x, sphere.y, sphere.z)}",
                 f"coll_radius = {_number(sphere.radius)}",
             ])
     replace_group(radius_rows, legacy_lines, "legacy radius")

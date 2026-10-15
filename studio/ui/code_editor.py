@@ -22,6 +22,7 @@ from PySide6.QtGui import (
     QSyntaxHighlighter,
 )
 from PySide6.QtWidgets import (
+    QApplication,
     QCheckBox,
     QHBoxLayout,
     QLabel,
@@ -238,7 +239,7 @@ class ScriptCodeEditor(QWidget):
         super().__init__(parent)
         self.setSizePolicy(QSizePolicy.Policy.Expanding,
                            QSizePolicy.Policy.Expanding)
-        self._theme = _THEME
+        self._theme = dict(_THEME)
         self._zoom = 10
         self._error_message = ""
         self._error_line: int | None = None
@@ -368,24 +369,27 @@ class ScriptCodeEditor(QWidget):
         self.set_error("")
 
     def _apply_theme(self) -> None:
-        palette = self.editor.palette()
-        palette.setColor(QPalette.ColorRole.Base,
-                         QColor(self._theme["background"]))
-        palette.setColor(QPalette.ColorRole.Text,
-                         QColor(self._theme["foreground"]))
-        palette.setColor(QPalette.ColorRole.Highlight,
-                         QColor(self._theme["selection"]))
-        palette.setColor(QPalette.ColorRole.HighlightedText,
-                         QColor(self._theme["foreground"]))
+        self._theme = dict(_THEME)
+        self._theme.update(QApplication.instance().property("studioSyntaxColors") or {})
+        self.editor.ensurePolished()
+        palette = QApplication.instance().palette()
+        self._theme.update({
+            "background": palette.color(QPalette.ColorRole.Base).name(),
+            "foreground": palette.color(QPalette.ColorRole.Text).name(),
+            "gutter": palette.color(QPalette.ColorRole.Window).name(),
+            "current_line": palette.color(QPalette.ColorRole.AlternateBase).name(),
+            "selection": palette.color(QPalette.ColorRole.Highlight).name(),
+        })
         self.editor.setPalette(palette)
-        self.editor.setStyleSheet(
-            "QPlainTextEdit { border: 1px solid #555; "
-            f"background-color: {self._theme['background']}; "
-            f"color: {self._theme['foreground']}; "
-            f"selection-background-color: {self._theme['selection']}; }}")
         self.highlighter.set_theme(self._theme)
         self.status_label.setStyleSheet(
             f"color: {self._theme['foreground']};")
+
+    def refresh_studio_theme(self) -> None:
+        """Refresh script colors while preserving text, cursor and undo history."""
+        self._apply_theme()
+        self._update_cursor_state()
+        self.editor.viewport().update()
 
     def _set_tab_stop(self) -> None:
         metrics = QFontMetricsF(self.editor.font())
