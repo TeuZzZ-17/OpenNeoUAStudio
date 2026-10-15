@@ -1,6 +1,6 @@
 """Destruction FX preview: script reading, engine rules and simulation.
 
-The Destruction FX tab previews effects and provides live script-text editing
+The Visuals & FX tab previews effects and provides live script-text editing
 through the same parser. Two effect systems are read:
 
 * OpenNeoUA ``begin_fx ... end`` blocks (Chain FX). Parsing and validation
@@ -35,8 +35,10 @@ CONTEXT_WEAPON = "weapon"
 
 MODE_VISUAL = "visual"
 MODE_PHYSICAL = "physical"
+# Ground decals are not a begin_fx mode: they come from the reusable
+# ``new_decal`` profiles that vehicles/weapons link with ground_decal_id.
 MODE_DECAL = "ground_decal"
-MODES = (MODE_VISUAL, MODE_PHYSICAL, MODE_DECAL)
+MODES = (MODE_VISUAL, MODE_PHYSICAL)
 
 TRIGGERS = {
     CONTEXT_VEHICLE: ("destroyed", "air_destroyed"),
@@ -63,6 +65,14 @@ IMPACT_PREVIEW_MS = 600
 # so the timeline stays usable.
 SMOKE_PREVIEW_MS = 20000.0
 SIMULATION_STEP_MS = 10.0
+# The engine keeps the four strongest shakes; the preview draws a new random
+# turn of the view about 60 times a second.
+MAX_SHAKES = 4
+SHAKE_FRAME_MS = 16.0
+# Most frames a painted preview frame looks back over for the strongest shake.
+SHAKE_SCAN_FRAMES = 12
+# Source id of the profile decal in timeline rows (not an item of the document).
+PROFILE_DECAL_SOURCE = -5
 LEGACY_NESTING_LIMIT = 3
 
 _SOUND_PREFIXES = ("snd_", "pal_", "shk_")  # shk_ is read by the game, never previewed
@@ -259,7 +269,9 @@ def format_range(low: float, high: float) -> str:
 VEHICLE_SOUND_EVENTS = (
     "normal", "fire", "wait", "genesis", "explode", "crashland", "crashvhcl",
     "goingdown", "cockpit", "beamin", "beamout", "build", "airexplode")
-WEAPON_SOUND_EVENTS = ("normal", "launch", "hit")
+# launch_player only has a shake package (shk_launch_player_*): the view shake
+# of the player's own launches.
+WEAPON_SOUND_EVENTS = ("normal", "launch", "hit", "launch_player")
 PHYSICAL_SOUND_EVENTS = ("normal", "goingdown", "explode")
 # Sounds that keep playing while their state lasts (TVhclProto::IsLoopingSnd).
 LOOPING_VEHICLE_SOUNDS = frozenset({
@@ -281,8 +293,26 @@ class ScreenFx:
 
 
 @dataclass(frozen=True)
+class ShakeFx:
+    """``shk_<event>_*``: the whole view shakes while the event plays.
+
+    The strength goes from ``mag0`` to ``mag1`` over ``time`` ms (a looping event
+    holds ``mag0``). Every frame the engine turns the view by random angles
+    ``rnd * strength * pos`` around X, Y and Z (radians). ``radius`` and ``mute``
+    only weaken the shake with the distance from the listener; the preview plays
+    the event at the listener, so they are not applied.
+    """
+
+    slot: int
+    mag0: float = 1.0
+    mag1: float = 0.0
+    time: int = 1000
+    pos: tuple[float, float, float] = (0.2, 0.2, 0.2)
+
+
+@dataclass(frozen=True)
 class SoundSpec:
-    """The ``snd_`` and ``pal_`` packages of one event.
+    """The ``snd_``, ``pal_`` and ``shk_`` packages of one event.
 
     ``sample`` may be empty when the event only flashes the palette. The
     engine plays the sample at (sample rate + pitch), a random whole pitch of
@@ -293,6 +323,7 @@ class SoundSpec:
     volume: int = 0
     pitch: tuple[int, int] = (0, 0)
     palette: ScreenFx | None = None
+    shake: ShakeFx | None = None
 
 
 def _palette_fx(values: dict[str, str], event: str) -> ScreenFx | None:
@@ -305,19 +336,43 @@ def _palette_fx(values: dict[str, str], event: str) -> ScreenFx | None:
         time=script_int(values.get(f"pal_{event}_time")))
 
 
+def _shake_fx(values: dict[str, str], event: str) -> ShakeFx | None:
+    slot = script_int(values.get(f"shk_{event}_slot"))
+    if event == "launch_player":
+        # The player launch shake reads only these four keys; negatives become 0.
+        if slot <= 0:
+            return None
+        time = max(0, script_int(values.get(f"shk_{event}_time"), 1000))
+        mag0 = _stof(values.get(f"shk_{event}_mag0", "1"))
+        mag1 = _stof(values.get(f"shk_{event}_mag1", "0"))
+        return ShakeFx(
+            slot=slot, time=time,
+            mag0=mag0 if math.isfinite(mag0) and mag0 >= 0 else 0.0,
+            mag1=mag1 if math.isfinite(mag1) and mag1 >= 0 else 0.0)
+    if slot == 0:
+        return None
+    return ShakeFx(
+        slot=slot, mag0=_stof(values.get(f"shk_{event}_mag0", "1")),
+        mag1=_stof(values.get(f"shk_{event}_mag1", "0")),
+        time=script_int(values.get(f"shk_{event}_time"), 1000),
+        pos=tuple(_stof(values.get(f"shk_{event}_{axis}", "0.2"))
+                  for axis in "xyz"))
+
+
 def sound_specs(values: dict[str, str], events) -> dict[str, SoundSpec]:
-    """Every event of ``events`` with a sample or a palette flash."""
+    """Every event of ``events`` with a sample, a palette flash or a shake."""
 
     specs: dict[str, SoundSpec] = {}
     for event in events:
         sample = values.get(f"snd_{event}_sample", "")
         palette = _palette_fx(values, event)
-        if not (sample or palette):
+        shake = _shake_fx(values, event)
+        if not (sample or palette or shake):
             continue
         pitch = parse_int_range(values.get(f"snd_{event}_pitch", "")) or (0, 0)
         specs[event] = SoundSpec(
             sample=sample, volume=script_int(values.get(f"snd_{event}_volume")),
-            pitch=pitch, palette=palette)
+            pitch=pitch, palette=palette, shake=shake)
     return specs
 
 
@@ -327,6 +382,59 @@ CLASSIC_PALETTE = (
     (1.0, 1.0, 1.0), (0.57, 0.59, 0.59), (1.4, 1.08, 1.12), (0.3, 0.60, 0.7))
 INVERSE_PALETTE_SLOTS = frozenset({4, 5, 7})
 MAX_PALETTE_EFFECTS = 8
+
+
+@dataclass(frozen=True)
+class EffectSettings:
+    """Game-wide OpenNeoUA.ini values that shape sounds, palette flashes and shakes."""
+
+    # game.global_shk_fade_inout / game.global_pal_fade_inout: (in, out) ms.
+    shake_fade: tuple[int, int] = (0, 0)
+    palette_fade: tuple[int, int] = (0, 0)
+    # gfx.color_effects: 0 switches every palette flash off.
+    color_effects: int = 1
+    # audio.num_palfx: how many palette flashes play at once (0..8, 0 = none).
+    num_palfx: int = 4
+    # audio.volume: master volume of the samples (0..127).
+    volume: int = 127
+
+
+def parse_global_fade(value: str) -> tuple[int, int]:
+    """``game.global_*_fade_inout = in_out`` in ms; anything malformed is 0_0."""
+
+    parts = split_tuple(value, 2)
+    if parts is None:
+        return (0, 0)
+
+    def milliseconds(text: str) -> int:
+        number = _full_float(text) if "," not in text else None
+        if number is None or number <= 0:
+            return 0
+        return int(min(round(number), 2147483647))
+
+    return (milliseconds(parts[0]), milliseconds(parts[1]))
+
+
+def parse_effect_settings(text: str) -> EffectSettings:
+    """The effect-related keys of OpenNeoUA.ini, with the engine's defaults."""
+
+    values: dict[str, str] = {}
+    for line in text.splitlines():
+        code = line.split(";", 1)[0].strip()
+        key, _sep, value = code.partition("=")
+        if key.strip():
+            values[key.strip().casefold()] = value.strip()
+
+    def integer(key: str, default: int, low: int, high: int) -> int:
+        parsed = _full_int(values.get(key, ""))
+        return default if parsed is None else max(low, min(parsed, high))
+
+    return EffectSettings(
+        shake_fade=parse_global_fade(values.get("game.global_shk_fade_inout", "")),
+        palette_fade=parse_global_fade(values.get("game.global_pal_fade_inout", "")),
+        color_effects=integer("gfx.color_effects", 1, 0, 99),
+        num_palfx=integer("audio.num_palfx", 4, 0, 8),
+        volume=integer("audio.volume", 127, 0, 127))
 
 
 def parse_color_settings(text: str) -> tuple[dict[int, tuple], dict[int, float]]:
@@ -498,7 +606,80 @@ def parse_scale_fx(value: str) -> ScaleFx | None:
                    _stol(parts[3])[0], tuple(vps[:MAX_SCALE_FX_VPS]))
 
 
-FxItem = FxBlock | DestFxLine
+# Top-level snd_/pal_/shk_ keys of a definition, grouped by effect: every key
+# group of one kind and event is a row of the effects list.
+KEY_GROUP_KINDS = {"snd": "sound", "pal": "palette", "shk": "shake"}
+KEY_GROUP_FIELDS = {
+    "sound": ("sample", "volume", "pitch", "radius", "ext"),
+    "palette": ("slot", "mag0", "mag1", "time", "radius"),
+    "shake": ("slot", "mag0", "mag1", "time", "radius", "mute", "x", "y", "z"),
+}
+
+
+def key_group_of(key: str) -> tuple[str, str] | None:
+    """(kind, event) of a snd_/pal_/shk_ key of a known sound event, else None."""
+
+    prefix, _sep, rest = key.casefold().partition("_")
+    kind = KEY_GROUP_KINDS.get(prefix)
+    if kind is None:
+        return None
+    # The longest event name wins: launch_player is not the launch event.
+    known = sorted(set(VEHICLE_SOUND_EVENTS) | set(WEAPON_SOUND_EVENTS),
+                   key=len, reverse=True)
+    for event in known:
+        if rest.startswith(event + "_") and len(rest) > len(event) + 1:
+            return kind, event
+    return None
+
+
+@dataclass
+class FxKeyGroup:
+    """The consecutive ``snd_`` / ``pal_`` / ``shk_`` lines of one sound event.
+
+    ``lines`` keeps the comments and blank lines between the keys.
+    """
+
+    lines: list[str]
+
+    def rows(self) -> list[tuple[int, str, str]]:
+        rows = []
+        for index, line in enumerate(self.lines):
+            tokens = engine_tokens(line)
+            if tokens is not None:
+                rows.append((index, tokens[0].casefold(), tokens[1]))
+        return rows
+
+    @property
+    def values(self) -> dict[str, str]:
+        """Last value of every key of the group."""
+
+        return {key: value for _index, key, value in self.rows()}
+
+    @property
+    def group(self) -> tuple[str, str]:
+        for _index, key, _value in self.rows():
+            found = key_group_of(key)
+            if found is not None:
+                return found
+        return ("sound", "")
+
+    @property
+    def kind(self) -> str:
+        return self.group[0]
+
+    @property
+    def event(self) -> str:
+        return self.group[1]
+
+
+@dataclass
+class FxBlank:
+    """A new, still empty effect: what is written in it decides what it becomes."""
+
+    lines: list[str] = field(default_factory=list)
+
+
+FxItem = FxBlock | DestFxLine | FxKeyGroup | FxBlank
 
 
 @dataclass
@@ -518,13 +699,25 @@ def _fx_item_ranges(lines: list[str], start_line: int, end_line: int):
 
     Nesting follows the script grammar: ``begin``/``begin_*`` opens a scope
     and ``end`` closes it. Only direct children of the definition count.
+    Consecutive snd_/pal_/shk_ lines of the same event form one "keys" item.
     """
 
     depth = 1
     index = start_line + 1
+    run = None   # [first, last, (kind, event)] of the key group being read
     while index < end_line:
         token = _scope_token(lines[index])
-        if depth == 1 and token == "begin_fx":
+        keys = key_group_of(token_key) if depth == 1 and (
+            token_key := _key(lines[index])) else None
+        if run is not None and keys != run[2] and token:
+            yield run[0], run[1], "keys"
+            run = None
+        if keys is not None:
+            if run is None:
+                run = [index, index, keys]
+            else:
+                run[1] = index
+        elif depth == 1 and token == "begin_fx":
             first = index
             index += 1
             nested = 1
@@ -545,6 +738,8 @@ def _fx_item_ranges(lines: list[str], start_line: int, end_line: int):
         elif depth == 1 and token in DEST_FX_KEYS:
             yield index, index, "dest"
         index += 1
+    if run is not None:
+        yield run[0], run[1], "keys"
 
 
 def extract_fx_document(text: str, start_line: int, end_line: int) -> FxDocument:
@@ -555,6 +750,8 @@ def extract_fx_document(text: str, start_line: int, end_line: int) -> FxDocument
     for first, last, kind in _fx_item_ranges(lines, start_line, end_line):
         if kind == "block":
             items.append(FxBlock(lines[first:last + 1]))
+        elif kind == "keys":
+            items.append(FxKeyGroup(lines[first:last + 1]))
         else:
             items.append(DestFxLine(lines[first]))
     return FxDocument(items)
@@ -659,7 +856,7 @@ def _nonnegative_ms(text: str) -> int:
 
 
 def _interpret_smoke(rows: dict[str, str], issue) -> decal_smoke.SmokeSpec:
-    """The smoke_* keys of a ground_decal block, with the engine's fallbacks.
+    """The smoke_* keys of a new_decal profile, with the engine's fallbacks.
 
     Mirrors ``ParseGroundDecalSmokeParam``: a bad value keeps the default of
     that key (with a warning), so a typo never removes the whole smoke.
@@ -731,7 +928,7 @@ def _interpret_smoke(rows: dict[str, str], issue) -> decal_smoke.SmokeSpec:
                 for part, default in zip(parts, fade))
 
     return decal_smoke.SmokeSpec(
-        enabled=rows.get("smoke") == "1",
+        enabled=True,
         chance=bounded_int("smoke_chance", 0, 100, defaults.chance),
         duration=int_range("smoke_duration", 0, 3600000, defaults.duration),
         fade_in=fade[0],
@@ -767,7 +964,6 @@ def interpret_block(block: FxBlock, context: str) -> FxSpec:
     launch_max = [0.0, 0.0, 0.0]
     spin = [0.0, 0.0, 0.0]
     duration = 0
-    decal_duration_valid = permanent = False
     fade_in = fade_out = 0
     visuals: list[VisualRef] = []
     physical_vehicle = 0
@@ -780,14 +976,7 @@ def interpret_block(block: FxBlock, context: str) -> FxSpec:
     visual_scale = 1.0
     mass = airconst = force = maxrot = radius = 0.0
     lifetime = (30000, 30000)
-    texture = ""
-    size = (0.0, 0.0)
-    stretch_x = (1.0, 1.0)
-    stretch_z = (1.0, 1.0)
-    decal_tint = (255, 255, 255, 255)
     random_rotation = False
-    edge_fade = (0.0, 0.0)
-    smoke_rows: dict[str, str] = {}
     sound_values: dict[str, str] = {}
 
     if not block.lines or _key(block.lines[-1]) != "end":
@@ -830,13 +1019,7 @@ def interpret_block(block: FxBlock, context: str) -> FxSpec:
             end_size = _stof(value)
             has_end_size = True
         elif key == "duration":
-            if value.casefold() == "permanent":
-                duration, permanent, decal_duration_valid = 0, True, True
-            else:
-                parsed, used = _stol(value)
-                duration = parsed
-                permanent = False
-                decal_duration_valid = used == len(value) and parsed > 0
+            duration = _stol(value)[0]
         elif key == "fade_inout":
             parts = split_tuple(value, 2)
             if parts is None:
@@ -911,7 +1094,7 @@ def interpret_block(block: FxBlock, context: str) -> FxSpec:
                 visuals[-1] = VisualRef(last.vp, last.mesh3ds, value, last.tint)
             else:
                 visuals.append(VisualRef(base_path=value))
-        elif key == "tint" and mode != MODE_DECAL:
+        elif key == "tint":
             parsed = parse_tint(value)
             if mode == MODE_PHYSICAL:
                 has_inline = True
@@ -974,46 +1157,8 @@ def interpret_block(block: FxBlock, context: str) -> FxSpec:
         elif key == "physical_vehicle":
             has_physical_vehicle_key = True
             physical_vehicle = _stol(value)[0]
-        elif key in decal_smoke.SMOKE_KEYS:
-            smoke_rows[key] = value
-        elif key == "texture":
-            texture = value
-        elif key == "size":
-            parsed = parse_float_range(value)
-            size = parsed if parsed and parsed[0] > 0 and parsed[1] > 0 else (0.0, 0.0)
-        elif key == "stretch_xz":
-            parts = split_tuple(value, 2)
-            if parts is None:
-                issue(SEVERITY_WARNING,
-                      f"Invalid stretch_xz '{value}': expected x_z.")
-            else:
-                axes = []
-                for part in parts:
-                    parsed = parse_float_range(part, "~")
-                    if not parsed or parsed[0] <= 0 or parsed[1] <= 0:
-                        issue(SEVERITY_WARNING,
-                              f"Invalid stretch_xz '{value}': using 1.0.")
-                        parsed = (1.0, 1.0)
-                    axes.append(parsed)
-                stretch_x, stretch_z = axes
-        elif key == "tint":
-            decal_tint = parse_tint(value) or (255, 255, 255, 255)
         elif key == "random_rotation":
             random_rotation = value == "1"
-        elif key == "edge_fade":
-            if "_" in value:
-                parsed = parse_int_range(value)
-                if parsed is None:
-                    issue(SEVERITY_WARNING,
-                          f"Invalid edge_fade range '{value}': using 0.")
-                    edge_fade = (0.0, 0.0)
-                else:
-                    edge_fade = (max(0, min(parsed[0], 10)),
-                                 max(0, min(parsed[1], 10)))
-            else:
-                parsed = _full_float(value)
-                fade = max(0.0, min(parsed, 10.0)) if parsed is not None else 0.0
-                edge_fade = (fade, fade)
         else:
             # Newer engines may add keys Studio does not know yet. The line
             # is kept verbatim and the preview continues without it.
@@ -1022,15 +1167,6 @@ def interpret_block(block: FxBlock, context: str) -> FxSpec:
                   "OpenNeoUA version does not support it either, the engine "
                   "stops loading the whole script file (PARSE ERROR unknown "
                   "keyword).")
-
-    smoke = None
-    if smoke_rows:
-        if mode != MODE_DECAL:
-            issue(SEVERITY_WARNING,
-                  "smoke_* keys only work with mode = ground_decal: the smoke "
-                  "is ignored.")
-        else:
-            smoke = _interpret_smoke(smoke_rows, issue)
 
     def build(active: bool, **values) -> FxSpec:
         if mode == MODE_PHYSICAL:
@@ -1045,9 +1181,6 @@ def interpret_block(block: FxBlock, context: str) -> FxSpec:
     if any(item.severity == SEVERITY_FATAL for item in issues) \
             or bad_trigger or bad_mode:
         return build(False, **common)
-    if mode == MODE_DECAL and not has_trigger:
-        trigger = "destroyed" if context == CONTEXT_VEHICLE else "impact_world"
-        has_trigger = True
     if not has_trigger:
         issue(SEVERITY_IGNORED, "No trigger: the block is ignored.")
         return build(False, **common)
@@ -1109,32 +1242,217 @@ def interpret_block(block: FxBlock, context: str) -> FxSpec:
             radius=radius, lifetime=lifetime, visual_scale=visual_scale,
             physical_tint=physical_tint, physical_model=model, **common)
 
-    valid_trigger = (
-        (context == CONTEXT_WEAPON and trigger == "impact_world")
-        or (context == CONTEXT_VEHICLE and trigger == "destroyed"))
-    if not valid_trigger:
-        needed = "impact_world" if context == CONTEXT_WEAPON else "destroyed"
-        issue(SEVERITY_IGNORED,
-              f"A {context} ground_decal supports only trigger = {needed}: "
-              "the block is ignored.")
-        return build(False, **common)
-    if (size[0] <= 0 or not decal_duration_valid
-            or (not permanent and duration <= 0) or decal_tint[3] <= 0):
-        issue(SEVERITY_IGNORED,
-              "Incomplete or disabled ground_decal (needs size > 0, a valid "
-              "duration and tint alpha > 0): it is ignored.")
-        return build(False, **common)
+
+# -- reusable ground decal profiles (new_decal) ---------------------------------
+
+@dataclass(frozen=True)
+class DecalProfile:
+    """One ``new_decal <id>`` block of the decal scripts.
+
+    ``spec`` is the decal template (texture, stretch, tint, fades, smoke). Its
+    size is filled in per vehicle/weapon by ``resolve``: ``size_by_model_%`` is a
+    percentage of the diameter of the unit's visual model sphere.
+    """
+
+    profile_id: int
+    spec: FxSpec
+    name: str = ""
+    model_percent: tuple[float, float] = (100.0, 100.0)
+
+    def size_for(self, model_diameter: float,
+                 percent: tuple[float, float] | None = None) -> tuple[float, float]:
+        """Decal size range for a model sphere of this diameter (0 = no decal).
+
+        ``percent`` is the unit's own ground_decal_size_by_model_%: when given it
+        replaces the size_by_model_% of the profile.
+        """
+
+        if not math.isfinite(model_diameter) or model_diameter <= 0:
+            return (0.0, 0.0)
+        low, high = percent or self.model_percent
+        return (model_diameter * low * 0.01, model_diameter * high * 0.01)
+
+    def resolve(self, trigger: str, model_diameter: float,
+                percent: tuple[float, float] | None = None) -> FxSpec:
+        """The ground decal a unit spawns on ``trigger`` (destroyed / impact_world)."""
+
+        return replace(self.spec, trigger=trigger,
+                       size=self.size_for(model_diameter, percent))
+
+
+def _decal_percent_range(text: str, *, strip_percent: bool = False
+                         ) -> tuple[float, float] | None:
+    """Percentage or size range (fixed or min_max), both ends > 0."""
+
+    if strip_percent:
+        # One optional '%' per value: 30, 30%, 30_40, 30%_40%, 30_40%.
+        text = "_".join(part[:-1] if part.endswith("%") else part
+                        for part in text.split("_"))
+    parsed = parse_float_range(text)
+    return parsed if parsed and parsed[0] > 0 and parsed[1] > 0 else None
+
+
+def parse_decal_profile(profile_id: int, values: dict[str, str]) -> DecalProfile | None:
+    """Mirror of ``DecalProfileParser``; None when the engine drops the profile."""
+
+    issues: list[FxIssue] = []
+
+    def issue(severity: str, message: str) -> None:
+        issues.append(FxIssue(severity, message))
+
+    model_percent = (100.0, 100.0)
+    stretch = [(1.0, 1.0), (1.0, 1.0)]
+    tint = (255, 255, 255, 255)
+    edge_fade = (0.0, 0.0)
+    duration, permanent, duration_valid = 0, False, False
+    fade_in = fade_out = 0
+
+    if "size_by_model_%" in values:
+        parsed = _decal_percent_range(values["size_by_model_%"], strip_percent=True)
+        if parsed is None:
+            issue(SEVERITY_WARNING, f"Invalid size_by_model_% "
+                  f"'{values['size_by_model_%']}': using 100_100.")
+        else:
+            model_percent = parsed
+    if "stretch_xz" in values:
+        parts = split_tuple(values["stretch_xz"], 2)
+        if parts is None:
+            issue(SEVERITY_WARNING,
+                  f"Invalid stretch_xz '{values['stretch_xz']}': expected x_z.")
+        else:
+            for axis, part in enumerate(parts):
+                parsed = parse_float_range(part, "~")
+                if not parsed or parsed[0] <= 0 or parsed[1] <= 0:
+                    issue(SEVERITY_WARNING,
+                          f"Invalid stretch_xz '{values['stretch_xz']}': using 1.0.")
+                    parsed = (1.0, 1.0)
+                stretch[axis] = parsed
+    if "tint" in values:
+        tint = parse_tint(values["tint"]) or (255, 255, 255, 255)
+    if "edge_fade" in values:
+        text = values["edge_fade"]
+        if "_" in text:
+            parsed_range = parse_int_range(text)
+            if parsed_range is None:
+                issue(SEVERITY_WARNING, f"Invalid edge_fade range '{text}': using 0.")
+            else:
+                edge_fade = (float(max(0, min(parsed_range[0], 10))),
+                             float(max(0, min(parsed_range[1], 10))))
+        else:
+            parsed_fade = _full_float(text)
+            if parsed_fade is not None:
+                fade = max(0.0, min(parsed_fade, 10.0))
+                edge_fade = (fade, fade)
+    if "duration" in values:
+        text = values["duration"]
+        if text.casefold() == "permanent":
+            permanent, duration, duration_valid = True, 0, True
+        else:
+            duration, used = _stol(text)
+            duration_valid = used == len(text) and duration > 0
+    if "fade_inout" in values:
+        parts = split_tuple(values["fade_inout"], 2)
+        if parts is None:
+            issue(SEVERITY_WARNING,
+                  f"Invalid fade_inout '{values['fade_inout']}': expected in_out.")
+        else:
+            fade_in, fade_out = _nonnegative_ms(parts[0]), _nonnegative_ms(parts[1])
+
+    # The engine ignores a profile without a valid duration or with a clear tint.
+    if not duration_valid or (not permanent and duration <= 0) or tint[3] <= 0:
+        return None
     if permanent:
-        decal_fade_out, decal_fade_in = 0, fade_in
+        fade_out = 0
     else:
-        decal_fade_out = min(fade_out, duration)
-        decal_fade_in = min(fade_in, duration - decal_fade_out)
-    return build(
-        True, duration=duration, fade_in=decal_fade_in,
-        fade_out=decal_fade_out, texture=texture, size=size,
-        stretch_x=stretch_x, stretch_z=stretch_z, decal_tint=decal_tint,
-        edge_fade=edge_fade, permanent=permanent,
-        smoke=smoke if smoke is not None and smoke.enabled else None, **common)
+        fade_out = min(fade_out, duration)
+        fade_in = min(fade_in, duration - fade_out)
+
+    # Any smoke_* key switches the smoke on (smoke_count = 0 keeps it silent).
+    smoke_rows = {key: value for key, value in values.items()
+                  if key in decal_smoke.SMOKE_KEYS}
+    smoke = _interpret_smoke(smoke_rows, issue) if smoke_rows else None
+
+    spec = FxSpec(
+        mode=MODE_DECAL, trigger="", active=True, issues=tuple(issues),
+        random_rotation=values.get("random_rotation") == "1",
+        duration=duration, fade_in=fade_in, fade_out=fade_out,
+        texture=values.get("texture", ""), stretch_x=stretch[0],
+        stretch_z=stretch[1], decal_tint=tint, edge_fade=edge_fade,
+        permanent=permanent, smoke=smoke)
+    return DecalProfile(profile_id, spec, values.get("name", ""), model_percent)
+
+
+def decal_profiles_from_text(text: str) -> dict[int, DecalProfile]:
+    """Every valid ``new_decal N ... end`` profile of a script text."""
+
+    profiles: dict[int, DecalProfile] = {}
+    lines = text.splitlines()
+    for index, line in enumerate(lines):
+        match = re.match(r"\s*new_decal\s+(\d+)", line, re.IGNORECASE)
+        if match is None:
+            continue
+        end_line = next((cursor for cursor in range(index + 1, len(lines))
+                         if _scope_token(lines[cursor]) == "end"), len(lines))
+        profile = parse_decal_profile(
+            int(match[1]), top_level_values(text, index, end_line))
+        if profile is not None:
+            profiles[profile.profile_id] = profile
+        else:
+            profiles.pop(int(match[1]), None)
+    return profiles
+
+
+def key_group_issues(group: FxKeyGroup, context: str) -> tuple[FxIssue, ...]:
+    """Problems the engine would have with the keys of one sound event."""
+
+    issues: list[FxIssue] = []
+    kind, event = group.group
+    events = VEHICLE_SOUND_EVENTS if context == CONTEXT_VEHICLE else WEAPON_SOUND_EVENTS
+    if event not in events:
+        issues.append(FxIssue(
+            SEVERITY_FATAL,
+            f"'{event}' is not a sound event of a {context}: the script file stops loading."))
+    for _index, key, value in group.rows():
+        found = key_group_of(key)
+        if found is None or found[0] != kind or found[1] != event:
+            issues.append(FxIssue(
+                SEVERITY_IGNORED,
+                f"'{key}' does not belong to this effect: keep one event and one "
+                "snd_ / pal_ / shk_ package here."))
+            continue
+        field = key[len(("snd" if kind == "sound" else "pal" if kind == "palette"
+                         else "shk") + "_" + event) + 1:]
+        if event == "launch_player":
+            valid = field in ("slot", "time", "mag0", "mag1")
+        else:
+            valid = field in KEY_GROUP_FIELDS[kind]
+        if not valid:
+            issues.append(FxIssue(
+                SEVERITY_UNKNOWN,
+                f"Unknown key '{key}': if the engine does not know it either, "
+                "it stops loading the whole script file."))
+        elif field not in ("sample", "ext", "pitch") and _full_float(value) is None:
+            issues.append(FxIssue(
+                SEVERITY_WARNING, f"{key} = '{value}' is not a number: 0 is used."))
+    return tuple(issues)
+
+
+def key_group_summary(group: FxKeyGroup) -> str:
+    """One readable line, e.g. 'Shake · 0.8→0.5 · 250 ms'."""
+
+    values = group.values
+    kind, event = group.group
+    if kind == "sound":
+        sample = values.get(f"snd_{event}_sample", "")
+        name = sample.replace("\\", "/").rsplit("/", 1)[-1] if sample else "no sample"
+        extra = f"vol {values[f'snd_{event}_volume']}" if f"snd_{event}_volume" in values else ""
+        return " · ".join(part for part in (name, extra) if part)
+    prefix = "pal" if kind == "palette" else "shk"
+    slot = values.get(f"{prefix}_{event}_slot", "0")
+    mag0 = values.get(f"{prefix}_{event}_mag0", "1" if kind == "shake" else "0")
+    mag1 = values.get(f"{prefix}_{event}_mag1", "0")
+    time = values.get(f"{prefix}_{event}_time", "1000" if kind == "shake" else "0")
+    return f"slot {slot} · {mag0}→{mag1} · {time} ms"
 
 
 def dest_fx_issues(line: DestFxLine) -> tuple[FxIssue, ...]:
@@ -1649,6 +1967,12 @@ def unit_look(values: dict[str, str], *, weapon: bool) -> dict:
             base_path=values.get("base_genesis", "")),
         "energy": max(0.0, _stof(values.get("energy", "0"))),
         "maxrot": _stof(values.get("maxrot", "0")),
+        "ground_decal_id": (lambda decal_id: decal_id if decal_id >= 0 else -1)(
+            script_int(values.get("ground_decal_id"), -1)),
+        # The unit's own size, written in its script; a bad value is ignored.
+        "decal_percent": (_decal_percent_range(values["ground_decal_size_by_model_%"],
+                                               strip_percent=True)
+                          if "ground_decal_size_by_model_%" in values else None),
     }
 
 
@@ -2080,6 +2404,13 @@ class UnitPhases:
     genesis: VisualRef = VisualRef()
     energy: float = 0.0
     maxrot: float = 0.0
+    # Reusable ground decal (new_decal) the unit spawns. Its size is a percentage
+    # of ``model_diameter``, the bounding sphere of the visual model with scale
+    # applied (the tab fills it from the loaded model; 0 = no model, no decal).
+    ground_decal_id: int = -1
+    model_diameter: float = 0.0
+    # ground_decal_size_by_model_% of the unit's script (None = the profile's size).
+    decal_percent: tuple[float, float] | None = None
 
     @property
     def plasma_ms(self) -> float:
@@ -2131,7 +2462,7 @@ class UnitPhases:
         return self.trail_tint if (self.weapon and main) else self.tint
 
 
-# Preview events of the Destruction FX tab.
+# Preview events of the Visuals & FX tab.
 SEQUENCE_TRIGGER = "sequence"          # vehicle: full death
 WEAPON_HIT_UNIT = "hit_unit"           # weapon: detonate on a unit
 WEAPON_HIT_GROUND = "hit_ground"       # weapon: impact_world on terrain
@@ -2257,7 +2588,9 @@ class PreviewSimulation:
                  enabled: set[int] | None = None,
                  unit: UnitPhases | None = None,
                  weapons: dict[int, WeaponDef] | None = None,
-                 debuffs: dict[int, DebuffSpec] | None = None) -> None:
+                 debuffs: dict[int, DebuffSpec] | None = None,
+                 decals: dict[int, DecalProfile] | None = None,
+                 settings: EffectSettings | None = None) -> None:
         self.document = document
         self.context = context
         self.trigger = trigger
@@ -2268,6 +2601,7 @@ class PreviewSimulation:
         self.catalog = legacy_catalog or {}
         self.enabled = enabled
         self.unit = unit or UnitPhases(weapon=context == CONTEXT_WEAPON)
+        self.unit = self._unit_with_authored_audio(self.unit, document, enabled)
         self.notes: list[str] = []
         self._events: list[tuple] = []
         self._sounds: list[SoundEvent] = []
@@ -2279,6 +2613,8 @@ class PreviewSimulation:
             if isinstance(item, FxBlock)}
         self.weapons = weapons or {}
         self.debuffs = debuffs or {}
+        self.decals = decals or {}
+        self.settings = settings or EffectSettings()
         self._root = _Def(self.unit, document, self._specs, enabled)
         self._cluster_projectiles = 0
         if trigger == SEQUENCE_TRIGGER and context == CONTEXT_VEHICLE:
@@ -2291,16 +2627,41 @@ class PreviewSimulation:
 
     # -- event construction ---------------------------------------------------------
 
+    def _unit_with_authored_audio(self, unit: "UnitPhases", document: FxDocument,
+                                  enabled) -> "UnitPhases":
+        """Sounds, palette flashes and shakes of the enabled key groups.
+
+        The rows of the effects list own these keys: a hidden row is silent and
+        an edited row changes the preview. A document without key groups keeps
+        the sounds the unit was built with.
+        """
+
+        groups = [(index, item) for index, item in enumerate(document.items)
+                  if isinstance(item, FxKeyGroup)]
+        if not groups:
+            return unit
+        values: dict[str, str] = {}
+        for index, group in groups:
+            if enabled is None or index in enabled:
+                values.update(group.values)
+        events = WEAPON_SOUND_EVENTS if unit.weapon else VEHICLE_SOUND_EVENTS
+        return replace(unit, sounds=sound_specs(values, events))
+
     def _rng(self, source: int, salt: str) -> random.Random:
         return random.Random(hash((self.seed, source, salt)) & 0xFFFFFFFF)
 
     def _build_event(self, trigger: str, start: float, origin,
                      prefix: str = "", decals_only: bool = False,
                      definition: "_Def | None" = None) -> None:
-        """Spawn every enabled item listening to ``trigger`` at ``start``."""
+        """Spawn every enabled item listening to ``trigger`` at ``start``.
+
+        ``decals_only`` skips the document and spawns just the ground decal.
+        """
 
         definition = definition or self._root
         for index, item in enumerate(definition.document.items):
+            if decals_only:
+                break
             if definition.enabled is not None and index not in definition.enabled:
                 continue
             source = index if definition.source is None else definition.source
@@ -2309,20 +2670,36 @@ class PreviewSimulation:
                 spec = definition.specs[index]
                 if not spec.active or spec.trigger != trigger:
                     continue
-                if decals_only and spec.mode != MODE_DECAL:
-                    continue
                 if spec.mode == MODE_VISUAL:
                     self._build_visual(source, spec, rng, start, origin, prefix)
-                elif spec.mode == MODE_PHYSICAL:
-                    self._build_physical(source, spec, rng, start, origin, prefix)
                 else:
-                    self._build_decal(source, spec, rng, start, origin, prefix)
-            elif not decals_only:
+                    self._build_physical(source, spec, rng, start, origin, prefix)
+            elif isinstance(item, DestFxLine):
                 dest = item.parsed
                 if dest is None or dest.kind != trigger:
                     continue
                 self._build_legacy(source, dest, origin, rng, start, 0,
                                    prefix=prefix)
+        self._build_profile_decal(trigger, start, origin, prefix, definition)
+
+    def _build_profile_decal(self, trigger: str, start: float, origin, prefix: str,
+                             definition: "_Def") -> None:
+        """The ground decal a unit gets from its ``ground_decal_id`` profile.
+
+        Vehicles spawn it when destroyed, weapons on a terrain impact
+        (``ResolveDecalProfileLinks``). A missing profile means no decal.
+        """
+
+        unit = definition.unit
+        profile = self.decals.get(unit.ground_decal_id)
+        if profile is None or trigger != ("impact_world" if unit.weapon else "destroyed"):
+            return
+        spec = profile.resolve(trigger, unit.model_diameter, unit.decal_percent)
+        if spec.size[1] <= 0:
+            return
+        source = PROFILE_DECAL_SOURCE if definition.source is None else definition.source
+        self._build_decal(source, spec, self._rng(source, trigger + definition.salt),
+                          start, origin, prefix)
 
     def _unit_event(self, ref: VisualRef, start: float, end: float, path,
                     label: str, heading: Matrix3 = IDENTITY,
@@ -2361,15 +2738,66 @@ class PreviewSimulation:
     def palette_effects_at(self, time_ms: float) -> list[tuple[int, float]]:
         """[(palette slot, strength)] of the flashes active at ``time_ms``."""
 
+        settings = self.settings
+        if settings.color_effects <= 0 or settings.num_palfx <= 0:
+            return []
         palettes: list[tuple[int, float]] = []
         for sound in self._sounds:
             fx = sound.spec.palette
             if fx is None:
                 continue
-            strength = _screen_fx_strength(sound, fx, time_ms)
+            strength = _screen_fx_strength(sound, fx, time_ms, settings.palette_fade)
             if strength is not None:
                 palettes.append((fx.slot, strength))
-        return palettes
+        # The engine keeps only the audio.num_palfx strongest flashes.
+        palettes.sort(key=lambda entry: -entry[1])
+        return palettes[:settings.num_palfx]
+
+    def shake_angles_at(self, time_ms: float) -> tuple[float, float, float]:
+        """Turn of the view (radians around X, Y, Z) caused by the shakes now.
+
+        Like the engine: the strongest four shakes add up
+        ``rnd * strength * pos`` with a new random ``rnd`` every frame.
+        """
+
+        return self._shake_frame(time_ms, int(time_ms // SHAKE_FRAME_MS))
+
+    def shake_angles_between(self, start_ms: float, end_ms: float
+                             ) -> tuple[float, float, float]:
+        """The strongest shake of the preview frames between two painted frames.
+
+        The engine draws about 60 frames a second; the preview can paint far
+        fewer, and a short shake would be missed or look sparse. Every 16 ms
+        frame in between is evaluated and the one that turns the view most wins.
+        """
+
+        last = int(end_ms // SHAKE_FRAME_MS)
+        first = max(int(start_ms // SHAKE_FRAME_MS) + 1, last - SHAKE_SCAN_FRAMES + 1)
+        best = (0.0, 0.0, 0.0)
+        for frame in range(first, last + 1):
+            angles = self._shake_frame(
+                min(end_ms, frame * SHAKE_FRAME_MS + SHAKE_FRAME_MS / 2.0), frame)
+            if sum(value * value for value in angles) > sum(value * value for value in best):
+                best = angles
+        return best if any(best) else self._shake_frame(end_ms, last)
+
+    def _shake_frame(self, time_ms: float, frame: int) -> tuple[float, float, float]:
+        active = []
+        for sound in self._sounds:
+            fx = sound.spec.shake
+            if fx is None:
+                continue
+            strength = _shake_strength(sound, fx, time_ms, self.settings.shake_fade)
+            if strength is not None:
+                active.append((strength, fx))
+        if not active:
+            return (0.0, 0.0, 0.0)
+        rng = random.Random((self.seed * 1000003 + frame) & 0xFFFFFFFF)
+        angles = [0.0, 0.0, 0.0]
+        for strength, fx in sorted(active, key=lambda entry: -entry[0])[:MAX_SHAKES]:
+            for axis in range(3):
+                angles[axis] += rng.uniform(-1.0, 1.0) * strength * fx.pos[axis]
+        return tuple(angles)
 
     # -- decoration_fx, launch flash and weapon tracer ------------------------------------
 
@@ -2666,12 +3094,17 @@ class PreviewSimulation:
                              unit=unit)
         self._build_launch_flash(launch, look, unit, start)
         self._add_sound(unit.sounds, "launch", start, label=who, salt=definition.salt)
+        if root:
+            self._add_sound(unit.sounds, "launch_player", start, label=who,
+                            salt=definition.salt)
         self._add_sound(unit.sounds, "normal", start, stop, who, definition.salt)
         self._build_decoration(stop, flight, unit, start)
         self._build_tracer(stop, flight, unit, start)
         if split is not None:
             # The projectile is replaced by its children: no impact effects.
-            position, _rotation = flight.pose(split)
+            # Like the engine (_position), children and flash start from the real
+            # path point, not from the render-only spiral/chaos offset of the parent.
+            position = _path_position(path, split)
             self._spawn_cluster(cluster, definition, position, look, split,
                                 speed, generation)
             return stop
@@ -3395,17 +3828,55 @@ def _plasma_scale(total_ms: float, age_ms: float) -> float:
     return math.sqrt(max(0.0, total_ms - age_ms) / max(total_ms, 1.0)) * PLASMA_SCALE
 
 
-def _screen_fx_strength(sound: SoundEvent, fx: ScreenFx, time_ms: float):
+def _global_fade_factor(sound: SoundEvent, duration: float, time_ms: float,
+                        fade: tuple[int, int]) -> float:
+    """game.global_*_fade_inout: SFX_EffectTemporalFactor of the engine.
+
+    A one-shot fades over the length of its package; a loop has no end, so only
+    its fade-in applies.
+    """
+
+    if fade[0] <= 0 and fade[1] <= 0:
+        return 1.0
+    return temporal_envelope(
+        time_ms - sound.start, 0.0 if sound.loops else float(duration),
+        float(fade[0]), float(fade[1]))
+
+
+def _screen_fx_strength(sound: SoundEvent, fx: ScreenFx, time_ms: float,
+                        fade: tuple[int, int] = (0, 0)):
     """Strength of a palette package at ``time_ms``, None when over."""
 
     age = time_ms - sound.start
     if age < 0:
         return None
     if sound.loops:
-        return fx.mag0 if time_ms < sound.end else None
-    if fx.time <= 0 or age > fx.time:
+        strength = fx.mag0 if time_ms < sound.end else None
+    elif fx.time <= 0 or age > fx.time:
         return None
-    return fx.mag0 + (fx.mag1 - fx.mag0) * age / fx.time
+    else:
+        strength = fx.mag0 + (fx.mag1 - fx.mag0) * age / fx.time
+    if strength is None:
+        return None
+    return strength * _global_fade_factor(sound, fx.time, time_ms, fade)
+
+
+def _shake_strength(sound: SoundEvent, fx: ShakeFx, time_ms: float,
+                    fade: tuple[int, int] = (0, 0)):
+    """Strength of a shake package at ``time_ms``, None when over."""
+
+    age = time_ms - sound.start
+    if age < 0:
+        return None
+    if sound.loops:
+        strength = fx.mag0 if time_ms < sound.end else None
+    elif fx.time <= 0 or age > fx.time:
+        return None
+    else:
+        strength = fx.mag0 + (fx.mag1 - fx.mag0) * age / fx.time
+    if strength is None:
+        return None
+    return strength * _global_fade_factor(sound, fx.time, time_ms, fade)
 
 
 def _decoration_pose(payload, time_ms: float):
@@ -3584,9 +4055,6 @@ def block_summary(block: FxBlock, context: str) -> str:
         parts.append(f"{spec.duration} ms")
     elif spec.mode == MODE_PHYSICAL and spec.vp_models:
         parts.append(f"VP {'/'.join(str(vp) for vp in spec.vp_models)}")
-    elif spec.mode == MODE_DECAL and spec.texture:
-        parts.append(spec.texture.replace("\\", "/").rsplit("/", 1)[-1])
-        parts.append("permanent" if spec.permanent else f"{spec.duration} ms")
     if spec.count != (1, 1):
         parts.append(f"×{format_range(*spec.count)}")
     return " · ".join(parts)

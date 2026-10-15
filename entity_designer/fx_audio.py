@@ -174,6 +174,8 @@ class FxSoundPlayer:
         # resolver(name) -> Path | None finds the sample in the game data.
         self.resolver = resolver
         self.muted = False
+        # audio.volume of OpenNeoUA.ini (0..127), the master gain of every sample.
+        self.master_volume = MAX_VOLUME
         # Preview speed: the sounds are played at (sample rate + pitch) times
         # this factor, so slow motion lowers them like a slowed tape.
         self.speed = 1.0
@@ -233,7 +235,8 @@ class FxSoundPlayer:
         voice = self._voice_factory()
         if voice is None:
             return
-        voice.play(path, sound_volume(event.spec.volume), event.loops)
+        gain = sound_volume(event.spec.volume) * sound_volume(self.master_volume)
+        voice.play(path, gain, event.loops)
         self._active.append((event, voice))
 
     def step(self, events, previous: float, now: float) -> None:

@@ -1,4 +1,4 @@
-"""Ground decal smoke: settings of a ``begin_fx`` ground_decal block and the puff math.
+"""Ground decal smoke: settings of a ``new_decal`` profile and the puff math.
 
 ``evaluate`` is a port of ``World::GroundDecalSmoke::Evaluate`` (engine file
 ``world/grounddecal_smoke.h``). The engine keeps no particles: every puff is
@@ -19,9 +19,9 @@ MIN_PARTICLE_SIZE = 1.0
 
 _MASK = 0xFFFFFFFF
 
-# Every smoke key of the block. ``smoke`` switches the rest on.
+# Every smoke key of a profile; any of them switches the smoke on.
 SMOKE_KEYS = (
-    "smoke", "smoke_chance", "smoke_duration", "smoke_fade_inout",
+    "smoke_chance", "smoke_duration", "smoke_fade_inout",
     "smoke_count", "smoke_size", "smoke_growth", "smoke_rise_speed",
     "smoke_puff_time", "smoke_drift", "smoke_spread", "smoke_intensity",
     "smoke_tint",

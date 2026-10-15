@@ -41,6 +41,19 @@ UNIT = (
 )
 
 
+
+def _offset(panel):
+    """Model-state rows lead the effects list; effect N is the row after them."""
+    return len(panel.state_session.originals)
+
+
+def _item(panel, number):
+    return panel.effects_list.item(number + _offset(panel))
+
+
+def _effect_rows(panel):
+    return panel.effects_list.count() - _offset(panel)
+
 def _document(text=UNIT):
     block = next(block for block in find_script_blocks(text)
                  if block.object_id == 5)
@@ -490,11 +503,13 @@ def test_decal_edge_fade_clears_the_corners_and_keeps_the_center():
 
 # -- weapon decals in unit mode, launch flash, spiral and chaos ------------------------------
 
+DECAL_PROFILES = fx.decal_profiles_from_text(
+    "new_decal 1\n    texture = Interface/GroundDecals/impact_01.png\n"
+    "    size_by_model_% = 10_20\n    duration = permanent\nend\n")
+
 DECAL_WEAPON = (
     "new_weapon 9\n"
-    "begin_fx\n    trigger = impact_world\n    mode = ground_decal\n"
-    "    texture = Interface/GroundDecals/impact_01.png\n    size = 10_20\n"
-    "    duration = permanent\nend\n"
+    "    ground_decal_id = 1\n"
     "begin_fx\n    trigger = impact_world\n    mode = visual\n"
     "    duration = 400\n    vp_model = 51\nend\n"
     "end\n")
@@ -504,9 +519,10 @@ def test_hit_unit_preview_also_shows_the_weapon_ground_decal():
     document = fx.extract_fx_document(
         DECAL_WEAPON, 0, DECAL_WEAPON.count("\n") - 1)
     unit = fx.UnitPhases(normal=fx.VisualRef(60), dead=fx.VisualRef(61),
-                         weapon=True)
+                         weapon=True, ground_decal_id=1, model_diameter=100.0)
     on_unit = fx.PreviewSimulation(document, fx.CONTEXT_WEAPON,
-                                   fx.WEAPON_HIT_UNIT, unit=unit)
+                                   fx.WEAPON_HIT_UNIT, unit=unit,
+                                   decals=DECAL_PROFILES)
     impact = fx.WEAPON_FLIGHT_MS
     shown = [i for i in on_unit.items_at(impact + 50)
              if i.kind == fx.MODE_DECAL]
@@ -515,7 +531,8 @@ def test_hit_unit_preview_also_shows_the_weapon_ground_decal():
     assert not [i for i in on_unit.items_at(impact + 50) if i.kind == "visual"]
     assert any("preview only" in note for note in on_unit.notes)
     on_ground = fx.PreviewSimulation(document, fx.CONTEXT_WEAPON,
-                                     fx.WEAPON_HIT_GROUND, unit=unit)
+                                     fx.WEAPON_HIT_GROUND, unit=unit,
+                                     decals=DECAL_PROFILES)
     assert {i.kind for i in on_ground.items_at(impact + 50)} >= {"visual", fx.MODE_DECAL}
     assert not any("preview only" in note for note in on_ground.notes)
 
@@ -895,6 +912,18 @@ def test_cluster_replaces_the_parent_with_its_children_at_the_trigger_time():
     assert ends == [600]
 
 
+def test_cluster_starts_from_the_real_path_not_from_the_chaos_offset():
+    # chaos/spiral only move the drawing; like the engine's _position, the flash
+    # and the children start from the path point the weapon really reached.
+    chaotic = CLUSTER_PARENT.replace(
+        "start_speed = 100", "start_speed = 100\n    chaos_factor = 2.5\n    chaos_radius = 30")
+    plain = _cluster_simulation()
+    moved = _cluster_simulation(_cluster_weapons(chaotic))
+    flash_plain = [i for i in plain.items_at(700) if i.kind == "cluster"][0]
+    flash_moved = [i for i in moved.items_at(700) if i.kind == "cluster"][0]
+    assert flash_moved.position == pytest.approx(flash_plain.position)
+
+
 def test_cluster_children_fall_to_the_ground_with_their_own_effects():
     simulation = _cluster_simulation(trigger=fx.WEAPON_HIT_GROUND)
     last = max(t.end for t in simulation.tracks if t.label.startswith("Cluster"))
@@ -1039,14 +1068,17 @@ def test_artillery_barrage_falls_from_its_arc_height_at_the_shell_speed():
     assert simulation.tracks[0].end == pytest.approx(3000 / 1.8)
 
 
-def test_palette_packages_run_for_their_time_and_shake_is_ignored():
+def test_palette_and_shake_packages_run_for_their_time():
     values = {
         "pal_launch_slot": "8", "pal_launch_mag0": "1", "pal_launch_mag1": "0",
         "pal_launch_time": "200", "shk_hit_slot": "2", "shk_hit_mag0": "2",
         "shk_hit_mag1": "2", "shk_hit_time": "100", "shk_hit_x": "0.1"}
     specs = fx.sound_specs(values, fx.WEAPON_SOUND_EVENTS)
     assert specs["launch"].sample == "" and specs["launch"].palette.slot == 8
-    assert "hit" not in specs  # the camera shake is not part of the preview
+    # The view shake is part of the preview: a package without sample or palette.
+    assert specs["hit"].sample == "" and specs["hit"].palette is None
+    assert specs["hit"].shake == fx.ShakeFx(
+        slot=2, mag0=2.0, mag1=2.0, time=100, pos=(0.1, 0.2, 0.2))
     unit = fx.UnitPhases(normal=fx.VisualRef(60), weapon=True, sounds=specs)
     simulation = _weapon_simulation(unit)
     assert simulation.palette_effects_at(100) == [(8, pytest.approx(0.5))]
@@ -1096,8 +1128,9 @@ def test_palette_mute_button_follows_the_sound_button_and_switches_flashes_off(a
     panel.seek(100)
     assert panel.palette_effects()
     layout = panel.mute_button.parentWidget().layout().itemAt(0).layout()
-    assert layout.indexOf(panel.pal_button) == layout.indexOf(panel.mute_button) + 1
-    assert not hasattr(panel, "shake_button")
+    # The view-shake button sits between the sound and the palette buttons.
+    assert layout.indexOf(panel.shake_button) == layout.indexOf(panel.mute_button) + 1
+    assert layout.indexOf(panel.pal_button) == layout.indexOf(panel.shake_button) + 1
     panel.pal_button.setChecked(True)
     assert panel.palette_effects() == []
     # The slash of the switched-off icon is white, like the other icons.
@@ -1192,11 +1225,11 @@ def test_preview_tab_shows_effects_and_reloads_from_file(app, tmp_path):
         window._active_model_reference = reference
         window._load_fx_context(UNIT, block, reference)
         panel = window.fx_panel
-        assert panel.effects_list.count() == 3
+        assert _effect_rows(panel) == 3
         assert panel.unit.flies and panel.unit.altitude == fx.DEFAULT_FLIGHT_ALTITUDE
         assert panel.unit.dead.base_path == "Data/Models/Base/WRECK.BASE"
         # Hide one effect: the preview keeps only the others.
-        panel.effects_list.item(1).setCheckState(Qt.CheckState.Unchecked)
+        _item(panel, 1).setCheckState(Qt.CheckState.Unchecked)
         assert 1 in panel.hidden_items
         script.write_text(UNIT.replace("duration   = 800", "duration   = 1600"),
                           encoding="utf-8")
