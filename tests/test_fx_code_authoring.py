@@ -21,6 +21,23 @@ from entity_designer.script_model import find_script_blocks
 EFFECT = "begin_fx\n    trigger = destroyed\n    mode = visual\n    vp_model = 129\n    duration = 400\nend"
 
 
+
+def _offset(panel):
+    """Model-state rows lead the effects list; effect N is the row after them."""
+    return len(panel.state_session.originals)
+
+
+def _item(panel, number):
+    return panel.effects_list.item(number + _offset(panel))
+
+
+def _set_row(panel, number):
+    panel.effects_list.setCurrentRow(number + _offset(panel))
+
+
+def _effect_rows(panel):
+    return panel.effects_list.count() - _offset(panel)
+
 def _document(text):
     block = find_script_blocks(text)[0]
     return fx.extract_fx_document(text, block.start_line, block.end_line), block
@@ -133,7 +150,7 @@ def test_click_opens_attached_editor_and_live_drafts_keep_last_valid_preview(app
         panel.set_context(fx.CONTEXT_VEHICLE, document)
         panel.set_script_sources([(path, 0, block.end_line)])
         app.processEvents()
-        row = panel.effects_list.item(0)
+        row = _item(panel, 0)
         checkbox = panel.effects_list.checkbox_rect(row).center()
         QTest.mouseClick(panel.effects_list.viewport(), Qt.MouseButton.LeftButton, pos=checkbox)
         assert not panel.code_drawer.expanded
@@ -142,6 +159,9 @@ def test_click_opens_attached_editor_and_live_drafts_keep_last_valid_preview(app
         QTest.mouseClick(panel.effects_list.viewport(), Qt.MouseButton.LeftButton, pos=point)
         drawer = _open_drawer(panel, app)
         assert drawer.expanded and drawer.isVisible()
+        # Nothing edited yet: both Save buttons are grayed out.
+        assert not drawer.save_button.isEnabled()
+        assert not drawer.code.save_button.isEnabled()
         # Attached: same height as the Effects box, ending where the box begins.
         box = panel.effects_box
         corner = box.mapTo(window, box.rect().topLeft())
@@ -161,6 +181,7 @@ def test_click_opens_attached_editor_and_live_drafts_keep_last_valid_preview(app
         assert not drawer.save_button.isEnabled()
         drawer.code.setPlainText(EFFECT.replace("400", "650"))
         QTest.qWait(300)
+        assert drawer.save_button.isEnabled() and drawer.code.save_button.isEnabled()
         window.activateWindow()
         drawer.code.editor.setFocus()
         app.processEvents()
@@ -201,14 +222,14 @@ def test_tab_opens_and_collapses_the_editor_and_text_click_opens_the_effect(app)
         drawer = panel.code_drawer
         tab = drawer.tab
         # One list only, with the small tab sticking out of the box on its left.
-        assert panel.effects_list.count() == 2
+        assert _effect_rows(panel) == 2
         box = panel.effects_box
         corner = box.mapTo(window, box.rect().topLeft())
         assert tab.isVisible() and tab.x() < corner.x() < tab.x() + tab.width()
         assert abs(tab.geometry().center().y() - (corner.y() + box.height() // 2)) <= 1
         assert not drawer.isVisible()
         # The tab opens the editor on the selected effect ...
-        panel.effects_list.setCurrentRow(1)
+        _set_row(panel, 1)
         QTest.mouseClick(tab, Qt.MouseButton.LeftButton)
         _open_drawer(panel, app)
         assert drawer.expanded and drawer.isVisible() and drawer.index == 1
@@ -331,12 +352,12 @@ def test_delete_button_and_menu_remove_effects_from_the_script_and_the_preview(a
         view = panel.effects_view
         assert not view.delete_button.isEnabled()
         # The list keeps its room: the five buttons are small.
-        assert view.delete_button.height() >= 2 * view.show_all_button.height() - 4
+        assert view.delete_button.height() >= view.show_all_button.height() - 4
         panel.hide_all_button.click()
-        panel.effects_list.setCurrentRow(1)
+        _set_row(panel, 1)
         panel.edit_effect_code(2)
         _open_drawer(panel, app)
-        panel.effects_list.setCurrentRow(1)
+        _set_row(panel, 1)
         assert view.delete_button.isEnabled()
         # Cancel: nothing changes.
         with patch.object(QMessageBox, "question", return_value=QMessageBox.StandardButton.Cancel):
@@ -349,7 +370,7 @@ def test_delete_button_and_menu_remove_effects_from_the_script_and_the_preview(a
             view.delete_button.click()
         written = path.read_text(encoding="latin-1")
         assert "vp_model = 130" not in written and written.count("begin_fx") == 2
-        assert panel.effects_list.count() == 2 and len(panel.document.items) == 2
+        assert _effect_rows(panel) == 2 and len(panel.document.items) == 2
         assert panel.hidden_items == {1}
         assert panel.code_drawer.index == 1 and "vp_model = 131" in panel.code_drawer.code.toPlainText()
         assert not panel.has_unsaved_text
@@ -360,7 +381,7 @@ def test_delete_button_and_menu_remove_effects_from_the_script_and_the_preview(a
                               Qt.KeyboardModifier.ControlModifier) is None
         assert "duration = 620" in path.read_text(encoding="latin-1")
         # Menu: the deleted effect that is open in the editor folds the editor away.
-        panel.effects_list.setCurrentRow(1)
+        _set_row(panel, 1)
         menu = panel._create_effects_context_menu()
         delete = next(action for action in menu.actions() if action.text() == "Delete Effect")
         assert delete.isEnabled()
@@ -409,3 +430,80 @@ def test_editor_play_and_speed_controls_follow_the_transport_bar(app):
         assert speed.currentData() == 2.0
     finally:
         window.close()
+
+
+def test_add_button_writes_a_new_effect_whose_type_comes_from_its_text(app, tmp_path):
+    text = "new_vehicle 1\n    name = Test\n" + EFFECT + "\nend\nnew_vehicle 2\nend\n"
+    path = tmp_path / "vehicle.cfg"
+    path.write_text(text, encoding="utf-8")
+    document, block = _document(text)
+    panel = DestructionFxPanel()
+    window = _in_wide_window(panel, app)
+    try:
+        view = panel.effects_view
+        # Without a script file there is nowhere to write a new effect.
+        assert not view.add_button.isEnabled()
+        panel.set_context(fx.CONTEXT_VEHICLE, document)
+        panel.set_script_sources([(path, 0, block.end_line)])
+        app.processEvents()
+        assert view.add_button.isEnabled()
+
+        view.add_button.click()
+        drawer = _open_drawer(panel, app)
+        assert len(panel.document.items) == 2 and drawer.expanded
+        row = _item(panel, 1)
+        assert row.text().startswith("New effect") and "Empty" in row.text()
+        assert not drawer.save_button.isEnabled()             # nothing written yet
+        assert path.read_text(encoding="utf-8") == text
+
+        # A sound-event shake: the row becomes a Shake row.
+        drawer.code.setPlainText("    shk_explode_slot = 1\n    shk_explode_time = 300")
+        QTest.qWait(300)
+        assert _item(panel, 1).text().startswith("Shake · explode")
+        assert drawer.save_button.isEnabled()
+        # A begin_fx block: the same row becomes a Visual row.
+        drawer.code.setPlainText(EFFECT.replace("destroyed", "air_destroyed"))
+        QTest.qWait(300)
+        assert _item(panel, 1).text().startswith("Visual · air_destroyed")
+        drawer.save_button.click()
+        saved = path.read_text(encoding="utf-8")
+        # Written inside the first definition, right before its own end.
+        assert saved == text.replace(
+            "    duration = 400\nend\nend\n",
+            "    duration = 400\nend\n" + EFFECT.replace("destroyed", "air_destroyed")
+            + "\nend\n", 1)
+        assert not drawer.save_button.isEnabled() and not panel.has_unsaved_text
+
+        # A second new effect goes after the first one; an unsaved one is deleted silently.
+        view.add_button.click()
+        assert len(panel.document.items) == 3
+        _set_row(panel, 2)
+        with patch.object(QMessageBox, "question") as ask:
+            view.delete_button.click()
+            assert not ask.called
+        assert len(panel.document.items) == 2
+        assert path.read_text(encoding="utf-8") == saved
+    finally:
+        panel.close()
+        window.close()
+
+
+def test_two_new_effects_are_saved_together_in_list_order(tmp_path):
+    text = "new_vehicle 1\n" + EFFECT + "\nend\n"
+    path = tmp_path / "vehicle.cfg"
+    path.write_text(text, encoding="utf-8")
+    document, block = _document(text)
+    session = FxTextSession(document, fx.CONTEXT_VEHICLE, [(path, 0, block.end_line)])
+    first, second = session.add_blank(), session.add_blank()
+    assert (first, second) == (1, 2) and session.is_pending(first)
+    assert not session.dirty                      # blank effects have nothing to save
+    session.set_draft(first, "    shk_explode_slot = 1")
+    session.set_draft(second, "    pal_explode_slot = 2")
+    session.save([first, second])
+    assert path.read_text(encoding="utf-8") == (
+        "new_vehicle 1\n" + EFFECT + "\n    shk_explode_slot = 1\n    pal_explode_slot = 2\nend\n")
+    assert not session.is_pending(first) and session.end_line[1] == 9
+    # Later saves keep working on the moved lines.
+    session.set_draft(first, "    shk_explode_slot = 1\n    shk_explode_time = 99")
+    session.save([first])
+    assert "shk_explode_time = 99\n    pal_explode_slot = 2\nend" in path.read_text(encoding="utf-8")

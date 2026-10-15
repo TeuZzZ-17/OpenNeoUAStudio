@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import math
 from dataclasses import replace
+from pathlib import Path
 from time import perf_counter
 
 from PySide6.QtCore import QPointF, QRectF, QSignalBlocker, QSize, Qt, QTimer, Signal, QItemSelectionModel
@@ -22,6 +23,7 @@ from PySide6.QtWidgets import (
 
 from entity_designer import destruction_fx as fx
 from entity_designer.fx_audio import FxSoundPlayer
+from entity_designer import fx_visuals
 from entity_designer.fx_authoring import FxTextSession, effect_text
 from studio.ui.widgets import LIST_BASE, LIST_SELECTED, LIST_HOVER, use_standard_list_style
 
@@ -29,7 +31,9 @@ SPEEDS = (0.1, 0.25, 0.5, 1.0, 2.0, 4.0)
 MODE_COLORS = {
     fx.MODE_VISUAL: "#5fb7e8",
     fx.MODE_PHYSICAL: "#d98c4a",
-    fx.MODE_DECAL: "#9b8be0",
+    "sound": "#e6b94d",
+    "palette": "#d96cc4",
+    "shake": "#5fd1c3",
     "dest": "#5cbf72",
 }
 STATUS_GLYPHS = {
@@ -40,6 +44,8 @@ STATUS_GLYPHS = {
 }
 # Preview tail after the last effect before a loop restarts.
 LOOP_TAIL_MS = 400.0
+# Longest gap between two painted frames whose skipped shakes still count.
+SHAKE_LOOK_BACK_MS = 400.0
 EMPTY_TIMELINE_MS = 2000.0
 
 def _palette_icon(muted: bool) -> QIcon:
@@ -57,6 +63,32 @@ def _palette_icon(muted: bool) -> QIcon:
     for center, dot in (((7, 8), "#e0524a"), ((13, 8), "#52c46b"), ((10, 13.5), "#4f8fe8")):
         painter.setBrush(QColor("#6e7782") if muted else QColor(dot))
         painter.drawEllipse(QPointF(*center), 2.3, 2.3)
+    if muted:
+        painter.setPen(QPen(QColor("#eef0f4"), 2.0, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap))
+        painter.drawLine(QPointF(3, 17), QPointF(17, 3))
+    painter.end()
+    return QIcon(pixmap)
+
+
+KEY_GROUP_LABELS = {"sound": "Sound", "palette": "PAL", "shake": "Shake"}
+
+
+def _shake_icon(muted: bool) -> QIcon:
+    """A vibrating body with arcs on both sides; a white slash when switched off."""
+
+    pixmap = QPixmap(20, 20)
+    pixmap.fill(Qt.GlobalColor.transparent)
+    painter = QPainter(pixmap)
+    painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+    color = QColor("#8d96a3" if muted else "#eef0f4")
+    painter.setPen(QPen(color, 1.5, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap))
+    painter.setBrush(Qt.BrushStyle.NoBrush)
+    painter.drawRoundedRect(QRectF(7, 4.5, 6, 11), 1.5, 1.5)
+    # Vibration arcs on both sides of the body.
+    for radius in (6.0, 9.0):
+        rect = QRectF(10 - radius, 10 - radius, 2 * radius, 2 * radius)
+        painter.drawArc(rect, -35 * 16, 70 * 16)
+        painter.drawArc(rect, 145 * 16, 70 * 16)
     if muted:
         painter.setPen(QPen(QColor("#eef0f4"), 2.0, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap))
         painter.drawLine(QPointF(3, 17), QPointF(17, 3))
@@ -329,13 +361,24 @@ class FxEffectsView(QWidget):
         self.delete_action.setToolTip(
             "Remove the selected effects from the script file (asks first).")
         self.delete_action.triggered.connect(self.delete_selected)
+        # Add writes a new, empty effect: what is typed in it decides its type.
+        self.add_action = QAction("Add Effect", self)
+        self.add_action.setToolTip(
+            "Add an empty effect and open it in the code editor. What you write in it "
+            "decides its type; saving writes it into the script file.")
+        self.add_action.triggered.connect(self.panel.add_effect)
+        self.add_button = QPushButton("Add", self)
+        self.add_button.setToolTip(self.add_action.toolTip())
+        self.add_button.clicked.connect(self.add_action.trigger)
+        self.add_action.changed.connect(
+            lambda: self.add_button.setEnabled(self.add_action.isEnabled()))
+        buttons.addWidget(self.add_button, 0, 2)
         self.delete_button = QPushButton("Delete", self)
-        self.delete_button.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Expanding)
         self.delete_button.setToolTip(self.delete_action.toolTip())
         self.delete_button.clicked.connect(self.delete_action.trigger)
         self.delete_action.changed.connect(
             lambda: self.delete_button.setEnabled(self.delete_action.isEnabled()))
-        buttons.addWidget(self.delete_button, 0, 2, 2, 1)
+        buttons.addWidget(self.delete_button, 1, 2)
         layout.addLayout(buttons)
         self.list.itemSelectionChanged.connect(self.update_actions)
         self.list.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
@@ -349,37 +392,41 @@ class FxEffectsView(QWidget):
         selected = {row.data(Qt.ItemDataRole.UserRole) for row in self.list.selectedItems()}
         with QSignalBlocker(self.list):
             self.list.clear()
+            self._add_state_rows(selected if keep_selection else set())
             for index, item in enumerate(panel.document.items):
-                if isinstance(item, fx.FxBlock):
-                    color = MODE_COLORS.get(item.mode, "#a0a0a0")
-                    text = (f"{item.trigger or 'no trigger'}  ·  "
-                            f"{fx.block_summary(item, panel.context)}")
-                    issues = fx.interpret_block(item, panel.context).issues
+                if isinstance(item, fx.FxBlank):
+                    color = "#6f7682"
+                    issues = ()
+                    title = "New effect"
+                    detail = "Empty · write a begin_fx, a dest_fx or snd_ / pal_ / shk_ keys"
+                elif isinstance(item, fx.FxKeyGroup):
+                    color = MODE_COLORS[item.kind]
+                    issues = fx.key_group_issues(item, panel.context)
+                    title = f"{KEY_GROUP_LABELS[item.kind]} · {item.event}"
+                    detail = fx.key_group_summary(item)
                 else:
-                    color = MODE_COLORS["dest"]
-                    parsed = item.parsed
-                    text = (f"{parsed.kind if parsed else '?'}  ·  "
-                            f"{fx.dest_summary(item, panel.catalog)}")
-                    issues = fx.dest_fx_issues(item)
+                    if isinstance(item, fx.FxBlock):
+                        color = MODE_COLORS.get(item.mode, "#a0a0a0")
+                        text = (f"{item.trigger or 'no trigger'}  ·  "
+                                f"{fx.block_summary(item, panel.context)}")
+                        issues = fx.interpret_block(item, panel.context).issues
+                    else:
+                        color = MODE_COLORS["dest"]
+                        parsed = item.parsed
+                        text = (f"{parsed.kind if parsed else '?'}  ·  "
+                                f"{fx.dest_summary(item, panel.catalog)}")
+                        issues = fx.dest_fx_issues(item)
+                    parts = text.replace("Vanilla ", "", 1).split("  ·  ", 1)
+                    trigger = parts[0]
+                    summary = parts[1] if len(parts) > 1 else ""
+                    mode, _, detail = summary.partition(" · ")
+                    title = f"{mode} · {trigger}"
                 glyph, meaning = STATUS_GLYPHS.get(_issues_status(issues), ("", ""))
-                parts = text.replace("Vanilla ", "", 1).split("  ·  ", 1)
-                trigger = parts[0]
-                summary = parts[1] if len(parts) > 1 else ""
-                mode, _, detail = summary.partition(" · ")
-                title = f"{mode} · {trigger}"
                 row = QListWidgetItem(title + (" · Warning" if glyph else "") + "\n" + detail)
                 row.setFlags(row.flags() | Qt.ItemFlag.ItemIsUserCheckable)
                 row.setCheckState(Qt.CheckState.Unchecked if index in panel.hidden_items
                                   else Qt.CheckState.Checked)
-                dot = QPixmap(12, 12)
-                dot.fill(Qt.GlobalColor.transparent)
-                painter = QPainter(dot)
-                painter.setRenderHint(QPainter.RenderHint.Antialiasing)
-                painter.setPen(Qt.PenStyle.NoPen)
-                painter.setBrush(QColor(color))
-                painter.drawEllipse(2, 2, 8, 8)
-                painter.end()
-                row.setIcon(QIcon(dot))
+                row.setIcon(self._dot_icon(color))
                 row.setForeground(QColor("#edf1f7"))
                 row.setToolTip("\n".join(
                     [meaning] + [issue.message for issue in issues]).strip())
@@ -387,7 +434,7 @@ class FxEffectsView(QWidget):
                 self.list.addItem(row)
                 if keep_selection and index in selected:
                     row.setSelected(True)
-            if not panel.document.items:
+            if not panel.document.items and not panel.state_session.originals:
                 placeholder = QListWidgetItem(
                     "No destruction effects in this definition.")
                 placeholder.setFlags(Qt.ItemFlag.NoItemFlags)
@@ -395,6 +442,40 @@ class FxEffectsView(QWidget):
             if current is not None:
                 self.list.setCurrentRow(current, QItemSelectionModel.SelectionFlag.NoUpdate)
         self.update_actions()
+
+    @staticmethod
+    def _dot_icon(color: str) -> QIcon:
+        dot = QPixmap(12, 12)
+        dot.fill(Qt.GlobalColor.transparent)
+        painter = QPainter(dot)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.setBrush(QColor(color))
+        painter.drawEllipse(2, 2, 8, 8)
+        painter.end()
+        return QIcon(dot)
+
+    def _add_state_rows(self, selected) -> None:
+        """One Model row leads the list: the VP / BASE / 3DS of every state."""
+
+        panel = self.panel
+        session = panel.state_session
+        index = fx_visuals.MODEL_INDEX
+        if index not in session.originals:
+            return
+        row = QListWidgetItem("Model\n" + fx_visuals.model_summary(
+            fx_visuals.parse_model_text(session.originals[index], panel.weapon_context),
+            panel.weapon_context))
+        row.setFlags(row.flags() | Qt.ItemFlag.ItemIsUserCheckable)
+        row.setCheckState(Qt.CheckState.Unchecked if index in panel.hidden_items
+                          else Qt.CheckState.Checked)
+        row.setIcon(self._dot_icon(fx_visuals.MODEL_COLOR))
+        row.setForeground(QColor("#edf1f7"))
+        row.setToolTip("vp_ / base_ / 3ds_ of every model state")
+        row.setData(Qt.ItemDataRole.UserRole, index)
+        self.list.addItem(row)
+        if index in selected:
+            row.setSelected(True)
 
     def mark_dirty(self) -> None:
         """Append a star to the effects with unsaved code."""
@@ -405,7 +486,7 @@ class FxEffectsView(QWidget):
                 if index is not None:
                     lines = row.text().split("\n", 1)
                     lines[0] = lines[0].removesuffix(" *") + (
-                        " *" if self.panel.text_session.is_dirty(index) else "")
+                        " *" if self.panel.session_for(index).is_dirty(index) else "")
                     row.setText("\n".join(lines))
 
     def sync_checks(self) -> None:
@@ -427,23 +508,27 @@ class FxEffectsView(QWidget):
     # -- actions ------------------------------------------------------------------------
 
     def update_actions(self) -> None:
-        available = bool(self.panel.document.items)
+        available = bool(self.panel.document.items) or bool(self.panel.state_session.originals)
         selected = any(row.data(Qt.ItemDataRole.UserRole) is not None
                        for row in self.list.selectedItems())
         for index, action in enumerate(self.actions):
             action.setEnabled(available and (index < 2 or selected))
-        self.delete_action.setEnabled(available and selected)
+        # Model-state rows cannot be deleted: only effects can.
+        self.delete_action.setEnabled(bool(self.panel.document.items) and bool(self.selected_indexes()))
+        self.add_action.setEnabled(self.panel.text_session.can_add())
 
     def selected_indexes(self) -> list[int]:
         return sorted(row.data(Qt.ItemDataRole.UserRole) for row in self.list.selectedItems()
-                      if row.data(Qt.ItemDataRole.UserRole) is not None)
+                      if row.data(Qt.ItemDataRole.UserRole) is not None
+                      and row.data(Qt.ItemDataRole.UserRole) >= 0)
 
     def delete_selected(self) -> None:
         self.panel.delete_effects(self.selected_indexes())
 
     def create_menu(self):
-        """Reuse the actions shared with the buttons: Delete and the four visibility ones."""
+        """Reuse the actions shared with the buttons: Add, Delete and the four visibility ones."""
         menu = QMenu(self)
+        menu.addAction(self.add_action)
         edit = menu.addAction("Edit Effect Code")
         current = self.list.currentItem()
         index = current.data(Qt.ItemDataRole.UserRole) if current else None
@@ -466,7 +551,7 @@ class FxEffectsView(QWidget):
 
     def visibility_edited(self) -> None:
         current = self.list.currentItem()
-        self.panel.set_highlight(current.data(Qt.ItemDataRole.UserRole) if current is not None else None)
+        self.panel.set_highlight(self._highlight_of(current))
         self.update_actions()
         self.panel.set_hidden_items({
             row.data(Qt.ItemDataRole.UserRole) for position in range(self.list.count())
@@ -489,7 +574,7 @@ class FxEffectsView(QWidget):
         selected = {row.data(Qt.ItemDataRole.UserRole) for row in self.list.selectedItems()
                     if row.data(Qt.ItemDataRole.UserRole) is not None}
         if selected:
-            self.panel.set_hidden_items(set(range(len(self.panel.document.items))) - selected)
+            self.panel.set_hidden_items(self.panel.all_row_indexes() - selected)
 
     def _item_toggled(self, row: QListWidgetItem) -> None:
         index = row.data(Qt.ItemDataRole.UserRole)
@@ -501,7 +586,14 @@ class FxEffectsView(QWidget):
 
     def _row_selected(self, position: int) -> None:
         row = self.list.item(position) if position >= 0 else None
-        self.panel.set_highlight(row.data(Qt.ItemDataRole.UserRole) if row else None)
+        self.panel.set_highlight(self._highlight_of(row))
+
+    @staticmethod
+    def _highlight_of(row):
+        """Only effects are highlighted in the preview and on the timeline."""
+
+        index = row.data(Qt.ItemDataRole.UserRole) if row is not None else None
+        return index if index is not None and index >= 0 else None
 
 
 class DestructionFxPanel(QWidget):
@@ -512,10 +604,13 @@ class DestructionFxPanel(QWidget):
     documentEdited = Signal()
     draftStateChanged = Signal()
     sourceSaved = Signal(object)
+    # A model-state key was written to the script: the editor reloads the definition.
+    visualsSaved = Signal()
 
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
         self.context = fx.CONTEXT_VEHICLE
+        self.state_session = fx_visuals.StateSession((), False)
         self.document = fx.FxDocument()
         self.text_session = FxTextSession(self.document, self.context)
         self.code_drawer = None
@@ -523,6 +618,10 @@ class DestructionFxPanel(QWidget):
         self.catalog: dict[int, fx.LegacyFxVehicle] = {}
         self.weapons: dict[int, fx.WeaponDef] = {}
         self.debuffs: dict[int, fx.DebuffSpec] = {}
+        self.decals: dict[int, fx.DecalProfile] = {}
+        self.settings = fx.EffectSettings()
+        # (time, simulation, angles) of the last shake handed to the viewport.
+        self._shake_cache = None
         self.unit = fx.UnitPhases()
         self.current_trigger = fx.SEQUENCE_TRIGGER
         self.origin = (0.0, 0.0, 0.0)
@@ -599,10 +698,6 @@ class DestructionFxPanel(QWidget):
         self.altitude_spin.valueChanged.connect(self._altitude_changed)
         layout.addWidget(self.altitude_box)
 
-        self.show_unit = FxCheckBox("Show the unit and its model changes", self)
-        self.show_unit.setChecked(True)
-        self.show_unit.toggled.connect(lambda _on: self.frameChanged.emit())
-        layout.addWidget(self.show_unit)
         self.follow_unit = FxCheckBox("Follow unit with camera", self)
         self.follow_unit.setChecked(True)
         self.follow_unit.setToolTip("Follow the unit's position during flight and falling. Disable to explore the scene freely.")
@@ -662,6 +757,7 @@ class DestructionFxPanel(QWidget):
         self.loop_button = button("Loop", "Repeat the preview", True)
         self.loop_button.setChecked(True)
         self.mute_button = button("Mute", "Mute the preview sounds", True)
+        self.shake_button = button("Shake", "Switch off the view shake (shk_*)", True)
         self.pal_button = button("Palette", "Switch off the palette flashes (pal_*)", True)
         for widget, symbol in (
                 (self.restart_button, QStyle.StandardPixmap.SP_MediaSkipBackward),
@@ -673,17 +769,23 @@ class DestructionFxPanel(QWidget):
             widget.setIcon(self._transport_icon(symbol))
             widget.setIconSize(QSize(20, 20))
 
-            widget.setMinimumWidth(32)
+            widget.setMinimumWidth(28)
         self.restart_button.setAccessibleName("Restart")
         self.play_button.setAccessibleName("Play / pause")
         self.stop_button.setAccessibleName("Stop")
         self.loop_button.setAccessibleName("Loop")
         self.mute_button.setAccessibleName("Mute sound")
         self.mute_button.toggled.connect(self._mute_toggled)
+        self.shake_button.setText("")
+        self.shake_button.setIcon(_shake_icon(False))
+        self.shake_button.setIconSize(QSize(20, 20))
+        self.shake_button.setMinimumWidth(28)
+        self.shake_button.toggled.connect(self._shake_toggled)
+        self.shake_button.setAccessibleName("Mute view shake")
         self.pal_button.setText("")
         self.pal_button.setIcon(_palette_icon(False))
         self.pal_button.setIconSize(QSize(20, 20))
-        self.pal_button.setMinimumWidth(32)
+        self.pal_button.setMinimumWidth(28)
         self.pal_button.toggled.connect(self._palette_toggled)
         self.pal_button.setAccessibleName("Mute palette flashes")
         self.restart_button.clicked.connect(self.restart)
@@ -724,7 +826,8 @@ class DestructionFxPanel(QWidget):
 
     def set_context(self, context: str, document: fx.FxDocument, *,
                     catalog=None, unit: fx.UnitPhases | None = None,
-                    keep_view: bool = False, weapons=None, debuffs=None) -> None:
+                    keep_view: bool = False, weapons=None, debuffs=None,
+                    decals=None, settings=None) -> None:
         """Show one definition; ``keep_view`` keeps time and hidden effects."""
 
         self.context = context
@@ -737,6 +840,9 @@ class DestructionFxPanel(QWidget):
         self.catalog = dict(catalog or {})
         self.weapons = dict(weapons or {})
         self.debuffs = dict(debuffs or {})
+        self.decals = dict(decals or {})
+        self.settings = settings or fx.EffectSettings()
+        self.sound.master_volume = self.settings.volume
         self.unit = unit or fx.UnitPhases(weapon=context == fx.CONTEXT_WEAPON)
         if not keep_view:
             self.hidden_items.clear()
@@ -748,9 +854,6 @@ class DestructionFxPanel(QWidget):
                                     else fx.SEQUENCE_TRIGGER)
         weapon = context == fx.CONTEXT_WEAPON
         self.weapon_box.setVisible(weapon)
-        self.show_unit.setText(
-            "Show the weapon and its model changes" if weapon
-            else "Show the unit and its model changes")
         self.follow_unit.setText(
             "Follow weapon with camera" if weapon
             else "Follow unit with camera")
@@ -789,12 +892,14 @@ class DestructionFxPanel(QWidget):
             self.sound.resume(self._sound_events, self.time_ms)
 
     def set_scene(self, origin, ground_y: float, unit_radius: float, *, transform=None, overeof=None,
-                  scale=None, euler=None) -> None:
+                  scale=None, euler=None, model_diameter=None) -> None:
         values = (tuple(origin), float(ground_y), float(unit_radius))
         unit = replace(self.unit, transform=transform if transform is not None else self.unit.transform,
                        overeof=overeof if overeof is not None else self.unit.overeof,
                        scale=scale if scale is not None else self.unit.scale,
-                       euler=euler if euler is not None else self.unit.euler)
+                       euler=euler if euler is not None else self.unit.euler,
+                       model_diameter=(model_diameter if model_diameter is not None
+                                       else self.unit.model_diameter))
         if values == (self.origin, self.ground_y, self.unit_radius) and unit == self.unit:
             return
         self.origin, self.ground_y, self.unit_radius = values
@@ -827,20 +932,116 @@ class DestructionFxPanel(QWidget):
 
     def set_script_sources(self, origins) -> None:
         self.text_session = FxTextSession(self.document, self.context, origins)
+        self.state_session = fx_visuals.StateSession(origins, self.context == fx.CONTEXT_WEAPON)
+        self._fill_list(keep_selection=True)
         self.update_text_status()
-        if self._pending_code_index is not None and self.document.items:
-            index = min(self._pending_code_index, len(self.document.items) - 1)
+        self.effects_view.update_actions()
+        if self._pending_code_index is not None:
+            index = self._pending_code_index
             self._pending_code_index = None
+            if not self.is_state_index(index) and self.document.items:
+                index = min(index, len(self.document.items) - 1)
             self.edit_effect_code(index)
 
     @property
     def has_unsaved_text(self) -> bool:
-        return self.text_session.dirty
+        return self.text_session.dirty or self.state_session.dirty
+
+    @property
+    def weapon_context(self) -> bool:
+        return self.context == fx.CONTEXT_WEAPON
+
+    def is_state_index(self, index) -> bool:
+        """The Model row of the list has a negative index (-1 means none)."""
+
+        return index == fx_visuals.MODEL_INDEX
+
+    def session_for(self, index):
+        """The draft session that owns a list row: effects or model states."""
+
+        return self.state_session if self.is_state_index(index) else self.text_session
+
+    def edit_title(self, index) -> str:
+        if self.is_state_index(index):
+            return "Model"
+        return f"Effect {index + 1}"
+
+    def edit_source(self, index) -> str:
+        if self.is_state_index(index):
+            origins = self.state_session.origins
+            return str(origins[-1][0]) if origins else "Preview draft"
+        session = self.text_session
+        return str(session.sources[index].path) if len(session.sources) > index else "Preview draft"
+
+    @property
+    def hidden_states(self) -> set[str]:
+        """Model states the preview does not draw: all of them when the Model row is off."""
+
+        if fx_visuals.MODEL_INDEX not in self.hidden_items:
+            return set()
+        return {state for state, _label in fx_visuals.states_for(self.weapon_context)}
+
+    def all_row_indexes(self) -> set[int]:
+        return (set(range(len(self.document.items)))
+                | ({fx_visuals.MODEL_INDEX} if self.state_session.originals else set()))
+
+    def has_rows(self) -> bool:
+        return bool(self.document.items) or bool(self.state_session.originals)
+
+    def is_valid_index(self, index) -> bool:
+        if self.is_state_index(index):
+            return index in self.state_session.originals
+        return index is not None and 0 <= index < len(self.document.items)
+
+    def save_rows(self, indexes) -> bool:
+        """Save the given list rows (None = all) to the script; False if it was refused.
+
+        Effect code goes through ``FxTextSession``. Model states rewrite their keys
+        and then the whole definition is reloaded, so effect drafts must be saved first.
+        """
+
+        effects = (range(len(self.document.items)) if indexes is None
+                   else [index for index in indexes if not self.is_state_index(index)])
+        states = (self.state_session.indexes() if indexes is None
+                  else [index for index in indexes if self.is_state_index(index)])
+        paths = self.text_session.save(effects)
+        if paths:
+            self.sourceSaved.emit(paths)
+            self.state_session.refresh_snapshots(paths)
+        if states:
+            if self.text_session.dirty:
+                raise ValueError("Save or revert the effect-code drafts first: "
+                                 "the script is reloaded after a model change.")
+            if self.state_session.save(states):
+                self.visualsSaved.emit()
+        return True
 
     def edit_effect_code(self, index) -> None:
-        if index is None or not 0 <= index < len(self.document.items):
+        if index is None:
+            return
+        if self.is_state_index(index):
+            if index not in self.state_session.originals:
+                return
+        elif not 0 <= index < len(self.document.items):
             return
         self._ensure_code_drawer().load_effect(index)
+
+    def add_effect(self) -> None:
+        """Add an empty effect and open it: what is written in it decides its type."""
+
+        session = self.text_session
+        try:
+            index = session.add_blank()
+        except ValueError as exc:
+            QMessageBox.warning(self, "Effect was not added", str(exc))
+            return
+        self.document.items.append(fx.FxBlank())
+        self._fill_list(current=index)
+        self._rebuild_simulation()
+        self.update_text_status()
+        self.effects_view.select_effect(index)
+        self.documentEdited.emit()
+        self.edit_effect_code(index)
 
     def _ensure_code_drawer(self):
         """Create the editor and its tab once the panel sits in its final window."""
@@ -867,14 +1068,16 @@ class DestructionFxPanel(QWidget):
             return False
         files = ", ".join(sorted({session.sources[i].path.name for i in indexes}))
         count = len(indexes)
-        answer = QMessageBox.question(
-            self, "Delete effects",
-            f"Delete {count} effect{'s' if count > 1 else ''} from {files}?\n"
-            "The script file is changed right away.",
-            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.Cancel,
-            QMessageBox.StandardButton.Cancel)
-        if answer != QMessageBox.StandardButton.Yes:
-            return False
+        # An effect that was never saved is not in the file: no question needed.
+        if not all(session.is_pending(i) for i in indexes):
+            answer = QMessageBox.question(
+                self, "Delete effects",
+                f"Delete {count} effect{'s' if count > 1 else ''} from {files}?\n"
+                "The script file is changed right away.",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.Cancel,
+                QMessageBox.StandardButton.Cancel)
+            if answer != QMessageBox.StandardButton.Yes:
+                return False
         drawer = self.code_drawer
         if drawer is not None:
             drawer.timer.stop()      # an edit waiting for the timer must not revive a deleted effect
@@ -906,27 +1109,39 @@ class DestructionFxPanel(QWidget):
         self.documentEdited.emit()
         return True
 
+    def create_mirror_button(self, parent, source: QPushButton) -> QPushButton:
+        """A copy of a transport bar button that looks and works like the original.
+
+        The icon, tooltip and checked state always follow the original, so the
+        code editor can offer the same controls.
+        """
+
+        mirror = QPushButton(parent)
+        mirror.setCheckable(source.isCheckable())
+        mirror.setIconSize(QSize(20, 20))
+        mirror.setMinimumWidth(28)
+        mirror.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+
+        def follow(*_args) -> None:
+            mirror.setIcon(source.icon())
+            mirror.setToolTip(source.toolTip())
+            mirror.setAccessibleName(source.accessibleName())
+            if source.isCheckable():
+                with QSignalBlocker(mirror):
+                    mirror.setChecked(source.isChecked())
+
+        if source.isCheckable():
+            mirror.toggled.connect(source.setChecked)
+            source.toggled.connect(follow)
+        else:
+            mirror.clicked.connect(source.click)
+        follow()
+        return mirror
+
     def create_play_button(self, parent) -> QPushButton:
         """A Play / Pause button that looks and works like the transport bar's."""
 
-        mirror = QPushButton(parent)
-        mirror.setCheckable(True)
-
-        mirror.setIconSize(QSize(20, 20))
-        mirror.setMinimumWidth(32)
-        mirror.setFocusPolicy(Qt.FocusPolicy.NoFocus)
-        mirror.setAccessibleName("Play / pause")
-
-        def follow(playing: bool) -> None:
-            with QSignalBlocker(mirror):
-                mirror.setChecked(playing)
-            mirror.setIcon(self.play_button.icon())
-            mirror.setToolTip(self.play_button.toolTip())
-
-        mirror.toggled.connect(self.play_button.setChecked)
-        self.play_button.toggled.connect(follow)
-        follow(self.play_button.isChecked())
-        return mirror
+        return self.create_mirror_button(parent, self.play_button)
 
     def create_speed_combo(self, parent) -> QComboBox:
         """A playback speed list that always shows the transport bar's speed."""
@@ -944,6 +1159,10 @@ class DestructionFxPanel(QWidget):
         return combo
 
     def apply_text_item(self, index, item) -> None:
+        if self.is_state_index(index):
+            # A model state shows its new draft in the preview once it is saved.
+            self.update_text_status()
+            return
         if effect_text(self.document.items[index]) != effect_text(item):
             self.document.items[index] = item
             self._fill_list(keep_selection=True, current=index)
@@ -971,12 +1190,17 @@ class DestructionFxPanel(QWidget):
             try:
                 paths = self.text_session.save(range(len(self.document.items)))
                 self.sourceSaved.emit(paths)
+                self.state_session.refresh_snapshots(paths)
+                if self.state_session.save(self.state_session.indexes()):
+                    self.visualsSaved.emit()
             except (OSError, ValueError, RuntimeError, UnicodeError) as exc:
                 QMessageBox.warning(self, "Effects were not saved", str(exc))
                 return False
         else:
             for index in range(len(self.document.items)):
                 self.document.items[index] = self.text_session.revert(index)
+            for index in self.state_session.indexes():
+                self.state_session.revert(index)
             self._fill_list()
             self._rebuild_simulation()
         if self.code_drawer is not None:
@@ -1002,7 +1226,7 @@ class DestructionFxPanel(QWidget):
 
     def hide_all(self):
         """Disable every effect while keeping the current row selection."""
-        self.set_hidden_items(set(range(len(self.document.items))))
+        self.set_hidden_items(self.all_row_indexes())
 
     def show_all(self) -> None:
         self.set_hidden_items(set())
@@ -1019,7 +1243,7 @@ class DestructionFxPanel(QWidget):
             origin=self.origin, ground_y=self.ground_y,
             unit_radius=self.unit_radius, legacy_catalog=self.catalog,
             enabled=enabled, unit=self.unit, weapons=self.weapons,
-            debuffs=self.debuffs)
+            debuffs=self.debuffs, decals=self.decals, settings=self.settings)
         self.timeline.set_tracks(self.simulation.tracks, self._length())
         self.sound.stop_all()
         self._sound_events = self.simulation.sound_events
@@ -1094,6 +1318,31 @@ class DestructionFxPanel(QWidget):
             "Palette flashes switched off: click to show them" if muted
             else "Switch off the palette flashes (pal_*)")
         self.frameChanged.emit()
+
+    def _shake_toggled(self, muted: bool) -> None:
+        self.shake_button.setIcon(_shake_icon(muted))
+        self.shake_button.setToolTip(
+            "View shake switched off: click to show it" if muted
+            else "Switch off the view shake (shk_*)")
+        self.frameChanged.emit()
+
+    def shake_angles(self) -> tuple[float, float, float]:
+        """Turn of the view now (radians around X, Y, Z); zero when switched off."""
+
+        if self.simulation is None or self.shake_button.isChecked():
+            return (0.0, 0.0, 0.0)
+        now = self.time_ms
+        cached = self._shake_cache
+        if cached is not None and cached[0] == now and cached[1] is self.simulation:
+            return cached[2]
+        # The preview paints fewer frames than the game: the shake of the frames
+        # skipped since the last paint counts too, so a short shake still shows.
+        previous = cached[0] if cached is not None and cached[1] is self.simulation else now
+        if not previous < now <= previous + SHAKE_LOOK_BACK_MS:
+            previous = now
+        angles = self.simulation.shake_angles_between(previous, now)
+        self._shake_cache = (now, self.simulation, angles)
+        return angles
 
     def palette_effects(self) -> list[tuple[int, float]]:
         """[(palette slot, strength)] of the current time; empty when switched off."""
@@ -1186,7 +1435,7 @@ class DestructionFxPanel(QWidget):
                 vps.update(visual.vp for visual in spec.visuals if visual.vp > 0)
                 vps.update(vp for vp in spec.vp_models if vp > 0)
                 vps.update(vp for vp in spec.vp_impacts if vp > 0)
-            else:
+            elif isinstance(item, fx.DestFxLine):
                 dest = item.parsed
                 if dest is not None:
                     vps.update(self._legacy_vps(dest.vehicle_id, 0))
