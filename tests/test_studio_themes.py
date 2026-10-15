@@ -1,0 +1,138 @@
+import os
+os.environ.setdefault('QT_QPA_PLATFORM', 'offscreen')
+import pytest
+from PySide6.QtCore import QEvent, QPoint, QPointF, Qt
+from PySide6.QtGui import QMouseEvent, QPalette, QTextCursor
+from PySide6.QtTest import QTest
+from PySide6.QtWidgets import (QApplication, QCheckBox, QComboBox, QMainWindow,
+                              QMenu, QScrollBar, QStyle, QStyleOptionComboBox)
+from studio.ui.style import apply_studio_style, install_theme_menu
+from studio.ui.code_editor import ScriptCodeEditor
+
+@pytest.fixture
+def app():
+    app = QApplication.instance() or QApplication([])
+    apply_studio_style('dark')
+    yield app
+    apply_studio_style('dark')
+
+
+def test_theme_switch_updates_open_menus_and_preserves_script_undo(app):
+    windows = [QMainWindow(), QMainWindow()]
+    editor = ScriptCodeEditor()
+    try:
+        for window in windows:
+            install_theme_menu(window)
+        editor.setPlainText('begin_fx\n    lifetime = 400\nend')
+        cursor = editor.editor.textCursor()
+        cursor.movePosition(QTextCursor.MoveOperation.End)
+        cursor.insertText('\n; retained edit')
+        editor.editor.setTextCursor(cursor)
+        position = cursor.position()
+        apply_studio_style('light')
+        assert app.palette().color(QPalette.ColorRole.Base).name() == '#d8dcdf'
+        assert editor._theme['key'] == '#005f9e'
+        assert editor.editor.textCursor().position() == position
+        assert editor.toPlainText().endswith('; retained edit')
+        assert editor.editor.document().isUndoAvailable()
+        for window in windows:
+            assert [a.text() for a in window.studio_theme_menu.actions()] == ['Dark', 'Light']
+            assert [a.isChecked() for a in window.studio_theme_menu.actions()] == [False, True]
+        editor.editor.undo()
+        assert '; retained edit' not in editor.toPlainText()
+        apply_studio_style('dark')
+        assert editor._theme['key'] == '#82c9ff'
+    finally:
+        editor.close()
+        for window in windows:
+            window.close()
+
+
+@pytest.mark.parametrize('theme', ['dark', 'light'])
+def test_submenu_hover_is_visible_and_fields_have_inset(app, theme):
+    apply_studio_style(theme)
+    menu = QMenu()
+    submenu = menu.addMenu('Import')
+    first = submenu.addAction('Import BAS Archive')
+    submenu.addAction('Import BASE')
+    combo = QComboBox()
+    combo.addItem('4:3 (default / vanilla)')
+    combo.resize(260, 36)
+    try:
+        combo.show()
+        submenu.popup(QPoint(40, 40))
+        QTest.qWait(30)
+        QTest.mouseMove(submenu, QPoint(1, 1))
+        QTest.qWait(10)
+        before = submenu.grab().toImage()
+        rect = submenu.actionGeometry(first)
+        app.sendEvent(submenu, QMouseEvent(QEvent.Type.MouseMove, QPointF(rect.center()),
+                      QPointF(submenu.mapToGlobal(rect.center())), Qt.MouseButton.NoButton,
+                      Qt.MouseButton.NoButton, Qt.KeyboardModifier.NoModifier))
+        QTest.qWait(30)
+        assert submenu.activeAction() is first
+        after = submenu.grab().toImage()
+        point = QPoint(rect.left() + 2, rect.center().y())
+        assert before.pixelColor(point) != after.pixelColor(point)
+        assert after.pixelColor(point).name() == app.palette().color(QPalette.ColorRole.Highlight).name()
+        option = QStyleOptionComboBox()
+        combo.initStyleOption(option)
+        text_rect = combo.style().subControlRect(QStyle.ComplexControl.CC_ComboBox, option,
+                                                QStyle.SubControl.SC_ComboBoxEditField, combo)
+        assert text_rect.left() >= 8
+        assert text_rect.right() < combo.width() - 15
+    finally:
+        menu.close()
+        submenu.close()
+        combo.close()
+
+
+def test_checkboxes_and_scrollbars_share_style_across_windows(app):
+    windows = [QMainWindow(), QMainWindow()]
+    controls = []
+    try:
+        for window in windows:
+            check = QCheckBox('Visible', window)
+            check.setChecked(True)
+            check.resize(120, 32)
+            bar = QScrollBar(Qt.Orientation.Vertical, window)
+            bar.setRange(0, 100)
+            bar.setValue(30)
+            bar.resize(12, 180)
+            controls.append((check, bar))
+        for theme in ('dark', 'light'):
+            apply_studio_style(theme)
+            assert controls[0][0].grab().toImage() == controls[1][0].grab().toImage()
+            assert controls[0][1].grab().toImage() == controls[1][1].grab().toImage()
+            assert all(not control.styleSheet() for pair in controls for control in pair)
+            image = controls[0][0].grab().toImage()
+            indicator_colors = {image.pixelColor(x, y).name()
+                                for x in range(18) for y in range(8, 25)}
+            assert '#ffffff' in indicator_colors
+            assert app.palette().highlight().color().name() in indicator_colors
+    finally:
+        for window in windows:
+            window.close()
+
+
+def test_menu_choice_is_remembered_for_next_application_start(app, monkeypatch):
+    import studio.ui.style as style
+    values = {}
+    class Settings:
+        def __init__(self, *args):
+            pass
+        def value(self, key, default):
+            return values.get(key, default)
+        def setValue(self, key, value):
+            values[key] = value
+    monkeypatch.setattr(style, "QSettings", Settings)
+    window = QMainWindow()
+    try:
+        install_theme_menu(window)
+        window.studio_theme_menu.actions()[1].trigger()
+        assert values == {"ui/theme": "light"}
+        app.setProperty("studioStyleLoaded", False)
+        apply_studio_style()
+        assert app.property("studioTheme") == "light"
+    finally:
+        window.close()

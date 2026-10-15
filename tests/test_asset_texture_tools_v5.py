@@ -237,6 +237,23 @@ class AssetResolverIntegrityTests(unittest.TestCase):
                 path.is_relative_to(package)
                 for path in resolved.candidates))
 
+    def test_file_beside_base_wins_over_same_name_in_subfolders(self):
+        with tempfile.TemporaryDirectory() as temp:
+            package = Path(temp)
+            other_family = package / "VP_OTHER_FAMILY"
+            other_family.mkdir()
+            local = package / "FX2.ILBM"
+            local.write_bytes(b"new export")
+            (other_family / "FX2.ILBM").write_bytes(b"old export")
+
+            resolved = AssetResolver(
+                [package], prefer_earliest_root=True).resolve(
+                    "FX2.ILBM", "texture")
+
+            self.assertEqual(resolved.status, "found")
+            self.assertEqual(resolved.path, local)
+            self.assertEqual(len(resolved.candidates), 2)
+
     def test_package_logical_path_precedes_later_set_root(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)

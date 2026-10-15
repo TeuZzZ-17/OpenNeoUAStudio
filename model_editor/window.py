@@ -6,7 +6,7 @@ from pathlib import Path
 
 from PySide6.QtGui import QAction
 from PySide6.QtCore import Qt
-from PySide6.QtWidgets import QHBoxLayout, QPushButton, QMessageBox
+from PySide6.QtWidgets import QMessageBox
 
 
 from studio.workbench.window import AssemblyWindow, _BAS_KIND_ROLE, _BAS_NAME_ROLE
@@ -91,16 +91,6 @@ class ModelEditorWindow(EntityListMixin, SetBasMixin, AssemblyWindow):
         self.generate_genesis_action.triggered.connect(self._generate_genesis)
         self.file_menu.insertAction(self.exit_action, self.generate_genesis_action)
         self.file_menu.aboutToShow.connect(self._sync_generator_actions)
-        row = QHBoxLayout()
-        self.generate_wireframe_button = QPushButton("Generate Wireframe")
-        self.generate_genesis_button = QPushButton("Generate Genesis")
-        for button, action in (
-                (self.generate_wireframe_button, self.generate_wireframe_action),
-                (self.generate_genesis_button, self.generate_genesis_action)):
-            button.clicked.connect(action.trigger)
-            row.addWidget(button)
-        layout = self.model_texture_label.parentWidget().layout()
-        layout.insertLayout(layout.indexOf(self.model_texture_label), row)
         self._sync_generator_actions()
 
         # Keep the detached container alive because the shared AssemblyWindow
@@ -149,7 +139,6 @@ class ModelEditorWindow(EntityListMixin, SetBasMixin, AssemblyWindow):
 
     def _sync_generator_actions(self) -> None:
         self._sync_wireframe_generator_action()
-        self.generate_wireframe_button.setEnabled(self.viewport.has_model)
         reason = self._material_structure_reason()
         obj = self._workbench_obj
         if not reason and (self._family.base_asset is None
@@ -157,11 +146,9 @@ class ModelEditorWindow(EntityListMixin, SetBasMixin, AssemblyWindow):
             reason = "load a complete BASE asset family first"
         enabled = not reason and obj is not None and bool(obj.skeleton.polygons)
         self.generate_genesis_action.setEnabled(enabled)
-        self.generate_genesis_button.setEnabled(enabled)
         tip = ("Transform the current model into a Genesis. Undo restores it."
                if enabled else "Generate Genesis: " + (reason or "load a model first"))
         self.generate_genesis_action.setToolTip(tip)
-        self.generate_genesis_button.setToolTip(tip)
 
     def _add_model_generator_context_actions(self, menu, item) -> None:
         kind = item.data(0, _BAS_KIND_ROLE) if item is not None else None
