@@ -2,6 +2,8 @@
 from pathlib import Path
 import re
 
+from studio.exchange.portable import find_existing_path
+
 SUFFIXES = {'.cfg', '.scr', '.ini'}
 
 
@@ -17,26 +19,15 @@ def script_texts(scripts: Path, extra: str = '', with_source=False):
         except UnicodeDecodeError:
             return path.read_text(encoding='cp1252', errors='replace')
 
-    def find(parent, parts):
-        for part in parts:
-            if not parent.is_dir():
-                return None
-            parent = next((p for p in parent.iterdir() if p.name.casefold() == part.casefold()), None)
-            if parent is None:
-                return None
-        return parent
-
     def include_path(value, directory):
         value = value.strip().strip('"').replace('\\', '/')
         lower = value.casefold()
-        if lower.startswith('data:'):
+        if lower.startswith(('data:', 'data/')):
             value = value[5:]
-            return find(scripts, value.split('/')[1:]) if value.casefold().startswith('scripts/') else find(scripts.parent, value.split('/'))
-        if lower.startswith('data/'):
-            value = value[5:]
-            return find(scripts, value.split('/')[1:]) if value.casefold().startswith('scripts/') else find(scripts.parent, value.split('/'))
-        path = find(directory, value.split('/'))
-        return path or find(scripts.parent, value.split('/'))
+            if value.casefold().startswith('scripts/'):
+                return find_existing_path(scripts, value[len('scripts/'):])
+            return find_existing_path(scripts.parent, value)
+        return find_existing_path(directory, value) or find_existing_path(scripts.parent, value)
 
     def expand(text, directory, stack, source):
         pending = []
@@ -55,7 +46,7 @@ def script_texts(scripts: Path, extra: str = '', with_source=False):
         if pending:
             yield ('\n'.join(pending), source) if with_source else '\n'.join(pending)
 
-    entry = find(scripts, ['Startup.cfg']) or find(scripts, ['startup.scr'])
+    entry = find_existing_path(scripts, 'Startup.cfg') or find_existing_path(scripts, 'startup.scr')
     if entry is not None:
         yield from expand(decode(entry), entry.parent, {entry}, label(entry))
     elif scripts.is_dir():

@@ -61,10 +61,11 @@ def set_dir(set_number: int) -> Path:
 
 
 def find_ci(directory: Path, *names: str) -> Path | None:
-    if not directory.is_dir():
-        return None
-    wanted = {n.lower() for n in names}
-    for entry in directory.iterdir():
-        if entry.name.lower() in wanted:
-            return entry
+    """Return the first of ``names`` found in ``directory``, ignoring case."""
+    from studio.exchange.portable import find_existing_path
+
+    for name in names:
+        found = find_existing_path(directory, name)
+        if found is not None:
+            return found
     return None

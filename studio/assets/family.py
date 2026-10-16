@@ -15,6 +15,7 @@ from studio.exchange.portable import (
     AssetFamilyPackageError,
     AssetResolver,
     DirectoryIndex,
+    find_existing_path,
     MANIFEST_FORMAT,
     MANIFEST_NAME,
     MANIFEST_VERSION,
@@ -729,8 +730,8 @@ def _find_engine_effect_overrides(family: AssetFamily) -> None:
     for logical_name in effect_names:
         stem = Path(logical_name.replace("\\", "/")).stem
         for root in roots:
-            override = root / "HI" / "ALPHA" / f"{stem}.PNG"
-            if override.is_file():
+            override = find_existing_path(root, "HI", "ALPHA", f"{stem}.PNG")
+            if override is not None and override.is_file():
                 family.effect_override_paths[logical_name.lower()] = override
                 break
 
