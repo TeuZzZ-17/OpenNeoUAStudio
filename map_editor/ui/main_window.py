@@ -2744,8 +2744,8 @@ class MainWindow(QMainWindow):
         install = bootstrap.installation()
         if install is not None:
             levels = install.folder("levels")
-            single = levels / "Single"
-            if single.is_dir():
+            single = bootstrap.find_ci(levels, "Single")
+            if single is not None and single.is_dir():
                 return str(single)
             if levels.is_dir():
                 return str(levels)

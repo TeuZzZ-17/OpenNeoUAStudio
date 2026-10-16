@@ -105,3 +105,62 @@ def test_sets_field_may_point_to_one_set_or_the_modern_parent(tmp_path):
     single = GameInstallation(tmp_path, {"sets": tmp_path / "loose" / "Set3"})
     assert single.available_sets() == [3]
 
+
+
+def _disk_names(path):
+    """Names as stored on disk (Path equality ignores case on Windows)."""
+    return list(path.parts)
+
+
+def test_vanilla_layout_reads_levels_and_music_from_the_game_root(tmp_path):
+    # Vanilla keeps LEVELS and MUSIC next to DATA, all in upper case.
+    root = tmp_path / "urban-assault"
+    data = root / "DATA"
+    _make_set(data / "SET1")
+    (data / "SCRIPTS").mkdir()
+    (root / "LEVELS" / "MBPIX").mkdir(parents=True)
+    (root / "LEVELS" / "SINGLE").mkdir()
+    (root / "LEVELS" / "SINGLE" / "L0101.LDF").write_bytes(b"")
+    (root / "LEVELS" / "MBPIX" / "MB_01.IFF").write_bytes(b"")
+    (root / "LEVELS" / "MBPIX" / "DB_01.IFF").write_bytes(b"")
+    (root / "MUSIC").mkdir()
+    for chosen in (root, data):
+        install = GameInstallation.suggest(chosen)
+        assert _disk_names(install.data)[-1] == "DATA"
+        assert _disk_names(install.folder("levels"))[-2:] == ["urban-assault", "LEVELS"]
+        assert _disk_names(install.folder("briefings"))[-2:] == ["LEVELS", "MBPIX"]
+        assert _disk_names(install.folder("music"))[-2:] == ["urban-assault", "MUSIC"]
+        assert _disk_names(install.folder("scripts"))[-1] == "SCRIPTS"
+        counts = install.inventory()
+        assert (counts["sets"], counts["levels"], counts["mb"], counts["db"]) == (1, 1, 1, 1)
+
+
+def test_data_folders_win_over_the_game_root(tmp_path):
+    for folder in ("Data/Levels", "Levels", "Data/Music", "Music"):
+        (tmp_path / folder).mkdir(parents=True)
+    install = GameInstallation.suggest(tmp_path)
+    assert install.folder("levels") == tmp_path / "Data" / "Levels"
+    assert install.folder("music") == tmp_path / "Data" / "Music"
+
+
+def test_missing_remembered_folder_is_guessed_again(tmp_path):
+    root = tmp_path / "game"
+    _make_set(root / "Data" / "Set1")
+    (root / "Levels").mkdir()
+    install = GameInstallation.suggest(root)
+    payload = install.to_json()
+    payload["folders"]["levels"] = str(root / "Data" / "Levels")  # wrong, older guess
+    restored = GameInstallation.from_json(payload)
+    assert restored.folder("levels") == root / "Levels"
+
+
+def test_find_existing_path_returns_the_disk_spelling(tmp_path):
+    from studio.exchange.portable import find_existing_path
+
+    (tmp_path / "DATA" / "Set1" / "objects").mkdir(parents=True)
+    (tmp_path / "DATA" / "Set1" / "objects" / "SET.BAS").write_bytes(b"")
+    found = find_existing_path(tmp_path, "data", r"set1/OBJECTS\set.bas")
+    assert _disk_names(found)[-4:] == ["DATA", "Set1", "objects", "SET.BAS"]
+    assert find_existing_path(tmp_path, "data", "missing") is None
+    assert find_existing_path(tmp_path / "nowhere", "data") is None
+    assert bootstrap.find_ci(tmp_path / "DATA", "nope", "SET1").name == "Set1"
