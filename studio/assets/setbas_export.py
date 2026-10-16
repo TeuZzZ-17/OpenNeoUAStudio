@@ -20,6 +20,7 @@ from studio.exchange.portable import (
     AssetResolver,
     commit_verified_files,
     DirectoryIndex,
+    find_existing_path,
     VerifiedCommitError,
 )
 from studio.formats.setbas import SetBasArchive
@@ -92,16 +93,15 @@ def find_external_palette(archive_path: Path) -> Path | None:
     """Set palette next to the archive (Data/SetN/PALETTE/STANDARD.PAL)."""
 
     for base in (archive_path.parent, archive_path.parent.parent):
-        palette_dir = base / "PALETTE"
-        if not palette_dir.is_dir():
+        palette_dir = find_existing_path(base, "PALETTE")
+        if palette_dir is None or not palette_dir.is_dir():
             continue
-        standard = palette_dir / "STANDARD.PAL"
-        if standard.is_file():
+        standard = find_existing_path(palette_dir, "STANDARD.PAL")
+        if standard is not None and standard.is_file():
             return standard
-        for candidate in sorted(palette_dir.glob("*.PAL")):
-            return candidate
-        for candidate in sorted(palette_dir.glob("*.pal")):
-            return candidate
+        for candidate in sorted(palette_dir.iterdir()):
+            if candidate.is_file() and candidate.suffix.casefold() == ".pal":
+                return candidate
     return None
 
 
@@ -128,7 +128,8 @@ def infer_runtime_loose_root(archive_path: str | Path) -> Path | None:
     set_id = _archive_set_id(archive_path)
     if set_id is None or not 1 <= set_id <= 7:
         return None
-    return archive_path.parent.parent / "Loose"
+    set_root = archive_path.parent.parent
+    return find_existing_path(set_root, "Loose") or set_root / "Loose"
 
 
 def resolve_runtime_loose_root(target: str | Path) -> tuple[Path, int]:
@@ -140,7 +141,7 @@ def resolve_runtime_loose_root(target: str | Path) -> tuple[Path, int]:
         set_root = target.parent
     else:
         set_root = target
-        loose_root = target / "Loose"
+        loose_root = find_existing_path(target, "Loose") or target / "Loose"
     set_id = _set_id_from_name(set_root.name)
     if set_id is None or not 1 <= set_id <= 7:
         raise SetBasExportError(

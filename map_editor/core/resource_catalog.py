@@ -8,6 +8,8 @@ from pathlib import Path
 
 from PySide6.QtGui import QImage
 
+from studio.exchange.portable import find_existing_path
+
 from .. import bootstrap
 from .game_installation import (GameInstallation, IMAGE_SUFFIXES,
                                 MOVIE_SUFFIXES, MUSIC_SUFFIXES)
@@ -54,14 +56,14 @@ class ResourceCatalog:
 
     def _skies(self) -> dict[str, SkyResource]:
         directory = self.installation.folder("skies")
-        loose = directory / "loose"
+        loose = find_existing_path(directory, "Loose")
         result = {}
         if directory.is_dir():
             for path in directory.iterdir():
                 if path.is_file() and path.suffix.casefold() == ".bas" and path.stem.casefold() != "set":
                     preview = None
-                    sky_loose = loose / path.stem
-                    if sky_loose.is_dir():
+                    sky_loose = find_existing_path(loose, path.stem) if loose is not None else None
+                    if sky_loose is not None and sky_loose.is_dir():
                         preview = next((p for p in sky_loose.iterdir()
                                         if p.stem.casefold() == "newsky1" and p.suffix.casefold() in IMAGE_SUFFIXES), None)
                     result[path.stem.casefold()] = SkyResource(path.stem, path, preview)
@@ -81,8 +83,8 @@ class ResourceCatalog:
 
         set_path = bootstrap.set_dir(set_number)
         for name in ("NORMAL.PAL", "STANDARD.PAL"):
-            path = set_path / "Palette" / name
-            if path.is_file():
+            path = find_existing_path(set_path, "Palette", name)
+            if path is not None and path.is_file():
                 return parse_pal_file(path)
         return None
 

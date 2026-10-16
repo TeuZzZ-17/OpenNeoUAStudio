@@ -21,13 +21,57 @@ The current repository should be treated as a development version rather than a 
 
 ## Basic use
 
-Run from source:
+A precompiled Windows executable may be included in the repository for convenience.
+On every other system (and on Windows, if you prefer) run the Studio from source.
 
-```bash
-python main.py
-```
+### Running from source
 
-A precompiled Windows executable may also be included in the repository for convenience.
+Requirements: Python 3.10 or newer and `pip`.
+
+1. Open a terminal in the repository folder.
+2. (Recommended) create and activate a virtual environment, so the dependencies stay separate from the system Python:
+
+   ```bash
+   python3 -m venv .venv
+   source .venv/bin/activate        # Windows: .venv\Scripts\activate
+   ```
+
+3. Install the dependencies:
+
+   ```bash
+   python -m pip install -r requirements.txt
+   ```
+
+4. Start the Studio:
+
+   ```bash
+   python main.py
+   ```
+
+On Linux, PySide6 (Qt) may need a few system libraries that are not installed by `pip`.
+If the application does not start and Qt reports that the `xcb` platform plugin could not be loaded,
+install the XCB cursor library from your distribution (for example `xcb-util-cursor` on Fedora,
+`libxcb-cursor0` on Debian/Ubuntu).
+
+### Choosing the game installation
+
+On first start, select either the game folder or its `Data` folder. The Studio then fills in every
+resource folder (sets, scripts, levels, briefing maps, music, ...) and shows how many items it found.
+Every folder can still be changed by hand.
+
+Both layouts are recognized:
+
+- **Vanilla Urban Assault**: `Levels` (with `Mbpix`) and `Music` sit next to the `Data` folder,
+  and the sets are loose `SetN` folders inside `Data`.
+- **OpenNeoUA**: everything sits inside `Data`, as the engine reads `Data` first and the game folder second.
+
+Folder and file names are matched without regard to case, so `DATA`, `Data` and `data`
+(or `SET.BAS` and `set.bas`) all work on case-sensitive file systems such as Linux.
+The `Models` and `Interface` folders exist only in OpenNeoUA, so they stay empty for a vanilla installation.
+
+The chosen folders are remembered in `%APPDATA%\Sektor3\installation.json` on Windows and in
+`~/.config/Sektor3/installation.json` (or `$XDG_CONFIG_HOME`) elsewhere. A remembered folder that no
+longer exists is detected again automatically; *Reset Configuration* forgets all of them.
 
 For a map of the source code (folders, shared layers, where each editor lives) see [ARCHITECTURE.md](ARCHITECTURE.md).
 

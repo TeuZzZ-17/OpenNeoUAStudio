@@ -22,7 +22,11 @@ def game_icon(kind, owner=1, tight=True, grey=False):
 
 @lru_cache(maxsize=48)
 def _glyph(root, font, code, tight, grey):
-    directory = bootstrap.find_ci(Path(root), 'Fonts')
+    data = Path(root)
+    directory = bootstrap.find_ci(data, 'Fonts')
+    if directory is None and data.name.casefold() == 'data':
+        # Like the engine, fall back to the game root used by the vanilla layout.
+        directory = bootstrap.find_ci(data.parent, 'Fonts')
     definitions = bootstrap.find_ci(directory, 'HFonts') if directory else None
     path = bootstrap.find_ci(definitions, font + '.FON', font + '.font') if definitions else None
     if path is None:

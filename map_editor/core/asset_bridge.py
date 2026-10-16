@@ -68,7 +68,7 @@ class SetAssets:
             index: dict[str, Path] = {}
             install = bootstrap.installation()
             models = install.folder("models") if install is not None else bootstrap.game_data_dir() / "Models"
-            roots = [self.set_dir, models / "Base"]
+            roots = [self.set_dir, bootstrap.find_ci(models, "Base") or models / "Base"]
             for root in roots:
                 if not root.is_dir():
                     continue

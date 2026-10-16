@@ -242,6 +242,14 @@ def _display_path(path: str | Path) -> Path:
     return Path(path).expanduser().resolve(strict=False)
 
 
+def _reveal_in_file_manager(path: str | Path) -> None:
+    """Show a file in the system file manager: selected on Windows, its folder elsewhere."""
+    if sys.platform == "win32":
+        subprocess.Popen(["explorer", "/select,", str(path)])
+    else:
+        QDesktopServices.openUrl(QUrl.fromLocalFile(str(Path(path).parent)))
+
+
 def _next_backup_path(source: Path) -> Path:
     """Return a non-destructive .bak path beside a loose source file."""
 
@@ -1025,7 +1033,7 @@ class AssemblyWindow(QMainWindow):
         if path is None:
             self.statusBar().showMessage("No on-disk file to reveal.")
             return
-        subprocess.Popen(["explorer", "/select,", str(path)])
+        _reveal_in_file_manager(path)
 
     def _play_asset_animation(self, item) -> None:
         if self._family is None or item is None:
@@ -1184,8 +1192,7 @@ class AssemblyWindow(QMainWindow):
             if ref and ref.path:
                 menu.addAction(
                     "Reveal Source File",
-                    lambda: subprocess.Popen(
-                        ["explorer", "/select,", str(ref.path)]))
+                    lambda: _reveal_in_file_manager(ref.path))
         if names:
             menu.addSeparator()
             menu.addAction("Copy texture name(s)",

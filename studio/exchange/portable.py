@@ -208,6 +208,33 @@ def same_path(first: Path, second: Path) -> bool:
         return first.absolute() == second.absolute()
 
 
+def find_existing_path(parent: Path | str, *parts: str) -> Path | None:
+    """Return ``parent/parts`` as spelled on disk, matching each name without case.
+
+    Urban Assault data mixes casings (DATA, Levels, SET.BAS, set.sdf). Windows
+    ignores case, Linux and macOS usually do not. A part may hold several
+    names separated by ``/`` or ``\\``. An exact spelling wins over a
+    case-insensitive one. Returns None when the path does not exist.
+    """
+
+    current = Path(parent)
+    for part in parts:
+        for name in str(part).replace("\\", "/").split("/"):
+            if not name or name == ".":
+                continue
+            folded = name.casefold()
+            try:
+                entries = [entry for entry in current.iterdir()
+                           if entry.name.casefold() == folded]
+            except OSError:
+                return None
+            if not entries:
+                return None
+            current = next((entry for entry in entries if entry.name == name),
+                           entries[0])
+    return current if current.exists() else None
+
+
 # ----------------------------------------------------------------------------
 # Non-destructive recursive resolver for Urban Assault asset references.
 # (formerly asset_resolver.py)
