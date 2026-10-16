@@ -10,7 +10,7 @@ from PySide6.QtWidgets import QApplication, QDialog
 
 from studio.rendering.asset_viewport import VIEW_PRESET_ANGLES
 from model_editor import ModelEditorWindow
-from model_editor.wireframe_dialog import WireframeGeneratorDialog
+from model_editor.wireframe_dialog import DEFAULT_SIMPLIFICATION, WireframeGeneratorDialog
 
 
 class _Projection:
@@ -80,7 +80,7 @@ class WireframeGeneratorDialogTests(unittest.TestCase):
         self.assertEqual(len(calls), 1)
         self.assertEqual(calls[0]["preset"], "Current View")
         self.assertTrue(calls[0]["respect_transparency"])
-        self.assertEqual(calls[0]["simplification"], 3.0)
+        self.assertEqual(calls[0]["simplification"], DEFAULT_SIMPLIFICATION)
 
     def test_settings_regenerate_using_chosen_preset_and_geometry_mode(self):
         calls = []
@@ -95,7 +95,7 @@ class WireframeGeneratorDialogTests(unittest.TestCase):
 
         self.assertEqual(calls[-1]["preset"], preset)
         self.assertTrue(calls[-1]["respect_transparency"])
-        self.assertEqual(calls[-1]["simplification"], 3.0)
+        self.assertEqual(calls[-1]["simplification"], DEFAULT_SIMPLIFICATION)
         self.assertFalse(hasattr(dialog, "simplification_spin"))
         self.assertTrue(dialog.save_button.isEnabled())
 

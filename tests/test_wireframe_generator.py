@@ -9,7 +9,7 @@ import numpy as np
 from PySide6.QtCore import QPointF, QSize
 from PySide6.QtWidgets import QApplication
 from studio.rendering.asset_viewport import AssetViewport, ViewFace, ViewMaterial
-from model_editor.wireframe_generator import generate_wireframe, _mask_contours, _simplify
+from model_editor.wireframe_generator import generate_wireframe, _mask_contours, _simplify, _smooth_mask, _visvalingam, _convex_loop
 from studio.formats.sklt import parse_sklt_file
 
 
@@ -61,11 +61,22 @@ class WireframeGeneratorTests(unittest.TestCase):
         output = generate_wireframe(view, respect_transparency=False)
         self.assertEqual(len(output.segments), 4)
 
-    def test_material_seam_edges_are_deduplicated(self):
+    def test_seam_inside_one_flat_surface_is_not_drawn(self):
+        # Two coplanar quads (a material seam) look like one rectangle.
         view = self.viewport([quad(-1,0),quad(0,1,poly_id=1)])
         output = generate_wireframe(view, respect_transparency=False)
-        self.assertEqual(len(output.segments), 7)
-        self.assertEqual(len({tuple(sorted(p)) for p in output.segments}), 7)
+        self.assertEqual(len(output.segments), 4)
+        self.assertEqual(len({tuple(sorted(p)) for p in output.segments}), 4)
+
+    def test_fold_between_two_faces_keeps_its_line(self):
+        folded = ViewFace([(1,1,0.8),(1,-1,0.8),(0,-1,0),(0,1,0)], [], 0, poly_id=1)
+        view = self.viewport([quad(-1,0), folded])
+        output = generate_wireframe(view, respect_transparency=False)
+        xs = [p[0] for p in output.points]
+        middle = [seg for seg in output.segments
+                  if all(abs(output.points[i][0] - (min(xs)+max(xs))/2) < 400 for i in seg)
+                  and abs(output.points[seg[0]][2] - output.points[seg[1]][2]) > 1000]
+        self.assertTrue(middle, "the fold edge must stay")
 
     def test_preset_does_not_change_parent_camera_pose_or_diagnostics(self):
         view = self.viewport([quad(-1,1)])
@@ -111,6 +122,49 @@ class WireframeGeneratorTests(unittest.TestCase):
     def test_contour_simplification_handles_long_staircase(self):
         line = [(i, i%2) for i in range(20000)]
         self.assertEqual(_simplify(line,3),[line[0],line[-1]])
+
+
+    def test_smoothing_removes_specks_and_ragged_edges_but_keeps_the_shape(self):
+        mask = np.zeros((80,80), dtype=bool)
+        mask[20:60,10:70] = True
+        mask[18:20,30:32] = True            # a speck on the edge
+        mask[5,5] = True                    # an isolated pixel
+        mask[20:60:2,69] = False            # a ragged right edge
+        smooth = _smooth_mask(mask, 3)
+        self.assertFalse(smooth[5,5] or smooth[18,30:32].any())
+        self.assertTrue(smooth[25:55,15:65].all())
+        loops = list(_mask_contours(smooth))
+        self.assertEqual(len(loops),1)
+        self.assertLessEqual(len(_simplify(loops[0],3.0)),12)
+
+    def test_smoothing_keeps_shapes_that_touch_the_image_border(self):
+        mask = np.zeros((40,40), dtype=bool)
+        mask[:,:20] = True
+        self.assertTrue(_smooth_mask(mask,3)[:,:17].all())
+
+    def test_corner_removal_keeps_real_corners_and_drops_small_teeth(self):
+        # A saw-tooth along a straight edge with a real 90-degree corner at the end.
+        line = [(0, 0)]
+        for x in range(10, 200, 10):
+            line.append((x, 3 if x % 20 else -3))
+        line += [(200, 0), (200, 120)]
+        simple = _visvalingam(line, 400.0)
+        self.assertEqual(simple[0], (0, 0))
+        self.assertEqual(simple[-1], (200, 120))
+        self.assertIn((200, 0), simple)
+        self.assertLessEqual(len(simple), 4)
+        self.assertEqual(_visvalingam(line, 0.0), line)
+
+    def test_a_sprite_outline_is_a_simple_convex_polygon(self):
+        mask = np.zeros((60,120), dtype=bool)
+        mask[10:50,10:110] = True
+        mask[10:50:3,109] = False           # ragged right edge
+        loop = _convex_loop(mask)
+        self.assertEqual(loop[0], loop[-1])
+        xs = [p[0] for p in loop]
+        ys = [p[1] for p in loop]
+        self.assertEqual((min(xs), max(xs), min(ys), max(ys)), (10, 110, 10, 50))
+        self.assertIsNone(_convex_loop(np.zeros((10,10), dtype=bool)))
 
 
 if __name__ == '__main__':
