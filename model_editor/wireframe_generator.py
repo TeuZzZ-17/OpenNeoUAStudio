@@ -9,11 +9,22 @@ import numpy as np
 from PySide6.QtCore import QPointF, QRectF, QSize, Qt
 from PySide6.QtGui import QColor, QImage, QPainter, QPen, QPolygonF
 
+from .wireframe_cleanup import clean_segments
 from studio.rendering.depth import CameraPolygon, clip_camera_polygon_near
 from studio.rendering.indexed import IndexedRasterizer
 from studio.formats.sklt import create_minimal_sklt_model, save_sklt_with_poo2_pol2_structure
 
 SOURCE_SIZE = QSize(1024, 1024)
+# Two faces meeting at less than this angle are one flat surface: no line between them.
+SOFT_EDGE_DEGREES = 12.0
+SOFT_EDGE_COS = math.cos(math.radians(SOFT_EDGE_DEGREES))
+# Texture-transparency contours are simplified by this fraction of the model size.
+CONTOUR_TOLERANCE_FRACTION = 0.03
+# A corner of a texture contour must add at least this many tolerance-squares of area.
+CONTOUR_TOOTH_AREA = 3.0
+# A see-through face drawn on less than this share of its polygon is a sprite
+# (propeller, rotor, antenna): it keeps only a simple outline, never its ragged shape.
+SPRITE_VISIBLE_FRACTION = 0.5
 
 
 @dataclass
@@ -134,6 +145,136 @@ def _runs(vertices, flags):
         yield run
 
 
+def _smooth_mask(mask, radius):
+    """Round off pixel noise: a pixel stays covered when most of its neighbourhood is.
+
+    This removes specks and ragged texture edges before the contour is traced, so
+    the outline follows the shape of the model and not every pixel of its texture.
+    """
+    if radius < 1:
+        return mask
+    size = 2*radius+1
+    height, width = mask.shape
+    padded = np.pad(mask.astype(np.int32), radius+1, mode="edge")
+    integral = padded.cumsum(axis=0).cumsum(axis=1)
+    total = (integral[size:size+height, size:size+width]
+             - integral[:height, size:size+width]
+             - integral[size:size+height, :width]
+             + integral[:height, :width])
+    return total*2 > size*size
+
+
+def _visvalingam(points, min_area):
+    """Drop the corners that add the least area until every corner adds ``min_area``.
+
+    Ragged texture edges are made of many small teeth; removing the smallest teeth first
+    keeps the real corners of the shape and flattens the noise between them.
+    """
+    if len(points) < 3 or min_area <= 0:
+        return points
+    import heapq
+    pts = [np.asarray(p, dtype=float) for p in points]
+    previous = list(range(-1, len(pts)-1))
+    following = list(range(1, len(pts)+1))
+    alive = [True]*len(pts)
+
+    def area(i):
+        a, b, c = pts[previous[i]], pts[i], pts[following[i]]
+        return abs((b[0]-a[0])*(c[1]-a[1])-(c[0]-a[0])*(b[1]-a[1]))/2.0
+
+    heap = [(area(i), i) for i in range(1, len(pts)-1)]
+    heapq.heapify(heap)
+    while heap:
+        value, i = heapq.heappop(heap)
+        if not alive[i] or value != area(i):
+            continue
+        if value >= min_area:
+            break
+        alive[i] = False
+        before, after = previous[i], following[i]
+        following[before], previous[after] = after, before
+        for j in (before, after):
+            if 0 < j < len(pts)-1 and alive[j]:
+                heapq.heappush(heap, (area(j), j))
+    return [points[i] for i in range(len(pts)) if alive[i]]
+
+
+def _polyline_length(points):
+    return sum(math.dist(a, b) for a, b in zip(points, points[1:]))
+
+
+def _convex_loop(mask):
+    """Closed convex outline (pixel corners) of a mask, or None if it is tiny."""
+    rows = np.flatnonzero(mask.any(axis=1))
+    if len(rows) < 3:
+        return None
+    points = set()
+    for y in rows:
+        xs = np.flatnonzero(mask[y])
+        points.update(((int(xs[0]), int(y)), (int(xs[-1])+1, int(y)),
+                       (int(xs[0]), int(y)+1), (int(xs[-1])+1, int(y)+1)))
+    points = sorted(points)
+
+    def cross(o, a, b):
+        return (a[0]-o[0])*(b[1]-o[1])-(a[1]-o[1])*(b[0]-o[0])
+
+    lower, upper = [], []
+    for p in points:
+        while len(lower) >= 2 and cross(lower[-2], lower[-1], p) <= 0:
+            lower.pop()
+        lower.append(p)
+    for p in reversed(points):
+        while len(upper) >= 2 and cross(upper[-2], upper[-1], p) <= 0:
+            upper.pop()
+        upper.append(p)
+    hull = lower[:-1]+upper[:-1]
+    return hull+[hull[0]] if len(hull) >= 3 else None
+
+
+def _face_normal(vertices):
+    """Unit normal of a polygon (Newell's method), or None when it is degenerate."""
+    points = np.array(vertices, dtype=float)
+    normal = np.zeros(3)
+    for a, b in zip(points, np.roll(points, -1, axis=0)):
+        normal += (a[1]-b[1])*(a[2]+b[2]), (a[2]-b[2])*(a[0]+b[0]), (a[0]-b[0])*(a[1]+b[1])
+    length = float(np.linalg.norm(normal))
+    return normal/length if length > 1e-12 else None
+
+
+def _see_through_shapes(viewport, faces, face_ids, transparent, indexed, camera, target):
+    """Pixel shapes of the see-through faces, as ``(surfaces, sprites)``.
+
+    A sprite (propeller, rotor, antenna, net) is a texture that fills only a small part
+    of its polygon. The renderer gives see-through pixels no owner, so each face is drawn
+    alone and its pixels are compared with the area of its polygon.
+    """
+    surfaces, sprites = [], []
+    for key, face in faces.items():
+        face_id = face_ids[key]
+        if face_id not in transparent:
+            continue
+        vertices = tuple(viewport._camera_vertex(p, camera) for p in face.vertices)
+        clipped = clip_camera_polygon_near(
+            CameraPolygon(vertices, tuple(() for _ in vertices), None),
+            minimum_distance=float(camera.get("near_distance", 0.2)))
+        if clipped is None:
+            continue
+        xy = np.array([(p.x(), p.y()) for p in
+                       (viewport._project(v, target, camera) for v in clipped.vertices)])
+        x, y = xy[:, 0], xy[:, 1]
+        area = abs(float(np.dot(x, np.roll(y, -1))-np.dot(y, np.roll(x, -1))))/2
+        pieces = [piece for piece in indexed if piece.polygon_id == face_id]
+        if area < 16 or not pieces:
+            continue
+        alone = IndexedRasterizer.render(
+            SOURCE_SIZE.width(), SOURCE_SIZE.height(), pieces,
+            viewport._indexed_adapter.tables, collect_diagnostics=False)
+        shown = np.asarray(alone.coverage, dtype=bool)
+        (surfaces if np.count_nonzero(shown)/area >= SPRITE_VISIBLE_FRACTION
+         else sprites).append(shown)
+    return surfaces, sprites
+
+
 def _geometry_ownership(viewport, pieces, camera, face_ids):
     """Paint the existing BSP pieces as ownership labels, without textures."""
     image = QImage(SOURCE_SIZE, QImage.Format.Format_RGB32)
@@ -156,7 +297,8 @@ def _geometry_ownership(viewport, pieces, camera, face_ids):
 
 def generate_wireframe(viewport, preset: str = "Current View", *,
                        respect_transparency: bool = True,
-                       simplification: float = 3.0) -> WireframeProjection:
+                       simplification: float = 3.0,
+                       tidy: bool = True) -> WireframeProjection:
     """Freeze visible scene geometry, project it and remove hidden edge runs."""
     if not viewport._faces:
         raise ValueError("Load a model before generating a wireframe.")
@@ -198,6 +340,7 @@ def generate_wireframe(viewport, preset: str = "Current View", *,
         coverage = owner >= 0
 
     edges = {}
+    normals = {}
     for key, face in faces.items():
         face_id = face_ids[key]
         if face_id in transparent:
@@ -208,6 +351,7 @@ def generate_wireframe(viewport, preset: str = "Current View", *,
             minimum_distance=float(camera.get("near_distance", 0.2)))
         if clipped is None:
             continue
+        normals[face_id] = _face_normal(vertices)
         projected = [viewport._project(p, target, camera) for p in clipped.vertices]
         xy = [tuple((p.x(), p.y())) for p in projected]
         for a, b in zip(xy, xy[1:]+xy[:1]):
@@ -221,6 +365,11 @@ def generate_wireframe(viewport, preset: str = "Current View", *,
     segments = []
     h, w = owner.shape
     for (a, b), adjacent in edges.items():
+        if len(adjacent) == 2:
+            first, second = (normals.get(face_id) for face_id in adjacent)
+            if first is not None and second is not None \
+                    and abs(float(first @ second)) >= SOFT_EDGE_COS:
+                continue
         a, b = np.array(a), np.array(b)
         count = max(2, int(math.ceil(np.linalg.norm(b-a)*2))+1)
         # Clip screen samples before allocating; off-screen camera views may
@@ -242,10 +391,13 @@ def generate_wireframe(viewport, preset: str = "Current View", *,
         samples = a+(b-a)*t[:, None]
         pixel = np.rint(samples).astype(int)
         accepted = np.zeros(count, dtype=bool)
+        # A fin, antenna or wing drawn with a see-through texture does not hide the
+        # edges behind it; otherwise those edges would be cut where it passes over them.
+        visible_owners = list(adjacent | transparent)
         for dy in (-1, 0, 1):
             for dx in (-1, 0, 1):
                 values = owner[np.clip(pixel[:, 1]+dy, 0, h-1), np.clip(pixel[:, 0]+dx, 0, w-1)]
-                accepted |= np.isin(values, list(adjacent))
+                accepted |= np.isin(values, visible_owners)
         start = None
         for i, good in enumerate(accepted):
             if good and start is None:
@@ -265,7 +417,23 @@ def generate_wireframe(viewport, preset: str = "Current View", *,
         for dy in range(5):
             for dx in range(5):
                 near_opaque |= padded[dy:dy+h, dx:dx+w]
-        for loop in _mask_contours(coverage):
+        surfaces, sprites = _see_through_shapes(
+            viewport, faces, face_ids, transparent, indexed, camera, target)
+        covered = np.argwhere(coverage)
+        span = float((covered.max(axis=0)-covered.min(axis=0)).max()) if len(covered) else 0.0
+        # Texture contours follow irregular alpha shapes, so they are simplified more
+        # than hard edges: in proportion to the model, never below ``simplification``.
+        contour_tolerance = max(simplification, span*CONTOUR_TOLERANCE_FRACTION)
+        smooth_radius = max(1, min(8, int(round(contour_tolerance/2))))
+        loops = []
+        for shape in surfaces:
+            loops.extend(_mask_contours(_smooth_mask(shape, smooth_radius)))
+        for shape in sprites:
+            # A sprite keeps a simple convex outline instead of its ragged texture shape.
+            outline = _convex_loop(shape)
+            if outline is not None:
+                loops.append(outline)
+        for loop in loops:
             flags = []
             for a, b in zip(loop, loop[1:]):
                 x, y = np.clip(np.rint((np.array(a)+b)/2).astype(int), (0, 0), (w-1, h-1))
@@ -279,9 +447,17 @@ def generate_wireframe(viewport, preset: str = "Current View", *,
             for run in _runs(loop, flags):
                 if len(run) < 5:
                     continue
-                simple = _simplify(run, simplification)
+                simple = _simplify(run, contour_tolerance*0.5)
+                simple = _visvalingam(
+                    simple, contour_tolerance*contour_tolerance*CONTOUR_TOOTH_AREA)
+                if _polyline_length(simple) < contour_tolerance*6:
+                    # Tiny scribbles are texture noise, not part of the silhouette.
+                    continue
                 segments.extend((np.array(a), np.array(b)) for a, b in zip(simple, simple[1:])
                                 if np.linalg.norm(np.array(a)-b) >= 1)
+    if segments and tidy:
+        flat = np.array([p for segment in segments for p in segment])
+        segments = clean_segments(segments, float(max(flat.max(axis=0)-flat.min(axis=0))))
     if not segments:
         raise ValueError("The current view contains no visible lines.")
     xy = np.array([p for segment in segments for p in segment])

@@ -88,7 +88,7 @@ class ModelEditorWindow(EntityListMixin, SetBasMixin, AssemblyWindow):
             self.exit_action, self.generate_wireframe_action)
 
         self.generate_genesis_action = QAction("Generate Genesis", self)
-        self.generate_genesis_action.triggered.connect(self._generate_genesis)
+        self.generate_genesis_action.triggered.connect(self._generate_genesis_action)
         self.file_menu.insertAction(self.exit_action, self.generate_genesis_action)
         self.file_menu.aboutToShow.connect(self._sync_generator_actions)
         self._sync_generator_actions()
@@ -137,8 +137,29 @@ class ModelEditorWindow(EntityListMixin, SetBasMixin, AssemblyWindow):
         if hasattr(self, "generate_genesis_action"):
             self._sync_generator_actions()
 
+    def _bas_manager_model_item(self):
+        """The model selected in the Bas Manager while that tab is shown, else None.
+
+        The Bas Manager works on a model that is not yet in Edit Mode; its context
+        menu loads it first. File > Generate Genesis does the same for the selection.
+        """
+
+        if (self._setbas is None
+                or self._right_tabs.currentWidget() is not self._resources_tabs
+                or self._resources_tabs.currentWidget() is not self._bas_panel):
+            return None
+        item = self.setbas_tree.currentItem()
+        kind = item.data(0, _BAS_KIND_ROLE) if item is not None else None
+        return item if kind in ("base", "sklt.class") else None
+
     def _sync_generator_actions(self) -> None:
         self._sync_wireframe_generator_action()
+        if self._bas_manager_model_item() is not None:
+            self.generate_genesis_action.setEnabled(True)
+            self.generate_genesis_action.setToolTip(
+                "Transform the model selected in the Bas Manager into a Genesis. "
+                "Undo restores it.")
+            return
         reason = self._material_structure_reason()
         obj = self._workbench_obj
         if not reason and (self._family.base_asset is None
@@ -209,6 +230,15 @@ class ModelEditorWindow(EntityListMixin, SetBasMixin, AssemblyWindow):
             self._generate_genesis()
         else:
             self._open_wireframe_generator()
+
+    def _generate_genesis_action(self) -> None:
+        """File / viewport menu: the Bas Manager selection, else the current model."""
+
+        item = self._bas_manager_model_item()
+        if item is not None:
+            self._generate_from_setbas_item(item, genesis=True)
+        else:
+            self._generate_genesis()
 
     def _generate_genesis(self) -> None:
         if not self._require_editing("Generate Genesis"):
