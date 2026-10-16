@@ -7,11 +7,13 @@ from pathlib import Path
 from PySide6.QtCore import QSize, Qt
 from PySide6.QtGui import QPixmap
 from PySide6.QtWidgets import (
+    QApplication,
     QComboBox,
     QDialog,
     QFileDialog,
     QFormLayout,
     QFrame,
+    QGroupBox,
     QHBoxLayout,
     QLabel,
     QPushButton,
@@ -20,6 +22,10 @@ from PySide6.QtWidgets import (
 )
 
 from studio.rendering.asset_viewport import VIEW_PRESET_ANGLES
+
+
+# Contour simplification in pixels of the 1024 px source view.
+DEFAULT_SIMPLIFICATION = 3.0
 
 
 def _load_wireframe_generator():
@@ -35,8 +41,7 @@ class _ImagePreview(QLabel):
         super().__init__(parent)
         self._image = QPixmap()
         self.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.setMinimumSize(360, 360)
-        self.setMaximumSize(640, 640)
+        self.setMinimumSize(420, 420)
         self.setSizePolicy(
             QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
         self.setFrameShape(QFrame.Shape.StyledPanel)
@@ -66,7 +71,7 @@ class _ImagePreview(QLabel):
 class WireframeGeneratorDialog(QDialog):
     """Let the user inspect and save a generated SKLT wireframe."""
 
-    PREVIEW_SIZE = QSize(640, 640)
+    PREVIEW_SIZE = QSize(900, 900)
 
     def __init__(self, viewport, parent=None) -> None:
         super().__init__(parent)
@@ -75,9 +80,12 @@ class WireframeGeneratorDialog(QDialog):
 
         self.setWindowTitle("Generate Wireframe")
         self.setModal(True)
-        self.resize(760, 760)
+        self.setMinimumSize(520, 600)
+        self.resize(820, 860)
 
         layout = QVBoxLayout(self)
+        layout.setContentsMargins(12, 12, 12, 12)
+        layout.setSpacing(8)
         settings = QFormLayout()
 
         self.view_preset_combo = QComboBox(self)
@@ -90,23 +98,30 @@ class WireframeGeneratorDialog(QDialog):
 
         layout.addLayout(settings)
 
-        self.preview = _ImagePreview(self)
+        preview_box = QGroupBox("Preview", self)
+        preview_layout = QVBoxLayout(preview_box)
+        preview_layout.setContentsMargins(8, 6, 8, 8)
+        preview_layout.setSpacing(6)
+        self.preview = _ImagePreview(preview_box)
         self.preview.setText("Preparing preview...")
-        layout.addWidget(self.preview, 1)
+        preview_layout.addWidget(self.preview, 1)
 
-        self.stats_label = QLabel("", self)
+        self.stats_label = QLabel("", preview_box)
         self.stats_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        layout.addWidget(self.stats_label)
+        preview_layout.addWidget(self.stats_label)
+        layout.addWidget(preview_box, 1)
 
         self.error_label = QLabel("", self)
         self.error_label.setWordWrap(True)
         self.error_label.setStyleSheet("color: #ff9b86;")
+        self.error_label.setVisible(False)
         layout.addWidget(self.error_label)
 
         buttons = QHBoxLayout()
         buttons.addStretch(1)
         self.save_button = QPushButton("Export", self)
         self.save_button.setEnabled(False)
+        self.save_button.setDefault(True)
         self.save_button.clicked.connect(self._save_projection)
         buttons.addWidget(self.save_button)
         self.cancel_button = QPushButton("Cancel", self)
@@ -122,10 +137,11 @@ class WireframeGeneratorDialog(QDialog):
         self.projection = None
         self.save_button.setEnabled(False)
         self.stats_label.clear()
-        self.error_label.clear()
+        self._show_error("")
         self.preview.clear_image()
         self.preview.setText("Generating preview...")
 
+        QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
         try:
             generate_wireframe = _load_wireframe_generator()
             projection = generate_wireframe(
@@ -133,23 +149,29 @@ class WireframeGeneratorDialog(QDialog):
                 preset=self.view_preset_combo.currentText(),
                 respect_transparency=(
                     bool(self.viewport.indexed_renderer_info().get("available"))),
-                simplification=3.0,
+                simplification=DEFAULT_SIMPLIFICATION,
             )
             image = projection.preview_image(size=self.PREVIEW_SIZE)
             if image is None or image.isNull():
                 raise ValueError("The generated wireframe preview is empty.")
             stats_text = (
-                f"{len(projection.points)} points Â· "
+                f"{len(projection.points)} points · "
                 f"{len(projection.segments)} segments")
         except Exception as exc:
             self.preview.setText("Preview unavailable")
-            self.error_label.setText(str(exc))
+            self._show_error(str(exc))
             return
+        finally:
+            QApplication.restoreOverrideCursor()
 
         self.projection = projection
         self.preview.set_image(image)
         self.stats_label.setText(stats_text)
         self.save_button.setEnabled(True)
+
+    def _show_error(self, text: str) -> None:
+        self.error_label.setText(text)
+        self.error_label.setVisible(bool(text))
 
     def _save_projection(self) -> None:
         if self.projection is None:
@@ -172,7 +194,7 @@ class WireframeGeneratorDialog(QDialog):
         try:
             self.projection.save(target)
         except Exception as exc:
-            self.error_label.setText(f"Could not save the wireframe: {exc}")
+            self._show_error(f"Could not save the wireframe: {exc}")
             return
 
         if parent is not None and hasattr(parent, "_last_directory"):
