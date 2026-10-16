@@ -409,6 +409,42 @@ class AssetResolverIntegrityTests(unittest.TestCase):
             self.assertIsNone(resolved.path)
             self.assertTrue(resolved.embedded_available)
 
+    def test_setbas_itself_ignores_same_named_files_outside_loose(self):
+        # Vanilla sets keep FX textures in HI/ALPHA, HI/BETA and HI/GAMMA.
+        # The engine replaces SET.BAS resources only from SetN/Loose.
+        with tempfile.TemporaryDirectory() as temp:
+            set_root = Path(temp) / "SET1"
+            setbas = set_root / "OBJECTS" / "SET.BAS"
+
+            class Archive:
+                path = setbas
+
+                @staticmethod
+                def find(_name, _class_id):
+                    return [SimpleNamespace(resource_name="FX2.ILBM", index=1)]
+
+            setbas.parent.mkdir(parents=True)
+            setbas.write_bytes(b"")
+            for theme in ("ALPHA", "BETA"):
+                (set_root / "HI" / theme).mkdir(parents=True)
+                (set_root / "HI" / theme / "FX2.ILB").write_bytes(b"x")
+            family = AssetFamily(setbas_archive=Archive(), base_path=setbas,
+                                 setbas_path=setbas)
+            resolver = AssetResolver([setbas.parent, set_root])
+
+            resolved = _resolve_with_setbas(
+                family, resolver, "FX2.ILBM", "texture", "ilbm.class")
+            self.assertEqual(resolved.status, "setbas")
+
+            for name in ("a", "b"):
+                (set_root / "Loose" / name).mkdir(parents=True)
+                (set_root / "Loose" / name / "FX2.ILBM").write_bytes(b"x")
+            DirectoryIndex.clear_cache()
+            resolved = _resolve_with_setbas(
+                family, AssetResolver([setbas.parent, set_root]), "FX2.ILBM",
+                "texture", "ilbm.class")
+            self.assertEqual(resolved.status, "ambiguous")
+
 
 class TextureAssignmentTests(unittest.TestCase):
     @staticmethod

@@ -21,6 +21,7 @@ from studio.exchange.portable import (
     MANIFEST_VERSION,
     normalize_logical_name,
     ResolvedFile,
+    same_path,
 )
 from studio.formats.animation import parse_anm_file, VanmData
 from studio.formats.base_format import (
@@ -172,6 +173,13 @@ def _wants_setbas(family: AssetFamily, name: str) -> bool:
     return bool(family.setbas_overrides.get(bare))
 
 
+def _is_setbas_family(family: AssetFamily) -> bool:
+    """True when the family is the SET.BAS archive itself, not a loose BASE."""
+
+    return (family.base_path is not None and family.setbas_path is not None
+            and same_path(Path(family.base_path), Path(family.setbas_path)))
+
+
 def _resolve_with_setbas(family: AssetFamily, resolver: AssetResolver,
                          name: str, kind: str, class_id: str) -> ResolvedFile:
     """Three-way resolution: manual override > loose file > SET.BAS embedded.
@@ -222,10 +230,15 @@ def _resolve_with_setbas(family: AssetFamily, resolver: AssetResolver,
                 f"{family.setbas_archive.path.name}; loose wins (engine "
                 "precedence). Use Asset Dependencies to compare sources."
             )
-    elif ref.status == "ambiguous":
+    elif ref.status == "ambiguous" and not (
+            embedded is not None and _is_setbas_family(family) and not any(
+                part.casefold() == "loose"
+                for candidate in ref.candidates for part in candidate.parts)):
         # A plausible loose override must not be bypassed by silently using
         # SET.BAS; the user first has to disambiguate the higher-priority
-        # loose source.
+        # loose source. For SET.BAS itself the engine only replaces resources
+        # from SetN/Loose, so same-named files elsewhere in the set (vanilla
+        # HI/ALPHA, BETA, GAMMA FX textures) fall through to the embedded copy.
         pass
     elif embedded is not None:
         ref.status = "setbas"
