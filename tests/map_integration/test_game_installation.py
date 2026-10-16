@@ -122,7 +122,7 @@ def test_vanilla_layout_reads_levels_and_music_from_the_game_root(tmp_path):
     (root / "LEVELS" / "SINGLE").mkdir()
     (root / "LEVELS" / "SINGLE" / "L0101.LDF").write_bytes(b"")
     (root / "LEVELS" / "MBPIX" / "MB_01.IFF").write_bytes(b"")
-    (root / "LEVELS" / "MBPIX" / "DB_01.IFF").write_bytes(b"")
+    (root / "LEVELS" / "MBPIX" / "DB_01.ILB").write_bytes(b"")
     (root / "MUSIC").mkdir()
     for chosen in (root, data):
         install = GameInstallation.suggest(chosen)

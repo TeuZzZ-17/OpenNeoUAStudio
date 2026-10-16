@@ -13,7 +13,7 @@ from studio.exchange.portable import find_existing_path
 
 FOLDERS = ("briefings", "skies", "music", "movies", "sets", "scripts",
            "levels", "models", "interface")
-IMAGE_SUFFIXES = {".png", ".jpg", ".jpeg", ".bmp", ".webp", ".iff", ".ilbm", ".lbm", ".vbmp"}
+IMAGE_SUFFIXES = {".png", ".jpg", ".jpeg", ".bmp", ".webp", ".iff", ".ilbm", ".ilb", ".lbm", ".vbmp"}
 MUSIC_SUFFIXES = {".ogg"}
 MOVIE_SUFFIXES = {".mpg", ".mpeg", ".avi", ".mp4", ".mkv", ".webm"}
 SCRIPT_SUFFIXES = {".cfg", ".ini", ".lua", ".sdf", ".scr"}
