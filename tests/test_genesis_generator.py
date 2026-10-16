@@ -190,6 +190,36 @@ def test_failed_or_cancelled_resource_activation_does_not_generate_stale_model(a
         window.close()
 
 
+def test_file_menu_genesis_works_on_the_bas_manager_selection(app):
+    from types import SimpleNamespace
+    window = ModelEditorWindow()
+    try:
+        window._setbas = SimpleNamespace(resources=[])
+        item = QTreeWidgetItem(["VP_TEST"])
+        item.setData(0, _BAS_KIND_ROLE, "base")
+        window.setbas_tree.addTopLevelItem(item)
+        window.setbas_tree.setCurrentItem(item)
+        # On the Editor tab nothing is loaded: the action stays disabled.
+        window._right_tabs.setCurrentWidget(window._editor_tabs)
+        window._sync_generator_actions()
+        assert not window.generate_genesis_action.isEnabled()
+        # On the Bas Manager tab it acts on the selected model, like its context menu.
+        window._right_tabs.setCurrentWidget(window._resources_tabs)
+        window._resources_tabs.setCurrentWidget(window._bas_panel)
+        window._sync_generator_actions()
+        assert window.generate_genesis_action.isEnabled()
+        with patch.object(window, "_generate_from_setbas_item") as handler:
+            window.generate_genesis_action.trigger()
+            handler.assert_called_once_with(item, genesis=True)
+        # A resource that is not a model (a texture) keeps it disabled.
+        item.setData(0, _BAS_KIND_ROLE, "ilbm.class")
+        window._sync_generator_actions()
+        assert not window.generate_genesis_action.isEnabled()
+    finally:
+        window._setbas = None
+        window.close()
+
+
 def test_real_family_genesis_undo_redo_and_export_roundtrip(app):
     archive = Path(r"C:\Users\proto\Desktop\ProgettoUA\UA Rising\Data\Sets\Set3\Objects\SET.BAS")
     if not archive.exists():
