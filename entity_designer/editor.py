@@ -5135,7 +5135,9 @@ class CollisionEditorWindow(QMainWindow):
                 self._fx_script_sources.update(str((scripts / source).resolve())
                                                for _body, source in script_texts(scripts, with_source=True))
                 self._fx_script_sources.update(str(path.resolve()) for path in
-                                               (scripts / "Startup.cfg", scripts / "startup.scr") if path.is_file())
+                                               (bootstrap.find_ci(scripts, "Startup.cfg"),
+                                                bootstrap.find_ci(scripts, "startup.scr"))
+                                               if path is not None and path.is_file())
         unit = self._fx_unit_phases(text, block, reference)
         if keep_view and (unit.weapon or self.fx_panel.unit.flies):
             unit = replace(unit, altitude=self.fx_panel.unit.altitude)

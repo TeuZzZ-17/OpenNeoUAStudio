@@ -46,8 +46,8 @@ def slider_to_briefing_size(value):
 def briefing_layout(install):
     """Read the engine's rectangle when its source accompanies the game."""
     rectangle = (-0.98750001, 0.34999999, -0.003125, 0.85416669)
-    path = install.data / "src" / "yw_funcs.cpp"
-    if path.is_file():
+    path = bootstrap.find_ci(install.data, "src/game/yw_funcs.cpp", "src/yw_funcs.cpp")
+    if path is not None and path.is_file():
         return _source_layout(path, path.stat().st_mtime_ns)
     return rectangle
 
@@ -68,8 +68,8 @@ def find_background(install, mode):
     if manual is not None and manual.is_file():
         return manual
     stem = "brief" if mode == "brief" else "debrief"
-    preferred = install.folder("levels") / "Bg"
-    if preferred.is_dir():
+    preferred = bootstrap.find_ci(install.folder("levels"), "Bg")
+    if preferred is not None and preferred.is_dir():
         found = next((path for path in preferred.iterdir() if path.is_file() and
                       path.stem.casefold() == stem and path.suffix.casefold() in IMAGE_SUFFIXES), None)
         if found is not None:

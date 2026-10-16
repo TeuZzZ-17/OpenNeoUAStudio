@@ -8,6 +8,8 @@ import re
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from studio.exchange.portable import find_existing_path
+
 
 FOLDERS = ("briefings", "skies", "music", "movies", "sets", "scripts",
            "levels", "models", "interface")
@@ -25,14 +27,22 @@ def _has_loose_sets(folder: Path) -> bool:
 
 
 def _child(parent: Path, *names: str) -> Path:
-    for name in names:
-        if parent.is_dir():
-            match = next((p for p in parent.iterdir() if p.name.casefold() == name.casefold()), None)
-            if match is not None:
-                parent = match
-                continue
-        parent = parent / name
-    return parent
+    """Return the existing path ignoring case, or the plain join when it is missing."""
+    return find_existing_path(parent, *names) or Path(parent).joinpath(*names)
+
+
+def _first_dir(bases, *names: str) -> Path:
+    """Return the first existing ``base/names`` folder, or the join on the first base."""
+    for base in bases:
+        found = find_existing_path(base, *names)
+        if found is not None and found.is_dir():
+            return found
+    return Path(bases[0]).joinpath(*names)
+
+
+def _game_root(data: Path) -> Path:
+    """Folder that holds ``Data``; the vanilla layout keeps Levels and Music there."""
+    return data.parent if data.name.casefold() == "data" else data
 
 
 @dataclass
@@ -45,16 +55,25 @@ class GameInstallation:
 
     @classmethod
     def suggest(cls, chosen: str | Path) -> "GameInstallation":
-        root = Path(chosen).expanduser().resolve()
-        data = _child(root, "Data") if _child(root, "Data").is_dir() else root
+        """Guess every resource folder from the game folder or its Data folder.
+
+        Like the engine (uaResolvePath in common/utils.cpp), Levels and Music
+        are read from Data first and then from the game root, where the
+        vanilla layout keeps them. Folder names are matched without case.
+        """
+        chosen = Path(chosen).expanduser().resolve()
+        data_child = find_existing_path(chosen, "Data")
+        data = data_child if data_child is not None and data_child.is_dir() else chosen
+        bases = (data,) if _game_root(data) == data else (data, _game_root(data))
+        levels = _first_dir(bases, "Levels")
         folders = {
-            "briefings": _child(data, "Levels", "Mbpix"),
+            "briefings": _child(levels, "Mbpix"),
             "skies": _child(data, "Objects"),
-            "music": _child(data, "Music"),
+            "music": _first_dir(bases, "Music"),
             "movies": _child(data, "Mov"),
             "sets": _child(data, "Sets"),
             "scripts": _child(data, "Scripts"),
-            "levels": _child(data, "Levels"),
+            "levels": levels,
             "models": _child(data, "Models"),
             "interface": _child(data, "Interface"),
         }
@@ -172,7 +191,7 @@ class GameInstallation:
                 if path.is_file() and path.suffix.casefold() == ".base")
         interface = self.folder("interface")
         icon_count = 0
-        status = interface / "StatusIcons" if interface.is_dir() else None
+        status = find_existing_path(interface, "StatusIcons")
         if status is not None and status.is_dir():
             icon_count = sum(1 for path in status.iterdir()
                              if path.is_file() and path.suffix.casefold() == ".png")
@@ -199,12 +218,17 @@ class GameInstallation:
     def from_json(cls, payload: dict) -> "GameInstallation":
         data = Path(payload["data"])
         suggested = cls.suggest(data)
-        folders = {key: Path(payload.get("folders", {}).get(key, suggested.folder(key))) for key in FOLDERS}
+        folders = {}
+        for key in FOLDERS:
+            saved = payload.get("folders", {}).get(key)
+            # A remembered folder that no longer exists is guessed again.
+            folders[key] = Path(saved) if saved and Path(saved).is_dir() else suggested.folder(key)
         return cls(data, folders, {key: Path(value) for key, value in payload.get("preview_backgrounds", {}).items()})
 
 
 def settings_path() -> Path:
-    base = Path(os.environ.get("APPDATA") or Path.home() / ".config")
+    base = Path(os.environ.get("APPDATA") or os.environ.get("XDG_CONFIG_HOME")
+                or Path.home() / ".config")
     return base / "Sektor3" / "installation.json"
 
 

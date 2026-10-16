@@ -26,6 +26,7 @@ from studio.assets.visproto import (
     VPParseError,
     VPTable,
 )
+from studio.exchange.portable import find_existing_path
 from studio.formats.base_format import BaseObject
 from studio.formats.sklt import SkltModel
 
@@ -286,7 +287,12 @@ def _resolve_data_asset_path(
                 if data_root is not None:
                     candidates.append(data_root / relative)
     for candidate in candidates:
-        if candidate.is_file():
+        if not candidate.is_file():
+            # Scripts often spell folders differently from the disk (Linux is case-sensitive).
+            anchor = next((parent for parent in candidate.parents if parent.is_dir()), None)
+            candidate = (find_existing_path(anchor, candidate.relative_to(anchor).as_posix())
+                         if anchor is not None else None)
+        if candidate is not None and candidate.is_file():
             return candidate.resolve(strict=False)
     return None
 
@@ -956,8 +962,10 @@ def runtime_vp_table(
     path = Path(set_bas_path)
     set_root = path.parent.parent if path.parent.name.casefold() in (
         "objects", "object") else path.parent
-    loose = set_root / "Loose" / "VISPROTO.LST"
-    scripts = set_root / "Scripts" / "VISPROTO.LST"
+    loose = (find_existing_path(set_root, "Loose", "VISPROTO.LST")
+             or set_root / "Loose" / "VISPROTO.LST")
+    scripts = (find_existing_path(set_root, "Scripts", "VISPROTO.LST")
+               or set_root / "Scripts" / "VISPROTO.LST")
     warnings: list[str] = []
     if loose.is_file():
         try:
