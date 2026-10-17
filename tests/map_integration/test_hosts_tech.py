@@ -107,6 +107,7 @@ def test_placed_host_cannot_overwrite_another_host_draft(win):
     win._refresh_squads()
     win._refresh_hosts()
     win.palette_tabs.setCurrentIndex(win.host_tab_index)
+    win.host_panel.deselect()
     win._add_host()
     expected = dict(win._draft_host)
     win.host_panel.list.setCurrentRow(0)

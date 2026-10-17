@@ -6,7 +6,8 @@ from PySide6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QFormLayout,
 from ..core.ldf_model import FACTIONS, HOST_AI_FIELDS, HOST_AI_BUDGET_FIELDS, make_host_ai, DEFAULT_HOST_POS_Y
 from ..core.host_ai_presets import HOST_AI_PRESETS, CUSTOM_AI_PRESETS
 from .preview_cards import PreviewList, set_card, faction_style, DETAIL_ROLE, form_vehicle
-from .squad_panel import WorldCoordinateSpinBox
+from .squad_panel import WorldCoordinateSpinBox, coordinate_speed_slider
+from ..render.squad_scene import squad_xz
 
 
 class HostPanel(QWidget):
@@ -15,6 +16,8 @@ class HostPanel(QWidget):
     addRequested = Signal()
     removeRequested = Signal(int)
     playerRequested = Signal(int)
+    clearRequested = Signal()
+    findRequested = Signal()
 
     def __init__(self):
         super().__init__()
@@ -33,11 +36,26 @@ class HostPanel(QWidget):
         buttons = QHBoxLayout()
         for title, slot in (('Add', self.addRequested.emit),
                             ('Delete', lambda: self.removeRequested.emit(self.list.currentRow())),
+                            ('Find', self.findRequested.emit),
                             ('Deselect', self.deselect)):
             button = QPushButton(title)
             button.clicked.connect(slot)
             buttons.addWidget(button)
+            if title == 'Add':
+                self.add_button = button
+                button.setToolTip('Deselect the current host before adding a host station.')
+            elif title == 'Find':
+                self.find_button = button
+            elif title == 'Delete':
+                self.delete_button = button
         layout.addLayout(buttons)
+        count_row = QHBoxLayout()
+        self.total = QLabel()
+        count_row.addWidget(self.total, 1)
+        self.clear_button = QPushButton('Delete all')
+        self.clear_button.clicked.connect(self.clearRequested.emit)
+        count_row.addWidget(self.clear_button)
+        layout.addLayout(count_row)
         self.form_widget = QWidget()
         form = QFormLayout(self.form_widget)
         form.setRowWrapPolicy(QFormLayout.RowWrapPolicy.WrapLongRows)
@@ -68,6 +86,12 @@ class HostPanel(QWidget):
         self.advanced_fields = QWidget()
         fields = QFormLayout(self.advanced_fields)
         fields.setRowWrapPolicy(QFormLayout.RowWrapPolicy.WrapLongRows)
+        self.x, self.z = WorldCoordinateSpinBox(), WorldCoordinateSpinBox()
+        fields.addRow('World X', self.x)
+        fields.addRow('World Z', self.z)
+        self.coordinate_speed = coordinate_speed_slider(fields, self.x, self.z)
+        self.x.valueChanged.connect(lambda value: self._change('pos_x', value))
+        self.z.valueChanged.connect(lambda value: self._change('pos_z', value))
         self.fields = {'pos_y': self.height}
         for key, title, low, high in (('reload_const', 'Reload constant', 0, 2147483647),
                                      ('viewangle', 'View angle (POV)', -2147483647, 2147483647)):
@@ -186,10 +210,20 @@ class HostPanel(QWidget):
         if self._loading:
             return
         valid = self.doc is not None and 0 <= index < len(self.doc.host_stations)
+        self.add_button.setEnabled(not valid)
+        self.find_button.setEnabled(valid)
+        self.delete_button.setEnabled(valid)
+        self.clear_button.setEnabled(bool(self.doc and self.doc.host_stations))
+        self.total.setText(f'{len(self.doc.host_stations) if self.doc else 0} hosts')
         self.form_widget.setEnabled(True)
+        self.x.setEnabled(valid)
+        self.z.setEnabled(valid)
         if valid:
             self._loading = True
             host = self.doc.host_stations[index]
+            x, z = squad_xz(host)
+            self.x.setValue(x)
+            self.z.setValue(z)
             placing = any(item.get('_preview') for item in self.doc.host_stations)
             self.form_widget.setEnabled(not placing or bool(host.get('_preview')))
             self.owner.setCurrentIndex(self.owner.findData(host['owner']))

@@ -215,6 +215,7 @@ def test_special_panel_escape_undo_key_edit_filter_and_delete_all(win, monkeypat
     item_panel.key_road.setChecked(True)
     assert win.doc.grids['type'][4][6] == 'f4'
 
+    item_panel.deselect_button.click()
     item_panel.add_button.click()
     second_item = item_panel.slot
     win._special_click((4, 6))
@@ -296,7 +297,7 @@ def test_special_template_survives_deselect_cancelling_draft(win):
 
 
 def test_special_context_menus_cancel_unplaced_previews_and_gate_key_actions(win):
-    expected = {'Add Preview', 'Move Selected Object', 'Focus',
+    expected = {'Move Selected Object', 'Find',
                 'Delete', 'Deselect'}
     key_actions = {'Add Key Preview', 'Move Selected Key', 'Delete key'}
     for kind, panel in win.special_panels.items():
@@ -304,7 +305,8 @@ def test_special_context_menus_cancel_unplaced_previews_and_gate_key_actions(win
         menu = QMenu(win)
         win._special_context_actions(menu, kind)
         labels = {action.text() for action in menu.actions()}
-        assert labels == expected | (key_actions if kind != 'gem' else set())
+        from map_editor.core.special_objects import SPECIAL_KINDS
+        assert labels == expected | {'Add ' + SPECIAL_KINDS[kind][3]} | (key_actions if kind != 'gem' else set())
 
     panel = win.special_panels['gate']
     win.palette_tabs.setCurrentIndex(win.special_tab_indices['gate'])
@@ -318,7 +320,7 @@ def test_special_context_menus_cancel_unplaced_previews_and_gate_key_actions(win
         win._special_context_actions(menu, 'gate')
         return {action.text(): action for action in menu.actions()}
 
-    menu_actions()['Add Preview'].trigger()
+    menu_actions()['Add Beamgate'].trigger()
     assert win._special_draft is not None and win._special_draft[0] == 'gate'
     assert not panel.keys_group.isEnabled()
     assert win.doc.snapshot() == baseline
@@ -335,7 +337,7 @@ def test_special_context_menus_cancel_unplaced_previews_and_gate_key_actions(win
         undo_depth, redo_depth, dirty)
 
     # The delete command also cancels a preview instead of deleting data.
-    menu_actions()['Add Preview'].trigger()
+    menu_actions()['Add Beamgate'].trigger()
     draft_actions = menu_actions()
     assert draft_actions['Delete'].isEnabled()
     draft_actions['Delete'].trigger()
@@ -346,7 +348,7 @@ def test_special_context_menus_cancel_unplaced_previews_and_gate_key_actions(win
 
     # Once the object is placed, adding a key is available; with a key selected,
     # all three key actions are enabled outside any preview draft.
-    menu_actions()['Add Preview'].trigger()
+    menu_actions()['Add Beamgate'].trigger()
     win._special_click((2, 2))
     assert win._special_draft is None and win.doc.visible_gate_slots == 1
     assert panel.keys_group.isEnabled()
@@ -415,7 +417,7 @@ def test_gem_action_editor_keeps_template_and_draft_effects_until_placement(win)
     panel = win.special_panels['gem']
     win.palette_tabs.setCurrentIndex(win.special_tab_indices['gem'])
     panel.target.setCurrentIndex(panel.target.findData('modify_vehicle'))
-    panel.target_id.setValue(222)
+    panel.target_id.setEditText('222')
     panel.param.setCurrentText('enable')
     panel.action_value.setText('arbitrary-token')
     panel._save_action(False)
@@ -432,7 +434,7 @@ def test_gem_action_editor_keeps_template_and_draft_effects_until_placement(win)
         ('modify_weapon', 7, 'add_energy_tank', '2.5'),
     ):
         panel.target.setCurrentIndex(panel.target.findData(target))
-        panel.target_id.setValue(obj_id)
+        panel.target_id.setEditText(str(obj_id))
         panel.param.setCurrentText(param)
         panel.action_value.setText(value)
         panel._save_action(False)

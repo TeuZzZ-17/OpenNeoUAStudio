@@ -108,7 +108,7 @@ class ResourceCardDelegate(QStyledItemDelegate):
                          if checked == Qt.CheckState.Checked.value else QStyle.StateFlag.State_Off)
             view.style().drawControl(QStyle.ControlElement.CE_CheckBox, box, painter, view)
             right -= 30
-        painter.setPen(color)
+        painter.setPen(option.palette.color(QPalette.ColorRole.HighlightedText) if selected else color)
         top = card.center().y() - (title_height + detail_height + 8) // 2
         title_layout.draw(painter, QPointF(left, top))
         painter.setPen(option.palette.color(QPalette.ColorRole.HighlightedText if selected else QPalette.ColorRole.Text))
