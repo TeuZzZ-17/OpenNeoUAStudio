@@ -254,7 +254,8 @@ class MainWindow(QMainWindow):
         self.addAction(delete_action)
         act(map_menu, "Change Set", self.map_set)
         act(map_menu, "Resize", self.map_resize)
-        self.reset_action = act(map_menu, "Reset", self.map_reset)
+        self.reset_action = act(map_menu, "Clear Map", self.map_reset)
+        self.reset_level_action = act(map_menu, "Restore Level", self.level_reset)
         self.reset_camera_action = act(view_menu, 'Reset Camera', self.view.reset_camera, 'Home')
         self.copy_action = act(edit_menu, 'Copy', self._copy_elements, 'Ctrl+C')
         self.paste_action = act(edit_menu, 'Paste', self._paste_elements, 'Ctrl+V')
@@ -307,10 +308,13 @@ class MainWindow(QMainWindow):
         self.redo_action.setText("Redo >")
         self.reset_button = QToolButton()
         self.reset_button.setDefaultAction(self.reset_action)
-        self.reset_action.setText('Reset Map')
+        self.reset_action.setToolTip('Create an empty map with the current size and set.')
+        self.reset_level_action.setToolTip('Restore the entire level to its state when opened.')
         self.reset_camera_button = QToolButton()
         self.reset_camera_button.setDefaultAction(self.reset_camera_action)
-        for button in (self.undo_button, self.reset_button, self.reset_camera_button, self.redo_button):
+        self.reset_level_button = QToolButton()
+        self.reset_level_button.setDefaultAction(self.reset_level_action)
+        for button in (self.undo_button, self.reset_button, self.reset_level_button, self.reset_camera_button, self.redo_button):
             button.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextOnly)
             history_row.addWidget(button)
         history_row.addStretch()
@@ -510,6 +514,8 @@ class MainWindow(QMainWindow):
         self.squad_panel.addRequested.connect(self._add_squad)
         self.squad_panel.valuesChanged.connect(self._live_squad_changed)
         self.squad_panel.removeRequested.connect(self._delete_squads)
+        self.squad_panel.findRequested.connect(lambda: self._center_squad(self.squad_panel.list.currentRow()))
+        self.squad_panel.clearRequested.connect(lambda: self._clear_actors('squad'))
         from .preview_cards import actor_scroll_area
         squad_scroll = actor_scroll_area(self.squad_panel)
         self.squad_tab_index = tabs.addTab(squad_scroll, "Squad")
@@ -517,6 +523,8 @@ class MainWindow(QMainWindow):
         self.host_panel.selected.connect(self._host_selected)
         self.host_panel.addRequested.connect(self._add_host)
         self.host_panel.removeRequested.connect(self._delete_host)
+        self.host_panel.findRequested.connect(lambda: self._center_host(self.host_panel.list.currentRow()))
+        self.host_panel.clearRequested.connect(lambda: self._clear_actors('host'))
         self.host_panel.valuesChanged.connect(self._host_changed)
         self.host_panel.playerRequested.connect(self._host_player)
         host_scroll = actor_scroll_area(self.host_panel)
@@ -814,16 +822,51 @@ class MainWindow(QMainWindow):
 
     def map_reset(self):
         self._released(-1, -1, Qt.KeyboardModifier.NoModifier)
-        answer = QMessageBox.question(self, 'Reset map',
+        answer = QMessageBox.question(self, 'Clear Map',
             'Create an empty map with the current size and set?\n'
             'This removes buildings, factions, terrain edits, squads, hosts, special objects and custom script.\n'
-            'You can undo this reset.', QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            'You can undo this operation.', QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
             QMessageBox.StandardButton.No)
         if answer != QMessageBox.StandardButton.Yes:
             return
         self.history.push(self.doc)
         self.doc.reset_map()
         self._cancel_operation(clear=False)
+        self._after_history()
+
+    def level_reset(self):
+        """Restore the complete level as it was when opened."""
+        self._released(-1, -1, Qt.KeyboardModifier.NoModifier)
+        answer = QMessageBox.question(self, 'Restore Level',
+            'Restore the level to its state when opened? All edits will be reverted.\n'
+            'You can undo this operation.',
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No)
+        if answer != QMessageBox.StandardButton.Yes:
+            return
+        self._cancel_operation(clear=False)
+        self.history.push(self.doc)
+        self.doc.restore(self._original_level)
+        self._clear_selection()
+        self._after_history()
+        self._rebuild_level_panel()
+
+    def _clear_actors(self, kind):
+        """Delete all squads or hosts as one undoable edit."""
+        self._released(-1, -1, Qt.KeyboardModifier.NoModifier)
+        self._cancel_operation(clear=False)
+        records = self.doc.squads if kind == 'squad' else self.doc.host_stations
+        if not records:
+            return
+        answer = QMessageBox.question(self, 'Delete all',
+            f'Delete all {len(records)} {"squads" if kind == "squad" else "host stations"}?\nYou can undo this.',
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No)
+        if answer != QMessageBox.StandardButton.Yes:
+            return
+        self.history.push(self.doc)
+        records.clear()
+        self._clear_selection()
         self._after_history()
 
     def map_fill(self):
@@ -950,6 +993,8 @@ class MainWindow(QMainWindow):
         self.view.enter_pov_at(eye, (-math.sin(angle), 0, math.cos(angle)))
 
     def _add_host(self):
+        if self.host_panel.list.currentRow() >= 0:
+            return
         self._released(-1, -1, Qt.KeyboardModifier.NoModifier)
         self._cancel_operation(clear=False)
         try:
@@ -1030,6 +1075,8 @@ class MainWindow(QMainWindow):
             host['ai']['preset'] = 'Custom'
         else:
             host[field] = value
+            if field in ('pos_x', 'pos_z'):
+                host['x'], host['y'] = world_to_grid(*squad_xz(host))
             if field in ('x', 'y'):
                 host.pop('pos_x' if field == 'x' else 'pos_z', None)
         if host == hosts[index]:
@@ -1041,7 +1088,7 @@ class MainWindow(QMainWindow):
         if self._draft_host is not None:
             self._draft_host = host
         else:
-            if field in ('x', 'y') and not actors_fit(self.doc, [host], kind='host', exclude_hosts={index}):
+            if field in ('x', 'y', 'pos_x', 'pos_z') and not actors_fit(self.doc, [host], kind='host', exclude_hosts={index}):
                 self.host_panel.status.setText('This sector already contains another Host Station.')
                 self.host_panel.status.show()
                 return
@@ -1058,7 +1105,7 @@ class MainWindow(QMainWindow):
             self._refresh_hosts(index)
         else:
             self.host_panel.update_rows()
-        if field in ('viewangle', 'pos_y', 'x', 'y') and self.view.camera.perspective and self._host_pov_index == index:
+        if field in ('viewangle', 'pos_y', 'x', 'y', 'pos_x', 'pos_z') and self.view.camera.perspective and self._host_pov_index == index:
             self._host_pov(index)
 
     def _deselect_other_objects(self, kind):
@@ -1568,6 +1615,8 @@ class MainWindow(QMainWindow):
         self._refresh_title()
 
     def _add_squad(self):
+        if self.squad_panel.selected_indices():
+            return
         self._released(-1, -1, Qt.KeyboardModifier.NoModifier)
         self._cancel_operation(clear=False)
         selected = self.squad_panel.selected_indices()
@@ -2016,11 +2065,11 @@ class MainWindow(QMainWindow):
     def _special_context_actions(self, menu, kind, allow_delete=True):
         panel = self.special_panels[kind]
         slot = panel.slot
-        action = menu.addAction('Add Preview', lambda: self._add_special(kind))
+        action = menu.addAction('Add ' + SPECIAL_KINDS[kind][3], lambda: self._add_special(kind))
         action.setEnabled(panel.add_button.isEnabled())
         action = menu.addAction('Move Selected Object', lambda: self._place_special(kind, 'object', -1))
         action.setEnabled(bool(slot))
-        action = menu.addAction('Focus', lambda: self._focus_special(special_cell(panel.record())))
+        action = menu.addAction('Find', lambda: self._focus_special(special_cell(panel.record())))
         action.setEnabled(bool(slot) and special_cell(panel.record()) is not None)
         if allow_delete:
             action = menu.addAction('Delete', lambda: self._delete_special(kind, slot))
@@ -2080,18 +2129,20 @@ class MainWindow(QMainWindow):
             item = widget.itemAt(position)
             if item is not None and not item.isSelected():
                 self.squad_panel.set_selection({widget.row(item)})
+            action = menu.addAction('Add Squad', self._add_squad)
+            action.setEnabled(self.squad_panel.add_button.isEnabled())
             menu.addAction('Delete Selected Squads',lambda: self._delete_squads(self.squad_panel.selected_indices()))
             index = widget.currentRow()
-            action = menu.addAction('Squad POV',lambda: self._squad_pov(index))
-            action.setEnabled(0 <= index < len(self.doc.squads))
-            action = menu.addAction('Squad Focus', lambda: self._center_squad(index))
+            action = menu.addAction('Find Squad', lambda: self._center_squad(index))
             action.setEnabled(0 <= index < len(self.doc.squads))
         if widget is self.host_panel.list:
             item = widget.itemAt(position)
             if item is not None:
                 widget.setCurrentItem(item)
+            action = menu.addAction('Add Host Station', self._add_host)
+            action.setEnabled(self.host_panel.add_button.isEnabled())
             index = widget.currentRow()
-            for text, slot in (('Host Station POV', self._host_pov), ('Host Station Focus', self._center_host)):
+            for text, slot in (('Find Host Station', self._center_host),):
                 action = menu.addAction(text, lambda checked=False, fn=slot: fn(index))
                 action.setEnabled(0 <= index < len(self.doc.host_stations))
             action = menu.addAction('Delete selected Host Station',
@@ -2200,15 +2251,17 @@ class MainWindow(QMainWindow):
         if special_kind is not None:
             self._special_context_actions(menu, special_kind, allow_delete=False)
         elif self.palette_tabs.currentIndex() == self.host_tab_index:
+            action = menu.addAction('Add Host Station', self._add_host)
+            action.setEnabled(self.host_panel.add_button.isEnabled())
             index = host if host is not None else self.host_panel.list.currentRow()
-            for text, slot in (('Host Station POV', self._host_pov), ('Host Station Focus', self._center_host)):
+            for text, slot in (('Find Host Station', self._center_host),):
                 action = menu.addAction(text, lambda checked=False, fn=slot: fn(index))
                 action.setEnabled(0 <= index < len(self.doc.host_stations))
         elif context_tool == 'squad':
+            action = menu.addAction('Add Squad', self._add_squad)
+            action.setEnabled(self.squad_panel.add_button.isEnabled())
             index = squad if squad is not None else min(self.squad_panel.selected_indices(),default=-1)
-            action = menu.addAction('Squad POV',lambda: self._squad_pov(index,position))
-            action.setEnabled(0 <= index < len(self.doc.squads))
-            action = menu.addAction('Squad Focus', lambda: self._center_squad(index))
+            action = menu.addAction('Find Squad', lambda: self._center_squad(index))
             action.setEnabled(0 <= index < len(self.doc.squads))
             menu.addAction('Select All Squads', lambda: self.squad_panel.set_selection(set(range(len(self.doc.squads)))))
         elif self.palette_tabs.currentIndex() == self.script_tab_index:
@@ -2268,7 +2321,8 @@ class MainWindow(QMainWindow):
                         guns.addAction(label,lambda checked=False,i=index: self._gun_pov(cell,i))
         menu.addSeparator()
         menu.addAction('Clear Selection', self._clear_selection)
-        menu.addAction('Reset map', self.map_reset)
+        menu.addAction(self.reset_action)
+        menu.addAction(self.reset_level_action)
         menu.addAction(self.reset_camera_action)
         menu.popup(global_position)
         self._context_menu = menu
@@ -2665,6 +2719,7 @@ class MainWindow(QMainWindow):
         self._finish_script()
         self._released(-1, -1, Qt.KeyboardModifier.NoModifier)
         self.doc, self.path, self.dirty = doc, path, False
+        self._original_level = doc.snapshot()
         self.history.clear()
         self._draft_squads = []
         self._draft_host = None

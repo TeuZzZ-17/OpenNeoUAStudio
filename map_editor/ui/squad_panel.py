@@ -2,7 +2,7 @@
 from PySide6.QtCore import Signal, QEvent, Qt
 from PySide6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QFormLayout,
                               QComboBox, QSpinBox, QDoubleSpinBox, QLineEdit,
-                              QCheckBox, QPushButton, QLabel, QGroupBox, QAbstractItemView)
+                              QCheckBox, QPushButton, QLabel, QGroupBox, QAbstractItemView, QSlider)
 from ..core.ldf_model import FACTIONS
 from ..render.squad_scene import squad_xz
 from .preview_cards import PreviewList, set_card, faction_style, DETAIL_ROLE, form_vehicle
@@ -10,10 +10,27 @@ from .preview_cards import PreviewList, set_card, faction_style, DETAIL_ROLE, fo
 
 class WorldCoordinateSpinBox(QDoubleSpinBox):
     def __init__(self):
-        super().__init__(minimum=-2147483647, maximum=2147483647, decimals=15)
+        super().__init__(minimum=-2147483647, maximum=2147483647, decimals=15, singleStep=50)
 
     def textFromValue(self, value):
-        return self.locale().toString(value, 'g', 15)
+        return self.locale().toString(value, 'f', 2)
+
+    def valueFromText(self, text):
+        # Merely focusing a compact field must preserve the imported precision.
+        if text == self.textFromValue(self.value()):
+            return self.value()
+        return super().valueFromText(text)
+
+
+def coordinate_speed_slider(form, *coordinates):
+    """Set the arrow movement step without changing stored coordinates."""
+    slider = QSlider(Qt.Orientation.Horizontal)
+    slider.setRange(1, 200)
+    slider.setValue(50)
+    slider.setToolTip('World units moved per arrow step (1–200). Default: 50.')
+    slider.valueChanged.connect(lambda step: [spin.setSingleStep(step) for spin in coordinates])
+    form.addRow('Movement speed', slider)
+    return slider
 
 
 class SquadPanel(QWidget):
@@ -21,6 +38,8 @@ class SquadPanel(QWidget):
     valuesChanged = Signal(object, str, object)
     addRequested = Signal()
     removeRequested = Signal(object)
+    clearRequested = Signal()
+    findRequested = Signal()
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -50,11 +69,26 @@ class SquadPanel(QWidget):
         row = QHBoxLayout()
         for text, slot in (("Add", self.addRequested.emit),
                            ("Delete", lambda: self.removeRequested.emit(self.selected_indices())),
+                           ("Find", self.findRequested.emit),
                            ("Deselect", lambda: self.set_selection(set()))):
             button = QPushButton(text)
             button.clicked.connect(slot)
             row.addWidget(button)
+            if text == 'Add':
+                self.add_button = button
+                button.setToolTip('Deselect the current squad before adding a squad.')
+            elif text == 'Find':
+                self.find_button = button
+            elif text == 'Delete':
+                self.delete_button = button
         layout.addLayout(row)
+        count_row = QHBoxLayout()
+        self.total = QLabel()
+        count_row.addWidget(self.total, 1)
+        self.clear_button = QPushButton('Delete all')
+        self.clear_button.clicked.connect(self.clearRequested.emit)
+        count_row.addWidget(self.clear_button)
+        layout.addLayout(count_row)
         self.form_widget = QWidget()
         form = QFormLayout(self.form_widget)
         form.setRowWrapPolicy(QFormLayout.RowWrapPolicy.WrapLongRows)
@@ -88,6 +122,7 @@ class SquadPanel(QWidget):
         advanced_form = QFormLayout(self.advanced_fields)
         for title, widget in (('World X', self.x), ('World Z', self.z), ('Comment', self.name)):
             advanced_form.addRow(title, widget)
+        self.coordinate_speed = coordinate_speed_slider(advanced_form, self.x, self.z)
         self.advanced_fields.hide()
         self.advanced.toggled.connect(self.advanced_fields.setVisible)
         advanced_layout.addWidget(self.advanced_fields)
@@ -191,6 +226,11 @@ class SquadPanel(QWidget):
         index = self.list.currentRow() if self.list.currentRow() in indices else min(indices, default=-1)
         valid = self.doc is not None and 0 <= index < len(self.doc.squads)
         self.form_widget.setEnabled(True)
+        self.add_button.setEnabled(not indices)
+        self.find_button.setEnabled(valid)
+        self.delete_button.setEnabled(bool(indices))
+        self.clear_button.setEnabled(bool(self.doc and self.doc.squads))
+        self.total.setText(f'{len(self.doc.squads) if self.doc else 0} squads')
         self.multiple_notice.setVisible(len(indices) > 1)
         self.status.setText("Add a squad, then click the map to insert it." if not valid else
                            f'{len(indices)} selected · Changes apply immediately')
