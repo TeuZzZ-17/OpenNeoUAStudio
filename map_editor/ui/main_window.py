@@ -30,6 +30,7 @@ from ..core.game_installation import GameInstallation
 from ..core.factions import load_owner_colors
 from ..core.script_catalog import script_texts
 from ..core.history import History
+from ..core.map_diagnostics import map_issues
 from ..core.ldf_model import (DEFAULT_HGT, FACTIONS, HGT_MIN, HGT_MAX,
                               LdfDocument, load_ldf, save_ldf, world_to_grid, decode_ldf_bytes, SECTOR_SIZE)
 from ..render.map_viewport import create_viewport
@@ -331,6 +332,20 @@ class MainWindow(QMainWindow):
         self.hover_height.setWordWrap(True)
         self.hover_height.setObjectName("mapHoverHeight")
         panel_layout.addWidget(self.hover_height)
+        self.map_issues_toggle = QToolButton(text='Map issues', checkable=True)
+        self.map_issues_toggle.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextBesideIcon)
+        self.map_issues_toggle.setArrowType(Qt.ArrowType.RightArrow)
+        self.map_issues_toggle.setToolTip('Check missing resources and building ownership. Click a row to find its sector.')
+        panel_layout.addWidget(self.map_issues_toggle)
+        self.map_issues_list = QListWidget()
+        from studio.ui.widgets import use_standard_list_style
+        use_standard_list_style(self.map_issues_list)
+        self.map_issues_list.setMaximumHeight(140)
+        self.map_issues_list.setWordWrap(True)
+        self.map_issues_list.hide()
+        self.map_issues_toggle.toggled.connect(self._toggle_map_issues)
+        self.map_issues_list.itemClicked.connect(self._find_map_issue)
+        panel_layout.addWidget(self.map_issues_list)
         panel_layout.addWidget(tabs, 1)
         self.sector_list = self._make_list(True)
         self.sector_list.setItemDelegate(ThumbnailDelegate(self.sector_list))
@@ -932,6 +947,31 @@ class MainWindow(QMainWindow):
                                 self.view.owner_colors, selected)
         self.tech_panel.refresh(self.doc, lib.vehicles if lib else {}, self.buildings,
                                 self.view.owner_colors)
+        self._refresh_map_issues()
+
+    def _toggle_map_issues(self, expanded):
+        self.map_issues_list.setVisible(expanded)
+        self.map_issues_toggle.setArrowType(Qt.ArrowType.DownArrow if expanded else Qt.ArrowType.RightArrow)
+
+    def _refresh_map_issues(self):
+        issues = map_issues(self.doc, self._lib())
+        self.map_issues_list.clear()
+        for issue in issues:
+            col, row = issue.cell
+            item = QListWidgetItem(f'{issue.severity.upper()} · ({col}, {row}) · {issue.message}')
+            item.setToolTip(item.text())
+            item.setData(Qt.ItemDataRole.UserRole, issue.cell)
+            item.setForeground(QColor({'error': '#ff8787', 'warning': '#f0c36b', 'info': '#aab8c8'}[issue.severity]))
+            self.map_issues_list.addItem(item)
+        errors = sum(issue.severity == 'error' for issue in issues)
+        self.map_issues_toggle.setText(f'Map issues: {len(issues)} ({errors} {"error" if errors == 1 else "errors"})')
+        self.map_issues_toggle.setVisible(bool(issues))
+        self.map_issues_list.setVisible(bool(issues) and self.map_issues_toggle.isChecked())
+
+    def _find_map_issue(self, item):
+        cell = item.data(Qt.ItemDataRole.UserRole)
+        self.view.selection = {tuple(cell)}
+        self._focus_special(cell)
 
     def _refresh_script_catalog(self):
         lib = self._lib()
@@ -3168,6 +3208,7 @@ class MainWindow(QMainWindow):
             self._stroke_active = False
             if self.history.commit(self.doc, self._stroke_changed):
                 self.dirty = True
+                self._refresh_map_issues()
             self._refresh_title()
 
     def _double_clicked(self, col, row, _modifiers):

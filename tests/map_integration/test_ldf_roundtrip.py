@@ -70,9 +70,16 @@ def test_byte_identical_with_sektor2():
             # Sektor2 drops empty allowlists. Compare its other formatting here;
             # the new explicit-empty contract is covered by dedicated tests.
             doc.tech_explicit.clear()
+            with open(dst, 'rb') as fh:
+                expected = fh.read()
+            legacy = lm.loads_ldf(expected.decode(doc.encoding))
+            # Sektor2 also loses unmarked scripts and all but the last gate
+            # destination. Those preservation fixes have separate regression tests.
+            doc.script_content = legacy.script_content
+            for gate in doc.gates.values():
+                gate['targets'] = gate['targets'][-1:] or [0]
             mine = lm.dumps_ldf(doc).encode(doc.encoding)
-            with open(dst, "rb") as fh:
-                assert mine == fh.read(), path
+            assert mine == expected, path
 
 
 def test_modern_briefing_extension_is_preserved():

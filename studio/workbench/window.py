@@ -13726,8 +13726,10 @@ if __name__ == "__main__":
     import sys
 
     from PySide6.QtWidgets import QApplication
+    from studio.rendering.gpu import request_desktop_opengl
     from main import _open_startup_path
 
+    request_desktop_opengl()
     app = QApplication(sys.argv)
     window = AssemblyWindow()
     window.show()

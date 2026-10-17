@@ -129,7 +129,7 @@ class HostPanel(QWidget):
         ai_layout.addLayout(preset_buttons)
         self.ai_fields = QWidget()
         grid = QGridLayout(self.ai_fields)
-        for col, title in enumerate(('Task', 'Budget %', 'Delay ms')):
+        for col, title in enumerate(('Task', 'Budget %', 'Delay ticks')):
             grid.addWidget(QLabel(title), 0, col)
         tasks = ('Conquest', 'Defense', 'Recon', 'Host attack', 'Power', 'Radar', 'Safety', 'Completion')
         self.ai_spins = {}
@@ -137,6 +137,8 @@ class HostPanel(QWidget):
             grid.addWidget(QLabel(title), row, 0)
             for col, key in enumerate(HOST_AI_FIELDS[(row-1)*2:row*2], 1):
                 spin = QSpinBox(minimum=0, maximum=100 if key in HOST_AI_BUDGET_FIELDS else 2147483647)
+                if key not in HOST_AI_BUDGET_FIELDS:
+                    spin.setToolTip('Game time: 1024 ticks = 1 second. Raw script values are preserved.')
                 self.ai_spins[key] = spin
                 spin.valueChanged.connect(lambda value, field=key: self._change('ai.' + field, value))
                 grid.addWidget(spin, row, col)

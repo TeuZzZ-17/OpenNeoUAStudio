@@ -59,11 +59,27 @@ On first start, select either the game folder or its `Data` folder. The Studio t
 resource folder (sets, scripts, levels, briefing maps, music, ...) and shows how many items it found.
 Every folder can still be changed by hand.
 
-Both layouts are recognized:
+The following layouts are recognized:
 
 - **Vanilla Urban Assault**: `Levels` (with `Mbpix`) and `Music` sit next to the `Data` folder,
   and the sets are loose `SetN` folders inside `Data`.
 - **OpenNeoUA**: everything sits inside `Data`, as the engine reads `Data` first and the game folder second.
+- **Metropolis Dawn**: select `dataxp` to use the expansion's scripts and sets together with the
+  sibling `levelsxp` folder. If both `Data` and `dataxp` are installed, selecting the game folder
+  defaults to `Data`; select `dataxp` explicitly for the expansion.
+
+The Map Editor preserves every `target_level` of a beamgate and reads original level scripts,
+including `script:` includes. Vehicle and Host Station IDs come from the selected installation's
+scripts, including expansion-specific IDs.
+
+The collapsible **Map issues** indicator in the left panel lists missing sector/building/model
+references, inactive buildings owned by faction `0`, and flak without a matching Host Station.
+Click an entry to find its sector. A power station owned by a faction without a Host is listed as
+information: neutral stations, usually owner `7`, can be intentional. Checks do not change the map.
+
+Stoudson Bomb countdowns use **1024 game ticks per second** and display `MM:SS`, rounding a remaining
+fractional second up as the game does. Unedited imported tick values are preserved exactly.
+Host AI delays remain editable as raw ticks, with the same conversion shown in their tooltips.
 
 Folder and file names are matched without regard to case, so `DATA`, `Data` and `data`
 (or `SET.BAS` and `set.bas`) all work on case-sensitive file systems such as Linux.

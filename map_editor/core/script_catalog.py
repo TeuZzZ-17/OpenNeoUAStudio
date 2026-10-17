@@ -22,6 +22,8 @@ def script_texts(scripts: Path, extra: str = '', with_source=False):
     def include_path(value, directory):
         value = value.strip().strip('"').replace('\\', '/')
         lower = value.casefold()
+        if lower.startswith('script:'):
+            return find_existing_path(scripts, value[len('script:'):])
         if lower.startswith(('data:', 'data/')):
             value = value[5:]
             if value.casefold().startswith('scripts/'):

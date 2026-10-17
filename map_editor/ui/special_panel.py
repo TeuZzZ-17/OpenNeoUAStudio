@@ -9,23 +9,24 @@ from PySide6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QFormLayout, Q
                               QComboBox, QCheckBox, QLabel, QGroupBox, QDialog, QDialogButtonBox)
 
 from studio.ui.widgets import use_standard_list_style
-from ..core.ldf_model import GEM_ACTION_PARAMS_BY_TARGET, MAX_SPECIAL_SLOTS
+from ..core.ldf_model import GEM_ACTION_PARAMS_BY_TARGET, MAX_SPECIAL_SLOTS, GAME_TICKS_PER_SECOND
 from .preview_cards import PreviewList, set_card, RESOURCE_ROLE
 from ..render.special_scene import SPECIAL_COLORS as COLORS
 from ..core.special_objects import SPECIAL_KINDS, special_store, special_slots, special_cell
 
 
 class DurationSpinBox(QSpinBox):
-    """Display milliseconds as MM:SS without losing imported subsecond values."""
+    """Display game ticks as MM:SS without losing imported subsecond values."""
 
-    _MAX_MILLISECONDS = 2147483647
+    _MAX_TICKS = 2147483647
 
     def __init__(self, parent=None):
         self._raw_value = 0
         self._input_edited = False
         super().__init__(parent)
-        self.setRange(0, self._MAX_MILLISECONDS)
-        self.setSingleStep(1000)
+        self.setRange(0, self._MAX_TICKS)
+        self.setSingleStep(GAME_TICKS_PER_SECOND)
+        self.setToolTip('Game time: 1024 ticks = 1 second. Imported fractional seconds are preserved.')
         self.lineEdit().textEdited.connect(self._mark_edited)
 
     def _mark_edited(self, _text):
@@ -41,24 +42,23 @@ class DurationSpinBox(QSpinBox):
         super().stepBy(steps)
 
     def textFromValue(self, value):
-        minutes, seconds = divmod(int(value) // 1000, 60)
-        return f'{minutes:02d}:{seconds:02d}'
+        return format_duration(value)
 
     @classmethod
-    def _parse_milliseconds(cls, text):
+    def _parse_ticks(cls, text):
         match = re.fullmatch(r'(\d+):(\d{1,2})', text.strip())
         if match is None:
             return None
         minutes, seconds = map(int, match.groups())
         if seconds > 59:
             return None
-        milliseconds = (minutes * 60 + seconds) * 1000
-        return milliseconds if milliseconds <= cls._MAX_MILLISECONDS else None
+        ticks = (minutes * 60 + seconds) * GAME_TICKS_PER_SECOND
+        return ticks if ticks <= cls._MAX_TICKS else None
 
     def valueFromText(self, text):
         if not self._input_edited and text == self.textFromValue(self._raw_value):
             return self._raw_value
-        value = self._parse_milliseconds(text)
+        value = self._parse_ticks(text)
         if value is None:
             return super().value()
         self._raw_value = value
@@ -67,13 +67,14 @@ class DurationSpinBox(QSpinBox):
     def validate(self, text, position):
         if text == '' or re.fullmatch(r'\d+', text) or re.fullmatch(r'\d+:', text):
             return QValidator.State.Intermediate, text, position
-        if self._parse_milliseconds(text) is not None:
+        if self._parse_ticks(text) is not None:
             return QValidator.State.Acceptable, text, position
         return QValidator.State.Invalid, text, position
 
 
-def format_duration(milliseconds):
-    minutes, seconds = divmod(int(milliseconds) // 1000, 60)
+def format_duration(ticks):
+    # The game's countdown rounds a remaining fractional second upward.
+    minutes, seconds = divmod((int(ticks) + GAME_TICKS_PER_SECOND - 1) // GAME_TICKS_PER_SECOND, 60)
     return f'{minutes:02d}:{seconds:02d}'
 
 
@@ -144,7 +145,12 @@ class SpecialPanel(QWidget):
         if kind == 'gate':
             self.preset.addItem('No road · 25 / 26', {'closed_bp': 25, 'opened_bp': 26})
             self.preset.addItem('With roads · 5 / 6', {'closed_bp': 5, 'opened_bp': 6})
-            specs = [('target', 'Target level', 0, 2147483647), ('closed_bp', 'Closed building', 0, 255),
+            self.target_levels = QLineEdit()
+            self.target_levels.setPlaceholderText('e.g. 40, 50')
+            self.target_levels.setToolTip('All levels unlocked by this gate, separated by commas. Leave empty for no destination.')
+            self.target_levels.editingFinished.connect(self._targets_changed)
+            form.addRow('Target levels', self.target_levels)
+            specs = [('closed_bp', 'Closed building', 0, 255),
                      ('opened_bp', 'Opened building', 0, 255)]
         elif kind == 'item':
             self.preset.addItem('Standard · 35 / 36 / 37', {'inactive_bp': 35, 'active_bp': 36, 'trigger_bp': 37})
@@ -270,7 +276,7 @@ class SpecialPanel(QWidget):
             value = special_store(doc, self.kind)[index]
             cell = special_cell(value)
             title = SPECIAL_KINDS[self.kind][3]
-            detail = f'Target level {value["target"]} · {len(value["keys"])} keys' if self.kind == 'gate' else (
+            detail = f'Target levels {", ".join(map(str, value["targets"])) or "none"} · {len(value["keys"])} keys' if self.kind == 'gate' else (
                 f'{format_duration(value["countdown"])} · {len(value["keys"])} keys' if self.kind == 'item' else
                 f'Building {value["blg"]} · {len(value["actions"])} effects')
             item = QListWidgetItem()
@@ -304,6 +310,8 @@ class SpecialPanel(QWidget):
         self.add_button.setEnabled(not self.slot and self.list.count() < MAX_SPECIAL_SLOTS)
         self.delete_button.setEnabled(bool(self.slot))
         self._loading = True
+        if self.kind == 'gate':
+            self.target_levels.setText(', '.join(map(str, value['targets'])))
         for key, widget in self.fields.items():
             widget.setValue(value.get(key, -1))
         for key in ('x', 'y'):
@@ -341,6 +349,17 @@ class SpecialPanel(QWidget):
                             'Changes apply immediately. Drag the object or its keys to move them.')
         self.selected.emit(self.slot)
 
+    def _targets_changed(self):
+        if self._loading:
+            return
+        text = self.target_levels.text().strip()
+        parts = text.split(',') if text else []
+        if any(not part.strip().isdecimal() or int(part.strip()) > 2147483647 for part in parts):
+            self.status.setText('Enter numeric level IDs (0–2147483647), separated by commas.')
+            self.target_levels.setText(', '.join(map(str, self.record()['targets'])))
+            return
+        self._change({'targets': [int(part.strip()) for part in parts]})
+
     def update_preview_position(self, doc, slot):
         if self.slot != slot or self.list.count() != getattr(doc, SPECIAL_KINDS[self.kind][1]):
             self.refresh(doc, slot)
@@ -356,7 +375,7 @@ class SpecialPanel(QWidget):
             resource = ('blg', building)
             if item.data(RESOURCE_ROLE) != resource:
                 item.setIcon(QIcon())
-            detail = f'Target level {value["target"]} · {len(value["keys"])} keys' if self.kind == 'gate' else (
+            detail = f'Target levels {", ".join(map(str, value["targets"])) or "none"} · {len(value["keys"])} keys' if self.kind == 'gate' else (
                 f'{format_duration(value["countdown"])} · {len(value["keys"])} keys' if self.kind == 'item' else
                 f'Building {value["blg"]} · {len(value["actions"])} effects')
             set_card(item, f'{SPECIAL_KINDS[self.kind][3]} {slot} · {special_cell(value)}',

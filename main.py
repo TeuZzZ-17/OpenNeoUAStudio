@@ -137,8 +137,10 @@ def main() -> int:
         return _run_map_editor(args)
 
     from PySide6.QtWidgets import QApplication
+    from studio.rendering.gpu import request_desktop_opengl
     from studio.ui.shell import StartupToolSelector
 
+    request_desktop_opengl()
     app = QApplication(sys.argv)
     from studio.ui.style import apply_studio_style
     apply_studio_style()
