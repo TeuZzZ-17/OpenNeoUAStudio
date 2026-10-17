@@ -17,6 +17,15 @@ from PySide6.QtGui import (
 from PySide6.QtOpenGLWidgets import QOpenGLWidget
 from PySide6.QtWidgets import QApplication, QPushButton, QWidget
 
+
+def request_desktop_opengl() -> None:
+    """Keep Qt's default surface settings and request desktop OpenGL."""
+
+    surface = QSurfaceFormat.defaultFormat()
+    surface.setRenderableType(QSurfaceFormat.RenderableType.OpenGL)
+    QSurfaceFormat.setDefaultFormat(surface)
+
+
 # ----------------------------------------------------------------------------
 # QWidget paint surface backed by a native Qt OpenGL canvas when available.
 # (formerly gpu_widget.py)

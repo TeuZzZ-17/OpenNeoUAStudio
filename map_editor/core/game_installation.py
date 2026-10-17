@@ -42,7 +42,7 @@ def _first_dir(bases, *names: str) -> Path:
 
 def _game_root(data: Path) -> Path:
     """Folder that holds ``Data``; the vanilla layout keeps Levels and Music there."""
-    return data.parent if data.name.casefold() == "data" else data
+    return data.parent if data.name.casefold() in ("data", "dataxp") else data
 
 
 @dataclass
@@ -63,9 +63,13 @@ class GameInstallation:
         """
         chosen = Path(chosen).expanduser().resolve()
         data_child = find_existing_path(chosen, "Data")
+        if data_child is None:
+            data_child = find_existing_path(chosen, "Dataxp")
         data = data_child if data_child is not None and data_child.is_dir() else chosen
         bases = (data,) if _game_root(data) == data else (data, _game_root(data))
-        levels = _first_dir(bases, "Levels")
+        levels = _first_dir(bases, "Levelsxp" if data.name.casefold() == "dataxp" else "Levels")
+        if not levels.is_dir():
+            levels = _first_dir(bases, "Levels")
         folders = {
             "briefings": _child(levels, "Mbpix"),
             "skies": _child(data, "Objects"),

@@ -122,6 +122,9 @@ def update_special(doc, kind, slot, changes, buildings=None):
     old = special_store(doc, kind)[slot]
     value = copy.deepcopy(old)
     value.update(copy.deepcopy(changes))
+    if kind == 'gate' and any(type(target) is not int or not 0 <= target <= 2147483647
+                              for target in value['targets']):
+        raise ValueError('Target levels must be numeric IDs between 0 and 2147483647.')
     if old == value:
         return False
     cell = special_cell(value)

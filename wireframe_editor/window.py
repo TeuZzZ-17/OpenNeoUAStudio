@@ -1063,6 +1063,9 @@ class WireframeEditorWindow(QMainWindow):
 
 
 def main() -> int:
+    from studio.rendering.gpu import request_desktop_opengl
+
+    request_desktop_opengl()
     app = QApplication(sys.argv)
     app.setApplicationName("OpenNeoUAStudio")
     app.setApplicationDisplayName("")

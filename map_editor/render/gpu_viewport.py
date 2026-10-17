@@ -26,6 +26,7 @@ from ..core.ldf_model import DEFAULT_HGT
 
 def gl_format():
     fmt = QSurfaceFormat()
+    fmt.setRenderableType(QSurfaceFormat.RenderableType.OpenGL)
     fmt.setVersion(3, 3)
     fmt.setProfile(QSurfaceFormat.OpenGLContextProfile.CoreProfile)
     fmt.setSamples(0)
