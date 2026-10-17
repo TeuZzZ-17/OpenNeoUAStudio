@@ -108,7 +108,10 @@ class SpecialPanel(QWidget):
         self.delete_button.clicked.connect(lambda: self.removeRequested.emit(self.slot))
         self.deselect_button = QPushButton('Deselect')
         self.deselect_button.clicked.connect(lambda: self.list.setCurrentRow(-1))
-        for button in (self.add_button, self.delete_button, self.deselect_button):
+        self.focus = QPushButton('Find')
+        self.focus.clicked.connect(lambda: self.focusRequested.emit(special_cell(self.record())))
+        self.add_button.setToolTip('Deselect the current object before adding another object.')
+        for button in (self.add_button, self.delete_button, self.focus, self.deselect_button):
             row.addWidget(button)
         layout.addLayout(row)
         self.count = QLabel()
@@ -134,10 +137,7 @@ class SpecialPanel(QWidget):
         placement = QHBoxLayout()
         self.place = QPushButton('Place / Move')
         self.place.clicked.connect(lambda: self.placementRequested.emit('object', -1))
-        self.focus = QPushButton('Focus')
-        self.focus.clicked.connect(lambda: self.focusRequested.emit(special_cell(self.record())))
         placement.addWidget(self.place)
-        placement.addWidget(self.focus)
         form.addRow(placement)
         self.preset = QComboBox()
         self.preset.addItem('Custom', None)
@@ -230,18 +230,16 @@ class SpecialPanel(QWidget):
         for target, title in (('modify_vehicle', 'Vehicle'), ('modify_building', 'Building'), ('modify_weapon', 'Weapon')):
             self.target.addItem(title, target)
         self.target.currentIndexChanged.connect(self._action_params)
-        self.target_id = QSpinBox(minimum=0, maximum=2147483647)
+        self.target_id = QComboBox()
+        self.target_id.setEditable(True)
+        self.target_id.setInsertPolicy(QComboBox.InsertPolicy.NoInsert)
+        self.target_id.completer().setFilterMode(Qt.MatchFlag.MatchContains)
+        self.target_id.completer().setCaseSensitivity(Qt.CaseSensitivity.CaseInsensitive)
+        self.target_id.setToolTip('Search by name or enter a numeric ID. Names are not written to the level.')
         self.param = QComboBox()
         self.action_value = QLineEdit('1')
         for title, widget in (('Modify', self.target), ('ID', self.target_id), ('Parameter', self.param), ('Value', self.action_value)):
             fields.addRow(title, widget)
-        self.lookup = QComboBox()
-        self.lookup.setEditable(True)
-        self.lookup.setInsertPolicy(QComboBox.InsertPolicy.NoInsert)
-        self.lookup.completer().setFilterMode(Qt.MatchFlag.MatchContains)
-        self.lookup.completer().setCaseSensitivity(Qt.CaseSensitivity.CaseInsensitive)
-        self.lookup.activated.connect(lambda: self.target_id.setValue(self.lookup.currentData()) if self.lookup.currentData() is not None else None)
-        fields.insertRow(1, 'Find target', self.lookup)
         dialog_layout.addLayout(fields)
         buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
         buttons.accepted.connect(self.effect_dialog.accept)
@@ -303,6 +301,7 @@ class SpecialPanel(QWidget):
             self.template.update(x=-1, y=-1)
             if 'keys' in self.template:
                 self.template['keys'] = []
+        self.add_button.setEnabled(not self.slot and self.list.count() < MAX_SPECIAL_SLOTS)
         self.delete_button.setEnabled(bool(self.slot))
         self._loading = True
         for key, widget in self.fields.items():
@@ -433,12 +432,16 @@ class SpecialPanel(QWidget):
         self._lookup_targets()
 
     def _lookup_targets(self):
-        if not hasattr(self, 'lookup'):
+        if not hasattr(self, 'target_id'):
             return
-        self.lookup.clear()
-        self.lookup.addItem('Search by name or use the ID below', None)
+        previous = self.target_id.currentText().split(';', 1)[0].strip() or '0'
+        self.target_id.clear()
         for key, name in sorted(self.catalogs.get(self.target.currentData(), {}).items()):
-            self.lookup.addItem(f'{key} · {name}', key)
+            self.target_id.addItem(f'{key} ; {name}', key)
+        index = self.target_id.findData(int(previous)) if previous.isdecimal() else -1
+        self.target_id.setCurrentIndex(index)
+        if index < 0:
+            self.target_id.setEditText(previous)
 
     def _edit_action(self, update):
         if update and self.actions.currentRow() < 0:
@@ -460,7 +463,10 @@ class SpecialPanel(QWidget):
             return
         action = actions[index]
         self.target.setCurrentIndex(self.target.findData(action['target_type']))
-        self.target_id.setValue(action['id'])
+        target_index = self.target_id.findData(action['id'])
+        self.target_id.setCurrentIndex(target_index)
+        if target_index < 0:
+            self.target_id.setEditText(str(action['id']))
         self.param.setCurrentText(action['param'])
         self.action_value.setText(str(action['val']))
 
@@ -470,7 +476,11 @@ class SpecialPanel(QWidget):
         if not value or '\n' in value or '\r' in value:
             self.status.setText('Enter an effect value on a single line.')
             return
-        action = dict(target_type=self.target.currentData(), id=self.target_id.value(),
+        text = self.target_id.currentText().split(';', 1)[0].strip()
+        if not text.isdecimal() or not 0 <= int(text) <= 2147483647:
+            self.status.setText('Enter a valid numeric target ID (0–2147483647).')
+            return
+        action = dict(target_type=self.target.currentData(), id=int(text),
                       param=self.param.currentText(), val=value)
         index = self.actions.currentRow()
         if update:
