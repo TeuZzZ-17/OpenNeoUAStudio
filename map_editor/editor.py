@@ -25,6 +25,9 @@ def create_window(argv=None, parent=None):
     app_args = [sys.argv[0], *args]
     app = QApplication.instance()
     if app is None:
+        from studio.rendering.gpu import request_desktop_opengl
+
+        request_desktop_opengl()
         app = QApplication(app_args)
     _active_app = app
     from studio.ui.style import apply_studio_style
@@ -70,7 +73,12 @@ def main(argv=None):
     """Launch the integrated editor, preserving an existing QApplication."""
 
     args = list(sys.argv[1:] if argv is None else argv)
-    app = QApplication.instance() or QApplication([sys.argv[0], *args])
+    app = QApplication.instance()
+    if app is None:
+        from studio.rendering.gpu import request_desktop_opengl
+
+        request_desktop_opengl()
+        app = QApplication([sys.argv[0], *args])
     if create_window(args) is None:
         return 0
     return app.exec()

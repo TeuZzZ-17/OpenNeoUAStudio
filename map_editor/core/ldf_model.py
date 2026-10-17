@@ -27,6 +27,7 @@ EDITOR_HEIGHT_BASE = 30
 EDITOR_HEIGHT_MIN = 0
 EDITOR_HEIGHT_MAX = 60
 MAX_SPECIAL_SLOTS = 10
+GAME_TICKS_PER_SECOND = 1024
 MAX_HISTORY = 100
 DEFAULT_HOST_POS_Y = -700
 DEFAULT_HOST_RELOAD_CONST = 500000
@@ -119,7 +120,7 @@ def ensure_host_defaults(host: dict) -> None:
 
 
 def new_gate() -> dict:
-    return {'active': False, 'x': -1, 'y': -1, 'keys': [], 'target': 0,
+    return {'active': False, 'x': -1, 'y': -1, 'keys': [], 'targets': [0],
             'closed_bp': 25, 'opened_bp': 26, 'hidden': False}
 
 
@@ -222,7 +223,20 @@ def briefing_for_export(value, default_name="") -> str:
 def split_user_script_block(raw_text: str) -> tuple[str, str]:
     marker = re.search(r'(?im)^[ \t]*;[ \t]*---[ \t]*USER SCRIPT[ \t]*---[ \t\r]*$', raw_text)
     if not marker:
-        return "", raw_text
+        # Original levels have no Studio marker. Extract only top-level
+        # prototype scripts, leaving enable lists and gem actions to the LDF parser.
+        script, level = [], []
+        depth, in_script = 0, False
+        for line in raw_text.splitlines(keepends=True):
+            code = line.split(';', 1)[0].strip().lower()
+            if depth == 0:
+                in_script = bool(re.match(r'(?:include\s|(?:new|modify)_(?:vehicle|building|weapon)\b)', code))
+            (script if in_script else level).append(line)
+            if code.startswith(('begin_', 'new_', 'modify_')):
+                depth += 1
+            elif code == 'end':
+                depth = max(0, depth - 1)
+        return ''.join(script), ''.join(level)
     rest = raw_text[marker.end():]
     maps_match = re.search(r'(?im)^[ \t]*begin_maps\b', rest)
     block_end = marker.end() + maps_match.start() if maps_match else len(raw_text)
@@ -621,6 +635,7 @@ def loads_ldf(raw_text: str, encoding: str = DEFAULT_LDF_ENCODING) -> LdfDocumen
                 idx = free_slot(doc.gates)
                 if idx != -1:
                     cur_gate = doc.gates[idx]
+                    cur_gate['targets'] = []
                     doc.visible_gate_slots = max(doc.visible_gate_slots, idx)
                 else:
                     skipped['gate'] += 1
@@ -768,7 +783,7 @@ def loads_ldf(raw_text: str, encoding: str = DEFAULT_LDF_ENCODING) -> LdfDocumen
                 elif t == 'sec_y':
                     cur_gate['y'] = int(get_val())
                 elif t == 'target_level':
-                    cur_gate['target'] = int(get_val())
+                    cur_gate['targets'].append(int(get_val()))
                 elif t == 'closed_bp':
                     cur_gate['closed_bp'] = int(get_val())
                 elif t == 'opened_bp':
@@ -884,7 +899,8 @@ def dumps_ldf(doc: LdfDocument, defs: dict | None = None) -> str:
         if g['x'] != -1:
             w("begin_gate")
             w(f"   sec_x = {g['x']}\n   sec_y = {g['y']}")
-            w(f"   target_level = {g['target']}")
+            for target in g['targets']:
+                w(f"   target_level = {target}")
             w(f"   closed_bp = {g['closed_bp']}")
             w(f"   opened_bp = {g['opened_bp']}")
             if g.get('hidden'):

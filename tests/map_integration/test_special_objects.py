@@ -63,7 +63,7 @@ def test_special_objects_place_and_round_trip_all_effect_targets():
     doc = LdfDocument(mw=9, mh=9)
     gate = add_special(doc, 'gate')
     update_special(doc, 'gate', gate, {
-        'x': 2, 'y': 2, 'target': 19, 'keys': [(3, 2)], 'hidden': True,
+        'x': 2, 'y': 2, 'targets': [19], 'keys': [(3, 2)], 'hidden': True,
     })
     item = add_special(doc, 'item')
     update_special(doc, 'item', item, {
@@ -159,7 +159,7 @@ def test_special_slot_limit_and_delete_compacts_slots():
     doc = LdfDocument(mw=9, mh=9)
     for index in range(1, 11):
         slot = add_special(doc, 'gate')
-        update_special(doc, 'gate', slot, {'target': index})
+        update_special(doc, 'gate', slot, {'targets': [index]})
     before = doc.snapshot()
     with pytest.raises(ValueError):
         add_special(doc, 'gate')
@@ -167,7 +167,7 @@ def test_special_slot_limit_and_delete_compacts_slots():
 
     remove_special(doc, 'gate', 4)
     assert doc.visible_gate_slots == 9
-    assert [special_store(doc, 'gate')[i]['target'] for i in range(1, 10)] == [1, 2, 3, 5, 6, 7, 8, 9, 10]
+    assert [special_store(doc, 'gate')[i]['targets'][0] for i in range(1, 10)] == [1, 2, 3, 5, 6, 7, 8, 9, 10]
     assert add_special(doc, 'gate') == 10
     assert doc.visible_gate_slots == 10
 
@@ -283,17 +283,17 @@ def test_special_drag_is_one_history_step_and_copy_keeps_source_keys(win):
 def test_special_template_survives_deselect_cancelling_draft(win):
     panel = win.special_panels['gate']
     win.palette_tabs.setCurrentIndex(win.special_tab_indices['gate'])
-    panel.fields['target'].setValue(23)
-    panel.fields['target'].editingFinished.emit()
+    panel.target_levels.setText('23')
+    panel.target_levels.editingFinished.emit()
     before = win.doc.snapshot()
     panel.add_button.click()
-    assert win._special_draft[1]['target'] == 23
+    assert win._special_draft[1]['targets'] == [23]
     panel.deselect_button.click()
     assert win._special_draft is None
     assert win.doc.snapshot() == before
     assert win.doc.visible_gate_slots == 0
-    assert panel.slot == 0 and panel.template['target'] == 23
-    assert panel.fields['target'].value() == 23
+    assert panel.slot == 0 and panel.template['targets'] == [23]
+    assert panel.target_levels.text() == '23'
 
 
 def test_special_context_menus_cancel_unplaced_previews_and_gate_key_actions(win):
@@ -586,17 +586,17 @@ def test_special_preview_defaults_and_item_countdown_mm_ss(win):
     panel.refresh(win.doc, slot)
     countdown = panel.fields['countdown']
     assert isinstance(countdown, DurationSpinBox)
-    assert countdown.singleStep() == 1000
-    assert countdown.text() == '00:45'
+    assert countdown.singleStep() == 1024
+    assert countdown.text() == '00:44'
     assert countdown.value() == 45001
-    assert format_duration(45001) == '00:45'
-    assert '00:45' in panel.list.item(0).toolTip()
+    assert format_duration(45001) == '00:44'
+    assert '00:44' in panel.list.item(0).toolTip()
     assert countdown.validate('12:', 3)[0] == QValidator.State.Intermediate
     assert countdown.validate('12:3', 4)[0] == QValidator.State.Acceptable
     assert countdown.validate('12:60', 5)[0] == QValidator.State.Invalid
     assert countdown.validate('35792:2', 7)[0] == QValidator.State.Invalid
 
-    # Interpreting an untouched rounded label must retain its source milliseconds.
+    # Interpreting an untouched rounded label must retain its source ticks.
     countdown.interpretText()
     countdown.editingFinished.emit()
     assert countdown.value() == 45001
@@ -606,14 +606,14 @@ def test_special_preview_defaults_and_item_countdown_mm_ss(win):
     QTest.keyClicks(countdown.lineEdit(), '12:34')
     countdown.interpretText()
     countdown.editingFinished.emit()
-    assert countdown.value() == 754000
-    assert win.doc.items[slot]['countdown'] == 754000
+    assert countdown.value() == 772096
+    assert win.doc.items[slot]['countdown'] == 772096
     countdown.lineEdit().selectAll()
     QTest.keyClicks(countdown.lineEdit(), '13:')
     countdown.interpretText()
-    assert countdown.value() == 754000
+    assert countdown.value() == 772096
     update_special(win.doc, 'item', slot, {'x': 2, 'y': 2})
-    assert loads_ldf(dumps_ldf(win.doc)).items[slot]['countdown'] == 754000
+    assert loads_ldf(dumps_ldf(win.doc)).items[slot]['countdown'] == 772096
 
 
 def test_item_preview_hover_preserves_uncommitted_countdown(win):
@@ -633,8 +633,8 @@ def test_item_preview_hover_preserves_uncommitted_countdown(win):
     line_edit.selectAll()
     QTest.keyClicks(line_edit, '12:34')
     pending_text, pending_value = line_edit.text(), countdown.value()
-    assert pending_text == '12:34' and pending_value == 754000
-    assert win._special_draft[1]['countdown'] == 754000
+    assert pending_text == '12:34' and pending_value == 772096
+    assert win._special_draft[1]['countdown'] == 772096
 
     win._move_special_draft((2, 2))
     assert line_edit.text() == pending_text
@@ -646,15 +646,15 @@ def test_item_preview_hover_preserves_uncommitted_countdown(win):
     # undo stack stay untouched until the user places the preview.
     countdown.interpretText()
     countdown.editingFinished.emit()
-    assert countdown.value() == 754000
-    assert win._special_draft[1]['countdown'] == 754000
+    assert countdown.value() == 772096
+    assert win._special_draft[1]['countdown'] == 772096
     assert win.doc.snapshot() == before
     assert (len(win.history._undo), len(win.history._redo)) == history
     assert win.dirty == dirty
 
     win._special_click((3, 2))
     assert win._special_draft is None
-    assert win.doc.items[slot]['countdown'] == 754000
+    assert win.doc.items[slot]['countdown'] == 772096
     assert len(win.history._undo) == history[0] + 1
 
 

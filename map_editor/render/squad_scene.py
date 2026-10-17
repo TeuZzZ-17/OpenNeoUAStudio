@@ -58,6 +58,8 @@ def ground_height(doc, terrain, lib, x, z):
     if dx % 4 and dz % 4:
         if lib is not None:
             resolved = lib.resolver.resolve_typ(sector_type(doc, lib, c, r))
+            if resolved.sector is None:
+                return terrain.cell_y(col, row)
             index = 4 if resolved.sector.single else (dz % 4 - 1) * 3 + dx % 4 - 1
             sub = next((s for s in resolved.subs if s.index == index), None)
             skeleton = lib.collision_skeleton(sub.sklt_name) if sub and sub.sklt_name else None
