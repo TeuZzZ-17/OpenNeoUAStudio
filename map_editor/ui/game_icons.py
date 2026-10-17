@@ -10,18 +10,18 @@ from .. import bootstrap
 from ..core.resource_catalog import preview_image
 
 
-def game_icon(kind, owner=1, tight=True, grey=False):
+def game_icon(kind, owner=1, tight=True, grey=False, outlined=False):
     if kind in ('power', 'gate', 'gem', 'item', 'gate_key', 'item_key', 'wave', 'wave_key'):
         font, code = 'MAPCUR64', dict(power=137, gate=147, gem=136, item=139,
                                      gate_key=138, item_key=139, wave=143, wave_key=143)[kind]
     else:
         font, code = 'TYPE_NS', {'radar': ord('U'), 'flak': ord('V')}[kind]
     root = bootstrap.game_data_dir()
-    return _glyph(str(root), font, code, tight, grey)
+    return _glyph(str(root), font, code, tight, grey, outlined)
 
 
 @lru_cache(maxsize=48)
-def _glyph(root, font, code, tight, grey):
+def _glyph(root, font, code, tight, grey, outlined):
     data = Path(root)
     directory = bootstrap.find_ci(data, 'Fonts')
     if directory is None and data.name.casefold() == 'data':
@@ -58,6 +58,15 @@ def _glyph(root, font, code, tight, grey):
         if grey:
             luma = np.rint(rgba[:, :, :3] @ np.array((.299, .587, .114))).astype(np.uint8)
             rgba[:, :, :3] = luma[:, :, None]
+        if outlined:
+            # Outline only visible glyph pixels, leaving the icon and its transparent gaps intact.
+            mask = rgba[:, :, 3] > 0
+            padded = np.pad(mask, 1)
+            expanded = np.zeros_like(mask)
+            for dy in range(3):
+                for dx in range(3):
+                    expanded |= padded[dy:dy + mask.shape[0], dx:dx + mask.shape[1]]
+            rgba[expanded & ~mask] = (255, 255, 255, 255)
         if tight:
             yy, xx = np.where(rgba[:, :, 3] > 0)
             if len(xx):

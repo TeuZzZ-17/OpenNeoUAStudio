@@ -1,7 +1,8 @@
 """Per-faction build permissions from discovered scripts and existing LDF IDs."""
 from PySide6.QtCore import Qt, Signal
+from PySide6.QtGui import QColor
 from PySide6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QComboBox, QLineEdit, QLabel,
-                               QTreeWidget, QTreeWidgetItem, QHeaderView)
+                               QTreeWidget, QTreeWidgetItem, QHeaderView, QStyledItemDelegate)
 from ..core.ldf_model import FACTIONS
 from .preview_cards import PreviewList, set_card, faction_style
 
@@ -17,6 +18,7 @@ class TechPanel(QWidget):
         layout = QVBoxLayout(self)
         row = QHBoxLayout()
         self.faction = QComboBox()
+        self.faction.setItemDelegate(QStyledItemDelegate(self.faction))
         for key, name in FACTIONS.items():
             if key:
                 self.faction.addItem(name, key)
@@ -95,6 +97,10 @@ class TechPanel(QWidget):
             self.summary.addTopLevelItem(row)
         # Existing permissions stay visible even if a mod definition is missing.
         self.list.setEnabled(True)
+        # Each popup entry keeps its faction color; only the closed field follows the selection.
+        for index in range(self.faction.count()):
+            color = QColor(*self.colors.get(self.faction.itemData(index), (180, 180, 180)))
+            self.faction.setItemData(index, color, Qt.ItemDataRole.ForegroundRole)
         faction_style(self.faction, self.colors)
         self._loading = False
 
