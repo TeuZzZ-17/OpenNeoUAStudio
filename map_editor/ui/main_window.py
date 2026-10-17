@@ -2133,6 +2133,8 @@ class MainWindow(QMainWindow):
             action.setEnabled(self.squad_panel.add_button.isEnabled())
             menu.addAction('Delete Selected Squads',lambda: self._delete_squads(self.squad_panel.selected_indices()))
             index = widget.currentRow()
+            action = menu.addAction('Deselect Squad', lambda: self.squad_panel.set_selection(set()))
+            action.setEnabled(bool(self.squad_panel.selected_indices()))
             action = menu.addAction('Find Squad', lambda: self._center_squad(index))
             action.setEnabled(0 <= index < len(self.doc.squads))
         if widget is self.host_panel.list:
@@ -2142,6 +2144,8 @@ class MainWindow(QMainWindow):
             action = menu.addAction('Add Host Station', self._add_host)
             action.setEnabled(self.host_panel.add_button.isEnabled())
             index = widget.currentRow()
+            action = menu.addAction('Deselect Host Station', self.host_panel.deselect)
+            action.setEnabled(self.host_panel.list.currentRow() >= 0)
             for text, slot in (('Find Host Station', self._center_host),):
                 action = menu.addAction(text, lambda checked=False, fn=slot: fn(index))
                 action.setEnabled(0 <= index < len(self.doc.host_stations))
@@ -2254,6 +2258,8 @@ class MainWindow(QMainWindow):
             action = menu.addAction('Add Host Station', self._add_host)
             action.setEnabled(self.host_panel.add_button.isEnabled())
             index = host if host is not None else self.host_panel.list.currentRow()
+            action = menu.addAction('Deselect Host Station', self.host_panel.deselect)
+            action.setEnabled(self.host_panel.list.currentRow() >= 0)
             for text, slot in (('Find Host Station', self._center_host),):
                 action = menu.addAction(text, lambda checked=False, fn=slot: fn(index))
                 action.setEnabled(0 <= index < len(self.doc.host_stations))
@@ -2261,6 +2267,8 @@ class MainWindow(QMainWindow):
             action = menu.addAction('Add Squad', self._add_squad)
             action.setEnabled(self.squad_panel.add_button.isEnabled())
             index = squad if squad is not None else min(self.squad_panel.selected_indices(),default=-1)
+            action = menu.addAction('Deselect Squad', lambda: self.squad_panel.set_selection(set()))
+            action.setEnabled(bool(self.squad_panel.selected_indices()))
             action = menu.addAction('Find Squad', lambda: self._center_squad(index))
             action.setEnabled(0 <= index < len(self.doc.squads))
             menu.addAction('Select All Squads', lambda: self.squad_panel.set_selection(set(range(len(self.doc.squads)))))
