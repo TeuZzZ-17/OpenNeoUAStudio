@@ -58,7 +58,7 @@ def test_parse_supports_cfg_and_scr_syntax(tmp_path):
         assert power.kinds == ("power",)
         radar = definitions[54]
         assert radar.is_radar and radar.has_guns and not radar.has_power
-        assert set(radar.kinds) == {"flak", "radar"}
+        assert radar.kinds == ("radar",)
         assert len(radar.guns) == 1 and radar.guns[0].vehicle == 98
     merged = load_building_files(tmp_path)
     assert set(merged) == {1, 54}
@@ -79,6 +79,27 @@ def test_installation_scripts_include_scr_and_buildings():
     assert definitions[1].sec_type == 201
     assert definitions[54].is_radar
     assert any(len(d.guns) >= 4 for d in definitions.values())
+
+
+def test_real_radar_badges_exclude_flak_and_keep_antenna(app, monkeypatch):
+    from PySide6.QtGui import QColor
+    from map_editor.ui.building_overlay import BuildingOverlay, CapabilityPreview
+
+    definitions = load_building_files(bootstrap.game_data_dir() / 'Scripts')
+    drawn = []
+    monkeypatch.setattr('map_editor.ui.building_overlay.draw_game_badge',
+                        lambda painter, center, size, kind, color, now: drawn.append(kind) or True)
+    for bid in (54, 71, 72, 73):
+        radar = definitions[bid]
+        assert radar.guns and radar.kinds == ('radar',)
+        drawn.clear()
+        BuildingOverlay._draw_icons(None, None, (100, 100), radar, QColor('white'), 0, 0, 0)
+        assert drawn == ['radar']
+        preview = CapabilityPreview(radar)
+        assert preview.minimumWidth() == 36
+    for building in definitions.values():
+        if building.has_guns and not building.is_radar:
+            assert 'flak' in building.kinds
 
 
 def test_building_tool_paints_sector_and_script_id_with_undo(app):

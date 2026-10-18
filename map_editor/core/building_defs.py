@@ -79,7 +79,7 @@ class BuildingDef:
         out = []
         if self.has_power:
             out.append("power")
-        if self.has_guns:
+        if self.has_guns and not self.is_radar:
             out.append("flak")
         if self.is_radar:
             out.append("radar")

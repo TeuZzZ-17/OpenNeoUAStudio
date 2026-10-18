@@ -138,7 +138,7 @@ def scene_polygons(lib, doc, terrain, cam):
     else:
         c0, c1, r0, r1 = 0, doc.mw, 0, doc.mh
 
-    def append_mesh(mesh, col, row, *, filler=False, structure_only=False, position=None, actor_code=None, special_code=None):
+    def append_mesh(mesh, col, row, *, filler=False, structure_only=False, ground_only=False, position=None, actor_code=None, special_code=None):
         nonlocal order
         wx, wy, wz = position if position is not None else terrain.cell_center(col, row)
         if filler:
@@ -148,7 +148,7 @@ def scene_polygons(lib, doc, terrain, cam):
             ground = actor_code is None and (filler or all(abs(v[1]) < 1e-6 for v in face.vertices))
             if structure_only and ground:
                 continue
-            if actor_code is None and (col in (0, doc.mw - 1) or row in (0, doc.mh - 1)) and not ground:
+            if ground_only and not ground:
                 continue
             vertices = [(v[0] + ox + wx, v[1] + wy, v[2] + oz + wz) for v in face.vertices]
             source_camera = tuple(cam.to_camera(v) for v in vertices)
@@ -200,17 +200,18 @@ def scene_polygons(lib, doc, terrain, cam):
 
     for row in range(r0, r1):
         for col in range(c0, c1):
+            border = col in (0, doc.mw - 1) or row in (0, doc.mh - 1)
             special = specials.get((col, row))
             code = actor_code(doc, special[0]) if special else None
             append_mesh(meshes[types[row][col]], col, row, special_code=code)
             structure_typ = key_building_sector(special[1], lib) if special else None
             if structure_typ is not None and structure_typ != types[row][col]:
                 append_mesh(meshes[structure_typ], col, row,
-                            structure_only=True, special_code=code)
+                            structure_only=True, ground_only=border, special_code=code)
             # Conserva la visualizzazione dei blg già presenti nei documenti.
             building = buildings[row][col]
             if building:
-                append_mesh(extras[building], col, row, special_code=code)
+                append_mesh(extras[building], col, row, ground_only=border, special_code=code)
             for vertical in (False, True):
                 if (vertical and col == 0) or (not vertical and row == 0):
                     continue

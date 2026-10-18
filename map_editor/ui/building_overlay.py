@@ -127,10 +127,7 @@ class BuildingOverlay(QObject):
         icons: list[str] = []
         for _ in range(definition.energy_levels):
             icons.append("power")
-        if definition.has_guns:
-            icons.append("flak")
-        if definition.is_radar:
-            icons.append("radar")
+        icons.extend(kind for kind in definition.kinds if kind in ("flak", "radar"))
         if not icons:
             return
         phase = (col * 0.7 + row * 1.3)
@@ -235,7 +232,7 @@ class CapabilityPreview(QWidget):
         super().__init__(parent)
         self.definition = definition
         self.setFixedHeight(38)
-        count = definition.energy_levels + int(definition.has_guns) + int(definition.is_radar)
+        count = definition.energy_levels + sum(kind in ("flak", "radar") for kind in definition.kinds)
         self.setMinimumWidth(max(1, count*22 + 14))
 
     def paintEvent(self, event):

@@ -139,7 +139,7 @@ class WorldScene:
         key = ('sector', typ, border)
         template = self._templates.get(key)
         if template is None:
-            template = self._template(key, self.lib.mesh(typ), ground_only=border)
+            template = self._template(key, self.lib.mesh(typ))
         x, _, z = terrain.cell_center(col, row)
         cell_ref = (row * doc.mw + col,) * 4
         parts = [(template, (x, 0, z), cell_ref, False)]
