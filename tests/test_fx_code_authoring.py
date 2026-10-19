@@ -507,3 +507,43 @@ def test_two_new_effects_are_saved_together_in_list_order(tmp_path):
     session.set_draft(first, "    shk_explode_slot = 1\n    shk_explode_time = 99")
     session.save([first])
     assert "shk_explode_time = 99\n    pal_explode_slot = 2\nend" in path.read_text(encoding="utf-8")
+
+@pytest.mark.parametrize("context,kind,trigger", [
+    (fx.CONTEXT_VEHICLE, "vehicle", "destroyed"),
+    (fx.CONTEXT_WEAPON, "weapon", "detonate"),
+])
+@pytest.mark.parametrize("position", [0, 2, 4, 6, 7])
+@pytest.mark.parametrize("values,expected", [
+    ([], None),
+    (["255_231_8_255"], (255, 231, 8, 255)),
+    (["255_231_8_255", "8_231_255_128"], (8, 231, 255, 128)),
+    (["invalid"], (255, 255, 255, 255)),
+    (["999_-3_8"], (255, 0, 8, 255)),
+])
+def test_visual_block_tint_is_shared_in_preview_and_saved_text(
+        tmp_path, context, kind, trigger, position, values, expected):
+    rows = ["mode = visual", "duration = 900", "vp_model = 1",
+            "vp_model = 2", "base_model = Data/Models/Base/FX.BASE",
+            "3ds_model = Data/Models/3ds/FX.3ds", "vp_model = 3"]
+    rows[position:position] = ["tint = " + value for value in values]
+    effect = "begin_fx\ntrigger = " + trigger + "\n" + "\n".join(rows) + "\nend"
+    item, issues = parse_effect_text(effect, context)
+    assert not issues
+    spec = fx.interpret_block(item, context)
+    assert spec.active and len(spec.visuals) == 3
+    assert all(visual.tint == expected for visual in spec.visuals)
+    # The editor keeps the user's code, including tint placement and comments.
+    text = f"new_{kind} 1\n{EFFECT.replace('destroyed', trigger)}\nend\n"
+    path = tmp_path / "effects.cfg"
+    path.write_text(text, encoding="utf-8")
+    document, block = _document(text)
+    session = FxTextSession(document, context, [(path, 0, block.end_line)])
+    session.set_draft(0, effect)
+    session.save([0])
+    saved, _ = _document(path.read_text(encoding="utf-8"))
+    assert effect_text(saved.items[0]) == effect
+    simulation = fx.PreviewSimulation(saved, context, trigger)
+    for time in (10, 350, 700):
+        rendered = [item for item in simulation.items_at(time) if item.kind == "visual"]
+        assert len(rendered) == 1
+        assert rendered[0].tint == expected

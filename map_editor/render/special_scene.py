@@ -90,6 +90,7 @@ def scene_object_styles(view):
         is_selected = selection == (member.kind, member.slot, member.key)
         color = (160, 160, 160) if preview else cell_owner_color(view, doc, member.cell)
         styles.append((*color, 3 if preview else 2 if is_selected else 1))
+    styles.extend(getattr(view.lib, "preview_styles", ()))
     return styles
 
 

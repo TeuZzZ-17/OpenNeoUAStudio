@@ -966,6 +966,7 @@ def interpret_block(block: FxBlock, context: str) -> FxSpec:
     duration = 0
     fade_in = fade_out = 0
     visuals: list[VisualRef] = []
+    visual_tint = None
     physical_vehicle = 0
     has_physical_vehicle_key = has_inline = has_offset = False
     invalid_inline = False
@@ -1100,14 +1101,7 @@ def interpret_block(block: FxBlock, context: str) -> FxSpec:
                 has_inline = True
                 physical_tint = parsed or (255, 255, 255, 255)
                 continue
-            if not visuals:
-                issue(SEVERITY_WARNING,
-                      "tint without a preceding vp_model/base_model/3ds_model "
-                      "is ignored.")
-                continue
-            last = visuals[-1]
-            visuals[-1] = VisualRef(last.vp, last.mesh3ds, last.base_path,
-                                    parsed or (255, 255, 255, 255))
+            visual_tint = parsed or (255, 255, 255, 255)
         elif key == "vp_impact":
             has_inline = True
             parsed = parse_int_list(value, allow_zero=True)
@@ -1201,7 +1195,9 @@ def interpret_block(block: FxBlock, context: str) -> FxSpec:
         return build(
             True, spin=tuple(spin), start_size=start_size,
             mid_size=mid_size, end_size=end_size, duration=duration,
-            fade_in=fade_in, fade_out=fade_out, visuals=tuple(visuals),
+            fade_in=fade_in, fade_out=fade_out,
+            visuals=tuple(VisualRef(v.vp, v.mesh3ds, v.base_path, visual_tint)
+                          for v in visuals),
             **common)
 
     if mode == MODE_PHYSICAL:

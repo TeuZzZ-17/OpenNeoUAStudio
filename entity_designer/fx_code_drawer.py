@@ -117,6 +117,9 @@ class FxCodeDrawer(QFrame):
         self.source_label.setWordWrap(True)
         layout.addWidget(self.source_label)
         self.code = ScriptCodeEditor(self)
+        self.code.setToolTip(
+            "Visual begin_fx: tint applies to every model in the block, "
+            "regardless of position. If repeated, the last value wins.")
         layout.addWidget(self.code, 1)
         # The same controls as the transport bar under the preview.
         transport = QHBoxLayout()

@@ -20,6 +20,7 @@ a = Analysis(
     datas=[('.\\icons', 'icons'), ('studio/ui/studio.qss', 'studio/ui')] + copy_metadata('coacd'),
     hiddenimports=[
         'wireframe_editor.window',
+        'sector_editor.window',
         'map_editor.editor',
         'map_editor.core.asset_bridge',
         'map_editor.core.game_installation',

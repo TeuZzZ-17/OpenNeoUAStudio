@@ -122,15 +122,17 @@ def test_switching_editor_is_cancelled_when_the_old_one_refuses_to_close():
     source.close()
 
 
-def test_sector_editor_only_shows_a_notice():
+def test_sector_editor_opens_its_workspace():
     app = QApplication.instance() or QApplication([])
     source = _Tool()
     install_workspace_shell(source, "wireframe_editor")
     action = next(a for a in source.studio_change_menu.actions() if a.text() == "Sector Editor")
-    with patch("main.create_workspace") as create, patch("studio.ui.shell.QMessageBox.information") as info:
+    target = _Tool()
+    with patch("main.create_workspace", return_value=target) as create, patch("studio.ui.shell.QMessageBox.information") as info:
         action.trigger()
-    create.assert_not_called()
-    info.assert_called_once()
+    create.assert_called_once_with("sector_editor")
+    info.assert_not_called()
+    target.close()
     source.close()
 
 
