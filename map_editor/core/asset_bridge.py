@@ -20,9 +20,9 @@ from .set_sdf_parser import SetSdf, parse_set_sdf  # noqa: E402
 class SetAssets:
     """Risorse di un Set nello stesso ordine del gioco: file sciolti, poi SET.BAS."""
 
-    def __init__(self, set_number: int):
+    def __init__(self, set_number: int, *, set_dir: Path | None = None):
         self.set_number = set_number
-        self.set_dir = bootstrap.set_dir(set_number)
+        self.set_dir = Path(set_dir) if set_dir is not None else bootstrap.set_dir(set_number)
         self.setbas_path = self._find_setbas()
         self.sdf_path = self._find_sdf()
         self.archive: SetBasArchive | None = None
@@ -59,6 +59,8 @@ class SetAssets:
     @staticmethod
     def _key(name: str) -> str:
         name = name.strip()
+        if name.lower().endswith(".bas"):
+            name = name[:-4] + ".base"
         if not name.lower().endswith(".base"):
             name += ".base"
         return normalize_base_name(name)
@@ -73,7 +75,7 @@ class SetAssets:
                 if not root.is_dir():
                     continue
                 for path in root.rglob("*"):
-                    if path.suffix.lower() == ".base":
+                    if path.suffix.lower() in {".base", ".bas"} and path.name.casefold() != "set.bas":
                         index.setdefault(self._key(path.name), path)
             self._loose_index = index
         return self._loose_index

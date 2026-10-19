@@ -284,6 +284,11 @@ def compat_color(level: str) -> QColor:
 
 def compatibility_entries(window, key):
     """Describe each workspace using its existing pages and supported output formats."""
+    if key == "sector_editor":
+        doc = getattr(window, "document", None)
+        extended = doc is not None and (len(doc.sdf.models) > 256 or len(doc.sdf.buildings) > 256)
+        return [("Sector definitions", OPENNEOUA if extended else VANILLA,
+                 "Writes native SET.SDF tables and LEGO visual overrides, and packages all set resources. Sector IDs stay 0–255. Tables above 256 model/building rows require the updated OpenNeoUA engine. Compatibility also depends on the selected models, materials and scripts.")]
     if key == "entity_designer":
         tabs = window.properties_tabs
         return [(tabs.tabText(i), *window._tab_compatibility[tabs.widget(i)])
@@ -313,7 +318,7 @@ def compatibility_entries(window, key):
     if key == "wireframe_editor":
         return [("Wireframe geometry / Save / Export", VANILLA, "Edits the existing 2D SKLT wireframe format. The game must still reference the exported resource correctly."),
                 ("View and editing guides", PREVIEW, "Zoom, selection, grid and symmetry guides belong to Studio and add no game parameters.")]
-    return [("Sector Editor", UNKNOWN, "This workspace is not yet available; there is no exported data to assess.")]
+    return []
 
 
 def install_compatibility_markers(window, key):
@@ -404,7 +409,7 @@ class CompatibilityDialog(QDialog):
 # Workspaces that have a Change Set menu (the Map Editor and the Wireframe
 # Editor are left out: they do not switch sets this way).
 SET_MENU_TOOLS = frozenset({
-    "model_editor", "main_suite", "entity_designer", "snapshot_studio"})
+    "model_editor", "main_suite", "entity_designer", "snapshot_studio", "sector_editor"})
 
 
 def set_combo_of(window):
@@ -538,9 +543,6 @@ def _edit_resources(window):
 
 
 def switch_workspace(source, key):
-    if key == "sector_editor":
-        QMessageBox.information(source, "Sector Editor", "Sector Editor will be available soon.\nIt will edit sector placement, states and SET.SDF definitions.")
-        return
     from main import create_workspace
     target = create_workspace(key)
     if target is None:
@@ -610,7 +612,7 @@ TOOL_OPTIONS = (
         "Wireframe Editor",
         "Inspect and edit 2D wireframe geometry stored in SKLT files.",
     ),
-    ToolOption("sector_editor", "Sector Editor", "Edit SET.SDF sector placement and states. Coming soon."),
+    ToolOption("sector_editor", "Sector Editor", "Create sets, compose sector cells and damage states, and export complete set packages."),
 )
 
 
@@ -930,10 +932,6 @@ class StartupToolSelector(QDialog):
         return super().eventFilter(watched, event)
 
     def accept(self):
-        if self.selected_tool() == "sector_editor":
-            from PySide6.QtWidgets import QMessageBox
-            QMessageBox.information(self, "Sector Editor", "Sector Editor will be available soon.\nIt will edit sector placement, states and SET.SDF definitions.")
-            return
         if self.resources_panel.apply() is not None:
             super().accept()
 

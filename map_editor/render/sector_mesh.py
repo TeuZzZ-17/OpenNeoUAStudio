@@ -40,9 +40,10 @@ class SectorMeshLibrary:
     stesse trasformazioni scale_rot_7, stessi materiali e superfici indicizzate.
     """
 
-    def __init__(self, assets: SetAssets):
+    def __init__(self, assets: SetAssets, *, set_only: bool = False):
         import studio.rendering.asset_viewport as av
         self.assets = assets
+        self.set_only = set_only
         self.resolver = SectorResolver(assets.sdf)
         self._loader = av.AssetViewport()
         self._loader.load_family(assets.family, visible_owners=set())
@@ -94,6 +95,7 @@ class SectorMeshLibrary:
         return self._collision_skeletons[key]
 
     def _base_faces(self, base_name: str, *, set_only: bool = False) -> list | None:
+        set_only = set_only or self.set_only
         key = (base_name.lower(), set_only)
         if key in self._base_cache:
             return self._base_cache[key]

@@ -155,13 +155,28 @@ class GeometryPartSelectionWidget(QWidget):
         action.setEnabled(self.isEnabled() and bool(self.tree.selectedItems()))
         action.triggered.connect(self.deselect_component)
 
-    def _add_component_toggle_action(self, menu, item) -> None:
-        enable = item.checkState(0) == Qt.CheckState.Unchecked
+    def _add_component_toggle_action(self, menu, item=None) -> None:
+        selected = list(self.tree.selectedItems())
+        if item is not None and not item.isSelected():
+            selected = [item]
+        selected = [row for row in selected
+                    if row.flags() & Qt.ItemFlag.ItemIsUserCheckable]
+        if not selected:
+            return
+        enable = (item.checkState(0) != Qt.CheckState.Checked
+                  if item is not None else
+                  any(row.checkState(0) != Qt.CheckState.Checked
+                      for row in selected))
         action = menu.addAction("Enable" if enable else "Disable")
         action.setEnabled(self.isEnabled())
-        action.triggered.connect(
-            lambda: item.setCheckState(
-                0, Qt.CheckState.Checked if enable else Qt.CheckState.Unchecked))
+
+        def set_selected_state():
+            state = (Qt.CheckState.Checked if enable
+                     else Qt.CheckState.Unchecked)
+            for row in selected:
+                row.setCheckState(0, state)
+
+        action.triggered.connect(set_selected_state)
 
     def _items(self):
         stack = [self.tree.topLevelItem(i)

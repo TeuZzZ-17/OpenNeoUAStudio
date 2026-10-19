@@ -105,9 +105,11 @@ class WorldScene:
             index, surface = self._material(face)
             mode = {'none': 0, 'clear': 1, 'flat': 2}[surface.tracy_mode]
             shade = surface.shade_value if surface.shade_mode != 'none' else -1
+            # Optional preview codes style temporary faces without changing shared materials.
             attrs = (index if surface.kind == 'texture' else -1,
                      surface.width, surface.height, shade, mode,
-                     surface.solid_index or 0, 1 if ground else -1)
+                     surface.solid_index or 0,
+                     getattr(self.lib, "preview_face_codes", {}).get(id(face), 1 if ground else -1))
             vertices = [(v[0] + ox, v[1], v[2] + oz, *u, *attrs, 0, 0, 0, 0)
                         for v, u in zip(face.vertices, uv)]
             triangles = [vertices[j] for i in range(2, len(vertices))
@@ -202,7 +204,7 @@ class WorldScene:
             else:
                 a[:, 12:16] = refs
             a[:, :3] += offset
-            a[a[:, 11] < 0, 11] = actor_code(doc, special[0]) if special and not filler else -(row * doc.mw + col + 1)
+            a[a[:, 11] == -1, 11] = actor_code(doc, special[0]) if special and not filler else -(row * doc.mw + col + 1)
             flat.append(a)
             for start, count in template.flat_faces:
                 faces.append((flat_offset + start, count))

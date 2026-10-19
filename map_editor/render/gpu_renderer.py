@@ -46,7 +46,7 @@ void main(){
             else world.y=cornerAt(cell+(ref==8 ? (kind==3 ? ivec2(0,1) : ivec2(1,0)) : ivec2(0)));
         }
         world.xz+=instance.xy;
-        if(mode.z<0) mode.z=kind<0 ? float(kind) : -float(id+1);
+        if(mode.z==-1.0) mode.z=kind<0 ? float(kind) : -float(id+1);
     }else if(heightRefs.x>=0.0) world.y+=all(equal(heightRefs,vec4(heightRefs.x)))
         ? texelFetch(heights,int(heightRefs.x)).r
         : (texelFetch(heights,int(heightRefs.x)).r+texelFetch(heights,int(heightRefs.y)).r+
