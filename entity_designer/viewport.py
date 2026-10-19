@@ -17,9 +17,11 @@ from PySide6.QtCore import (
 )
 from PySide6.QtGui import (
     QColor,
+    QCursor,
     QMouseEvent,
     QPainter,
     QPen,
+    QPixmap,
     QPolygonF,
 )
 
@@ -159,6 +161,30 @@ class CollisionMoveGizmo(ModelSpaceGizmo):
         super().mouseDoubleClickEvent(event)
 
 
+def _make_shape_component_idle_cursor() -> QCursor:
+    pixmap = QPixmap(23, 23)
+    pixmap.fill(Qt.GlobalColor.transparent)
+    painter = QPainter(pixmap)
+    painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+    painter.setPen(QPen(QColor(18, 25, 35), 3.0))
+    painter.drawRect(7.0, 7.0, 9.0, 9.0)
+    painter.drawLine(11, 1, 11, 6)
+    painter.drawLine(11, 17, 11, 22)
+    painter.drawLine(1, 11, 6, 11)
+    painter.drawLine(17, 11, 22, 11)
+    painter.setPen(QPen(QColor(83, 224, 255), 1.5))
+    painter.drawRect(7.0, 7.0, 9.0, 9.0)
+    painter.drawLine(11, 1, 11, 6)
+    painter.drawLine(11, 17, 11, 22)
+    painter.drawLine(1, 11, 6, 11)
+    painter.drawLine(17, 11, 22, 11)
+    painter.setPen(Qt.PenStyle.NoPen)
+    painter.setBrush(QColor(255, 255, 255))
+    painter.drawEllipse(QPointF(11, 11), 1.0, 1.0)
+    painter.end()
+    return QCursor(pixmap, 11, 11)
+
+
 # Camera-space depth beyond which AssetViewport's projection folds points
 # back (its denominator is clamped); shapes are cut here before projecting.
 _NEAR_CAMERA_Z = 3.65
@@ -238,6 +264,8 @@ class CollisionViewport(FxPreviewViewportMixin, AssetViewport):
         self._model_preview_rotation = (0.0, 0.0, 0.0)
         self._collision_shape: CollisionShape | None = None
         self._collision_shape_overlay_visible = False
+        self._shape_cursor_mouse_tracking_previous = None
+        self._shape_component_idle_cursor = _make_shape_component_idle_cursor()
         self._shape_selected_indices = set()
         self._shape_press_pos = None
         self._geometry_component_preview: tuple | None = None
@@ -660,11 +688,35 @@ class CollisionViewport(FxPreviewViewportMixin, AssetViewport):
 
     def set_collision_shape(self, shape: CollisionShape | None) -> None:
         self._collision_shape = shape
+        if shape is None:
+            self.unsetCursor()
         self.set_empty_hint_suppressed(shape is not None)
         self.update()
 
+    def _update_shape_component_cursor(self, position: QPointF) -> None:
+        if not self._collision_shape_overlay_visible:
+            self.unsetCursor()
+        elif self._hit_shape_component(position) is not None:
+            self.setCursor(Qt.CursorShape.OpenHandCursor)
+        else:
+            self.setCursor(self._shape_component_idle_cursor)
+
     def set_collision_shape_overlay_visible(self, visible: bool) -> None:
-        self._collision_shape_overlay_visible = bool(visible)
+        visible = bool(visible)
+        was_visible = self._collision_shape_overlay_visible
+        if visible and not was_visible:
+            self._shape_cursor_mouse_tracking_previous = self.hasMouseTracking()
+            self.setMouseTracking(True)
+        elif not visible and was_visible:
+            if self._shape_cursor_mouse_tracking_previous is not None:
+                self.setMouseTracking(
+                    self._shape_cursor_mouse_tracking_previous)
+                self._shape_cursor_mouse_tracking_previous = None
+            self.unsetCursor()
+        self._collision_shape_overlay_visible = visible
+        if visible and not was_visible:
+            self._update_shape_component_cursor(
+                QPointF(self.mapFromGlobal(QCursor.pos())))
         self.update()
 
     def set_shape_selected_indices(self, indices) -> None:
@@ -1534,6 +1586,15 @@ class CollisionViewport(FxPreviewViewportMixin, AssetViewport):
         if self._cockpit_preview_active:
             event.accept()
             return
+        if self._collision_shape_overlay_visible and self._collision_shape is not None:
+            if not event.buttons():
+                self._update_shape_component_cursor(event.position())
+            elif (self._shape_press_pos is not None
+                  and event.buttons() & Qt.MouseButton.LeftButton):
+                delta = event.position() - self._shape_press_pos
+                if abs(delta.x()) > 4.0 or abs(delta.y()) > 4.0:
+                    # A held drag orbits the view; it does not move the shape.
+                    self.setCursor(Qt.CursorShape.ClosedHandCursor)
         if self._sphere_press_pos is not None \
                 and event.buttons() & Qt.MouseButton.LeftButton:
             current = event.position()
@@ -1565,6 +1626,7 @@ class CollisionViewport(FxPreviewViewportMixin, AssetViewport):
                 if key is not None:
                     self.shapeComponentPicked.emit(
                         key, bool(event.modifiers() & Qt.KeyboardModifier.ControlModifier))
+            self._update_shape_component_cursor(event.position())
             return
         if event.button() == Qt.MouseButton.RightButton:
             press_pos = self._context_press_pos
