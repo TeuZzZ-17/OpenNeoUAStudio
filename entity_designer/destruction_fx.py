@@ -830,6 +830,8 @@ class FxSpec:
     visual_scale: float = 1.0
     physical_tint: tuple[int, int, int, int] | None = None
     physical_model: VisualRef | None = None
+    # follow_carcass: the fragment mirrors the falling wreck of the unit.
+    follow_carcass: bool = False
     # Ground decal
     texture: str = ""
     size: tuple[float, float] = (0.0, 0.0)
@@ -978,6 +980,7 @@ def interpret_block(block: FxBlock, context: str) -> FxSpec:
     mass = airconst = force = maxrot = radius = 0.0
     lifetime = (30000, 30000)
     random_rotation = False
+    follow_carcass = False
     sound_values: dict[str, str] = {}
 
     if not block.lines or _key(block.lines[-1]) != "end":
@@ -1115,9 +1118,11 @@ def interpret_block(block: FxBlock, context: str) -> FxSpec:
             has_inline = True
             parsed = _stof(value)
             visual_scale = parsed if math.isfinite(parsed) and parsed > 0 else 1.0
-        elif key in ("impact_energy", "impact_energy_radius",
-                     "follow_carcass"):
+        elif key in ("impact_energy", "impact_energy_radius"):
             has_inline = True
+        elif key == "follow_carcass":
+            has_inline = True
+            follow_carcass = value == "1"
         elif key == "lifetime":
             has_inline = True
             parsed = parse_int_range(value)
@@ -1236,7 +1241,8 @@ def interpret_block(block: FxBlock, context: str) -> FxSpec:
             vp_models=tuple(vp_models), vp_impacts=tuple(vp_impacts),
             mass=mass, airconst=airconst, force=force, maxrot=maxrot,
             radius=radius, lifetime=lifetime, visual_scale=visual_scale,
-            physical_tint=physical_tint, physical_model=model, **common)
+            physical_tint=physical_tint, physical_model=model,
+            follow_carcass=follow_carcass, **common)
 
 
 # -- reusable ground decal profiles (new_decal) ---------------------------------
@@ -2600,6 +2606,9 @@ class PreviewSimulation:
         self.unit = self._unit_with_authored_audio(self.unit, document, enabled)
         self.notes: list[str] = []
         self._events: list[tuple] = []
+        # Wreck fall [(ms, position, landed)] while air_destroyed blocks are
+        # built; physical fragments with follow_carcass copy it.
+        self._wreck_path: list[tuple] | None = None
         self._sounds: list[SoundEvent] = []
         self._tracks: list[PreviewTrack] = []
         self._instances: list[VpInstance] | None = None
@@ -3006,10 +3015,6 @@ class PreviewSimulation:
                 f"model = {unit.model}: straight to megadeth, no dead model, "
                 "no air_destroyed and no dest_fx death (engine rule).")
         else:
-            self._build_event("air_destroyed", death, kill, "Air · ")
-            self._build_event("death", death, kill, "Death · ")
-            if unit.flies and altitude > 0:
-                self._add_sound(sounds, "airexplode", death, label="unit")
             # Dead wrecks fall without air resistance: CrashOrLand sets
             # _airconst = 0 for non-inline dead vehicles.
             fall = _Fall(list(kill), [0.0, 0.0, 0.0], 1.0, 0.0)
@@ -3018,6 +3023,12 @@ class PreviewSimulation:
             shifted = [(death + ms, position, flag)
                        for ms, position, flag in path]
             land_ms, landed = shifted[-1][0], shifted[-1][1]
+            self._wreck_path = shifted
+            self._build_event("air_destroyed", death, kill, "Air · ")
+            self._wreck_path = None
+            self._build_event("death", death, kill, "Death · ")
+            if unit.flies and altitude > 0:
+                self._add_sound(sounds, "airexplode", death, label="unit")
             self._add_sound(sounds, "goingdown", death, land_ms, "unit")
             self._add_sound(sounds, "crashland", land_ms, label="unit")
             self._unit_event(unit.dead, death, land_ms, shifted, "dead")
@@ -3392,12 +3403,21 @@ class PreviewSimulation:
                 impact = spec.vp_impacts[0]
             lifetime = float(_randint(rng, *spec.lifetime))
             rotation = _random_rotation(rng, spec.random_rotation)
-            # Inline fragments keep their authored air resistance.
-            fall = _Fall(list(origin), launch, spec.mass, spec.airconst)
-            path = self._record_path(fall, lifetime, max(spec.radius, 0.0))
+            wreck = self._wreck_path
+            event_spec = spec
+            if spec.follow_carcass and wreck and len(wreck) > 1:
+                # follow_carcass: the fragment copies the falling wreck until
+                # the wreck lands, so it has no spin of its own.
+                path = [(ms - start, position, landed)
+                        for ms, position, landed in wreck if ms >= start]
+                event_spec = replace(spec, maxrot=0.0)
+            else:
+                # Inline fragments keep their authored air resistance.
+                fall = _Fall(list(origin), launch, spec.mass, spec.airconst)
+                path = self._record_path(fall, lifetime, max(spec.radius, 0.0))
             land_ms, final = start + path[-1][0], path[-1][1]
             self._events.append((source, MODE_PHYSICAL, start, land_ms,
-                                 (spec, vp, path, rotation)))
+                                 (event_spec, vp, path, rotation)))
             # Fragments are born dead: normal once, goingdown while they fly,
             # explode when they end.
             fragment = f"fragment {source}"
