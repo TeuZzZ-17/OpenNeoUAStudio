@@ -147,6 +147,61 @@ def test_flying_unit_dies_in_the_air_falls_and_lands():
     assert [item.vp for item in ground if item.kind == "visual"] == [281]
 
 
+_CARCASS_UNIT = (
+    "new_vehicle 5\n"
+    "    name = Weasel\n"
+    "    model = heli\n"
+    "begin_fx\n"
+    "    trigger = air_destroyed\n"
+    "    mode = physical\n"
+    "    vp_model = 202\n"
+    "    mass = 40\n"
+    "    radius = 10\n"
+    "    maxrot = 3\n"
+    "    airconst = 500\n"
+    "    launch_xyz = 0_0_0\n"
+    "    follow_carcass = {value}\n"
+    "end\n"
+    "end\n"
+)
+
+
+def _fragment_and_wreck(value, time_ms):
+    text = _CARCASS_UNIT.format(value=value)
+    unit = fx.UnitPhases(
+        normal=fx.VisualRef(10), dead=fx.VisualRef(11),
+        megadeth=fx.VisualRef(12), model="heli", altitude=600)
+    simulation = fx.PreviewSimulation(
+        _document(text), fx.CONTEXT_VEHICLE, fx.SEQUENCE_TRIGGER, unit=unit)
+    items = simulation.items_at(time_ms)
+    fragment = next(item for item in items if item.kind == fx.MODE_PHYSICAL)
+    wreck = next(item for item in items if item.kind == "unit")
+    return fragment, wreck
+
+
+def test_follow_carcass_is_parsed_only_for_exact_one():
+    for value, expected in (("1", True), ("0", False), ("2", False), ("x", False)):
+        spec = _spec("trigger = air_destroyed\nmode = physical\nvp_model = 3\n"
+                     f"mass = 40\nradius = 10\nfollow_carcass = {value}")
+        assert spec.active and spec.follow_carcass is expected
+        assert not [i for i in spec.issues if i.severity == fx.SEVERITY_UNKNOWN]
+
+
+def test_follow_vehicle_is_no_longer_a_known_key():
+    spec = _spec("trigger = air_destroyed\nmode = physical\nvp_model = 3\n"
+                 "mass = 40\nradius = 10\nfollow_vehicle = 1")
+    assert spec.issues[0].severity == fx.SEVERITY_UNKNOWN
+
+
+def test_follow_carcass_fragment_stays_on_the_falling_wreck():
+    moment = fx.SEQUENCE_PREROLL_MS + 200
+    fragment, wreck = _fragment_and_wreck(1, moment)
+    assert fragment.position == pytest.approx(wreck.position)
+    # Without the flag the fragment drops with its own air resistance.
+    free, wreck = _fragment_and_wreck(0, moment)
+    assert free.position != pytest.approx(wreck.position)
+
+
 def test_ground_unit_goes_straight_to_megadeth():
     unit = fx.UnitPhases(normal=fx.VisualRef(10), dead=fx.VisualRef(11),
                          megadeth=fx.VisualRef(12), model="tank")
