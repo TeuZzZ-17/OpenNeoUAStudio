@@ -7,6 +7,7 @@ editor is imported only after the user selects it, while the explicit
 Usage:
     python main.py [path/to/asset.base | path/to/SET.BAS]
     python main.py --map-editor [path/to/level.ldf]
+    python main.py --sector-editor [path/to/SetN]
 """
 
 from __future__ import annotations
@@ -16,6 +17,7 @@ from pathlib import Path
 
 APP_TITLE = "OpenNeoUA Studio"
 MAP_EDITOR_FLAG = "--map-editor"
+SECTOR_EDITOR_FLAG = "--sector-editor"
 COLLISION_BAKE_WORKER_FLAG = "--collision-bake-worker"
 MAIN_SUITE_TOOL = "main_suite"  # backward-compatible internal key
 MODEL_EDITOR_TOOL = "model_editor"
@@ -23,6 +25,7 @@ SNAPSHOT_STUDIO_TOOL = "snapshot_studio"
 MAP_EDITOR_TOOL = "map_editor"
 COLLISION_EDITOR_TOOL = "entity_designer"
 WIREFRAME_EDITOR_TOOL = "wireframe_editor"
+SECTOR_EDITOR_TOOL = "sector_editor"
 
 _active_window = None
 
@@ -98,6 +101,10 @@ def create_workspace(tool: str, startup_path: str | None = None):
         window = create_window([startup_path] if startup_path else [])
         if window is None:
             return None
+    elif tool == SECTOR_EDITOR_TOOL:
+        from sector_editor import SectorEditorWindow
+
+        window = SectorEditorWindow(startup_path)
     else:
         return None
 
@@ -148,6 +155,19 @@ def main() -> int:
     # Each window composes its own full title. Keep the platform from
     # appending a second "OpenNeoUA Studio" label to document titles.
     app.setApplicationDisplayName("")
+
+    if SECTOR_EDITOR_FLAG in args:
+        from map_editor import bootstrap
+        from map_editor.core.game_installation import load_remembered
+        install = bootstrap.installation() or load_remembered()
+        if install is None:
+            from studio.ui.shell import ResourcesDialog
+            if not ResourcesDialog().exec():
+                return 0
+        else:
+            bootstrap.set_installation(install)
+        index = args.index(SECTOR_EDITOR_FLAG)
+        return _show_qt_tool(app, SECTOR_EDITOR_TOOL, _startup_path(args[index + 1:]))
 
     selector = StartupToolSelector()
     if selector.exec() != selector.DialogCode.Accepted:

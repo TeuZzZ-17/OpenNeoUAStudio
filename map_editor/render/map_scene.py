@@ -184,7 +184,9 @@ def scene_polygons(lib, doc, terrain, cam):
                     (col, row, points, attrs),)
                 for c, r, world, coordinates in regions:
                     camera = tuple(cam.to_camera(v) for v in world)
-                    code = actor_code if actor_code is not None else special_code if special_code is not None and not ground else (r * doc.mw + c + 1) * (1 if ground else -1)
+                    code = getattr(lib, "preview_face_codes", {}).get(id(face))
+                    if code is None:
+                        code = actor_code if actor_code is not None else special_code if special_code is not None and not ground else (r * doc.mw + c + 1) * (1 if ground else -1)
                     polygon = CameraPolygon(
                         camera, tuple(coordinates),
                         (surface, code, source), order)

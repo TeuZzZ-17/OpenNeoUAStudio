@@ -21,6 +21,109 @@ The current repository should be treated as a development version rather than a 
 
 ## Basic use
 
+The **Sector Editor** is available from the startup selector and **Change Editor** menu.
+Choose an installed set through **Change Set** or use **Open Set** to select a `SetN` folder. The left list
+shows all 256 sector slots, including free IDs. Compose nine cells or select one
+large cell, preview all four damage states, and assign existing buildings or models.
+Assigning a model creates an independent building state row, so other sectors keep
+their existing states. The Definitions tab edits shared model, collision, shield,
+symbol and destruction-effect data. Rotate and mirror rearrange cell positions.
+
+Sector and model cards show cached 3D thumbnails, generated only for visible rows.
+Click the actual geometry to select a cell, including tall buildings; **Ctrl+click**
+extends the selection; **Shift+click** selects a rectangle. The **Cells** panel shows
+an interactive top view of the actual nine cell models, with small position indices.
+Browsing the **Models** list previews the highlighted BASE as a grey ghost on the
+selected cells. The ghost temporarily replaces the destination geometry in the shared
+3D scene, preserving depth and staying visible while orbiting the camera. It never
+changes the native tables. **W/A** browse backwards and **S/D** browse forwards in
+resource lists; context menus accept WASD as directional keys. **Enter** applies the
+model or confirms the active placement. Text fields keep normal text editing.
+
+Drag a model onto either view to apply it; dropping inside the current selection
+applies it to that selection. Drag an existing building or already selected cells to
+move their pattern, keeping the grabbed cell beneath the pointer. Drag from background
+or an empty cell to draw a selection rectangle; **Ctrl** adds to the selection.
+**Shift+drag** also starts a selection rectangle over existing cells. Double-click
+outside the sector to deselect all cells, including in single-cell layouts.
+
+Right-click cells for **Move**, **Copy**, **Cut**, **Paste**, **Delete**, layout
+rotation/mirroring and selection tools. **Copy** immediately starts a clipboard ghost,
+including the relative positions and all four damage states. Point at a destination
+and click, press **Enter**, or use **Ctrl+V** to place it. **Paste** restarts the visual
+placement after cancellation; **Esc** cancels the preview without losing the clipboard.
+Cut clears the source through Undo/Redo and starts the same placement preview. A copied
+single cell can fill a destination selection; larger patterns must fit inside the grid.
+Every edit uses the existing Undo/Redo history. Rotation rearranges the cell layout;
+it does not rotate individual BASE geometry.
+
+Use **Ctrl/Shift** in the sector list to select several definitions. **Ground / filler**
+context tools fill, replace matching families, or sample the native connection family
+(0-5), while preserving buildings. The inline preview shows its actual native connection
+to family 0 at a sample height difference. A standalone sector has no neighboring
+connections to display. Terrain inside a BASE remains part of that model. **Minimap
+symbol** shows the real 4px and 8px game glyphs enlarged beside its numeric value.
+
+**F** frames selected cells, the toolbar provides the shared Studio view presets, and
+**Reset View** restores the sector's initial framing. **F5** reloads set assets while
+preserving current edits. **Export Complete Set as ZIP** packages all set resources.
+Table/resource checks remain active during save and export. **View > Validation Report**
+opens their details; a status-bar link appears when the set has issues. There is no
+persistent Validation tab.
+
+**File > Export selected sector definition** and **Export all sector definitions**
+write native SDF tables with the models and four damage states they reference.
+**Import sector definitions** merges these into free ordinary slots and reuses
+matching model/building rows. This exchanges definitions using the open set's assets;
+use the complete ZIP to distribute the resource files as well. Missing assets block
+the merge. **Sector > Restore saved sector layout** restores the saved cell arrangement
+and properties and can be undone. **Export current view as PNG** saves the rendered
+view on a transparent background without editor guides.
+
+Model definition fields retain unapplied edits while working on cells. Switching
+models offers Apply/Discard/Cancel, and Save/Save As/ZIP include pending model edits.
+Malformed fields block the operation and remain available for correction.
+Independent damage-state fields also retain pending edits across panel refreshes,
+model-definition updates and asset reloads. Switching cells or sectors offers
+Apply/Discard/Cancel; saving and exporting includes these pending states and the
+current sector description even when its text field still has focus.
+
+Right-click a model card and choose **Find sectors using this model**, or select
+**Using selected model** in the sector filter, to find references across all four
+damage states. Cell tooltips list both model IDs and their BASE names. The model
+usage summary shows the number of affected sectors before a shared definition is
+changed. Editing or refreshing a model preserves the current camera position.
+
+The right panel separates **Cells**, **Models** and **Definitions**.
+Cells contains the layout, nine-cell selection, existing buildings and independent
+damage states. Models provides the larger thumbnail browser and clearly identifies
+the destination sector/cells. Definitions contains the shared model properties.
+**Choose model** opens the browser; **Inspect model** opens the assigned model for
+the currently previewed damage state.
+
+Right-click a cell for replacement, inspection, **Select matching buildings**, copy,
+paste and clear. Copy/paste retains all four state and model definitions, including
+after undo or model-slot reuse; pasting reuses matching definitions and restores
+missing dependencies within the current set. A copied cell fills any selection;
+a copied group retains its relative cell positions during visual placement. **Delete** clears
+selected cells when working in the viewport; text fields keep normal text editing.
+
+**New Set** assembles independently selected `HI`, `Objects`, `Palette`, `Remap` and
+`Scripts` folders in a new `Set<number>` directory. It can start with no sectors;
+without an existing `SET.SDF`, it starts with a dummy model and building row.
+**Save** preserves unchanged SDF rows and research notes, and uses the game's native
+`Scripts/override.lst` LEGO entries when visual BASE replacements are required.
+Required inline BASE objects are extracted with the existing Studio writer to
+native `Objects/*.bas` files, so the game can load each replacement directly.
+**Save Set As** creates a complete independent set. **Export complete ZIP** includes
+all set files and current edits under `Data/Sets/SetN/` without saving over the source.
+
+Sector IDs remain **0–255** for map/save compatibility. Slots **248–255** are reserved
+for native map borders. The updated OpenNeoUA engine supports **4096 model rows and
+4096 building state rows**; sets exceeding either original 256-row limit require that
+engine. The compatibility checker identifies these extended tables. Map and save
+formats are unchanged. Missing BASE/collision resources block saving and packaging.
+
 A precompiled Windows executable may be included in the repository for convenience.
 On every other system (and on Windows, if you prefer) run the Studio from source.
 
