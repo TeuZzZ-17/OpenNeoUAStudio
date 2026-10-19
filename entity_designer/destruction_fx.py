@@ -1116,7 +1116,7 @@ def interpret_block(block: FxBlock, context: str) -> FxSpec:
             parsed = _stof(value)
             visual_scale = parsed if math.isfinite(parsed) and parsed > 0 else 1.0
         elif key in ("impact_energy", "impact_energy_radius",
-                     "follow_vehicle"):
+                     "follow_carcass"):
             has_inline = True
         elif key == "lifetime":
             has_inline = True
