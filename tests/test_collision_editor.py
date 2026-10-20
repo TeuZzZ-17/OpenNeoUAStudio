@@ -671,7 +671,7 @@ class CollisionEditorTests(unittest.TestCase):
         file_labels = [
             action.text() for action in window.file_import_menu.actions()]
         self.assertIn("Import BAS Archive", file_labels)
-        self.assertIn("Import SKLT", file_labels)
+        self.assertNotIn("Import SKLT", file_labels)
         self.assertEqual(window.undo_action.iconText(), "< Undo")
         self.assertEqual(window.redo_action.iconText(), "Redo >")
         self.assertEqual(window.undo_button.text(), "Undo")
@@ -755,7 +755,7 @@ class CollisionEditorTests(unittest.TestCase):
                 "Undo", "Redo", "Add Legacy Radius",
                 "Add OpenNeoUA Collision",
                 "Duplicate Sphere", "Delete Sphere",
-                "Reset View", "Import BAS Archive", "Import SKLT",
+                "Reset View", "Import BAS Archive",
                 "View Preset"):
             self.assertIn(label, labels)
         self.assertNotIn("Delete All Collisions", labels)
@@ -2194,7 +2194,6 @@ class CollisionEditorTests(unittest.TestCase):
         self.assertEqual(
             window.close_bas_archive_action.text(), "Close Current Resource")
         self.assertFalse(window.close_bas_archive_action.isEnabled())
-        self.assertEqual(window.open_sklt_action.text(), "Import SKLT")
         self.assertEqual(
             window.open_vehicle_script_action.text(),
             "Import Vehicle / Weapon from Script")
