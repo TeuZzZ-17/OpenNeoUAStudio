@@ -6,7 +6,7 @@ from PySide6.QtGui import QMouseEvent, QPalette, QTextCursor
 from PySide6.QtTest import QTest
 from PySide6.QtWidgets import (QApplication, QCheckBox, QComboBox, QMainWindow,
                               QMenu, QScrollBar, QStyle, QStyleOptionComboBox)
-from studio.ui.style import apply_studio_style, install_theme_menu
+from studio.ui.style import apply_studio_style, install_theme_menu, load_themes
 from studio.ui.code_editor import ScriptCodeEditor
 
 @pytest.fixture
@@ -29,26 +29,31 @@ def test_theme_switch_updates_open_menus_and_preserves_script_undo(app):
         cursor.insertText('\n; retained edit')
         editor.editor.setTextCursor(cursor)
         position = cursor.position()
-        apply_studio_style('light')
-        assert app.palette().color(QPalette.ColorRole.Base).name() == '#d8dcdf'
-        assert editor._theme['key'] == '#005f9e'
+        apply_studio_style('metropolis')
+        light = load_themes()['metropolis']
+        assert app.palette().color(QPalette.ColorRole.Base).name() == light['palette']['Base']
+        assert editor._theme['key'] == light['syntax']['key']
         assert editor.editor.textCursor().position() == position
         assert editor.toPlainText().endswith('; retained edit')
         assert editor.editor.document().isUndoAvailable()
         for window in windows:
-            assert [a.text() for a in window.studio_theme_menu.actions()] == ['Dark', 'Light']
-            assert [a.isChecked() for a in window.studio_theme_menu.actions()] == [False, True]
+            choices = [a for a in window.studio_theme_menu.actions() if a.property('studioThemeChoice')]
+            assert choices[0].property('studioThemeChoice') == 'resistance'
+            assert choices[-1].property('studioThemeChoice') == 'dark'
+            assert not [a for a in window.studio_theme_menu.actions() if a.isSeparator()]
+            assert {a.property('studioThemeChoice') for a in choices} == set(load_themes())
+            assert [a.property('studioThemeChoice') for a in choices if a.isChecked()] == ['metropolis']
         editor.editor.undo()
         assert '; retained edit' not in editor.toPlainText()
         apply_studio_style('dark')
-        assert editor._theme['key'] == '#82c9ff'
+        assert editor._theme['key'] == load_themes()['dark']['syntax']['key']
     finally:
         editor.close()
         for window in windows:
             window.close()
 
 
-@pytest.mark.parametrize('theme', ['dark', 'light'])
+@pytest.mark.parametrize('theme', ['dark', 'metropolis'])
 def test_submenu_hover_is_visible_and_fields_have_inset(app, theme):
     apply_studio_style(theme)
     menu = QMenu()
@@ -100,7 +105,7 @@ def test_checkboxes_and_scrollbars_share_style_across_windows(app):
             bar.setValue(30)
             bar.resize(12, 180)
             controls.append((check, bar))
-        for theme in ('dark', 'light'):
+        for theme in ('dark', 'metropolis'):
             apply_studio_style(theme)
             assert controls[0][0].grab().toImage() == controls[1][0].grab().toImage()
             assert controls[0][1].grab().toImage() == controls[1][1].grab().toImage()
@@ -129,10 +134,47 @@ def test_menu_choice_is_remembered_for_next_application_start(app, monkeypatch):
     window = QMainWindow()
     try:
         install_theme_menu(window)
-        window.studio_theme_menu.actions()[1].trigger()
-        assert values == {"ui/theme": "light"}
+        next(a for a in window.studio_theme_menu.actions()
+             if a.property('studioThemeChoice') == 'metropolis').trigger()
+        assert values == {"ui/theme": "metropolis"}
         app.setProperty("studioStyleLoaded", False)
         apply_studio_style()
-        assert app.property("studioTheme") == "light"
+        assert app.property("studioTheme") == "metropolis"
     finally:
         window.close()
+
+
+def test_every_theme_file_is_valid_and_readable(app):
+    """Each theme in studio/themes must load, apply and keep text readable on its backgrounds."""
+    def lum(color):
+        r, g, b = (int(color[i:i + 2], 16) / 255 for i in (1, 3, 5))
+        f = lambda v: v / 12.92 if v <= 0.03928 else ((v + 0.055) / 1.055) ** 2.4
+        return 0.2126 * f(r) + 0.7152 * f(g) + 0.0722 * f(b)
+
+    def ratio(a, b):
+        hi, lo = sorted((lum(a), lum(b)), reverse=True)
+        return (hi + 0.05) / (lo + 0.05)
+
+    themes = load_themes()
+    assert len(themes) >= 10 and {'dark', 'resistance'} <= set(themes) and 'light' not in themes
+    for theme_id, theme in themes.items():
+        pal = theme['palette']
+        assert ratio(pal['Text'], pal['Base']) >= 7, theme_id
+        assert ratio(pal['WindowText'], pal['Window']) >= 7, theme_id
+        assert ratio(pal['HighlightedText'], pal['Highlight']) >= 4.5, theme_id
+        assert ratio(pal['Text'], theme['lists']['Hover']) >= 4.5, theme_id
+        assert ratio(pal['Text'], theme['lists']['DependencySelected']) >= 4.5, theme_id
+        assert ratio(pal['Text'], theme['lists']['Problem']) >= 4.5, theme_id
+        assert ratio(theme['tone']['Accent'], pal['Window']) >= 4.5, theme_id
+        for name, color in theme['syntax'].items():
+            if name not in ('error', 'line_number'):
+                assert ratio(color, pal['Base']) >= 4.5, (theme_id, name)
+        apply_studio_style(theme_id)
+        assert app.property('studioTheme') == theme_id
+        assert app.property('studioThemeMode') == theme['mode']
+        assert app.palette().color(QPalette.ColorRole.Base).name() == pal['Base'].lower()
+
+
+def test_unknown_theme_falls_back_to_the_default_theme(app):
+    apply_studio_style('does-not-exist')
+    assert app.property('studioTheme') == 'resistance'

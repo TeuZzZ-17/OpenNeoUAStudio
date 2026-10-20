@@ -17,7 +17,7 @@ a = Analysis(
     ['main.py'],
     pathex=[],
     binaries=coacd_binaries,
-    datas=[('.\\icons', 'icons'), ('studio/ui/studio.qss', 'studio/ui')] + copy_metadata('coacd'),
+    datas=[('.\\icons', 'icons'), ('studio/ui/studio.qss', 'studio/ui'), ('studio/themes', 'studio/themes')] + copy_metadata('coacd'),
     hiddenimports=[
         'wireframe_editor.window',
         'sector_editor.window',

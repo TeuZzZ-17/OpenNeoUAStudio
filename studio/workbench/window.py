@@ -145,6 +145,7 @@ from studio.rendering.snapshot_export import (
 )
 from studio.rendering.gizmo import ModelSpaceGizmo
 from studio.rendering.indexed import IndexedFamilyAdapter
+from studio.ui.style import theme_list_color
 from studio.ui.tabs import PaletteTabStrip
 from studio.ui.uv_editor import (
     apply_uv_vertex_deletion,
@@ -166,8 +167,6 @@ from studio.ui.widgets import (
     crop_uv_region,
     draw_uv_polygon as _draw_uv_polygon,
     install_standard_file_menu_tail,
-    LIST_DEPENDENCY_SELECTED,
-    LIST_HOVER,
     PROBLEM_STATUSES as _PROBLEM_STATUSES,
     ProblemRowDelegate as _ProblemRowDelegate,
     mark_problem_item as _mark_problem_item,
@@ -329,7 +328,7 @@ class AddFxElementDialog(QDialog):
         self.preview_label = QLabel("Preview unavailable")
         configure_stable_image_preview(self.preview_label, 360)
         self.preview_label.setStyleSheet(
-            "background: #22252b; border: 1px solid #555b66;")
+            "background: palette(base); border: 1px solid palette(mid);")
         layout.addWidget(self.preview_label)
         self.preview_info = QLabel()
         self.preview_info.setWordWrap(True)
@@ -651,8 +650,7 @@ class AssemblyWindow(QMainWindow):
 
         self.asset_tree = QTreeWidget()
         from studio.ui.widgets import use_standard_list_style
-        use_standard_list_style(
-            self.asset_tree, selected_color=LIST_DEPENDENCY_SELECTED)
+        use_standard_list_style(self.asset_tree, selected_color=True)
         self.asset_tree.setSelectionMode(
             QAbstractItemView.SelectionMode.ExtendedSelection)
         self.asset_tree.setHeaderLabels(["Asset", "Status", "Source / Path"])
@@ -697,12 +695,9 @@ class AssemblyWindow(QMainWindow):
         self.tree_search.textChanged.connect(self._filter_asset_tree)
         self.texture_list = QListWidget()
         use_standard_list_style(self.texture_list)
-        # The global theme turns a hovered row grey, which looks like an
-        # unloaded texture: hover keeps the blue family of the selection.
-        self.texture_list.setStyleSheet(
-            self.texture_list.styleSheet()
-            + "QListWidget::item:hover:!selected { background-color: "
-            + f"{LIST_HOVER}; color: #ffffff; }}")
+        # The generic grey hover reads as "texture not loaded": this list uses the
+        # theme's row hover color instead (rule in studio.qss).
+        self.texture_list.setProperty("studioList", "textures")
         self.texture_list.setItemDelegate(_ProblemRowDelegate(self.texture_list))
         self.texture_list.setIconSize(QPixmap(96, 96).size())
         self.texture_list.setSelectionMode(
@@ -1213,6 +1208,43 @@ class AssemblyWindow(QMainWindow):
         menu.addSeparator()
         menu.addAction("Select All Textures", self.texture_list.selectAll)
         menu.exec(self.texture_list.viewport().mapToGlobal(position))
+
+    def refresh_studio_theme(self) -> None:
+        """Re-tint rows painted with theme colors (used textures, unresolved assets)."""
+
+        if hasattr(self, "texture_list"):
+            self._refresh_texture_usage_highlight()
+        from studio.ui.widgets import mark_problem_item, PROBLEM_ROLE
+        for view in (getattr(self, "asset_tree", None), getattr(self, "texture_list", None)):
+            if view is None:
+                continue
+            items = ([view.item(i) for i in range(view.count())] if hasattr(view, "count")
+                     else self._iter_tree_items(view))
+            is_tree = hasattr(view, "topLevelItemCount")
+            for item in items:
+                if item is None:
+                    continue
+                mark_problem_item(
+                    item, bool(item.data(0, PROBLEM_ROLE) if is_tree else item.data(PROBLEM_ROLE)),
+                    columns=3 if is_tree else 1)
+                if is_tree:
+                    # Status text colors depend on the theme mode (darker shades on light themes).
+                    status = item.text(1)
+                    key = {"auto_loaded": "found", "loaded": "found", "resolved": "found",
+                           "kept_for_session": "manual", "trial_loaded": "manual",
+                           "failed_load": "decode failed", "skipped": "missing",
+                           "unsupported_loader": "ambiguous"}.get(status, status)
+                    color = _STATUS_COLORS.get(key)
+                    if status and color is not None:
+                        item.setForeground(1, color)
+
+    @staticmethod
+    def _iter_tree_items(tree):
+        stack = [tree.topLevelItem(i) for i in range(tree.topLevelItemCount())]
+        while stack:
+            item = stack.pop()
+            yield item
+            stack.extend(item.child(i) for i in range(item.childCount()))
 
     def _build_toolbar(self) -> None:
         # --- File menu: explicit import/export workflow ---
@@ -13334,7 +13366,7 @@ class AssemblyWindow(QMainWindow):
 
         used = self._active_model_texture_names()
         # Same green as the active model rows of Asset Dependencies.
-        active_brush = QBrush(QColor(LIST_DEPENDENCY_SELECTED))
+        active_brush = QBrush(theme_list_color("DependencySelected"))
         clear_brush = QBrush()
         text_brush = QBrush()
 

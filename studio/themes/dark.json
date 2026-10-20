@@ -1,0 +1,47 @@
+{
+  "id": "dark",
+  "name": "Dark",
+  "description": "Tema scuro classico di Studio (grigio neutro, accento azzurro).",
+  "mode": "dark",
+  "order": 50,
+  "palette": {
+    "Window": "#1f1f1f",
+    "WindowText": "#e0e0e0",
+    "Base": "#2d2d2d",
+    "AlternateBase": "#383838",
+    "Text": "#e0e0e0",
+    "Button": "#2d2d2d",
+    "ButtonText": "#e0e0e0",
+    "Highlight": "#006d96",
+    "HighlightedText": "#ffffff",
+    "Mid": "#555555",
+    "Midlight": "#454545",
+    "Light": "#656565",
+    "Dark": "#151515",
+    "ToolTipBase": "#2d2d2d",
+    "ToolTipText": "#e0e0e0",
+    "Disabled.Text": "#999999",
+    "Disabled.WindowText": "#999999",
+    "Disabled.ButtonText": "#999999"
+  },
+  "tone": {
+    "Accent": "#f1c66d"
+  },
+  "lists": {
+    "Hover": "#234e64",
+    "Selected": "#006d96",
+    "DependencySelected": "#31483a",
+    "Problem": "#6e2b2b",
+    "ModifiedSelected": "#15435b",
+    "ModifiedHover": "#213e50"
+  },
+  "syntax": {
+    "key": "#82c9ff",
+    "function": "#e5bc70",
+    "number": "#b6dc8b",
+    "string": "#d99a88",
+    "comment": "#8d9b93",
+    "line_number": "#77818d",
+    "error": "#542c32"
+  }
+}
