@@ -1,9 +1,18 @@
 """Shared Studio themes and menu, used by every workspace."""
 from pathlib import Path
 import re
-from PySide6.QtCore import QSettings
+from PySide6.QtCore import QSettings, Qt
 from PySide6.QtGui import QAction, QActionGroup, QColor, QPalette
-from PySide6.QtWidgets import QApplication
+from PySide6.QtWidgets import QApplication, QProxyStyle, QStyle
+
+
+class StudioStyle(QProxyStyle):
+    """Fusion with sliders that jump to the clicked point instead of moving page by page."""
+
+    def styleHint(self, hint, option=None, widget=None, returnData=None):  # noqa: N802
+        if hint == QStyle.StyleHint.SH_Slider_AbsoluteSetButtons:
+            return int(Qt.MouseButton.LeftButton.value)
+        return super().styleHint(hint, option, widget, returnData)
 
 
 def apply_studio_style(theme: str | None = None, *, persist: bool = False) -> None:
@@ -15,7 +24,7 @@ def apply_studio_style(theme: str | None = None, *, persist: bool = False) -> No
     theme = theme or str(settings.value("ui/theme", "dark"))
     theme = theme if theme in {"dark", "light"} else "dark"
     if not app.property("studioStyleLoaded"):
-        app.setStyle("Fusion")
+        app.setStyle(StudioStyle("Fusion"))
     sheet = Path(__file__).with_name("studio.qss").read_text(encoding="utf-8")
     colors = dict(re.findall(r"Palette\.((?:Disabled\.)?\w+)\s*=\s*(#[0-9a-fA-F]{6})", sheet))
     if theme == "light":
@@ -41,6 +50,8 @@ def apply_studio_style(theme: str | None = None, *, persist: bool = False) -> No
     sheet = re.sub(r"@((?:Disabled\.)?\w+)", lambda match: colors[match[1]], sheet)
     app.setStyleSheet(sheet)
     app.setProperty("studioStyleLoaded", True)
+    from studio.ui.pointer_cursors import install_pointer_cursors
+    install_pointer_cursors(app)
     from studio.ui.widgets import SELECTION_STYLE
     for widget in app.allWidgets():
         if SELECTION_STYLE in widget.styleSheet():

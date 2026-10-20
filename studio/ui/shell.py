@@ -309,7 +309,8 @@ def compatibility_entries(window, key):
     ]
     if key == "model_editor":
         return resources + [
-            ("Model and Texture Editor", MIXED, "BASE/SKLT geometry, mapping and indexed ILBM/VBMP textures use vanilla formats. External models referenced through OpenNeoUA-only script parameters require OpenNeoUA; the .onua3d exchange format is for Studio import/export, not direct vanilla loading."),
+            ("Models and Textures", MIXED, "BASE/SKLT geometry, mapping and indexed ILBM/VBMP textures use vanilla formats. External models referenced through OpenNeoUA-only script parameters require OpenNeoUA; the .onua3d exchange format is for Studio import/export, not direct vanilla loading."),
+            ("Wireframe", VANILLA, "Shows, generates and exports the vanilla SKLT wireframe named by the entity's wireframe key. Export writes only that file; the script must still reference it."),
             ("Asset Dependencies / Asset Textures", PREVIEW, "Inspects the model's resources and textures. Preview substitutions are session-only; exported assets must satisfy the target game's format and palette requirements."),
             ("Import / Export", MIXED, "Exporting supported native assets preserves their format. PNG, OBJ and .onua3d are presentation or exchange files and require conversion before use as vanilla assets."),
         ]
