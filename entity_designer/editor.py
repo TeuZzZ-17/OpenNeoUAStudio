@@ -842,6 +842,11 @@ class CollisionEditorWindow(QMainWindow):
         self.viewport_layout.setRowStretch(0, 1)
         self.viewport_layout.setRowStretch(1, 0)
         self.fx_panel.transport_bar.hide()
+        # Wireframe: the one the definition has now, or a new one generated from its model.
+        from entity_designer.wireframe_panel import TAB_TITLE, WireframePanel
+        self.wireframe_panel = WireframePanel(self.viewport, self)
+        self.wireframe_tab_index = self.properties_tabs.addTab(
+            self.wireframe_panel, TAB_TITLE)
         self.properties_tabs.currentChanged.connect(
             self._properties_tab_changed)
         self.properties_tabs.setMinimumHeight(0)
@@ -881,6 +886,10 @@ class CollisionEditorWindow(QMainWindow):
                 "and the OpenNeoUA weapon/vehicle FX (tracers, decorations, "
                 "clusters, lasers, debuffs, palette flashes) need OpenNeoUA, "
                 "as labelled in the list. Camera shake (shk_*) is not shown."),
+            self.wireframe_panel: (
+                VANILLA, "The wireframe is the vanilla SKLT file named by the "
+                "wireframe key. Export writes only that file: the script must "
+                "still reference it."),
         }
         self.properties_tab_strip = PaletteTabStrip.install(
             self.properties_tabs, markers={
@@ -4953,6 +4962,7 @@ class CollisionEditorWindow(QMainWindow):
             self.transform_box.setVisible(
                 not shape_tab_active and not briefing_active
                 and self.properties_tabs.currentIndex() != self.ground_tab_index
+                and self.properties_tabs.currentIndex() != self.wireframe_tab_index
                 and not self._is_fx_tab_active())
             self.transform_box.setTitle(
                 "Move Cockpit Camera" if cockpit_selected else "Move Element")
@@ -5118,12 +5128,23 @@ class CollisionEditorWindow(QMainWindow):
             unit = replace(unit, altitude=unit.altitude or fx.WEAPON_LAUNCH_HEIGHT)
         return unit
 
+    def _sync_wireframe_current(self, text: str, block: ScriptBlock) -> None:
+        """Give the Wireframe tab the file named by ``wireframe =`` of the loaded definition."""
+
+        from entity_designer.wireframe_panel import resolve_wireframe_path
+
+        value = fx.top_level_value(text, block.start_line, block.end_line, "wireframe")
+        self.wireframe_panel.set_current_wireframe(
+            resolve_wireframe_path(
+                value, self._active_script_path, self._active_base_path))
+
     def _load_fx_context(self, text: str, block: ScriptBlock,
                          reference: VehicleModelReference, *,
                          keep_view: bool = False, objects=None) -> None:
         """Show one loaded definition in the Destruction FX preview."""
 
         self._fx_catalog = self._build_fx_catalog(text, objects)
+        self._sync_wireframe_current(text, block)
         if not keep_view:
             self._fx_changed_assets.clear()
         if not keep_view or self._fx_source_from_catalog:
@@ -7230,6 +7251,7 @@ class CollisionEditorWindow(QMainWindow):
         self.transform_box.setVisible(
             not shape_tab_active and not briefing_active
             and self.properties_tabs.currentIndex() != self.ground_tab_index
+            and self.properties_tabs.currentIndex() != self.wireframe_tab_index
             and not self._is_fx_tab_active())
         self._sync_fx_preview()
 

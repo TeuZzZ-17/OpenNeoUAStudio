@@ -1,4 +1,4 @@
-"""Model Editor workspace: asset workbench plus Genesis and wireframe generators."""
+"""Model Editor workspace: asset workbench plus the Genesis generator."""
 
 from .window import ModelEditorWindow
 

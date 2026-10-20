@@ -14,7 +14,7 @@ import subprocess
 import sys
 import tempfile
 
-from PySide6.QtCore import QEvent, QIODevice, QSaveFile, QSize, Qt, QTimer, QUrl
+from PySide6.QtCore import QEvent, QSize, Qt, QTimer, QUrl
 from PySide6.QtGui import (
     QAction,
     QBrush,
@@ -2200,7 +2200,7 @@ class AssemblyWindow(QMainWindow):
         model_scroll.setWidget(model_panel)
 
         editor_tabs = category_tabs()
-        editor_tabs.addTab(model_scroll, "Model and Texture Editor")
+        editor_tabs.addTab(model_scroll, "Models and Textures")
 
         visuals_tabs = category_tabs()
         visuals_tabs.addTab(textures_panel, "Textures")
@@ -7577,7 +7577,7 @@ class AssemblyWindow(QMainWindow):
             return
         self._draw_uv_overlay(tex, [], -1, extra_groups=block.olpl)
 
-    # -- Model and Texture Editor -------------------------------------------------
+    # -- Models and Textures ------------------------------------------------------
 
     def _apply_transform_mode_colors(self) -> None:
         colors = {

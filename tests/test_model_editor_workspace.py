@@ -26,6 +26,56 @@ class ModelEditorWorkspaceTests(unittest.TestCase):
         finally:
             window.close()
 
+    def test_wireframe_tab_reads_the_selected_entity_wireframe(self):
+        import tempfile
+        from pathlib import Path
+        from types import SimpleNamespace
+
+        from PySide6.QtCore import QSignalBlocker
+
+        from studio.assets.catalog import GameObject, VisualChoice
+        from entity_designer.wireframe_generator import WireframeProjection
+
+        window = ModelEditorWindow()
+        try:
+            with tempfile.TemporaryDirectory() as folder:
+                data = Path(folder) / "Data"
+                (data / "Scripts").mkdir(parents=True)
+                (data / "Wireless").mkdir()
+                (data / "Models").mkdir()
+                skl = data / "Wireless" / "Tank.SKL"
+                WireframeProjection(
+                    [(0.0, 0.0, 0.0), (500.0, 0.0, 500.0)], [[0, 1]]).save(skl)
+                source = data / "Scripts" / "Vehicles.cfg"
+                entity = GameObject(
+                    "vehicle", 1, source,
+                    {"name": "Tank", "wireframe": "wireless/tank.sklt"})
+                model = data / "Models" / "Tank.BASE"
+                window._current_entity = entity
+                with QSignalBlocker(window.entity_state):
+                    window.entity_state.clear()
+                    window.entity_state.addItem(
+                        "Normal", VisualChoice("Normal", model))
+                window._family = SimpleNamespace(base_path=model)
+                window._sync_model_wireframe()
+                self.assertEqual(
+                    window.wireframe_panel.current_path, skl.resolve())
+                self.assertTrue(
+                    window.wireframe_panel.current_button.isChecked())
+                self.assertEqual(
+                    window.wireframe_panel.path_label.text(), str(skl.resolve()))
+
+                # A different model drops the entity wireframe instead of showing a stale one.
+                window._family = SimpleNamespace(
+                    base_path=data / "Models" / "Other.BASE")
+                window._sync_model_wireframe()
+                self.assertIsNone(window.wireframe_panel.current_path)
+                self.assertFalse(
+                    window.wireframe_panel.current_button.isEnabled())
+                self.assertTrue(window.wireframe_panel.path_label.isHidden())
+        finally:
+            window.close()
+
     def test_resources_pages_are_flat_palette_buttons(self):
         window = ModelEditorWindow()
         try:
@@ -37,11 +87,12 @@ class ModelEditorWorkspaceTests(unittest.TestCase):
             # One flat level of palette buttons: no sub-tab bars.
             self.assertEqual(
                 [button.text() for button in strip.buttons()],
-                ["Model and Texture Editor", "Bas Manager", "Entity List",
-                 "Asset Dependencies", "Asset Textures"])
+                ["Models and Textures", "Wireframe", "Bas Manager",
+                 "Entity List", "Asset Dependencies", "Asset Textures"])
             self.assertTrue(window._right_tabs.tabBar().isHidden())
             self.assertTrue(window._resources_tabs.tabBar().isHidden())
-            strip.buttons()[2].click()
+            next(button for button in strip.buttons()
+                 if button.text() == "Entity List").click()
             self.assertIs(window._right_tabs.currentWidget(), window._resources_tabs)
             self.assertEqual(
                 window._resources_tabs.tabText(

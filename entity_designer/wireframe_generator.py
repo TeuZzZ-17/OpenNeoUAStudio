@@ -10,21 +10,16 @@ from PySide6.QtCore import QPointF, QRectF, QSize, Qt
 from PySide6.QtGui import QColor, QImage, QPainter, QPen, QPolygonF
 
 from .wireframe_cleanup import clean_segments
+from .wireframe_detail import DEFAULT_DETAIL, detail_settings
 from studio.rendering.depth import CameraPolygon, clip_camera_polygon_near
 from studio.rendering.indexed import IndexedRasterizer
 from studio.formats.sklt import create_minimal_sklt_model, save_sklt_with_poo2_pol2_structure
 
 SOURCE_SIZE = QSize(1024, 1024)
-# Two faces meeting at less than this angle are one flat surface: no line between them.
-SOFT_EDGE_DEGREES = 12.0
-SOFT_EDGE_COS = math.cos(math.radians(SOFT_EDGE_DEGREES))
-# Texture-transparency contours are simplified by this fraction of the model size.
-CONTOUR_TOLERANCE_FRACTION = 0.03
-# A corner of a texture contour must add at least this many tolerance-squares of area.
-CONTOUR_TOOTH_AREA = 3.0
 # A see-through face drawn on less than this share of its polygon is a sprite
 # (propeller, rotor, antenna): it keeps only a simple outline, never its ragged shape.
 SPRITE_VISIBLE_FRACTION = 0.5
+
 
 
 @dataclass
@@ -298,8 +293,14 @@ def _geometry_ownership(viewport, pieces, camera, face_ids):
 def generate_wireframe(viewport, preset: str = "Current View", *,
                        respect_transparency: bool = True,
                        simplification: float = 3.0,
-                       tidy: bool = True) -> WireframeProjection:
-    """Freeze visible scene geometry, project it and remove hidden edge runs."""
+                       detail: float = DEFAULT_DETAIL) -> WireframeProjection:
+    """Freeze visible scene geometry, project it and remove hidden edge runs.
+
+    ``detail`` runs from 0 (every line of the model) to 4 (the fewest, straightest lines,
+    like the original game outlines). Whole numbers are the rows of ``DETAIL_LEVELS``;
+    values in between blend two neighbouring rows.
+    """
+    settings = detail_settings(detail)
     if not viewport._faces:
         raise ValueError("Load a model before generating a wireframe.")
     if not math.isfinite(simplification) or not 0.5 <= simplification <= 12:
@@ -368,7 +369,7 @@ def generate_wireframe(viewport, preset: str = "Current View", *,
         if len(adjacent) == 2:
             first, second = (normals.get(face_id) for face_id in adjacent)
             if first is not None and second is not None \
-                    and abs(float(first @ second)) >= SOFT_EDGE_COS:
+                    and abs(float(first @ second)) >= settings.soft_edge_cos:
                 continue
         a, b = np.array(a), np.array(b)
         count = max(2, int(math.ceil(np.linalg.norm(b-a)*2))+1)
@@ -391,9 +392,9 @@ def generate_wireframe(viewport, preset: str = "Current View", *,
         samples = a+(b-a)*t[:, None]
         pixel = np.rint(samples).astype(int)
         accepted = np.zeros(count, dtype=bool)
-        # A fin, antenna or wing drawn with a see-through texture does not hide the
-        # edges behind it; otherwise those edges would be cut where it passes over them.
-        visible_owners = list(adjacent | transparent)
+        # With see_through_open a fin, antenna or wing drawn with a see-through texture
+        # does not hide the edges behind it; otherwise those edges would be cut.
+        visible_owners = list(adjacent | transparent if settings.see_through_open else adjacent)
         for dy in (-1, 0, 1):
             for dx in (-1, 0, 1):
                 values = owner[np.clip(pixel[:, 1]+dy, 0, h-1), np.clip(pixel[:, 0]+dx, 0, w-1)]
@@ -417,17 +418,20 @@ def generate_wireframe(viewport, preset: str = "Current View", *,
         for dy in range(5):
             for dx in range(5):
                 near_opaque |= padded[dy:dy+h, dx:dx+w]
-        surfaces, sprites = _see_through_shapes(
-            viewport, faces, face_ids, transparent, indexed, camera, target)
+        if settings.per_shape:
+            surfaces, sprites = _see_through_shapes(
+                viewport, faces, face_ids, transparent, indexed, camera, target)
+        else:
+            surfaces, sprites = [coverage], []
         covered = np.argwhere(coverage)
         span = float((covered.max(axis=0)-covered.min(axis=0)).max()) if len(covered) else 0.0
         # Texture contours follow irregular alpha shapes, so they are simplified more
         # than hard edges: in proportion to the model, never below ``simplification``.
-        contour_tolerance = max(simplification, span*CONTOUR_TOLERANCE_FRACTION)
+        contour_tolerance = max(simplification, span*settings.contour_fraction)
         smooth_radius = max(1, min(8, int(round(contour_tolerance/2))))
         loops = []
         for shape in surfaces:
-            loops.extend(_mask_contours(_smooth_mask(shape, smooth_radius)))
+            loops.extend(_mask_contours(_smooth_mask(shape, smooth_radius) if settings.smooth else shape))
         for shape in sprites:
             # A sprite keeps a simple convex outline instead of its ragged texture shape.
             outline = _convex_loop(shape)
@@ -447,15 +451,18 @@ def generate_wireframe(viewport, preset: str = "Current View", *,
             for run in _runs(loop, flags):
                 if len(run) < 5:
                     continue
-                simple = _simplify(run, contour_tolerance*0.5)
-                simple = _visvalingam(
-                    simple, contour_tolerance*contour_tolerance*CONTOUR_TOOTH_AREA)
-                if _polyline_length(simple) < contour_tolerance*6:
-                    # Tiny scribbles are texture noise, not part of the silhouette.
-                    continue
+                if settings.smooth:
+                    simple = _simplify(run, contour_tolerance*0.5)
+                    simple = _visvalingam(
+                        simple, contour_tolerance*contour_tolerance*settings.tooth_area)
+                    if _polyline_length(simple) < contour_tolerance*6:
+                        # Tiny scribbles are texture noise, not part of the silhouette.
+                        continue
+                else:
+                    simple = _simplify(run, contour_tolerance)
                 segments.extend((np.array(a), np.array(b)) for a, b in zip(simple, simple[1:])
                                 if np.linalg.norm(np.array(a)-b) >= 1)
-    if segments and tidy:
+    if segments and settings.tidy:
         flat = np.array([p for segment in segments for p in segment])
         segments = clean_segments(segments, float(max(flat.max(axis=0)-flat.min(axis=0))))
     if not segments:

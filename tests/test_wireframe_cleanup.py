@@ -2,7 +2,7 @@
 
 import numpy as np
 
-from model_editor.wireframe_cleanup import clean_segments, snap_distance
+from entity_designer.wireframe_cleanup import clean_segments, snap_distance
 
 
 def test_dashes_on_one_edge_become_one_line():
