@@ -435,8 +435,6 @@ class CollisionEditorWindow(QMainWindow):
             self, self.open_base_dialog, shortcut=True)
         self.open_base_action.setToolTip(
             "Import a BASE/SET archive or an external 3DS visual model.")
-        self.open_sklt_action = QAction("Import SKLT", self)
-        self.open_sklt_action.triggered.connect(self.open_sklt_dialog)
         self.open_vehicle_script_action = QAction(
             "Import Vehicle / Weapon from Script", self)
         self.open_vehicle_script_action.setIconText("Import Script Object")
@@ -448,7 +446,7 @@ class CollisionEditorWindow(QMainWindow):
 
         self.file_import_menu = file_menu.addMenu("Import")
         for action in (
-                self.open_base_action, self.open_sklt_action,
+                self.open_base_action,
                 self.open_vehicle_script_action, self.import_action):
             self.file_import_menu.addAction(action)
 
@@ -3514,13 +3512,6 @@ class CollisionEditorWindow(QMainWindow):
         self._sync_close_archive_action()
         return True
 
-    def open_sklt_dialog(self):
-        path, _ = QFileDialog.getOpenFileName(
-            self, "Import external SKLT", str(self._last_directory),
-            "Skeletons (*.sklt *.skl *.SKLT *.SKL);;All files (*)")
-        if path:
-            self.open_sklt(path)
-
     def open_sklt(self, path: str | Path):
         if not self.fx_panel.confirm_text_changes():
             return False
@@ -4282,7 +4273,6 @@ class CollisionEditorWindow(QMainWindow):
         menu.addAction(self.reset_view_action)
         menu.addSeparator()
         menu.addAction(self.open_base_action)
-        menu.addAction(self.open_sklt_action)
         preset_menu = menu.addMenu("View Preset")
         self._populate_view_preset_context_menu(preset_menu)
         return menu
@@ -4313,7 +4303,6 @@ class CollisionEditorWindow(QMainWindow):
         menu.addAction(self.reset_view_action)
         menu.addSeparator()
         menu.addAction(self.open_base_action)
-        menu.addAction(self.open_sklt_action)
         preset_menu = menu.addMenu("View Preset")
         self._populate_view_preset_context_menu(preset_menu)
 
@@ -4440,7 +4429,6 @@ class CollisionEditorWindow(QMainWindow):
 
         menu.addSeparator()
         menu.addAction(self.open_base_action)
-        menu.addAction(self.open_sklt_action)
         return menu
 
     def _show_collision_shape_context_menu(self, local_pos: QPoint) -> None:

@@ -180,6 +180,32 @@ def _is_setbas_family(family: AssetFamily) -> bool:
             and same_path(Path(family.base_path), Path(family.setbas_path)))
 
 
+def _only_foreign_model_files(family: AssetFamily, ref: ResolvedFile) -> bool:
+    """True when every loose match lies in another model's folder under Models/Base."""
+
+    if _is_setbas_family(family) or family.base_path is None:
+        return False
+    own = Path(family.base_path).resolve().parent
+    container = next((p for p in own.parents
+                      if p.name.casefold() == "base"
+                      and p.parent.name.casefold() == "models"), None)
+    if container is None:
+        return False
+    found = [Path(ref.path)] if ref.path is not None else list(ref.candidates)
+    if not found:
+        return False
+    for item in found:
+        try:
+            resolved = Path(item).resolve()
+        except OSError:
+            return False
+        inside_own = own == resolved.parent or own in resolved.parents
+        inside_container = container in resolved.parents
+        if inside_own or not inside_container:
+            return False
+    return True
+
+
 def _resolve_with_setbas(family: AssetFamily, resolver: AssetResolver,
                          name: str, kind: str, class_id: str) -> ResolvedFile:
     """Three-way resolution: manual override > loose file > SET.BAS embedded.
@@ -221,6 +247,18 @@ def _resolve_with_setbas(family: AssetFamily, resolver: AssetResolver,
     if embedded_matches:
         ref.embedded_available = True
         ref.embedded_candidates = embedded_labels
+
+    # A loose BASE only sees its own folder and the SET.BAS: same-named files
+    # inside other models' folders are not engine search paths, so they must
+    # not hide the embedded copy (or be taken in its place).
+    if (embedded is not None and ref.status != "manual"
+            and _only_foreign_model_files(family, ref)):
+        ref.path = None
+        ref.status = "setbas"
+        ref.source = "SET.BAS"
+        ref.resolution_rule = ("unique embedded copy: the loose files found are "
+                               "in other models' folders, not engine search paths")
+        return ref
 
     if ref.path is not None:
         ref.source = "manual" if ref.status == "manual" else "loose"
