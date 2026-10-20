@@ -108,16 +108,16 @@ def app():
     return QApplication.instance() or QApplication([])
 
 
-def test_action_tracks_model_and_opens_wireframe_command(app):
+def test_the_model_editor_uses_the_shared_wireframe_tab(app):
+    from entity_designer.wireframe_panel import WireframePanel
     window = ModelEditorWindow()
     try:
-        assert not window.generate_wireframe_action.isEnabled()
-        window.viewport._faces.append(object())
-        window._sync_generator_actions()
-        assert window.generate_wireframe_action.isEnabled()
-        with patch("model_editor.wireframe_dialog.WireframeGeneratorDialog") as dialog:
-            window.generate_wireframe_action.trigger()
-            dialog.assert_called_once_with(window.viewport, window)
+        assert not hasattr(window, "generate_wireframe_action")
+        assert isinstance(window.wireframe_panel, WireframePanel)
+        assert "Generate Wireframe" not in [a.text() for a in window.file_menu.actions()]
+        titles = [window._editor_tabs.tabText(i) for i in range(window._editor_tabs.count())]
+        assert titles == ["Models and Textures", "Wireframe"]
+        assert window._editor_tabs.widget(1) is window.wireframe_panel
     finally:
         window.close()
 
@@ -132,12 +132,12 @@ def test_context_actions_only_allow_model_resources_and_share_current_commands(a
             menu = QMenu()
             window._add_model_generator_context_actions(menu, item)
             actions = [a for a in menu.actions() if not a.isSeparator()]
-            assert [a.text() for a in actions] == ["Generate Wireframe", "Generate Genesis"]
+            assert [a.text() for a in actions] == ["Generate Genesis"]
             assert all(a.isEnabled() == enabled for a in actions)
             if enabled:
                 with patch.object(window, "_generate_from_setbas_item") as handler:
                     actions[0].trigger()
-                    handler.assert_called_once_with(item, genesis=False)
+                    handler.assert_called_once_with(item)
         snapshot_menu = QMenu()
         AssemblyWindow._add_model_generator_context_actions(window, snapshot_menu, item)
         assert not snapshot_menu.actions()
@@ -150,19 +150,10 @@ def test_viewport_menu_reuses_generator_actions_and_labels_without_ellipsis(app)
     try:
         menu = window._create_viewport_context_menu()
         actions = menu.actions()
-        assert window.generate_wireframe_action in actions
         assert window.generate_genesis_action in actions
-        assert window.generate_wireframe_action.text() == "Generate Wireframe"
-        assert not window.generate_wireframe_action.isEnabled()
+        assert "Generate Wireframe" not in [a.text() for a in actions]
         assert not window.generate_genesis_action.isEnabled()
-        window.viewport._faces.append(object())
-        menu = window._create_viewport_context_menu()
-        assert window.generate_wireframe_action.isEnabled()
-        with patch("model_editor.wireframe_dialog.WireframeGeneratorDialog") as dialog:
-            window.generate_wireframe_action.trigger()
-            dialog.assert_called_once_with(window.viewport, window)
         shared = AssemblyWindow._create_viewport_context_menu(window)
-        assert window.generate_wireframe_action not in shared.actions()
         assert window.generate_genesis_action not in shared.actions()
     finally:
         window.close()
@@ -177,13 +168,13 @@ def test_failed_or_cancelled_resource_activation_does_not_generate_stale_model(a
         item.setData(0, _BAS_KIND_ROLE, "sklt.class")
         item.setData(0, Qt.ItemDataRole.UserRole, 0)
         with patch.object(window, "_confirm_discard_geometry", return_value=False), \
-                patch.object(window, "_open_wireframe_generator") as generator:
-            window._generate_from_setbas_item(item, genesis=False)
+                patch.object(window, "_generate_genesis") as generator:
+            window._generate_from_setbas_item(item)
             generator.assert_not_called()
         with patch.object(window, "_confirm_discard_geometry", return_value=True), \
                 patch.object(window, "_preview_setbas_skeleton", return_value=False), \
-                patch.object(window, "_open_wireframe_generator") as generator:
-            window._generate_from_setbas_item(item, genesis=False)
+                patch.object(window, "_generate_genesis") as generator:
+            window._generate_from_setbas_item(item)
             generator.assert_not_called()
     finally:
         window._setbas = None
@@ -210,7 +201,7 @@ def test_file_menu_genesis_works_on_the_bas_manager_selection(app):
         assert window.generate_genesis_action.isEnabled()
         with patch.object(window, "_generate_from_setbas_item") as handler:
             window.generate_genesis_action.trigger()
-            handler.assert_called_once_with(item, genesis=True)
+            handler.assert_called_once_with(item)
         # A resource that is not a model (a texture) keeps it disabled.
         item.setData(0, _BAS_KIND_ROLE, "ilbm.class")
         window._sync_generator_actions()

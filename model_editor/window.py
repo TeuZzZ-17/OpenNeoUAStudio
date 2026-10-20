@@ -12,6 +12,7 @@ from PySide6.QtWidgets import QMessageBox
 from studio.workbench.window import AssemblyWindow, _BAS_KIND_ROLE, _BAS_NAME_ROLE
 from studio.ui.tabs import SetBasMixin
 from studio.ui.browsers import EntityListMixin
+from studio.exchange.portable import same_path
 
 
 WINDOW_TITLE = "OpenNeoUA Studio - Model Editor"
@@ -79,14 +80,6 @@ class ModelEditorWindow(EntityListMixin, SetBasMixin, AssemblyWindow):
                 self.map_editor_action):
             action.setVisible(False)
 
-        self.generate_wireframe_action = QAction(
-            "Generate Wireframe", self)
-        self.generate_wireframe_action.setEnabled(False)
-        self.generate_wireframe_action.triggered.connect(
-            self._open_wireframe_generator)
-        self.file_menu.insertAction(
-            self.exit_action, self.generate_wireframe_action)
-
         self.generate_genesis_action = QAction("Generate Genesis", self)
         self.generate_genesis_action.triggered.connect(self._generate_genesis_action)
         self.file_menu.insertAction(self.exit_action, self.generate_genesis_action)
@@ -97,6 +90,55 @@ class ModelEditorWindow(EntityListMixin, SetBasMixin, AssemblyWindow):
         # still owns the Snapshot controls and their signal connections.
         self._detached_visuals_tabs = visuals_tabs
         self._right_tabs.setCurrentWidget(editor_tabs)
+
+        # Same Wireframe page as the Entity Designer: one widget, both editors.
+        from entity_designer.wireframe_panel import TAB_TITLE, WireframePanel
+        self.wireframe_panel = WireframePanel(self.viewport, self)
+        self._editor_tabs.addTab(self.wireframe_panel, TAB_TITLE)
+        strip = getattr(self._right_tabs, "_palette_strip", None)
+        if strip is not None:
+            strip.refresh()
+
+    def _set_family(self, family) -> None:
+        super()._set_family(family)
+        if hasattr(self, "wireframe_panel"):
+            self._sync_model_wireframe()
+
+    def _open_entity_state(self, *args):
+        opened = super()._open_entity_state(*args)
+        if opened and hasattr(self, "wireframe_panel"):
+            self._sync_model_wireframe()
+        return opened
+
+    def _sync_model_wireframe(self) -> None:
+        """Give the Wireframe tab the file named by the loaded game entity."""
+
+        entity = getattr(self, "_current_entity", None)
+        choice = (self.entity_state.currentData()
+                  if hasattr(self, "entity_state") else None)
+        path = None
+        if (entity is not None and choice is not None
+                and self._entity_model_is_loaded(choice)):
+            from entity_designer.wireframe_panel import resolve_wireframe_path
+            path = resolve_wireframe_path(
+                entity.values.get("wireframe"), entity.source,
+                self._family.base_path if self._family is not None else None)
+        if path != self.wireframe_panel.current_path:
+            self.wireframe_panel.set_current_wireframe(path)
+
+    def _entity_model_is_loaded(self, choice) -> bool:
+        """True when the open family is the model state chosen for the entity."""
+
+        family = self._family
+        if family is None:
+            return False
+        if choice.base_name:
+            target = self._resolve_family_base_object(family, choice.base_name)
+            # A SET.BAS family holds every base; only the active one is the entity's model.
+            return (target is not None
+                    and self._selected_owner == target.owner_path)
+        return (family.base_path is not None
+                and same_path(family.base_path, choice.path))
 
     def _open_visual_texture(
             self, name: str, *, show_preview: bool = False,
@@ -129,9 +171,6 @@ class ModelEditorWindow(EntityListMixin, SetBasMixin, AssemblyWindow):
 
 
 
-    def _sync_wireframe_generator_action(self) -> None:
-        self.generate_wireframe_action.setEnabled(self.viewport.has_model)
-
     def _sync_edit_action_states(self) -> None:
         super()._sync_edit_action_states()
         if hasattr(self, "generate_genesis_action"):
@@ -153,7 +192,6 @@ class ModelEditorWindow(EntityListMixin, SetBasMixin, AssemblyWindow):
         return item if kind in ("base", "sklt.class") else None
 
     def _sync_generator_actions(self) -> None:
-        self._sync_wireframe_generator_action()
         if self._bas_manager_model_item() is not None:
             self.generate_genesis_action.setEnabled(True)
             self.generate_genesis_action.setToolTip(
@@ -174,24 +212,20 @@ class ModelEditorWindow(EntityListMixin, SetBasMixin, AssemblyWindow):
     def _add_model_generator_context_actions(self, menu, item) -> None:
         kind = item.data(0, _BAS_KIND_ROLE) if item is not None else None
         menu.addSeparator()
-        for text, genesis in (("Generate Wireframe", False),
-                              ("Generate Genesis", True)):
-            action = menu.addAction(text)
-            action.setEnabled(kind in ("base", "sklt.class"))
-            action.triggered.connect(
-                lambda _checked=False, g=genesis:
-                self._generate_from_setbas_item(item, genesis=g))
+        action = menu.addAction("Generate Genesis")
+        action.setEnabled(kind in ("base", "sklt.class"))
+        action.triggered.connect(
+            lambda _checked=False: self._generate_from_setbas_item(item))
 
     def _create_viewport_context_menu(self, position=None):
         menu = super()._create_viewport_context_menu(position)
         self._sync_generator_actions()
         reset_camera = menu.actions()[-1]
-        menu.insertAction(reset_camera, self.generate_wireframe_action)
         menu.insertAction(reset_camera, self.generate_genesis_action)
         menu.insertSeparator(reset_camera)
         return menu
 
-    def _generate_from_setbas_item(self, item, *, genesis: bool) -> None:
+    def _generate_from_setbas_item(self, item) -> None:
         if self._setbas is None or item is None:
             return
         kind = item.data(0, _BAS_KIND_ROLE)
@@ -223,20 +257,17 @@ class ModelEditorWindow(EntityListMixin, SetBasMixin, AssemblyWindow):
                 if not self._preview_setbas_skeleton(
                         resource, confirm_discard=False):
                     return
-        if genesis:
-            self._right_tabs.setCurrentWidget(self._editor_tabs)
-            self._editor_tabs.setCurrentWidget(self._model_editor_panel)
-            self._sync_tab_edit_mode()
-            self._generate_genesis()
-        else:
-            self._open_wireframe_generator()
+        self._right_tabs.setCurrentWidget(self._editor_tabs)
+        self._editor_tabs.setCurrentWidget(self._model_editor_panel)
+        self._sync_tab_edit_mode()
+        self._generate_genesis()
 
     def _generate_genesis_action(self) -> None:
         """File / viewport menu: the Bas Manager selection, else the current model."""
 
         item = self._bas_manager_model_item()
         if item is not None:
-            self._generate_from_setbas_item(item, genesis=True)
+            self._generate_from_setbas_item(item)
         else:
             self._generate_genesis()
 
@@ -256,21 +287,6 @@ class ModelEditorWindow(EntityListMixin, SetBasMixin, AssemblyWindow):
             return
         self._notify("Genesis generated. Undo restores the original model; "
                      "Export Asset Family saves the result.", 7000)
-
-    def _open_wireframe_generator(self) -> None:
-        if not self.viewport.has_model:
-            return
-
-        from .wireframe_dialog import WireframeGeneratorDialog
-
-        animation_was_active = self.viewport._anim_timer.isActive()
-        if animation_was_active:
-            self.viewport._anim_timer.stop()
-        try:
-            WireframeGeneratorDialog(self.viewport, self).exec()
-        finally:
-            if animation_was_active:
-                self.viewport._anim_timer.start()
 
     def _set_document_title(self, path: str | Path | None) -> None:
         if path is None:
