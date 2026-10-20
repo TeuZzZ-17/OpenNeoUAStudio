@@ -136,7 +136,7 @@ class WindowContractV5Tests(unittest.TestCase):
             self.assertEqual(
                 [window._editor_tabs.tabText(index)
                  for index in range(window._editor_tabs.count())],
-                ["Model and Texture Editor"])
+                ["Models and Textures"])
             self.assertEqual(window.mapping_repair_action.text(),
                              "Mapping Repair")
             self.assertNotIn(

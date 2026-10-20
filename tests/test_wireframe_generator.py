@@ -9,7 +9,8 @@ import numpy as np
 from PySide6.QtCore import QPointF, QSize
 from PySide6.QtWidgets import QApplication
 from studio.rendering.asset_viewport import AssetViewport, ViewFace, ViewMaterial
-from model_editor.wireframe_generator import generate_wireframe, _mask_contours, _simplify, _smooth_mask, _visvalingam, _convex_loop
+from entity_designer.wireframe_detail import DEFAULT_DETAIL, DETAIL_LEVELS, detail_settings
+from entity_designer.wireframe_generator import generate_wireframe, _mask_contours, _simplify, _smooth_mask, _visvalingam, _convex_loop
 from studio.formats.sklt import parse_sklt_file
 
 
@@ -165,6 +166,33 @@ class WireframeGeneratorTests(unittest.TestCase):
         ys = [p[1] for p in loop]
         self.assertEqual((min(xs), max(xs), min(ys), max(ys)), (10, 110, 10, 50))
         self.assertIsNone(_convex_loop(np.zeros((10,10), dtype=bool)))
+
+    def test_detail_level_zero_keeps_the_flat_seam_that_the_default_removes(self):
+        view = self.viewport([quad(-1,0),quad(0,1,poly_id=1)])
+        raw = generate_wireframe(view, respect_transparency=False, detail=0)
+        default = generate_wireframe(view, respect_transparency=False)
+        self.assertEqual(len(raw.segments), 7)
+        self.assertEqual(len(default.segments), 4)
+        explicit = generate_wireframe(view, respect_transparency=False, detail=DEFAULT_DETAIL)
+        self.assertEqual((explicit.points, explicit.segments), (default.points, default.segments))
+
+    def test_every_detail_level_works_and_a_bad_level_is_refused(self):
+        view = self.viewport([quad(-1,0),quad(0,1,poly_id=1)])
+        for level in range(len(DETAIL_LEVELS)):
+            self.assertTrue(generate_wireframe(view, respect_transparency=False, detail=level).segments)
+        for between in (0.5, 1.5, 2.9, 3.4):
+            self.assertTrue(generate_wireframe(view, respect_transparency=False, detail=between).segments)
+        for bad in (-1, len(DETAIL_LEVELS), 4.01, float("nan"), "2", True):
+            with self.assertRaises(ValueError):
+                generate_wireframe(view, respect_transparency=False, detail=bad)
+
+    def test_a_detail_between_two_levels_blends_them(self):
+        low, high = DETAIL_LEVELS[2], DETAIL_LEVELS[3]
+        mid = detail_settings(2.5)
+        self.assertAlmostEqual(mid.contour_fraction, (low.contour_fraction+high.contour_fraction)/2)
+        self.assertAlmostEqual(mid.tooth_area, (low.tooth_area+high.tooth_area)/2)
+        self.assertEqual(detail_settings(3), DETAIL_LEVELS[3])
+        self.assertEqual(detail_settings(0), DETAIL_LEVELS[0])
 
 
 if __name__ == '__main__':
