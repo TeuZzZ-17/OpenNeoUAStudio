@@ -1,0 +1,47 @@
+{
+  "id": "blacksect",
+  "name": "Black Sect Silence",
+  "description": "Quasi nero con argento freddo: il Black Sect lavora nell'ombra.",
+  "mode": "dark",
+  "order": 25,
+  "palette": {
+    "Window": "#1f1e22",
+    "Base": "#2a292e",
+    "AlternateBase": "#37363d",
+    "Button": "#2a292e",
+    "Mid": "#515058",
+    "Midlight": "#434248",
+    "Light": "#686770",
+    "Dark": "#121214",
+    "WindowText": "#e2e1e5",
+    "Text": "#e2e1e5",
+    "ButtonText": "#e2e1e5",
+    "ToolTipBase": "#313036",
+    "ToolTipText": "#e2e1e5",
+    "Highlight": "#4d5589",
+    "HighlightedText": "#ffffff",
+    "Disabled.Text": "#807d8c",
+    "Disabled.WindowText": "#807d8c",
+    "Disabled.ButtonText": "#807d8c"
+  },
+  "tone": {
+    "Accent": "#828bc7"
+  },
+  "lists": {
+    "Hover": "#373a51",
+    "Selected": "#4d5589",
+    "DependencySelected": "#31483a",
+    "Problem": "#6e2b2b",
+    "ModifiedSelected": "#15435b",
+    "ModifiedHover": "#213e50"
+  },
+  "syntax": {
+    "key": "#97a4f7",
+    "function": "#e7c074",
+    "number": "#a7d685",
+    "string": "#e29e8d",
+    "comment": "#928ea3",
+    "line_number": "#77738c",
+    "error": "#5e2f2d"
+  }
+}

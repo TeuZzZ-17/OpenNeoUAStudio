@@ -61,41 +61,25 @@ ORIGINAL_COLORS_ROLE = MODIFIED_ROLE + 1
 MODIFIED_COLOR = QColor(255, 80, 80)
 
 
-LIST_BASE = "#2d2d2d"
+def _theme_row_color(name: str, fallback: str) -> QColor:
+    """Row color of the active theme (studio/themes/*.json, section ``lists``)."""
 
-
-LIST_SELECTED = "#006d96"
-
-
-LIST_HOVER = "#234e64"
-
-
-LIST_DEPENDENCY_SELECTED = "#31483a"
-
-
-# One selection look for every resource list (game catalog, BAS Manager,
-# entity lists). Without it some lists took the Windows accent color and
-# others the native grey.
-SELECTION_STYLE = (
-    f"QTreeView, QListView {{ background-color: {LIST_BASE}; alternate-background-color: {LIST_BASE}; }}"
-    f"QTreeView::item:selected, QListView::item:selected, QTreeView::item:selected:!active, QListView::item:selected:!active {{ background-color: {LIST_SELECTED}; color: #ffffff; }}"
-    f"QTreeView::item:hover:!selected, QListView::item:hover:!selected {{ background-color: {LIST_HOVER}; color: #ffffff; }}"
-)
+    app = QApplication.instance()
+    colors = (app.property("studioListColors") if app is not None else None) or {}
+    return QColor(colors.get(name, fallback))
 
 
 def use_standard_list_style(view, *, selected_color: str | None = None) -> None:
-    """Apply the shared list colors, with an optional selection accent."""
+    """Shared list behavior. Colors come from the app stylesheet (the theme).
+
+    ``selected_color`` marks the Asset Dependencies tree: its selected rows use the
+    theme's "active model" tint through the ``studioList`` property.
+    """
 
     view.setAlternatingRowColors(False)
     view.setMouseTracking(True)
-    if not QApplication.instance().property("studioStyleLoaded") and SELECTION_STYLE not in view.styleSheet():
-        view.setStyleSheet(view.styleSheet() + SELECTION_STYLE)
     if selected_color is not None:
-        view.setStyleSheet(
-            view.styleSheet()
-            + f"QTreeWidget::item:selected, QTreeWidget::item:selected:!active {{ background-color: {selected_color}; color: #ffffff; }}"
-            + f"QTreeWidget::item:selected:hover {{ background-color: {LIST_HOVER}; color: #ffffff; }}"
-        )
+        view.setProperty("studioList", "dependency")
 
 
 def use_resource_delegate(tree) -> None:
@@ -108,7 +92,6 @@ def use_resource_delegate(tree) -> None:
 # Rows of assets that could not be resolved (missing, ambiguous, failed to
 # load) are painted red, over the green "used by the model" tint.
 PROBLEM_ROLE = Qt.ItemDataRole.UserRole + 41
-PROBLEM_BACKGROUND = QColor("#6e2b2b")
 PROBLEM_STATUSES = frozenset(
     {"missing", "ambiguous", "failed_load", "decode failed", "skipped",
      "unsupported_loader"})
@@ -118,7 +101,7 @@ def mark_problem_item(item, problem: bool, columns: int = 1) -> None:
     """Flag a tree/list item as an unresolved asset and tint its row red."""
 
     item.setData(0, PROBLEM_ROLE, bool(problem)) if columns > 1 else item.setData(PROBLEM_ROLE, bool(problem))
-    brush = QBrush(PROBLEM_BACKGROUND) if problem else QBrush()
+    brush = QBrush(_theme_row_color("Problem", "#6e2b2b")) if problem else QBrush()
     if columns > 1:
         for column in range(columns):
             item.setBackground(column, brush)
@@ -146,9 +129,9 @@ class ResourceStatusDelegate(QStyledItemDelegate):
             visible = QStyleOptionViewItem(option)
             visible.state &= ~(QStyle.StateFlag.State_Selected | QStyle.StateFlag.State_MouseOver)
             self.initStyleOption(visible, index)
-            visible.backgroundBrush = QBrush(QColor(
-                "#15435b" if option.state & QStyle.StateFlag.State_Selected
-                else "#213e50"))
+            visible.backgroundBrush = QBrush(_theme_row_color(
+                "ModifiedSelected" if option.state & QStyle.StateFlag.State_Selected
+                else "ModifiedHover", "#15435b"))
             style = visible.widget.style()
             style.drawControl(QStyle.ControlElement.CE_ItemViewItem, visible, painter, visible.widget)
             return
@@ -178,8 +161,8 @@ def mark_resource_modified(item, modified):
 # ----------------------------------------------------------------------------
 
 DIALOG_STYLE = (
-    "QDialog { background: #15141b; }"
-    "QLabel { color: #ece9f7; background: transparent; font-size: 14px; }"
+    "QDialog { background: palette(window); }"
+    "QLabel { color: palette(window-text); background: transparent; font-size: 14px; }"
 )
 
 
@@ -284,7 +267,9 @@ def install_standard_file_menu_tail(
     return close_action, exit_action
 
 
-STATUS_COLORS = {
+# Status colors carry meaning (green = loaded) and are not part of a theme; light themes
+# get darker shades of the same hues so they stay readable on a light background.
+_STATUS_DARK_MODE = {
     "found": QColor(90, 200, 110),
     "manual": QColor(110, 170, 255),
     "manual (SET.BAS)": QColor(110, 170, 255),
@@ -293,6 +278,22 @@ STATUS_COLORS = {
     "missing": QColor(240, 90, 90),
     "decode failed": QColor(200, 90, 200),
 }
+_STATUS_LIGHT_MODE = {
+    "found": QColor(24, 125, 52),
+    "manual": QColor(24, 84, 190),
+    "manual (SET.BAS)": QColor(24, 84, 190),
+    "setbas": QColor(0, 116, 124),
+    "ambiguous": QColor(160, 94, 0),
+    "missing": QColor(190, 34, 34),
+    "decode failed": QColor(140, 36, 150),
+}
+STATUS_COLORS = dict(_STATUS_DARK_MODE)
+
+
+def apply_status_colors_for_mode(mode: str) -> None:
+    """Swap the status colors in place (other modules hold a reference to the dict)."""
+
+    STATUS_COLORS.update(_STATUS_LIGHT_MODE if mode == "light" else _STATUS_DARK_MODE)
 
 
 class ResponsiveButtonGrid(QWidget):

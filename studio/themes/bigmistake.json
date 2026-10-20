@@ -1,0 +1,47 @@
+{
+  "id": "bigmistake",
+  "name": "Big Mistake Dust",
+  "description": "Polvere beige e terra del collasso, tema chiaro neutro.",
+  "mode": "light",
+  "order": 42,
+  "palette": {
+    "Window": "#eae7e4",
+    "Base": "#f5f3f2",
+    "AlternateBase": "#e0dbd7",
+    "Button": "#f0eeec",
+    "Mid": "#a69e96",
+    "Midlight": "#d2ccc6",
+    "Light": "#ffffff",
+    "Dark": "#736b63",
+    "WindowText": "#221e1b",
+    "Text": "#221e1b",
+    "ButtonText": "#221e1b",
+    "ToolTipBase": "#ffffff",
+    "ToolTipText": "#221e1b",
+    "Highlight": "#9e572e",
+    "HighlightedText": "#ffffff",
+    "Disabled.Text": "#938476",
+    "Disabled.WindowText": "#938476",
+    "Disabled.ButtonText": "#938476"
+  },
+  "tone": {
+    "Accent": "#964b20"
+  },
+  "lists": {
+    "Hover": "#e2d1c7",
+    "Selected": "#9e572e",
+    "DependencySelected": "#c9e6d0",
+    "Problem": "#f1c3c3",
+    "ModifiedSelected": "#b9dcec",
+    "ModifiedHover": "#d3e8f2"
+  },
+  "syntax": {
+    "key": "#993d08",
+    "function": "#805307",
+    "number": "#266805",
+    "string": "#93361f",
+    "comment": "#6f6052",
+    "line_number": "#70655c",
+    "error": "#ffe0e0"
+  }
+}

@@ -341,7 +341,7 @@ class WireframePanel(QWidget):
         app = QApplication.instance()
         if app is None:
             return
-        theme = str(app.property("studioTheme") or "dark")
+        theme = str(app.property("studioThemeMode") or "dark")
         border, glow = CURRENT_BUTTON_ACCENTS.get(theme, CURRENT_BUTTON_ACCENTS["dark"])
         background = app.palette().color(QPalette.ColorRole.Highlight).name()
         self.current_button.setStyleSheet(

@@ -58,7 +58,7 @@ _REFRESH_MS = 400
 def palette_button_style(color: tuple[int, int, int]) -> str:
     """Style of one palette tab button (shared with the Map Editor)."""
 
-    light = QApplication.instance().property("studioTheme") == "light"
+    light = QApplication.instance().property("studioThemeMode") == "light"
     red, green, blue = color
     if light:
         red, green, blue = (int(channel * 0.55) for channel in color)

@@ -1,0 +1,47 @@
+{
+  "id": "sulgogar",
+  "name": "Sulgogar Nursery",
+  "description": "Turchese organico del nido Sulgogar, con riflessi di rame.",
+  "mode": "dark",
+  "order": 24,
+  "palette": {
+    "Window": "#182728",
+    "Base": "#213536",
+    "AlternateBase": "#2c4647",
+    "Button": "#213536",
+    "Mid": "#446364",
+    "Midlight": "#385152",
+    "Light": "#597c7d",
+    "Dark": "#0f1718",
+    "WindowText": "#dde8e9",
+    "Text": "#dde8e9",
+    "ButtonText": "#dde8e9",
+    "ToolTipBase": "#273e3f",
+    "ToolTipText": "#dde8e9",
+    "Highlight": "#12817d",
+    "HighlightedText": "#ffffff",
+    "Disabled.Text": "#729697",
+    "Disabled.WindowText": "#729697",
+    "Disabled.ButtonText": "#729697"
+  },
+  "tone": {
+    "Accent": "#4cf0eb"
+  },
+  "lists": {
+    "Hover": "#1b5251",
+    "Selected": "#12817d",
+    "DependencySelected": "#31483a",
+    "Problem": "#6e2b2b",
+    "ModifiedSelected": "#15435b",
+    "ModifiedHover": "#213e50"
+  },
+  "syntax": {
+    "key": "#7bf4f0",
+    "function": "#e7c074",
+    "number": "#a7d685",
+    "string": "#e4a292",
+    "comment": "#889d9d",
+    "line_number": "#738b8c",
+    "error": "#593632"
+  }
+}
