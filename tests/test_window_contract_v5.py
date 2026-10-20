@@ -181,7 +181,7 @@ class WindowContractV5Tests(unittest.TestCase):
                 "Export Runtime Loose SET")
             self.assertEqual(
                 window.export_runtime_loose_action.text(),
-                "Export Runtime Loose SET")
+                "Extract Entire Current Set")
             self.assertFalse(window.setbas_runtime_loose_button.isEnabled())
             self.assertFalse(window.export_runtime_loose_action.isEnabled())
             self.assertEqual(
@@ -208,7 +208,7 @@ class WindowContractV5Tests(unittest.TestCase):
                 window.findChildren(assembly_window_module.QProgressDialog), [])
             self.assertFalse(hasattr(window, "import_vp_package_action"))
             self.assertEqual(
-                window.save_asset_family_action.text(), "Export Asset Family")
+                window.save_asset_family_action.text(), "Export BASE")
             for removed_vp_control in (
                     "vp_import_button", "vp_new_spin", "vp_assign_button",
                     "vp_undo_button", "vp_redo_button", "vp_clear_button",
@@ -249,17 +249,14 @@ class WindowContractV5Tests(unittest.TestCase):
             self.assertEqual(
                 [action.text() for action in window.file_import_menu.actions()],
                 [
-                    "Import BAS Archive", "Import BASE", "Import SKLT",
-                    "Import ILBM",
-                    "Import Asset Family",
+                    "Import BAS Archive", "Import BASE",
                     "Import OpenNeoUA 3D",
                 ],
             )
             self.assertEqual(
                 [action.text() for action in window.file_export_menu.actions()],
                 [
-                    "Export Runtime Loose SET", "Export BASE",
-                    "Export SKLT", "Export ILBM", "Export Asset Family",
+                    "Extract Entire Current Set", "Export BASE",
                     "Export OpenNeoUA 3D", "Overwrite",
                 ],
             )
@@ -269,7 +266,7 @@ class WindowContractV5Tests(unittest.TestCase):
                     assembly_window_module.QToolBar)
                 for action in toolbar.actions() if action.text()]
             self.assertNotIn("Import BAS Archive", toolbar_texts)
-            self.assertNotIn("Import Asset Family", toolbar_texts)
+            self.assertNotIn("Import BASE", toolbar_texts)
             self.assertFalse(any(
                 "extra asset root" in label.casefold()
                 or "report" in label.casefold()
@@ -295,10 +292,11 @@ class WindowContractV5Tests(unittest.TestCase):
                     window, "_standalone_sklt_source", return_value=ref.path):
                 window._sync_geometry_save_controls()
 
-            self.assertTrue(window.save_sklt_action.isEnabled())
             self.assertTrue(window.overwrite_action.isEnabled())
-            self.assertFalse(window.save_base_action.isEnabled())
-            self.assertFalse(window.save_ilbm_action.isEnabled())
+            self.assertFalse(window.save_asset_family_action.isEnabled())
+            for removed in ("save_base_action", "save_sklt_action",
+                            "save_ilbm_action"):
+                self.assertFalse(hasattr(window, removed))
         finally:
             window.close()
 
@@ -351,21 +349,6 @@ class WindowContractV5Tests(unittest.TestCase):
                 window.open_bas_archive_dialog()
             open_setbas.assert_called_once_with(path)
             open_base.assert_not_called()
-        finally:
-            window.close()
-
-    def test_import_base_routes_standalone_base_normally(self):
-        window = AssemblyWindow()
-        try:
-            path = Path("C:/UA/Data/Objects/ASKY2.BAS")
-            with patch.object(
-                    assembly_window_module.QFileDialog, "getOpenFileName",
-                    return_value=(str(path), "BAS archive")), patch.object(
-                    window, "open_setbas") as open_setbas, patch.object(
-                    window, "open_base") as open_base:
-                window.open_base_dialog()
-            open_base.assert_called_once_with(path)
-            open_setbas.assert_not_called()
         finally:
             window.close()
 

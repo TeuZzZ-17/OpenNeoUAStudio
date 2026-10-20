@@ -167,6 +167,11 @@ from studio.ui.widgets import (
     draw_uv_polygon as _draw_uv_polygon,
     install_standard_file_menu_tail,
     LIST_DEPENDENCY_SELECTED,
+    LIST_HOVER,
+    PROBLEM_STATUSES as _PROBLEM_STATUSES,
+    ProblemRowDelegate as _ProblemRowDelegate,
+    mark_problem_item as _mark_problem_item,
+    PROBLEM_ROLE as _PROBLEM_ROLE,
     LiveRotateDialog,
     LiveScaleDialog,
     qimage_from_ilbm as _qimage_from_ilbm,
@@ -651,6 +656,7 @@ class AssemblyWindow(QMainWindow):
         self.asset_tree.setSelectionMode(
             QAbstractItemView.SelectionMode.ExtendedSelection)
         self.asset_tree.setHeaderLabels(["Asset", "Status", "Source / Path"])
+        self.asset_tree.setItemDelegate(_ProblemRowDelegate(self.asset_tree))
         self.asset_tree.setUniformRowHeights(True)
         self.asset_tree.setIndentation(12)
         self.asset_tree.setAnimated(False)
@@ -691,6 +697,13 @@ class AssemblyWindow(QMainWindow):
         self.tree_search.textChanged.connect(self._filter_asset_tree)
         self.texture_list = QListWidget()
         use_standard_list_style(self.texture_list)
+        # The global theme turns a hovered row grey, which looks like an
+        # unloaded texture: hover keeps the blue family of the selection.
+        self.texture_list.setStyleSheet(
+            self.texture_list.styleSheet()
+            + "QListWidget::item:hover:!selected { background-color: "
+            + f"{LIST_HOVER}; color: #ffffff; }}")
+        self.texture_list.setItemDelegate(_ProblemRowDelegate(self.texture_list))
         self.texture_list.setIconSize(QPixmap(96, 96).size())
         self.texture_list.setSelectionMode(
             QAbstractItemView.SelectionMode.ExtendedSelection)
@@ -1210,22 +1223,16 @@ class AssemblyWindow(QMainWindow):
         # Retain the public action attribute used by existing integrations;
         # its UI meaning remains the read-only archive import.
         self.open_base_action = self.open_bas_archive_action
-        self.import_base_action = QAction("Import BASE", self)
-        self.import_base_action.triggered.connect(self.open_base_dialog)
-        self.open_sklt_action = QAction("Import SKLT", self)
-        self.open_sklt_action.triggered.connect(self.open_sklt_dialog)
-        self.open_ilbm_action = QAction("Import ILBM", self)
-        self.open_ilbm_action.triggered.connect(self.open_ilbm_dialog)
-        self.open_family_action = QAction("Import Asset Family", self)
+        # "Import BASE" is the guided asset-family import: BASE, skeleton,
+        # textures and animations chosen in one go (each step is optional).
+        self.open_family_action = QAction("Import BASE", self)
         self.open_family_action.triggered.connect(self.open_family_dialog)
         self.import_onua3d_action = QAction("Import OpenNeoUA 3D", self)
         self.import_onua3d_action.triggered.connect(self._import_onua3d)
 
         self.file_import_menu = file_menu.addMenu("Import")
         for action in (
-                self.open_bas_archive_action, self.import_base_action,
-                self.open_sklt_action,
-                self.open_ilbm_action, self.open_family_action,
+                self.open_bas_archive_action, self.open_family_action,
                 self.import_onua3d_action):
             self.file_import_menu.addAction(action)
 
@@ -1233,20 +1240,13 @@ class AssemblyWindow(QMainWindow):
         # and Tools > BAS Archive.  Keeping one QAction means both entry
         # points always share the same enabled state and implementation.
         self.export_runtime_loose_action = QAction(
-            "Export Runtime Loose SET", self)
+            "Extract Entire Current Set", self)
         self.export_runtime_loose_action.setEnabled(False)
         self.export_runtime_loose_action.triggered.connect(
             self._export_runtime_loose_set)
-        self.save_base_action = QAction("Export BASE", self)
-        self.save_base_action.setEnabled(False)
-        self.save_base_action.triggered.connect(self._save_base_as)
-        self.save_sklt_action = QAction("Export SKLT", self)
-        self.save_sklt_action.setEnabled(False)
-        self.save_sklt_action.triggered.connect(self._save_sklt_as)
-        self.save_ilbm_action = QAction("Export ILBM", self)
-        self.save_ilbm_action.setEnabled(False)
-        self.save_ilbm_action.triggered.connect(self._save_ilbm_as)
-        self.save_asset_family_action = QAction("Export Asset Family", self)
+        # "Export BASE" is the guided asset-family export (BASE, skeleton,
+        # textures and animations as one portable package).
+        self.save_asset_family_action = QAction("Export BASE", self)
         self.save_asset_family_action.setEnabled(False)
         self.save_asset_family_action.triggered.connect(self._save_model_as)
         self.export_blender_action = QAction("Export OpenNeoUA 3D", self)
@@ -1258,8 +1258,7 @@ class AssemblyWindow(QMainWindow):
 
         self.file_export_menu = file_menu.addMenu("Export")
         for action in (
-                self.export_runtime_loose_action, self.save_base_action,
-                self.save_sklt_action, self.save_ilbm_action,
+                self.export_runtime_loose_action,
                 self.save_asset_family_action,
                 self.export_blender_action,
                 self.overwrite_action):
@@ -2497,22 +2496,6 @@ class AssemblyWindow(QMainWindow):
         with loading_resources(self, 'Loading BAS archive. Please wait…'):
             self.open_setbas(Path(path))
 
-    def open_base_dialog(self) -> None:
-        """Import a standalone, exportable BASE family entry point."""
-
-        path, _ = QFileDialog.getOpenFileName(
-            self, "Import BASE asset", str(self._last_directory),
-            "Urban Assault BASE (*.base *.bas *.BASE *.BAS);;All files (*)",
-        )
-        if path:
-            source = Path(path)
-            if source.name.casefold() == "set.bas":
-                self._notify(
-                    "SET.BAS is an archive provider: use Import BAS Archive; "
-                    "Import BASE is for standalone BASE files.", 10000)
-            else:
-                self.open_base(source)
-
     def open_base(self, path: str | Path, *, confirm_discard: bool = True) -> None:
         base_path = Path(path)
         if base_path.name.casefold() == "set.bas" and confirm_discard:
@@ -2574,55 +2557,6 @@ class AssemblyWindow(QMainWindow):
         self._set_family(family)
         if primary_path:
             self._set_document_title(primary_path)
-
-    def open_sklt_dialog(self) -> None:
-        path, _ = QFileDialog.getOpenFileName(
-            self, "Import SKLT", str(self._last_directory),
-            "Skeletons (*.sklt *.skl *.SKLT *.SKL);;All files (*)",
-        )
-        if path:
-            self._open_manual_asset_family(sklt=path)
-
-    def open_ilbm_dialog(self) -> None:
-        path, _ = QFileDialog.getOpenFileName(
-            self, "Import ILBM", str(self._last_directory),
-            "ILBM textures (*.ilbm *.ilb *.lbm *.iff *.vbmp "
-            "*.ILBM *.ILB *.LBM *.IFF *.VBMP);;All files (*)",
-        )
-        if not path:
-            return
-        source = Path(path)
-        self._last_directory = source.parent
-        try:
-            from studio.formats.images import parse_ilbm_file
-
-            image = parse_ilbm_file(source)
-            if not image.has_body:
-                raise ValueError("the selected texture has no decodable BODY")
-            palette = image.palette
-            palette_source = "embedded CMAP" if palette is not None else ""
-            if palette is None and self._family is not None:
-                palette = self._family.external_palette
-                if palette is not None:
-                    palette_source = "loaded family palette"
-            if palette is None and self._setbas is not None:
-                palette, palette_source = self._setbas_palette()
-            qimage = _qimage_from_ilbm(image, palette)
-            if qimage is None or qimage.isNull():
-                raise ValueError("the selected texture decoded to an empty image")
-        except Exception as exc:
-            QMessageBox.warning(
-                self, "Texture preview failed",
-                f"No file was modified.\n\n{exc}",
-            )
-            return
-        self._show_image_preview(
-            f"Texture preview - {source.name}",
-            f"{source.name}  |  {image.width} x {image.height}  | "
-            f"{image.kind}",
-            qimage,
-            f"Palette: {palette_source or 'grayscale fallback'}",
-        )
 
     def open_family_dialog(self) -> None:
         # Keep the chooser anchored to the most recently selected file during
@@ -8395,13 +8329,6 @@ class AssemblyWindow(QMainWindow):
         return bool(
             context is not None and not self.viewport.paste_preview_active)
 
-    def can_export_ilbm(self) -> bool:
-        family = self._family
-        return bool(
-            family is not None
-            and any(getattr(image, "has_body", False)
-                    for image in family.textures.values()))
-
     def _standalone_sklt_source(self, fam_obj) -> Path | None:
         """Loose source used only by a manual SKLT-only editing session."""
 
@@ -9664,14 +9591,9 @@ class AssemblyWindow(QMainWindow):
 
     def _sync_geometry_save_controls(self) -> None:
         family_export_enabled = self.can_save_as_geometry()
-        sklt_export_enabled = self.can_export_sklt()
-        ilbm_export_enabled = self.can_export_ilbm()
         overwrite_enabled = self.can_overwrite_geometry()
         self.model_save_button.setEnabled(overwrite_enabled)
         self.model_save_as_button.setEnabled(family_export_enabled)
-        self.save_base_action.setEnabled(family_export_enabled)
-        self.save_sklt_action.setEnabled(sklt_export_enabled)
-        self.save_ilbm_action.setEnabled(ilbm_export_enabled)
         self.save_asset_family_action.setEnabled(family_export_enabled)
         onua3d_enabled = bool(
             self._blender_export_object() is not None
@@ -10354,155 +10276,6 @@ class AssemblyWindow(QMainWindow):
             raise MappingEditError(
                 "exported SKLT failed coordinate round-trip verification")
         return verified
-
-    def _save_base_as(self) -> None:
-        context = self._model_save_context()
-        if context is None:
-            return
-        owner, family, fam_obj, _model, tree = context
-        base_label = fam_obj.base_object.name or "MODEL"
-        suggested = self._last_directory / f"{Path(base_label).stem}.BASE"
-        output, _selected_filter = QFileDialog.getSaveFileName(
-            self, "Export BASE", str(suggested),
-            "BASE model (*.BASE *.base);;All files (*)")
-        if not output:
-            return
-        target = Path(output)
-        if target.suffix.casefold() != ".base":
-            target = target.with_suffix(".BASE")
-        source = Path(family.base_path) if family.base_path else None
-        if source is not None and target.resolve() == source.resolve():
-            QMessageBox.warning(
-                self, "Choose another output file",
-                "Export BASE cannot replace the BASE currently open. "
-                "Choose a different destination.")
-            return
-        try:
-            standalone = self._bundle_base_snapshots.get(owner)
-            if standalone is None:
-                standalone = export_base_object_bytes(
-                    tree.data, fam_obj.base_object)
-            uv_edits, texture_edits = self._bundle_base_edits(owner, fam_obj)
-            structural_blocks = self._bundle_topology_states(
-                standalone, fam_obj)
-            notes = save_model_base_copy(
-                standalone, uv_edits, texture_edits, target,
-                structural_blocks=structural_blocks)
-        except (MappingEditError, OSError) as exc:
-            QMessageBox.critical(
-                self, "Export BASE failed - nothing written", str(exc))
-            return
-        self._last_directory = target.parent
-        self._log("BASE export: " + "; ".join(notes))
-        self._notify(f"BASE exported to {target}.", 8000)
-
-    def _save_sklt_as(self) -> None:
-        context = self._sklt_save_context(notify=True)
-        if context is None:
-            return
-        _owner, _family, fam_obj, model = context
-        relative = self._bundle_skeleton_relative_path(fam_obj)
-        suggested = self._last_directory / relative.name
-        output, _selected_filter = QFileDialog.getSaveFileName(
-            self, "Export SKLT", str(suggested),
-            "Skeleton (*.SKLT *.sklt);;All files (*)")
-        if not output:
-            return
-        target = Path(output)
-        if target.suffix.casefold() not in (".sklt", ".skl"):
-            target = target.with_suffix(".SKLT")
-        source_ref = getattr(fam_obj, "skeleton_ref", None)
-        source = getattr(source_ref, "path", None)
-        if source is not None and target.resolve() == Path(source).resolve():
-            QMessageBox.warning(
-                self, "Choose another output file",
-                "Export SKLT cannot replace the skeleton currently open. "
-                "Choose a different destination.")
-            return
-        try:
-            with tempfile.TemporaryDirectory(
-                    prefix="OpenNeoUAStudio_sklt_") as temp_dir:
-                temporary = Path(temp_dir) / target.name
-                self._write_verified_sklt(model, temporary)
-                warnings = _commit_verified_files([(temporary, target)])
-        except (MappingEditError, OSError, SkltParseError,
-                _BundleCommitError) as exc:
-            QMessageBox.critical(
-                self, "Export SKLT failed - nothing written", str(exc))
-            return
-        self._last_directory = target.parent
-        for warning in warnings:
-            self._log(f"SKLT export: {warning}")
-        self._notify(f"SKLT exported to {target}.", 8000)
-
-    def _current_model_texture_name(self) -> str | None:
-        """Return the texture bound to the current polygon/UV selection."""
-
-        if self._uv_ctx is not None:
-            _fam_obj, block, _block_index, _atts_index, _poly_id = self._uv_ctx
-            texture = getattr(block, "texture", None) if block is not None else None
-            name = getattr(texture, "name", "") if texture is not None else ""
-            if name:
-                return str(name)
-        if self._selected_poly is None or self._mapping_index is None:
-            return None
-        refs = self._mapping_index.refs.get(self._selected_poly, [])
-        if len(refs) != 1:
-            return None
-        texture = getattr(refs[0].block, "texture", None)
-        name = getattr(texture, "name", "") if texture is not None else ""
-        return str(name) if name else None
-
-    def _save_ilbm_as(self) -> None:
-        if self._family is None:
-            self._notify("Import an asset family before exporting an ILBM.", 5000)
-            return
-        names = self._selected_texture_names()
-        if not names:
-            item = self.texture_list.currentItem()
-            name = item.data(Qt.ItemDataRole.UserRole) if item else None
-            if name:
-                names = [str(name)]
-        if not names:
-            current_name = self._current_model_texture_name()
-            if current_name:
-                names = [current_name]
-        if not names:
-            self._notify(
-                "Select a texture in the list or a textured polygon first.",
-                5000)
-            return
-        name = names[0]
-        loaded_name = self._ensure_model_texture_loaded(name)
-        image = (self._family.textures.get(loaded_name)
-                 if loaded_name is not None else None)
-        if image is None or not image.has_body:
-            self._notify("The selected texture is not decoded.", 5000)
-            return
-        safe_name = Path(name.replace("\\", "/")).stem or "texture"
-        suggested = self._last_directory / f"{safe_name}.ILBM"
-        output, _selected_filter = QFileDialog.getSaveFileName(
-            self, "Export ILBM", str(suggested),
-            "ILBM texture (*.ILBM *.ilbm);;All files (*)")
-        if not output:
-            return
-        target = Path(output)
-        if target.suffix.casefold() not in (".ilbm", ".ilb"):
-            target = target.with_suffix(".ILBM")
-        palette = image.palette
-        if palette is None:
-            palette = self._family.external_palette
-        if palette is None and self._setbas is not None:
-            palette, _palette_source = self._setbas_palette()
-        try:
-            result = write_image_as_ilbm(
-                image, target, palette, source=name)
-        except (TextureConvertError, OSError) as exc:
-            QMessageBox.critical(
-                self, "Export ILBM failed - nothing written", str(exc))
-            return
-        self._last_directory = target.parent
-        self._notify(f"ILBM exported to {result.output}.", 8000)
 
     def _owners_for_component(self, kind: str, name: str) -> list[str]:
         family = self._family
@@ -12857,6 +12630,9 @@ class AssemblyWindow(QMainWindow):
             color = _STATUS_COLORS.get(status_key)
             if color is not None:
                 item.setForeground(1, color)
+        _mark_problem_item(
+            item, status in _PROBLEM_STATUSES or status_key in _PROBLEM_STATUSES,
+            columns=3)
         item.setData(0, Qt.ItemDataRole.UserRole, node_data)
         return item
 
@@ -12905,6 +12681,9 @@ class AssemblyWindow(QMainWindow):
         color = _STATUS_COLORS.get(status_key)
         if color is not None:
             item.setForeground(1, color)
+        _mark_problem_item(
+            item, status in _PROBLEM_STATUSES or status_key in _PROBLEM_STATUSES,
+            columns=3)
         location = (dep.display_path() if dep.resolved_path is not None else
                     dep.error or dep.source or "-")
         if dep.resolution_source:
@@ -13585,8 +13364,9 @@ class AssemblyWindow(QMainWindow):
                 name = item.data(Qt.ItemDataRole.UserRole)
                 folded = str(name).casefold() if name else ""
                 item.setForeground(text_brush)
-                item.setBackground(
-                    active_brush if folded in used else clear_brush)
+                if not item.data(_PROBLEM_ROLE):
+                    item.setBackground(
+                        active_brush if folded in used else clear_brush)
                 (used_items if folded in used else other_items).append(item)
 
             for item in used_items + other_items:
@@ -13681,6 +13461,11 @@ class AssemblyWindow(QMainWindow):
                     lines.append(f"warning: {warning}")
             item = QListWidgetItem("\n".join(lines))
             item.setData(Qt.ItemDataRole.UserRole, name)
+            _mark_problem_item(
+                item,
+                status in _PROBLEM_STATUSES
+                or (ref is not None and not ref.found
+                    and entry.archive_resource is None))
             # Status remains visible in the label/icon; valid/error rows do not
             # compete with the model-usage background through colored text.
             item.setForeground(QBrush())
