@@ -105,6 +105,39 @@ def use_resource_delegate(tree) -> None:
     tree.setItemDelegate(ResourceStatusDelegate(tree))
 
 
+# Rows of assets that could not be resolved (missing, ambiguous, failed to
+# load) are painted red, over the green "used by the model" tint.
+PROBLEM_ROLE = Qt.ItemDataRole.UserRole + 41
+PROBLEM_BACKGROUND = QColor("#6e2b2b")
+PROBLEM_STATUSES = frozenset(
+    {"missing", "ambiguous", "failed_load", "decode failed", "skipped",
+     "unsupported_loader"})
+
+
+def mark_problem_item(item, problem: bool, columns: int = 1) -> None:
+    """Flag a tree/list item as an unresolved asset and tint its row red."""
+
+    item.setData(0, PROBLEM_ROLE, bool(problem)) if columns > 1 else item.setData(PROBLEM_ROLE, bool(problem))
+    brush = QBrush(PROBLEM_BACKGROUND) if problem else QBrush()
+    if columns > 1:
+        for column in range(columns):
+            item.setBackground(column, brush)
+    else:
+        item.setBackground(brush)
+
+
+class ProblemRowDelegate(QStyledItemDelegate):
+    """Draw flagged rows red even when they are selected or hovered."""
+
+    def paint(self, painter, option, index):
+        if index.siblingAtColumn(0).data(PROBLEM_ROLE):
+            option = QStyleOptionViewItem(option)
+            option.state &= ~(QStyle.StateFlag.State_Selected
+                              | QStyle.StateFlag.State_MouseOver
+                              | QStyle.StateFlag.State_HasFocus)
+        super().paint(painter, option, index)
+
+
 class ResourceStatusDelegate(QStyledItemDelegate):
     def paint(self, painter, option, index):
         # Keep modified text red while preserving distinct selection and hover bands.
