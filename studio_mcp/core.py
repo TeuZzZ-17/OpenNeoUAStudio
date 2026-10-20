@@ -402,6 +402,11 @@ def validate(source: Source) -> dict:
     for warning in family.warnings:
         if "No CMAP palette" in warning or "external palette" in warning:
             continue  # normal: palette comes from the set
+        if "exists both loose" in warning:
+            # Studio searches the parent folder too; the engine only looks beside the BASE
+            # (and its own subfolders), so this is information, not an error.
+            notes.append("Studio resolver note: " + warning)
+            continue
         problems.append(warning)
     for obj in family.all_objects():
         if obj.skeleton is None:
