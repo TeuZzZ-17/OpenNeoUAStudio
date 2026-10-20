@@ -1,0 +1,47 @@
+{
+  "id": "beamgate",
+  "name": "Beam Gate Frost",
+  "description": "Bianco-azzurro ghiacciato dei beam gate, tema chiaro freddo.",
+  "mode": "light",
+  "order": 41,
+  "palette": {
+    "Window": "#e0e8ee",
+    "Base": "#f1f4f6",
+    "AlternateBase": "#d1dde5",
+    "Button": "#eaeff3",
+    "Mid": "#8ba1b1",
+    "Midlight": "#beceda",
+    "Light": "#ffffff",
+    "Dark": "#596d7d",
+    "WindowText": "#162027",
+    "Text": "#162027",
+    "ButtonText": "#162027",
+    "ToolTipBase": "#ffffff",
+    "ToolTipText": "#162027",
+    "Highlight": "#0f6cbd",
+    "HighlightedText": "#ffffff",
+    "Disabled.Text": "#728797",
+    "Disabled.WindowText": "#728797",
+    "Disabled.ButtonText": "#728797"
+  },
+  "tone": {
+    "Accent": "#0561b1"
+  },
+  "lists": {
+    "Hover": "#bfd6e9",
+    "Selected": "#0f6cbd",
+    "DependencySelected": "#c9e6d0",
+    "Problem": "#f1c3c3",
+    "ModifiedSelected": "#b9dcec",
+    "ModifiedHover": "#d3e8f2"
+  },
+  "syntax": {
+    "key": "#095ca5",
+    "function": "#805307",
+    "number": "#266805",
+    "string": "#93361f",
+    "comment": "#52636f",
+    "line_number": "#5c6770",
+    "error": "#ffe0e0"
+  }
+}

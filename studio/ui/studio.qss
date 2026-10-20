@@ -1,51 +1,6 @@
 /* Shared OpenNeoUA Studio controls. Semantic tab and script colors stay separate.
-   Palette entries also style native Qt controls; role tokens use the matching entry.
-   Palette.Window = #1f1f1f
-   Palette.WindowText = #e0e0e0
-   Palette.Base = #2d2d2d
-   Palette.AlternateBase = #383838
-   Palette.Text = #e0e0e0
-   Palette.Button = #2d2d2d
-   Palette.ButtonText = #e0e0e0
-   Palette.Highlight = #006d96
-   Palette.HighlightedText = #ffffff
-   Palette.Mid = #555555
-   Palette.Midlight = #454545
-   Palette.Light = #656565
-   Palette.Dark = #151515
-   Palette.ToolTipBase = #2d2d2d
-   Palette.ToolTipText = #e0e0e0
-   Palette.Disabled.Text = #999999
-   Palette.Disabled.WindowText = #999999
-   Palette.Disabled.ButtonText = #999999
-   Light.Window = #e3e5e7
-   Light.WindowText = #202020
-   Light.Base = #d8dcdf
-   Light.AlternateBase = #cbd1d6
-   Light.Text = #202020
-   Light.Button = #e9edf0
-   Light.ButtonText = #202020
-   Light.Highlight = #006d96
-   Light.HighlightedText = #ffffff
-   Light.Mid = #a0a6ac
-   Light.Midlight = #c5cbd0
-   Light.Light = #ffffff
-   Light.Dark = #707780
-   Light.ToolTipBase = #ffffff
-   Light.ToolTipText = #202020
-   Light.Disabled.Text = #707780
-   Light.Disabled.WindowText = #707780
-   Light.Disabled.ButtonText = #707780
-   LightSyntax.key = #005f9e
-   LightSyntax.function = #8a5900
-   LightSyntax.number = #386600
-   LightSyntax.string = #9a4329
-   LightSyntax.comment = #56655c
-   LightSyntax.line_number = #687078
-   LightSyntax.error = #ffe0e0
-   Tone.Accent = #f1c66d
-   LightTone.Accent = #845800
-*/
+   Colors written as a name after the at-sign are filled at runtime from the selected
+   theme file in studio/themes: palette roles, Accent and the row colors (List...). */
 QWidget { background-color: @Window; color: @WindowText; }
 QLabel { background-color: transparent; }
 QLineEdit, QComboBox, QAbstractSpinBox {
@@ -160,3 +115,10 @@ QWidget#wireframeInfoPanel QLabel#panelSubtitle,
 QWidget#wireframeInfoPanel QLabel#mutedValue { color: @Disabled.Text; }
 QWidget#wireframeInfoPanel QLabel#metricValue { color: @Accent; font-size: 16px; font-weight: 600; }
 QLabel[studioRole="warning"] { color: @Accent; }
+
+/* Rows of the Asset Dependencies tree that belong to the active model, and the hover of
+   the Asset Textures list (the generic grey hover reads as "texture not loaded"). */
+QTreeWidget[studioList="dependency"]::item:selected,
+QTreeWidget[studioList="dependency"]::item:selected:!active { background-color: @ListDependencySelected; color: @Text; }
+QTreeWidget[studioList="dependency"]::item:selected:hover { background-color: @ListHover; color: @Text; }
+QListWidget[studioList="textures"]::item:hover:!selected { background-color: @ListHover; color: @Text; }

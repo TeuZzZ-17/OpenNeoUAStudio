@@ -400,9 +400,10 @@ class AssetDependenciesWorkflowTests(unittest.TestCase):
             self.assertEqual(names, ["USED.ILBM", "A.ILBM", "B.ILBM"])
             highlighted = window.texture_list.item(0).background().color()
             self.assertGreater(highlighted.green(), highlighted.red())
+            from studio.ui.style import theme_list_color
             self.assertEqual(
                 window.texture_list.item(0).background().color().name(),
-                "#31483a")
+                theme_list_color("DependencySelected").name())
             self.assertEqual(
                 window.texture_list.item(0).foreground().style(),
                 Qt.BrushStyle.NoBrush)
@@ -427,8 +428,7 @@ class AssetDependenciesWorkflowTests(unittest.TestCase):
             self.assertEqual(
                 window.texture_list.item(1).background().style(),
                 Qt.BrushStyle.NoBrush)
-            self.assertIn("#31483a",
-                          window.asset_tree.styleSheet())
+            self.assertEqual(window.asset_tree.property("studioList"), "dependency")
         finally:
             window.close()
 

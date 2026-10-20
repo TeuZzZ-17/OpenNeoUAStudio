@@ -1,0 +1,47 @@
+{
+  "id": "ghorkov",
+  "name": "Ghorkov Iron Fist",
+  "description": "Cremisi e ferro dell'impero poliziesco Ghorkov/Kyterneser.",
+  "mode": "dark",
+  "order": 22,
+  "palette": {
+    "Window": "#261a1b",
+    "Base": "#342324",
+    "AlternateBase": "#452e30",
+    "Button": "#342324",
+    "Mid": "#624749",
+    "Midlight": "#503a3c",
+    "Light": "#7a5c5f",
+    "Dark": "#170f10",
+    "WindowText": "#e9ddde",
+    "Text": "#e9ddde",
+    "ButtonText": "#e9ddde",
+    "ToolTipBase": "#3d292a",
+    "ToolTipText": "#e9ddde",
+    "Highlight": "#b81e33",
+    "HighlightedText": "#ffffff",
+    "Disabled.Text": "#977275",
+    "Disabled.WindowText": "#977275",
+    "Disabled.ButtonText": "#977275"
+  },
+  "tone": {
+    "Accent": "#ef5a6e"
+  },
+  "lists": {
+    "Hover": "#66212a",
+    "Selected": "#b81e33",
+    "DependencySelected": "#31483a",
+    "Problem": "#6e2b2b",
+    "ModifiedSelected": "#15435b",
+    "ModifiedHover": "#213e50"
+  },
+  "syntax": {
+    "key": "#f58695",
+    "function": "#e7c074",
+    "number": "#a7d685",
+    "string": "#e29e8d",
+    "comment": "#a08b8d",
+    "line_number": "#8c7375",
+    "error": "#652b26"
+  }
+}

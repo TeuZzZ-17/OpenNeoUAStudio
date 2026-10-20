@@ -25,7 +25,7 @@ from entity_designer import destruction_fx as fx
 from entity_designer.fx_audio import FxSoundPlayer
 from entity_designer import fx_visuals
 from entity_designer.fx_authoring import FxTextSession, effect_text
-from studio.ui.widgets import LIST_BASE, LIST_SELECTED, LIST_HOVER, use_standard_list_style
+from studio.ui.widgets import use_standard_list_style
 
 SPEEDS = (0.1, 0.25, 0.5, 1.0, 2.0, 4.0)
 MODE_COLORS = {

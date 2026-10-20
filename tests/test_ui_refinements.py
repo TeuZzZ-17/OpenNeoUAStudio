@@ -40,7 +40,7 @@ def test_map_palette_is_fixed_and_preset_has_full_width(app, tmp_path, monkeypat
         window.close()
 
 
-@pytest.mark.parametrize('theme',['dark','light'])
+@pytest.mark.parametrize('theme',['dark','metropolis'])
 def test_model_tabs_stay_fixed_and_texture_rows_follow_palette(app,theme):
     apply_studio_style(theme)
     window=ModelEditorWindow()
@@ -71,7 +71,7 @@ def test_uv_background_changes_without_changing_texture_pixels(app):
     image=QImage(16,16,QImage.Format.Format_ARGB32);image.fill(Qt.GlobalColor.red)
     widget.set_data(image,[],False)
     try:
-        for theme in ('dark','light'):
+        for theme in ('dark','metropolis'):
             apply_studio_style(theme)
             output=QImage(widget.size(),QImage.Format.Format_ARGB32)
             painter=QPainter(output);widget._paint_viewport(painter);painter.end()

@@ -1,0 +1,47 @@
+{
+  "id": "resistance",
+  "name": "Resistance Command",
+  "description": "Azzurro acciaio della Resistenza: sala operativa delle Host Station. Tema predefinito.",
+  "mode": "dark",
+  "order": 0,
+  "palette": {
+    "Window": "#191f27",
+    "Base": "#222b35",
+    "AlternateBase": "#2d3946",
+    "Button": "#222b35",
+    "Mid": "#455363",
+    "Midlight": "#394451",
+    "Light": "#5b6a7c",
+    "Dark": "#0f1317",
+    "WindowText": "#dde3e9",
+    "Text": "#dde3e9",
+    "ButtonText": "#dde3e9",
+    "ToolTipBase": "#28323e",
+    "ToolTipText": "#dde3e9",
+    "Highlight": "#1579c1",
+    "HighlightedText": "#ffffff",
+    "Disabled.Text": "#728397",
+    "Disabled.WindowText": "#728397",
+    "Disabled.ButtonText": "#728397"
+  },
+  "tone": {
+    "Accent": "#47adf5"
+  },
+  "lists": {
+    "Hover": "#1d496a",
+    "Selected": "#1579c1",
+    "DependencySelected": "#31483a",
+    "Problem": "#6e2b2b",
+    "ModifiedSelected": "#15435b",
+    "ModifiedHover": "#213e50"
+  },
+  "syntax": {
+    "key": "#7bc2f4",
+    "function": "#e7c074",
+    "number": "#a7d685",
+    "string": "#e29e8d",
+    "comment": "#88929d",
+    "line_number": "#737f8c",
+    "error": "#593032"
+  }
+}

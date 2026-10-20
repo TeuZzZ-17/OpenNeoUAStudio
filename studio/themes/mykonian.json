@@ -1,0 +1,47 @@
+{
+  "id": "mykonian",
+  "name": "Mykonian Parasite",
+  "description": "Viola profondo degli invasori Mykonian e del loro Parasite.",
+  "mode": "dark",
+  "order": 23,
+  "palette": {
+    "Window": "#1f1828",
+    "Base": "#2a2136",
+    "AlternateBase": "#382c47",
+    "Button": "#2a2136",
+    "Mid": "#524464",
+    "Midlight": "#433852",
+    "Light": "#69597d",
+    "Dark": "#130f18",
+    "WindowText": "#e2dde9",
+    "Text": "#e2dde9",
+    "ButtonText": "#e2dde9",
+    "ToolTipBase": "#31273f",
+    "ToolTipText": "#e2dde9",
+    "Highlight": "#6b20b6",
+    "HighlightedText": "#ffffff",
+    "Disabled.Text": "#827297",
+    "Disabled.WindowText": "#827297",
+    "Disabled.ButtonText": "#827297"
+  },
+  "tone": {
+    "Accent": "#ad6cef"
+  },
+  "lists": {
+    "Hover": "#432167",
+    "Selected": "#6b20b6",
+    "DependencySelected": "#31483a",
+    "Problem": "#6e2b2b",
+    "ModifiedSelected": "#15435b",
+    "ModifiedHover": "#213e50"
+  },
+  "syntax": {
+    "key": "#c18cf6",
+    "function": "#e7c074",
+    "number": "#a7d685",
+    "string": "#e29e8d",
+    "comment": "#91889d",
+    "line_number": "#7e738c",
+    "error": "#5e2932"
+  }
+}

@@ -69,28 +69,26 @@ def remember_set(number):
 
 # One sheet for the floating dialog and the startup selector, so both look the same.
 RESOURCES_STYLE = """
-QDialog#resourcesDialog { background: #15141b; }
-ResourcesPanel { background: #1c1b23; border: 1px solid #34314a; border-radius: 6px; }
-ResourcesPanel QLabel { color: #d9d6e6; background: transparent; }
-ResourcesPanel QLabel#resourcesSummary { color: #a79fc9; }
+QDialog#resourcesDialog { background: palette(window); }
+ResourcesPanel { background: palette(base); border: 1px solid palette(mid); border-radius: 6px; }
+ResourcesPanel QLabel { color: palette(window-text); background: transparent; }
 ResourcesPanel QLineEdit {
-    background: #14131a; color: #ece9f7; border: 1px solid #3a3752;
-    border-radius: 4px; padding: 3px 6px; selection-background-color: #6d4fd6;
+    background: palette(base); color: palette(text); border: 1px solid palette(mid);
+    border-radius: 4px; padding: 3px 6px; selection-background-color: palette(highlight);
 }
-ResourcesPanel QLineEdit:focus { border: 1px solid #9575f2; }
+ResourcesPanel QLineEdit:focus { border: 1px solid palette(highlight); }
 ResourcesPanel QPushButton {
-    background: #2a2838; color: #ece9f7; border: 1px solid #45415f;
+    background: palette(button); color: palette(button-text); border: 1px solid palette(mid);
     border-radius: 4px; padding: 3px 12px; min-width: 0; min-height: 0;
 }
-ResourcesPanel QPushButton:hover { background: #38344d; border-color: #9575f2; }
-ResourcesPanel QPushButton#resetButton { color: #e3a7c0; }
+ResourcesPanel QPushButton:hover { background: palette(alternate-base); border-color: palette(highlight); }
 QDialog#resourcesDialog QDialogButtonBox QPushButton {
-    background: #2a2838; color: #ece9f7; border: 1px solid #45415f;
+    background: palette(button); color: palette(button-text); border: 1px solid palette(mid);
     border-radius: 4px; padding: 5px 18px; min-width: 70px; min-height: 0;
 }
-QDialog#resourcesDialog QDialogButtonBox QPushButton:hover { background: #38344d; border-color: #9575f2; }
+QDialog#resourcesDialog QDialogButtonBox QPushButton:hover { background: palette(alternate-base); border-color: palette(highlight); }
 QDialog#resourcesDialog QDialogButtonBox QPushButton:default {
-    background: #6d4fd6; border-color: #9575f2; color: white; font-weight: 600;
+    background: palette(highlight); border-color: palette(highlight); color: palette(highlighted-text); font-weight: 600;
 }
 """
 
@@ -382,7 +380,7 @@ class CompatibilityDialog(QDialog):
         for name, level, note in self.entries:
             style = COMPAT_STYLES[level]
             card = QFrame()
-            card.setStyleSheet("QFrame { background: #252930; border-radius: 6px; }")
+            card.setStyleSheet("QFrame { background: palette(alternate-base); border-radius: 6px; }")
             row = QVBoxLayout(card)
             label = QLabel(f"{name} · {style.title}")
             label.setWordWrap(True)
@@ -391,7 +389,7 @@ class CompatibilityDialog(QDialog):
             detail = QLabel(note)
             detail.setWordWrap(True)
             detail.setTextFormat(Qt.TextFormat.PlainText)
-            detail.setStyleSheet("color: #e4e8ef; padding: 2px;")
+            detail.setStyleSheet("color: palette(window-text); padding: 2px;")
             row.addWidget(detail)
             cards.addWidget(card)
         cards.addStretch()
@@ -865,23 +863,20 @@ class StartupToolSelector(QDialog):
         self.setStyleSheet(
             """
             QDialog {
-                background: #20262b;
+                background: palette(window);
             }
             QLabel#selectorTitle {
-                color: #f2f5f7;
+                color: palette(window-text);
                 font-size: 21px;
                 font-weight: 600;
             }
             QLabel#selectorSubtitle, QLabel#selectorNote {
-                color: #aeb9c1;
+                color: palette(window-text);
                 font-size: 11px;
             }
-            QLabel#selectorNote {
-                color: #8f9ca5;
-            }
             QFrame#toolList {
-                background: #171c20;
-                border: 1px solid #3b464d;
+                background: palette(base);
+                border: 1px solid palette(mid);
                 border-radius: 6px;
             }
             QFrame#toolCard {
@@ -890,24 +885,27 @@ class StartupToolSelector(QDialog):
                 border-radius: 5px;
             }
             QFrame#toolCard:hover {
-                background: #202b31;
+                background: palette(alternate-base);
             }
             QFrame#toolCard[selected="true"] {
-                background: #28566a;
-                border: 1px solid #69c9e8;
+                background: palette(highlight);
+                border: 1px solid palette(highlight);
             }
             QLabel#toolTitle {
-                color: #f2f5f7;
+                color: palette(window-text);
                 font-size: 13px;
                 font-weight: 600;
                 background: transparent;
                 border: none;
             }
             QLabel#toolDescription {
-                color: #b9c4ca;
+                color: palette(window-text);
                 font-size: 11px;
                 background: transparent;
                 border: none;
+            }
+            QFrame#toolCard[selected="true"] QLabel {
+                color: palette(highlighted-text);
             }
             QPushButton {
                 min-width: 92px;
@@ -915,14 +913,15 @@ class StartupToolSelector(QDialog):
                 padding: 4px 14px;
             }
             QPushButton#openToolButton {
-                background: #347e9a;
-                border: 1px solid #69c9e8;
+                background: palette(highlight);
+                border: 1px solid palette(highlight);
                 border-radius: 4px;
-                color: white;
+                color: palette(highlighted-text);
                 font-weight: 600;
             }
             QPushButton#openToolButton:hover {
-                background: #4197b5;
+                background: palette(highlight);
+                border-color: palette(window-text);
             }
             """)
 
