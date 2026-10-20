@@ -294,6 +294,16 @@ def _load_texture(family: AssetFamily, resolver: AssetResolver, name: str) -> No
     if not name or name in family.texture_refs:
         return
     ref = _resolve_with_setbas(family, resolver, name, "texture", "ilbm.class")
+    # Engine order for an external BASE: ILBM beside the BASE, then a PNG with the same
+    # name, then SET.BAS. The FX1/FX2/FX3 names are remapped by the engine and skip this.
+    if (ref.path is None and ref.status in ("missing", "setbas")
+            and not _is_setbas_family(family)
+            and name.casefold() not in ("fx1.ilbm", "fx2.ilbm", "fx3.ilbm")):
+        png = resolver.resolve(name.rsplit(".", 1)[0] + ".PNG", "texture")
+        if png.path is not None and png.status in ("found", "manual"):
+            png.logical_name = name
+            png.resolution_rule = "PNG fallback: no ILBM beside the BASE (engine order)"
+            ref = png
     family.texture_refs[name] = ref
 
     if ref.status in ("setbas", "manual (SET.BAS)"):

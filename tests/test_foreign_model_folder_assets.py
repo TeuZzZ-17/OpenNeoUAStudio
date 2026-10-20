@@ -1,6 +1,8 @@
 """Same-named files in other models' folders must not hide or replace the SET.BAS copy."""
 
 from pathlib import Path
+import shutil
+import tempfile
 import unittest
 
 from studio.assets.family import load_asset_family
@@ -24,6 +26,35 @@ class ForeignModelFolderAssetsTest(unittest.TestCase):
         family = load_asset_family(BASE, setbas=SETBAS)
         self.assertEqual(family.texture_refs["BAGGER.ILBM"].status, "found")
         self.assertEqual(family.animation_refs["LEOSIDE1.ANM"].status, "found")
+
+
+SKY = DATA / "Objects" / "Loose" / "h2"
+
+
+@unittest.skipUnless((SKY / "h2.BASE").is_file() and (SKY / "H.PNG").is_file(), "game data not available")
+class ExternalBasePngFallbackTest(unittest.TestCase):
+    """An external BASE uses the ILBM beside it first, then a PNG with the same name."""
+
+    def _family(self, keep_ilbm):
+        tmp = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, tmp, True)
+        for item in SKY.iterdir():
+            if keep_ilbm or item.suffix.lower() != ".ilbm":
+                shutil.copyfile(item, tmp / item.name)
+        return load_asset_family(tmp / "h2.BASE", isolated_root=tmp)
+
+    def test_png_used_when_ilbm_is_missing(self):
+        family = self._family(keep_ilbm=False)
+        ref = family.texture_refs["H.ILBM"]
+        self.assertEqual(ref.status, "found")
+        self.assertEqual(ref.path.suffix.lower(), ".png")
+        self.assertIn("H.ILBM", family.textures)
+
+    def test_ilbm_wins_over_png(self):
+        if not (SKY / "H.ILBM").is_file():
+            self.skipTest("H.ILBM not present")
+        family = self._family(keep_ilbm=True)
+        self.assertEqual(family.texture_refs["H.ILBM"].path.suffix.lower(), ".ilbm")
 
 
 if __name__ == "__main__":

@@ -511,8 +511,45 @@ def parse_ilbm_tree(tree: IffTree) -> IlbmImage:
     return img
 
 
+def parse_png_texture(path: str | Path) -> IlbmImage:
+    """Read a PNG texture as an indexed image, like the engine's PNG fallback for external BASEs.
+
+    Transparent pixels become the palette color (255,255,0), which is the engine's
+    "transparent" key. Truecolor PNGs are reduced to 256 colors (preview only).
+    """
+
+    from PySide6.QtGui import QImage
+    file_path = Path(path)
+    source = QImage(str(file_path))
+    if source.isNull():
+        raise ValueError(f"could not read PNG: {file_path}")
+    rgba = source.convertToFormat(QImage.Format.Format_RGBA8888)
+    width, height = rgba.width(), rgba.height()
+    data = bytearray(rgba.constBits().tobytes())
+    key_alpha = False
+    for i in range(0, len(data), 4):
+        if data[i + 3] < 128:
+            data[i:i + 4] = bytes((255, 255, 0, 255))
+            key_alpha = True
+        else:
+            data[i + 3] = 255
+    flat = QImage(bytes(data), width, height, width * 4, QImage.Format.Format_RGBA8888)
+    indexed = flat.convertToFormat(QImage.Format.Format_Indexed8)
+    palette: Palette = [(c >> 16 & 255, c >> 8 & 255, c & 255) for c in indexed.colorTable()]
+    pixels = bytearray()
+    for y in range(height):
+        pixels += bytes(indexed.constScanLine(y))[:width]
+    image = IlbmImage(source_name=file_path.name, kind="ILBM", width=width, height=height,
+                      palette=palette + [(0, 0, 0)] * (256 - len(palette)), pixels=bytes(pixels))
+    image.warnings.append("PNG texture shown with a reduced 256-color preview palette"
+                          + (" (transparent pixels keyed as yellow)" if key_alpha else ""))
+    return image
+
+
 def parse_ilbm_file(path: str | Path) -> IlbmImage:
     file_path = Path(path)
+    if file_path.suffix.lower() == ".png":
+        return parse_png_texture(file_path)
     tree = read_iff_file(file_path)
     img = parse_ilbm_tree(tree)
     img.source_name = file_path.name
