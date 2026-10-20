@@ -15,6 +15,8 @@ class ScriptCodeEditorTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         cls.app = QApplication.instance() or QApplication([])
+        from studio.ui.style import apply_studio_style
+        apply_studio_style('dark')  # these tests assert the colors of the Dark theme
 
     def make_editor(self, text=""):
         editor = ScriptCodeEditor()
@@ -156,10 +158,10 @@ class ScriptCodeEditorTests(unittest.TestCase):
             self.assertEqual(color_at(0, 0), "#e5bc70")
             self.assertEqual(color_at(1, 0), "#82c9ff")
             self.assertEqual(color_at(1, 6), "#b6dc8b")
-            self.assertEqual(color_at(1, 13), "#83918a")
+            self.assertEqual(color_at(1, 13), "#8d9b93")
             self.assertEqual(color_at(2, 9), "#d99a88")
             self.assertEqual(color_at(3, 9), "#d99a88")
-            self.assertEqual(color_at(3, 12), "#83918a")
+            self.assertEqual(color_at(3, 12), "#8d9b93")
 
             # The editor has one look, the Studio theme: no theme selector.
             self.assertFalse(hasattr(widget, "theme_combo"))

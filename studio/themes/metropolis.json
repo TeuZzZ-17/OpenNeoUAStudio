@@ -1,0 +1,47 @@
+{
+  "id": "metropolis",
+  "name": "Metropolis Dawn",
+  "description": "Alba crema e ambra sulle citta' cupola, tema chiaro caldo.",
+  "mode": "light",
+  "order": 40,
+  "palette": {
+    "Window": "#eee9e0",
+    "Base": "#f6f4f1",
+    "AlternateBase": "#e6dfd1",
+    "Button": "#f3f0e9",
+    "Mid": "#b2a58a",
+    "Midlight": "#dbd1bd",
+    "Light": "#ffffff",
+    "Dark": "#7e7258",
+    "WindowText": "#282215",
+    "Text": "#282215",
+    "ButtonText": "#282215",
+    "ToolTipBase": "#ffffff",
+    "ToolTipText": "#282215",
+    "Highlight": "#ab5f09",
+    "HighlightedText": "#ffffff",
+    "Disabled.Text": "#91856c",
+    "Disabled.WindowText": "#91856c",
+    "Disabled.ButtonText": "#91856c"
+  },
+  "tone": {
+    "Accent": "#914d00"
+  },
+  "lists": {
+    "Hover": "#e6d3be",
+    "Selected": "#ab5f09",
+    "DependencySelected": "#c9e6d0",
+    "Problem": "#f1c3c3",
+    "ModifiedSelected": "#b9dcec",
+    "ModifiedHover": "#d3e8f2"
+  },
+  "syntax": {
+    "key": "#884c07",
+    "function": "#805307",
+    "number": "#266805",
+    "string": "#93361f",
+    "comment": "#6f6652",
+    "line_number": "#70695c",
+    "error": "#ffe0e0"
+  }
+}

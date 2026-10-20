@@ -1,0 +1,47 @@
+{
+  "id": "taerkasten",
+  "name": "Taerkasten Ordo",
+  "description": "Ambra e ottone dell'ordine retro-luddista dei Taerkasten.",
+  "mode": "dark",
+  "order": 21,
+  "palette": {
+    "Window": "#282218",
+    "Base": "#362e21",
+    "AlternateBase": "#473d2c",
+    "Button": "#362e21",
+    "Mid": "#645844",
+    "Midlight": "#524838",
+    "Light": "#7d7059",
+    "Dark": "#18140f",
+    "WindowText": "#e9e4dd",
+    "Text": "#e9e4dd",
+    "ButtonText": "#e9e4dd",
+    "ToolTipBase": "#3f3627",
+    "ToolTipText": "#e9e4dd",
+    "Highlight": "#936d0c",
+    "HighlightedText": "#ffffff",
+    "Disabled.Text": "#978972",
+    "Disabled.WindowText": "#978972",
+    "Disabled.ButtonText": "#978972"
+  },
+  "tone": {
+    "Accent": "#fac642"
+  },
+  "lists": {
+    "Hover": "#594619",
+    "Selected": "#936d0c",
+    "DependencySelected": "#31483a",
+    "Problem": "#6e2b2b",
+    "ModifiedSelected": "#15435b",
+    "ModifiedHover": "#213e50"
+  },
+  "syntax": {
+    "key": "#f4d27b",
+    "function": "#e7c074",
+    "number": "#a7d685",
+    "string": "#e29e8d",
+    "comment": "#9d9588",
+    "line_number": "#8c8373",
+    "error": "#663224"
+  }
+}
