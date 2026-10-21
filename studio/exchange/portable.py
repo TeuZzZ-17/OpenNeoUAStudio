@@ -248,7 +248,7 @@ EXTENSION_ALIASES: dict[str, tuple[str, ...]] = {
     ".ilbm": (".ilbm", ".ilb", ".lbm", ".iff"),
     ".ilb": (".ilb", ".ilbm", ".lbm", ".iff"),
     ".lbm": (".lbm", ".ilbm", ".ilb", ".iff"),
-    ".anm": (".anm", ".vanm"),
+    ".anm": (".ANM", ".VANM"),
     ".vanm": (".vanm", ".anm"),
     ".pal": (".pal",),
 }
@@ -422,10 +422,21 @@ def _rank_candidates(matches: list[Path], file_name: str, kind: str,
     return sorted(matches, key=score)
 
 
-def _alias_names(file_name: str) -> list[str]:
+# A BASE may reference a resource without extension (e.g. the SET.BAS animation
+# "PANZERKETTEN"). When such a resource is exported, the package stores it with the
+# default extension, so the resolver must also try that name.
+_EXTENSIONLESS_CANDIDATES = {
+    "animation": (".ANM", ".VANM"),
+    "texture": (".ILBM", ".ILB", ".LBM", ".IFF", ".VBMP"),
+}
+
+
+def _alias_names(file_name: str, kind: str = "any") -> list[str]:
     stem, dot, ext = file_name.rpartition(".")
     if not dot:
-        return [file_name]
+        return [file_name] + [
+            file_name + suffix
+            for suffix in _EXTENSIONLESS_CANDIDATES.get(kind, ())]
     aliases = EXTENSION_ALIASES.get("." + ext.lower(), ("." + ext.lower(),))
     return [stem + alias for alias in aliases]
 
@@ -494,7 +505,7 @@ class AssetResolver:
         parts = normalized.split("/")
         file_name = parts[-1]
         has_subpath = len(parts) > 1
-        names = _alias_names(file_name)
+        names = _alias_names(file_name, kind)
 
         # Priority 1: exact relative path as written in the .base
         # ("Skeleton/BP_FLAK1.sklt"), tried against every root.  Applies only
