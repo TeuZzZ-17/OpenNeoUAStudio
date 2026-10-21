@@ -8,7 +8,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 import struct
 from typing import Iterator
-from studio.exchange.portable import same_path
+from studio.exchange.portable import backup_existing_file, same_path
 
 # ----------------------------------------------------------------------------
 # Generic, defensive IFF-like chunk reader for Urban Assault assets.
@@ -878,6 +878,7 @@ def write_image_as_ilbm(image: IlbmImage, out_path: str | Path,
             f"verification failed: {out_path} does not re-parse to the "
             "source pixels")
     out_path.parent.mkdir(parents=True, exist_ok=True)
+    backup_existing_file(out_path)
     out_path.write_bytes(out_bytes)
     source_path = Path(source) if source is not None else Path(
         image.source_name or "embedded_texture.VBMP")
@@ -1043,6 +1044,7 @@ def convert_png_to_ilbm(png_path: str | Path, template_path: str | Path,
             f"verification failed: {out_path} does not re-parse to the "
             "converted pixels")
     out_path.parent.mkdir(parents=True, exist_ok=True)
+    backup_existing_file(out_path)
     out_path.write_bytes(out_bytes)
     warning = ("PNG had colors outside the template palette; mapped to "
                "nearest palette colors" if palette_warning else "")

@@ -110,9 +110,11 @@ from studio.assets.visproto import (
 )
 from studio.exchange.portable import (
     AssetFamilyPackageError,
+    backup_enabled,
     commit_verified_files as _commit_verified_files,
     DirectoryIndex,
     MANIFEST_NAME as ASSET_FAMILY_MANIFEST,
+    next_backup_path as _next_backup_path,
     package_relative_path,
     VerifiedCommitError as _BundleCommitError,
 )
@@ -255,20 +257,6 @@ def _reveal_in_file_manager(path: str | Path) -> None:
         subprocess.Popen(["explorer", "/select,", str(path)])
     else:
         QDesktopServices.openUrl(QUrl.fromLocalFile(str(Path(path).parent)))
-
-
-def _next_backup_path(source: Path) -> Path:
-    """Return a non-destructive .bak path beside a loose source file."""
-
-    candidate = source.with_name(source.name + ".bak")
-    if not candidate.exists():
-        return candidate
-    index = 1
-    while True:
-        candidate = source.with_name(source.name + f".{index}.bak")
-        if not candidate.exists():
-            return candidate
-        index += 1
 
 
 class AddFxElementDialog(QDialog):
@@ -828,7 +816,7 @@ class AssemblyWindow(QMainWindow):
         self._sync_geometry_save_controls()
         self._notify(
             "Model exports are verified; overwriting a loose skeleton requires "
-            "confirmation and creates a .bak backup.", 12000)
+            "confirmation (File Backup menu: optional .bak copy).", 12000)
 
     def closeEvent(self, event) -> None:  # noqa: N802 - Qt override
         if self.viewport.paste_preview_active:
@@ -5963,14 +5951,13 @@ class AssemblyWindow(QMainWindow):
             hashlib.sha256(provider.read_bytes()).digest()
             if provider is not None and provider.is_file()
             and provider.resolve() != source.resolve() else None)
-        backup = _next_backup_path(source)
+        backup = _next_backup_path(source) if backup_enabled() else None
         try:
             original = source.read_bytes()
             with tempfile.TemporaryDirectory(
                     prefix="OpenNeoUAStudio_base_dependencies_") as temp_dir:
                 staged = Path(temp_dir) / source.name
                 save_model_base_copy(original, [], edits, staged)
-                shutil.copy2(source, backup)
                 warnings = _commit_verified_files([(staged, source)])
             if provider_digest is not None and hashlib.sha256(
                     provider.read_bytes()).digest() != provider_digest:
@@ -5978,14 +5965,16 @@ class AssemblyWindow(QMainWindow):
         except (MappingEditError, OSError, _BundleCommitError) as exc:
             QMessageBox.critical(
                 self, "Save failed - original BASE preserved",
-                f"{exc}\n\nBackup: {backup if backup.exists() else '-'}")
+                f"{exc}\n\nBackup: {backup if backup and backup.exists() else '-'}")
             return False
         self._log(
-            f"BASE dependency references saved to {source}; backup {backup}"
+            f"BASE dependency references saved to {source}"
+            + (f"; backup {backup}" if backup else "")
             + ("; " + "; ".join(warnings) if warnings else ""))
         self.open_base(source, confirm_discard=False)
         self._notify(
-            f"BASE dependencies saved and verified. Backup: {backup.name}.",
+            "BASE dependencies saved and verified."
+            + (f" Backup: {backup.name}." if backup else ""),
             9000)
         return True
 
@@ -8372,8 +8361,9 @@ class AssemblyWindow(QMainWindow):
     def _loose_base_targets(self, fam_obj) -> tuple[Path, Path] | None:
         """Skeleton and BASE files of a loose BASE opened from disk (not SET.BAS).
 
-        Overwrite replaces exactly these two files (with .bak copies), so a model
-        opened from the game folder can be saved without exporting a new package.
+        Overwrite replaces exactly these two files (with .bak copies when the Backup
+        option is enabled), so a model opened from the game folder can be saved
+        without exporting a new package.
         """
 
         family = self._family
@@ -10417,21 +10407,22 @@ class AssemblyWindow(QMainWindow):
             if source is not None:
                 self._notify(
                     f"Overwrite requested for {source.name}; confirmation is "
-                    "required and a .bak backup will be created.", 12000)
+                    "required." + (" A .bak backup will be created."
+                                   if backup_enabled() else ""), 12000)
                 answer = QMessageBox.question(
                     self, "Overwrite SKLT",
-                    f"Overwrite the imported skeleton?\n\n{source}\n\n"
-                    "A .bak copy will be created first.",
+                    f"Overwrite the imported skeleton?\n\n{source}"
+                    + ("\n\nA .bak copy will be created first."
+                       if backup_enabled() else ""),
                     QMessageBox.StandardButton.Yes
                     | QMessageBox.StandardButton.No,
                     QMessageBox.StandardButton.No,
                 )
                 if answer != QMessageBox.StandardButton.Yes:
                     return
-                backup = _next_backup_path(source)
+                backup = _next_backup_path(source) if backup_enabled() else None
                 try:
                     source.parent.mkdir(parents=True, exist_ok=True)
-                    shutil.copy2(source, backup)
                     with tempfile.TemporaryDirectory(
                             prefix="OpenNeoUAStudio_overwrite_sklt_") as temp_dir:
                         temporary = Path(temp_dir) / source.name
@@ -10443,12 +10434,12 @@ class AssemblyWindow(QMainWindow):
                     QMessageBox.critical(
                         self, "Overwrite SKLT failed - original preserved",
                         f"{exc}\n\nBackup: "
-                        f"{backup if backup.exists() else '-'}")
+                        f"{backup if backup and backup.exists() else '-'}")
                     return
                 self._geom_dirty.pop(owner, None)
                 self._geom_original.pop(owner, None)
                 self._topology_original.pop(owner, None)
-                details = f" Backup: {backup.name}."
+                details = f" Backup: {backup.name}." if backup else ""
                 if warnings:
                     details += " " + " ".join(warnings)
                 self._sync_geometry_save_controls()
@@ -10476,7 +10467,9 @@ class AssemblyWindow(QMainWindow):
             answer = QMessageBox.question(
                 self, "Overwrite BASE",
                 f"Overwrite the model opened from disk?\n\n{base_target}\n"
-                f"{skeleton_target}\n\nA .bak copy of each file is created first.",
+                f"{skeleton_target}"
+                + ("\n\nA .bak copy of each file is created first."
+                   if backup_enabled() else ""),
                 QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
                 QMessageBox.StandardButton.No)
             if answer != QMessageBox.StandardButton.Yes:
@@ -10485,7 +10478,8 @@ class AssemblyWindow(QMainWindow):
                 owner, family, fam_obj, skeleton_target, base_target,
                 ask_replace=False, inplace=inplace):
             self._notify(
-                (f"BASE and skeleton overwritten safely (.bak kept): "
+                (f"BASE and skeleton overwritten safely"
+                 f"{' (.bak kept)' if backup_enabled() else ''}: "
                  f"{base_target.name}." if inplace else
                  f"Overwritten complete asset family rooted at "
                  f"{base_target.name}."), 9000)
@@ -10523,7 +10517,7 @@ class AssemblyWindow(QMainWindow):
 
         ``inplace`` overwrites the BASE and skeletons the model was opened from:
         the package is still built and validated in a temporary folder, but only
-        the BASE and skeleton files are replaced (after .bak copies) and the
+        the BASE and skeleton files are replaced (after .bak copies, if enabled) and the
         game folder receives no other file.
         """
 
@@ -10708,7 +10702,7 @@ class AssemblyWindow(QMainWindow):
                 "Asset-family export cannot replace a BASE, skeleton, "
                 "texture or animation currently open in the editor. Choose "
                 "another folder, or use File > Overwrite to replace the "
-                "model you opened (a .bak copy is kept).")
+                "model you opened.")
             return False
 
         existing = [path for path in all_targets if path.exists()]
@@ -10995,12 +10989,11 @@ class AssemblyWindow(QMainWindow):
                         raise AssetFamilyPackageError(
                             "overwritten skeleton does not match the edited one")
 
-                if inplace:
+                if inplace and backup_enabled():
                     for _temp_file, final_file in commit_pairs:
                         if final_file.exists():
-                            backup = _next_backup_path(final_file)
-                            shutil.copy2(final_file, backup)
-                            notes.append(f"backup {backup.name}")
+                            notes.append(
+                                f"backup {_next_backup_path(final_file).name}")
                 notes.extend(_commit_verified_files(
                     commit_pairs,
                     verify=verify_inplace if inplace else

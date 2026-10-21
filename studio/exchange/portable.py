@@ -37,6 +37,47 @@ class VerifiedCommitError(OSError):
         self.rollback_complete = rollback_complete
 
 
+# Safety copies of files about to be overwritten (File Backup menu of every workspace).
+# Off by default; the Studio UI turns it on from its saved setting at startup.
+_backup_enabled = False
+
+
+def set_backup_enabled(enabled: bool) -> None:
+    global _backup_enabled
+    _backup_enabled = bool(enabled)
+
+
+def backup_enabled() -> bool:
+    return _backup_enabled
+
+
+def next_backup_path(source: Path) -> Path:
+    """Return a free ``.bak`` path beside ``source``; older backups are never overwritten."""
+
+    source = Path(source)
+    candidate = source.with_name(source.name + ".bak")
+    index = 1
+    while candidate.exists():
+        candidate = source.with_name(source.name + f".{index}.bak")
+        index += 1
+    return candidate
+
+
+def backup_existing_file(path: Path | str) -> Path | None:
+    """Copy an existing file to ``<name>.bak`` before it is overwritten.
+
+    Does nothing (returns None) when the Backup option is disabled or the file does
+    not exist yet, so every writer can call it unconditionally.
+    """
+
+    path = Path(path)
+    if not _backup_enabled or not path.is_file():
+        return None
+    backup = next_backup_path(path)
+    shutil.copy2(path, backup)
+    return backup
+
+
 def commit_verified_files(
         files: list[tuple[Path, Path]], *,
         verify: Callable[[], None] | None = None,
@@ -123,6 +164,7 @@ def commit_verified_files(
             # ``Path.exists`` is false for a broken symlink.  It still needs a
             # rollback record before the staged file replaces the link.
             if target.exists() or target.is_symlink():
+                backup_existing_file(target)
                 fd, backup_name = tempfile.mkstemp(
                     prefix=f".{target.name}.", suffix=".rollback",
                     dir=target.parent)
