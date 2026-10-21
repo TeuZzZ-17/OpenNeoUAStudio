@@ -91,7 +91,7 @@ def test_external_base_gun_uses_real_family_and_missing_or_invalid_falls_back(ap
     lib = SectorMeshLibrary(SetAssets(1).load())
     lib.buildings[250] = BuildingDef(250, guns=[GunMount(250)])
     lib.vehicles[250] = VehicleVisual(vp_normal=42,
-        base_normal='Data/Models/Base/VP_MYKO2/VP_MYKO2.BASE')
+        base_normal='Data/Models/Base/VP_MYKO2_NORMAL/VP_MYKO2_NORMAL.BASE')
     mesh = lib.building_mesh(250)
     assert mesh.faces and not mesh.missing
     assert all(face.material in lib._material_adapters for face,x,z in mesh.faces)
