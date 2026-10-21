@@ -73,6 +73,7 @@ from studio.assets.family import (
     load_asset_family,
     load_manual_family,
     PackageEntry,
+    _is_setbas_family,
     rebuild_materials,
     family_object_has_animation,
     SETBAS_OVERRIDE_PREFIX,
@@ -8377,10 +8378,32 @@ class AssemblyWindow(QMainWindow):
             and source.is_file()
         ) else None
 
+    def _loose_base_targets(self, fam_obj) -> tuple[Path, Path] | None:
+        """Skeleton and BASE files of a loose BASE opened from disk (not SET.BAS).
+
+        Overwrite replaces exactly these two files (with .bak copies), so a model
+        opened from the game folder can be saved without exporting a new package.
+        """
+
+        family = self._family
+        if family is None or family.base_path is None or fam_obj is None:
+            return None
+        base = Path(family.base_path)
+        if (base.suffix.casefold() not in (".base", ".bas") or not base.is_file()
+                or _is_setbas_family(family)):
+            return None
+        ref = getattr(fam_obj, "skeleton_ref", None)
+        skeleton = Path(ref.path) if getattr(ref, "path", None) else None
+        if skeleton is None or not skeleton.is_file():
+            return None
+        return skeleton, base
+
     def can_overwrite_geometry(self) -> bool:
         owner = self.viewport.edit_owner or self._selected_owner
         fam_obj = self._owner_to_obj.get(owner) if owner else None
         if self.can_save_as_geometry() and owner in self._bundle_targets:
+            return True
+        if self.can_save_as_geometry() and self._loose_base_targets(fam_obj):
             return True
         return bool(
             self.can_export_sklt() and fam_obj is not None
@@ -10564,17 +10587,32 @@ class AssemblyWindow(QMainWindow):
             return
         owner, family, fam_obj, _model, _tree = context
         targets = self._bundle_targets.get(owner)
+        inplace = False
+        if targets is None:
+            targets = self._loose_base_targets(fam_obj)
+            inplace = targets is not None
         if targets is None:
             self._notify(
                 "Export Asset Family before Overwrite.", 5000)
             return
         skeleton_target, base_target = targets
+        if inplace:
+            answer = QMessageBox.question(
+                self, "Overwrite BASE",
+                f"Overwrite the model opened from disk?\n\n{base_target}\n"
+                f"{skeleton_target}\n\nA .bak copy of each file is created first.",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                QMessageBox.StandardButton.No)
+            if answer != QMessageBox.StandardButton.Yes:
+                return
         if self._write_model_files(
                 owner, family, fam_obj, skeleton_target, base_target,
-                ask_replace=False):
+                ask_replace=False, inplace=inplace):
             self._notify(
-                f"Overwritten complete asset family rooted at "
-                f"{base_target.name}.", 9000)
+                (f"BASE and skeleton overwritten safely (.bak kept): "
+                 f"{base_target.name}." if inplace else
+                 f"Overwritten complete asset family rooted at "
+                 f"{base_target.name}."), 9000)
 
     @staticmethod
     def _visual_reference_names(family_objects) -> tuple[set[str], set[str]]:
@@ -10603,8 +10641,15 @@ class AssemblyWindow(QMainWindow):
 
     def _write_model_files(self, owner: str, family: AssetFamily, fam_obj,
                            skeleton_target: Path, base_target: Path,
-                           *, ask_replace: bool, staged_consumer=None) -> bool:
-        """Export one portable Asset Family package."""
+                           *, ask_replace: bool, staged_consumer=None,
+                           inplace: bool = False) -> bool:
+        """Export one portable Asset Family package.
+
+        ``inplace`` overwrites the BASE and skeletons the model was opened from:
+        the package is still built and validated in a temporary folder, but only
+        the BASE and skeleton files are replaced (after .bak copies) and the
+        game folder receives no other file.
+        """
 
         model = fam_obj.skeleton
         tree = family.base_asset.tree
@@ -10637,8 +10682,15 @@ class AssemblyWindow(QMainWindow):
                     self, "Export failed - current files unchanged",
                     str(exc))
                 return False
-            target = (skeleton_target if object_index == 0
-                      else base_target.parent / relative)
+            ref = getattr(current_obj, "skeleton_ref", None)
+            ref_path = (Path(ref.path) if ref is not None
+                        and getattr(ref, "path", None) else None)
+            if object_index == 0:
+                target = skeleton_target
+            elif inplace and ref_path is not None and ref_path.is_file():
+                target = ref_path
+            else:
+                target = base_target.parent / relative
             key = str(target.resolve()).casefold()
             previous = skeleton_targets_by_key.get(key)
             if previous is not None:
@@ -10773,12 +10825,14 @@ class AssemblyWindow(QMainWindow):
                 "Two asset dependencies resolve to the same output path. "
                 "Rename the conflicting source resources before exporting.")
             return False
-        if any(target.resolve() in forbidden for target in all_targets):
+        if not inplace and any(
+                target.resolve() in forbidden for target in all_targets):
             QMessageBox.warning(
                 self, "Choose another output folder",
                 "Asset-family export cannot replace a BASE, skeleton, "
                 "texture or animation currently open in the editor. Choose "
-                "another folder.")
+                "another folder, or use File > Overwrite to replace the "
+                "model you opened (a .bak copy is kept).")
             return False
 
         existing = [path for path in all_targets if path.exists()]
@@ -11019,10 +11073,10 @@ class AssemblyWindow(QMainWindow):
                 commit_pairs = [
                     *temp_skeletons,
                     (temp_base, base_target),
-                    *temp_animations,
-                    *temp_textures,
-                    *temp_profiles,
                 ]
+                if not inplace:
+                    commit_pairs += [
+                        *temp_animations, *temp_textures, *temp_profiles]
 
                 def verify_destination_package() -> None:
                     # The JSON manifest is a staging/verification aid, not a
@@ -11049,12 +11103,36 @@ class AssemblyWindow(QMainWindow):
                         raise AssetFamilyPackageError(
                             "committed indexed profile is incomplete: " + reason)
 
+                def verify_inplace() -> None:
+                    # The game folder does not hold the exported textures and
+                    # profiles, so reload the way the editor opened the model.
+                    DirectoryIndex.clear_cache()
+                    committed = load_asset_family(
+                        base_target, setbas=family.setbas_path)
+                    reloaded = committed.root_object
+                    if reloaded is None or reloaded.skeleton is None:
+                        raise AssetFamilyPackageError(
+                            "overwritten BASE failed to reload")
+                    if (reloaded.skeleton.polygons != model.polygons
+                            or len(reloaded.skeleton.points)
+                            != len(model.points)):
+                        raise AssetFamilyPackageError(
+                            "overwritten skeleton does not match the edited one")
+
+                if inplace:
+                    for _temp_file, final_file in commit_pairs:
+                        if final_file.exists():
+                            backup = _next_backup_path(final_file)
+                            shutil.copy2(final_file, backup)
+                            notes.append(f"backup {backup.name}")
                 notes.extend(_commit_verified_files(
-                    commit_pairs, verify=verify_destination_package))
+                    commit_pairs,
+                    verify=verify_inplace if inplace else
+                    verify_destination_package))
                 # Eradicate any stale manifest created by an older Studio
                 # export in the same destination.  The current exporter never
                 # leaves this tool-side verification file in the asset family.
-                if manifest_target.exists():
+                if not inplace and manifest_target.exists():
                     try:
                         manifest_target.unlink()
                     except OSError as exc:

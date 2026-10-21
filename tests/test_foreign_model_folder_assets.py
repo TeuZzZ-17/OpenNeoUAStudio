@@ -23,9 +23,12 @@ class ForeignModelFolderAssetsTest(unittest.TestCase):
         self.assertEqual(bad, [])
 
     def test_own_folder_files_still_win(self):
-        family = load_asset_family(BASE, setbas=SETBAS)
+        own = DATA / "Models" / "Base" / "ALPHA_VP_SIMP2_FIRE" / "ALPHA_VP_SIMP2_FIRE.BASE"
+        if not own.is_file():
+            self.skipTest("ALPHA_VP_SIMP2_FIRE not available")
+        family = load_asset_family(own, setbas=SETBAS)
         self.assertEqual(family.texture_refs["BAGGER.ILBM"].status, "found")
-        self.assertEqual(family.animation_refs["LEOSIDE1.ANM"].status, "found")
+        self.assertEqual(family.animation_refs["SIMPEL.ANM"].status, "found")
 
 
 SKY = DATA / "Objects" / "Loose" / "h2"
