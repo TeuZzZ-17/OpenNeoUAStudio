@@ -12,6 +12,7 @@ import os
 import re
 import tempfile
 from dataclasses import dataclass, field
+from studio.exchange.portable import backup_existing_file
 from .host_ai_presets import HOST_AI_PRESETS, CUSTOM_AI_PRESETS
 
 SECTOR_STEP = 1200
@@ -164,6 +165,7 @@ def atomic_write_bytes(path: str, payload: bytes) -> None:
     fd, temporary = tempfile.mkstemp(
         prefix=f".{os.path.basename(target)}.", suffix=".tmp", dir=directory)
     try:
+        backup_existing_file(target)
         with os.fdopen(fd, "wb") as stream:
             stream.write(payload)
             stream.flush()

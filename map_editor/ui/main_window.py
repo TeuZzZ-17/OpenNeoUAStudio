@@ -11,6 +11,7 @@ import time
 import copy
 import math
 import re
+from studio.exchange.portable import backup_existing_file
 from studio.ui.widgets import loading_set
 
 from PySide6.QtCore import QEvent, QObject, QRunnable, QSize, Qt, QThreadPool, QTimer, Signal
@@ -832,6 +833,7 @@ class MainWindow(QMainWindow):
         path, _ = QFileDialog.getSaveFileName(self, 'Save custom script', '', 'Scripts (*.scr);;Text (*.txt)')
         if path:
             try:
+                backup_existing_file(path)
                 with open(path, 'w', encoding='utf-8', newline='') as stream:
                     stream.write(self.doc.script_content)
             except OSError as exc:

@@ -9,6 +9,8 @@ from pathlib import Path
 import struct
 from typing import Iterable
 
+from studio.exchange.portable import backup_existing_file
+
 MAX_FILE_SIZE = 512 * 1024 * 1024
 
 
@@ -357,6 +359,7 @@ def save_sklt_with_otl2_points(
     destination.parent.mkdir(parents=True, exist_ok=True)
 
     try:
+        backup_existing_file(destination)
         with destination.open("wb") as target:
             target.write(edited)
     except OSError as exc:
@@ -411,6 +414,7 @@ def save_sklt_with_poo2_points(
     destination.parent.mkdir(parents=True, exist_ok=True)
 
     try:
+        backup_existing_file(destination)
         with destination.open("wb") as target:
             target.write(edited)
     except OSError as exc:
@@ -450,6 +454,7 @@ def save_sklt_with_poo2_pol2_structure(
     destination.parent.mkdir(parents=True, exist_ok=True)
 
     try:
+        backup_existing_file(destination)
         with destination.open("wb") as target:
             target.write(edited)
     except OSError as exc:

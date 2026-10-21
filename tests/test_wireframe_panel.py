@@ -9,6 +9,7 @@ from PySide6.QtGui import QColor
 from PySide6.QtGui import QImage
 from PySide6.QtWidgets import QApplication, QMessageBox
 
+from studio.exchange.portable import set_backup_enabled
 from studio.rendering.asset_viewport import VIEW_PRESET_ANGLES
 from entity_designer.wireframe_detail import DEFAULT_DETAIL, DETAIL_LEVELS
 from entity_designer.wireframe_panel import DEFAULT_SIMPLIFICATION, SLIDER_STEPS, WireframePanel
@@ -447,6 +448,8 @@ class WireframePanelTests(unittest.TestCase):
 
     def test_overwrite_replaces_the_current_file_keeps_a_backup_and_reads_back(self):
         import tempfile
+        set_backup_enabled(True)
+        self.addCleanup(set_backup_enabled, False)
         with tempfile.TemporaryDirectory() as folder:
             panel, path = self._panel_with_current(folder)
             original = path.read_bytes()

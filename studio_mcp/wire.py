@@ -242,7 +242,7 @@ def w_delete_polygons(ctx, select=None, drop_orphan_points: bool = True):
 def w_transform(ctx, select=None, translate=None, rotate_deg: float = 0.0, scale=1.0, pivot="center",
                 mirror: bool = False):
     """Move / rotate (degrees, in the x-z plane) / scale chosen points. translate = [dx, dz]; pivot = [x, z] or
-    'center'|'origin'. mirror=true keeps the shape symmetric across the z=0 axis like the editor's Mirror Symmetry."""
+    'center'|'origin'. mirror=true keeps the shape symmetric left/right across the x=0 axis like the editor's Mirror Symmetry."""
     wm = ctx.wm
     _need_poo2(wm)
     chosen = ctx.points(select)

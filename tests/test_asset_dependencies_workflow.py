@@ -13,7 +13,7 @@ from PySide6.QtWidgets import QApplication, QDialogButtonBox, QLineEdit
 
 from studio.workbench.window import AssemblyWindow
 from studio.assets.family import AssetFamily, FamilyObject
-from studio.exchange.portable import ResolvedFile
+from studio.exchange.portable import ResolvedFile, set_backup_enabled
 from studio.assets.dependencies import AssetDependency
 from studio.assets.mapping import (
     MappingEditError,
@@ -171,6 +171,8 @@ class AssetDependenciesWorkflowTests(unittest.TestCase):
             window.close()
 
     def test_base_dependency_specs_save_revert_and_writer_limits(self):
+        set_backup_enabled(True)
+        self.addCleanup(set_backup_enabled, False)
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
             family, obj = _writable_family(root, "FX1")

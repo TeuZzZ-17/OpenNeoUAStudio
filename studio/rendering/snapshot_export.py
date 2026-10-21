@@ -11,6 +11,8 @@ from typing import Callable
 from PySide6.QtCore import QIODevice, QSaveFile
 from PySide6.QtGui import QImage, QImageWriter
 
+from studio.exchange.portable import backup_existing_file
+
 
 FORMAT_EXTENSIONS = {
     "png": "png",
@@ -101,6 +103,7 @@ def write_static_image_atomic(
             frame, path, "WEBP", quality=max(1, min(100, int(quality))))
         return
 
+    backup_existing_file(path)
     target = QSaveFile(str(path))
     if not target.open(QIODevice.OpenModeFlag.WriteOnly):
         raise OSError(target.errorString() or f"Could not open {path}")
@@ -178,6 +181,7 @@ def _gif_palette_frame(frame):
 
 def _save_pillow_atomic(image, path: Path, image_format: str, **options) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
+    backup_existing_file(path)
     descriptor, temporary = tempfile.mkstemp(
         prefix=f".{path.stem}.", suffix=".part", dir=path.parent)
     os.close(descriptor)
