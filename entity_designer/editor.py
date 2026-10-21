@@ -255,6 +255,7 @@ class CollisionEditorWindow(QMainWindow):
         # script): state name -> VP id of the unit, and the state on screen.
         self._model_state_vps: dict[str, int] = {}
         self._model_state = "normal"
+        self._fx_base_unit = None
         self._normal_state_owner: str | None = None
         self._selected = -1
         self._selected_spheres: set[int] = set()
@@ -2703,6 +2704,10 @@ class CollisionEditorWindow(QMainWindow):
             return None, ""
         if reference.three_ds_normal or reference.base_normal:
             return None, ""
+        # The toolbar Model state wins: Cockpit View shows the state on screen.
+        toolbar_vp = self._model_state_vps.get(self._model_state)
+        if toolbar_vp is not None:
+            return toolbar_vp, f"vp_{self._model_state}"
         state = (
             self.cockpit_model_state_combo.currentData()
             if hasattr(self, "cockpit_model_state_combo") else "normal")
@@ -3948,6 +3953,12 @@ class CollisionEditorWindow(QMainWindow):
             combo.setCurrentIndex(0)
         combo.setEnabled(combo.count() > 1)
 
+    def _fx_unit_in_model_state(self, unit):
+        """The FX unit showing the Model state on screen as its normal model."""
+
+        vp = self._model_state_vps.get(self._model_state)
+        return unit if vp is None else replace(unit, normal=fx.VisualRef(vp))
+
     def _on_model_state_changed(self, _index) -> None:
         """Show another model state of the unit; the script stays untouched."""
 
@@ -3981,7 +3992,15 @@ class CollisionEditorWindow(QMainWindow):
             self.viewport._model_preview_base_owner_bounds.get(owner))
         self._refresh_collision_geometry_widget()
         self._sync_animation_controls()
+        base_unit = getattr(self, "_fx_base_unit", None)
+        if base_unit is not None and self._active_script_path is not None:
+            # Visuals & FX draws the unit from its own phases: swap the model.
+            self.fx_panel.unit = replace(
+                self.fx_panel.unit,
+                normal=self._fx_unit_in_model_state(base_unit).normal)
+            self.fx_panel._rebuild_simulation()
         self._sync_all()
+        self._sync_fx_preview()
 
     def _model_bounds(self):
         # Cockpit View may temporarily render vp_wait while collision data
@@ -5294,6 +5313,8 @@ class CollisionEditorWindow(QMainWindow):
                                                 bootstrap.find_ci(scripts, "startup.scr"))
                                                if path is not None and path.is_file())
         unit = self._fx_unit_phases(text, block, reference)
+        self._fx_base_unit = unit
+        unit = self._fx_unit_in_model_state(unit)
         if keep_view and (unit.weapon or self.fx_panel.unit.flies):
             unit = replace(unit, altitude=self.fx_panel.unit.altitude)
         self.fx_panel.set_context(
