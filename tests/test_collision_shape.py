@@ -796,6 +796,59 @@ class CollisionShapeTests(unittest.TestCase):
             window.project.collision_shape_path,
             "Data/Collision/Delete_Test.collision")
 
+    def test_collision_shape_buttons_use_two_rows_of_two(self):
+        window = CollisionEditorWindow()
+        self.addCleanup(lambda: (window._set_modified(False), window.close()))
+        from PySide6.QtWidgets import QGridLayout
+        grid = next(
+            item.layout() for item in (
+                window.collision_shape_box.layout().itemAt(index)
+                for index in range(window.collision_shape_box.layout().count()))
+            if isinstance(item.layout(), QGridLayout))
+        positions = {
+            button.text(): grid.getItemPosition(grid.indexOf(button))[:2]
+            for button in (
+                window.import_collision_shape_button,
+                window.export_collision_shape_button,
+                window.delete_collision_shape_button,
+                window.overwrite_collision_shape_button)}
+        self.assertEqual(positions, {
+            "Import": (0, 0), "Export": (0, 1),
+            "Delete": (1, 0), "Overwrite": (1, 1)})
+
+    def test_overwrite_collision_shape_rewrites_its_file_after_confirmation(self):
+        window = CollisionEditorWindow()
+        self.addCleanup(lambda: (window._set_modified(False), window.close()))
+        shape = CollisionShape(
+            "Overwrite_Test", "e" * 64, (1, 1, 1), (0, 0, 0),
+            (_tetrahedron(),))
+        window.project.collision_shape = shape
+        window._shape_preview_settings()
+        window._sync_all()
+        # A freshly generated shape has no file yet: it must be exported first.
+        self.assertFalse(window.overwrite_collision_shape_button.isEnabled())
+
+        directory = tempfile.TemporaryDirectory()
+        self.addCleanup(directory.cleanup)
+        target = Path(directory.name) / "Overwrite_Test.collision"
+        target.write_text("old", encoding="utf-8")
+        window.project.collision_shape_file_path = str(target)
+        window._sync_collision_generation_controls()
+        self.assertTrue(window.overwrite_collision_shape_button.isEnabled())
+
+        with patch.object(
+                editor_module.QMessageBox, "question",
+                return_value=QMessageBox.StandardButton.No):
+            window.overwrite_collision_shape_button.click()
+        self.assertEqual(target.read_text(encoding="utf-8"), "old")
+
+        with patch.object(
+                editor_module.QMessageBox, "question",
+                return_value=QMessageBox.StandardButton.Yes):
+            window.overwrite_collision_shape_button.click()
+        self.assertEqual(
+            target.read_text(encoding="utf-8"), collision_shape_text(shape))
+
     def test_importing_shape_keeps_existing_legacy_and_compound_spheres(self):
         window = CollisionEditorWindow()
         self.addCleanup(lambda: (window._set_modified(False), window.close()))

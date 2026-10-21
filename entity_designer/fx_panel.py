@@ -464,8 +464,7 @@ class FxEffectsView(QWidget):
         if index not in session.originals:
             return
         row = QListWidgetItem("Model\n" + fx_visuals.model_summary(
-            fx_visuals.parse_model_text(session.originals[index], panel.weapon_context),
-            panel.weapon_context))
+            fx_visuals.parse_model_text(session.originals[index])))
         row.setFlags(row.flags() | Qt.ItemFlag.ItemIsUserCheckable)
         row.setCheckState(Qt.CheckState.Unchecked if index in panel.hidden_items
                           else Qt.CheckState.Checked)
@@ -610,7 +609,7 @@ class DestructionFxPanel(QWidget):
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
         self.context = fx.CONTEXT_VEHICLE
-        self.state_session = fx_visuals.StateSession((), False)
+        self.state_session = fx_visuals.StateSession(())
         self.document = fx.FxDocument()
         self.text_session = FxTextSession(self.document, self.context)
         self.code_drawer = None
@@ -932,7 +931,7 @@ class DestructionFxPanel(QWidget):
 
     def set_script_sources(self, origins) -> None:
         self.text_session = FxTextSession(self.document, self.context, origins)
-        self.state_session = fx_visuals.StateSession(origins, self.context == fx.CONTEXT_WEAPON)
+        self.state_session = fx_visuals.StateSession(origins)
         self._fill_list(keep_selection=True)
         self.update_text_status()
         self.effects_view.update_actions()
@@ -946,10 +945,6 @@ class DestructionFxPanel(QWidget):
     @property
     def has_unsaved_text(self) -> bool:
         return self.text_session.dirty or self.state_session.dirty
-
-    @property
-    def weapon_context(self) -> bool:
-        return self.context == fx.CONTEXT_WEAPON
 
     def is_state_index(self, index) -> bool:
         """The Model row of the list has a negative index (-1 means none)."""
@@ -979,7 +974,7 @@ class DestructionFxPanel(QWidget):
 
         if fx_visuals.MODEL_INDEX not in self.hidden_items:
             return set()
-        return {state for state, _label in fx_visuals.states_for(self.weapon_context)}
+        return {state for state, _label in fx_visuals.STATES}
 
     def all_row_indexes(self) -> set[int]:
         return (set(range(len(self.document.items)))
@@ -1423,8 +1418,6 @@ class DestructionFxPanel(QWidget):
             vps.add(unit.decoration.visual.vp)
         if not unit.weapon and unit.genesis.vp > 0:
             vps.add(unit.genesis.vp)
-        if unit.weapon and unit.launch.vp > 0:
-            vps.add(unit.launch.vp)
         if unit.weapon:
             # Cluster children bring their own models and effects.
             vps |= fx.weapon_vps(unit, self.document, self.weapons, None,

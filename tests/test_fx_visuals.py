@@ -30,7 +30,7 @@ def _block(text, kind="new_vehicle"):
 
 def test_reads_top_level_keys_only_and_the_last_assignment_wins():
     text = SCRIPT.replace("energy = 100", "vp_normal = 11\n    energy = 100")
-    values = visuals.read_values(text, _block(text), weapon=False)
+    values = visuals.read_values(text, _block(text))
     assert values == {"vp_normal": "11", "base_fire": "Data/Models/Base/A.BASE"}
 
 
@@ -78,7 +78,7 @@ def test_save_writes_a_verified_file_and_refuses_a_changed_one(tmp_path: Path):
     snapshot = {path: path.read_bytes()}
     visuals.save_values(origins, {"vp_normal": "42"}, snapshot)
     assert "vp_normal = 42" in path.read_text(encoding="utf-8")
-    assert visuals.read_effective_values(origins, False)["vp_normal"] == "42"
+    assert visuals.read_effective_values(origins)["vp_normal"] == "42"
     with pytest.raises(ValueError, match="changed outside"):
         visuals.save_values(origins, {"vp_normal": "43"}, snapshot)
     assert "vp_normal = 42" in path.read_text(encoding="utf-8")

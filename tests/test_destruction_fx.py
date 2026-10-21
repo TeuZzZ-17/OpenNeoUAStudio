@@ -592,23 +592,28 @@ def test_hit_unit_preview_also_shows_the_weapon_ground_decal():
     assert not any("preview only" in note for note in on_ground.notes)
 
 
-def test_launch_flash_lives_one_second_at_the_launch_point():
-    values = fx.top_level_values(
-        "new_weapon 1\n vp_launch = 130\n 3ds_launch = Data/l.3ds\n"
-        " launch_scale = 0.2\nend\n", 0, 4)
-    look = fx.unit_look(values, weapon=True)
-    assert look["launch"] == fx.VisualRef(130, mesh3ds="Data/l.3ds")
-    assert look["launch_scale"] == 0.2
-    assert fx.unit_look(values, weapon=False)["launch"].vp == 0
-    unit = fx.UnitPhases(normal=fx.VisualRef(60), weapon=True,
-                         launch=look["launch"], launch_scale=0.2)
-    simulation = _weapon_simulation(unit)
-    flash = next(i for i in simulation.items_at(500) if i.kind == "launch")
-    assert flash.vp == 130 and flash.scale == (0.2, 0.2, 0.2)
+LAUNCH_WEAPON = (
+    "new_weapon 1\n"
+    "begin_fx\n    trigger = launch\n    mode = visual\n"
+    "    offset_xyz = 0_0_0\n    start_size = 0.2\n    end_size = 0.2\n"
+    "    duration = 1000\n    vp_model = 130\nend\n"
+    "end\n")
+
+
+def test_launch_trigger_is_a_weapon_only_begin_fx_at_the_muzzle():
+    body = "trigger = launch\nmode = visual\nduration = 100\nvp_model = 1"
+    assert _spec(body, fx.CONTEXT_WEAPON).active
+    assert not _spec(body, fx.CONTEXT_VEHICLE).active
+
+    document = fx.extract_fx_document(
+        LAUNCH_WEAPON, 0, LAUNCH_WEAPON.count("\n") - 1)
+    unit = fx.UnitPhases(normal=fx.VisualRef(60), weapon=True)
+    simulation = fx.PreviewSimulation(document, fx.CONTEXT_WEAPON,
+                                      fx.WEAPON_HIT_UNIT, unit=unit)
+    flash = next(i for i in simulation.items_at(500) if i.kind == "visual")
+    assert flash.vp == 130
     assert flash.position[1] == pytest.approx(-fx.WEAPON_LAUNCH_HEIGHT)
-    assert flash.external == ("Data/l.3ds",)
-    assert not [i for i in simulation.items_at(fx.LAUNCH_FLASH_MS + 5)
-                if i.kind == "launch"]
+    assert not [i for i in simulation.items_at(1005) if i.kind == "visual"]
 
 
 def test_spiral_orbits_the_flight_line_and_chaos_wins_over_it():

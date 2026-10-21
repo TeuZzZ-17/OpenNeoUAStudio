@@ -143,7 +143,7 @@ def visual_choices(obj, number):
     # Keep the engine's external 3DS -> BASE -> positional VP precedence.
     from entity_designer.script_model import _resolve_data_asset_path
     vp_table = None
-    for state in ("normal", "fire", "wait", "dead", "megadeth", "genesis", "launch"):
+    for state in ("normal", "fire", "wait", "dead", "megadeth", "genesis"):
         choice = None
         for prefix in ("3ds", "base"):
             value = obj.values.get(f"{prefix}_{state}", "")

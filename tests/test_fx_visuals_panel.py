@@ -51,7 +51,7 @@ def test_one_model_row_leads_the_effects_list(app, tmp_path):
 def test_unchecking_the_model_row_hides_every_model_state(app, tmp_path):
     panel, _path = _panel(app, tmp_path)
     _rows(panel)[visuals.MODEL_INDEX].setCheckState(Qt.CheckState.Unchecked)
-    assert panel.hidden_states == {"normal", "fire", "wait", "dead", "megadeth", "genesis", "launch"}
+    assert panel.hidden_states == {"normal", "fire", "wait", "dead", "megadeth", "genesis"}
     panel.show_all()
     assert panel.hidden_states == set()
     panel.hide_all()
@@ -68,13 +68,13 @@ def test_the_model_row_opens_one_editor_with_every_state_and_saves_it(app, tmp_p
     assert drawer.code.toPlainText() == (
         "vp_normal = 20\n\nbase_dead = Data/Models/Base/D.BASE")
     drawer.code.setPlainText(
-        "vp_normal = 20\nvp_fire = 33\n3ds_fire = Data/Models/3ds/f.3ds\nvp_launch = 7")
+        "vp_normal = 20\nvp_fire = 33\n3ds_fire = Data/Models/3ds/f.3ds\nvp_genesis = 7")
     drawer._apply()
     assert panel.has_unsaved_text and drawer.title_label.text().endswith("*")
     assert drawer._save()
     text = path.read_text(encoding="utf-8")
     assert "vp_fire = 33" in text and "3ds_fire = Data/Models/3ds/f.3ds" in text
-    assert "vp_launch = 7" in text and "base_dead" not in text  # a removed line leaves the script
+    assert "vp_genesis = 7" in text and "base_dead" not in text  # a removed line leaves the script
     assert saved == [True]
 
 
