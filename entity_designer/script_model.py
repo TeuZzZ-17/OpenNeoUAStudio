@@ -26,7 +26,7 @@ from studio.assets.visproto import (
     VPParseError,
     VPTable,
 )
-from studio.exchange.portable import find_existing_path
+from studio.exchange.portable import backup_existing_file, find_existing_path
 from studio.formats.base_format import BaseObject
 from studio.formats.sklt import SkltModel
 
@@ -2502,6 +2502,7 @@ def write_script_file(
     data = text.encode(encoding)
     if bom and encoding == "utf-8":
         data = b"\xef\xbb\xbf" + data
+    backup_existing_file(path)
     Path(path).write_bytes(data)
 
 
