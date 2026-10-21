@@ -79,7 +79,7 @@ def test_backup_menu_defaults_to_disable_and_follows_the_choice(isolated_setting
         install_backup_menu(window)
     for window in windows:
         actions = window.studio_backup_menu.actions()
-        assert [a.text() for a in actions] == ["Enable", "Disable"]
+        assert [a.text() for a in actions] == ["Enabled", "Disabled"]
         assert [a.isChecked() for a in actions] == [False, True]
     assert not backup_enabled()
 
