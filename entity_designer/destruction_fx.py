@@ -2457,7 +2457,7 @@ class UnitPhases:
 SEQUENCE_TRIGGER = "sequence"          # vehicle: full death
 WEAPON_HIT_UNIT = "hit_unit"           # weapon: detonate on a unit
 WEAPON_HIT_GROUND = "hit_ground"       # weapon: impact_world on terrain
-SEQUENCE_PREROLL_MS = 600.0
+SEQUENCE_PREROLL_MS = 120.0
 # How long the preview keeps the final model after the last effect ends.
 MEGADETH_HOLD_MS = 1200.0
 # Weapon flight shown before the impact: a vertical drop above the target.

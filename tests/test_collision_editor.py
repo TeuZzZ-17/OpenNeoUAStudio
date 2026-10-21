@@ -4185,8 +4185,12 @@ class CollisionEditorTests(unittest.TestCase):
         self.assertEqual(
             window._collision_shape_root_owner(), window._owner_for_vp(1))
         self.assertFalse(window._modified)
+        # Cockpit View and Visuals & FX show the same state.
+        self.assertEqual(window._cockpit_requested_vp(), (1, "vp_wait"))
+        self.assertEqual(window.fx_panel.unit.normal.vp, 1)
 
         combo.setCurrentIndex(0)
+        self.assertEqual(window.fx_panel.unit.normal.vp, 0)
         self.assertEqual(window._current_owner, normal_owner)
         self.assertEqual(
             window._collision_shape_root_owner(), window._owner_for_vp(0))
