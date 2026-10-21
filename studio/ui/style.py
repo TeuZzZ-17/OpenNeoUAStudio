@@ -1,4 +1,4 @@
-"""Shared Studio themes and menu, used by every workspace.
+"""Shared Studio themes, Theme menu and File Backup menu, used by every workspace.
 
 Every theme is one JSON file in ``studio/themes``. Adding a file there adds a theme
 to the Theme menu of every workspace: no code change is needed. A theme file holds:
@@ -129,6 +129,46 @@ def apply_studio_style(theme: str | None = None, *, persist: bool = False) -> No
                 action.setChecked(choice == theme)
     if persist:
         settings.setValue("ui/theme", theme)
+
+
+def load_backup_setting() -> bool:
+    """Apply the saved Backup choice to the writers; disabled when nothing was saved."""
+    from studio.exchange.portable import set_backup_enabled
+    enabled = QSettings("OpenNeoUA", "Studio").value("backup/enabled", False, type=bool)
+    set_backup_enabled(enabled)
+    return enabled
+
+
+def set_backup_option(enabled: bool) -> None:
+    """Enable or disable the ``.bak`` safety copy in every workspace and remember the choice."""
+    from studio.exchange.portable import set_backup_enabled
+    set_backup_enabled(enabled)
+    QSettings("OpenNeoUA", "Studio").setValue("backup/enabled", enabled)
+    for window in QApplication.topLevelWidgets():
+        for action in window.findChildren(QAction):
+            choice = action.property("studioBackupChoice")
+            if choice:
+                action.setChecked((choice == "enable") == enabled)
+
+
+def install_backup_menu(window) -> None:
+    """Add the File Backup menu (Enable / Disable); with Enable, a file about to be
+    overwritten is first copied to ``<name>.bak``."""
+    enabled = load_backup_setting()
+    menu = window.menuBar().addMenu("File Backup")
+    group = QActionGroup(menu)
+    group.setExclusive(True)
+    for choice, title in (("enable", "Enable"), ("disable", "Disable")):
+        action = menu.addAction(title)
+        action.setCheckable(True)
+        action.setToolTip("Save a .bak copy of a file before it is overwritten."
+                          if choice == "enable" else "Overwrite files without a .bak copy (default).")
+        action.setProperty("studioBackupChoice", choice)
+        action.setChecked((choice == "enable") == enabled)
+        group.addAction(action)
+        action.triggered.connect(lambda checked=False, value=(choice == "enable"):
+                                 set_backup_option(value))
+    window.studio_backup_menu = menu
 
 
 def install_theme_menu(window) -> None:

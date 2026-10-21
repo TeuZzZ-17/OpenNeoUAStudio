@@ -10,6 +10,7 @@ from pathlib import Path
 import struct
 from typing import Iterable
 
+from studio.exchange.portable import backup_existing_file
 from studio.formats.base_format import AmeshBlock, AttsEntry, parse_base_bytes
 from studio.formats.images import read_iff_bytes
 
@@ -2010,6 +2011,7 @@ def save_model_base_copy(data: bytes, uv_edits: list[UVEdit],
         raise MappingEditError("exported model BASE failed final verification")
     destination = Path(out_path)
     destination.parent.mkdir(parents=True, exist_ok=True)
+    backup_existing_file(destination)
     destination.write_bytes(edited)
     notes.append(f"saved to {destination}")
     return notes
@@ -2045,6 +2047,7 @@ def save_repaired_base(family, fam_obj, plans: list[RepairPlan],
         data = repaired
 
     out_path.parent.mkdir(parents=True, exist_ok=True)
+    backup_existing_file(out_path)
     out_path.write_bytes(data)
     notes.append(f"saved to {out_path}")
     return notes

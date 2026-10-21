@@ -510,7 +510,8 @@ def install_workspace_shell(window, key):
     menu_bar = window.menuBar()
     resources = menu_bar.addMenu("Resources")
     resources.addAction("Game Folders", lambda: _edit_resources(window))
-    from studio.ui.style import install_theme_menu
+    from studio.ui.style import install_backup_menu, install_theme_menu
+    install_backup_menu(window)
     install_theme_menu(window)
     if key in SET_MENU_TOOLS:
         install_set_menu(window, menu_bar)

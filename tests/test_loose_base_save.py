@@ -10,7 +10,7 @@ from unittest.mock import patch
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 from PySide6.QtWidgets import QApplication, QMessageBox
 
-from studio.exchange.portable import AssetResolver, _alias_names
+from studio.exchange.portable import AssetResolver, _alias_names, set_backup_enabled
 from studio.formats.sklt import parse_sklt_file
 
 DATA = Path(__file__).resolve().parents[2].parent / "UA Rising" / "Data"
@@ -56,6 +56,8 @@ class LooseBaseSaveTest(unittest.TestCase):
             self.assertTrue((out / "T.BASE").is_file())
 
     def test_overwrite_keeps_backup_and_writes_only_base_and_skeleton(self):
+        set_backup_enabled(True)
+        self.addCleanup(set_backup_enabled, False)
         with tempfile.TemporaryDirectory() as tmp:
             work = Path(tmp) / "model"
             shutil.copytree(MODEL, work)

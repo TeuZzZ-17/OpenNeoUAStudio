@@ -13,6 +13,8 @@ import sys
 import tempfile
 from typing import Iterable
 
+from studio.exchange.portable import backup_existing_file
+
 
 MAX_HULLS = 64
 MAX_VERTICES_PER_HULL = 128
@@ -359,6 +361,7 @@ def read_collision_shape(path: str | Path) -> CollisionShape:
 
 
 def write_collision_shape(path: str | Path, shape: CollisionShape) -> None:
+    backup_existing_file(path)
     Path(path).write_text(collision_shape_text(shape), encoding="utf-8", newline="\n")
 
 

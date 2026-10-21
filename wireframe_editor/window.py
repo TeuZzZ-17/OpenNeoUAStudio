@@ -57,7 +57,10 @@ MirrorGuide = tuple[tuple[float, float], tuple[float, float], bool]
 def _match_mirror_vertices(
     points: list[tuple[float, float]], scale: float
 ) -> tuple[dict[int, int], set[int]]:
-    """Match existing vertices around the Z=0 mirror axis.
+    """Match existing vertices around the X=0 mirror axis (left <-> right).
+
+    Points are (x, z). A vehicle is symmetric between its left and right side,
+    so the mirror of (x, z) is (-x, z).
 
     Pairing is intentionally conservative: only vertices already reasonably
     close to a mirrored counterpart are linked. This prevents Mirror Symmetry
@@ -68,38 +71,38 @@ def _match_mirror_vertices(
     pair_tolerance = 50.0 / safe_scale
 
     center_indices = {
-        index for index, (_x_value, z_value) in enumerate(points)
-        if abs(z_value) <= axis_tolerance
+        index for index, (x_value, _z_value) in enumerate(points)
+        if abs(x_value) <= axis_tolerance
     }
-    lower_indices = [
-        index for index, (_x_value, z_value) in enumerate(points)
-        if z_value < -axis_tolerance
+    left_indices = [
+        index for index, (x_value, _z_value) in enumerate(points)
+        if x_value < -axis_tolerance
     ]
-    upper_indices = [
-        index for index, (_x_value, z_value) in enumerate(points)
-        if z_value > axis_tolerance
+    right_indices = [
+        index for index, (x_value, _z_value) in enumerate(points)
+        if x_value > axis_tolerance
     ]
 
     candidates: list[tuple[float, int, int]] = []
-    for lower in lower_indices:
-        lower_x, lower_z = points[lower]
-        target_z = -lower_z
-        for upper in upper_indices:
-            upper_x, upper_z = points[upper]
-            distance = ((upper_x - lower_x) ** 2 + (upper_z - target_z) ** 2) ** 0.5
+    for left in left_indices:
+        left_x, left_z = points[left]
+        target_x = -left_x
+        for right in right_indices:
+            right_x, right_z = points[right]
+            distance = ((right_x - target_x) ** 2 + (right_z - left_z) ** 2) ** 0.5
             if distance <= pair_tolerance:
-                candidates.append((distance, lower, upper))
+                candidates.append((distance, left, right))
 
     pairs: dict[int, int] = {}
-    used_lower: set[int] = set()
-    used_upper: set[int] = set()
-    for _distance, lower, upper in sorted(candidates):
-        if lower in used_lower or upper in used_upper:
+    used_left: set[int] = set()
+    used_right: set[int] = set()
+    for _distance, left, right in sorted(candidates):
+        if left in used_left or right in used_right:
             continue
-        used_lower.add(lower)
-        used_upper.add(upper)
-        pairs[lower] = upper
-        pairs[upper] = lower
+        used_left.add(left)
+        used_right.add(right)
+        pairs[left] = right
+        pairs[right] = left
 
     return pairs, center_indices
 
@@ -118,13 +121,14 @@ def _apply_mirror_positions(
 
     for index in sorted(source_indices):
         point = source_positions[index]
+        # A vertex on the axis stays on it: it can only slide along Z.
         if index in center_indices:
-            positions[index] = (point[0], 0.0)
+            positions[index] = (0.0, point[1])
             continue
 
         partner = pair_map.get(index)
         if partner is None:
-            mirror_target = (point[0], -point[1])
+            mirror_target = (-point[0], point[1])
             guides.append((positions[index], mirror_target, False))
             continue
 
@@ -134,23 +138,25 @@ def _apply_mirror_positions(
         processed_pairs.add(pair_key)
 
         if partner in source_indices:
+            # Both sides are being dragged: average them so the pair stays
+            # exactly mirrored. The side each vertex started on is preserved.
             partner_point = source_positions[partner]
-            shared_x = (point[0] + partner_point[0]) * 0.5
-            radius = (abs(point[1]) + abs(partner_point[1])) * 0.5
-            index_started_lower = (
-                drag_start_points.get(index, point)[1]
-                <= drag_start_points.get(partner, partner_point)[1]
+            shared_z = (point[1] + partner_point[1]) * 0.5
+            half_width = (abs(point[0]) + abs(partner_point[0])) * 0.5
+            index_started_left = (
+                drag_start_points.get(index, point)[0]
+                <= drag_start_points.get(partner, partner_point)[0]
             )
-            if index_started_lower:
-                positions[index] = (shared_x, -radius)
-                positions[partner] = (shared_x, radius)
+            if index_started_left:
+                positions[index] = (-half_width, shared_z)
+                positions[partner] = (half_width, shared_z)
             else:
-                positions[index] = (shared_x, radius)
-                positions[partner] = (shared_x, -radius)
+                positions[index] = (half_width, shared_z)
+                positions[partner] = (-half_width, shared_z)
             guides.append((positions[index], positions[partner], True))
             continue
 
-        mirror_target = (positions[index][0], -positions[index][1])
+        mirror_target = (-positions[index][0], positions[index][1])
         positions[partner] = mirror_target
         guides.append((positions[index], mirror_target, True))
 
@@ -200,8 +206,8 @@ class MirrorGuideOverlay(QWidget):
         axis = self._canvas._to_screen((0.0, 0.0), transform)
         painter.setPen(QPen(QColor(218, 160, 255, 52), 1.0, Qt.PenStyle.DashLine))
         painter.drawLine(
-            QPointF(0.0, axis.y()),
-            QPointF(float(self.width()), axis.y()),
+            QPointF(axis.x(), 0.0),
+            QPointF(axis.x(), float(self.height())),
         )
 
         for source, target, matched in self._guides:
@@ -236,7 +242,8 @@ class WireframeEditorWindow(QMainWindow):
         self.mirror_symmetry_check = QCheckBox("Mirror Symmetry")
         self.mirror_symmetry_check.setChecked(True)
         self.mirror_symmetry_check.setToolTip(
-            "Move mode: keep existing mirrored vertices symmetric around Z=0. "
+            "Move mode: keep existing mirrored vertices symmetric between left and right "
+            "(around the vertical X=0 axis). "
             "Thin guide lines show the mirrored target while dragging."
         )
         self.mirror_symmetry_check.toggled.connect(self._mirror_symmetry_toggled)

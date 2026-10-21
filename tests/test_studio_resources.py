@@ -53,12 +53,12 @@ def test_resource_selection_is_required_and_shell_is_shared(tmp_path):
     window = QMainWindow()
     install_workspace_shell(window, "wireframe_editor")
     titles = [action.text() for action in window.menuBar().actions()]
-    assert titles == ["Resources", "Theme", "Change Editor", "Vanilla Compatibility Checker"]
+    assert titles == ["Resources", "File Backup", "Theme", "Change Editor", "Vanilla Compatibility Checker"]
     assert window.menuBar().cornerWidget() is None
     tool_titles = [action.text() for action in window.studio_change_menu.actions()]
     assert "Sector Editor" in tool_titles and "Map Editor" in tool_titles
     install_workspace_shell(window, "wireframe_editor")
-    assert len(window.menuBar().actions()) == 4
+    assert len(window.menuBar().actions()) == 5
     panel.close()
     window.close()
 
@@ -71,8 +71,8 @@ def test_change_editor_menu_follows_resources_in_every_tool():
         install_workspace_shell(window, option.key)
         titles = [action.text() for action in window.menuBar().actions()]
         # Change Set (only in the editors that use a set) sits before Change Editor.
-        assert titles[:3] == ["File", "Resources", "Theme"]
-        assert titles[3:] in (
+        assert titles[:4] == ["File", "Resources", "File Backup", "Theme"]
+        assert titles[4:] in (
             ["Change Editor", "Vanilla Compatibility Checker"],
             ["Change Set", "Change Editor", "Vanilla Compatibility Checker"])
         current = [a for a in window.studio_change_menu.actions() if a.isChecked()]

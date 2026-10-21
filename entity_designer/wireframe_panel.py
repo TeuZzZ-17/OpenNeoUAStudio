@@ -6,7 +6,6 @@ and exports the new one.
 
 from __future__ import annotations
 
-import shutil
 import tempfile
 import time
 from pathlib import Path
@@ -31,6 +30,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from studio.exchange.portable import backup_enabled, backup_existing_file
 from studio.rendering.asset_viewport import VIEW_PRESET_ANGLES
 
 from .wireframe_detail import DEFAULT_DETAIL, DETAIL_LEVELS
@@ -214,7 +214,7 @@ class WireframePanel(QWidget):
         self.overwrite_button.setEnabled(False)
         self.overwrite_button.setToolTip(
             "Replace the wireframe file this definition uses now with the new one. "
-            "A .bak copy of the old file is kept.")
+            "With the File Backup menu enabled, a .bak copy of the old file is kept.")
         self.overwrite_button.setMinimumHeight(ACTION_BUTTON_HEIGHT)
         self.overwrite_button.clicked.connect(self._overwrite_current)
         buttons.addWidget(self.overwrite_button, 1)
@@ -507,7 +507,7 @@ class WireframePanel(QWidget):
         self.error_label.setVisible(bool(text))
 
     def _overwrite_current(self) -> None:
-        """Replace the wireframe file the definition uses with the new wireframe (keeps a .bak)."""
+        """Replace the wireframe file the definition uses with the new wireframe (.bak if Backup is enabled)."""
 
         target = self.current_path
         if (self.projection is None or self._showing_current()
@@ -516,16 +516,15 @@ class WireframePanel(QWidget):
         answer = QMessageBox.question(
             self, "Overwrite wireframe",
             f"Overwrite the current wireframe?\n\n{target}\n\n"
-            "Every definition that uses this file will change. A .bak copy is created first.",
+            "Every definition that uses this file will change."
+            + (" A .bak copy is created first." if backup_enabled() else ""),
             QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
             QMessageBox.StandardButton.No)
         if answer != QMessageBox.StandardButton.Yes:
             return
-        from studio.workbench.window import _next_backup_path
-
-        backup = _next_backup_path(target)
+        backup = None
         try:
-            shutil.copy2(target, backup)
+            backup = backup_existing_file(target)
             # Written beside the original and swapped in at the end: a failure leaves the old file intact.
             with tempfile.TemporaryDirectory(dir=target.parent, prefix=".wireframe_") as folder:
                 staged = Path(folder) / target.name
@@ -544,7 +543,8 @@ class WireframePanel(QWidget):
         host = self.window()
         notify = getattr(host, "_notify", None)
         if callable(notify):
-            notify(f"Wireframe overwritten: {target.name}. Backup: {backup.name}.", 8000)
+            notify(f"Wireframe overwritten: {target.name}."
+                   + (f" Backup: {backup.name}." if backup else ""), 8000)
 
     def _save_projection(self) -> None:
         if self.projection is None or self._showing_current():
@@ -565,6 +565,7 @@ class WireframePanel(QWidget):
         if target.suffix.casefold() not in (".skl", ".sklt"):
             target = target.with_suffix(".SKL")
         try:
+            backup_existing_file(target)
             self.projection.save(target)
         except Exception as exc:
             self._show_error(f"Could not save the wireframe: {exc}")
