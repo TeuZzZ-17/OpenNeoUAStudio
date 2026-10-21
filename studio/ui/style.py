@@ -152,13 +152,13 @@ def set_backup_option(enabled: bool) -> None:
 
 
 def install_backup_menu(window) -> None:
-    """Add the File Backup menu (Enable / Disable); with Enable, a file about to be
+    """Add the File Backup menu (Enabled / Disabled); when Enabled, a file about to be
     overwritten is first copied to ``<name>.bak``."""
     enabled = load_backup_setting()
     menu = window.menuBar().addMenu("File Backup")
     group = QActionGroup(menu)
     group.setExclusive(True)
-    for choice, title in (("enable", "Enable"), ("disable", "Disable")):
+    for choice, title in (("enable", "Enabled"), ("disable", "Disabled")):
         action = menu.addAction(title)
         action.setCheckable(True)
         action.setToolTip("Save a .bak copy of a file before it is overwritten."
