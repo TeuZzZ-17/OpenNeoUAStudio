@@ -2810,7 +2810,7 @@ class CollisionEditorTests(unittest.TestCase):
             window.generate_collision_shape_button.text(),
             "Generate OpenNeoUA Collision Shape")
         self.assertEqual(
-            window.delete_collision_shape_button.text(), "Delete Collision Shape")
+            window.delete_collision_shape_button.text(), "Delete")
         self.assertIs(
             window.fire_points_box.parentWidget(), window.fire_points_tab)
         self.assertIs(
@@ -4159,6 +4159,44 @@ class CollisionEditorTests(unittest.TestCase):
         self.assertTrue(window.open_vehicle_script(
             script, object_id=object_id, object_kind=object_kind))
         return window, script
+
+    def test_model_state_menu_lists_unit_states_and_switches_the_shown_model(self):
+        text = (
+            "new_vehicle 1\n name = Serp\n vp_normal = 0\n vp_wait = 1\n"
+            " vp_dead = 0\n radius = 10\nend\n")
+        window, _script = self._script_unit_window(
+            object_id=1, object_kind="new_vehicle", script_text=text)
+        combo = window.toolbar_model_state_combo
+        # vp_dead repeats the normal model, so only Wait is a real extra state.
+        self.assertEqual(
+            [combo.itemData(index) for index in range(combo.count())],
+            ["normal", "wait"])
+        self.assertTrue(combo.isEnabled())
+        normal_owner = window._current_owner
+
+        camera = window.viewport._camera_state()
+        combo.setCurrentIndex(1)
+        # Only the model changes: the camera, and so the ground, stays put.
+        self.assertEqual(window.viewport._camera_state(), camera)
+        self.assertEqual(window._model_state, "wait")
+        self.assertEqual(window._current_owner, window._owner_for_vp(1))
+        self.assertNotEqual(window._current_owner, normal_owner)
+        # The collision shape is generated from the state on screen.
+        self.assertEqual(
+            window._collision_shape_root_owner(), window._owner_for_vp(1))
+        self.assertFalse(window._modified)
+
+        combo.setCurrentIndex(0)
+        self.assertEqual(window._current_owner, normal_owner)
+        self.assertEqual(
+            window._collision_shape_root_owner(), window._owner_for_vp(0))
+
+    def test_model_state_menu_is_disabled_without_extra_states(self):
+        window, _script = self._script_unit_window(
+            object_id=2, object_kind="new_vehicle")
+        combo = window.toolbar_model_state_combo
+        self.assertEqual(combo.count(), 1)
+        self.assertFalse(combo.isEnabled())
 
     def test_144_script_import_lists_source_units_and_filters_by_name(self):
         window, _script = self._script_unit_window(

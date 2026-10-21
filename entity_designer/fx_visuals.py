@@ -19,27 +19,22 @@ from entity_designer.script_model import (
 from studio.exchange.portable import commit_verified_files
 
 # (state, label) in the order the list shows them.
-VEHICLE_STATES = (
+STATES = (
     ("normal", "Normal"), ("fire", "Fire"), ("wait", "Wait"),
     ("dead", "Dead"), ("megadeth", "Megadeth"), ("genesis", "Genesis"),
 )
-WEAPON_STATES = VEHICLE_STATES + (("launch", "Launch"),)
 # VP is a number, BASE and 3DS are Data/... paths.
 KINDS = (("vp", "VP"), ("base", "BASE"), ("3ds", "3DS"))
 
 _FORBIDDEN_IN_PATH = re.compile(r"[;#\r\n=]")
 
 
-def states_for(weapon: bool):
-    return WEAPON_STATES if weapon else VEHICLE_STATES
-
-
 def state_keys(state: str) -> tuple[str, str, str]:
     return tuple(f"{kind}_{state}" for kind, _label in KINDS)
 
 
-def all_keys(weapon: bool) -> set[str]:
-    return {key for state, _label in states_for(weapon) for key in state_keys(state)}
+def all_keys() -> set[str]:
+    return {key for state, _label in STATES for key in state_keys(state)}
 
 
 def block_for_origin(text: str, origin):
@@ -57,10 +52,10 @@ def block_for_origin(text: str, origin):
     return None
 
 
-def read_values(text: str, block, weapon: bool) -> dict[str, str]:
+def read_values(text: str, block) -> dict[str, str]:
     """Active top-level visual keys of one block; the last assignment wins."""
 
-    keys = all_keys(weapon)
+    keys = all_keys()
     values: dict[str, str] = {}
     for _line, key, value, _indent in _top_level_assignment_rows(text, block):
         if key in keys:
@@ -68,7 +63,7 @@ def read_values(text: str, block, weapon: bool) -> dict[str, str]:
     return values
 
 
-def read_effective_values(origins, weapon: bool) -> dict[str, str]:
+def read_effective_values(origins) -> dict[str, str]:
     """Visual keys over every script part of the definition (``modify_*`` wins)."""
 
     values: dict[str, str] = {}
@@ -79,7 +74,7 @@ def read_effective_values(origins, weapon: bool) -> dict[str, str]:
             continue
         block = block_for_origin(text, origin)
         if block is not None:
-            values.update(read_values(text, block, weapon))
+            values.update(read_values(text, block))
     return values
 
 
@@ -148,7 +143,7 @@ def _insert_position(lines, block, end_line: int, key: str):
     text = "\n".join(lines) + "\n"
     rows = list(_top_level_assignment_rows(text, _Span(block.start_line, end_line)))
     visual = [row for row in rows if row[1].split("_", 1)[0] in {"vp", "base", "3ds"}
-              and row[1].split("_", 1)[-1] in {state for state, _l in WEAPON_STATES}]
+              and row[1].split("_", 1)[-1] in {state for state, _l in STATES}]
     if visual:
         return visual[-1][0] + 1, visual[-1][3]
     if rows:
@@ -200,25 +195,25 @@ MODEL_INDEX = -2
 
 
 def state_label(state: str) -> str:
-    return dict(WEAPON_STATES)[state]
+    return dict(STATES)[state]
 
 
-def model_text(values: dict[str, str], weapon: bool) -> str:
+def model_text(values: dict[str, str]) -> str:
     """The editable lines of every state, one blank line between states."""
 
     groups = []
-    for state, _label in states_for(weapon):
+    for state, _label in STATES:
         lines = [f"{key} = {values[key]}" for key in state_keys(state) if values.get(key)]
         if lines:
             groups.append("\n".join(lines))
     return "\n\n".join(groups)
 
 
-def model_summary(values: dict[str, str], weapon: bool) -> str:
+def model_summary(values: dict[str, str]) -> str:
     """One line per state that has a model, in the order of the text."""
 
     parts = []
-    for state, label in states_for(weapon):
+    for state, label in STATES:
         vp_key, base_key, mesh_key = state_keys(state)
         shown = (f"3DS {values[mesh_key]}" if values.get(mesh_key)
                  else f"BASE {values[base_key]}" if values.get(base_key)
@@ -228,10 +223,10 @@ def model_summary(values: dict[str, str], weapon: bool) -> str:
     return "\n".join(parts) or "No model"
 
 
-def parse_model_text(text: str, weapon: bool) -> dict[str, str]:
+def parse_model_text(text: str) -> dict[str, str]:
     """Check an edited Model text; returns every state key ("" = not set)."""
 
-    keys = all_keys(weapon)
+    keys = all_keys()
     updates = {key: "" for key in keys}
     for number, line in enumerate(text.splitlines(), 1):
         code = re.split(r";|//|#", line, maxsplit=1)[0].strip()
@@ -242,8 +237,7 @@ def parse_model_text(text: str, weapon: bool) -> dict[str, str]:
         if not separator or key not in keys:
             raise ValueError(
                 f"Line {number}: only vp_, base_ and 3ds_ keys of the model states "
-                f"(normal, fire, wait, dead, megadeth, genesis"
-                f"{', launch' if weapon else ''}) can be written here.")
+                f"(normal, fire, wait, dead, megadeth, genesis) can be written here.")
         updates[key] = normalize_value(key, value)
     return updates
 
@@ -251,8 +245,7 @@ def parse_model_text(text: str, weapon: bool) -> dict[str, str]:
 class StateSession:
     """Draft and saving of the Model row, like ``FxTextSession`` does for effects."""
 
-    def __init__(self, origins, weapon: bool) -> None:
-        self.weapon = weapon
+    def __init__(self, origins) -> None:
         self.origins = [(Path(path), first, last) for path, first, last in origins]
         self.source_error = ""
         self.snapshots: dict[Path, bytes] = {}
@@ -261,8 +254,8 @@ class StateSession:
                 self.snapshots[path] = path.read_bytes()
             except OSError as exc:
                 self.source_error = str(exc)
-        self.values = read_effective_values(self.origins, weapon) if self.origins else {}
-        self.originals = ({MODEL_INDEX: model_text(self.values, weapon)}
+        self.values = read_effective_values(self.origins) if self.origins else {}
+        self.originals = ({MODEL_INDEX: model_text(self.values)}
                           if self.origins else {})
         self.drafts = dict(self.originals)
 
@@ -280,7 +273,7 @@ class StateSession:
         """Validate a draft; the preview of the models changes when it is saved."""
 
         self.drafts[index] = text
-        parse_model_text(text, self.weapon)
+        parse_model_text(text)
         return None, []
 
     def revert(self, index: int) -> None:
@@ -292,11 +285,11 @@ class StateSession:
             return set()
         if self.source_error or not self.origins:
             raise ValueError(self.source_error or "No script source is attached to this definition.")
-        updates = parse_model_text(self.drafts[MODEL_INDEX], self.weapon)
+        updates = parse_model_text(self.drafts[MODEL_INDEX])
         path = save_values(self.origins, updates, self.snapshots)
         self.snapshots[path] = path.read_bytes()
-        self.values = read_effective_values(self.origins, self.weapon)
-        self.originals[MODEL_INDEX] = model_text(self.values, self.weapon)
+        self.values = read_effective_values(self.origins)
+        self.originals[MODEL_INDEX] = model_text(self.values)
         self.drafts[MODEL_INDEX] = self.originals[MODEL_INDEX]
         return {path}
 
