@@ -1929,6 +1929,36 @@ def rewrite_block_texture_template(
     return parsed.root.ades[0].source_objt_bytes
 
 
+def rewrite_ade_point_template(block, point_id: int) -> bytes:
+    """Return one ADES OBJT template whose ADE/STRC point reference (emitters, AREA) is ``point_id``."""
+
+    template = getattr(block, "source_objt_bytes", b"")
+    if not template:
+        raise MappingEditError("material block has no parsed source OBJT")
+    if not (-0x8000 <= int(point_id) <= 0x7FFF):
+        raise MappingEditError("the point id is outside the signed 16-bit range")
+    wrapped = _wrap_ades_objt(template)
+    parsed = parse_base_bytes(wrapped, "<ade-point-template>")
+    if parsed.root is None or parsed.tree is None or len(parsed.root.ades) != 1:
+        raise MappingEditError("material template failed to parse")
+    ade = parsed.root.ades[0]
+    if ade.ade_strc_chunk_offset < 0 or ade.ade_strc_chunk_size < 10:
+        raise MappingEditError("this block has no writable ADE/STRC point reference")
+    chunk = next((node for node in parsed.tree.iter_all()
+                  if node.offset == ade.ade_strc_chunk_offset), None)
+    if chunk is None or chunk.available_size < 10:
+        raise MappingEditError("the ADE/STRC chunk is truncated")
+    payload = bytearray(chunk.payload(wrapped))
+    struct.pack_into(">h", payload, 4, int(point_id))
+    rebuilt = _rebuild_iff_chunk(
+        wrapped, parsed.tree.roots[0], {chunk.offset: bytes(payload)})
+    verified = parse_base_bytes(rebuilt, "<ade-point-template-rewritten>")
+    if verified.root is None or len(verified.root.ades) != 1 \
+            or verified.root.ades[0].ade_point_id != int(point_id):
+        raise MappingEditError("the rewritten point reference did not verify")
+    return verified.root.ades[0].source_objt_bytes
+
+
 def save_model_base_copy(data: bytes, uv_edits: list[UVEdit],
                          texture_edits: list[TextureNameEdit],
                          out_path: str | Path,

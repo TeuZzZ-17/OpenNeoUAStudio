@@ -7,9 +7,7 @@ Rendering lives in render_worker.py because it needs a Qt application.
 from __future__ import annotations
 
 import hashlib
-import math
 import os
-import random
 import re
 import sys
 import tempfile
@@ -21,10 +19,10 @@ if str(STUDIO_ROOT) not in sys.path:
     sys.path.insert(0, str(STUDIO_ROOT))
 
 from studio.assets.family import load_asset_family  # noqa: E402
+from studio.exchange.portable import DirectoryIndex  # noqa: E402
 from studio.assets.mapping import export_base_object_bytes  # noqa: E402
 from studio.formats.base_format import parse_base_file  # noqa: E402
 from studio.formats.setbas import SetBasArchive, read_setbas  # noqa: E402
-from studio.formats.sklt import parse_sklt_bytes, parse_sklt_file, save_sklt_with_poo2_points  # noqa: E402
 
 
 class McpToolError(Exception):
@@ -50,8 +48,8 @@ def work_dir() -> Path:
 
 
 def writable_roots() -> list[Path]:
-    """Folders the MCP may write to: game models, plus any extra roots from ONUA_MCP_WRITE_ROOTS."""
-    roots = [data_root() / "Models", work_dir()]
+    """Folders the MCP may write to: game models and wireframes, plus any extra roots from ONUA_MCP_WRITE_ROOTS."""
+    roots = [data_root() / "Models", data_root() / "Wireless", work_dir()]
     for extra in os.environ.get("ONUA_MCP_WRITE_ROOTS", "").split(os.pathsep):
         if extra.strip():
             roots.append(Path(extra.strip()).resolve())
@@ -208,6 +206,9 @@ def resolve_source(spec: str, set_hint: str = "") -> Source:
 
 
 def load_family(source: Source):
+    # The resolver caches folder listings per process; this server writes files (new .ANM, edited models) and
+    # must see them on the next call, so every load starts from a fresh listing.
+    DirectoryIndex.clear_cache()
     return load_asset_family(source.base_path, setbas=source.setbas_path)
 
 
@@ -251,8 +252,14 @@ def describe(source: Source) -> dict:
             "objects": objects, "warnings": family.warnings, "checks": [list(c) for c in family.checks]}
 
 
-def geometry(source: Source, owner_path: str = "") -> dict:
-    """Points and polygons of one object (the first one with a skeleton by default)."""
+def geometry(source: Source, owner_path: str = "", points=None, polygons=None, with_uvs: bool = False,
+             precision: int = 3) -> dict:
+    """Points and polygons of one object (the first one with a skeleton by default).
+
+    ``points`` / ``polygons`` are selectors (see select.py) that limit what is returned; with_uvs adds the
+    UV pairs of every returned polygon."""
+    from studio_mcp.select import select_points, select_polygons, view_of_object
+
     family = load_family(source)
     candidates = [o for o in family.all_objects() if o.skeleton is not None]
     if owner_path:
@@ -260,20 +267,48 @@ def geometry(source: Source, owner_path: str = "") -> dict:
     if not candidates:
         raise McpToolError("No object with a skeleton found")
     obj = candidates[0]
-    owner = {}
-    for index, block in enumerate(obj.base_object.ades):
-        for att in block.atts:
-            owner[att.poly_id] = index
-        if block.class_id == "area.class" and not block.atts:
-            owner[block.ade_poly_id] = index
     skeleton = obj.skeleton
-    return {
+    view = view_of_object(obj)
+    uv_of = {}
+    if with_uvs:
+        for block in obj.base_object.ades:
+            if block.uses_atts_only_mapping:
+                continue
+            for index, entry in enumerate(block.atts):
+                if index < len(block.olpl):
+                    uv_of[entry.poly_id] = [list(uv) for uv in block.olpl[index]]
+    point_ids = select_points(points, view)
+    polygon_ids = select_polygons(polygons, view)
+    rounded = lambda p: [round(v, precision) for v in p]  # noqa: E731
+    result = {
         "object": obj.owner_path, "skeleton": obj.base_object.skeleton_name,
-        "points": [list(p) for p in skeleton.points],
-        "polygons": [{"id": i, "points": list(poly), "block": owner.get(i)} for i, poly in enumerate(skeleton.polygons)],
+        "points": [rounded(skeleton.points[i]) for i in point_ids],
+        "polygons": [{"id": i, "points": list(skeleton.polygons[i]), "block": view.poly_block.get(i),
+                      **({"uv": uv_of[i]} if i in uv_of else {})} for i in polygon_ids],
         "bbox": _bbox(skeleton.points),
         "axes": "x right, y down (negative = up), z forward",
     }
+    if points is not None:
+        result["point_indices"] = point_ids
+    return result
+
+
+def list_models(text_filter: str = "", limit: int = 200) -> list[dict]:
+    """Loose .BASE models under Data/Models, as paths usable in the game scripts (Data/...)."""
+    root = data_root()
+    models_dir = _find_child(root, "Models")
+    rows = []
+    if models_dir is None:
+        return rows
+    for path in sorted(models_dir.rglob("*")):
+        if path.is_file() and path.suffix.lower() == ".base":
+            relative = "Data/" + path.relative_to(root).as_posix()
+            if text_filter and text_filter.lower() not in relative.lower():
+                continue
+            rows.append({"model": relative, "skeletons": sorted(p.name for p in path.parent.glob("*.sklt"))})
+            if len(rows) >= limit:
+                break
+    return rows
 
 
 # --- writing -----------------------------------------------------------------
@@ -315,6 +350,8 @@ def export_model(source: Source, out_dir: str, base_name: str, skeleton_stem: st
         raise McpToolError(f"Skeleton {old_skeleton} not found in the Set.BAS")
     sklt_file = target_dir / f"{new_stem}.sklt"
     sklt_file.write_bytes(archive.payload_bytes(resources[0]))
+    from studio_mcp import history
+    history.clear(base_file)   # the files were just re-created: old undo snapshots no longer belong to them
     check = parse_base_file(base_file)
     return {"base_file": str(base_file), "skeleton_file": str(sklt_file),
             "object": check.root.name if check.root else None, "warnings": check.warnings,
@@ -327,67 +364,6 @@ def _is_under(path: Path, root: Path) -> bool:
         return True
     except ValueError:
         return False
-
-
-def _sklt_path(path: str) -> Path:
-    target = ensure_writable(path)
-    if target.is_dir():
-        found = sorted(target.glob("*.sklt"))
-        if len(found) != 1:
-            raise McpToolError(f"{target} must contain exactly one .sklt, found {len(found)}")
-        target = found[0]
-    if not target.exists():
-        raise McpToolError(f"Skeleton not found: {target}")
-    return target
-
-
-def set_points(sklt: str, points: list[list[float]]) -> dict:
-    """Replace every point of a loose skeleton. Topology (polygons) is unchanged."""
-    path = _sklt_path(sklt)
-    model = parse_sklt_file(path)
-    if len(points) != len(model.points):
-        raise McpToolError(f"Expected {len(model.points)} points, got {len(points)}: topology edits are not supported")
-    clean = []
-    for p in points:
-        if len(p) != 3 or not all(isinstance(v, (int, float)) and math.isfinite(v) for v in p):
-            raise McpToolError("Every point must be three finite numbers [x, y, z]")
-        clean.append(tuple(float(v) for v in p))
-    save_sklt_with_poo2_points(model, clean, path, update_sensors=False)
-    return {"skeleton_file": str(path), "points": len(clean), "bbox": _bbox(clean)}
-
-
-def _rotate(point, rx, ry, rz):
-    x, y, z = point
-    c, s = math.cos(rx), math.sin(rx)
-    y, z = y * c - z * s, y * s + z * c
-    c, s = math.cos(ry), math.sin(ry)
-    x, z = x * c + z * s, -x * s + z * c
-    c, s = math.cos(rz), math.sin(rz)
-    x, y = x * c - y * s, x * s + y * c
-    return x, y, z
-
-
-def transform_points(sklt: str, indices: list[int] | None, rotate_deg=(0, 0, 0), scale=(1, 1, 1),
-                     translate=(0, 0, 0), pivot=(0, 0, 0), jitter: float = 0.0, seed: int = 0) -> dict:
-    """Scale, rotate (X, Y, Z in degrees around pivot), translate and jitter chosen points; others stay."""
-    path = _sklt_path(sklt)
-    model = parse_sklt_file(path)
-    count = len(model.points)
-    chosen = list(range(count)) if not indices else indices
-    for i in chosen:
-        if not isinstance(i, int) or not 0 <= i < count:
-            raise McpToolError(f"Point index {i} out of range 0..{count - 1}")
-    rng = random.Random(seed)
-    rx, ry, rz = (math.radians(a) for a in rotate_deg)
-    points = [tuple(p) for p in model.points]
-    for i in chosen:
-        p = [points[i][k] - pivot[k] for k in range(3)]
-        p = [p[k] * scale[k] for k in range(3)]
-        p = list(_rotate(p, rx, ry, rz))
-        p = [p[k] + pivot[k] + translate[k] + (rng.uniform(-jitter, jitter) if jitter else 0.0) for k in range(3)]
-        points[i] = tuple(round(v, 3) for v in p)
-    save_sklt_with_poo2_points(model, points, path, update_sensors=False)
-    return {"skeleton_file": str(path), "moved": len(chosen), "bbox": _bbox(points)}
 
 
 # --- validation ----------------------------------------------------------------
