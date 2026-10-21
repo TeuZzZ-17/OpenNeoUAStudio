@@ -8,7 +8,7 @@ import unittest
 from studio.assets.family import load_asset_family
 
 DATA = Path(__file__).resolve().parents[2].parent / "UA Rising" / "Data"
-BASE = DATA / "Models" / "Base" / "ALPHA_LEOPARD_FIRE" / "LEOPARD_FIRE.BASE"
+BASE = DATA / "Models" / "Base" / "ALPHA_LEOPARD_FIRE" / "ALPHA_LEOPARD_FIRE.BASE"
 SETBAS = DATA / "Sets" / "Set1" / "Objects" / "Set.BAS"
 
 
