@@ -188,6 +188,7 @@ from studio.rendering.geometry import (
     build_fx_element_clipboard,
     build_fx_elements_clipboard,
     build_geometry_clipboard,
+    build_topology_states,
     detach_shared_fx_vertices,
     detect_fx_elements,
     FxElement,
@@ -200,6 +201,7 @@ from studio.rendering.geometry import (
     plan_delete_geometry,
     prepare_fx_clipboard,
     stage_fx_clipboard,
+    unsafe_fx_geometry_polys,
     validate_fx_element_clipboard,
 )
 
@@ -7975,19 +7977,8 @@ class AssemblyWindow(QMainWindow):
 
     def _unsafe_fx_geometry_polys(
             self, owner: str, selected_polys) -> set[int]:
-        selected = set(selected_polys)
-        unsafe = set()
-        for element in self._fx_elements:
-            if element.owner_path != owner:
-                continue
-            element_polys = set(element.poly_ids)
-            if not (selected & element_polys):
-                continue
-            if element.shared_state == "invalid" \
-                    or (element.bilateral
-                        and not element_polys.issubset(selected)):
-                unsafe.update(selected & element_polys)
-        return unsafe
+        return unsafe_fx_geometry_polys(
+            self._fx_elements, owner, selected_polys)
 
     def _build_geometry_placement_clipboard(self, elements=None):
         """Build the one immutable source used by both Copy and Move."""
@@ -10151,124 +10142,9 @@ class AssemblyWindow(QMainWindow):
 
     def _bundle_topology_states(
             self, data: bytes, fam_obj) -> list[StructuralBlockState]:
-        parsed = parse_base_bytes(data, "<saved-model-base>")
-        if parsed.root is None:
-            raise MappingEditError(
-                "the saved BASE snapshot has no parseable root object")
-        saved_blocks = parsed.root.ades
-        current_blocks = fam_obj.base_object.ades
-        model = fam_obj.skeleton
-        mapping = MappingIndex(fam_obj)
-        if mapping.invalid:
-            raise MappingEditError(
-                "the in-memory BASE has invalid ATTS polygon references")
-        if mapping.duplicates:
-            raise MappingEditError(
-                "the in-memory BASE has duplicate polygon mappings")
-        diagnostics = [
-            issue for issue in diagnose_polygon_references(
-                fam_obj, detect_fx_elements(
-                    fam_obj, self._family.animations
-                    if self._family else {}))
-            if "missing typed handler" not in issue
-        ]
-        if diagnostics:
-            raise MappingEditError(
-                "the in-memory reference graph is invalid: "
-                + "; ".join(diagnostics[:4]))
-
-        def template_signature(block) -> tuple:
-            texture = block.texture
-            tracy = block.tracy_texture
-            return (
-                (block.class_id or "").lower(),
-                block.payload_form_type,
-                block.ade_flags,
-                block.ade_point_id,
-                block.area_flags,
-                block.polflags,
-                block.color_val,
-                block.tracy_val,
-                block.shade_val,
-                (
-                    texture.class_id, texture.kind, texture.name,
-                    texture.anim_type, tuple(texture.outline_uvs)
-                ) if texture is not None else None,
-                (
-                    tracy.class_id, tracy.kind, tracy.name,
-                    tracy.anim_type, tuple(tracy.outline_uvs)
-                ) if tracy is not None else None,
-            )
-
-        def template_for(block, block_index: int) -> bytes:
-            source = block.source_objt_bytes
-            exact = next(
-                (saved.source_objt_bytes for saved in saved_blocks
-                 if source and saved.source_objt_bytes == source), None)
-            if exact is not None:
-                return exact
-            signature = template_signature(block)
-            compatible = [
-                saved for saved in saved_blocks
-                if template_signature(saved) == signature
-            ]
-            if compatible:
-                candidate = (
-                    saved_blocks[block_index]
-                    if block_index < len(saved_blocks)
-                    and saved_blocks[block_index] in compatible
-                    else compatible[0])
-                return candidate.source_objt_bytes
-            if source:
-                return source
-            raise MappingEditError(
-                f"block #{block_index} ({block.class_id or 'unknown class'}) "
-                "has no parsed source OBJT")
-
-        states = []
-        for block_index, current in enumerate(current_blocks):
-            class_id = (current.class_id or "").lower()
-            atts_only = current.uses_atts_only_mapping
-            if class_id == "amesh.class" \
-                    and not atts_only \
-                    and len(current.atts) != len(current.olpl):
-                raise MappingEditError(
-                    f"material block #{block_index} has ambiguous "
-                    "ATTS/OLPL counts")
-            for index, entry in enumerate(current.atts):
-                if not (0 <= entry.poly_id < len(model.polygons)):
-                    raise MappingEditError(
-                        f"block #{block_index} mapping #{index} has invalid "
-                        f"polyID {entry.poly_id}")
-                if atts_only:
-                    continue
-                if index >= len(current.olpl):
-                    if class_id != "area.class":
-                        raise MappingEditError(
-                            f"block #{block_index} mapping #{index} has no "
-                            "matching OLPL group")
-                    continue
-                uvs = current.olpl[index]
-                expected_uvs = len(model.polygons[entry.poly_id])
-                if len(uvs) != expected_uvs:
-                    raise MappingEditError(
-                        f"block #{block_index} mapping #{index} has "
-                        f"{len(uvs)} UVs for {expected_uvs} vertices")
-            states.append(StructuralBlockState(
-                block_index=block_index,
-                atts=tuple(copy.deepcopy(current.atts)),
-                olpl=(
-                    None if atts_only else tuple(
-                        tuple(tuple(uv) for uv in group)
-                        for group in current.olpl)),
-                class_id=current.class_id,
-                payload_form_type=current.payload_form_type,
-                ade_poly_id=(
-                    current.ade_poly_id
-                    if class_id == "area.class" else None),
-                template_objt=template_for(current, block_index),
-            ))
-        return states
+        return build_topology_states(
+            data, fam_obj,
+            self._family.animations if self._family else {})
 
     @staticmethod
     def _adopt_saved_block_sources(fam_obj, data: bytes) -> None:

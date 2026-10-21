@@ -13,14 +13,18 @@ from studio.assets.family import FamilyObject
 from studio.assets.mapping import (
     build_material_block_clipboard,
     build_polygon_reference_graph,
+    diagnose_polygon_references,
+    MappingEditError,
+    MappingIndex,
     MaterialBlockClipboard,
     paste_material_block,
     plan_polygon_renumber,
     PolygonReferenceError,
+    StructuralBlockState,
     transfer_material_resources,
 )
 from studio.formats.animation import VanmData
-from studio.formats.base_format import AmeshBlock, AttsEntry, TextureRef
+from studio.formats.base_format import AmeshBlock, AttsEntry, parse_base_bytes, TextureRef
 from studio.formats.sklt import Point3D, SkltModel
 from studio.rendering.indexed import UnsupportedIndexedMaterialError, validate_retail_polygon_flags
 
@@ -441,6 +445,43 @@ def _polygon_area_measure(points) -> float:
     return nx * nx + ny * ny + nz * nz
 
 
+def propagate_mirror_transform(
+        origin, pending: list[Point3D], sources, match: MirrorMatchResult,
+        tolerance: float, axes=(0, 1, 2)) -> None:
+    """Copy the move of the ``sources`` points onto their mirror counterparts (in place on ``pending``).
+
+    ``origin`` holds the positions before the move, ``pending`` the positions after it. Points that sit on a
+    mirror plane stay on it. Shared by the editor's Mirror Select and the MCP."""
+
+    for component in match.components:
+        component_sources = [
+            index for index in component if index in sources]
+        if not component_sources or any(
+                index in match.ambiguous_vertices
+                for index in component):
+            continue
+        source = min(component_sources)
+        source_point = pending[source]
+        for target in component:
+            values = list(source_point)
+            for axis in axes:
+                source_coordinate = origin[source][axis]
+                target_coordinate = origin[target][axis]
+                if abs(target_coordinate) <= tolerance:
+                    values[axis] = 0.0
+                elif source_coordinate * target_coordinate < 0.0:
+                    values[axis] = -values[axis]
+            pending[target] = tuple(values)
+    for index in sources:
+        if index >= len(origin):
+            continue
+        values = list(pending[index])
+        for axis in axes:
+            if abs(origin[index][axis]) <= tolerance:
+                values[axis] = 0.0
+        pending[index] = tuple(values)
+
+
 def build_geometry_clipboard(
         fam_obj: FamilyObject, owner: str, poly_ids, mapping,
         unsafe_fx_poly_ids=(), *, require_writable_chunks: bool = False
@@ -842,6 +883,149 @@ def apply_delete_geometry(model: SkltModel, blocks,
     )
 
 
+def unsafe_fx_geometry_polys(fx_elements, owner: str, selected_polys) -> set[int]:
+    """Selected polygons that belong to a shared, invalid or partly selected FX element."""
+
+    selected = set(selected_polys)
+    unsafe = set()
+    for element in fx_elements:
+        if element.owner_path != owner:
+            continue
+        element_polys = set(element.poly_ids)
+        if not (selected & element_polys):
+            continue
+        if element.shared_state == "invalid"                 or (element.bilateral
+                    and not element_polys.issubset(selected)):
+            unsafe.update(selected & element_polys)
+    return unsafe
+
+
+def build_topology_states(
+        data: bytes, fam_obj: FamilyObject,
+        animations: Mapping[str, VanmData] | None = None
+        ) -> list[StructuralBlockState]:
+    """Complete ADES state of an edited model, ready for ``save_model_base_copy``.
+
+    ``data`` is the standalone BASE the edit started from. Each block keeps its exact
+    source OBJT, so a grown or shrunk ATTS/OLPL can be written back byte-safely.
+    """
+
+    parsed = parse_base_bytes(data, "<saved-model-base>")
+    if parsed.root is None:
+        raise MappingEditError(
+            "the saved BASE snapshot has no parseable root object")
+    saved_blocks = parsed.root.ades
+    current_blocks = fam_obj.base_object.ades
+    model = fam_obj.skeleton
+    mapping = MappingIndex(fam_obj)
+    if mapping.invalid:
+        raise MappingEditError(
+            "the in-memory BASE has invalid ATTS polygon references")
+    if mapping.duplicates:
+        raise MappingEditError(
+            "the in-memory BASE has duplicate polygon mappings")
+    diagnostics = [
+        issue for issue in diagnose_polygon_references(
+            fam_obj, detect_fx_elements(fam_obj, animations or {}))
+        if "missing typed handler" not in issue
+    ]
+    if diagnostics:
+        raise MappingEditError(
+            "the in-memory reference graph is invalid: "
+            + "; ".join(diagnostics[:4]))
+
+    def template_signature(block) -> tuple:
+        texture = block.texture
+        tracy = block.tracy_texture
+        return (
+            (block.class_id or "").lower(),
+            block.payload_form_type,
+            block.ade_flags,
+            block.ade_point_id,
+            block.area_flags,
+            block.polflags,
+            block.color_val,
+            block.tracy_val,
+            block.shade_val,
+            (
+                texture.class_id, texture.kind, texture.name,
+                texture.anim_type, tuple(texture.outline_uvs)
+            ) if texture is not None else None,
+            (
+                tracy.class_id, tracy.kind, tracy.name,
+                tracy.anim_type, tuple(tracy.outline_uvs)
+            ) if tracy is not None else None,
+        )
+
+    def template_for(block, block_index: int) -> bytes:
+        source = block.source_objt_bytes
+        exact = next(
+            (saved.source_objt_bytes for saved in saved_blocks
+             if source and saved.source_objt_bytes == source), None)
+        if exact is not None:
+            return exact
+        signature = template_signature(block)
+        compatible = [
+            saved for saved in saved_blocks
+            if template_signature(saved) == signature
+        ]
+        if compatible:
+            candidate = (
+                saved_blocks[block_index]
+                if block_index < len(saved_blocks)
+                and saved_blocks[block_index] in compatible
+                else compatible[0])
+            return candidate.source_objt_bytes
+        if source:
+            return source
+        raise MappingEditError(
+            f"block #{block_index} ({block.class_id or 'unknown class'}) "
+            "has no parsed source OBJT")
+
+    states = []
+    for block_index, current in enumerate(current_blocks):
+        class_id = (current.class_id or "").lower()
+        atts_only = current.uses_atts_only_mapping
+        if class_id == "amesh.class"                 and not atts_only                 and len(current.atts) != len(current.olpl):
+            raise MappingEditError(
+                f"material block #{block_index} has ambiguous "
+                "ATTS/OLPL counts")
+        for index, entry in enumerate(current.atts):
+            if not (0 <= entry.poly_id < len(model.polygons)):
+                raise MappingEditError(
+                    f"block #{block_index} mapping #{index} has invalid "
+                    f"polyID {entry.poly_id}")
+            if atts_only:
+                continue
+            if index >= len(current.olpl):
+                if class_id != "area.class":
+                    raise MappingEditError(
+                        f"block #{block_index} mapping #{index} has no "
+                        "matching OLPL group")
+                continue
+            uvs = current.olpl[index]
+            expected_uvs = len(model.polygons[entry.poly_id])
+            if len(uvs) != expected_uvs:
+                raise MappingEditError(
+                    f"block #{block_index} mapping #{index} has "
+                    f"{len(uvs)} UVs for {expected_uvs} vertices")
+        states.append(StructuralBlockState(
+            block_index=block_index,
+            atts=tuple(copy.deepcopy(current.atts)),
+            olpl=(
+                None if atts_only else tuple(
+                    tuple(tuple(uv) for uv in group)
+                    for group in current.olpl)),
+            class_id=current.class_id,
+            payload_form_type=current.payload_form_type,
+            ade_poly_id=(
+                current.ade_poly_id
+                if class_id == "area.class" else None),
+            template_objt=template_for(current, block_index),
+        ))
+    return states
+
+
 def invert_3x3(matrix: Matrix3) -> Matrix3 | None:
     """Inverse of a 3x3 matrix, or None when singular."""
 
@@ -1066,36 +1250,9 @@ class GeometryEditSession:
         sources = self._modal_transform_selection or set()
         if not self.mirror_enabled or origin is None or not sources:
             return
-        axes = (0, 1, 2)
-        match = self._current_mirror_match(origin)
-        tolerance = self._mirror_tolerance
-        for component in match.components:
-            component_sources = [
-                index for index in component if index in sources]
-            if not component_sources or any(
-                    index in match.ambiguous_vertices
-                    for index in component):
-                continue
-            source = min(component_sources)
-            source_point = pending[source]
-            for target in component:
-                values = list(source_point)
-                for axis in axes:
-                    source_coordinate = origin[source][axis]
-                    target_coordinate = origin[target][axis]
-                    if abs(target_coordinate) <= tolerance:
-                        values[axis] = 0.0
-                    elif source_coordinate * target_coordinate < 0.0:
-                        values[axis] = -values[axis]
-                pending[target] = tuple(values)
-        for index in sources:
-            if index >= len(origin):
-                continue
-            values = list(pending[index])
-            for axis in axes:
-                if abs(origin[index][axis]) <= tolerance:
-                    values[axis] = 0.0
-            pending[index] = tuple(values)
+        propagate_mirror_transform(
+            origin, pending, sources, self._current_mirror_match(origin),
+            self._mirror_tolerance)
 
     def _transform_selection(self) -> set[int]:
         return (
