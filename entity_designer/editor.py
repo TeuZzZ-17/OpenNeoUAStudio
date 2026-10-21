@@ -69,6 +69,7 @@ from PySide6.QtWidgets import (
 )
 
 from entity_designer import destruction_fx as fx
+from entity_designer import fx_visuals
 from entity_designer.dialogs import (
     ApplyScriptDialog,
     ImportCollisionDialog,
@@ -218,7 +219,7 @@ def _fx_item_state(item) -> str | None:
     if item.kind == "unit":
         state = item.label.split(" · ", 1)[0]
         return "normal" if state == "attached" else state
-    return {"plasma": "genesis", "launch": "launch", "decoration": "normal",
+    return {"plasma": "genesis", "decoration": "normal",
             "tracer": "normal", "cluster": "normal", "laser": "normal"}.get(item.kind)
 
 
@@ -250,6 +251,11 @@ class CollisionEditorWindow(QMainWindow):
         self._current_owner: str | None = None
         self._current_owner_base_bounds: tuple[float, float, float, float, float, float] | None = None
         self._viewport_owner: str | None = None
+        # Model state shown in the viewport (preview only, never written to the
+        # script): state name -> VP id of the unit, and the state on screen.
+        self._model_state_vps: dict[str, int] = {}
+        self._model_state = "normal"
+        self._normal_state_owner: str | None = None
         self._selected = -1
         self._selected_spheres: set[int] = set()
         self._selected_fire_point = -1
@@ -618,6 +624,19 @@ class CollisionEditorWindow(QMainWindow):
         self.toolbar_view_preset_combo.currentTextChanged.connect(
             self._on_view_preset_changed)
         toolbar.addWidget(self.toolbar_view_preset_combo)
+        toolbar.addWidget(QLabel(" Model state: "))
+        self.toolbar_model_state_combo = QComboBox()
+        self.toolbar_model_state_combo.setMinimumWidth(150)
+        self.toolbar_model_state_combo.setToolTip(
+            "Model state shown in the viewport: Normal, or any other state "
+            "(Wait, Fire, Dead...) this unit defines. The collision shape is "
+            "generated from the state on screen. Preview only: the script is "
+            "not changed.")
+        self.toolbar_model_state_combo.addItem("Normal", "normal")
+        self.toolbar_model_state_combo.setEnabled(False)
+        self.toolbar_model_state_combo.currentIndexChanged.connect(
+            self._on_model_state_changed)
+        toolbar.addWidget(self.toolbar_model_state_combo)
         toolbar.addSeparator()
         self.reset_tab_button = QPushButton("Reset")
         self.reset_tab_button.setToolTip(
@@ -965,18 +984,32 @@ class CollisionEditorWindow(QMainWindow):
         self.export_collision_shape_button = QPushButton("Export")
         self.export_collision_shape_button.clicked.connect(
             self.export_collision_shape)
-        self.delete_collision_shape_button = QPushButton("Delete Collision Shape")
+        self.delete_collision_shape_button = QPushButton("Delete")
+        self.delete_collision_shape_button.setToolTip(
+            "Delete the collision shape loaded in this unit.")
         self.delete_collision_shape_button.clicked.connect(
             self.delete_collision_shape)
         self.delete_collision_shape_button.setEnabled(False)
+        self.overwrite_collision_shape_button = QPushButton("Overwrite")
+        self.overwrite_collision_shape_button.setToolTip(
+            "Write the shape back to the .collision file it was imported "
+            "from or last exported to. Export a new shape first.")
+        self.overwrite_collision_shape_button.clicked.connect(
+            self.overwrite_collision_shape)
+        self.overwrite_collision_shape_button.setEnabled(False)
         shape_buttons = QHBoxLayout()
         shape_buttons.addWidget(self.generate_collision_shape_button, 1)
         shape_buttons.addWidget(self.collision_shape_quality)
         shape_layout.addLayout(shape_buttons)
-        shape_io = QHBoxLayout()
-        shape_io.addWidget(self.import_collision_shape_button)
-        shape_io.addWidget(self.export_collision_shape_button)
-        shape_io.addWidget(self.delete_collision_shape_button)
+        # Two rows of two buttons: every column takes half of the panel width.
+        shape_io = QGridLayout()
+        shape_io.setSpacing(4)
+        shape_io.addWidget(self.import_collision_shape_button, 0, 0)
+        shape_io.addWidget(self.export_collision_shape_button, 0, 1)
+        shape_io.addWidget(self.delete_collision_shape_button, 1, 0)
+        shape_io.addWidget(self.overwrite_collision_shape_button, 1, 1)
+        shape_io.setColumnStretch(0, 1)
+        shape_io.setColumnStretch(1, 1)
         shape_layout.addLayout(shape_io)
         self.collision_shape_status = QLabel("No convex shape loaded.")
         self.collision_shape_status.setWordWrap(True)
@@ -2343,6 +2376,7 @@ class CollisionEditorWindow(QMainWindow):
         self._active_script_id = None
         self._active_model_reference = None
         self._active_visual_reference = None
+        self._model_state_vps = {}
         self._loaded_gun_points_enabled = False
         self._loaded_gun_points = []
         self._loaded_unit_gun_default_icon = ""
@@ -2643,6 +2677,7 @@ class CollisionEditorWindow(QMainWindow):
             if active_visual_reference != reference else None)
         self._fill_script_units(
             references, active_visual_reference=resolved_unit_reference)
+        self._model_state_vps = self._script_model_state_vps(text, block, reference)
         self._show_model_item(self._select_script_unit_item(reference))
         self._load_fx_context(text, block, reference)
         self._set_modified(False)
@@ -2864,6 +2899,7 @@ class CollisionEditorWindow(QMainWindow):
             else:
                 self.collision_shape_status.setText("No collision shape loaded.")
             self.export_collision_shape_button.setEnabled(False)
+            self._sync_collision_overwrite_button()
             return
         enabled_count = sum(hull.enabled for hull in shape.hulls)
         quality = f"{shape.quality.capitalize()} quality" if shape.quality else "Quality unknown"
@@ -2884,6 +2920,16 @@ class CollisionEditorWindow(QMainWindow):
                 "rotation differs from the generated shape.")
         self.collision_shape_status.setText(details)
         self.export_collision_shape_button.setEnabled(enabled_count > 0 and self._collision_bake_process is None)
+        self._sync_collision_overwrite_button()
+
+    def _sync_collision_overwrite_button(self) -> None:
+        """Overwrite needs a shape and the .collision file it belongs to."""
+
+        shape = self.project.collision_shape
+        self.overwrite_collision_shape_button.setEnabled(
+            shape is not None and any(h.enabled for h in shape.hulls)
+            and bool(self.project.collision_shape_file_path)
+            and self._collision_bake_process is None)
 
     def _collision_shape_components_changed(self) -> None:
         shape = self.project.collision_shape
@@ -3040,6 +3086,7 @@ class CollisionEditorWindow(QMainWindow):
                 self.export_collision_shape_button.isEnabled())
             self.delete_collision_shape_button.setEnabled(
                 self.project.collision_shape is not None and not process_running)
+            self._sync_collision_overwrite_button()
             self.collision_shape_progress.setVisible(
                 process_running and not self._collision_bake_cancelled)
             if widget is not None:
@@ -3407,6 +3454,31 @@ class CollisionEditorWindow(QMainWindow):
         target = Path(path)
         if target.suffix.casefold() != ".collision":
             target = target.with_suffix(".collision")
+        self._write_collision_shape(shape, target)
+
+    def overwrite_collision_shape(self) -> None:
+        """Rewrite the .collision file the shape came from, without a file dialog."""
+
+        if self._collision_shape_blocked_for_weapon(warn=True):
+            return
+        if self.collision_geometry_widget._selection_timer.isActive():
+            self.collision_geometry_widget._flush_selection_changed()
+        shape = self.project.collision_shape
+        file_path = self.project.collision_shape_file_path
+        if shape is None or not file_path:
+            return
+        answer = QMessageBox.question(
+            self, "Overwrite collision shape",
+            f"Overwrite the collision shape file?\n\n{file_path}",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No)
+        if answer != QMessageBox.StandardButton.Yes:
+            return
+        self._write_collision_shape(shape, Path(file_path))
+
+    def _write_collision_shape(self, shape, target: Path) -> None:
+        """Write ``shape`` to ``target`` and make it the unit's shape file."""
+
         try:
             target.parent.mkdir(parents=True, exist_ok=True)
             write_collision_shape(target, shape)
@@ -3754,6 +3826,9 @@ class CollisionEditorWindow(QMainWindow):
         if reference is not None and (
                 reference.three_ds_normal or reference.base_normal):
             return "root"
+        state_vp = self._model_state_vps.get(self._model_state)
+        if state_vp is not None and self._owner_for_vp(state_vp) is not None:
+            return self._owner_for_vp(state_vp)
         if reference is not None and reference.vp_normal is not None:
             return self._owner_for_vp(reference.vp_normal)
         if (self._active_base_path is not None
@@ -3802,6 +3877,9 @@ class CollisionEditorWindow(QMainWindow):
         owner = item.data(0, Qt.ItemDataRole.UserRole)
         owner = owner or None
         self._current_owner = owner
+        self._model_state = "normal"
+        self._normal_state_owner = owner
+        self._fill_model_state_combo()
         # Capture the new unit's orbit view; _sync_all restores the active tab.
         self.viewport.set_cockpit_preview_active(False)
         self.viewport.load_family(
@@ -3836,6 +3914,74 @@ class CollisionEditorWindow(QMainWindow):
         self._sync_animation_controls()
         self._sync_gizmo_camera()
         self._update_reset_view_controls()
+
+    def _script_model_state_vps(self, text, block, reference) -> dict[str, int]:
+        """State -> VP of every extra model state the unit defines and can show."""
+
+        values = fx_visuals.read_values(text, block)
+        normal_vp = reference.vp_normal
+        states: dict[str, int] = {}
+        for state, _label in fx_visuals.STATES:
+            if state == "normal":
+                continue
+            raw = values.get(f"vp_{state}")
+            if raw is None and state == "wait" and reference.vp_wait is not None:
+                raw = str(reference.vp_wait)
+            try:
+                vp = int(str(raw), 0)
+            except (TypeError, ValueError):
+                continue
+            if vp > 0 and vp != normal_vp and self._owner_for_vp(vp) is not None:
+                states[state] = vp
+        return states
+
+    def _fill_model_state_combo(self) -> None:
+        """List Normal plus the states of the loaded unit; Normal is selected."""
+
+        combo = self.toolbar_model_state_combo
+        labels = dict(fx_visuals.STATES)
+        with QSignalBlocker(combo):
+            combo.clear()
+            combo.addItem("Normal", "normal")
+            for state, vp in self._model_state_vps.items():
+                combo.addItem(f"{labels[state]} (VP {vp})", state)
+            combo.setCurrentIndex(0)
+        combo.setEnabled(combo.count() > 1)
+
+    def _on_model_state_changed(self, _index) -> None:
+        """Show another model state of the unit; the script stays untouched."""
+
+        state = self.toolbar_model_state_combo.currentData() or "normal"
+        if state == self._model_state or self.family is None:
+            return
+        if state == "normal":
+            owner = self._normal_state_owner
+        else:
+            owner = self._owner_for_vp(self._model_state_vps.get(state, 0))
+        if owner is None:
+            return
+        self._model_state = state
+        self._current_owner = owner
+        # Loading another model re-frames the camera on it, which makes the
+        # ground seem to move. Only the model changes: keep the exact view.
+        previous_camera = self.viewport._camera_state()
+        previous_home_camera = self.viewport._home_camera_state
+        self.viewport.load_family(
+            self.family, {owner}, keep_camera=True, primary_owner=owner)
+        self.viewport._set_camera_state(previous_camera)
+        self.viewport._home_camera_state = previous_home_camera
+        self._viewport_owner = owner
+        self.viewport.set_model_preview_scale(
+            self.project.model_scale_x, self.project.model_scale_y,
+            self.project.model_scale_z)
+        self.viewport.set_ground_alignment(
+            self.project.target_category == VEHICLE,
+            self.project.overeof_enabled, self.project.overeof)
+        self._current_owner_base_bounds = (
+            self.viewport._model_preview_base_owner_bounds.get(owner))
+        self._refresh_collision_geometry_widget()
+        self._sync_animation_controls()
+        self._sync_all()
 
     def _model_bounds(self):
         # Cockpit View may temporarily render vp_wait while collision data
@@ -5301,7 +5447,7 @@ class CollisionEditorWindow(QMainWindow):
                          if dep.resolved_path is not None)
             paths.update(str(path.resolve()) for path in family.effect_override_paths.values())
         unit = self.fx_panel.unit
-        visuals = [unit.normal, unit.dead, unit.megadeth, unit.genesis, unit.launch]
+        visuals = [unit.normal, unit.dead, unit.megadeth, unit.genesis]
         values = []
         for item in self.fx_panel.document.items:
             if isinstance(item, fx.FxBlock):
@@ -5341,8 +5487,7 @@ class CollisionEditorWindow(QMainWindow):
                 path = self._resolve_fx_sound(sample)
                 if path is not None:
                     paths.add(str(path.resolve()))
-            visuals.extend((child.unit.normal, child.unit.dead, child.unit.megadeth,
-                            child.unit.launch))
+            visuals.extend((child.unit.normal, child.unit.dead, child.unit.megadeth))
             if child.unit.tracer is not None:
                 values.append(child.unit.tracer.mesh)
             if child.unit.decoration is not None:
