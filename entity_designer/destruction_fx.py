@@ -42,7 +42,7 @@ MODES = (MODE_VISUAL, MODE_PHYSICAL)
 
 TRIGGERS = {
     CONTEXT_VEHICLE: ("destroyed", "air_destroyed"),
-    CONTEXT_WEAPON: ("detonate", "impact_world"),
+    CONTEXT_WEAPON: ("detonate", "impact_world", "launch"),
 }
 LEGACY_TRIGGERS = ("death", "megadeth", "create", "beam")
 DEST_FX_KEYS = ("dest_fx", "ext_dest_fx", "extended_dest_fx")
@@ -1697,8 +1697,6 @@ DECORATION_PERIODIC_PREVIEW_MAX_MS = 12000.0
 DECORATION_PERIODIC_PREVIEW_MIN_MS = 1200.0
 # Death plasma (genesis VP) left by a destroyed vehicle: it lasts 70% of the
 # vehicle energy, clamped to 10..25 s, and the preview plays its first part.
-# Weapon launch VP (vp_launch) stays alive for this long at the muzzle.
-LAUNCH_FLASH_MS = 1000.0
 PLASMA_SCALE = 0.75
 PLASMA_MIN_MS = 10000.0
 PLASMA_MAX_MS = 25000.0
@@ -1956,13 +1954,6 @@ def unit_look(values: dict[str, str], *, weapon: bool) -> dict:
                      if weapon and values.get("model", "").casefold() == "artillery_shell"
                      else 0.0),
         "start_speed": max(0.0, _stof(values.get("start_speed", "0"))),
-        # Weapons flash a launch VP (1 s) at the muzzle.
-        "launch": VisualRef(
-            vp=_non_negative_int(values.get("vp_launch")),
-            mesh3ds=values.get("3ds_launch", ""),
-            base_path=values.get("base_launch", "")) if weapon else VisualRef(),
-        "launch_scale": (lambda v: v if math.isfinite(v) and v > 0 else 1.0)(
-            _stof(values.get("launch_scale", "1"))),
         "genesis": VisualRef() if weapon else VisualRef(
             vp=script_int(values.get("vp_genesis"), 5),
             mesh3ds=values.get("3ds_genesis", ""),
@@ -2326,7 +2317,7 @@ def weapon_vps(unit: "UnitPhases", document: "FxDocument", weapons: dict,
 
     debuffs = debuffs or {}
 
-    vps = {ref.vp for ref in (unit.normal, unit.dead, unit.megadeth, unit.launch)
+    vps = {ref.vp for ref in (unit.normal, unit.dead, unit.megadeth)
            if ref.vp > 0}
     if unit.decoration is not None and unit.decoration.visual.vp > 0:
         vps.add(unit.decoration.visual.vp)
@@ -2398,8 +2389,6 @@ class UnitPhases:
     delay_debuff_id: int = -1
     fixed_speed: float = 0.0
     start_speed: float = 0.0
-    launch: VisualRef = VisualRef()
-    launch_scale: float = 1.0
     # snd_* packages of the definition, by event name.
     sounds: dict = field(default_factory=dict)
     # Genesis VP of the death plasma and the values that drive it.
@@ -2578,7 +2567,8 @@ class PreviewSimulation:
     ``trigger`` is ``"sequence"`` (vehicle death: normal -> dead +
     air_destroyed + dest_fx death -> wreck fall -> megadeth + destroyed +
     dest_fx megadeth), ``"hit_unit"``/``"hit_ground"`` (weapon flight and
-    detonate / impact_world), or one single begin_fx/dest_fx trigger.
+    detonate / impact_world, with launch at the muzzle), or one single
+    begin_fx/dest_fx trigger.
     Random choices are rolled once per seed so scrubbing always shows the
     same activation. All times are absolute ms.
     """
@@ -2804,7 +2794,7 @@ class PreviewSimulation:
                 angles[axis] += rng.uniform(-1.0, 1.0) * strength * fx.pos[axis]
         return tuple(angles)
 
-    # -- decoration_fx, launch flash and weapon tracer ------------------------------------
+    # -- decoration_fx and weapon tracer ------------------------------------
 
     def _decoration_window(self, unit: "UnitPhases | None" = None) -> float:
         """Preview time the parent stays active so decorations can show up."""
@@ -2853,18 +2843,6 @@ class PreviewSimulation:
             self._tracks.append(PreviewTrack(
                 -2, f"Decoration × {spawned}", start, end,
                 float(deco.fade_in), float(deco.fade_out)))
-
-    def _build_launch_flash(self, position, heading: Matrix3,
-                            unit: "UnitPhases | None" = None,
-                            start: float = 0.0) -> None:
-        """vp_launch: a transient visual at the muzzle, alive for one second."""
-
-        unit = unit or self.unit
-        if unit.launch.vp <= 0 and not _external_paths(unit.launch):
-            return
-        self._events.append((-3, "launch", start, start + LAUNCH_FLASH_MS,
-                             (unit.launch, tuple(position), heading,
-                              unit.launch_scale)))
 
     def _build_tracer(self, end: float, flight: _Flight,
                       unit: "UnitPhases | None" = None,
@@ -3099,7 +3077,7 @@ class PreviewSimulation:
             self._unit_event(unit.normal, start, stop, path, "normal", look,
                              main=True, motion=unit.motion, speed=speed,
                              unit=unit)
-        self._build_launch_flash(launch, look, unit, start)
+        self._build_event("launch", start, launch, "Launch · ", definition=definition)
         self._add_sound(unit.sounds, "launch", start, label=who, salt=definition.salt)
         if root:
             self._add_sound(unit.sounds, "launch_player", start, label=who,
@@ -3696,12 +3674,6 @@ class PreviewSimulation:
                 items.append(PreviewItem(
                     -4, "cluster", ref.vp, position, heading, (1.0, 1.0, 1.0),
                     1.0, None, f"cluster · {ref.label}", _external_paths(ref)))
-            elif kind == "launch":
-                ref, position, heading, scale = payload
-                items.append(PreviewItem(
-                    -3, "launch", ref.vp, position, heading,
-                    (scale, scale, scale), 1.0, None,
-                    f"launch · {ref.label}", _external_paths(ref)))
             elif kind == "tracer":
                 items.extend(self._tracer_items(payload, time_ms))
             elif kind == MODE_DECAL:
@@ -3940,10 +3912,6 @@ def _instances_for_event(source, kind, start, end, payload, unit=None):
         ref, position, heading = payload
         return [VpInstance(source, ref.vp, start, end, position=position,
                            scale=(1.0, 1.0, 1.0), rotation=heading)] if ref.vp > 0 else []
-    if kind == "launch":
-        ref, position, heading, scale = payload
-        return [VpInstance(source, ref.vp, start, end, position=position,
-                           scale=(scale,) * 3, rotation=heading)] if ref.vp > 0 else []
     if kind == "plasma":
         ref, position, total, _maxrot = payload
         if ref.vp <= 0:
