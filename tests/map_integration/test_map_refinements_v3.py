@@ -34,7 +34,7 @@ def test_hover_height_and_flatten_sample_are_explicit_without_editing_map(win):
     assert '(4, 3)' in win.hover_height.text() and '42/60' in win.hover_height.text()
     assert not win.flatten_height.isEnabled()
     win._sample_map_height(4, 3)
-    assert win.mode_combo.currentIndex() == 2 and win.flatten_height.isEnabled()
+    assert win.mode_combo.currentData() == BrushMode.FLATTEN and win.flatten_height.isEnabled()
     assert win.flatten_height.value() == 42
     assert win.doc.snapshot() == before
     win._hovered(-1, -1)
@@ -234,33 +234,35 @@ def test_terrain_click_over_actor_hit_paints_ground_without_actor_selection(win,
 
 
 @pytest.mark.parametrize('kind', TERRAIN_OVERLAP_KINDS)
-def test_terrain_context_menu_ignores_actor_hits_and_keeps_height_sampling(win, app, monkeypatch, kind):
+def test_terrain_right_drag_rotates_over_actor_hits_without_sculpting(win, app, monkeypatch, kind):
     cell = (4, 4)
     _place_test_actor_at_cell(win, kind, cell)
     win.set_tool('terrain')
+    win.mode_combo.setCurrentIndex(win.mode_combo.findData(BrushMode.RAISE))
     win.doc.grids['hgt'][cell[1]][cell[0]] = HGT_MIN + 12
+    height_before = win.doc.grids['hgt'][cell[1]][cell[0]]
     actor_state = _actor_selection_state(win)
     picks = _mock_actor_hits(monkeypatch, win.view, kind)
     monkeypatch.setattr(win.view, 'ground_cell', lambda *_args: cell)
     win.resize(1000, 700)
     win.show()
     app.processEvents()
-    position = QPoint(100, 100)
+    context = QSignalSpy(win.view.contextRequested)
+    pressed = QSignalSpy(win.view.cellPressed)
 
-    win._map_context_menu(position, win.view.mapToGlobal(position))
-    menu = win._context_menu
-    try:
-        assert win.palette_tabs.currentIndex() == 3 and win.tool == 'terrain'
-        assert _actor_selection_state(win) == actor_state
-        assert not picks
-        sample = next(action for action in menu.actions() if action.text() == 'Sample This Height')
-        sample.trigger()
-        assert win.flatten_height.value() == win.doc.grids['hgt'][cell[1]][cell[0]] - HGT_MIN
-        assert win.palette_tabs.currentIndex() == 3 and win.tool == 'terrain'
-        assert _actor_selection_state(win) == actor_state
-    finally:
-        menu.close()
-        app.processEvents()
+    pos = win.view.rect().center()
+    yaw_before = win.view.camera.yaw
+    QTest.mousePress(win.view, Qt.MouseButton.RightButton, pos=pos)
+    QTest.mouseMove(win.view, pos + QPoint(50, 20))
+    QTest.mouseRelease(win.view, Qt.MouseButton.RightButton, pos=pos + QPoint(50, 20))
+    assert win.view.camera.yaw != yaw_before
+    assert pressed.count() == 0 and context.count() == 0
+    assert win.doc.grids['hgt'][cell[1]][cell[0]] == height_before
+    assert win.palette_tabs.currentIndex() == 3 and win.tool == 'terrain'
+    assert not picks
+    assert _actor_selection_state(win) == actor_state
+
+
 
 
 def test_terrain_double_click_uses_ground_cell_over_gate_hit(win, app, monkeypatch):

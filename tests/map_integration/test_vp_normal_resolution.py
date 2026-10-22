@@ -69,6 +69,7 @@ def test_vp_faces_do_not_reuse_external_geometry_or_family_cache():
     loader._load_object = lambda *args, **kwargs: loader._faces.append(normal_face)
     library = SectorMeshLibrary.__new__(SectorMeshLibrary)
     library._base_cache = {}
+    library.set_only = False
     library._material_index = {}
     library._loader = loader
     library._family_faces = lambda *args: [external_face]

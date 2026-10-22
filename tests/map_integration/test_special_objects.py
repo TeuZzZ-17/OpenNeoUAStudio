@@ -106,10 +106,10 @@ def test_gate_and_item_visuals_restore_underlay_and_respect_authored_buildings()
     update_special(doc, 'gate', gate, {'x': 2, 'y': 2})
     assert (doc.grids['type'][2][2], doc.grids['blg'][2][2]) == ('03', '19')
     update_special(doc, 'gate', gate, {'x': 3, 'y': 3})
-    assert (doc.grids['type'][2][2], doc.grids['blg'][2][2]) == ('00', '00')
+    assert (doc.grids['type'][2][2], doc.grids['blg'][2][2]) == ('ab', '00')
     assert (doc.grids['type'][3][3], doc.grids['blg'][3][3]) == ('03', '19')
     remove_special(doc, 'gate', gate)
-    assert (doc.grids['type'][3][3], doc.grids['blg'][3][3]) == ('00', '00')
+    assert (doc.grids['type'][3][3], doc.grids['blg'][3][3]) == ('ab', '00')
 
     doc.grids['type'][4][4] = '12'
     doc.grids['blg'][4][4] = '37'
@@ -117,7 +117,7 @@ def test_gate_and_item_visuals_restore_underlay_and_respect_authored_buildings()
     update_special(doc, 'item', item, {'x': 4, 'y': 4})
     assert (doc.grids['type'][4][4], doc.grids['blg'][4][4]) == ('12', '37')
     remove_special(doc, 'item', item)
-    assert (doc.grids['type'][4][4], doc.grids['blg'][4][4]) == ('00', '00')
+    assert (doc.grids['type'][4][4], doc.grids['blg'][4][4]) == ('12', '37')
 
 
 def test_special_validation_is_atomic_and_keys_match_legacy_occupancy():
@@ -215,8 +215,7 @@ def test_special_panel_escape_undo_key_edit_filter_and_delete_all(win, monkeypat
     item_panel.key_road.setChecked(True)
     assert win.doc.grids['type'][4][6] == 'f4'
 
-    item_panel.deselect_button.click()
-    item_panel.add_button.click()
+    item_panel.add_button.click()  # New = Deselect + Add
     second_item = item_panel.slot
     win._special_click((4, 6))
     item_panel.search.setText('Super item 2')
@@ -288,7 +287,7 @@ def test_special_template_survives_deselect_cancelling_draft(win):
     before = win.doc.snapshot()
     panel.add_button.click()
     assert win._special_draft[1]['targets'] == [23]
-    panel.deselect_button.click()
+    panel.list.setCurrentRow(-1)
     assert win._special_draft is None
     assert win.doc.snapshot() == before
     assert win.doc.visible_gate_slots == 0
@@ -474,7 +473,7 @@ def test_gem_visual_uses_building_sector_type_and_restores_underlay():
     assert (doc.grids['type'][2][2], doc.grids['blg'][2][2]) == ('7b', '32')
 
     update_special(doc, 'gem', gem, {'x': 4, 'y': 4}, buildings=buildings)
-    assert (doc.grids['type'][2][2], doc.grids['blg'][2][2]) == ('00', '00')
+    assert (doc.grids['type'][2][2], doc.grids['blg'][2][2]) == ('ab', '00')
     assert (doc.grids['type'][4][4], doc.grids['blg'][4][4]) == ('7b', '32')
 
     update_special(doc, 'gem', gem, {'blg': 51}, buildings=buildings)
@@ -483,7 +482,7 @@ def test_gem_visual_uses_building_sector_type_and_restores_underlay():
     assert (restored.grids['type'][4][4], restored.grids['blg'][4][4]) == ('7c', '33')
 
     remove_special(doc, 'gem', gem, buildings=buildings)
-    assert (doc.grids['type'][4][4], doc.grids['blg'][4][4]) == ('00', '00')
+    assert (doc.grids['type'][4][4], doc.grids['blg'][4][4]) == ('cd', '00')
 
     fallback = LdfDocument(mw=9, mh=9)
     fallback.grids['type'][3][3], fallback.grids['blg'][3][3] = 'ef', '00'
@@ -491,7 +490,7 @@ def test_gem_visual_uses_building_sector_type_and_restores_underlay():
     update_special(fallback, 'gem', fallback_gem, {'actions': actions, 'x': 3, 'y': 3})
     assert (fallback.grids['type'][3][3], fallback.grids['blg'][3][3]) == ('ef', '32')
     remove_special(fallback, 'gem', fallback_gem)
-    assert (fallback.grids['type'][3][3], fallback.grids['blg'][3][3]) == ('00', '00')
+    assert (fallback.grids['type'][3][3], fallback.grids['blg'][3][3]) == ('ef', '00')
 
 
 def _loaded_item_with_key_visual(visual='f4'):
@@ -514,10 +513,11 @@ def test_loaded_item_key_road_toggle_delete_and_move_preserve_marker_metadata(wi
     assert panel.key_road.isChecked()
     panel.key_road.setChecked(False)
     assert loaded.grids['type'][3][3] == 'f3'
-    assert loaded.items[1]['_key_visuals'][(3, 3)] == {'before': 'f4', 'applied': 'f3'}
+    assert loaded.items[1]['_key_visuals'][(3, 3)] == {'before': '00', 'applied': 'f3'}
     panel.delete_button.click()
     assert loaded.visible_item_slots == 0
-    assert loaded.grids['type'][3][3] == 'f4'
+    # A removed key leaves an empty sector, not a stray key marker.
+    assert loaded.grids['type'][3][3] == '00'
 
     moved = _loaded_item_with_key_visual()
     moved.grids['type'][5][5] = 'ab'
@@ -551,12 +551,12 @@ def test_loaded_and_saved_gem_visual_restore_preserves_type_map():
     buildings = {50: SimpleNamespace(sec_type=123)}
     loaded = _loaded_legacy_gem('05')
     remove_special(loaded, 'gem', 1, buildings=buildings)
-    assert (loaded.grids['type'][2][2], loaded.grids['blg'][2][2]) == ('00', '00')
+    assert (loaded.grids['type'][2][2], loaded.grids['blg'][2][2]) == ('05', '00')
 
     moved = _loaded_legacy_gem('05')
     moved.grids['type'][4][4], moved.grids['blg'][4][4] = '06', '00'
     update_special(moved, 'gem', 1, {'x': 4, 'y': 4}, buildings=buildings)
-    assert (moved.grids['type'][2][2], moved.grids['blg'][2][2]) == ('00', '00')
+    assert (moved.grids['type'][2][2], moved.grids['blg'][2][2]) == ('05', '00')
     assert (moved.grids['type'][4][4], moved.grids['blg'][4][4]) == ('7b', '32')
 
     authored = LdfDocument(mw=9, mh=9)
@@ -567,7 +567,7 @@ def test_loaded_and_saved_gem_visual_restore_preserves_type_map():
     reloaded = loads_ldf(dumps_ldf(authored))
     assert (reloaded.grids['type'][2][2], reloaded.grids['blg'][2][2]) == ('7b', '32')
     remove_special(reloaded, 'gem', 1, buildings=buildings)
-    assert (reloaded.grids['type'][2][2], reloaded.grids['blg'][2][2]) == ('00', '00')
+    assert (reloaded.grids['type'][2][2], reloaded.grids['blg'][2][2]) == ('ab', '00')
 
 
 def test_special_preview_defaults_and_item_countdown_mm_ss(win):
@@ -853,7 +853,7 @@ def test_clear_view_filters_cpu_actor_geometry_without_document_edits(win, monke
 
     class _CaptureJob(QRunnable):
         def __init__(self, polygons, camera, tables, key, generation, terrain,
-                     preview_cells=(), preview_codes=()):
+                     preview_cells=(), preview_codes=(), preview_tint=None):
             super().__init__()
             self.polygons, self.camera, self.tables, self.key = polygons, camera, tables, key
             self.signals = _Signals()

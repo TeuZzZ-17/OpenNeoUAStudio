@@ -65,6 +65,31 @@ def test_level_info_preserves_modern_briefing_and_decodes_installed_sky():
         bootstrap.set_installation(previous)
 
 
+def test_level_info_media_choices_come_from_current_folders(tmp_path):
+    from map_editor.ui.dialogs import LevelInfoPanel
+
+    app = QApplication.instance() or QApplication([])
+    data = tmp_path / 'Data'
+    for folder, names in (
+            ('Music', ('My_New_Ambience.ogg', 'Another.OGG', 'ignore.txt')),
+            ('Mov', ('My_New_Intro.mpg', 'Another.MP4', 'ignore.txt'))):
+        directory = data / folder
+        directory.mkdir(parents=True)
+        for name in names:
+            (directory / name).write_bytes(b'')
+    previous = bootstrap.installation()
+    try:
+        bootstrap.set_installation(GameInstallation.suggest(data))
+        panel = LevelInfoPanel(LdfDocument(mw=7, mh=7))
+        music = [panel.music_box.itemText(i) for i in range(panel.music_box.count())]
+        movies = [panel.movie_box.itemText(i) for i in range(panel.movie_box.count())]
+        assert music == ['None', 'Another.OGG', 'My_New_Ambience.ogg']
+        assert movies == ['None', 'Another.MP4', 'My_New_Intro.mpg']
+        panel.dispose()
+    finally:
+        bootstrap.set_installation(previous)
+
+
 def test_preview_cache_invalidates_local_file_changes(tmp_path):
     path=tmp_path/'preview.png'
     image=QImage(4,4,QImage.Format.Format_RGB32)

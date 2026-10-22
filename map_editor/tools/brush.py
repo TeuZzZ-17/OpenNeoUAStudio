@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import math
+import random
 from enum import Enum
 
 from ..core.ldf_model import HGT_MAX, HGT_MIN, LdfDocument
@@ -13,6 +14,7 @@ class BrushMode(str, Enum):
     LOWER = "lower"
     FLATTEN = "flatten"
     SMOOTH = "smooth"
+    NOISE = "noise"
 
 
 class BrushShape(str, Enum):
@@ -141,6 +143,8 @@ class TerrainBrush:
         self._target: int | None = None
         self._mode: BrushMode | None = None
         self.target_height: int | None = None
+        self._noise_base = {}
+        self._noise_phase = (0.0, 0.0)
 
     @property
     def radius(self):
@@ -156,6 +160,8 @@ class TerrainBrush:
     def begin_stroke(self, doc: LdfDocument, col: int, row: int) -> None:
         self._acc.clear()
         self._mode = None
+        self._noise_base.clear()
+        self._noise_phase = (random.uniform(0, math.tau), random.uniform(0, math.tau))
         inside = 0 <= col < doc.mw and 0 <= row < doc.mh
         self._target = (self.target_height if self.target_height is not None
                         else doc.grids['hgt'][row][col] if inside else None)
@@ -180,6 +186,13 @@ class TerrainBrush:
                 delta = -strength
             elif mode == BrushMode.FLATTEN:
                 delta = (self._target - current) * min(1.0, weight * strength)
+            elif mode == BrushMode.NOISE:
+                # One gentle, spatially coherent height step per stroke, without frame-dependent jitter.
+                base = self._noise_base.setdefault((c, r), current)
+                phase_x, phase_z = self._noise_phase
+                wave = math.sin(c * .7 + phase_x) * math.cos(r * .55 + phase_z)
+                target = base + round(wave)
+                delta = (target - current) * min(1.0, weight * strength)
             else:
                 total = count = 0
                 for rr in range(r - 1, r + 2):

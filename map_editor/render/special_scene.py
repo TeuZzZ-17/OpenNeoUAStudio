@@ -38,9 +38,11 @@ def special_members(doc, lib=None):
                 x, y = cell
                 if not (1 <= x < doc.mw - 1 and 1 <= y < doc.mh - 1):
                     continue
-                typ = ('f4' if value.get('_key_roads', {}).get(index) else 'f3') if kind == 'item' and value.get('_preview') else str(doc.grids['type'][y][x])
+                # Keys being added or moved are previews: only the key at ``index`` is grey.
+                preview = value.get('_preview', False) or index in value.get('_preview_keys', ())
+                typ = ('f4' if value.get('_key_roads', {}).get(index) else 'f3') if kind == 'item' and preview else str(doc.grids['type'][y][x])
                 yield SpecialMember(kind, slot, index, (x, y), int(typ, 16),
-                                    int(str(doc.grids['blg'][y][x]), 16), value.get('_preview', False))
+                                    int(str(doc.grids['blg'][y][x]), 16), preview)
 
 
 def special_cells(doc, lib=None):
@@ -82,13 +84,18 @@ def scene_object_styles(view):
         preview = value.get('_preview') or code in dragged
         is_selected = index in selected if index < len(doc.squads) else index - len(doc.squads) == getattr(view, 'selected_host', -1)
         color = (160, 160, 160) if preview else view.owner_colors.get(value['owner'], (150, 150, 150))
-        styles.append((*color, 3 if preview else 2 if is_selected else 1))
+        styles.append((*color, 3 if preview else 2 if is_selected else
+                       4 if index < len(doc.squads) else 1))
     selection = getattr(view, 'selected_special', None)
     for index, member in enumerate(special_members(doc, view.lib)):
         code = -(doc.mw * doc.mh + len(doc.squads) + len(doc.host_stations) + index + 1)
         preview = member.preview or code in dragged
-        is_selected = selection == (member.kind, member.slot, member.key)
+        # Every key sector of the selected beamgate or super item is outlined, not only the chosen row.
+        is_selected = selection == (member.kind, member.slot, member.key) or (
+            selection is not None and selection[:2] == (member.kind, member.slot) and member.key >= 0)
         color = (160, 160, 160) if preview else cell_owner_color(view, doc, member.cell)
+        if preview and getattr(view, 'placement_error', ''):
+            color = (225, 115, 120)
         styles.append((*color, 3 if preview else 2 if is_selected else 1))
     styles.extend(getattr(view.lib, "preview_styles", ()))
     return styles

@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import copy
 import re
+import struct
 import zlib
 from pathlib import Path
 
@@ -16,6 +17,8 @@ from .terrain_mesh import HEIGHT_UNIT, TerrainMesh
 from .map_scene import scene_polygons, render_scene
 
 BRIEFING_SEED = 1977
+# Share of its tone the outermost margin keeps (0 would be pure black).
+MARGIN_FLOOR = .22
 # Share of the map's own color kept in the MB: the painted retail art is
 # paler than the game textures.
 BRIEFING_SATURATION = .8
@@ -229,11 +232,128 @@ def style_briefing(image, doc, camera):
     # Keep the rectangular retail footprint, with a ragged black margin.
     edge = np.minimum.reduce((xx + .5, width - xx - .5, yy + .5, height - yy - .5))
     fade = np.clip((edge - 8 + (blotch - .5) * 22) / 14, 0, 1) ** 1.3
+    # The retail margin is very dark but still textured, not pure black.
+    fade = MARGIN_FLOOR + (1 - MARGIN_FLOOR) * fade
     color *= fade[:, :, None]
     color[rgba[:, :, 3] == 0] = 0
     result = np.full((height, width, 4), 255, np.uint8)
     result[:, :, :3] = np.clip(np.rint(color), 0, 255).astype(np.uint8)
     return QImage(result.data, width, height, width*4, QImage.Format.Format_RGBA8888).copy()
+
+
+# Luminance percentiles (0..100) of the 302x302 retail MB (40 images) and DB (79 images).
+# The generated artwork is pulled towards them so its tones, black share and highlights match.
+RETAIL_LUMA = {
+    'mb': (0.0, 0.0, 0.0, 0.1, 0.1, 0.1, 0.1, 0.1, 0.1, 0.1, 0.1, 0.1, 9.3, 9.3, 9.3, 10.0, 10.0, 10.0, 10.0, 10.0, 10.0, 10.5, 10.8, 12.5, 14.0, 14.6, 14.6, 14.6, 17.0, 17.0, 17.0, 17.0, 17.0, 20.7, 20.9, 21.0, 21.6, 23.7, 23.7, 23.7, 25.3, 25.4, 25.4, 26.9, 26.9, 26.9, 28.1, 29.8, 31.6, 31.7, 33.3, 34.0, 36.0, 37.9, 38.5, 38.5, 38.9, 40.5, 40.7, 40.7, 40.7, 42.6, 42.7, 45.1, 48.5, 48.5, 51.0, 51.0, 51.2, 51.4, 53.4, 54.2, 54.7, 56.7, 60.3, 60.5, 64.1, 64.1, 64.9, 68.0, 68.0, 70.3, 72.7, 74.5, 77.2, 77.5, 81.5, 84.7, 85.4, 90.0, 95.2, 97.1, 102.9, 109.0, 114.0, 119.0, 128.9, 136.5, 153.0, 170.0, 255.0),
+    'db': (0.0, 0.0, 0.1, 0.1, 0.1, 0.1, 0.1, 0.1, 0.1, 0.1, 0.1, 0.1, 0.1, 0.1, 0.1, 0.1, 9.3, 9.3, 9.3, 10.0, 10.0, 10.0, 10.0, 10.0, 10.0, 10.0, 10.0, 10.0, 10.8, 10.8, 12.5, 12.5, 14.0, 14.6, 14.6, 14.6, 17.0, 17.0, 17.0, 17.0, 17.0, 17.0, 18.6, 20.9, 20.9, 21.0, 21.6, 23.7, 23.7, 23.7, 23.7, 25.3, 25.4, 25.4, 26.9, 26.9, 28.1, 28.6, 31.6, 31.7, 32.0, 34.0, 34.0, 36.0, 38.5, 38.5, 38.9, 38.9, 40.7, 40.7, 42.0, 42.7, 44.1, 48.5, 48.5, 51.0, 51.2, 51.4, 53.4, 54.7, 56.7, 60.3, 63.6, 64.1, 65.2, 68.0, 71.3, 72.7, 75.8, 77.7, 84.7, 85.0, 90.0, 96.3, 102.0, 106.9, 114.0, 122.5, 136.0, 157.3, 255.0),
+}
+# How far the generated tone curve moves to the retail one (1 = identical histogram).
+RETAIL_TONE_WEIGHT = .75
+# Mean absolute difference from the 3x3 blur that the retail art shows (film grain).
+RETAIL_GRAIN = {'mb': 6.4, 'db': 6.2}
+# Retail MB/DB use the Set 7 palette only; the briefing is reduced to it like the originals.
+BRIEFING_PALETTE_SET = 7
+# Film-strip perforations of the retail artwork: holes at fixed pixel positions along the
+# top and bottom edge (centres 34.5 + 36.5 * n, 13 x 11 pixels, from the edge inwards).
+PERFORATION_FIRST, PERFORATION_STEP = 34.5, 36.5
+PERFORATION_SIZE, PERFORATION_OFFSET = (13, 11), 1
+
+
+def perforations(width, height):
+    """Boolean mask of the dark film-strip holes."""
+    mask = np.zeros((height, width), bool)
+    hole_w, hole_h = PERFORATION_SIZE
+    yy, xx = np.indices((height, width))
+    number = 0
+    while True:
+        cx = PERFORATION_FIRST + PERFORATION_STEP * number
+        number += 1
+        if cx - hole_w / 2 > width:
+            break
+        for top in (PERFORATION_OFFSET, height - PERFORATION_OFFSET - hole_h):
+            if top < 0 or top + hole_h > height:
+                continue
+            # Rounded rectangle: the corners are cut by a 3 px radius.
+            dx = np.maximum(np.abs(xx - cx) - (hole_w / 2 - 3), 0)
+            dy = np.maximum(np.abs(yy - (top + hole_h / 2)) - (hole_h / 2 - 3), 0)
+            mask |= (np.hypot(dx, dy) <= 3) & (np.abs(xx - cx) <= hole_w / 2) & (np.abs(yy - (top + hole_h / 2)) <= hole_h / 2)
+    return mask
+
+
+def _luma(rgb):
+    return rgb @ np.array((.299, .587, .114))
+
+
+def match_retail_tones(rgb, kind):
+    """Move the tone curve towards the retail catalog while keeping each pixel's hue."""
+    luma = _luma(rgb)
+    flat = luma.ravel()
+    order = np.argsort(flat, kind='stable')
+    rank = np.empty(len(flat))
+    rank[order] = np.linspace(0, 100, len(flat))
+    own = np.percentile(flat, np.arange(101))
+    target = np.asarray(RETAIL_LUMA[kind], float)
+    mixed = np.maximum.accumulate((1 - RETAIL_TONE_WEIGHT) * own + RETAIL_TONE_WEIGHT * target)
+    wanted = np.interp(rank, np.arange(101), mixed).reshape(luma.shape)
+    factor = (wanted / np.maximum(luma, 1.0))[:, :, None]
+    flat_pixels = luma < 1.0
+    result = np.where(flat_pixels[:, :, None], wanted[:, :, None], rgb * factor)
+    return np.clip(result, 0, 255)
+
+
+# Saturation of the retail art by luminance (luminance, factor applied to the colour offset).
+RETAIL_SATURATION = ((4, 1.0), (14, 1.45), (30, 1.13), (55, .94), (90, .86), (140, .8))
+
+
+def shape_saturation(rgb):
+    """Dark tones a little more colourful, highlights paler: the retail balance."""
+    luma = _luma(rgb)[:, :, None]
+    scale = np.interp(luma, [level for level, _ in RETAIL_SATURATION],
+                      [factor for _, factor in RETAIL_SATURATION])
+    return np.clip(luma + (rgb - luma) * scale, 0, 255)
+
+
+def add_retail_grain(rgb, kind, rng):
+    """Fine grain until the image's mean detail matches the retail art."""
+    luma = _luma(rgb)
+    pad = np.pad(luma, 1, mode='edge')
+    height, width = luma.shape
+    blur = sum(pad[i:i + height, j:j + width] for i in range(3) for j in range(3)) / 9
+    current = float(np.abs(luma - blur).mean())
+    target = RETAIL_GRAIN[kind]
+    if current >= target:
+        return rgb
+    # White noise of sigma s shows up as about .72 * s of mean detail.
+    sigma = np.sqrt(max(target ** 2 - current ** 2, 0)) / .72
+    # Dark pixels carry less grain and the brightest a little less, as in the scanned originals.
+    weight = np.interp(luma, (0, 40, 110, 255), (.25, 1.0, .85, .75))[:, :, None]
+    return np.clip(rgb + rng.normal(0, sigma, luma.shape)[:, :, None] * weight, 0, 255)
+
+
+def finish_briefing(image, kind, palette=None):
+    """Retail look of a styled briefing image: tones, grain, film strip and the Set 7 palette."""
+    image = image.convertToFormat(QImage.Format.Format_RGBA8888)
+    height, width = image.height(), image.width()
+    rgba = np.frombuffer(image.bits(), np.uint8).reshape(height, image.bytesPerLine())[:, :width * 4].reshape(height, width, 4)
+    rgb = rgba[:, :, :3].astype(float)
+    rng = np.random.default_rng(BRIEFING_SEED + width * 7919 + height)
+    rgb = shape_saturation(match_retail_tones(rgb, kind))
+    rgb = add_retail_grain(rgb, kind, rng)
+    rgb[perforations(width, height)] = 0
+    result = np.full((height, width, 4), 255, np.uint8)
+    result[:, :, :3] = np.clip(np.rint(rgb), 0, 255).astype(np.uint8)
+    if palette:
+        table = np.asarray([tuple(color)[:3] for color in palette], np.uint8)
+        indices = np.frombuffer(quantize_to_palette(
+            QImage(result.data, width, height, width * 4, QImage.Format.Format_RGBA8888), palette), np.uint8)
+        result[:, :, :3] = table[indices].reshape(height, width, 3)
+    return QImage(result.data, width, height, width * 4, QImage.Format.Format_RGBA8888).copy()
+
+
+def briefing_palette(set_number):
+    """The palette the retail briefings share (Set 7), else the level's own set palette."""
+    from ..core.resource_catalog import palette_for_set
+    return palette_for_set(BRIEFING_PALETTE_SET) or palette_for_set(set_number)
 
 
 def render_briefing(doc, lib, surface=None):
@@ -278,19 +398,55 @@ def render_briefing(doc, lib, surface=None):
     image = image.scaled(output_camera.width, output_camera.height,
                          Qt.AspectRatioMode.IgnoreAspectRatio,
                          Qt.TransformationMode.SmoothTransformation)
-    return style_briefing(image, doc, output_camera)
+    return finish_briefing(style_briefing(image, doc, output_camera), 'mb', briefing_palette(doc.set_number))
+
+
+# Output formats of the generated pair: PNG by default, or the original game's IFF ILBM.
+BRIEFING_FORMATS = {'png': '.png', 'ilbm': '.IFF'}
 
 
 def available_stem(directory, preferred):
     stem = re.sub(r'[<>:"/\\|?*\x00-\x1f]', '_', preferred).strip(' .') or 'Untitled'
     candidate, number = stem, 2
-    while any((Path(directory) / f'{prefix}_{candidate}.png').exists() for prefix in ('Mb', 'Db')):
+    taken = {path.name.casefold() for path in Path(directory).glob('*')} if Path(directory).is_dir() else set()
+    while any(f'{prefix}_{candidate}{suffix}'.casefold() in taken
+              for prefix in ('Mb', 'Db') for suffix in BRIEFING_FORMATS.values()):
         candidate = f'{stem}_{number}'
         number += 1
     return candidate
 
 
-def debriefing_variant(image):
+def quantize_to_palette(image, palette):
+    """Nearest game-palette index for every pixel of a QImage (row-major bytes)."""
+    rgb = image.convertToFormat(QImage.Format.Format_RGBA8888)
+    width, height = rgb.width(), rgb.height()
+    pixels = np.frombuffer(rgb.bits(), np.uint8).reshape(
+        height, rgb.bytesPerLine())[:, :width * 4].reshape(-1, 4)[:, :3].astype(np.int32)
+    table = np.asarray([tuple(color)[:3] for color in palette], np.int32)
+    indices = np.empty(len(pixels), np.uint8)
+    for start in range(0, len(pixels), 4096):
+        chunk = pixels[start:start + 4096]
+        indices[start:start + 4096] = ((chunk[:, None, :] - table[None, :, :]) ** 2).sum(axis=2).argmin(axis=1)
+    return indices.tobytes()
+
+
+def ilbm_bytes(image, palette):
+    """A standalone FORM ILBM (8 planes, uncompressed) of ``image`` in the game palette."""
+    from studio.formats.images import (iff_chunk, pack_ilbm_body, palette_to_cmap,
+                                       parse_ilbm_bytes)
+    width, height = image.width(), image.height()
+    indices = quantize_to_palette(image, palette)
+    header = struct.pack('>HHhhBBBBHBBHH', width, height, 0, 0, 8, 0, 0, 0, 0, 10, 10, width, height)
+    payload = (b'ILBM' + iff_chunk(b'BMHD', header) + iff_chunk(b'CMAP', palette_to_cmap(palette))
+               + iff_chunk(b'BODY', pack_ilbm_body(indices, width, height, 8)))
+    data = iff_chunk(b'FORM', payload)
+    check = parse_ilbm_bytes(data, 'briefing')
+    if (check.width, check.height) != (width, height) or check.pixels != indices:
+        raise OSError('The ILBM briefing image failed its own verification.')
+    return data
+
+
+def debriefing_variant(image, palette=None):
     """The DB of an MB: less saturated and darker, same shapes and margins."""
 
     db_image = image.convertToFormat(QImage.Format.Format_RGBA8888).copy()
@@ -301,21 +457,28 @@ def debriefing_variant(image):
     luma = (color @ np.array((.299, .587, .114)))[:, :, None]
     color = (luma + (color - luma) * DEBRIEFING_SATURATION) * DEBRIEFING_BRIGHTNESS
     pixels[:, :, :3] = np.clip(np.rint(color), 0, 255).astype(np.uint8)
-    return db_image
+    return finish_briefing(db_image, 'db', palette)
 
 
-def write_briefing_pair(image, directory, stem):
+def write_briefing_pair(image, directory, stem, fmt='png', palette=None):
+    if fmt not in BRIEFING_FORMATS:
+        raise ValueError(f'Unknown briefing format: {fmt}')
     if not stem or stem.strip(' .') != stem or re.search(r'[<>:"/\\|?*\x00-\x1f]', stem):
         raise ValueError('Choose a filename without path separators or reserved characters.')
     if image.isNull():
         raise ValueError('The generated image is empty.')
+    if fmt == 'ilbm' and not palette:
+        raise ValueError('ILBM needs the set palette, which was not found.')
     directory = Path(directory)
-    paths = tuple(directory / f'{prefix}_{stem}.png' for prefix in ('Mb', 'Db'))
+    paths = tuple(directory / f'{prefix}_{stem}{BRIEFING_FORMATS[fmt]}' for prefix in ('Mb', 'Db'))
     if any(path.exists() for path in paths):
         raise FileExistsError('That MB/DB name already exists. Choose a new name to preserve the existing artwork.')
-    db_image = debriefing_variant(image)
+    db_image = debriefing_variant(image, palette)
     payloads = []
     for artwork in (image, db_image):
+        if fmt == 'ilbm':
+            payloads.append(ilbm_bytes(artwork, palette))
+            continue
         buffer = QBuffer()
         buffer.open(QIODevice.OpenModeFlag.WriteOnly)
         if not artwork.save(buffer, 'PNG'):

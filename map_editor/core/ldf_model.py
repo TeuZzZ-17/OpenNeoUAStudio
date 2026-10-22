@@ -33,7 +33,7 @@ MAX_HISTORY = 100
 DEFAULT_HOST_POS_Y = -700
 DEFAULT_HOST_RELOAD_CONST = 500000
 DEFAULT_HOST_VIEWANGLE = 0
-DEFAULT_SCRIPT_CONTENT = ";include data:scripts/startup2.scr"
+DEFAULT_SCRIPT_CONTENT = ""
 DEFAULT_LDF_ENCODING = "cp1252"
 TECH_FACTIONS = range(1, 8)
 
@@ -324,6 +324,8 @@ class LdfDocument:
     # Empty begin_enable blocks carry a reset that cannot be inferred from lists.
     tech_explicit: set = field(default_factory=set)
     custom_tech_names: dict = field(default_factory=dict)
+    # Editor-only terrain history, saved as comments the game ignores.
+    building_underlays: dict = field(default_factory=dict)
     lvl_info: dict = field(default_factory=new_lvl_info)
     script_content: str = DEFAULT_SCRIPT_CONTENT
     visible_gate_slots: int = 0
@@ -360,6 +362,7 @@ class LdfDocument:
         self.tech_explicit.clear()
         self.tech = new_tech()
         self.custom_tech_names.clear()
+        self.building_underlays.clear()
 
     def snapshot(self) -> dict:
         return self._copy_state(self.__dict__)
@@ -395,6 +398,32 @@ class LdfDocument:
                 else:
                     continue
                 self.grids['type'][r][c] = t
+
+    def remember_building_ground(self, col, row, building):
+        """Keep the original terrain when placing or replacing a building."""
+        previous = self.building_underlays.get((col, row))
+        current = str(self.grids['blg'][row][col]).lower()
+        terrain = previous[0] if previous and previous[1] == current else self.grids['type'][row][col]
+        value = (terrain, f'{building:02x}')
+        self.building_underlays[col, row] = value
+        return previous != value
+
+    def building_ground_is_current(self, col, row, building):
+        if str(self.grids['blg'][row][col]).lower() == building:
+            return True
+        for store in (self.gates, self.items, self.gems):
+            for value in store.values():
+                before = value.get('_visual_before')
+                if value.get('x') == col and value.get('y') == row and before and before[1] == building:
+                    return True
+        return False
+
+    def remove_building(self, col, row):
+        """Remove the building and recover its terrain; old levels retain their authored sector."""
+        previous = self.building_underlays.pop((col, row), None)
+        if previous and previous[1] == str(self.grids['blg'][row][col]).lower():
+            self.grids['type'][row][col] = previous[0]
+        self.grids['blg'][row][col] = '00'
 
     def normalize_border_heights(self) -> list:
         hgt = self.grids.get('hgt')
@@ -460,23 +489,40 @@ class LdfDocument:
         self.squads = [s for s in self.squads if inb(s['x'], s['y'])]
         self.host_stations = [h for h in self.host_stations if inb(h['x'], h['y'])]
 
-    def resize(self, w: int, h: int, remove_out_of_bounds: bool = False) -> dict:
+    def resize(self, w: int, h: int, remove_out_of_bounds: bool = False,
+               height: int | None = None) -> dict:
+        """Resize the grids, keeping the interior; ``height`` (0-60) flattens every sector to it.
+
+        The old border ring becomes plain empty sectors when it ends up inside the new map,
+        so an enlarged map has no leftover wall sectors in the middle.
+        """
         counts = self.count_resize_out_of_bounds(w, h)
         if any(counts.values()) and not remove_out_of_bounds:
             raise ValueError(f"objects outside map after resize: {counts}")
+        base = DEFAULT_HGT if height is None else HGT_MIN + max(EDITOR_HEIGHT_MIN, min(EDITOR_HEIGHT_MAX, int(height)))
         new = {
             'type': [['00'] * w for _ in range(h)],
             'own': [[0] * w for _ in range(h)],
-            'hgt': [[DEFAULT_HGT] * w for _ in range(h)],
+            'hgt': [[base] * w for _ in range(h)],
             'blg': [['00'] * w for _ in range(h)],
         }
-        for r in range(min(self.mh, h)):
-            for c in range(min(self.mw, w)):
+        old_w, old_h = self.mw, self.mh
+        for r in range(min(old_h, h)):
+            for c in range(min(old_w, w)):
+                if (r in (0, old_h - 1) or c in (0, old_w - 1)) and 1 <= r < h - 1 and 1 <= c < w - 1:
+                    # Old border cell now inside the map: keep the terrain height, drop the wall sector.
+                    new['hgt'][r][c] = self.grids['hgt'][r][c] if height is None else base
+                    continue
                 for k in new:
+                    if k == 'hgt' and height is not None:
+                        continue
                     new[k][r][c] = self.grids[k][r][c]
         if any(counts.values()):
             self.remove_out_of_bounds(w, h)
         self.mw, self.mh, self.grids = w, h, new
+        self.building_underlays = {(c, r): value for (c, r), value in self.building_underlays.items()
+                                   if 1 <= c < w - 1 and 1 <= r < h - 1
+                                   and new['blg'][r][c] == value[1]}
         self.apply_borders()
         self.normalize_border_heights()
         return counts
@@ -840,6 +886,12 @@ def loads_ldf(raw_text: str, encoding: str = DEFAULT_LDF_ENCODING) -> LdfDocumen
     doc.grids['own'] = loaded.get('own_map', [[0] * w for _ in range(h)])
     doc.grids['hgt'] = loaded.get('hgt_map', [[DEFAULT_HGT] * w for _ in range(h)])
     doc.grids['blg'] = loaded.get('blg_map', [['00'] * w for _ in range(h)])
+    from .special_objects import load_special_ground_comments
+    load_special_ground_comments(doc, raw_text)
+    for match in re.finditer(r'(?im)^; Studio building ground (\d+) (\d+) ([0-9a-f]{2}) ([0-9a-f]{2})\s*$', raw_text):
+        col, row = int(match[1]), int(match[2])
+        if 1 <= col < w - 1 and 1 <= row < h - 1 and doc.building_ground_is_current(col, row, match[4].lower()):
+            doc.building_underlays[col, row] = (match[3].lower(), match[4].lower())
     doc.normalize_border_heights()
     if raw_title is not None:
         doc.lvl_info['title'] = raw_title
@@ -852,6 +904,12 @@ def load_ldf(path) -> LdfDocument:
     with open(path, "rb") as fh:
         text, encoding = decode_ldf_bytes(fh.read())
     return loads_ldf(text, encoding)
+
+
+def _ldf_position(value) -> str:
+    """Keep five decimal places at most, without float tails or negative zero."""
+    text = f'{value:.5f}'.rstrip('0').rstrip('.')
+    return '0' if text == '-0' else text
 
 
 def dumps_ldf(doc: LdfDocument, defs: dict | None = None) -> str:
@@ -869,7 +927,7 @@ def dumps_ldf(doc: LdfDocument, defs: dict | None = None) -> str:
 
     sep = ";------------------------------------------------------------"
     info = doc.lvl_info
-    w("; --- Generated by Map Editor ---")
+    w("; --- Generated by OpenNeoUA Studio ---")
     w(sep)
     w("begin_level")
     w(f"   set = {doc.set_number}")
@@ -958,11 +1016,11 @@ def dumps_ldf(doc: LdfDocument, defs: dict | None = None) -> str:
         w("begin_robo")
         w(f"   owner = {h['owner']}")
         label = h['custom_name'] or host_names.get(h['veh'], '')
-        w(f"   vehicle = {h['veh']} ; {label}")
+        w(f"   vehicle = {h['veh']}" + (f" ; {label}" if label else ''))
         fx, fz = grid_to_world(h['x'], h['y'])
-        w(f"   pos_x = {h.get('pos_x', fx):.17g}")
-        w(f"   pos_y = {h['pos_y']:.17g}")
-        w(f"   pos_z = {h.get('pos_z', fz):.17g}")
+        w(f"   pos_x = {_ldf_position(h.get('pos_x', fx))}")
+        w(f"   pos_y = {_ldf_position(h['pos_y'])}")
+        w(f"   pos_z = {_ldf_position(h.get('pos_z', fz))}")
         w(f"   energy = {h['energy']}")
         if h.get('hidden'):
             w("   mb_status = unknown")
@@ -981,15 +1039,15 @@ def dumps_ldf(doc: LdfDocument, defs: dict | None = None) -> str:
         w("begin_squad")
         w(f"   owner = {s['owner']}")
         label = s['custom_name'] or veh_names.get(s['veh'], '')
-        w(f"   vehicle = {s['veh']} ; {label}")
+        w(f"   vehicle = {s['veh']}" + (f" ; {label}" if label else ''))
         w(f"   num = {s['num']}")
         if s.get('useable'):
             w("   useable")
         if s['hidden']:
             w("   mb_status = unknown")
         fx, fz = grid_to_world(s['x'], s['y'])
-        w(f"   pos_x = {s.get('pos_x', fx):.17g}")
-        w(f"   pos_z = {s.get('pos_z', fz):.17g}")
+        w(f"   pos_x = {_ldf_position(s.get('pos_x', fx))}")
+        w(f"   pos_z = {_ldf_position(s.get('pos_z', fz))}")
         w("end")
     w(sep)
     for i in TECH_FACTIONS:
@@ -997,9 +1055,11 @@ def dumps_ldf(doc: LdfDocument, defs: dict | None = None) -> str:
         if d['veh'] or d['blg'] or i in doc.tech_explicit:
             w(f"begin_enable {i}")
             for v in d['veh']:
-                w(f"   vehicle = {v:<4} ; {doc.custom_tech_names.get(v, veh_names.get(v, ''))}")
+                label = doc.custom_tech_names.get(v, veh_names.get(v, ''))
+                w(f"   vehicle = {v}" + (f" ; {label}" if label else ''))
             for b in d['blg']:
-                w(f"   building = {b:<4} ; {doc.custom_tech_names.get(b, blg_names.get(b, ''))}")
+                label = doc.custom_tech_names.get(b, blg_names.get(b, ''))
+                w(f"   building = {b}" + (f" ; {label}" if label else ''))
             w("end")
     w(sep)
     w("; --- USER SCRIPT ---")
@@ -1024,6 +1084,18 @@ def dumps_ldf(doc: LdfDocument, defs: dict | None = None) -> str:
                 cells = [str(x) for x in row]
             w("      " + " ".join(cells))
     w("end")
+    editor_comments = [
+        f'; Studio building ground {col} {row} {terrain} {building}'
+        for (col, row), (terrain, building) in sorted(doc.building_underlays.items())
+        if doc.cell_is_valid({'x': col, 'y': row}) and doc.building_ground_is_current(col, row, building)]
+    from .special_objects import special_ground_comments
+    editor_comments.extend(special_ground_comments(doc))
+    if editor_comments:
+        w(sep)
+        w('; --- Editor data (OpenNeoUA Studio) ---')
+        w('; Original sectors restored when objects are moved or removed. Ignored by the game.')
+        for comment in editor_comments:
+            w(comment)
     return f.getvalue()
 
 

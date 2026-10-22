@@ -11,6 +11,7 @@ import time
 import copy
 import math
 import re
+from collections import deque
 from studio.exchange.portable import backup_existing_file
 from studio.ui.widgets import loading_set
 
@@ -26,7 +27,7 @@ from PySide6.QtWidgets import (QApplication, QAbstractItemView, QComboBox, QDock
 
 from ..core.asset_bridge import SetAssets
 from ..core.actor_placement import actors_fit, host_copy_preview
-from ..core.building_defs import load_building_files
+from ..core.building_defs import is_special_building, load_building_files
 from ..core.game_installation import GameInstallation
 from ..core.factions import load_owner_colors
 from ..core.script_catalog import script_texts
@@ -37,12 +38,13 @@ from ..core.ldf_model import (DEFAULT_HGT, FACTIONS, HGT_MIN, HGT_MAX,
 from ..render.map_viewport import create_viewport
 from ..render.terrain_mesh import HEIGHT_UNIT
 from ..render.sector_mesh import SectorMeshLibrary
-from ..render.sector_sprite import rasterize_sprite, sprite_input
+from ..render.sector_sprite import Sprite, rasterize_sprite, sprite_input
 from ..tools.brush import BrushMode, BrushShape, TerrainBrush
 from ..tools.paint import paint_cells
 from .dialogs import LevelInfoPanel, NewMapDialog, ResizeDialog
 from .music_preview import MusicPreview
 from .building_overlay import BuildingOverlay, CapabilityPreview
+from .settings_lock import SettingsLockButton
 from .thumbnail_delegate import ThumbnailDelegate, PaletteCardDelegate
 from .squad_panel import SquadPanel
 from .host_panel import HostPanel
@@ -51,20 +53,22 @@ from .special_panel import SpecialPanel
 from .special_overlay import SpecialOverlay
 from ..core.special_objects import (SPECIAL_KINDS, special_store, special_slots, special_cell,
                                     add_special, update_special, remove_special, set_item_key_road)
-from .preview_cards import RESOURCE_ROLE, COLOR_ROLE
+from .preview_cards import PREVIEW_PIXELS, RESOURCE_ROLE, COLOR_ROLE
 from ..core.ldf_model import ensure_host_defaults, make_host_ai
 from .squad_overlay import SquadOverlay
 from .colored_tabs import PaletteTabs, TAB_COLORS
 from ..render.squad_scene import squad_xz, centered_squad_position, host_position, MAX_PREVIEW_MEMBERS
 from .. import bootstrap
 from studio.rendering.asset_viewport import VIEW_PRESET_ANGLES
+from ..render.camera import ISO_PITCH, ISO_YAW
 
 TOOLS = (("select", "Select"), ("sector", "Sector"), ("building", "Building"),
          ("owner", "Faction"), ("terrain", "Terrain"), ("squad", "Squad"))
-SECTOR_PREVIEW_SCALES = (0.7, 1.1, 1.8)
+SECTOR_PREVIEW_SCALES = (0.7, 1.4, 1.8)
 SECTOR_PREVIEW_COLUMNS = (3, 2, 1)
-BUILDING_PREVIEW_PIXELS = (96, 128, 176)
-PALETTE_BATCH_SECONDS = .006
+BUILDING_PREVIEW_PIXELS = (96, 144, 192)
+PALETTE_BATCH_SECONDS = .016
+PALETTE_FRAME_MS = 16
 
 
 class _IconSignals(QObject):
@@ -84,31 +88,6 @@ class _IconJob(QRunnable):
         except Exception:
             sprite = None
         self.signals.finished.emit((self.set_number, self.typ, self.scale, self.epoch, sprite))
-
-
-def crop_transparent(image: QImage, margin: int = 3) -> QImage:
-    """Trim fully transparent borders so grid icons stay centred and compact."""
-    if image.isNull():
-        return image
-    converted = image.convertToFormat(QImage.Format.Format_RGBA8888)
-    width, height = converted.width(), converted.height()
-    try:
-        import numpy as np
-        pixels = np.frombuffer(converted.bits(), np.uint8).reshape(height, width, 4)
-        alpha = pixels[:, :, 3]
-        rows = np.any(alpha > 8, axis=1)
-        cols = np.any(alpha > 8, axis=0)
-        if not rows.any() or not cols.any():
-            return image
-        top, bottom = int(np.argmax(rows)), int(len(rows) - 1 - np.argmax(rows[::-1]))
-        left, right = int(np.argmax(cols)), int(len(cols) - 1 - np.argmax(cols[::-1]))
-        top = max(0, top - margin)
-        left = max(0, left - margin)
-        bottom = min(height - 1, bottom + margin)
-        right = min(width - 1, right + margin)
-        return converted.copy(left, top, right - left + 1, bottom - top + 1)
-    except Exception:
-        return image
 
 
 class MainWindow(QMainWindow):
@@ -135,6 +114,7 @@ class MainWindow(QMainWindow):
         self._bicon_level = 2
         self._stroke_active = False
         self._stroke_changed = False
+        self._stroke_button = Qt.MouseButton.LeftButton
         self._stroke_mode = BrushMode.RAISE
         self._last_cell: tuple[int, int] | None = None
         self._terrain_tick = 0.0
@@ -145,6 +125,11 @@ class MainWindow(QMainWindow):
         self._icon_job = None
         self._icon_level = 1
         self._icon_scale = SECTOR_PREVIEW_SCALES[self._icon_level]
+        self._icon_angle = (ISO_YAW, ISO_PITCH)
+        self._preview_sizes = {}
+        self._preview_last = {0: None, 1: None}
+        self._palette_frame_started = 0.0
+        self._palette_frame_times = deque(maxlen=60)
         self._bicon_queue: list = []
         self._bicon_items = {}
         self._bicon_rows = {}
@@ -159,6 +144,7 @@ class MainWindow(QMainWindow):
         self._special_target_slot = 0
         self._host_pov_index = None
         self._special_drag = None
+        self._key_preview_cell = None
         self._building_drag = None
         self._resource_icons = {}
         self._clipboard = None
@@ -191,6 +177,7 @@ class MainWindow(QMainWindow):
         self.view.actorDragFinished.connect(self._finish_actor_drag)
         self.view.cellSelected.connect(self._select_cell)
         self.view.cellSwept.connect(self._sweep_cell)
+        self.view.cellsMarqueed.connect(self._marquee_cells)
         self.view.selectionCleared.connect(self._clear_selection)
         self.view.contextRequested.connect(self._map_context_menu)
         self.view.placementConfirmed.connect(self._confirm_placement)
@@ -204,8 +191,10 @@ class MainWindow(QMainWindow):
         self.view.statusMessage.connect(lambda m: self.statusBar().showMessage(m, 4000))
         self._repeat = QTimer(self, interval=60)
         self._repeat.timeout.connect(self._repeat_terrain)
-        self._icons = QTimer(self, singleShot=True, interval=1)
+        self._icons = QTimer(self, singleShot=True, interval=PALETTE_FRAME_MS)
+        self._icons.setTimerType(Qt.TimerType.PreciseTimer)
         self._icons.timeout.connect(self._make_icon)
+        self.view.cameraChanged.connect(self._refresh_preview_angle)
         self._script_timer = QTimer(self, singleShot=True, interval=600)
         self._script_timer.timeout.connect(self._finish_script)
         self._live_timer = QTimer(self, singleShot=True, interval=500)
@@ -213,6 +202,10 @@ class MainWindow(QMainWindow):
 
         self._build_actions()
         self._build_palette()
+        self.view.cameraChanged.connect(self._sync_pov_buttons)
+        self.squad_panel.selected.connect(self._sync_pov_buttons)
+        self.host_panel.selected.connect(self._sync_pov_buttons)
+        self._sync_pov_buttons()
         self.info = QLabel("")
         self.statusBar().addPermanentWidget(self.info)
         from studio.rendering.gpu import add_renderer_badge
@@ -244,7 +237,9 @@ class MainWindow(QMainWindow):
 
         act(file_menu, "New", self.file_new, QKeySequence.StandardKey.New)
         act(file_menu, "Open", self.file_open, QKeySequence.StandardKey.Open)
-        act(file_menu, "Save", self.file_save, QKeySequence.StandardKey.Save)
+        # Overwrite only makes sense for a map that already has a file.
+        self.save_action = act(file_menu, "Overwrite", self.file_save, QKeySequence.StandardKey.Save)
+        self.save_action.setEnabled(False)
         act(file_menu, "Save as", self.file_save_as,
             QKeySequence.StandardKey.SaveAs)
         self.undo_action = act(edit_menu, "Undo", self.undo, QKeySequence.StandardKey.Undo)
@@ -262,6 +257,7 @@ class MainWindow(QMainWindow):
         self.copy_action = act(edit_menu, 'Copy', self._copy_elements, 'Ctrl+C')
         self.paste_action = act(edit_menu, 'Paste', self._paste_elements, 'Ctrl+V')
         act(map_menu, "Fill", self.map_fill)
+        act(map_menu, "Close Roads (Experimental)…", self.map_close_roads)
         act(map_menu, "Level Info", self.map_level_info)
         tools_menu = edit_menu.addMenu("Tool")
         group = QActionGroup(self)
@@ -285,7 +281,11 @@ class MainWindow(QMainWindow):
         view_menu.addAction(self.sky_action)
         self.music_action = QAction("Mute Music", self, checkable=True, checked=False)
         self.music_action.toggled.connect(lambda muted: self.music_preview.set_enabled(not muted))
+        self.border_walls_action = QAction("Border Walls", self, checkable=True, checked=True)
+        self.border_walls_action.setToolTip("Show the translucent walls around the map. Turn off to edit the border without them.")
+        self.border_walls_action.toggled.connect(self.view.set_border_walls)
         map_menu.addSeparator()
+        map_menu.addAction(self.border_walls_action)
         map_menu.addAction(self.music_action)
         self.palette_menu = view_menu
 
@@ -362,6 +362,9 @@ class MainWindow(QMainWindow):
         layout = QVBoxLayout(page)
         layout.addWidget(self.sector_filter)
         zoom_row = QHBoxLayout()
+        self.sector_settings_lock = SettingsLockButton()
+        self.sector_settings_lock.bind_palette(self.sector_list)
+        zoom_row.addWidget(self.sector_settings_lock)
         zoom_row.addWidget(QLabel("Preview size"))
         zoom_row.addStretch()
         self.sector_zoom_out = QPushButton("−")
@@ -387,6 +390,8 @@ class MainWindow(QMainWindow):
         self.show_special_buildings.toggled.connect(lambda: self._fill_buildings(self._lib()) if self._lib() else None)
         buildings_layout.addWidget(self.show_special_buildings)
         building_zoom_row = QHBoxLayout()
+        self.building_settings_lock = SettingsLockButton()
+        building_zoom_row.addWidget(self.building_settings_lock)
         building_zoom_row.addWidget(QLabel("Preview size"))
         building_zoom_row.addStretch()
         self.building_zoom_out = QPushButton("−")
@@ -404,6 +409,7 @@ class MainWindow(QMainWindow):
         self.building_zoom_in.setEnabled(False)
         buildings_layout.addLayout(building_zoom_row)
         self.building_list = QListWidget()
+        self.building_settings_lock.bind_palette(self.building_list)
         from studio.ui.widgets import use_standard_list_style
         use_standard_list_style(self.building_list)
         self.building_list.setItemDelegate(PaletteCardDelegate(self.building_list))
@@ -439,21 +445,29 @@ class MainWindow(QMainWindow):
         self.owner_list.setCurrentRow(self.sel_owner)
         self.owner_list.currentItemChanged.connect(self._owner_selected)
         self.owner_list.itemClicked.connect(self._owner_selected)
-        tabs.addTab(self.owner_list, "Factions")
+        owner_page = QWidget()
+        owner_layout = QVBoxLayout(owner_page)
+        self.owner_settings_lock = SettingsLockButton()
+        self.owner_settings_lock.bind_palette(self.owner_list)
+        owner_layout.addWidget(self.owner_settings_lock)
+        owner_layout.addWidget(self.owner_list)
+        tabs.addTab(owner_page, "Factions")
 
         terrain = QWidget()
-        form = QFormLayout(terrain)
+        terrain_layout = QVBoxLayout(terrain)
+        self.terrain_settings_lock = SettingsLockButton()
+        terrain_layout.addWidget(self.terrain_settings_lock)
+        terrain_fields = QWidget()
+        form = QFormLayout(terrain_fields)
+        terrain_layout.addWidget(self.terrain_settings_lock.wrap(terrain_fields))
         self.mode_combo = QComboBox()
-        for mode, label in ((BrushMode.RAISE, "Raise (Shift lowers)"),
-                            (BrushMode.LOWER, "Lower"),
-                            (BrushMode.FLATTEN, "Flatten (Ctrl)"),
-                            (BrushMode.SMOOTH, "Smooth (Alt / double-click)")):
-            self.mode_combo.addItem(label, mode)
+        for mode in BrushMode:
+            self.mode_combo.addItem(mode.value.title(), mode)
         self.mode_combo.hide()
         mode_row = QHBoxLayout()
         self.terrain_buttons = {}
-        for index, text in enumerate(("Raise", "Lower", "Flatten", "Smooth")):
-            button = QPushButton(text, checkable=True)
+        for index, mode in enumerate(BrushMode):
+            button = QPushButton(mode.value.title(), checkable=True)
             button.clicked.connect(lambda _checked, i=index: self.mode_combo.setCurrentIndex(i))
             mode_row.addWidget(button)
             self.terrain_buttons[index] = button
@@ -492,10 +506,10 @@ class MainWindow(QMainWindow):
         self.shape_combo.currentIndexChanged.connect(self._brush_params)
         form.addRow(mode_row)
         form.addRow('Shape', self.shape_combo)
+        form.addRow("Force", force_row)
         form.addRow('Radius X', radius_x_row)
         form.addRow('Radius Z', radius_z_row)
         form.addRow(self.link_radii)
-        form.addRow("Force", force_row)
         self.flatten_height = QSpinBox(minimum=0, maximum=60, value=30)
         self.flatten_height.setToolTip("Flatten only: drag on the map to level the brush area to this height. 30 = original ground, 1 step = 100 world units.")
         self.flatten_height.valueChanged.connect(self._brush_params)
@@ -507,7 +521,7 @@ class MainWindow(QMainWindow):
         target_row.addWidget(self.sample_height)
         form.addRow("Flatten to Height", target_row)
         self.flatten_height.setEnabled(self.mode_combo.currentData() == BrushMode.FLATTEN)
-        hint = QLabel('Drag to sculpt · Shift: lower · Alt: smooth · Ctrl: select')
+        hint = QLabel('Left button: sculpt · Right drag: rotate camera · Ctrl+drag: select')
         hint.setWordWrap(True)
         form.addRow(hint)
         tabs.addTab(terrain, "Terrain")
@@ -534,6 +548,7 @@ class MainWindow(QMainWindow):
         self.squad_panel.removeRequested.connect(self._delete_squads)
         self.squad_panel.findRequested.connect(lambda: self._center_squad(self.squad_panel.list.currentRow()))
         self.squad_panel.clearRequested.connect(lambda: self._clear_actors('squad'))
+        self.squad_panel.povRequested.connect(lambda: self._toggle_actor_pov('squad'))
         from .preview_cards import actor_scroll_area
         squad_scroll = actor_scroll_area(self.squad_panel)
         self.squad_tab_index = tabs.addTab(squad_scroll, "Squad")
@@ -543,6 +558,7 @@ class MainWindow(QMainWindow):
         self.host_panel.removeRequested.connect(self._delete_host)
         self.host_panel.findRequested.connect(lambda: self._center_host(self.host_panel.list.currentRow()))
         self.host_panel.clearRequested.connect(lambda: self._clear_actors('host'))
+        self.host_panel.povRequested.connect(lambda: self._toggle_actor_pov('host'))
         self.host_panel.valuesChanged.connect(self._host_changed)
         self.host_panel.playerRequested.connect(self._host_player)
         host_scroll = actor_scroll_area(self.host_panel)
@@ -617,6 +633,8 @@ class MainWindow(QMainWindow):
                 return True
         if obj is self.sector_list.viewport() and event.type() == QEvent.Type.Resize:
             QTimer.singleShot(0, self._layout_sector_icons)
+        if event.type() == QEvent.Type.DevicePixelRatioChange and hasattr(self, "_icons"):
+            self._icons.start(PALETTE_FRAME_MS)
         return super().eventFilter(obj, event)
 
     def _layout_sector_icons(self):
@@ -626,10 +644,12 @@ class MainWindow(QMainWindow):
         available = max(60, self.sector_list.viewport().width())
         spacing = self.sector_list.spacing()
         cell_width = max(60, available // columns - 2 * spacing)
-        icon_width = max(32, min(round(96 * self._icon_scale), cell_width - 12))
+        icon_width = max(4, cell_width - 30)
         icon_height = round(icon_width * 80 / 96)
         self.sector_list.setIconSize(QSize(icon_width, icon_height))
-        self.sector_list.setGridSize(QSize(cell_width, icon_height + 42))
+        self.sector_list.setGridSize(QSize(cell_width, icon_height + 54))
+        if hasattr(self, '_icons') and not self._icons.isActive():
+            self._icons.start()
 
     def _sector_zoom_step(self, direction: int):
         level = max(0, min(2, self._icon_level + direction))
@@ -641,10 +661,55 @@ class MainWindow(QMainWindow):
         self.sector_zoom_out.setEnabled(level > 0)
         self.sector_zoom_in.setEnabled(level < 2)
         self._layout_sector_icons()
-        self._palette_set = None
+        self._queue_visible_previews()
+        self._icons.start()
+
+    @property
+    def _icon_epoch(self):
+        """Keep the render request's camera and physical image size together."""
+        tab = self.palette_tabs.currentIndex()
+        return (self._asset_epoch, self._icon_angle, self._preview_pixel_size(tab))
+
+    def _preview_pixel_size(self, tab):
+        ratio = self.devicePixelRatioF()
+        size = (self.sector_list.iconSize() if tab == 0 else
+                QSize(BUILDING_PREVIEW_PIXELS[self._bicon_level] - 12,
+                      BUILDING_PREVIEW_PIXELS[self._bicon_level] - 12))
+        return max(4, round(size.width() * ratio)), max(4, round(size.height() * ratio))
+
+    def _camera_preview_angle(self):
+        return self.view.camera.yaw, self.view.camera.pitch
+
+    def _refresh_preview_angle(self):
+        """Coalesce camera events into the next frame, without waiting for the mouse to stop."""
         lib = self._lib()
-        if lib is not None:
-            self._fill_palettes(lib)
+        if lib is None or self.view.camera.perspective:
+            return
+        self._icon_angle = self._camera_preview_angle()
+        self._queue_visible_previews()
+        if not self._icons.isActive():
+            remaining = PALETTE_FRAME_MS - (time.monotonic() - self._palette_frame_started) * 1000
+            self._icons.start(max(0, math.ceil(remaining)))
+
+    def _queue_visible_previews(self):
+        """Only visible cards need a current frame; rotate priority so software cannot starve a row."""
+        tab = self.palette_tabs.currentIndex()
+        if tab not in (0, 1):
+            return
+        view = self.sector_list if tab == 0 else self.building_list
+        items = self._icon_items if tab == 0 else self._bicon_items
+        visible = view.viewport().rect()
+        size = self._preview_pixel_size(tab)
+        stamp = (self._asset_epoch, self._icon_angle, size)
+        pending = [key for key, item in items.items() if not item.isHidden()
+                   and view.visualItemRect(item).intersects(visible)
+                   and self._preview_sizes.get((self._palette_set, tab, key)) != stamp]
+        last = self._preview_last[tab]
+        if last in pending:
+            split = pending.index(last) + 1
+            pending = pending[split:] + pending[:split]
+        self._icon_queue = [(key, items[key]) for key in pending] if tab == 0 else []
+        self._bicon_queue = pending if tab == 1 else []
 
     def _link_radii_changed(self, checked):
         if checked:
@@ -683,7 +748,7 @@ class MainWindow(QMainWindow):
         shape = self.shape_combo.currentText()
         if self.brush.shape == BrushShape.ROUND:
             shape = 'Circle' if equal else 'Ellipse'
-        self.strength.setToolTip(f'{shape} · X {radius_x:g} · Z {radius_z:g} · Force {self.brush.strength:.0f} steps/s\nDrag to sculpt · Shift: lower · Alt: smooth · Ctrl: select')
+        self.strength.setToolTip(f'{shape} · X {radius_x:g} · Z {radius_z:g} · Force {self.brush.strength:.0f} steps/s\nLeft button: sculpt · Right drag: rotate camera · Ctrl+drag: select')
         if self.doc is not None and self.view.hover is not None:
             self._hovered(*self.view.hover)
 
@@ -703,8 +768,10 @@ class MainWindow(QMainWindow):
 
     def _update_cursor(self, modifiers=Qt.KeyboardModifier.NoModifier):
         colors = {BrushMode.RAISE: (80, 235, 130), BrushMode.LOWER: (255, 105, 95),
-                  BrushMode.FLATTEN: (70, 190, 255), BrushMode.SMOOTH: (215, 130, 255)}
-        self.view.cursor_color = (colors[self._terrain_mode(modifiers)] if self.tool == 'terrain'
+                  BrushMode.FLATTEN: (70, 190, 255), BrushMode.SMOOTH: (215, 130, 255),
+                  BrushMode.NOISE: (135, 220, 170)}
+        button = self._stroke_button if self._stroke_active else Qt.MouseButton.LeftButton
+        self.view.cursor_color = (colors[self._terrain_mode(modifiers, button)] if self.tool == 'terrain'
                                   else TAB_COLORS[self.palette_tabs.currentIndex() % len(TAB_COLORS)])
         self.view.sample_active = self._sampling_height
         self.view.update()
@@ -900,29 +967,57 @@ class MainWindow(QMainWindow):
         self._released(-1, -1, Qt.KeyboardModifier.NoModifier)
         if self._lib() is None:
             return
+        # The sector to fill with is the one selected in the Sectors list; no extra choice.
+        item = self._icon_items.get(self.sel_typ)
+        if self.sel_typ is None or item is None:
+            return
         dialog = QDialog(self)
         selected = cells is not None
         dialog.setWindowTitle('Fill Selected Sectors' if selected else 'Fill map with sector')
         layout = QVBoxLayout(dialog)
-        choice = QComboBox()
-        for i in range(self.sector_list.count()):
-            item = self.sector_list.item(i)
-            choice.addItem(item.icon(), item.text(), item.data(Qt.ItemDataRole.UserRole))
-        choice.setCurrentIndex(choice.findData(self.sel_typ))
-        layout.addWidget(choice)
         if selected:
             count = sum(1 for c, r in cells
                         if 1 <= c < self.doc.mw - 1 and 1 <= r < self.doc.mh - 1)
-            layout.addWidget(QLabel(
-                f'Fills the {count} selected interior sector(s). Buildings in those cells are removed.'))
+            text = f'Fills the {count} selected interior sector(s). Buildings in those cells are removed.'
         else:
-            layout.addWidget(QLabel('Fills all interior sectors. The outer border is preserved.'))
+            text = 'Fills all interior sectors. The outer border is preserved.'
+        layout.addWidget(QLabel(f'Sector: {item.text()}'))
+        layout.addWidget(QLabel(text))
         buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
         buttons.accepted.connect(dialog.accept)
         buttons.rejected.connect(dialog.reject)
         layout.addWidget(buttons)
-        if dialog.exec() and choice.currentData() is not None:
-            self._fill_sectors(choice.currentData(), cells)
+        if dialog.exec():
+            self._fill_sectors(self.sel_typ, cells)
+
+    def map_close_roads(self):
+        """Preview road-sector replacements from the active set, then apply one undoable edit."""
+        from ..core.road_network import RoadMasks, plan_road_fixes
+        self._released(-1, -1, Qt.KeyboardModifier.NoModifier)
+        lib = self._lib()
+        if lib is None:
+            return
+        QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
+        try:
+            plan = plan_road_fixes(self.doc, lib, RoadMasks(lib), self.view.selection or None)
+        finally:
+            QApplication.restoreOverrideCursor()
+        report = (f'{len(plan.changes)} sector replacement(s).\n'
+                  f'{len(plan.unresolved)} connection(s) have no matching piece in this set and will stay unchanged.\n\n'
+                  'Experimental: roads are detected from this set’s ground textures. '
+                  'Buildings and special objects are preserved. Check the result; Undo restores the map.')
+        if not plan.changes:
+            QMessageBox.information(self, 'Close Roads', report)
+            return
+        if QMessageBox.question(self, 'Close Roads', report + '\n\nApply these replacements?',
+                                QMessageBox.StandardButton.Apply | QMessageBox.StandardButton.Cancel,
+                                QMessageBox.StandardButton.Cancel) != QMessageBox.StandardButton.Apply:
+            return
+        self.history.begin(self.doc)
+        for col, row, _before, typ in plan.changes:
+            paint_cells(self.doc, [(col, row)], 'type', f'{typ:02x}')
+        if self.history.commit(self.doc, True):
+            self._after_history()
 
     def _fill_sectors(self, typ, cells=None):
         self.history.begin(self.doc)
@@ -1022,6 +1117,24 @@ class MainWindow(QMainWindow):
         self.view.cameraChanged.emit()
         self.view.update()
 
+    def _sync_pov_buttons(self, *_args):
+        active = self.view.camera.perspective
+        for kind, panel in (('squad', self.squad_panel), ('host', self.host_panel)):
+            values = [] if self.doc is None else (self.doc.squads if kind == 'squad' else self.doc.host_stations)
+            valid = 0 <= panel.list.currentRow() < len(values) and not self.view.draft_active
+            panel.pov_button.setText('Exit POV' if active else 'Enter POV')
+            panel.pov_button.setEnabled(active or valid)
+
+    def _toggle_actor_pov(self, kind):
+        if self.view.camera.perspective:
+            self.view.reset_camera()
+            return
+        panel = self.squad_panel if kind == 'squad' else self.host_panel
+        values = self.doc.squads if kind == 'squad' else self.doc.host_stations
+        index = panel.list.currentRow()
+        if not self.view.draft_active and 0 <= index < len(values):
+            (self._squad_pov if kind == 'squad' else self._host_pov)(index)
+
     def _host_pov(self, index):
         self._host_pov_index = index
         if not 0 <= index < len(self.doc.host_stations):
@@ -1050,6 +1163,7 @@ class MainWindow(QMainWindow):
         ensure_host_defaults(self._draft_host)
         self._refresh_squads()
         self._refresh_hosts(len(self.doc.host_stations))
+        self.view.setFocus(Qt.FocusReason.OtherFocusReason)
 
     def _confirm_host(self, cell):
         if cell is None or not (1 <= cell[0] < self.doc.mw - 1 and 1 <= cell[1] < self.doc.mh - 1):
@@ -1227,6 +1341,8 @@ class MainWindow(QMainWindow):
         if self._special_draft is None or cell is None:
             return
         kind, value = self._special_draft
+        if special_cell(value) != cell:
+            self.view.clear_placement_error()
         source = special_cell(value) or cell
         if 'keys' in value:
             value['keys'] = [(x + cell[0] - source[0], y + cell[1] - source[1]) for x, y in value['keys']]
@@ -1256,8 +1372,11 @@ class MainWindow(QMainWindow):
             self.history.commit(self.doc, False)
             self._refresh_squads(fields=False)
             self.special_panels[kind].status.setText(str(error))
+            if kind == 'gem':
+                self.view.show_placement_error(str(error))
             return
         self.history.commit(self.doc, changed)
+        self.view.clear_placement_error()
         self._special_draft = self._special_placement = None
         self._special_target_slot = 0
         self.dirty |= changed
@@ -1291,6 +1410,7 @@ class MainWindow(QMainWindow):
     def _special_changed(self, kind, slot, values):
         if self._special_draft is not None and self._special_draft[0] == kind:
             payload = self._special_draft[1]
+            self.view.clear_placement_error()
             if '_key_road' in values:
                 index, road = values['_key_road']
                 payload.setdefault('_key_roads', {})[index] = road
@@ -1336,14 +1456,31 @@ class MainWindow(QMainWindow):
             self._refresh_title()
         return changed
 
+    def _sync_special_selection(self):
+        """Mirror the active special tab (object and key row) into the view's highlight.
+
+        Called on every selection or tab change, so the white outlines never depend on
+        which signal happened to fire last.
+        """
+        index = self.palette_tabs.currentIndex()
+        kind = next((k for k, tab in self.special_tab_indices.items() if tab == index), None)
+        selected = None
+        if kind is not None:
+            panel = self.special_panels[kind]
+            if panel.slot:
+                selected = (kind, panel.slot, panel.keys.currentRow() if kind != 'gem' else -1)
+        if selected != self.view.selected_special:
+            self.view.selected_special = selected
+            self.view.update()
+
     def _special_selected(self, kind, slot):
         if self.view.selected_special is None or self.view.selected_special[:2] != (kind, slot):
             self._finish_live()
         if self.palette_tabs.currentIndex() == self.special_tab_indices[kind]:
             if slot:
                 self._deselect_other_objects(kind)
-            key = self.special_panels[kind].keys.currentRow() if kind != 'gem' else -1
-            self.view.selected_special = (kind, slot, key) if slot else None
+                self.view.selected_building = None
+            self._sync_special_selection()
         if self._special_draft is not None:
             if self._special_draft[0] == kind and not slot:
                 self._cancel_operation(clear=False)
@@ -1367,10 +1504,13 @@ class MainWindow(QMainWindow):
         self._released(-1, -1, Qt.KeyboardModifier.NoModifier)
         self._cancel_operation(clear=False)
         self._special_placement = (kind, panel.slot, mode, index)
+        self._key_preview_cell = self.view.hover
         self.view.active_tool = 'special'
         panel.status.setText('Click a sector to place or move the object. Esc cancels.' if mode == 'object' else
                              'Click a sector to place a key. Esc cancels.')
         self.view.preview_cells = {self.view.hover} if self.view.hover else set()
+        if mode == 'key':
+            self._refresh_squads(fields=False)
         self.view.update()
 
     def _special_click(self, cell):
@@ -1394,7 +1534,8 @@ class MainWindow(QMainWindow):
                 values = {'keys': keys}
             if self._special_changed(kind, slot, values):
                 self._special_placement = None
-                self.view.preview_cells = set()
+                self._key_preview_cell = None
+                self._refresh_squads(fields=False)
                 self.view.update()
             return True
         hit = self.special_overlay.pick(cell)
@@ -1457,8 +1598,10 @@ class MainWindow(QMainWindow):
             self.special_panels[kind].status.setText(str(error))
             self.view.scene_changed()
             return
+        # Restoring the starting state changes geometry even when the new position
+        # is that same starting cell and update_special has nothing further to do.
+        self.view.scene_changed()
         if changed:
-            self.view.scene_changed()
             panel = self.special_panels[kind]
             if any(k in values for k in ('keys', 'actions', '_key_road')) or len(values) > 2:
                 panel.refresh(self.doc, slot)
@@ -1523,7 +1666,9 @@ class MainWindow(QMainWindow):
                 continue
             kind, key = item.data(RESOURCE_ROLE)
             cache_key = (id(lib), self._asset_epoch, kind, key)
-            if cache_key in self._resource_icons:
+            pixels = max(4, round((max(PREVIEW_PIXELS) - 12) * self.devicePixelRatioF()))
+            cached = self._resource_icons.get(cache_key)
+            if cached is not None and (cached.isNull() or QSize(pixels,pixels) in cached.availableSizes()):
                 blocked = view.blockSignals(True)
                 item.setIcon(self._resource_icons[cache_key])
                 view.blockSignals(blocked)
@@ -1533,15 +1678,13 @@ class MainWindow(QMainWindow):
                     sprite = self.view.render_icon(lib, 0, 1.8,
                                                    vehicle_id=key if kind == 'veh' else None,
                                                    building_id=key if kind == 'blg' else None,
-                                                   max_dimension=256)
+                                                   target_size=(pixels,pixels), revision=self._asset_epoch)
                     if sprite is not None:
                         self._resource_finished(cache_key, sprite.image)
                         return
                 mesh = lib.actor_mesh(key) if kind == 'veh' else lib.building_preview(key)
-                data = sprite_input(lib, mesh, -45, 35.26, .23, fast=True, fit=True)
-                dimension = max(data[0], data[1])
-                if mesh.faces:
-                    data = sprite_input(lib, mesh, -45, 35.26, .23 * 250 / max(1, dimension - 6), fast=True, fit=True)
+                data = sprite_input(lib, mesh, -45, 35.26, .23, fast=True,
+                                    target_size=(pixels,pixels))
             except Exception:
                 self._resource_finished(cache_key, None)
                 return
@@ -1558,7 +1701,7 @@ class MainWindow(QMainWindow):
         self._icons.start()
 
     def _resource_finished(self, cache, image):
-        icon = QIcon(QPixmap.fromImage(crop_transparent(image))) if image is not None and not image.isNull() else QIcon()
+        icon = QIcon(QPixmap.fromImage(image)) if image is not None and not image.isNull() else QIcon()
         self._resource_icons[cache] = icon
         for view in self._resource_lists():
             blocked = view.blockSignals(True)
@@ -1623,6 +1766,7 @@ class MainWindow(QMainWindow):
             source, target, payload = self._building_drag
             render_doc = copy.copy(render_doc)
             render_doc.grids = {key: [row[:] for row in grid] for key, grid in render_doc.grids.items()}
+            render_doc.building_underlays = dict(render_doc.building_underlays)
             sx, sy = source; tx, ty = target
             from ..tools.map_clipboard import move_grid_cell
             if self._building_drop_valid:
@@ -1646,6 +1790,13 @@ class MainWindow(QMainWindow):
             self.view.doc = render_doc
             cells = [special_cell(value), *value.get('keys', [])]
             self.view.preview_cells = {cell for cell in cells if cell is not None and 1 <= cell[0] < self.doc.mw-1 and 1 <= cell[1] < self.doc.mh-1}
+        placement = self._special_placement
+        if placement is not None and placement[2] == 'key' and self._special_draft is None:
+            preview = self._key_preview_doc(render_doc, placement)
+            if preview is not None:
+                render_doc, cell = preview
+                self.view.doc = render_doc
+                self.view.preview_cells = {cell}
         self.view.draft_active = bool(self._draft_squads) or self._draft_grid is not None or self._draft_host is not None or self._special_draft is not None
         self.view.scene_changed()
         self.squad_overlay.invalidate()
@@ -1657,6 +1808,35 @@ class MainWindow(QMainWindow):
             self.squad_panel.update_rows()
             self._update_squad_status(self.squad_panel.selected_indices())
         self._refresh_title()
+
+    def _key_preview_doc(self, render_doc, placement):
+        """Copy of the document with the key being placed or moved shown grey under the cursor."""
+        kind, slot, _mode, index = placement
+        cell = self._key_preview_cell
+        value = special_store(self.doc, kind).get(slot)
+        if value is None or cell is None or not (1 <= cell[0] < self.doc.mw - 1 and 1 <= cell[1] < self.doc.mh - 1):
+            return None
+        keys = [tuple(key) for key in value['keys']]
+        if 0 <= index < len(keys):
+            keys[index] = cell
+        else:
+            index = len(keys)
+            keys.append(cell)
+        preview = copy.deepcopy(value)
+        preview['keys'] = keys
+        preview['_preview_keys'] = {index}
+        if kind == 'item':
+            # Roads follow the original key cells; a key that is being added has none yet.
+            preview['_key_roads'] = {i: 0 <= x < self.doc.mw and 0 <= y < self.doc.mh
+                                     and str(self.doc.grids['type'][y][x]).lower() == 'f4'
+                                     for i, (x, y) in enumerate(value['keys'])}
+            preview['_key_roads'].setdefault(index, False)
+        render_doc = copy.copy(render_doc)
+        name = SPECIAL_KINDS[kind][0]
+        store = dict(getattr(render_doc, name))
+        store[slot] = preview
+        setattr(render_doc, name, store)
+        return render_doc, cell
 
     def _add_squad(self):
         if self.squad_panel.selected_indices():
@@ -1683,6 +1863,7 @@ class MainWindow(QMainWindow):
         self._draft_origin = copy.deepcopy(self._draft_squads)
         self.set_tool('squad')
         self._refresh_squads(set(range(len(self.doc.squads), len(self.doc.squads) + len(self._draft_squads))))
+        self.view.setFocus(Qt.FocusReason.OtherFocusReason)
 
     def _move_draft(self, cell):
         if not self._draft_squads or cell is None:
@@ -1813,11 +1994,11 @@ class MainWindow(QMainWindow):
     def _finish_building_drag(self):
         from ..tools.map_clipboard import move_grid_cell
         source, target, payload = self._building_drag
-        _original_tool, typ, building = self._building_click_values
+        _original_tool, typ, _building = self._building_click_values
         valid_drop = self._building_drop_valid
         self._building_drag = None
-        # Dragging an existing object must not change the selected paint tool.
-        self.sel_typ, self.sel_building = typ, building
+        # Dragging an existing object must not change the sector brush.
+        self.sel_typ = typ
         if source != target and valid_drop:
             self.history.push(self.doc)
             if move_grid_cell(self.doc, source, target, payload):
@@ -1827,9 +2008,32 @@ class MainWindow(QMainWindow):
             self.palette_tabs.setCurrentIndex(1)
         self.view.selection = {target if valid_drop else source}
         self.view.selected_building = target if valid_drop else source
+        self._highlight_building(self.view.selected_building)
         self._refresh_squads(fields=False)
         self.view.unsetCursor()
         self._refresh_title()
+
+    def _highlight_building(self, cell):
+        """A building picked on the map is also selected in the Buildings list (and becomes the brush)."""
+        self.view.selected_special = None
+        try:
+            bid = int(str(self.doc.grids['blg'][cell[1]][cell[0]]), 16)
+        except (TypeError, ValueError, IndexError):
+            return
+        if not bid:
+            return
+        item = self._bicon_items.get(bid)
+        if item is None and bid in self.buildings and not self.show_special_buildings.isChecked():
+            # Plain buildings are hidden by default; show them so the pick is visible.
+            self.show_special_buildings.setChecked(True)
+            item = self._bicon_items.get(bid)
+        if item is None:
+            return
+        blocked = self.building_list.blockSignals(True)
+        self.building_list.setCurrentItem(item)
+        self.building_list.blockSignals(blocked)
+        self.building_list.scrollToItem(item)
+        self.sel_building = bid
 
     def _actor_records(self):
         return self.doc.host_stations if self._drag_kind == 'host' else self.doc.squads
@@ -1918,6 +2122,7 @@ class MainWindow(QMainWindow):
             self._refresh_specials()
             self.view.unsetCursor()
         had_special = self._special_draft is not None
+        self.view.clear_placement_error()
         self._special_draft = None
         self._special_target_slot = 0
         if had_special:
@@ -1927,8 +2132,9 @@ class MainWindow(QMainWindow):
         if self._special_placement is not None:
             kind = self._special_placement[0]
             self._special_placement = None
-            self.view.preview_cells = set()
+            self._key_preview_cell = None
             self.special_panels[kind].status.setText('Placement cancelled. The object stays in the list.')
+            self._refresh_squads(fields=False)
             self.view.update()
         if self._draft_host is not None:
             self._draft_host = None
@@ -1962,6 +2168,14 @@ class MainWindow(QMainWindow):
         self.view.selection.clear()
         self.squad_panel.set_selection(set())
         self.host_panel.deselect()
+        self.view.update()
+
+    def _marquee_cells(self, cells, _modifiers):
+        """Ctrl+drag rectangle: add every sector inside it to the selection."""
+        if not cells:
+            return
+        self._released(-1, -1, Qt.KeyboardModifier.NoModifier)
+        self.view.selection |= set(cells)
         self.view.update()
 
     def _sweep_cell(self, cell):
@@ -2070,6 +2284,9 @@ class MainWindow(QMainWindow):
         self.history.begin(self.doc)
         changed = False
         for c,r,values in targets:
+            pasted = dict(zip(self._draft_grid.layers, values))
+            if self._draft_grid.tool == 'building' and int(str(pasted.get('blg', '00')), 16):
+                self.doc.remember_building_ground(c, r, int(str(pasted['blg']), 16))
             for layer,value in zip(self._draft_grid.layers,values):
                 changed |= paint_cells(self.doc,[(c,r)],layer,value)
         if 'hgt' in self._draft_grid.layers:
@@ -2109,7 +2326,7 @@ class MainWindow(QMainWindow):
     def _special_context_actions(self, menu, kind, allow_delete=True):
         panel = self.special_panels[kind]
         slot = panel.slot
-        action = menu.addAction('Add ' + SPECIAL_KINDS[kind][3], lambda: self._add_special(kind))
+        action = menu.addAction('Add ' + SPECIAL_KINDS[kind][3], panel._new)
         action.setEnabled(panel.add_button.isEnabled())
         action = menu.addAction('Move Selected Object', lambda: self._place_special(kind, 'object', -1))
         action.setEnabled(bool(slot))
@@ -2173,7 +2390,7 @@ class MainWindow(QMainWindow):
             item = widget.itemAt(position)
             if item is not None and not item.isSelected():
                 self.squad_panel.set_selection({widget.row(item)})
-            action = menu.addAction('Add Squad', self._add_squad)
+            action = menu.addAction('Add Squad', self.squad_panel._new)
             action.setEnabled(self.squad_panel.add_button.isEnabled())
             menu.addAction('Delete Selected Squads',lambda: self._delete_squads(self.squad_panel.selected_indices()))
             index = widget.currentRow()
@@ -2185,7 +2402,7 @@ class MainWindow(QMainWindow):
             item = widget.itemAt(position)
             if item is not None:
                 widget.setCurrentItem(item)
-            action = menu.addAction('Add Host Station', self._add_host)
+            action = menu.addAction('Add Host Station', self.host_panel._new)
             action.setEnabled(self.host_panel.add_button.isEnabled())
             index = widget.currentRow()
             action = menu.addAction('Deselect Host Station', self.host_panel.deselect)
@@ -2207,9 +2424,8 @@ class MainWindow(QMainWindow):
             return
         self._released(-1, -1, Qt.KeyboardModifier.NoModifier)
         self.history.begin(self.doc)
-        changed = paint_cells(self.doc, [cell], 'blg', '00')
-        changed = paint_cells(self.doc, [cell], 'type', '00') or changed
-        if self.history.commit(self.doc, bool(changed)):
+        self.doc.remove_building(col, row)
+        if self.history.commit(self.doc, True):
             self._after_history()
 
     def _select_cell(self, cell, modifiers):
@@ -2230,6 +2446,7 @@ class MainWindow(QMainWindow):
                 self.view.selection.add(cell)
                 if self.tool == 'building' and int(str(self.doc.grids['blg'][cell[1]][cell[0]]), 16):
                     self.view.selected_building = cell
+                    self._highlight_building(cell)
                 if self.tool in ('sector', 'building', 'owner'):
                     self._apply_selection()
         self.view.update()
@@ -2299,18 +2516,22 @@ class MainWindow(QMainWindow):
         if special_kind is not None:
             self._special_context_actions(menu, special_kind, allow_delete=False)
         elif self.palette_tabs.currentIndex() == self.host_tab_index:
-            action = menu.addAction('Add Host Station', self._add_host)
+            action = menu.addAction('Add Host Station', self.host_panel._new)
             action.setEnabled(self.host_panel.add_button.isEnabled())
             index = host if host is not None else self.host_panel.list.currentRow()
+            action = menu.addAction('Enter POV', lambda: self._host_pov(index))
+            action.setEnabled(0 <= index < len(self.doc.host_stations) and not self.view.draft_active)
             action = menu.addAction('Deselect Host Station', self.host_panel.deselect)
             action.setEnabled(self.host_panel.list.currentRow() >= 0)
             for text, slot in (('Find Host Station', self._center_host),):
                 action = menu.addAction(text, lambda checked=False, fn=slot: fn(index))
                 action.setEnabled(0 <= index < len(self.doc.host_stations))
         elif context_tool == 'squad':
-            action = menu.addAction('Add Squad', self._add_squad)
+            action = menu.addAction('Add Squad', self.squad_panel._new)
             action.setEnabled(self.squad_panel.add_button.isEnabled())
             index = squad if squad is not None else min(self.squad_panel.selected_indices(),default=-1)
+            action = menu.addAction('Enter POV', lambda: self._squad_pov(index, position))
+            action.setEnabled(0 <= index < len(self.doc.squads) and not self.view.draft_active)
             action = menu.addAction('Deselect Squad', lambda: self.squad_panel.set_selection(set()))
             action.setEnabled(bool(self.squad_panel.selected_indices()))
             action = menu.addAction('Find Squad', lambda: self._center_squad(index))
@@ -2330,11 +2551,6 @@ class MainWindow(QMainWindow):
                     menu.addAction('Pick This Sector', lambda: self.sector_list.setCurrentItem(
                         self._icon_items.get(int(self.doc.grids['type'][cell[1]][cell[0]], 16))))
             menu.addAction('Fill map', self.map_fill)
-        elif context_tool == 'terrain':
-            for i, name in enumerate(('Raise', 'Lower', 'Flatten', 'Smooth')):
-                menu.addAction(name, lambda checked=False, index=i: self._activate_terrain(index))
-            if cell is not None:
-                menu.addAction('Sample This Height', lambda: self._sample_map_height(*cell))
         # One delete command for the object under the cursor, regardless of the active tab.
         delete_action = None
         hit_special = hit[1] if hit is not None and hit[0] == 'special' else None
@@ -2379,10 +2595,6 @@ class MainWindow(QMainWindow):
         menu.popup(global_position)
         self._context_menu = menu
 
-    def _activate_terrain(self, index):
-        self.set_tool('terrain')
-        self.mode_combo.setCurrentIndex(index)
-
     def _fill_palettes(self, lib: SectorMeshLibrary):
         if self._palette_set == lib.assets.set_number:
             return
@@ -2396,7 +2608,7 @@ class MainWindow(QMainWindow):
             item.setTextAlignment(Qt.AlignmentFlag.AlignHCenter | Qt.AlignmentFlag.AlignVCenter)
             self.sector_list.addItem(item)
             self._icon_items[typ] = item
-            key = (lib.assets.set_number, typ, self._icon_scale)
+            key = (lib.assets.set_number, typ, self._icon_scale, self._icon_angle)
             if key in self._icon_cache:
                 item.setIcon(self._icon_cache[key])
             else:
@@ -2420,35 +2632,63 @@ class MainWindow(QMainWindow):
             return
         if not self.palette_dock.isVisible():
             return
-        if self.view._job is not None or self.view._interacting or self._stroke_active:
-            self._icons.start(80)
-            return
         tab = self.palette_tabs.currentIndex()
         if tab in (self.squad_tab_index, self.host_tab_index, self.tech_tab_index, *self.special_tab_indices.values()):
             self._make_resource_icon(lib)
             return
         if tab not in (0, 1):
             return
+        self._queue_visible_previews()
         queue = self._icon_queue if tab == 0 else self._bicon_queue
-        deadline = time.monotonic() + PALETTE_BATCH_SECONDS
-        # Bound each group so camera input and widget repainting get a turn.
-        for _ in range(8):
-            before = len(queue)
-            if not before:
-                break
-            if tab == 0:
-                self._make_sector_icon(lib)
-            else:
-                self._make_building_icon(lib)
-            if self._icon_job is not None:
-                return
-            if len(queue) == before:
-                self._icons.stop()
-                return
-            if time.monotonic() >= deadline:
-                break
+        started = time.monotonic()
+        if len(self._palette_frame_times) == 60 and started - self._palette_frame_times[0] < 1:
+            self._icons.start(math.ceil((1 - started + self._palette_frame_times[0]) * 1000))
+            return
         if queue:
-            self._icons.start()
+            self._palette_frame_times.append(started)
+        self._palette_frame_started = started
+        deadline = started + PALETTE_BATCH_SECONDS
+        model = self.sector_list.model() if tab == 0 else self.building_list.model()
+        blocked = model.blockSignals(True)
+        try:
+            if queue and hasattr(self.view, 'render_palette_icons'):
+                keys = [entry[0] for entry in queue] if tab == 0 else list(queue)
+                requests = ([(typ, None) for typ in keys] if tab == 0 else
+                            [(self.buildings[bid].sec_type, bid) for bid in keys])
+                epoch = (self._asset_epoch, self._icon_angle, self._preview_pixel_size(tab))
+                images = self.view.render_palette_icons(lib, requests, epoch[2],
+                            yaw=epoch[1][0], pitch=epoch[1][1], revision=epoch[0])
+                if images is not None:
+                    queue.clear()
+                    for key, image in zip(keys, images):
+                        if tab == 0:
+                            sprite = Sprite(image, (0,0), 1) if image is not None else None
+                            self._icon_finished((self._palette_set,key,self._icon_scale,epoch,sprite))
+                        else:
+                            self._bicon_finished(key,image,epoch)
+                    self._icons.stop()
+                    return
+            # Bound each group so camera input and widget repainting get a turn.
+            for _ in range(32):
+                before = len(queue)
+                if not before:
+                    break
+                if tab == 0:
+                    self._make_sector_icon(lib)
+                else:
+                    self._make_building_icon(lib)
+                if self._icon_job is not None:
+                    return
+                if len(queue) == before:
+                    self._icons.stop()
+                    return
+                if time.monotonic() >= deadline:
+                    break
+        finally:
+            model.blockSignals(blocked)
+            (self.sector_list if tab == 0 else self.building_list).viewport().update()
+        if queue:
+            self._icons.start(max(1, PALETTE_FRAME_MS - round((time.monotonic() - started) * 1000)))
         else:
             self._icons.stop()
 
@@ -2461,40 +2701,44 @@ class MainWindow(QMainWindow):
                       if self.sector_list.visualItemRect(self._icon_queue[i][1]).intersects(visible)), candidates[0])
         typ, item = self._icon_queue.pop(index)
         try:
+            yaw, pitch = self._icon_angle
             if hasattr(self.view, 'render_icon'):
-                pixels = round(max(self.sector_list.iconSize().width(),
-                                   self.sector_list.iconSize().height()) * self.devicePixelRatioF()) + 4
-                sprite = self.view.render_icon(lib, typ, self._icon_scale, max_dimension=pixels)
+                sprite = self.view.render_icon(lib, typ, self._icon_scale,
+                                               target_size=self._preview_pixel_size(0),
+                                               revision=self._asset_epoch, yaw=yaw, pitch=pitch)
                 if sprite is not None:
                     self._icon_finished((lib.assets.set_number, typ, self._icon_scale,
-                                         self._asset_epoch, sprite))
+                                         self._icon_epoch, sprite))
                     return
-            data = sprite_input(lib, lib.mesh(typ), -45.0, 35.26,
-                                .13 * self._icon_scale, fast=True)
+            data = sprite_input(lib, lib.mesh(typ), yaw, pitch,
+                                .13 * self._icon_scale, fast=True,
+                                target_size=self._preview_pixel_size(0))
         except Exception:
             self._icon_finished((lib.assets.set_number, typ, self._icon_scale,
-                                 self._asset_epoch, None))
+                                 self._icon_epoch, None))
             return
         self._icon_job = _IconJob(data, lib.tables, lib.assets.set_number, typ,
-                                  self._icon_scale, self._asset_epoch)
+                                  self._icon_scale, self._icon_epoch)
         self._icon_job.signals.finished.connect(self._icon_finished)
         self._icon_pool.start(self._icon_job)
 
     def _icon_finished(self, result):
         number, typ, scale, epoch, sprite = result
         self._icon_job = None
-        if scale != self._icon_scale or epoch != self._asset_epoch:
+        if (scale != self._icon_scale or not isinstance(epoch, tuple)
+                or epoch[0] != self._asset_epoch or epoch[2] != self._preview_pixel_size(0)):
             self._icons.start()
             return
-        if sprite is not None:
-            icon = QIcon(QPixmap.fromImage(crop_transparent(sprite.image)))
-        else:
-            icon = QIcon()
-        self._icon_cache[(number, typ, scale)] = icon
+        icon = QIcon(QPixmap.fromImage(sprite.image)) if sprite is not None else QIcon()
+        for key in list(self._icon_cache):
+            if key[:3] == (number, typ, scale):
+                del self._icon_cache[key]
+        self._icon_cache[(number, typ, scale, epoch[1])] = icon
+        self._preview_sizes[(number, 0, typ)] = epoch
+        self._preview_last[0] = typ
         if number == self._palette_set and typ in self._icon_items:
             self._icon_items[typ].setIcon(icon)
-        if self._icon_queue or self._bicon_queue:
-            self._icons.start()
+        self._icons.start()
 
     def _refresh_buildings(self):
         self._bicon_cache.clear()
@@ -2525,7 +2769,7 @@ class MainWindow(QMainWindow):
         self._bicon_rows.clear()
         for bid in sorted(self.buildings):
             definition = self.buildings[bid]
-            if not self.show_special_buildings.isChecked() and not (definition.has_power or definition.is_radar or definition.has_guns):
+            if not self.show_special_buildings.isChecked() and is_special_building(definition):
                 continue
             title = f"{bid:02d} {definition.name}"
             item = QListWidgetItem()
@@ -2565,8 +2809,9 @@ class MainWindow(QMainWindow):
             self.building_list.setItemWidget(item, row)
             self._bicon_items[bid] = item
             self._bicon_rows[bid] = preview
-            cached = self._bicon_cache.get((lib.assets.set_number, bid, self.devicePixelRatioF()))
-            if cached is not None:
+            cached = self._bicon_cache.get((lib.assets.set_number, bid, self.devicePixelRatioF(), self._icon_angle))
+            if (cached is not None and self._preview_sizes.get((self._palette_set, 1, bid)) ==
+                    (self._asset_epoch, self._icon_angle, self._preview_pixel_size(1))):
                 self._bicon_finished(bid, cached)
             else:
                 self._bicon_queue.append(bid)
@@ -2627,13 +2872,8 @@ class MainWindow(QMainWindow):
         self.building_zoom_out.setEnabled(level > 0)
         self.building_zoom_in.setEnabled(level < 2)
         self._layout_building_rows()
-        lib = self._lib()
-        if lib is not None:
-            for bid in self._bicon_rows:
-                image = self._bicon_cache.get((lib.assets.set_number, bid, self.devicePixelRatioF()))
-                if image is not None:
-                    self._bicon_finished(bid, image)
-            self._icons.start()
+        self._queue_visible_previews()
+        self._icons.start()
 
     def _make_building_icon(self, lib: SectorMeshLibrary):
         while self._bicon_queue:
@@ -2652,23 +2892,26 @@ class MainWindow(QMainWindow):
             if definition is None:
                 continue
             sec_type = definition.sec_type
+            yaw, pitch = self._icon_angle
+            epoch = (self._asset_epoch, self._icon_angle, self._preview_pixel_size(1))
             try:
                 if hasattr(self.view, 'render_icon'):
-                    pixels = round(max(BUILDING_PREVIEW_PIXELS) * self.devicePixelRatioF()) + 4
                     sprite = self.view.render_icon(lib, sec_type, max(SECTOR_PREVIEW_SCALES),
-                                                   building_id=bid, max_dimension=pixels)
+                                                   building_id=bid, target_size=epoch[2], revision=self._asset_epoch,
+                                                   yaw=yaw, pitch=pitch)
                     if sprite is not None:
-                        self._bicon_finished(bid, sprite.image)
+                        self._bicon_finished(bid, sprite.image, epoch)
                         self._icons.start()
                         return
-                data = sprite_input(lib, lib.building_preview(bid), -45.0, 35.26,
-                                    .13 * max(SECTOR_PREVIEW_SCALES), fast=True, fit=True)
+                data = sprite_input(lib, lib.building_preview(bid), yaw, pitch,
+                                    .13 * max(SECTOR_PREVIEW_SCALES), fast=True, fit=True,
+                                    target_size=epoch[2])
             except Exception:
                 self._bicon_finished(bid, None)
                 self._icons.start()
                 return
             self._icon_job = _IconJob(data, lib.tables, lib.assets.set_number,
-                                      sec_type, self._icon_scale, self._asset_epoch)
+                                      sec_type, self._icon_scale, epoch)
             self._icon_job.signals.finished.connect(
                 lambda result, _bid=bid: self._bicon_from_sector(_bid, result))
             self._icon_pool.start(self._icon_job)
@@ -2677,29 +2920,30 @@ class MainWindow(QMainWindow):
     def _bicon_from_sector(self, bid: int, result):
         number, typ, scale, epoch, sprite = result
         self._icon_job = None
-        if number != self._palette_set or epoch != self._asset_epoch:
+        if (number != self._palette_set or not isinstance(epoch, tuple)
+                or epoch[0] != self._asset_epoch or epoch[2] != self._preview_pixel_size(1)):
             self._icons.start()
             return
-        self._bicon_finished(bid, sprite.image if sprite is not None else None)
-        if self._bicon_queue:
-            self._icons.start()
+        self._bicon_finished(bid, sprite.image if sprite is not None else None, epoch)
+        self._icons.start()
 
-    def _bicon_finished(self, bid: int, image):
+    def _bicon_finished(self, bid: int, image, epoch=None):
         preview = self._bicon_rows.get(bid)
         if preview is None:
             return
+        epoch = epoch or (self._asset_epoch, self._icon_angle, self._preview_pixel_size(1))
+        self._preview_sizes[(self._palette_set, 1, bid)] = epoch
+        self._preview_last[1] = bid
         if image is None or image.isNull():
             preview.setText("—")
             preview.setPixmap(QPixmap())
             return
-        cropped = crop_transparent(image)
-        self._bicon_cache[(self._palette_set, bid, self.devicePixelRatioF())] = image
-        size = BUILDING_PREVIEW_PIXELS[self._bicon_level]
-        ratio = self.devicePixelRatioF()
-        pixmap = QPixmap.fromImage(cropped).scaled(
-            QSize(round((size - 4) * ratio), round((size - 4) * ratio)), Qt.AspectRatioMode.KeepAspectRatio,
-            Qt.TransformationMode.SmoothTransformation)
-        pixmap.setDevicePixelRatio(ratio)
+        for key in list(self._bicon_cache):
+            if key[:3] == (self._palette_set, bid, self.devicePixelRatioF()):
+                del self._bicon_cache[key]
+        self._bicon_cache[(self._palette_set, bid, self.devicePixelRatioF(), epoch[1])] = image
+        pixmap = QPixmap.fromImage(image)
+        pixmap.setDevicePixelRatio(self.devicePixelRatioF())
         preview.setPixmap(pixmap)
 
     def _building_selected(self, item, _prev=None):
@@ -2813,6 +3057,7 @@ class MainWindow(QMainWindow):
         self.setWindowTitle(f"{'*' if self.dirty else ''}{name} · Set {set_number} - OpenNeoUA Studio · Map Editor")
         self.undo_action.setEnabled(self.history.can_undo or self._script_pending or self._live_pending)
         self.redo_action.setEnabled(self.history.can_redo)
+        self.save_action.setEnabled(bool(self.path))
 
     def _confirm_discard(self) -> bool:
         self._released(-1, -1, Qt.KeyboardModifier.NoModifier)
@@ -3007,10 +3252,10 @@ class MainWindow(QMainWindow):
         result = ResizeDialog.ask(self.doc, self)
         if result is None:
             return
-        w, h, remove = result
+        w, h, remove, sector_height = result
         self.history.push(self.doc)
         try:
-            self.doc.resize(w, h, remove_out_of_bounds=remove)
+            self.doc.resize(w, h, remove_out_of_bounds=remove, height=sector_height)
         except ValueError as exc:
             self.history.undo(self.doc)
             QMessageBox.warning(self, "Resize", str(exc))
@@ -3098,13 +3343,13 @@ class MainWindow(QMainWindow):
                        self.squad_tab_index: "squad"}.get(index, "select"))
         if index in self.special_tab_indices.values():
             self.view.active_tool = 'special'
-        if index == 0 and self._icon_queue:
-            self._icons.start()
-        if index == 1 and self._bicon_queue:
+        if index in (0, 1):
+            self._queue_visible_previews()
             self._icons.start()
         if index in (self.squad_tab_index, self.host_tab_index, self.tech_tab_index, *self.special_tab_indices.values()):
             self._icons.start()
         self._select_first_tab_item(index)
+        self._sync_special_selection()
 
     def _sector_selected(self, item, _prev=None):
         if item:
@@ -3121,6 +3366,9 @@ class MainWindow(QMainWindow):
             self._move_special_draft((col, row))
         elif self._special_placement is not None:
             self.view.preview_cells = {(col, row)} if self.doc and 1 <= col < self.doc.mw - 1 and 1 <= row < self.doc.mh - 1 else set()
+            if self._special_placement[2] == 'key' and self._key_preview_cell != (col, row):
+                self._key_preview_cell = (col, row)
+                self._refresh_squads(fields=False)
         if col < 0 or not self.doc:
             self.info.setText("")
             self.hover_height.setText("Sector under mouse: —")
@@ -3155,19 +3403,25 @@ class MainWindow(QMainWindow):
             self.view.brush_cells = {(c, r) for c, r, _w in self.brush.footprint(self.doc, col, row)}
         self.view.update()
 
-    def _terrain_mode(self, modifiers) -> BrushMode:
+    def _terrain_mode(self, modifiers, button=Qt.MouseButton.LeftButton) -> BrushMode:
+        """Use the selected sculpting tool; Shift and Alt keep their shortcuts."""
         if modifiers & Qt.KeyboardModifier.AltModifier:
             return BrushMode.SMOOTH
         if modifiers & Qt.KeyboardModifier.ShiftModifier:
             return BrushMode.LOWER
         return self.mode_combo.currentData()
 
-    def _pressed(self, col, row, _button, modifiers):
+    def _pressed(self, col, row, button, modifiers):
         self._finish_script()
         if self.tool == 'terrain' and self._sampling_height:
             self._sample_map_height(col, row)
             return
         if self.tool == 'squad':
+            return
+        if (self.tool in ('sector', 'building', 'owner') and len(self.view.selection) > 1
+                and (col, row) in self.view.selection):
+            # Several sectors are selected and one of them is clicked: all of them get the brush.
+            self._apply_selection()
             return
         if self.tool == 'sector':
             self.view.selected_building = None
@@ -3180,7 +3434,8 @@ class MainWindow(QMainWindow):
         self.view.set_editing(self.tool in ("sector", "building", "terrain"))
         self._last_cell = (col, row)
         if self.tool == "terrain":
-            self._stroke_mode = self._terrain_mode(modifiers)
+            self._stroke_button = button
+            self._stroke_mode = self._terrain_mode(modifiers, button)
             self.brush.begin_stroke(self.doc, col, row)
             # Un click produce un passo; la pressione continua usa la velocità al secondo.
             self._terrain_tick = time.monotonic() - 1.0 / self.brush.strength
@@ -3193,12 +3448,12 @@ class MainWindow(QMainWindow):
         self._last_cell = (col, row)
         self.view.selection = {(col, row)}
         if self.tool == "terrain":
-            self._stroke_mode = self._terrain_mode(modifiers)
+            self._stroke_mode = self._terrain_mode(modifiers, self._stroke_button)
         self._apply(col, row)
 
     def _repeat_terrain(self):
         if self._stroke_active and self._last_cell and self.tool == "terrain":
-            self._stroke_mode = self._terrain_mode(QApplication.keyboardModifiers())
+            self._stroke_mode = self._terrain_mode(QApplication.keyboardModifiers(), self._stroke_button)
             self._apply(*self._last_cell)
 
     def _released(self, _col, _row, _modifiers):
@@ -3257,7 +3512,8 @@ class MainWindow(QMainWindow):
             if definition is not None:
                 interior = (1 <= col < self.doc.mw - 1 and 1 <= row < self.doc.mh - 1)
                 if interior:
-                    changed = paint_cells(self.doc, [(col, row)], 'type', f"{definition.sec_type:02x}")
+                    changed = self.doc.remember_building_ground(col, row, definition.id)
+                    changed = paint_cells(self.doc, [(col, row)], 'type', f"{definition.sec_type:02x}") or changed
                     changed = paint_cells(self.doc, [(col, row)], 'blg', f"{definition.id:02x}") or changed
         elif self.tool == "owner":
             changed = paint_cells(self.doc, [(col, row)], 'own', self.sel_owner)

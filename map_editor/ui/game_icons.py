@@ -3,14 +3,20 @@ from functools import lru_cache
 from pathlib import Path
 
 import numpy as np
-from PySide6.QtCore import QRectF
-from PySide6.QtGui import QImage, QColor
+from PySide6.QtCore import QRectF, Qt
+from PySide6.QtGui import QImage, QColor, QPainter
 
 from .. import bootstrap
 from ..core.resource_catalog import preview_image
 
 
 def game_icon(kind, owner=1, tight=True, grey=False, outlined=False):
+    if kind in ('squad', 'player'):
+        return _badge_symbol(kind).copy()
+    if kind == 'host':
+        root = bootstrap.game_data_dir()
+        # The strategic map uses MAPROBO's largest owner group (0x18 + owner).
+        return _glyph(str(root), 'MAPROBO', 24 + max(0,min(7,int(owner))), tight, grey, outlined)
     if kind in ('power', 'gate', 'gem', 'item', 'gate_key', 'item_key', 'wave', 'wave_key'):
         font, code = 'MAPCUR64', dict(power=137, gate=147, gem=136, item=139,
                                      gate_key=138, item_key=139, wave=143, wave_key=143)[kind]
@@ -18,6 +24,25 @@ def game_icon(kind, owner=1, tight=True, grey=False, outlined=False):
         font, code = 'TYPE_NS', {'radar': ord('U'), 'flak': ord('V')}[kind]
     root = bootstrap.game_data_dir()
     return _glyph(str(root), font, code, tight, grey, outlined)
+
+
+@lru_cache(maxsize=2)
+def _badge_symbol(kind):
+    image = QImage(32,32,QImage.Format.Format_ARGB32_Premultiplied)
+    image.fill(Qt.GlobalColor.transparent)
+    painter = QPainter(image)
+    painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+    painter.setPen(Qt.PenStyle.NoPen)
+    painter.setBrush(Qt.GlobalColor.white)
+    if kind == 'player':
+        painter.drawEllipse(QRectF(11,3,10,10))
+        painter.drawRoundedRect(QRectF(6,16,20,12),5,5)
+    else:
+        for x,y in ((5,18),(20,18),(12,4)):
+            painter.drawRoundedRect(QRectF(x,y,8,9),2,2)
+            painter.drawRect(QRectF(x+3,y-4,2,8))
+    painter.end()
+    return image
 
 
 @lru_cache(maxsize=48)
@@ -50,9 +75,10 @@ def _glyph(root, font, code, tight, grey, outlined):
         glyph = image.copy(x, y, width, int(height))
         rgba = np.frombuffer(glyph.bits(), np.uint8).reshape(glyph.height(), glyph.bytesPerLine())[:, :glyph.width()*4].reshape(glyph.height(), glyph.width(), 4)
         rgba[(rgba[:, :, :3] == (255,255,0)).all(axis=2), 3] = 0
-        if font == 'MAPCUR64' and code in (147, 148):
-            # The gate tile includes the atlas's blue separator on its right.
-            # Exclude it before finding the visible bounds of the real symbol.
+        if font == 'MAPCUR64':
+            # Every MAPCUR64 tile carries the atlas's blue separator on its right edge. Drawn on
+            # the map it showed up as a stray blue line beside key sectors, so exclude it
+            # before finding the visible bounds of the real symbol.
             separator = (rgba[:, -1, :3] == (0, 52, 255)).all(axis=1)
             rgba[separator, -1, 3] = 0
         if grey:
@@ -80,6 +106,11 @@ def draw_game_badge(painter, center, size, kind, color, moment, owner=1):
     image = game_icon(kind, owner, grey=color.red() == color.green() == color.blue())
     if image.isNull():
         return False
+    if kind in ('squad', 'player'):
+        tint = QPainter(image)
+        tint.setCompositionMode(QPainter.CompositionMode.CompositionMode_SourceIn)
+        tint.fillRect(image.rect(), color)
+        tint.end()
     size *= .75
     painter.save()
     pulse = .85 + .15*math.sin(moment*3.2)

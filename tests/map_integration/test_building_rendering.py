@@ -162,6 +162,7 @@ def test_palette_batch_finishes_multiple_icons_and_stops_on_hidden_rows(app):
     win.palette_dock.isVisible = lambda: True
     win.palette_tabs.setCurrentIndex(0)
     win.view._job = None; win.view._interacting = False
+    win._queue_visible_previews = lambda: None
     win._icon_queue = [(1, None), (2, None), (3, None)]
     win._make_sector_icon = lambda lib: win._icon_queue.pop(0)
     win._make_icon()
@@ -182,7 +183,7 @@ def test_building_resize_reuses_rendered_source_and_stale_results_are_ignored(ap
     win.view.render_icon = Mock(side_effect=AssertionError('cached resize must not render'))
     win._building_zoom_step(1)
     assert not win._bicon_queue
-    assert win._bicon_cache[(win._palette_set, 1, win.devicePixelRatioF())] is image
+    assert win._bicon_cache[(win._palette_set, 1, win.devicePixelRatioF(), win._icon_angle)] is image
     assert not win._bicon_rows[1].pixmap().isNull()
     win._bicon_finished = Mock()
     win._bicon_from_sector(1, (win._palette_set, 0, 0, win._asset_epoch - 1,

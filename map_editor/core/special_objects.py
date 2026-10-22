@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import copy
+import re
 
 from .ldf_model import MAX_SPECIAL_SLOTS, new_gate, new_item, new_gem
 
@@ -79,22 +80,16 @@ def _sync_visual(doc, kind, old, value, buildings=None):
     if old_cell == cell and (old_visual == visual or kind == 'gem' and old['blg'] == value['blg']):
         return
     if old_cell is not None:
-        x, y = old_cell
-        if old_cell != cell:
-            # A special object's old sector becomes flat after it is moved or removed.
-            # Never restore the building that happened to be under the special.
-            doc.grids['type'][y][x] = '00'
-            doc.grids['blg'][y][x] = '00'
-        else:
-            _restore_visual(doc, old_cell, old_visual, old.get('_visual_before'))
+        _restore_visual(doc, old_cell, old_visual, old.get('_visual_before'))
     value.pop('_visual_before', None)
     value.pop('_visual_applied', None)
     if cell is None or visual is None:
         return
     x, y = cell
     if kind != 'gem' and str(doc.grids['blg'][y][x]).lower() != '00':
-        # Keep the building visible under a newly placed gate or Super Item.
-        # It is cleared if the special object later leaves this position.
+        # This overlay leaves the existing building untouched, including on removal.
+        value['_visual_before'] = (doc.grids['type'][y][x], doc.grids['blg'][y][x])
+        value['_visual_applied'] = None
         return
     value['_visual_before'] = (doc.grids['type'][y][x], doc.grids['blg'][y][x])
     value['_visual_applied'] = visual
@@ -186,7 +181,8 @@ def set_item_key_road(doc, slot, index, road):
         return False
     saved = value.setdefault('_key_visuals', {})
     info = saved.get((x, y))
-    before = info['before'] if info is not None and current == info['applied'] else doc.grids['type'][y][x]
+    before = (info['before'] if info is not None and current == info['applied'] else
+              '00' if current in ('f3', 'f4') else doc.grids['type'][y][x])
     saved[(x, y)] = {'before': before, 'applied': typ}
     doc.grids['type'][y][x] = typ
     return True
@@ -205,3 +201,65 @@ def remove_special(doc, kind, slot, buildings=None):
         store[index] = store[index + 1]
     store[count] = SPECIAL_KINDS[kind][2]()
     setattr(doc, SPECIAL_KINDS[kind][1], count - 1)
+
+
+def special_ground_comments(doc):
+    """Persist matching editor backups as ordinary comments ignored by the engine."""
+    for kind in SPECIAL_KINDS:
+        for slot in special_slots(doc, kind):
+            value = special_store(doc, kind)[slot]
+            cell = special_cell(value)
+            if cell is None or not doc.cell_is_valid(value):
+                continue
+            x, y = cell
+            before = value.get('_visual_before')
+            if before is not None and '_visual_applied' in value:
+                applied = value['_visual_applied']
+                expected = before if applied is None else applied
+                if (str(doc.grids['blg'][y][x]).lower() == expected[1] and
+                        (expected[0] is None or str(doc.grids['type'][y][x]).lower() == expected[0])):
+                    typ, building = applied if applied is not None else (None, None)
+                    yield (f'; Studio special ground {kind} {x} {y} {before[0]} {before[1]} '
+                           f'{typ or "--"} {building or "--"}')
+            if kind == 'item':
+                for (c, r), info in sorted(value.get('_key_visuals', {}).items()):
+                    if ((c, r) in value['keys'] and 0 <= c < doc.mw and 0 <= r < doc.mh
+                            and str(doc.grids['type'][r][c]).lower() == info['applied']):
+                        yield (f'; Studio item key ground {x} {y} {c} {r} '
+                               f'{info["before"]} {info["applied"]}')
+
+
+def load_special_ground_comments(doc, text):
+    """Match backups by position: saving omits unplaced slots and renumbers the others."""
+    pairs = {}
+    for kind in SPECIAL_KINDS:
+        for slot in special_slots(doc, kind):
+            value = special_store(doc, kind)[slot]
+            if doc.cell_is_valid(value):
+                pairs[kind, value['x'], value['y']] = value
+    pattern = (r'(?im)^; Studio special ground (gate|item|gem) (\d+) (\d+) '
+               r'([0-9a-f]{2}) ([0-9a-f]{2}) ([0-9a-f]{2}|--) ([0-9a-f]{2}|--)\s*$')
+    for match in re.finditer(pattern, text):
+        kind = match[1].lower()
+        x, y = int(match[2]), int(match[3])
+        value = pairs.get((kind, x, y))
+        if value is None:
+            continue
+        before = (match[4].lower(), match[5].lower())
+        applied = ((None if match[6] == '--' else match[6].lower()), match[7].lower())
+        if match[7] == '--':
+            applied = None
+        expected = before if applied is None else applied
+        if (str(doc.grids['blg'][y][x]).lower() == expected[1] and
+                (expected[0] is None or str(doc.grids['type'][y][x]).lower() == expected[0])):
+            value['_visual_before'] = before
+            value['_visual_applied'] = applied
+    pattern = (r'(?im)^; Studio item key ground (\d+) (\d+) (\d+) (\d+) '
+               r'([0-9a-f]{2}) (f3|f4)\s*$')
+    for match in re.finditer(pattern, text):
+        x, y, c, r = map(int, match.group(1, 2, 3, 4))
+        value = pairs.get(('item', x, y))
+        if (value is not None and (c, r) in value['keys'] and 0 <= c < doc.mw and 0 <= r < doc.mh
+                and str(doc.grids['type'][r][c]).lower() == match[6].lower()):
+            value.setdefault('_key_visuals', {})[c, r] = {
+                'before': match[5].lower(), 'applied': match[6].lower()}

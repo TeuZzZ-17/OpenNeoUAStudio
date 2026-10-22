@@ -77,7 +77,8 @@ def test_owner_color_and_actor_draft_grayscale_are_independent(app, actor_previe
                 cells[:, width // 2:] = -3
                 flags = (3, 1) if actor_preview == 'squad' else (1, 3)
             renderer.set_unit_styles([(1, 0, 0, flag) for flag in flags])
-        edges = np.ones((height, width, 4), dtype=np.float32)
+        # A point inside the one-pixel faction border, rather than exactly outside it.
+        edges = np.full((height, width, 4), .5, dtype=np.float32)
 
         gl.glBindTexture(gl.GL_TEXTURE_2D, renderer.indices)
         gl.glTexSubImage2D(gl.GL_TEXTURE_2D, 0, 0, 0, width, height,
@@ -142,7 +143,7 @@ def test_real_special_scene_ids_and_gpu_selected_and_drag_contours(app):
     from map_editor.core.special_objects import add_special, update_special
     from map_editor.render.camera import IsoCamera
     from map_editor.render.sector_mesh import SectorMeshLibrary
-    from map_editor.render.special_scene import SPECIAL_COLORS, actor_code, scene_object_styles, special_cells, special_members
+    from map_editor.render.special_scene import cell_owner_color, actor_code, scene_object_styles, special_cells, special_members
     from map_editor.render.terrain_mesh import HEIGHT_UNIT, TerrainMesh
     from map_editor.render.gpu_scene import WorldScene
 
@@ -238,7 +239,7 @@ def test_real_special_scene_ids_and_gpu_selected_and_drag_contours(app):
         ids, pixels = render()
         for kind, code in codes.items():
             assert np.any(ids == code), f'{kind} actor code {code} did not reach the GPU raster'
-            edge_color = np.asarray(SPECIAL_COLORS[kind], np.uint8)
+            edge_color = np.asarray(cell_owner_color(view, doc, positions[kind]), np.uint8)
             assert np.any(np.all(pixels[:, :, :3] == edge_color, axis=2)), (
                 f'{kind} actor edge color was not drawn')
 

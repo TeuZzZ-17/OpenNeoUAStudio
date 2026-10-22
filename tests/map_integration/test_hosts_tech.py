@@ -220,7 +220,8 @@ def test_dynamic_map_scripts_populate_all_panels_and_undo(win):
     assert win.host_panel.vehicle.findData(222) >= 0
     assert win.squad_panel.vehicle.findData(223) >= 0
     keys = {win.tech_panel.list.item(i).data(Qt.ItemDataRole.UserRole) for i in range(win.tech_panel.list.count())}
-    assert {222, 223} <= keys
+    # Host stations (class robo) are never offered as buildable units; ordinary vehicles are.
+    assert 223 in keys and 222 not in keys
     win.undo()
     assert win.host_panel.vehicle.findData(222) < 0
     win.redo()
