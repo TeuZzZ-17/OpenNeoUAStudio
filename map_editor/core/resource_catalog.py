@@ -23,6 +23,16 @@ class SkyResource:
     name: str
     archive: Path
     loose_preview: Path | None = None
+    reference: str = ''
+
+    @property
+    def level_value(self):
+        return self.reference or f'objects/{self.name}.bas'
+
+
+def sky_key(value):
+    value = str(value).replace('\\', '/')
+    return value.casefold() if value.casefold().endswith('.base') else Path(value).stem.casefold()
 
 
 class ResourceCatalog:
@@ -54,6 +64,25 @@ class ResourceCatalog:
         return next((path for path in self.briefings[prefix].values()
                      if path.stem.casefold() == stem), None)
 
+    def refresh_skies(self) -> None:
+        """Rescan the skies folder, e.g. after a custom sky was installed."""
+        external = {key: value for key, value in self.skies.items() if value.reference}
+        self.skies = dict(sorted({**self._skies(), **external}.items()))
+
+    def include_sky(self, value):
+        """Keep a level's external sky selectable after reopening it."""
+        key = sky_key(value)
+        if str(value).casefold().startswith('data/') and str(value).casefold().endswith('.base'):
+            path = self.installation.data / str(value)[5:]
+            try:
+                path.resolve().relative_to(self.installation.data.resolve())
+            except ValueError:
+                return key
+            if path.is_file():
+                self.skies[key] = SkyResource(path.stem, path, reference=value)
+                self.skies = dict(sorted(self.skies.items()))
+        return key
+
     def _skies(self) -> dict[str, SkyResource]:
         directory = self.installation.folder("skies")
         loose = find_existing_path(directory, "Loose")
@@ -78,15 +107,20 @@ class ResourceCatalog:
 
     @staticmethod
     def _palette(set_number: int):
-        bootstrap.ensure_studio_on_path()
-        from studio.formats.images import parse_pal_file
+        return palette_for_set(set_number)
 
-        set_path = bootstrap.set_dir(set_number)
-        for name in ("NORMAL.PAL", "STANDARD.PAL"):
-            path = find_existing_path(set_path, "Palette", name)
-            if path is not None and path.is_file():
-                return parse_pal_file(path)
-        return None
+
+def palette_for_set(set_number: int):
+    """The set's game palette (NORMAL.PAL, else STANDARD.PAL) or None."""
+    bootstrap.ensure_studio_on_path()
+    from studio.formats.images import parse_pal_file
+
+    set_path = bootstrap.set_dir(set_number)
+    for name in ("NORMAL.PAL", "STANDARD.PAL"):
+        path = find_existing_path(set_path, "Palette", name)
+        if path is not None and path.is_file():
+            return parse_pal_file(path)
+    return None
 
 
 def preview_image(source: Path | SkyResource, palette=None) -> QImage:
@@ -107,6 +141,14 @@ def _cached_preview(source, palette, _mtime, _size):
         if source.loose_preview is not None:
             return preview_image(source.loose_preview, palette)
         archive = read_setbas(source.archive)
+        if source.archive.suffix.casefold() == '.base':
+            from studio.assets.family import load_asset_family
+            family = load_asset_family(source.archive, setbas=archive, isolated_root=source.archive.parent)
+            if not family.textures:
+                return QImage()
+            decoded = next(iter(family.textures.values()))
+            rgba = decoded.to_rgba_bytes(palette_override=palette, alpha_mode='opaque')
+            return QImage(rgba, decoded.width, decoded.height, decoded.width * 4, QImage.Format.Format_RGBA8888).copy()
         candidates = archive.find("NEWSKY1.ILBM", "ilbm.class")
         if not candidates:
             candidates = [r for r in archive.resources if r.class_id.casefold() == "ilbm.class"]

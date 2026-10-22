@@ -42,7 +42,7 @@ def win(app):
 
 def test_default_sizes_building_capabilities_and_search(win):
     assert win._icon_level == 1 and win._bicon_level == 2
-    assert [panel.list.preview_level for panel in (win.squad_panel, win.host_panel, win.tech_panel)] == [0, 1, 0]
+    assert [panel.list.preview_level for panel in (win.squad_panel, win.host_panel, win.tech_panel)] == [0, 1, 1]
     visible = set(win._bicon_items)
     assert visible and visible < set(win.buildings)
     assert all(win.buildings[key].has_power or win.buildings[key].is_radar or win.buildings[key].has_guns
@@ -81,7 +81,8 @@ def test_unselected_squad_form_prepares_add_without_changing_existing(win):
     assert win.doc.squads[-1]['num'] == 7
     win.undo()
     assert win.doc.snapshot() == before
-    assert any(button.text() == 'Deselect' for button in panel.findChildren(QPushButton))
+    texts = [button.text() for button in panel.findChildren(QPushButton)]
+    assert 'New' in texts and 'Deselect' not in texts
 
 
 def test_unselected_host_form_prepares_height_and_ai(win):
@@ -107,7 +108,7 @@ def test_unselected_host_form_prepares_height_and_ai(win):
     win.undo()
     assert win.doc.snapshot() == before
     titles = [button.text() for button in panel.findChildren(QPushButton)]
-    assert 'Deselect' in titles and 'Place / Move' not in titles
+    assert 'New' in titles and 'Deselect' not in titles and 'Place / Move' not in titles
     assert set(panel.fields) == {'pos_y', 'viewangle', 'reload_const'}
 
 

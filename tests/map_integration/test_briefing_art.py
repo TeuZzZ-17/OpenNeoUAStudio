@@ -92,7 +92,9 @@ def test_briefing_style_is_a_dark_grainy_surface_with_a_ragged_margin_and_marks(
 
     assert (pixels[:, :, 3] == 255).all()
     assert core.mean() < 90 and core.std() > 12  # dark, with grain and crystal
-    assert luma[:3].max() == 0 and luma[:, :3].max() == 0  # black edge
+    # The revised margin retains the dark texture of the retail art.
+    assert 0 < luma[:3].mean() < core.mean() * .4
+    assert 0 < luma[:, :3].mean() < core.mean() * .4
     # The building of sector (5, 3) is a bright square with a dark halo.
     px = round(camera.width / 2 - ((5 + .5) * 1200 - camera.center[0]) * camera.zoom)
     py = round(camera.height / 2 + (-(3 + .5) * 1200 - camera.center[2]) * camera.zoom)

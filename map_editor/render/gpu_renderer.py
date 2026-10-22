@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import ctypes
 import math
+from collections import OrderedDict
 import numpy as np
 from OpenGL import GL as gl
 from OpenGL.GL.shaders import compileProgram, compileShader
@@ -125,6 +126,7 @@ uniform vec3 ownerColors[8];
 uniform ivec2 mapSize;
 uniform int hoverCell;
 uniform vec3 cursorColor;
+uniform vec4 previewTint;
 uniform bool showGrid;
 uniform bool showSky;
 uniform bool showOverlays;
@@ -152,12 +154,12 @@ void main(){
         int id=abs(code)-1;
         if(stateAt(ivec2(id%mapSize.x,id/mapSize.x)).a==2u){
             float grey=dot(color.rgb,vec3(0.299,0.587,0.114));
-            color.rgb=mix(vec3(grey),vec3(0.62),0.28);
+            color.rgb=mix(vec3(grey),previewTint.rgb,previewTint.a);
         }
     }
     if(unitStyle(code).a==3.0){
         float grey=dot(color.rgb,vec3(0.299,0.587,0.114));
-        color.rgb=mix(vec3(grey),vec3(0.62),0.28);
+        color.rgb=mix(vec3(grey),previewTint.rgb,previewTint.a);
     }
     // The visible negative sector pixels are the building silhouette.
     // Same widths as special objects: 1px edge, or 2px edge plus 2px white
@@ -192,7 +194,7 @@ void main(){
         if(whiteOuter){color.rgb=vec3(1.0);return;}
         if(yellowEdge){
             vec3 owned=building.r>0u && building.r<8u ? ownerColors[int(building.r)] : vec3(0.57);
-            color.rgb=building.a==2u ? vec3(0.62) : owned;
+            color.rgb=building.a==2u ? previewTint.rgb : owned;
             return;
         }
     }
@@ -205,11 +207,11 @@ void main(){
                 ivec2 q=clamp(p+offset,ivec2(0),textureSize(cells,0)-1);
                 int other=texelFetch(cells,q,0).r;
                 vec4 neighbour=unitStyle(other);
-                if(own.a>0.0 && other!=code && d<=(own.a==2.0 ? 2 : 1)){
-                    color.rgb=own.rgb; return;
+                if(own.a>0.0 && other!=code && d<=((own.a==2.0 || own.a==4.0) ? 2 : 1)){
+                    color.rgb=own.a==2.0 ? vec3(1.0) : own.rgb; return;
                 }
-                if(own.a==0.0 && neighbour.a==2.0 && d<=2){
-                    color.rgb=vec3(1.0); return;
+                if(own.a==0.0 && (neighbour.a==2.0 || neighbour.a==4.0) && d<=2){
+                    color.rgb=neighbour.a==2.0 ? vec3(1.0) : neighbour.rgb; return;
                 }
             }
         }
@@ -325,12 +327,30 @@ class GpuRenderer:
         self.flat_offsets = {}
         self.instance_buffers = {}
         self.scene = None
+        self._preview_buffers = OrderedDict()
         self.has_sky = False
         self.draw_calls = 0
         gl.glPixelStorei(gl.GL_UNPACK_ALIGNMENT, 1)
         self._image(self.sky, np.zeros((1, 1, 4), np.uint8), gl.GL_RGBA8, gl.GL_RGBA)
         self.set_states(np.zeros((1, 1, 4), np.uint8))
         self.set_heights(np.zeros((1, 1), np.float32))
+
+    def set_preview(self, scene, key):
+        """Keep the visible cards' GPU geometry while only their camera changes."""
+        if key in self._preview_buffers:
+            buffers, flat, offsets = self._preview_buffers.pop(key)
+            self.buffers, self.flat_buffer, self.flat_offsets = buffers, flat, offsets
+        else:
+            if not self._preview_buffers:
+                self.flat_buffer.delete()
+            self.buffers, self.flat_buffer, self.flat_offsets = {}, Buffer(), {}
+            self.set_scene(scene, {(0, 0)})
+        self._preview_buffers[key] = (self.buffers, self.flat_buffer, self.flat_offsets)
+        while len(self._preview_buffers) > 32:
+            buffers, flat, _offsets = self._preview_buffers.popitem(last=False)[1]
+            for buffer in buffers.values():
+                buffer.delete()
+            flat.delete()
 
     def uniform(self, program, name):
         key = (program, name)
@@ -524,7 +544,8 @@ class GpuRenderer:
 
     def render(self, camera, width, height, target, *, owner_colors, grid=True, sky=True,
                hover=0, pixel_scale=1.0, overlays=True, transparent_background=False,
-               cursor_color=(210, 210, 210), clear_view=False):
+               cursor_color=(210, 210, 210), clear_view=False,
+               preview_tint=(.62, .62, .62, .28)):
         self._begin(width, height)
         matrix = camera_matrix(camera, self.map_size)
         self._geometry_program(self.opaque_program, matrix)
@@ -599,7 +620,7 @@ class GpuRenderer:
         self._present(target, width, height, owner_colors=owner_colors, grid=grid,
                       sky=sky, hover=hover, pixel_scale=pixel_scale, overlays=overlays,
                       transparent_background=transparent_background,
-                      cursor_color=cursor_color)
+                      cursor_color=cursor_color, preview_tint=preview_tint)
 
     def _begin(self, width, height):
         self._resize(width, height)
@@ -620,7 +641,8 @@ class GpuRenderer:
 
     def _present(self, target, width, height, *, owner_colors, grid=True, sky=True,
                  hover=0, pixel_scale=1.0, overlays=True, transparent_background=False,
-                 blend=False, cursor_color=(210, 210, 210)):
+                 blend=False, cursor_color=(210, 210, 210),
+                 preview_tint=(.62, .62, .62, .28)):
         gl.glDepthMask(True)
         gl.glBindFramebuffer(gl.GL_FRAMEBUFFER, target)
         gl.glViewport(0, 0, width, height)
@@ -646,6 +668,7 @@ class GpuRenderer:
         gl.glUniform1i(self.uniform(program, 'transparentBackground'), transparent_background)
         gl.glUniform1i(self.uniform(program, 'hoverCell'), hover if overlays else 0)
         gl.glUniform3f(self.uniform(program, 'cursorColor'), *(v / 255 for v in cursor_color))
+        gl.glUniform4f(self.uniform(program, 'previewTint'), *preview_tint)
         gl.glUniform1f(self.uniform(program, 'pixelScale'), pixel_scale)
         if blend:
             gl.glEnable(gl.GL_BLEND)
@@ -689,6 +712,12 @@ class GpuRenderer:
         return data[::-1].copy()
 
     def delete(self):
+        for buffers, flat, _offsets in self._preview_buffers.values():
+            if buffers is not self.buffers:
+                for buffer in buffers.values():
+                    buffer.delete()
+                flat.delete()
+        self._preview_buffers.clear()
         for buffer, data, _ in self.instance_buffers.values():
             buffer.delete(); gl.glDeleteBuffers(1, [data])
         self.instance_buffers.clear()

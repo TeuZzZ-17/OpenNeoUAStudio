@@ -211,3 +211,10 @@ def load_building_files(scripts_dir: Path, extra: str = '') -> dict[int, Buildin
     return merged
 
 
+
+
+def is_special_building(definition) -> bool:
+    """Use the same optional-building filter in placement and Tech palettes."""
+    return not (getattr(definition, 'has_power', False) or
+                getattr(definition, 'is_radar', False) or
+                getattr(definition, 'has_guns', False))

@@ -44,6 +44,8 @@ class WorldScene:
         self._squad_key = None
         self._specials = {}
         self._special_actor_count = None
+        # False hides the tall wall faces of the border ring, keeping only its ground.
+        self.border_walls = True
 
     def set_library(self, lib):
         if lib is self.lib:
@@ -138,10 +140,13 @@ class WorldScene:
         special = self._specials.get((col, row))
         typ = special[1].typ if special else sector_type(doc, self.lib, col, row)
         border = col in (0, doc.mw - 1) or row in (0, doc.mh - 1)
-        key = ('sector', typ, border)
+        # Third key item: 0 interior, 1 border with walls, 2 border ground only.
+        # Plain 1 equals True, so the existing ('sector', typ, True) key keeps working.
+        ground_border = border and not self.border_walls
+        key = ('sector', typ, 2 if ground_border else int(border))
         template = self._templates.get(key)
         if template is None:
-            template = self._template(key, self.lib.mesh(typ))
+            template = self._template(key, self.lib.mesh(typ), ground_only=ground_border)
         x, _, z = terrain.cell_center(col, row)
         cell_ref = (row * doc.mw + col,) * 4
         parts = [(template, (x, 0, z), cell_ref, False)]

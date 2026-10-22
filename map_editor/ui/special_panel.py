@@ -10,6 +10,7 @@ from PySide6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QFormLayout, Q
 
 from studio.ui.widgets import use_standard_list_style
 from ..core.ldf_model import GEM_ACTION_PARAMS_BY_TARGET, MAX_SPECIAL_SLOTS, GAME_TICKS_PER_SECOND
+from .settings_lock import SettingsLockButton
 from .preview_cards import PreviewList, set_card, RESOURCE_ROLE
 from ..render.special_scene import SPECIAL_COLORS as COLORS
 from ..core.special_objects import SPECIAL_KINDS, special_store, special_slots, special_cell
@@ -78,6 +79,51 @@ def format_duration(ticks):
     return f'{minutes:02d}:{seconds:02d}'
 
 
+# Super item types the engine knows (TMapSuperItem): 1 bomb is the default, 2 wave.
+ITEM_TYPES = ((1, 'Default'), (2, '2 · Wave'))
+# Presets that fix the building IDs; only Custom lets those fields be edited.
+BUILDING_FIELDS = {'gate': ('closed_bp', 'opened_bp'),
+                   'item': ('inactive_bp', 'active_bp', 'trigger_bp'),
+                   'gem': ('blg',)}
+
+
+class ItemTypeBox(QComboBox):
+    """Super item type picker with the QSpinBox calls the panel already uses."""
+
+    valueChanged = Signal(int)
+
+    def __init__(self):
+        super().__init__()
+        for value, label in ITEM_TYPES:
+            self.addItem(label, value)
+        self.activated.connect(lambda _index: self.valueChanged.emit(self.value()))
+
+    def setRange(self, low, high):
+        """Only the engine's own types are selectable, whatever range is asked."""
+
+    def value(self):
+        return int(self.currentData())
+
+    def setValue(self, value):
+        value = int(value)
+        index = self.findData(value)
+        if value not in {item[0] for item in ITEM_TYPES}:
+            # Preserve a loaded value, but do not offer unsupported engine types for editing.
+            unknown_index = len(ITEM_TYPES)
+            if self.count() == unknown_index:
+                self.addItem(f'{value} · Unknown', value)
+            else:
+                self.setItemText(unknown_index, f'{value} · Unknown')
+                self.setItemData(unknown_index, value)
+            index = unknown_index
+            self.model().item(index).setEnabled(False)
+        else:
+            if self.count() > len(ITEM_TYPES):
+                self.removeItem(len(ITEM_TYPES))
+            index = self.findData(value)
+        self.setCurrentIndex(index)
+
+
 class SpecialPanel(QWidget):
     selected = Signal(int)
     addRequested = Signal()
@@ -89,6 +135,7 @@ class SpecialPanel(QWidget):
 
     def __init__(self, kind):
         super().__init__()
+        self.settings_lock = SettingsLockButton()
         self.kind, self.doc, self._loading = kind, None, False
         self.slot = 0
         self.template = SPECIAL_KINDS[kind][2]()
@@ -102,24 +149,28 @@ class SpecialPanel(QWidget):
         layout.addLayout(self.list.preview_controls())
         self.list.currentItemChanged.connect(self._selected)
         layout.addWidget(self.list, 1)
+        self.count = QLabel()
+        self.count.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        layout.addWidget(self.count)
         row = QHBoxLayout()
-        self.add_button = QPushButton('Add')
-        self.add_button.clicked.connect(self.addRequested.emit)
+        self.add_button = QPushButton('New')
+        self.add_button.clicked.connect(self._new)
         self.delete_button = QPushButton('Delete')
         self.delete_button.clicked.connect(lambda: self.removeRequested.emit(self.slot))
-        self.deselect_button = QPushButton('Deselect')
-        self.deselect_button.clicked.connect(lambda: self.list.setCurrentRow(-1))
         self.focus = QPushButton('Find')
         self.focus.clicked.connect(lambda: self.focusRequested.emit(special_cell(self.record())))
-        self.add_button.setToolTip('Deselect the current object before adding another object.')
-        for button in (self.add_button, self.delete_button, self.focus, self.deselect_button):
+        self.add_button.setToolTip('Deselect the current object and start a new one with its settings.')
+        for button in (self.add_button, self.delete_button, self.focus):
             row.addWidget(button)
         layout.addLayout(row)
-        self.count = QLabel()
-        count_row = QHBoxLayout()
-        count_row.addWidget(self.count, 1)
+        # Place / Move fills the row up to Delete all.
+        self.place = QPushButton('Place / Move')
+        self.place.clicked.connect(lambda: self.placementRequested.emit('object', -1))
         self.clear_button = QPushButton('Delete all')
         self.clear_button.clicked.connect(self.clearRequested.emit)
+        count_row = QHBoxLayout()
+        count_row.addWidget(self.settings_lock)
+        count_row.addWidget(self.place, 1)
         count_row.addWidget(self.clear_button)
         layout.addLayout(count_row)
         self.form_widget = QWidget()
@@ -135,11 +186,9 @@ class SpecialPanel(QWidget):
             coords.addWidget(QLabel(title))
             coords.addWidget(spin, 1)
         form.addRow('Sector', coords)
-        placement = QHBoxLayout()
-        self.place = QPushButton('Place / Move')
-        self.place.clicked.connect(lambda: self.placementRequested.emit('object', -1))
-        placement.addWidget(self.place)
-        form.addRow(placement)
+        self.hidden = QCheckBox('Hidden in Briefing')
+        self.hidden.toggled.connect(lambda value: self._change({'hidden': value}))
+        form.addRow(self.hidden)
         self.preset = QComboBox()
         self.preset.addItem('Custom', None)
         if kind == 'gate':
@@ -154,8 +203,10 @@ class SpecialPanel(QWidget):
                      ('opened_bp', 'Opened building', 0, 255)]
         elif kind == 'item':
             self.preset.addItem('Standard · 35 / 36 / 37', {'inactive_bp': 35, 'active_bp': 36, 'trigger_bp': 37})
-            self.preset.addItem('Parasite · 68 / 69 / 70', {'inactive_bp': 68, 'active_bp': 69, 'trigger_bp': 70})
-            specs = [('countdown', 'Countdown (MM:SS)', 0, 2147483647), ('type', 'Type (1 = default)', 0, 2147483647),
+            self.preset.addItem('Parasite*', {'inactive_bp': 68, 'active_bp': 69, 'trigger_bp': 70})
+            self.preset.setSizeAdjustPolicy(QComboBox.SizeAdjustPolicy.AdjustToMinimumContentsLengthWithIcon)
+            self.preset.setMinimumContentsLength(12)
+            specs = [('countdown', 'Countdown (MM:SS)', 0, 2147483647), ('type', 'Type', 1, 2),
                      ('inactive_bp', 'Inactive building', 0, 255), ('active_bp', 'Active building', 0, 255),
                      ('trigger_bp', 'Triggered building', 0, 255)]
         else:
@@ -168,6 +219,7 @@ class SpecialPanel(QWidget):
         form.addRow('Model Preset', self.preset)
         for field, title, low, high in specs:
             spin = (DurationSpinBox() if kind == 'item' and field == 'countdown'
+                    else ItemTypeBox() if kind == 'item' and field == 'type'
                     else QSpinBox(minimum=low, maximum=high))
             spin.setRange(low, high)
             self.fields[field] = spin
@@ -175,14 +227,11 @@ class SpecialPanel(QWidget):
             form.addRow(title, spin)
         if kind == 'gem':
             self.fields['type'].setToolTip('1 = Weapon power, 2 = Shield, 3 = Tech / Unlock. Custom IDs are preserved.')
-        self.hidden = QCheckBox('Hidden in Briefing')
-        self.hidden.toggled.connect(lambda value: self._change({'hidden': value}))
-        form.addRow(self.hidden)
         if kind in ('gate', 'item'):
             self._build_keys(form)
         else:
             self._build_actions(form)
-        layout.addWidget(self.form_widget)
+        layout.addWidget(self.settings_lock.wrap(self.form_widget))
         self.status = QLabel('Add an object, configure it, then place it on the map.')
         self.status.setWordWrap(True)
         layout.addWidget(self.status)
@@ -201,10 +250,13 @@ class SpecialPanel(QWidget):
         row = QHBoxLayout()
         for title, callback in (('Add on map', lambda: self.placementRequested.emit('key', -1)),
                                 ('Move', lambda: self.placementRequested.emit('key', self.keys.currentRow()) if self.keys.currentRow() >= 0 else None),
+                                ('Find', self._find_key),
                                 ('Remove', self._remove_key)):
             button = QPushButton(title)
             button.clicked.connect(callback)
             row.addWidget(button)
+            if title == 'Find':
+                self.key_find = button
         layout.addLayout(row)
         self.key_x, self.key_y = QSpinBox(), QSpinBox()
         coords = QHBoxLayout()
@@ -307,7 +359,7 @@ class SpecialPanel(QWidget):
             self.template.update(x=-1, y=-1)
             if 'keys' in self.template:
                 self.template['keys'] = []
-        self.add_button.setEnabled(not self.slot and self.list.count() < MAX_SPECIAL_SLOTS)
+        self.add_button.setEnabled(self.list.count() < MAX_SPECIAL_SLOTS)
         self.delete_button.setEnabled(bool(self.slot))
         self._loading = True
         if self.kind == 'gate':
@@ -322,6 +374,7 @@ class SpecialPanel(QWidget):
             if all(value.get(k) == v for k, v in self.preset.itemData(index).items()):
                 self.preset.setCurrentIndex(index)
                 break
+        self._sync_preset_fields()
         if self.kind == 'gem':
             index = self.actions.currentRow()
             self.actions.clear()
@@ -331,7 +384,7 @@ class SpecialPanel(QWidget):
         else:
             index = self.keys.currentRow()
             self.keys.clear()
-            self.keys.addItems([f'{i + 1} · Sector ({x}, {y})' for i, (x, y) in enumerate(value['keys'])])
+            self.keys.addItems([self._key_label(i, x, y, value) for i, (x, y) in enumerate(value['keys'])])
             self.keys.setCurrentRow(min(index, self.keys.count() - 1))
             self.keys_group.setEnabled(bool(self.slot) and not value.get('_preview'))
             if self.doc:
@@ -344,10 +397,15 @@ class SpecialPanel(QWidget):
             self._action_selected(self.actions.currentRow())
         else:
             self._key_selected(self.keys.currentRow())
-        self.status.setText('Configure the next object, then Add. Click to place; Esc cancels.' if not self.slot else
+        self.status.setText('Configure the next object, then New. Click to place; Esc cancels.' if not self.slot else
                             'Preview only · Click to insert · Esc cancels' if value.get('_preview') else
                             'Changes apply immediately. Drag the object or its keys to move them.')
         self.selected.emit(self.slot)
+
+    def _new(self):
+        """New = Deselect + Add: the next object starts from the current settings."""
+        self.list.setCurrentRow(-1)
+        self.addRequested.emit()
 
     def _targets_changed(self):
         if self._loading:
@@ -384,7 +442,7 @@ class SpecialPanel(QWidget):
             for index, (x, y) in enumerate(value['keys']):
                 item = self.keys.item(index)
                 if item is not None:
-                    item.setText(f'{index + 1} · Sector ({x}, {y})')
+                    item.setText(self._key_label(index, x, y, value))
         self._loading = False
 
     def placement_values(self):
@@ -413,10 +471,37 @@ class SpecialPanel(QWidget):
     def _preset(self):
         if self.preset.currentData():
             self._change(self.preset.currentData())
+        self._sync_preset_fields()
+
+    def _sync_preset_fields(self):
+        """Building IDs are edited only with the Custom preset; a fixed preset greys them out."""
+        custom = self.preset.currentIndex() == 0
+        for field in BUILDING_FIELDS[self.kind]:
+            self.fields[field].setEnabled(custom)
+
+    def _key_label(self, index, x, y, value):
+        """Key row text; a super item key on a road sector says so."""
+        text = f'{index + 1} · Sector ({x}, {y})'
+        if self.kind != 'item':
+            return text
+        roads = value.get('_key_roads', {})
+        if index in roads:
+            road = roads[index]
+        else:
+            road = (self.doc is not None and 0 <= x < self.doc.mw and 0 <= y < self.doc.mh
+                    and str(self.doc.grids['type'][y][x]).lower() == 'f4')
+        return text + (' · with Roads' if road else '')
+
+    def _find_key(self):
+        keys = self.record().get('keys', [])
+        index = self.keys.currentRow()
+        if 0 <= index < len(keys):
+            self.focusRequested.emit(tuple(keys[index]))
 
     def _key_selected(self, index):
         keys = self.record().get('keys', [])
         valid = 0 <= index < len(keys)
+        self.key_find.setEnabled(valid)
         self.key_x.setEnabled(valid)
         self.key_y.setEnabled(valid)
         if valid:

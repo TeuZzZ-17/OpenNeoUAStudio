@@ -68,3 +68,12 @@ def load_ai_preset(path):
     result = _preset_values(payload.get('name'), payload.get('values'))
     CUSTOM_AI_PRESETS[result['preset']] = result
     return result
+
+
+def host_ai_preset_dir():
+    """Keep custom Host AI presets beside the portable Studio installation."""
+    import sys
+    from pathlib import Path
+    from .. import bootstrap
+    root = Path(sys.executable).parent if getattr(sys, 'frozen', False) else bootstrap.studio_dir()
+    return root / 'Presets' / 'HostAI'

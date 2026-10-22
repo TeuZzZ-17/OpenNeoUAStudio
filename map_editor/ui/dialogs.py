@@ -6,17 +6,17 @@ from pathlib import Path
 
 from PySide6.QtCore import QEvent, QObject, QRunnable, QSize, Qt, QThreadPool, QTimer, Signal
 from PySide6.QtGui import QIcon, QImage, QPixmap
-from PySide6.QtWidgets import (QComboBox, QDialog, QDialogButtonBox,
+from PySide6.QtWidgets import (QCheckBox, QComboBox, QDialog, QDialogButtonBox,
                                QFormLayout, QHBoxLayout, QLabel,
                                QLineEdit, QListWidget, QListWidgetItem, QMessageBox, QPushButton, QSpinBox,
                                QStyle, QVBoxLayout, QWidget)
 
 from .. import bootstrap
-from ..core.ldf_model import LdfDocument, briefing_for_export, movie_filename
+from ..core.ldf_model import EDITOR_HEIGHT_MAX, LdfDocument, briefing_for_export, movie_filename
 from ..core.game_installation import (GameInstallation)
-from ..core.resource_catalog import ResourceCatalog, preview_image
+from ..core.resource_catalog import ResourceCatalog, preview_image, sky_key
 from studio.ui.shell import ResourcesDialog as GameInstallationDialog  # noqa: F401 - used by map_editor.editor, replaced by tests
-from .thumbnail_delegate import ThumbnailDelegate
+from .thumbnail_delegate import PLACEHOLDER_ROLE, ThumbnailDelegate
 
 MIN_SIZE, MAX_SIZE = 5, 255
 
@@ -61,25 +61,56 @@ class NewMapDialog(_Form):
 
 
 
+class _SectorHeightBox(QSpinBox):
+    """Terrain height 0-60 (30 = original ground); the lowest step reads "Default" and means "keep".
+
+    -1 is the "Default" step: the map keeps its terrain and new sectors get the standard ground.
+    """
+
+    def __init__(self):
+        super().__init__()
+        self.setRange(-1, EDITOR_HEIGHT_MAX)
+        self.setSpecialValueText("Default")
+        self.setValue(-1)
+        self.setToolTip("Default keeps the current terrain and gives new sectors the standard ground height. "
+                        "A number (0-60, 30 = original ground) sets every sector of the map to that height.")
+
+    def height(self) -> int | None:
+        return None if self.value() < 0 else self.value()
+
+
 class ResizeDialog(_Form):
     def __init__(self, doc: LdfDocument, parent=None):
         super().__init__(parent, "Resize map")
         self.doc = doc
         self.width_box, self.height_box = _size_box(doc.mw), _size_box(doc.mh)
+        self.link_box = QCheckBox("Change width and height together")
+        self.link_box.setChecked(True)
+        self.link_box.setToolTip("While checked, a new width is also used as the height, and the other way round.")
+        self.sector_height_box = _SectorHeightBox()
+        self.form.addRow(self.link_box)
         self.form.addRow("Width", self.width_box)
         self.form.addRow("Height", self.height_box)
+        self.form.addRow("Sector height", self.sector_height_box)
+        self.width_box.valueChanged.connect(lambda value: self._follow(self.height_box, value))
+        self.height_box.valueChanged.connect(lambda value: self._follow(self.width_box, value))
         self.finish()
+
+    def _follow(self, other: QSpinBox, value: int):
+        if self.link_box.isChecked() and other.value() != value:
+            other.setValue(value)
 
     def values(self):
         return self.width_box.value(), self.height_box.value()
 
     @staticmethod
     def ask(doc: LdfDocument, parent=None):
-        """Ritorna (w, h, rimuovi_fuori_mappa) oppure None se annullato."""
+        """Return (w, h, remove_out_of_bounds, sector_height) or None if cancelled."""
         dialog = ResizeDialog(doc, parent)
         if not dialog.exec():
             return None
         w, h = dialog.values()
+        sector_height = dialog.sector_height_box.height()
         counts = doc.count_resize_out_of_bounds(w, h)
         if any(counts.values()):
             labels = {'gate_objects': "gates", 'item_objects': "items", 'gems': "gems",
@@ -91,8 +122,8 @@ class ResizeDialog(_Form):
                 f"The new size leaves these objects outside the map: {text}.\nRemove them?")
             if answer != QMessageBox.StandardButton.Yes:
                 return None
-            return w, h, True
-        return w, h, False
+            return w, h, True, sector_height
+        return w, h, False, sector_height
 
 
 class _PreviewSignals(QObject):
@@ -126,6 +157,7 @@ class LevelInfoPanel(QWidget):
                                        GameInstallation.suggest(bootstrap.game_data_dir()),
                                        doc.set_number)
         self.sky_value = str(doc.lvl_info.get("sky", ""))
+        self.catalog.include_sky(self.sky_value)
         self._preview_pool = QThreadPool(self)
         self._preview_pool.setMaxThreadCount(2)
         self._preview_jobs = {}
@@ -194,7 +226,9 @@ class LevelInfoPanel(QWidget):
         layout.addWidget(self.generate_art_button)
 
         sky_label = QLabel("Select Sky:")
-        sky_label.setAlignment(Qt.AlignmentFlag.AlignHCenter)
+        # Centred between the button above and the list below, not stuck to the top of its box.
+        sky_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        sky_label.setMinimumHeight(30)
         layout.addWidget(sky_label)
         self.sky_list = QListWidget()
         from studio.ui.widgets import use_standard_list_style
@@ -212,7 +246,7 @@ class LevelInfoPanel(QWidget):
         self.sky_list.setMaximumHeight(278)
         self.sky_items = {}
         self._failed_skies = set()
-        current_name = Path(self.sky_value.replace("\\", "/")).stem.casefold()
+        current_name = sky_key(self.sky_value)
         for name, source in self.catalog.skies.items():
             item = QListWidgetItem(source.name)
             item.setData(Qt.ItemDataRole.UserRole, name)
@@ -225,6 +259,10 @@ class LevelInfoPanel(QWidget):
         # scroll bar appears or the panel is laid out after loading a map.
         self.sky_list.installEventFilter(self)
         layout.addWidget(self.sky_list)
+        self.custom_sky_button = QPushButton("Custom sky…")
+        self.custom_sky_button.setToolTip("Pick a sky archive (.bas) or complete sky file (.base) inside the game's Data folder")
+        self.custom_sky_button.clicked.connect(self._choose_custom_sky)
+        layout.addWidget(self.custom_sky_button)
         self.no_skies_label = QLabel("No sky archives found in the selected Skies folder.")
         self.no_skies_label.setVisible(not self.catalog.skies)
         layout.addWidget(self.no_skies_label)
@@ -322,11 +360,12 @@ class LevelInfoPanel(QWidget):
                 return
             if image is None or image.isNull():
                 self._failed_skies.add(key[1])
+                item.setData(PLACEHOLDER_ROLE, self._missing_sky_text(key[1]))
             else:
                 item.setIcon(QIcon(QPixmap.fromImage(image).scaled(
                     self.sky_list.iconSize(), Qt.AspectRatioMode.KeepAspectRatio,
                     Qt.TransformationMode.SmoothTransformation)))
-                selected_name = Path(self.sky_value.replace("\\", "/")).stem.casefold()
+                selected_name = sky_key(self.sky_value)
                 if selected_name == key[1]:
                     self.previewReady.emit(self.sky_value, QImage(image))
             if self.isVisible():
@@ -342,6 +381,15 @@ class LevelInfoPanel(QWidget):
             label.setText("")
             self._scale_art_preview(key[1], image)
 
+    def _missing_sky_text(self, name: str) -> str:
+        """An archive without any resource is the "no sky" entry; others just have no picture."""
+        try:
+            bootstrap.ensure_studio_on_path()
+            from studio.formats.setbas import read_setbas
+            return "No sky" if not read_setbas(self.catalog.skies[name].archive).resources else "No preview"
+        except Exception:
+            return "No preview"
+
     def _scale_art_preview(self, key: str, image: QImage):
         label = self.art_previews[key]
         label.setText("")
@@ -356,13 +404,36 @@ class LevelInfoPanel(QWidget):
         source = self.catalog.skies.get(name)
         if source is None:
             return
-        new_value = f"objects/{source.name}.bas"
+        new_value = source.level_value
         if new_value != self.sky_value:
             self.sky_value = new_value
             self._emit_values_changed()
         image = self._image_cache.get(source)
         if image is not None:
             self.previewReady.emit(self.sky_value, QImage(image))
+        self._schedule_visible_sky_load()
+
+    def _choose_custom_sky(self):
+        from .sky_dialog import CustomSkyDialog
+        dialog = CustomSkyDialog(self.catalog, self)
+        if dialog.exec() and dialog.value:
+            self.add_custom_sky(dialog.value)
+
+    def add_custom_sky(self, value: str):
+        """Show the validated sky and keep its exact engine-compatible level reference."""
+        self.catalog.refresh_skies()
+        name = self.catalog.include_sky(value)
+        if name not in self.catalog.skies:
+            return
+        item = self.sky_items.get(name)
+        if item is None:
+            item = QListWidgetItem(self.catalog.skies[name].name)
+            item.setData(Qt.ItemDataRole.UserRole, name)
+            self.sky_list.insertItem(sorted(self.catalog.skies).index(name), item)
+            self.sky_items[name] = item
+        self.sky_list.setCurrentItem(item)
+        self.no_skies_label.setVisible(False)
+        self.sky_list.scrollToItem(item)
         self._schedule_visible_sky_load()
 
     def _schedule_visible_sky_load(self):
@@ -434,13 +505,13 @@ class LevelInfoPanel(QWidget):
         self._schedule_sky_grid_layout()
 
     def selected_sky_image(self):
-        name = Path(self.sky_value.replace("\\", "/")).stem.casefold()
+        name = sky_key(self.sky_value)
         source = self.catalog.skies.get(name)
         image = self._image_cache.get(source) if source is not None else None
         return QImage(image) if image is not None else None
 
     def request_selected_sky(self):
-        name = Path(self.sky_value.replace("\\", "/")).stem.casefold()
+        name = sky_key(self.sky_value)
         source = self.catalog.skies.get(name)
         if self._disposed:
             return None
@@ -532,7 +603,7 @@ class LevelInfoDialog(QDialog):
         image = self.panel.selected_sky_image()
         if image is not None and not image.isNull():
             return image
-        name = Path(self.panel.sky_value.replace("\\", "/")).stem.casefold()
+        name = sky_key(self.panel.sky_value)
         source = self.catalog.skies.get(name)
         try:
             return preview_image(source, self.catalog.palette) if source else None

@@ -1,13 +1,36 @@
 """Resource cards with a fitted model, faction accent and readable details."""
 from PySide6.QtCore import QPointF, QRect, QSize, Qt, Signal
-from PySide6.QtGui import QPalette, QColor, QFont, QPen, QTextLayout, QTextOption
+from PySide6.QtGui import QPainter, QPalette, QColor, QFont, QPen, QTextLayout, QTextOption
 from PySide6.QtWidgets import (QApplication, QAbstractItemView, QHBoxLayout, QLabel, QListWidget, QLayout, QScrollArea,
-                              QPushButton, QStyledItemDelegate, QStyle, QStyleOptionButton)
+                              QPushButton, QStyledItemDelegate, QStyle, QStyleOptionButton, QWidget, QLineEdit)
 
 DETAIL_ROLE = int(Qt.ItemDataRole.UserRole) + 1
 COLOR_ROLE = DETAIL_ROLE + 1
 RESOURCE_ROLE = DETAIL_ROLE + 2
+DRAFT_ROLE = DETAIL_ROLE + 3
 PREVIEW_PIXELS = (80, 112, 160)
+
+
+class VehicleSearchRow(QWidget):
+    """Filter the existing picker without changing the selected unit while typing."""
+
+    def __init__(self, combo):
+        super().__init__()
+        self.combo = combo
+        self.search = QLineEdit(placeholderText='Search unit')
+        self.search.setClearButtonEnabled(True)
+        self.search.setMinimumWidth(80)
+        self.search.setToolTip('Filter the unit menu by name or ID, then choose a result.')
+        row = QHBoxLayout(self)
+        row.setContentsMargins(0, 0, 0, 0)
+        row.addWidget(combo, 2)
+        row.addWidget(self.search, 1)
+        self.search.textChanged.connect(self.filter_items)
+
+    def filter_items(self):
+        query = self.search.text().strip().casefold()
+        for index in range(self.combo.count()):
+            self.combo.view().setRowHidden(index, query not in self.combo.itemText(index).casefold())
 
 
 def actor_scroll_area(panel):
@@ -36,6 +59,19 @@ def paint_card_background(painter, card, color, selected, hovered=False):
 
 
 class ResourceCardDelegate(QStyledItemDelegate):
+    @staticmethod
+    def _paint_enabled_glow(painter, card, color, selected):
+        """Faction-coloured halo and tint for an enabled card; text colours stay untouched."""
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        painter.setBrush(Qt.BrushStyle.NoBrush)
+        for grow, alpha in ((3, 45), (2, 85), (1, 140)):
+            painter.setPen(QPen(QColor(color.red(), color.green(), color.blue(), alpha), 1.4))
+            painter.drawRoundedRect(card.adjusted(-grow, -grow, grow, grow), 5 + grow, 5 + grow)
+        if not selected:
+            painter.setPen(Qt.PenStyle.NoPen)
+            painter.setBrush(QColor(color.red(), color.green(), color.blue(), 34))
+            painter.drawRoundedRect(card, 5, 5)
+
     @staticmethod
     def wrapped_text(text, font, width):
         layout = QTextLayout(text, font)
@@ -76,8 +112,18 @@ class ResourceCardDelegate(QStyledItemDelegate):
         painter.save()
         color = index.data(COLOR_ROLE) or QColor(175, 175, 175)
         selected = bool(option.state & QStyle.StateFlag.State_Selected)
+        draft = bool(index.data(DRAFT_ROLE))
+        if draft:
+            color = QColor(155, 155, 155)
+        checked = index.data(Qt.ItemDataRole.CheckStateRole)
         paint_card_background(painter, card, color, selected,
                               bool(option.state & QStyle.StateFlag.State_MouseOver))
+        if draft:
+            painter.setPen(QPen(QColor(225, 225, 225), 2) if selected else Qt.PenStyle.NoPen)
+            painter.setBrush(QColor(75, 75, 75) if selected else QColor(48, 48, 48))
+            painter.drawRoundedRect(card, 5, 5)
+        if checked == Qt.CheckState.Checked.value:
+            self._paint_enabled_glow(painter, card, color, selected)
         painter.setPen(Qt.PenStyle.NoPen)
         painter.setBrush(color)
         painter.drawRoundedRect(QRect(card.left(), card.top() + 7, 3, card.height() - 14), 1, 1)
@@ -87,19 +133,24 @@ class ResourceCardDelegate(QStyledItemDelegate):
         icon = index.data(Qt.ItemDataRole.DecorationRole)
         if icon is not None and not icon.isNull():
             ratio = view.devicePixelRatioF()
-            pix = icon.pixmap(QSize(round((size - 4) * ratio), round((size - 4) * ratio)))
-            fitted = pix.size().scaled(image_rect.adjusted(2, 2, -2, -2).size(),
+            pix = icon.pixmap(QSize(round((size - 12) * ratio), round((size - 12) * ratio)))
+            fitted = pix.size().scaled(image_rect.adjusted(6, 6, -6, -6).size(),
                                        Qt.AspectRatioMode.KeepAspectRatio)
             target = QRect(image_rect.center().x() - fitted.width() // 2,
                            image_rect.center().y() - fitted.height() // 2,
                            fitted.width(), fitted.height())
-            painter.drawPixmap(target, pix, pix.rect())
+            if draft:
+                gray = pix.toImage().convertToFormat(pix.toImage().Format.Format_Grayscale8)
+                painter.setOpacity(.6)
+                painter.drawImage(target, gray)
+                painter.setOpacity(1)
+            else:
+                painter.drawPixmap(target, pix, pix.rect())
         else:
             painter.setPen(QColor(150, 150, 150))
             painter.drawText(image_rect, Qt.AlignmentFlag.AlignCenter, '—')
         left = image_rect.right() + 12
         right = card.right() - 8
-        checked = index.data(Qt.ItemDataRole.CheckStateRole)
         if checked is not None:
             box = QStyleOptionButton()
             box.rect = QRect(right - 20, card.center().y() - 10, 20, 20)
@@ -107,10 +158,12 @@ class ResourceCardDelegate(QStyledItemDelegate):
                          if checked == Qt.CheckState.Checked.value else QStyle.StateFlag.State_Off)
             view.style().drawControl(QStyle.ControlElement.CE_CheckBox, box, painter, view)
             right -= 30
-        painter.setPen(option.palette.color(QPalette.ColorRole.HighlightedText) if selected else color)
+        painter.setPen(QColor(210, 210, 210) if draft else
+                       option.palette.color(QPalette.ColorRole.HighlightedText) if selected else color)
         top = card.center().y() - (title_height + detail_height + 8) // 2
         title_layout.draw(painter, QPointF(left, top))
-        painter.setPen(option.palette.color(QPalette.ColorRole.HighlightedText if selected else QPalette.ColorRole.Text))
+        painter.setPen(QColor(185, 185, 185) if draft else
+                       option.palette.color(QPalette.ColorRole.HighlightedText if selected else QPalette.ColorRole.Text))
         detail_layout.draw(painter, QPointF(left, top + title_height + 8))
         painter.restore()
 
@@ -181,7 +234,18 @@ def set_card(item, title, detail, color, resource):
     item.setToolTip(f'{title}\n{detail}')
 
 
+def color_faction_items(combo, colors):
+    """Give every popup entry its own faction colour (a plain styled combo paints them all alike)."""
+    if type(combo.itemDelegate()) is not QStyledItemDelegate:
+        combo.setItemDelegate(QStyledItemDelegate(combo))
+    for index in range(combo.count()):
+        key = combo.itemData(index)
+        combo.setItemData(index, QColor(*colors.get(key, (180, 180, 180))), Qt.ItemDataRole.ForegroundRole)
+
+
 def faction_style(combo, colors):
+    """Colour the closed field with the chosen faction and each popup entry with its own."""
+    color_faction_items(combo, colors)
     color = colors.get(combo.currentData(), (180, 180, 180))
     combo.setStyleSheet(f'QComboBox {{ color: rgb{color}; }}')
 

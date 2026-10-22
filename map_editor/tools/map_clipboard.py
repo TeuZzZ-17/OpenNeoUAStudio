@@ -59,7 +59,13 @@ def move_grid_cell(doc, source, target, clipboard):
     if not all(1 <= x < doc.mw - 1 and 1 <= y < doc.mh - 1
                for x, y in (source, target)):
         return False
-    for layer, value in zip(clipboard.layers, clipboard.cells[0][2]):
-        doc.grids[layer][sy][sx] = '00'
+    values = dict(zip(clipboard.layers, clipboard.cells[0][2]))
+    underlay = doc.building_underlays.get(source)
+    ground = underlay[0] if underlay and underlay[1] == doc.grids['blg'][sy][sx] else '00'
+    if clipboard.tool == 'building' and int(str(values.get('blg', '00')), 16):
+        doc.remember_building_ground(tx, ty, int(str(values['blg']), 16))
+    for layer, value in values.items():
+        doc.grids[layer][sy][sx] = ground if layer == 'type' and clipboard.tool == 'building' else '00'
         doc.grids[layer][ty][tx] = value
+    doc.building_underlays.pop(source, None)
     return True

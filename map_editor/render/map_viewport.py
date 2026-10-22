@@ -7,17 +7,20 @@ import math
 import time
 
 import numpy as np
-from PySide6.QtCore import QObject, QPointF, QRunnable, Qt, QThreadPool, QTimer, Signal
-from PySide6.QtGui import (QColor, QImage, QPainter, QPainterPath,
+from PySide6.QtCore import QObject, QPointF, QRectF, QRunnable, Qt, QThreadPool, QTimer, Signal
+from PySide6.QtGui import (QColor, QFont, QImage, QPainter, QPainterPath,
                            QPainterPathStroker, QPen, QPixmap, QPolygonF)
-from PySide6.QtWidgets import QWidget, QApplication
+from PySide6.QtWidgets import QWidget, QApplication, QToolTip
 
 from ..core.factions import load_owner_colors
-from ..core.ldf_model import LdfDocument, SECTOR_SIZE
+from ..core.ldf_model import HGT_MIN, LdfDocument, SECTOR_SIZE
 from .camera import ISO_PITCH, ISO_YAW, IsoCamera
 from .sector_mesh import SectorMeshLibrary
 from .map_scene import render_scene, scene_polygons
 from .terrain_mesh import TerrainMesh
+
+PREVIEW_TINT = (.62, .62, .62, .28)
+REJECTED_PREVIEW_TINT = (.88, .32, .34, .50)
 
 
 class _RenderSignals(QObject):
@@ -25,23 +28,26 @@ class _RenderSignals(QObject):
 
 
 class _RenderJob(QRunnable):
-    def __init__(self, polygons, camera, tables, key, generation, terrain, preview_cells=(), preview_codes=()):
+    def __init__(self, polygons, camera, tables, key, generation, terrain, preview_cells=(), preview_codes=(),
+                 preview_tint=PREVIEW_TINT):
         super().__init__()
         self.signals = _RenderSignals()
         self.polygons, self.camera, self.tables = polygons, camera, tables
         self.key, self.generation, self.terrain = key, generation, terrain
         self.preview_codes = preview_codes
         self.preview_cells = preview_cells
+        self.preview_tint = preview_tint
 
     def run(self):
         try:
-            frame = render_scene(self.polygons, self.camera, self.tables, fast=self.key[-1],
-                                 preview_codes=self.preview_codes)
-            if self.preview_cells:
+            frame = render_scene(self.polygons, self.camera, self.tables, fast=self.key[-1])
+            if self.preview_cells or self.preview_codes:
                 ids = [r*self.terrain.width+c+1 for c,r in self.preview_cells]
-                mask = np.isin(np.abs(frame.cell_ids),ids)
+                mask = np.isin(np.abs(frame.cell_ids), ids) | np.isin(frame.cell_ids, self.preview_codes)
                 grey = frame.rgba[mask,:3] @ np.array((.299,.587,.114))
-                frame.rgba[mask,:3] = np.round(grey[:,None]*.72+255*.62*.28).astype(np.uint8)
+                tint = np.array(self.preview_tint[:3]) * 255
+                weight = self.preview_tint[3]
+                frame.rgba[mask,:3] = np.round(grey[:,None]*(1-weight)+tint*weight).astype(np.uint8)
             error = None
         except Exception as exc:
             frame, error = None, str(exc)
@@ -61,6 +67,7 @@ class MapViewport(QWidget):
     actorDragFinished = Signal()
     cellSelected = Signal(object, object)
     cellSwept = Signal(object)
+    cellsMarqueed = Signal(object, object)
     selectionCleared = Signal()
     contextRequested = Signal(object, object)
     placementConfirmed = Signal(object)
@@ -80,6 +87,9 @@ class MapViewport(QWidget):
         self.sample_active = False
         self.sample_flash_until = 0.0
         self.draft_active = False
+        self.placement_error = ''
+        self._placement_error_timer = QTimer(self, singleShot=True, interval=1800)
+        self._placement_error_timer.timeout.connect(self.clear_placement_error)
         self.dragged_codes = set()
         self.selected_special = None
         self.selected_building = None
@@ -92,6 +102,9 @@ class MapViewport(QWidget):
         self._sweep_gesture = False
         self._sweep_last = None
         self._paint_last = None
+        # Ctrl+left drag draws a selection rectangle (origin and current rect, in widget pixels).
+        self._marquee_origin = None
+        self._marquee_rect = None
         self._closed = False
         self.preview_cells = set()
         self.doc: LdfDocument | None = None
@@ -102,6 +115,7 @@ class MapViewport(QWidget):
         self.show_grid = True
         self.show_sky = True
         self.clear_view = False
+        self.border_walls = True
         self._sky_image = QImage()
         self._sky_scaled = QPixmap()
         self.hover: tuple[int, int] | None = None
@@ -157,6 +171,26 @@ class MapViewport(QWidget):
         self._scene_revision += 1
         self.update()
 
+    def preview_tint(self):
+        return REJECTED_PREVIEW_TINT if self.placement_error else PREVIEW_TINT
+
+    def show_placement_error(self, message):
+        """Briefly tint the placement ghost and explain the failure without a dialog."""
+        self.placement_error = message
+        self._placement_error_timer.start()
+        QToolTip.showText(self.mapToGlobal(self._last.toPoint()), message, self,
+                          self.rect(), self._placement_error_timer.interval())
+        self._scene_revision += 1
+        self.update()
+
+    def clear_placement_error(self):
+        self._placement_error_timer.stop()
+        if self.placement_error:
+            self.placement_error = ''
+            QToolTip.hideText()
+            self._scene_revision += 1
+            self.update()
+
     def owners_changed(self):
         self._owner_marks = None
         self._annotation_base = None
@@ -188,6 +222,11 @@ class MapViewport(QWidget):
     def set_clear_view(self, visible: bool):
         self.clear_view = bool(visible)
         self.update()
+
+    def set_border_walls(self, visible: bool):
+        """Show or hide the walls of the border ring; its ground stays."""
+        self.border_walls = bool(visible)
+        self.scene_changed()
 
     def set_camera_angles(self, yaw, pitch):
         self.camera.perspective = False
@@ -255,7 +294,7 @@ class MapViewport(QWidget):
         terrain = copy.deepcopy(self.terrain)
         try:
             # Il caricatore Qt resta nel thread della finestra; il raster lavora a parte.
-            polygons = scene_polygons(self.lib, self.doc, terrain, cam)
+            polygons = scene_polygons(self.lib, self.doc, terrain, cam, self.border_walls)
             if self.clear_view:
                 polygons = [polygon for polygon in polygons if int(polygon.payload[1]) > 0]
         except Exception as exc:
@@ -266,7 +305,7 @@ class MapViewport(QWidget):
         previews = tuple(-(self.doc.mw * self.doc.mh + i + 1) for i, style in
                          enumerate(scene_object_styles(self)) if style[3] == 3)
         self._job = _RenderJob(polygons, cam, self.lib.tables, key, self._generation, terrain,
-                              tuple(self.preview_cells), previews)
+                              tuple(self.preview_cells), previews, self.preview_tint())
         self._job.signals.finished.connect(self._render_finished)
         self._pool.start(self._job)
         self.update()
@@ -329,8 +368,12 @@ class MapViewport(QWidget):
     def _annotations(self):
         if self._annotation_base is None:
             self._annotation_base = self._make_annotation_base()
-        dynamic_cells = self.brush_cells | self.selection
-        if self.hover is not None:
+        # The terrain tool shows only the brush shape, not the selected or hovered sector.
+        terrain_tool = self.active_tool == 'terrain'
+        if terrain_tool:
+            return self._annotation_base
+        dynamic_cells = self.brush_cells | (set() if terrain_tool else self.selection)
+        if self.hover is not None and not terrain_tool:
             dynamic_cells = dynamic_cells | {self.hover}
         if not dynamic_cells:
             return self._annotation_base
@@ -548,7 +591,10 @@ class MapViewport(QWidget):
             code = abs(int(self._frame.cell_ids[iy, ix])) - self.doc.mw * self.doc.mh - len(self.doc.squads) - 1
             if 0 <= code < len(self.doc.host_stations):
                 return code
-        return None
+        overlay = getattr(self, "squad_overlay", None)
+        return overlay.pick_host_badge(x,y) if overlay is not None else None
+
+
 
     def _begin_interaction(self):
         self._interacting = True
@@ -571,13 +617,17 @@ class MapViewport(QWidget):
         self._paint_last = None
         self._sweep_gesture = False
         self._sweep_last = None
+        self._marquee_origin = self._marquee_rect = None
         if self.camera.perspective:
             return
+        if (event.button() == Qt.MouseButton.LeftButton and event.modifiers() & Qt.KeyboardModifier.ControlModifier
+                and self.active_tool in ('select', 'sector', 'building', 'owner', 'terrain')):
+            self._marquee_origin = event.position()
         if event.button() == Qt.MouseButton.LeftButton and self._space_pan_active:
             self._space_pan_gesture = True
             self.setCursor(Qt.CursorShape.ClosedHandCursor)
             return
-        if self.draft_active and event.button() in (Qt.MouseButton.LeftButton, Qt.MouseButton.RightButton):
+        if self.draft_active and event.button() == Qt.MouseButton.LeftButton:
             self.placementConfirmed.emit(self.ground_cell(event.position().x(), event.position().y()))
             self._drag_button = None
             return
@@ -590,6 +640,17 @@ class MapViewport(QWidget):
             if modifiers & Qt.KeyboardModifier.ShiftModifier and not painting:
                 self._sweep_gesture = True
                 self._sweep_over(cell)
+                return
+            if (overlay is not None and overlay.window._special_placement is not None
+                    and not modifiers & Qt.KeyboardModifier.ControlModifier):
+                # Placing a key or an object comes first: nothing under the cursor is grabbed.
+                return
+            if (self.active_tool in ('sector', 'building', 'owner') and len(self.selection) > 1
+                    and cell in self.selection and not modifiers & Qt.KeyboardModifier.ControlModifier):
+                self._paint_gesture = True
+                self._paint_started = True
+                self._paint_last = cell
+                self.cellPressed.emit(*cell, event.button(), modifiers)
                 return
             hit = None if painting else self.pick_scene_object(event.position().x(), event.position().y())
             if not painting and hit is None and overlay is not None:
@@ -649,7 +710,7 @@ class MapViewport(QWidget):
         self._last = pos
         if self._press_pos is not None and (pos - self._press_pos).manhattanLength() >= 4:
             self._moved = True
-        if self._drag_button == Qt.MouseButton.RightButton:
+        if self._drag_button == Qt.MouseButton.RightButton and not self._paint_gesture:
             if not self._moved:
                 return
             self.camera.yaw = (self.camera.yaw - delta.x() * 0.4) % 360
@@ -677,6 +738,12 @@ class MapViewport(QWidget):
             self.hover = cell
             self.cellHovered.emit(*(cell if cell else (-1, -1)))
             self.update()
+        if self._marquee_origin is not None and self._drag_button == Qt.MouseButton.LeftButton:
+            if self._moved:
+                self._marquee_rect = QRectF(self._marquee_origin, pos).normalized()
+                self.setCursor(Qt.CursorShape.CrossCursor)
+                self.update()
+            return
         if (event.modifiers() & Qt.KeyboardModifier.ShiftModifier or self._sweep_gesture) and not self.draft_active and self.active_tool != 'terrain':
             self._sweep_gesture = True
             self.setCursor(Qt.CursorShape.CrossCursor)
@@ -701,12 +768,12 @@ class MapViewport(QWidget):
             elif self._paint_gesture:
                 if cell and not self._paint_started:
                     self._paint_started = True
-                    self.cellPressed.emit(*cell, Qt.MouseButton.LeftButton, event.modifiers())
+                    self.cellPressed.emit(*cell, self._drag_button, event.modifiers())
                 elif cell:
                     from ..tools.paint import cells_between
                     cells = [cell] if self.active_tool == 'terrain' or self._paint_last is None else cells_between(self._paint_last, cell)
                     for crossed in cells:
-                        self.cellDragged.emit(*crossed, Qt.MouseButton.LeftButton, event.modifiers())
+                        self.cellDragged.emit(*crossed, self._drag_button, event.modifiers())
                 self._paint_last = cell
 
     def mouseReleaseEvent(self, event):
@@ -716,6 +783,14 @@ class MapViewport(QWidget):
             self._drag_button = None
             self._press_pos = None
             self.unsetCursor()
+            return
+        if event.button() == Qt.MouseButton.LeftButton and self._marquee_rect is not None:
+            self.cellsMarqueed.emit(self.cells_in_rect(self._marquee_rect), event.modifiers())
+            self._marquee_origin = self._marquee_rect = None
+            self._drag_button = None
+            self._press_pos = None
+            self.unsetCursor()
+            self.update()
             return
         if self.camera.perspective or self._sweep_gesture:
             if self.camera.perspective and event.button() == Qt.MouseButton.RightButton and not self._moved:
@@ -739,7 +814,8 @@ class MapViewport(QWidget):
                 self.cellReleased.emit(*(cell if cell else (-1, -1)), event.modifiers())
             elif self._drag_button is not None:
                 self.cellSelected.emit(cell, event.modifiers())
-        elif event.button() == Qt.MouseButton.RightButton and self._drag_button is not None and not self._moved:
+        elif (event.button() == Qt.MouseButton.RightButton and self._drag_button is not None
+              and not self._moved and not self.draft_active):
             self.contextRequested.emit(event.position(), event.globalPosition().toPoint())
         self._drag_button = None
         self._press_pos = None
@@ -772,6 +848,18 @@ class MapViewport(QWidget):
                     return col, row
         return None
 
+    def cells_in_rect(self, rect):
+        """Interior sectors whose centre lies inside ``rect`` (widget pixels)."""
+        if self.doc is None:
+            return set()
+        cells = set()
+        for row in range(1, self.doc.mh - 1):
+            for col in range(1, self.doc.mw - 1):
+                x, y = self.camera.world_to_screen(self.terrain.cell_center(col, row))[0]
+                if rect.contains(x, y):
+                    cells.add((col, row))
+        return cells
+
     def current_cursor_color(self):
         return (255, 220, 60) if self.sample_active or time.monotonic() < self.sample_flash_until else self.cursor_color
 
@@ -785,8 +873,14 @@ class MapViewport(QWidget):
             painter.drawLine(QPointF(cx,cy-7),QPointF(cx,cy+7))
             painter.restore()
             return
+        if self._marquee_rect is not None:
+            color = QColor(*self.cursor_color)
+            painter.setPen(QPen(color, 1.5, Qt.PenStyle.DashLine))
+            painter.setBrush(QColor(color.red(), color.green(), color.blue(), 40))
+            painter.drawRect(self._marquee_rect)
         if self.preview_cells:
-            self._draw_cell_footprint(painter,self.preview_cells,QColor(190,190,190))
+            color = QColor(225, 115, 120) if self.placement_error else QColor(190, 190, 190)
+            self._draw_cell_footprint(painter, self.preview_cells, color)
         if self.doc is not None and self.active_tool == 'terrain' and self.hover is not None:
             from ..tools.brush import brush_outlines
             col, row = self.hover
@@ -810,7 +904,27 @@ class MapViewport(QWidget):
                 painter.drawPolygon(polygon)
                 painter.setPen(QPen(color, 3 if sample else 2))
                 painter.drawPolygon(polygon)
+            if sample:
+                self._draw_sample_height(painter, (cx, cy - 3, cz), self.doc.grids['hgt'][row][col] - HGT_MIN)
         painter.restore()
+
+    def _draw_sample_height(self, painter, position, value):
+        """Big outlined height number in the middle of the sampled sector."""
+        font = QFont(self.font())
+        font.setPointSize(26)
+        font.setBold(True)
+        path = QPainterPath()
+        path.addText(0, 0, font, str(value))
+        box = path.boundingRect()
+        x, y = self.camera.world_to_screen(position)[0]
+        path.translate(x - box.center().x(), y - box.center().y())
+        painter.setBrush(Qt.BrushStyle.NoBrush)
+        painter.setPen(QPen(QColor(0, 0, 0, 235), 6, Qt.PenStyle.SolidLine,
+                            Qt.PenCapStyle.RoundCap, Qt.PenJoinStyle.RoundJoin))
+        painter.drawPath(path)
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.setBrush(QColor(255, 224, 85))
+        painter.drawPath(path)
 
     def leaveEvent(self, event):
         self.hover = None
@@ -933,6 +1047,7 @@ class MapViewport(QWidget):
         super().keyReleaseEvent(event)
 
     def focusOutEvent(self, event):
+        self._marquee_origin = self._marquee_rect = None
         if self._paint_started:
             self.cellReleased.emit(-1,-1,Qt.KeyboardModifier.NoModifier)
             self._paint_started = False
@@ -957,6 +1072,7 @@ class MapViewport(QWidget):
         self._sweep_last = cell
 
     def stop_rendering(self):
+        self.clear_placement_error()
         self._closed = True
         self._render_timer.stop()
         self._settle.stop()

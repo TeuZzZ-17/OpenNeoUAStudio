@@ -139,7 +139,7 @@ def test_script_pending_keyboard_undo_save_and_reload(win, tmp_path):
 def test_numeric_flatten_sampling_and_one_stroke_undo(win):
     win.set_tool('terrain')
     win.flatten_height.setValue(42)
-    win.terrain_buttons[2].click()
+    win.terrain_buttons[2].click()  # Flatten
     win._pressed(4, 4, Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier)
     win._released(4, 4, Qt.KeyboardModifier.NoModifier)
     assert win.doc.grids['hgt'][4][4] == HGT_MIN + 42
@@ -165,7 +165,7 @@ def test_squad_draft_cancel_and_left_click_confirm_are_single_history_steps(win,
     win.show()
     app.processEvents()
     add = next(button for button in win.squad_panel.findChildren(QPushButton)
-               if button.text() == 'Add')
+               if button.text() == 'New')
     before = win.doc.snapshot()
     monkeypatch.setattr(win.view, 'ground_cell', lambda *_: (4, 4))
 
