@@ -29,8 +29,11 @@ def test_set3_boundary_walls_in_both_scenes(app, resized):
     doc = LdfDocument(mw=5, mh=5)
     if resized:
         doc.resize(7, 7)
-        assert doc.grids['type'][2][4] == 'fd'
-        assert doc.grids['type'][4][2] == 'fe'
+        assert doc.grids['type'][2][6] == 'fd'
+        assert doc.grids['type'][6][2] == 'fe'
+        # The old border ring is now plain interior, not a wall sector.
+        assert doc.grids['type'][2][4] == '00'
+        assert doc.grids['type'][4][2] == '00'
     before = doc.snapshot()
     terrain = TerrainMesh()
     terrain.rebuild(doc.grids['hgt'])

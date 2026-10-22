@@ -85,7 +85,8 @@ class BuildingOverlay(QObject):
         pixels = building_outline_pixels(ids, doc.grids['blg'],
                                          selected=self.viewport.selected_building,
                                          previews=self.viewport.preview_cells,
-                                         owners=doc.grids['own'], owner_colors=self.viewport.owner_colors)
+                                         owners=doc.grids['own'], owner_colors=self.viewport.owner_colors,
+                                         preview_color=(225, 115, 120) if self.viewport.placement_error else (160, 160, 160))
         image = QImage(pixels.data, width, height, width * 4,
                        QImage.Format.Format_RGBA8888).copy()
         painter.drawImage(0, 0, image)
@@ -121,6 +122,8 @@ class BuildingOverlay(QObject):
         owner = doc.grids["own"][row][col]
         color = (QColor(160, 160, 160) if (col, row) in self.viewport.preview_cells else
                  QColor(*self.viewport.owner_colors.get(owner, (145, 145, 145))))
+        if (col, row) in self.viewport.preview_cells and self.viewport.placement_error:
+            color = QColor(225, 115, 120)
         self._draw_icons(painter, anchor, definition, color, now, col, row)
 
     def _draw_icons(self, painter, anchor, definition, color, now, col, row):

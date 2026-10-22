@@ -278,7 +278,9 @@ def test_owner_only_colors_visible_borders_and_selection_preserves_them(app):
         region = ids == code
         border = owner_pixels & region
         assert border.any()
-        assert np.any(np.all(pixels[border, :3] == view.owner_colors[owner], axis=1))
+        # Antialiasing blends the thin faction line with its contrast halo.
+        distance = np.linalg.norm(pixels[border, :3].astype(float) - view.owner_colors[owner], axis=1)
+        assert distance.min() < 8
         assert np.count_nonzero(border) < np.count_nonzero(region) / 3
         y, x = np.nonzero(border)
         samples = np.stack((x + .5, y + .5), axis=1)
@@ -375,8 +377,8 @@ def test_brush_controls_update_shape_axes_and_preview(app):
     win._icons.stop()
     win.set_tool('terrain')
     assert [label.text() for label in win.findChildren(QLabel)
-            if label.text() == 'Drag to sculpt · Shift: lower · Alt: smooth · Ctrl: select'] == [
-                'Drag to sculpt · Shift: lower · Alt: smooth · Ctrl: select']
+            if label.text() == 'Left button: sculpt · Right drag: rotate camera · Ctrl+drag: select'] == [
+                'Left button: sculpt · Right drag: rotate camera · Ctrl+drag: select']
     win.view.hover = (6, 6)
     win.radius_x_slider.setValue(8)
     assert (win.brush.radius_x, win.brush.radius_z) == (4, 4)
@@ -420,15 +422,18 @@ def test_palette_icons_rasterize_off_ui_thread_and_reuse_cache(app, monkeypatch)
     win = module.MainWindow()
     win._icons.stop()
     win.show()
+    app.processEvents()
+    win._layout_sector_icons()
+    win._icons.stop()
     win._make_icon()
     win._icon_pool.waitForDone(10000)
     app.processEvents()
     win._icons.stop()
     assert threads and all(thread != main_thread for thread in threads)
     rendered = len(threads)
-    typ = next(t for number, t, scale in win._icon_cache
-               if number == 1 and scale == win._icon_scale)
-    assert not win._icon_cache[(1, typ, win._icon_scale)].isNull()
+    typ = next(t for number, t, scale, angle in win._icon_cache
+               if number == 1 and scale == win._icon_scale and angle == win._icon_angle)
+    assert not win._icon_cache[(1, typ, win._icon_scale, win._icon_angle)].isNull()
     item = win._icon_items[typ]
     pending = len(win._icon_queue)
     win._new_doc(LdfDocument(mw=7, mh=9), None)
@@ -436,8 +441,10 @@ def test_palette_icons_rasterize_off_ui_thread_and_reuse_cache(app, monkeypatch)
     win._new_doc(LdfDocument(mw=7, mh=9, set_number=2), None)
     win._new_doc(LdfDocument(mw=7, mh=9), None)
     win._icons.stop()
-    assert win._icon_items[typ].icon().cacheKey() == win._icon_cache[(1, typ, win._icon_scale)].cacheKey()
-    assert typ not in [t for t, item in win._icon_queue]
+    assert win._icon_items[typ].icon().cacheKey() == win._icon_cache[(1, typ, win._icon_scale, win._icon_angle)].cacheKey()
+    if typ in [t for t, item in win._icon_queue]:
+        # Changed resources or physical dimensions require a fresh render.
+        assert win._preview_sizes[(1, 0, typ)] != win._icon_epoch
     assert len(threads) == rendered
     win.close()
     win.view._pool.waitForDone(10000)
@@ -480,10 +487,11 @@ def test_sector_preview_buttons_choose_three_fitted_grids(app):
     win.resize(1200, 800)
     win.show()
     app.processEvents()
-    assert win._icon_level == 1 and win._icon_scale == 1.1
+    assert win._icon_level == 1 and win._icon_scale == module.SECTOR_PREVIEW_SCALES[1]
+    # Levels 2 and 3 keep two columns; the third only zooms the picture inside its card.
     for button, level, columns in ((win.sector_zoom_out, 0, 3),
                                    (win.sector_zoom_in, 1, 2),
-                                   (win.sector_zoom_in, 2, 1)):
+                                   (win.sector_zoom_in, 2, 2)):
         button.click()
         app.processEvents()
         assert win._icon_level == level

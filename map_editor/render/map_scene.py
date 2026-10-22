@@ -87,8 +87,11 @@ class SceneFrame:
         return cell % width, cell // width
 
 
-def scene_polygons(lib, doc, terrain, cam):
-    """Settori e slurp reali, con quote e disposizione identiche a RenderSector."""
+def scene_polygons(lib, doc, terrain, cam, border_walls=True):
+    """Settori e slurp reali, con quote e disposizione identiche a RenderSector.
+
+    Con ``border_walls`` falso i settori del bordo mostrano solo il terreno, senza i muri.
+    """
     polygons = []
     surfaces = {}
     order = 0
@@ -205,7 +208,8 @@ def scene_polygons(lib, doc, terrain, cam):
             border = col in (0, doc.mw - 1) or row in (0, doc.mh - 1)
             special = specials.get((col, row))
             code = actor_code(doc, special[0]) if special else None
-            append_mesh(meshes[types[row][col]], col, row, special_code=code)
+            append_mesh(meshes[types[row][col]], col, row, special_code=code,
+                        ground_only=border and not border_walls)
             structure_typ = key_building_sector(special[1], lib) if special else None
             if structure_typ is not None and structure_typ != types[row][col]:
                 append_mesh(meshes[structure_typ], col, row,

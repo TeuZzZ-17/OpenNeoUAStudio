@@ -5,7 +5,8 @@ from PySide6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QFormLayout,
                               QCheckBox, QPushButton, QLabel, QGroupBox, QAbstractItemView, QSlider)
 from ..core.ldf_model import FACTIONS
 from ..render.squad_scene import squad_xz
-from .preview_cards import PreviewList, set_card, faction_style, DETAIL_ROLE, form_vehicle
+from .settings_lock import SettingsLockButton
+from .preview_cards import PreviewList, set_card, faction_style, color_faction_items, DETAIL_ROLE, DRAFT_ROLE, form_vehicle, VehicleSearchRow
 
 
 class WorldCoordinateSpinBox(QDoubleSpinBox):
@@ -40,11 +41,13 @@ class SquadPanel(QWidget):
     removeRequested = Signal(object)
     clearRequested = Signal()
     findRequested = Signal()
+    povRequested = Signal()
 
     def __init__(self, parent=None):
         super().__init__(parent)
         self.doc = None
         self._loading = False
+        self.settings_lock = SettingsLockButton()
         self.colors = {}
         self.vehicles = {}
         layout = QVBoxLayout(self)
@@ -67,16 +70,15 @@ class SquadPanel(QWidget):
         self.list.viewport().installEventFilter(self)
         layout.addWidget(self.list, 1)
         row = QHBoxLayout()
-        for text, slot in (("Add", self.addRequested.emit),
+        for text, slot in (("New", self._new),
                            ("Delete", lambda: self.removeRequested.emit(self.selected_indices())),
-                           ("Find", self.findRequested.emit),
-                           ("Deselect", lambda: self.set_selection(set()))):
+                           ("Find", self.findRequested.emit)):
             button = QPushButton(text)
             button.clicked.connect(slot)
             row.addWidget(button)
-            if text == 'Add':
+            if text == 'New':
                 self.add_button = button
-                button.setToolTip('Deselect the current squad before adding a squad.')
+                button.setToolTip('Deselect the current squad and start a new one with its settings.')
             elif text == 'Find':
                 self.find_button = button
             elif text == 'Delete':
@@ -85,6 +87,11 @@ class SquadPanel(QWidget):
         count_row = QHBoxLayout()
         self.total = QLabel()
         count_row.addWidget(self.total, 1)
+        self.pov_button = QPushButton('Enter POV')
+        self.pov_button.setEnabled(False)
+        self.pov_button.clicked.connect(self.povRequested.emit)
+        count_row.addWidget(self.settings_lock)
+        count_row.addWidget(self.pov_button)
         self.clear_button = QPushButton('Delete all')
         self.clear_button.clicked.connect(self.clearRequested.emit)
         count_row.addWidget(self.clear_button)
@@ -105,13 +112,14 @@ class SquadPanel(QWidget):
         self.vehicle.completer().setFilterMode(Qt.MatchFlag.MatchContains)
         self.vehicle.completer().setCaseSensitivity(Qt.CaseSensitivity.CaseInsensitive)
         self.vehicle.setToolTip("Search by name or enter the vehicle ID")
+        self.vehicle_row = VehicleSearchRow(self.vehicle)
         self.count = QSpinBox(minimum=1, maximum=2147483647, value=1)
         self.name = QLineEdit()
         self.hidden = QCheckBox("Hidden in Briefing")
         self.useable = QCheckBox("Usable by the Host AI")
         self.x = WorldCoordinateSpinBox()
         self.z = WorldCoordinateSpinBox()
-        for title, widget in (("Faction", self.owner), ("Vehicle", self.vehicle),
+        for title, widget in (("Faction", self.owner), ("Vehicle", self.vehicle_row),
                               ("Count", self.count)):
             form.addRow(title, widget)
         form.addRow(self.hidden)
@@ -127,7 +135,7 @@ class SquadPanel(QWidget):
         self.advanced.toggled.connect(self.advanced_fields.setVisible)
         advanced_layout.addWidget(self.advanced_fields)
         form.addRow(self.advanced)
-        layout.addWidget(self.form_widget)
+        layout.addWidget(self.settings_lock.wrap(self.form_widget))
         self.status = QLabel()
         self.status.setWordWrap(True)
         layout.addWidget(self.status)
@@ -140,6 +148,11 @@ class SquadPanel(QWidget):
         self.useable.toggled.connect(lambda v: self._change('useable', v))
         self.x.valueChanged.connect(lambda v: self._change('pos_x', v))
         self.z.valueChanged.connect(lambda v: self._change('pos_z', v))
+
+    def _new(self):
+        """New = Deselect + Add."""
+        self.set_selection(set())
+        self.addRequested.emit()
 
     def eventFilter(self, obj, event):
         if (obj is self.list.viewport() and event.type() == QEvent.Type.MouseButtonDblClick
@@ -167,6 +180,7 @@ class SquadPanel(QWidget):
         self.vehicles = vehicles
         if colors is not None:
             self.colors = colors
+            color_faction_items(self.faction_filter, colors)
         old = self.selected_indices() if selected is None else ({selected} if isinstance(selected, int) else set(selected))
         self._loading = True
         self.list.blockSignals(True)
@@ -181,6 +195,7 @@ class SquadPanel(QWidget):
             self.vehicle.addItem(f"{key} · {visual.name or visual.model or 'Vehicle'}", key)
         self.vehicle.blockSignals(False)
         self.vehicle.setCurrentIndex(max(0, self.vehicle.findData(current_vehicle)))
+        self.vehicle_row.filter_items()
         self.update_rows()
         self._loading = False
         self.set_selection({i for i in old if 0 <= i < len(doc.squads)})
@@ -198,6 +213,7 @@ class SquadPanel(QWidget):
             flags = (' · Briefing hidden' if squad.get('hidden') else '') + (' · Host AI' if squad.get('useable') else '')
             preview = 'PREVIEW · ' if squad.get('_preview') else ''
             item = self.list.item(i)
+            item.setData(DRAFT_ROLE, bool(squad.get("_preview")))
             set_card(item, f"{preview}{i + 1}. {name} ×{squad['num']}",
                      f"{FACTIONS.get(squad['owner'], '?')} · ID {squad['veh']}\n"
                      f"Sector ({squad['x']}, {squad['y']}){flags}"
@@ -226,7 +242,7 @@ class SquadPanel(QWidget):
         index = self.list.currentRow() if self.list.currentRow() in indices else min(indices, default=-1)
         valid = self.doc is not None and 0 <= index < len(self.doc.squads)
         self.form_widget.setEnabled(True)
-        self.add_button.setEnabled(not indices)
+        self.add_button.setEnabled(True)
         self.find_button.setEnabled(valid)
         self.delete_button.setEnabled(bool(indices))
         self.clear_button.setEnabled(bool(self.doc and self.doc.squads))

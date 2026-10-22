@@ -109,7 +109,7 @@ def test_building_tool_paints_sector_and_script_id_with_undo(app):
     win._icons.stop()
     assert 1 in win.buildings
     assert [win.palette_tabs.tabText(i) for i in range(win.palette_tabs.count())][1] == "Buildings"
-    assert win.palette_dock.windowTitle() == "Menu"
+    assert win.palette_dock.windowTitle() == ""
     win.set_tool("building")
     win.sel_building = 54
     win._pressed(4, 4, Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier)

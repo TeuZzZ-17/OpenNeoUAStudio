@@ -19,7 +19,7 @@ from .map_viewport import MapViewport as SoftwareMapViewport
 from .gpu_scene import WorldScene
 from .special_scene import scene_object_styles
 from .gpu_renderer import GpuRenderer
-from .camera import IsoCamera
+from .camera import ISO_PITCH, ISO_YAW, IsoCamera
 from .terrain_mesh import HEIGHT_UNIT
 from ..core.ldf_model import DEFAULT_HGT
 
@@ -114,6 +114,8 @@ class Canvas(QOpenGLWidget):
             if self.owner._preview_renderer is not None:
                 self.owner._preview_renderer.delete()
                 self.owner._preview_renderer = None
+            self.owner._preview_target = None
+            self.owner._preview_atlas = None
             self.owner.renderer.delete()
             self.owner.renderer = None
             self.doneCurrent()
@@ -134,6 +136,9 @@ class GpuMapViewport(SoftwareMapViewport):
         super().__init__(parent)
         self.renderer = None
         self._preview_renderer = None
+        self._preview_target = None
+        self._preview_atlas = None
+        self._preview_revision = None
         self._preview_scene = WorldScene()
         self._previews_primed = False
         self.renderer_name = 'OpenGL 3.3' if enable_gpu else 'Software'
@@ -245,8 +250,16 @@ class GpuMapViewport(SoftwareMapViewport):
     def set_library(self, lib):
         if lib is not self.lib:
             self.world_scene = WorldScene()
+            self.world_scene.border_walls = self.border_walls
             self.world_scene.set_library(lib)
         super().set_library(lib)
+
+    def set_border_walls(self, visible):
+        # Border cells use other templates: rebuild the whole scene once.
+        self.world_scene.border_walls = bool(visible)
+        self.world_scene.clear()
+        self._dirty_cells = None
+        super().set_border_walls(visible)
 
     def set_document(self, doc):
         self.world_scene.clear()
@@ -302,7 +315,8 @@ class GpuMapViewport(SoftwareMapViewport):
             renderer.set_heights(-(self.terrain.cells-DEFAULT_HGT)*HEIGHT_UNIT)
             self._heights_dirty = False
         state_key = (self._owner_revision, self.doc.mw, self.doc.mh,
-                     frozenset(self.brush_cells), frozenset(self.selection), frozenset(self.preview_cells), self.selected_building)
+                     frozenset(self.brush_cells), frozenset(self.selection), frozenset(self.preview_cells),
+                     self.selected_building, self.active_tool == 'terrain')
         if state_key != self._states_key:
             states = np.zeros((self.doc.mh, self.doc.mw, 4), np.uint8)
             states[:, :, 0] = self.doc.grids['own']
@@ -319,7 +333,8 @@ class GpuMapViewport(SoftwareMapViewport):
                     states[r,c,3] = 2
                     states[r,c,0] = 0
             for channel, cells in ((1, self.brush_cells), (2, self.selection)):
-                if channel == 1 and self.active_tool == 'terrain':
+                # The terrain tool draws only its brush shape: no selection or brush-cell marks.
+                if self.active_tool == 'terrain':
                     continue
                 for c, r in cells:
                     if 0 <= c < self.doc.mw and 0 <= r < self.doc.mh:
@@ -342,12 +357,14 @@ class GpuMapViewport(SoftwareMapViewport):
         ratio = self._canvas.devicePixelRatioF()
         styles = [(*(c / 255 for c in row[:3]), row[3]) for row in scene_object_styles(self)]
         renderer.set_unit_styles(styles)
-        hover = self.hover[1]*self.doc.mw+self.hover[0]+1 if self.hover else 0
+        hover = (self.hover[1]*self.doc.mw+self.hover[0]+1
+                 if self.hover and self.active_tool != 'terrain' else 0)
         renderer.render(self.camera, round(self.width()*ratio), round(self.height()*ratio),
                         self._canvas.defaultFramebufferObject(), owner_colors=self.owner_colors,
                         grid=self.show_grid, sky=self.show_sky, hover=hover, pixel_scale=ratio,
                         overlays=not self.camera.perspective,
-                        cursor_color=self.current_cursor_color(), clear_view=self.clear_view)
+                        cursor_color=self.current_cursor_color(), clear_view=self.clear_view,
+                        preview_tint=self.preview_tint())
         self._gpu_camera_key = (self._camera_key(), ratio, self.clear_view)
         self._frame_key = self._render_key()
         self.frame_ms.append((time.perf_counter()-start)*1000)
@@ -394,10 +411,54 @@ class GpuMapViewport(SoftwareMapViewport):
         if self.doc is None or self.clear_view:
             return None
         code = abs(self._pick_code(x, y)) - self.doc.mw * self.doc.mh - len(self.doc.squads) - 1
-        return code if 0 <= code < len(self.doc.host_stations) else None
+        if 0 <= code < len(self.doc.host_stations):
+            return code
+        overlay = getattr(self, "squad_overlay", None)
+        return overlay.pick_host_badge(x,y) if overlay is not None else None
 
-    def render_icon(self, lib, typ, scale, *, current=False, building_id=None, vehicle_id=None, max_dimension=512):
-        """Small GPU readback only for cached palette icons, never map frames."""
+    def render_palette_icons(self, lib, requests, target_size, *, yaw, pitch, revision):
+        """Read all visible thumbnails together, avoiding one GPU wait per card."""
+        if self.renderer is None or self._software_fallback:
+            return None
+        self._canvas.makeCurrent()
+        from OpenGL import GL
+        width, height = target_size
+        atlas_size = (width, height * len(requests))
+        try:
+            if (self._preview_atlas is None or
+                    (self._preview_atlas.width(), self._preview_atlas.height()) != atlas_size):
+                self._preview_atlas = QOpenGLFramebufferObject(*atlas_size)
+            atlas = self._preview_atlas
+            GL.glBindFramebuffer(GL.GL_FRAMEBUFFER, atlas.handle())
+            GL.glDisable(GL.GL_SCISSOR_TEST)
+            GL.glClearColor(0,0,0,0)
+            GL.glClear(GL.GL_COLOR_BUFFER_BIT)
+            valid = []
+            for index, (typ, building_id) in enumerate(requests):
+                target = self.render_icon(lib, typ, 1, current=True, building_id=building_id,
+                                          target_size=target_size, yaw=yaw, pitch=pitch,
+                                          revision=revision, readback=False)
+                valid.append(target is not None)
+                if target is not None:
+                    GL.glBindFramebuffer(GL.GL_READ_FRAMEBUFFER, target.handle())
+                    GL.glBindFramebuffer(GL.GL_DRAW_FRAMEBUFFER, atlas.handle())
+                    GL.glBlitFramebuffer(0,0,width,height, 0,index*height,width,(index+1)*height,
+                                         GL.GL_COLOR_BUFFER_BIT,GL.GL_NEAREST)
+            # Qt readback expects read and draw bindings to refer to the same framebuffer.
+            GL.glBindFramebuffer(GL.GL_FRAMEBUFFER, atlas.handle())
+            image = atlas.toImage()
+            return [image.copy(0,(len(requests)-1-index)*height,width,height) if present else None
+                    for index,present in enumerate(valid)]
+        finally:
+            GL.glBindFramebuffer(GL.GL_FRAMEBUFFER, self._canvas.defaultFramebufferObject())
+            self._canvas.doneCurrent()
+
+    def render_icon(self, lib, typ, scale, *, current=False, building_id=None, vehicle_id=None, max_dimension=512,
+                    yaw=ISO_YAW, pitch=ISO_PITCH, target_size=None, revision=None, readback=True):
+        """Small GPU readback only for cached palette icons, never map frames.
+
+        ``yaw`` / ``pitch`` let a sector preview match the map camera.
+        """
         if self.renderer is None or self._software_fallback:
             return None
         if not current:
@@ -405,8 +466,15 @@ class GpuMapViewport(SoftwareMapViewport):
         from OpenGL import GL
         unpack_alignment = int(GL.glGetIntegerv(GL.GL_UNPACK_ALIGNMENT))
         GL.glPixelStorei(GL.GL_UNPACK_ALIGNMENT, 1)
-        target = None
         try:
+            stamp = (id(lib), revision)
+            if self._preview_revision != stamp:
+                if self._preview_renderer is not None:
+                    self._preview_renderer.delete()
+                    self._preview_renderer = None
+                self._preview_scene = WorldScene()
+                self._preview_scene.set_library(lib)
+                self._preview_revision = stamp
             if self._preview_renderer is None:
                 self._preview_renderer = GpuRenderer((self.renderer.opaque_program,
                                                      self.renderer.flat_program,
@@ -415,33 +483,26 @@ class GpuMapViewport(SoftwareMapViewport):
                 self._preview_scene = WorldScene()
                 self._preview_scene.set_library(lib)
             scene = self._preview_scene
-            changed = scene.preview(typ, building_id, vehicle_id)
+            scene.preview(typ, building_id, vehicle_id)
             renderer = self._preview_renderer
-            renderer.set_scene(scene, changed)
+            renderer.set_preview(scene, (typ, building_id, vehicle_id))
             geometry = scene.chunks[0, 0]
             vertices = np.concatenate((geometry.opaque[:, :3], geometry.flat[:, :3]))
             if not len(vertices):
                 return None
-            camera = IsoCamera(center=(600, 0, -600), zoom=.13*scale,
-                               width=0, height=0)
-            cy, sy, cp, sp = camera._trig()
-            projection = np.asarray(((cy, 0, sy), (-sp*sy, cp, sp*cy)))
-            points = (vertices-np.asarray(camera.center)) @ projection.T * camera.zoom
-            lo, hi = points.min(axis=0), points.max(axis=0)
-            factor = (max_dimension-4)/max(1.0, float(max(hi-lo)))
-            if vehicle_id is None:
-                factor = min(1.0, factor)
-            camera.zoom *= factor
-            lo *= factor; hi *= factor
-            camera.width, camera.height = np.ceil(hi-lo+4).astype(int)
-            camera.pan = tuple(-(lo+hi)*.5)
-            target = QOpenGLFramebufferObject(int(camera.width), int(camera.height))
+            from .sector_sprite import fitted_preview_camera
+            if target_size is None:
+                # Other Studio tools keep their square, fitted thumbnail contract.
+                target_size = (max_dimension, max_dimension)
+            camera = fitted_preview_camera(vertices, yaw, pitch, target_size, (600, 0, -600))
+            if (self._preview_target is None or self._preview_target.width() != camera.width
+                    or self._preview_target.height() != camera.height):
+                self._preview_target = QOpenGLFramebufferObject(camera.width, camera.height)
+            target = self._preview_target
             renderer.render(camera, int(camera.width), int(camera.height), target.handle(),
                             owner_colors={}, sky=False, overlays=False, transparent_background=True)
-            return SimpleNamespace(image=target.toImage())
+            return SimpleNamespace(image=target.toImage()) if readback else target
         finally:
-            # Destroy the temporary FBO while its context is still current.
-            del target
             GL.glPixelStorei(GL.GL_UNPACK_ALIGNMENT, unpack_alignment)
             GL.glBindFramebuffer(GL.GL_FRAMEBUFFER, self._canvas.defaultFramebufferObject())
             GL.glActiveTexture(GL.GL_TEXTURE0)
