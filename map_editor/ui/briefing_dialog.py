@@ -4,9 +4,9 @@ from __future__ import annotations
 import copy
 from PySide6.QtCore import QObject, QRunnable, Qt, Signal
 from PySide6.QtGui import QImage, QOffscreenSurface, QPixmap
-from PySide6.QtWidgets import (QApplication, QDialog, QDialogButtonBox, QFormLayout,
+from PySide6.QtWidgets import (QApplication, QComboBox, QDialog, QDialogButtonBox, QFormLayout,
                               QLabel, QLineEdit, QMessageBox, QVBoxLayout)
-from ..render.briefing_art import available_stem, render_briefing, write_briefing_pair
+from ..render.briefing_art import available_stem, briefing_palette, render_briefing, write_briefing_pair
 
 
 class _BriefingSignals(QObject):
@@ -49,6 +49,15 @@ class BriefingArtDialog(QDialog):
         form = QFormLayout()
         self.name = QLineEdit(available_stem(directory, preferred))
         form.addRow('Map Image Name', self.name)
+        # PNG stays the default; ILBM is the original game format and needs the set palette.
+        self.palette = briefing_palette(doc.set_number)
+        self.format_box = QComboBox()
+        self.format_box.addItem('PNG', 'png')
+        self.format_box.addItem('ILBM (.IFF)', 'ilbm')
+        if not self.palette:
+            self.format_box.model().item(1).setEnabled(False)
+            self.format_box.setToolTip('ILBM is unavailable: the palette of this set was not found.')
+        form.addRow('File format', self.format_box)
         layout.addLayout(form)
         destination = QLabel(f'Destination: {directory}')
         destination.setWordWrap(True)
@@ -89,7 +98,8 @@ class BriefingArtDialog(QDialog):
 
     def _save(self):
         try:
-            self.paths = write_briefing_pair(self.image, self.directory, self.name.text().strip())
+            self.paths = write_briefing_pair(self.image, self.directory, self.name.text().strip(),
+                                             self.format_box.currentData(), self.palette)
         except (ValueError, OSError) as exc:
             QMessageBox.warning(self, 'Briefing artwork', str(exc))
             return

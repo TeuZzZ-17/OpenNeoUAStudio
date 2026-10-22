@@ -16,13 +16,22 @@ def test_add_find_and_delete_all_follow_selection(win, monkeypatch):
     win._sync_side_panels()
     for kind, panel in [('squad', win.squad_panel), ('host', win.host_panel)]:
         panel.list.setCurrentRow(0)
-        assert not panel.add_button.isEnabled()
+        # New stays available: it deselects the current record itself.
+        assert panel.add_button.isEnabled() and panel.add_button.text() == 'New'
         assert 'Deselect' in panel.add_button.toolTip()
         assert panel.find_button.isEnabled()
         calls = []
         monkeypatch.setattr(win, '_center_' + kind, calls.append)
         panel.find_button.click()
         assert calls == [0]
+        panel.add_button.click()
+        # The old record is deselected and the new draft takes over the selection.
+        if kind == 'squad':
+            assert win._draft_squads and 0 not in panel.selected_indices()
+        else:
+            assert win._draft_host is not None and panel.list.currentRow() != 0
+        win._cancel_operation(clear=False)
+        panel.list.setCurrentRow(0)
         if kind == 'squad':
             panel.set_selection(set())
         else:
@@ -120,7 +129,7 @@ def test_actor_context_menus_use_find_and_add(win):
 
 
 @pytest.mark.parametrize('kind', ['gem', 'gate', 'item'])
-def test_special_add_requires_deselection_and_find_follows_delete(win, kind):
+def test_special_new_deselects_and_find_follows_delete(win, kind):
     slot = add_special(win.doc, kind)
     values = {'x': 3, 'y': 3}
     if kind == 'gem':
@@ -128,13 +137,17 @@ def test_special_add_requires_deselection_and_find_follows_delete(win, kind):
     update_special(win.doc, kind, slot, values)
     panel = win.special_panels[kind]
     panel.refresh(win.doc, slot)
-    assert not panel.add_button.isEnabled()
-    assert panel.focus.isEnabled() and panel.focus.text() == 'Find'
-    row = panel.delete_button.parentWidget().layout().itemAt(3).layout()
-    assert [row.itemAt(i).widget().text() for i in range(row.count())] == ['Add', 'Delete', 'Find', 'Deselect']
-    panel.deselect_button.click()
     assert panel.add_button.isEnabled()
-    assert not panel.focus.isEnabled()
+    assert panel.focus.isEnabled() and panel.focus.text() == 'Find'
+    outer = panel.layout()
+    row = next(outer.itemAt(i).layout() for i in range(outer.count())
+               if outer.itemAt(i).layout() is not None
+               and outer.itemAt(i).layout().indexOf(panel.delete_button) >= 0)
+    assert [row.itemAt(i).widget().text() for i in range(row.count())] == ['New', 'Delete', 'Find']
+    # New = Deselect + Add: the selection is cleared and a placement draft starts.
+    panel.add_button.click()
+    assert win._special_draft is not None and panel.slot != slot
+    win._cancel_operation(clear=False)
 
 
 def test_host_world_movement_rejects_border_and_occupied_sector(win):
@@ -145,3 +158,159 @@ def test_host_world_movement_rejects_border_and_occupied_sector(win):
     assert win.doc.snapshot() == baseline
     win._host_changed(0, 'pos_z', 100)
     assert win.doc.snapshot() == baseline
+
+
+def test_squad_draft_card_returns_to_normal_after_placement(win):
+    from PySide6.QtCore import Qt
+    from map_editor.ui.preview_cards import DRAFT_ROLE
+    win.squad_panel.add_button.click()
+    index = len(win.doc.squads)
+    item = win.squad_panel.list.item(index)
+    assert item.data(DRAFT_ROLE)
+    assert item.flags() & Qt.ItemFlag.ItemIsEnabled
+    win._confirm_add((4,4))
+    assert not win.squad_panel.list.item(index).data(DRAFT_ROLE)
+
+
+@pytest.mark.parametrize('kind', ['squad', 'host'])
+def test_draft_right_drag_rotates_and_only_left_click_places(win, app, monkeypatch, kind):
+    from PySide6.QtCore import Qt
+    from PySide6.QtTest import QTest, QSignalSpy
+    panel = win.squad_panel if kind == 'squad' else win.host_panel
+    panel.add_button.click()
+    monkeypatch.setattr(win.view, 'ground_cell', lambda *args: (4,4))
+    win.resize(1100,800);win.show();app.processEvents()
+    win._icons.stop()
+    placed = QSignalSpy(win.view.placementConfirmed)
+    pos = win.view.rect().center()
+    yaw = win.view.camera.yaw
+    QTest.mousePress(win.view, Qt.MouseButton.RightButton, pos=pos)
+    QTest.mouseMove(win.view, pos + QPoint(50,20))
+    QTest.mouseRelease(win.view, Qt.MouseButton.RightButton, pos=pos + QPoint(50,20))
+    assert placed.count() == 0 and win.view.camera.yaw != yaw
+    assert win.view.draft_active
+    QTest.mouseClick(win.view, Qt.MouseButton.LeftButton, pos=pos)
+    assert placed.count() == 1 and not win.view.draft_active
+
+
+@pytest.mark.parametrize('kind', ['squad','host'])
+def test_actor_pov_button_enters_and_exits_existing_view(win, monkeypatch, kind):
+    win.doc.squads=[squad()];win.doc.host_stations=[host()]
+    win._sync_side_panels()
+    panel=win.squad_panel if kind=='squad' else win.host_panel
+    panel.list.setCurrentRow(0)
+    assert panel.pov_button.text()=='Enter POV' and panel.pov_button.isEnabled()
+    panel.pov_button.click()
+    assert win.view.camera.perspective and panel.pov_button.text()=='Exit POV'
+    panel.pov_button.click()
+    assert not win.view.camera.perspective and panel.pov_button.text()=='Enter POV'
+    panel.add_button.click()
+    assert not panel.pov_button.isEnabled()
+
+
+@pytest.mark.parametrize('kind', ['squad','host'])
+def test_new_actor_keeps_keyboard_navigation_available_before_placement(win, app, kind):
+    from PySide6.QtCore import Qt
+    from PySide6.QtTest import QTest
+    win.resize(1100,800);win.show();app.processEvents()
+    panel=win.squad_panel if kind=='squad' else win.host_panel
+    panel.add_button.setFocus()
+    panel.add_button.click()
+    assert win.view.hasFocus() and win.view.draft_active
+    for key in (Qt.Key.Key_W, Qt.Key.Key_A, Qt.Key.Key_S, Qt.Key.Key_D,
+                Qt.Key.Key_Up,Qt.Key.Key_Down,Qt.Key.Key_Left,Qt.Key.Key_Right):
+        before=win.view.camera.center,win.view.camera.pan
+        QTest.keyClick(app.focusWidget(),key)
+        assert (win.view.camera.center,win.view.camera.pan)!=before
+        assert win.view.draft_active
+    assert not win.doc.squads and not win.doc.host_stations
+
+
+def test_host_preset_folder_is_shared_by_open_save_and_load(win, tmp_path, monkeypatch):
+    import map_editor.core.host_ai_presets as presets
+    import map_editor.ui.host_panel as module
+    folder=tmp_path/'HostAI'
+    monkeypatch.setattr(presets,'host_ai_preset_dir',lambda:folder)
+    opened=[];dialogs=[]
+    monkeypatch.setattr(module.QDesktopServices,'openUrl',lambda url:opened.append(url.toLocalFile()))
+    monkeypatch.setattr(module.QInputDialog,'getText',lambda *args:('My AI',True))
+    monkeypatch.setattr(module.QFileDialog,'getSaveFileName',lambda *args:(dialogs.append(args[2]) or ('','')))
+    monkeypatch.setattr(module.QFileDialog,'getOpenFileName',lambda *args:(dialogs.append(args[2]) or ('','')))
+    panel=win.host_panel
+    panel.ai.setChecked(True)
+    panel.preset_folder_button.click();panel._save_preset();panel._load_preset()
+    assert folder.is_dir() and [__import__("pathlib").Path(value) for value in opened]==[folder]
+    assert dialogs==[str(folder/'My AI.json'),str(folder)]
+    form=panel.form_widget.layout()
+    assert form.getWidgetPosition(panel.ai)[0] < form.getWidgetPosition(panel.advanced)[0]
+
+
+def test_host_badges_follow_native_owner_glyph_and_actual_player_host(win):
+    from map_editor.ui.game_icons import game_icon, _glyph
+    from map_editor import bootstrap
+    win.doc.host_stations=[host(1,3,3),host(3,5,5)]
+    win.doc.player_owner=3
+    win._sync_side_panels()
+    badges=list(win.squad_overlay.host_badges(win.view.camera,win.view.terrain))
+    assert [entry[0] for entry in badges if entry[4]]==[1]
+    assert game_icon('host',3)==_glyph(str(bootstrap.game_data_dir()),'MAPROBO',27,True,False,False)
+    assert not game_icon('host',3).isNull()
+    win.host_panel.list.setCurrentRow(1)
+    assert win.host_panel.player.text()=='Current Player Faction'
+    win.host_panel.list.setCurrentRow(0)
+    assert win.host_panel.player.text()=='Use This Faction as Player'
+    win._host_player(0)
+    assert win.host_panel.player.text()=='Current Player Faction'
+    badges=list(win.squad_overlay.host_badges(win.view.camera,win.view.terrain))
+    assert [entry[0] for entry in badges if entry[4]]==[0]
+    for index,anchor,*rest in badges:
+        assert win.squad_overlay.pick_host_badge(anchor.x(),anchor.y())==index
+
+
+def test_host_energy_presets_and_custom_values_keep_exact_saved_energy(win):
+    from map_editor.ui.host_panel import ENERGY_PRESETS
+    win.doc.host_stations=[host()];win._sync_side_panels();win.host_panel.list.setCurrentRow(0)
+    combo=win.host_panel.energy
+    assert combo.count()==8 and combo.value()==500000
+    combo.setCurrentIndex(combo.findData(800000))
+    assert win.doc.host_stations[0]['energy']==800000
+    combo.setEditText('1234567');combo.lineEdit().editingFinished.emit()
+    assert win.doc.host_stations[0]['energy']==1234567
+    assert loads_ldf(dumps_ldf(win.doc)).host_stations[0]['energy']==1234567
+    combo.setEditText('invalid');combo.lineEdit().editingFinished.emit()
+    assert combo.value()==1234567
+    for title,value in ENERGY_PRESETS:
+        combo.setValue(value)
+        assert title in combo.currentText() and combo.value()==value
+
+
+@pytest.mark.parametrize('kind',['squad','host'])
+def test_settings_lock_survives_actor_selection_refresh_and_can_unlock(win, kind):
+    win.doc.squads=[squad()];win.doc.host_stations=[host()];win._sync_side_panels()
+    panel=win.squad_panel if kind=='squad' else win.host_panel
+    panel.list.setCurrentRow(0)
+    panel.settings_lock.click()
+    assert not panel.owner.isEnabled()
+    win._sync_side_panels()
+    panel.list.setCurrentRow(0)
+    assert not panel.owner.isEnabled() and panel.list.isEnabled()
+    panel.settings_lock.click()
+    assert panel.owner.isEnabled()
+
+
+def test_palette_lock_blocks_selection_but_keeps_scrolling(win, app):
+    from PySide6.QtCore import Qt
+    from PySide6.QtTest import QTest
+    win.resize(1100,800);win.show();app.processEvents();win._icons.stop()
+    view=win.sector_list
+    old=view.currentRow()
+    win.sector_settings_lock.click()
+    target=view.item(old+1)
+    QTest.mouseClick(view.viewport(),Qt.MouseButton.LeftButton,pos=view.visualItemRect(target).center())
+    assert view.currentRow()==old
+    view.verticalScrollBar().setValue(100)
+    assert view.verticalScrollBar().value()>0
+    win.sector_settings_lock.click()
+    view.scrollToItem(target);app.processEvents()
+    QTest.mouseClick(view.viewport(),Qt.MouseButton.LeftButton,pos=view.visualItemRect(target).center())
+    assert view.currentItem()==target

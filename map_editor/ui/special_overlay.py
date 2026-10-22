@@ -52,6 +52,8 @@ class SpecialOverlay:
             value = special_store(doc, member.kind)[member.slot]
             grey = member.preview or actor_code(doc, index) in view.dragged_codes
             color = QColor(160, 160, 160) if grey else QColor(*cell_owner_color(view, doc, member.cell))
+            if grey and view.placement_error:
+                color = QColor(225, 115, 120)
             x, y, z = terrain.cell_center(*member.cell)
             icon = 'wave' if member.kind == 'item' and value.get('type') == 2 else member.kind
             if member.key >= 0:
@@ -79,4 +81,15 @@ class SpecialOverlay:
             anchor = QPointF(*camera.world_to_screen((x, y + bounds[1] - 150, z))[0])
             if -80 < anchor.x() < view.width() + 80 and -80 < anchor.y() < view.height() + 80:
                 draw_game_badge(painter, anchor, 25 * (1 + .08 * math.sin(now * 3 + index)), icon, color, now + index)
+                if member.kind == 'gate':
+                    self._draw_key_badges(painter, anchor, doc, value, icon, color, now + index)
         painter.restore()
+
+    @staticmethod
+    def _draw_key_badges(painter, anchor, doc, value, icon, color, moment):
+        """One small key icon beside the badge for each key sector placed for this object."""
+        placed = [key for key in value.get('keys', [])
+                  if 1 <= key[0] < doc.mw - 1 and 1 <= key[1] < doc.mh - 1]
+        for number in range(len(placed)):
+            center = QPointF(anchor.x() + 29 + number * 23, anchor.y())
+            draw_game_badge(painter, center, 20, icon + '_key', color, moment + number)

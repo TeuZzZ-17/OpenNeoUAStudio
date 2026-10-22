@@ -90,9 +90,33 @@ def build_pieces(lib: SectorMeshLibrary, mesh: SectorMesh, cam: IsoCamera,
     return pieces
 
 
+def fitted_preview_camera(vertices, yaw, pitch, target_size, center=(0, 0, 0)):
+    """Fit the complete projected geometry into physical pixels, with a safe one-pixel rim."""
+    width, height = (max(4, int(value)) for value in target_size)
+    cam = IsoCamera(yaw=yaw, pitch=pitch, center=center, width=width, height=height)
+    vertices = np.asarray(vertices, dtype=float).reshape(-1, 3)
+    if not len(vertices):
+        return cam
+    cy, sy, cp, sp = cam._trig()
+    projection = np.asarray(((-cy, 0, -sy), (-sp * sy, cp, sp * cy)))
+    projected = (vertices - np.asarray(center)) @ projection.T
+    low, high = projected.min(axis=0), projected.max(axis=0)
+    cam.zoom = min((width - 4) / max(1, high[0] - low[0]),
+                   (height - 4) / max(1, high[1] - low[1]))
+    cam.pan = tuple(-(low + high) * .5 * cam.zoom)
+    return cam
+
+
 def sprite_input(lib: SectorMeshLibrary, mesh: SectorMesh, yaw: float,
-                 pitch: float, ppu: float, fast: bool = False, fit: bool = False):
+                 pitch: float, ppu: float, fast: bool = False, fit: bool = False,
+                 target_size=None):
     cam = IsoCamera(yaw=yaw, pitch=pitch, zoom=ppu)
+    if target_size is not None:
+        vertices = [(v[0] + ox, v[1], v[2] + oz) for face, ox, oz in mesh.faces for v in face.vertices]
+        cam = fitted_preview_camera(vertices, yaw, pitch, target_size)
+        width, height = cam.width, cam.height
+        origin = (width / 2 + cam.pan[0], height / 2 + cam.pan[1])
+        return width, height, origin, build_pieces(lib, mesh, cam, origin, fast)
     if fit and mesh.faces:
         projected = [cam.to_screen(cam.to_camera((v[0]+ox,v[1],v[2]+oz), True), (0,0))
                      for face,ox,oz in mesh.faces for v in face.vertices]

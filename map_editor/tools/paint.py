@@ -25,6 +25,8 @@ def paint_cells(doc: LdfDocument, cells, layer: str, value) -> bool:
         if grid[r][c] != value:
             grid[r][c] = value
             changed = True
+        if layer == 'blg' and str(value).lower() == '00':
+            doc.building_underlays.pop((c, r), None)
     return changed
 
 

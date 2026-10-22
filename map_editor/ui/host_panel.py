@@ -1,13 +1,68 @@
 """Host stations use the existing LDF fields and the shared model cards."""
-from PySide6.QtCore import Signal, Qt
+from PySide6.QtCore import Signal, Qt, QUrl
+from PySide6.QtGui import QDesktopServices
 from PySide6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QFormLayout,
                               QComboBox, QSpinBox, QLineEdit, QCheckBox, QPushButton,
                               QLabel, QGroupBox, QGridLayout, QFileDialog, QInputDialog, QMessageBox)
 from ..core.ldf_model import FACTIONS, HOST_AI_FIELDS, HOST_AI_BUDGET_FIELDS, make_host_ai, DEFAULT_HOST_POS_Y
 from ..core.host_ai_presets import HOST_AI_PRESETS, CUSTOM_AI_PRESETS
-from .preview_cards import PreviewList, set_card, faction_style, DETAIL_ROLE, form_vehicle
+from .settings_lock import SettingsLockButton
+from .preview_cards import PreviewList, set_card, faction_style, DETAIL_ROLE, DRAFT_ROLE, form_vehicle, VehicleSearchRow
 from .squad_panel import WorldCoordinateSpinBox, coordinate_speed_slider
 from ..render.squad_scene import squad_xz
+
+
+ENERGY_PRESETS = (
+    ('Very low',150000), ('Low',300000), ('Medium-low',500000), ('Medium',800000),
+    ('Medium-high',1000000), ('High',1200000), ('Very high',2000000), ('Extreme',3000000),
+)
+
+
+class HostEnergyCombo(QComboBox):
+    """Named energy choices retain the exact integer, including imported custom values."""
+    valueChanged = Signal(int)
+
+    def __init__(self):
+        super().__init__()
+        self._value = 500000
+        self.setEditable(True)
+        self.setInsertPolicy(QComboBox.InsertPolicy.NoInsert)
+        for title,value in ENERGY_PRESETS:
+            self.addItem(f'{title} ({value:,})', value)
+        self.setValue(self._value)
+        self.currentIndexChanged.connect(self._commit_energy)
+        self.lineEdit().editingFinished.connect(self._commit_energy)
+        self.setToolTip('Choose an energy preset, or replace the text with an exact integer (0-2147483647).')
+
+    def value(self):
+        return self._value
+
+    def setValue(self, value):
+        value = max(0,min(2147483647,int(value)))
+        changed = value != self._value
+        self._value = value
+        blocked = self.blockSignals(True)
+        index = self.findData(value)
+        self.setCurrentIndex(index)
+        if index < 0:
+            self.setEditText(str(value))
+        self.blockSignals(blocked)
+        if changed:
+            self.valueChanged.emit(value)
+
+    def _commit_energy(self, *_args):
+        if self.currentIndex() >= 0 and self.currentText() == self.itemText(self.currentIndex()):
+            value = self.currentData()
+        else:
+            try:
+                value = int(self.currentText().strip())
+            except ValueError:
+                self.setValue(self._value)
+                return
+        if not 0 <= value <= 2147483647:
+            self.setValue(self._value)
+            return
+        self.setValue(value)
 
 
 class HostPanel(QWidget):
@@ -18,12 +73,14 @@ class HostPanel(QWidget):
     playerRequested = Signal(int)
     clearRequested = Signal()
     findRequested = Signal()
+    povRequested = Signal()
 
     def __init__(self):
         super().__init__()
         self.doc = None
         self.vehicles, self.colors = {}, {}
         self._loading = False
+        self.settings_lock = SettingsLockButton()
         layout = QVBoxLayout(self)
         self.search = QLineEdit(placeholderText='Filter host stations')
         self.search.textChanged.connect(self._filter)
@@ -33,17 +90,19 @@ class HostPanel(QWidget):
         layout.addLayout(self.list.preview_controls())
         layout.addWidget(self.list, 1)
         self.list.currentRowChanged.connect(self._selected)
+        self.player = QPushButton('Use This Faction as Player')
+        self.player.clicked.connect(lambda: self.playerRequested.emit(self.list.currentRow()))
+        layout.addWidget(self.settings_lock.wrap(self.player))
         buttons = QHBoxLayout()
-        for title, slot in (('Add', self.addRequested.emit),
+        for title, slot in (('New', self._new),
                             ('Delete', lambda: self.removeRequested.emit(self.list.currentRow())),
-                            ('Find', self.findRequested.emit),
-                            ('Deselect', self.deselect)):
+                            ('Find', self.findRequested.emit)):
             button = QPushButton(title)
             button.clicked.connect(slot)
             buttons.addWidget(button)
-            if title == 'Add':
+            if title == 'New':
                 self.add_button = button
-                button.setToolTip('Deselect the current host before adding a host station.')
+                button.setToolTip('Deselect the current host and start a new one with its settings.')
             elif title == 'Find':
                 self.find_button = button
             elif title == 'Delete':
@@ -52,6 +111,11 @@ class HostPanel(QWidget):
         count_row = QHBoxLayout()
         self.total = QLabel()
         count_row.addWidget(self.total, 1)
+        self.pov_button = QPushButton('Enter POV')
+        self.pov_button.setEnabled(False)
+        self.pov_button.clicked.connect(self.povRequested.emit)
+        count_row.addWidget(self.settings_lock)
+        count_row.addWidget(self.pov_button)
         self.clear_button = QPushButton('Delete all')
         self.clear_button.clicked.connect(self.clearRequested.emit)
         count_row.addWidget(self.clear_button)
@@ -69,17 +133,15 @@ class HostPanel(QWidget):
         self.vehicle.completer().setFilterMode(Qt.MatchFlag.MatchContains)
         self.vehicle.completer().setCaseSensitivity(Qt.CaseSensitivity.CaseInsensitive)
         self.vehicle.setToolTip('Search a host from the scripts or enter its vehicle ID')
-        self.energy = QSpinBox(minimum=0, maximum=2147483647, value=500000)
+        self.vehicle_row = VehicleSearchRow(self.vehicle)
+        self.energy = HostEnergyCombo()
         self.height = WorldCoordinateSpinBox()
         self.height.setValue(DEFAULT_HOST_POS_Y)
         self.height.setToolTip('Height offset from the ground; negative values are above the surface.')
         self.hidden = QCheckBox('Hidden in Briefing')
-        self.player = QPushButton('Use This Faction as Player')
-        self.player.clicked.connect(lambda: self.playerRequested.emit(self.list.currentRow()))
-        for title, widget in (('Faction', self.owner), ('Host station', self.vehicle), ('Energy', self.energy), ('Height', self.height)):
+        for title, widget in (('Faction', self.owner), ('Host station', self.vehicle_row), ('Energy', self.energy), ('Height', self.height)):
             form.addRow(title, widget)
         form.addRow(self.hidden)
-        form.addRow(self.player)
         advanced = QGroupBox('Advanced Settings', checkable=True, checked=False)
         self.advanced = advanced
         advanced_layout = QVBoxLayout(advanced)
@@ -114,7 +176,6 @@ class HostPanel(QWidget):
         self.advanced_fields.hide()
         advanced.toggled.connect(self.advanced_fields.setVisible)
         advanced_layout.addWidget(self.advanced_fields)
-        form.addRow(advanced)
         self.ai = QGroupBox('Host AI', checkable=True, checked=False)
         ai_layout = QVBoxLayout(self.ai)
         self.ai_preset = QComboBox()
@@ -122,10 +183,13 @@ class HostPanel(QWidget):
         self.ai_preset.activated.connect(lambda: self._change('ai_preset', self.ai_preset.currentText()))
         ai_layout.addWidget(self.ai_preset)
         preset_buttons = QHBoxLayout()
-        for text, slot in (('Save preset', self._save_preset), ('Load preset', self._load_preset)):
+        for text, slot in (('Save preset', self._save_preset), ('Load preset', self._load_preset),
+                           ('Open Preset Folder', self._open_preset_folder)):
             button = QPushButton(text)
             button.clicked.connect(slot)
             preset_buttons.addWidget(button)
+            if text == "Open Preset Folder":
+                self.preset_folder_button = button
         ai_layout.addLayout(preset_buttons)
         self.ai_fields = QWidget()
         grid = QGridLayout(self.ai_fields)
@@ -146,7 +210,8 @@ class HostPanel(QWidget):
         self.ai.toggled.connect(self.ai_fields.setVisible)
         ai_layout.addWidget(self.ai_fields)
         form.addRow(self.ai)
-        layout.addWidget(self.form_widget)
+        form.addRow(advanced)
+        layout.addWidget(self.settings_lock.wrap(self.form_widget))
         self.status = QLabel()
         self.status.setWordWrap(True)
         layout.addWidget(self.status)
@@ -177,6 +242,7 @@ class HostPanel(QWidget):
             if visual.model.casefold() == 'robo':
                 self.vehicle.addItem(f'{key} · {visual.name or "Host station"}', key)
         self.vehicle.setCurrentIndex(max(0, self.vehicle.findData(previous_vehicle)))
+        self.vehicle_row.filter_items()
         self._loading = False
         self.list.setCurrentRow(index if 0 <= index < self.list.count() else -1)
         self._selected(self.list.currentRow())
@@ -191,6 +257,7 @@ class HostPanel(QWidget):
             visual = self.vehicles.get(host['veh'])
             name = (visual.name if visual else '') or host.get('custom_name') or f"Host {host['veh']}"
             role = 'PLAYER' if host is self.player_host else 'AI'
+            self.list.item(index).setData(DRAFT_ROLE, bool(host.get("_preview")))
             set_card(self.list.item(index), ('PREVIEW · ' if host.get('_preview') else '') + name,
                      f"{FACTIONS.get(host['owner'], '?')} · {role} · ID {host['veh']}\n"
                      f"Sector ({host['x']}, {host['y']}) · Energy {host['energy']:,}"
@@ -212,7 +279,7 @@ class HostPanel(QWidget):
         if self._loading:
             return
         valid = self.doc is not None and 0 <= index < len(self.doc.host_stations)
-        self.add_button.setEnabled(not valid)
+        self.add_button.setEnabled(True)
         self.find_button.setEnabled(valid)
         self.delete_button.setEnabled(valid)
         self.clear_button.setEnabled(bool(self.doc and self.doc.host_stations))
@@ -249,7 +316,9 @@ class HostPanel(QWidget):
             preset = HOST_AI_PRESETS.get(self.ai_preset.currentText(), {})
             self.ai_preset.setToolTip(preset.get('description', 'Adjust the budgets and delays below.'))
             self.ai.setEnabled(host is not self.player_host)
-            self.player.setEnabled(host['owner'] != self.doc.player_owner and not host.get('_preview'))
+            current_player_faction = host['owner'] == self.doc.player_owner
+            self.player.setText('Current Player Faction' if current_player_faction else 'Use This Faction as Player')
+            self.player.setEnabled(not current_player_faction and not host.get('_preview'))
             self.status.clear()
             self.status.hide()
             if placing and not host.get('_preview'):
@@ -259,6 +328,7 @@ class HostPanel(QWidget):
         else:
             self.ai.setEnabled(True)
             self.player.setEnabled(False)
+            self.player.setText('Use This Faction as Player')
             faction_style(self.owner, self.colors)
         self.selected.emit(index)
 
@@ -301,6 +371,11 @@ class HostPanel(QWidget):
         self.list.setCurrentRow(-1)
         self._selected(-1)
 
+    def _new(self):
+        """New = Deselect + Add."""
+        self.deselect()
+        self.addRequested.emit()
+
     def placement_values(self):
         return dict(owner=self.owner.currentData(), veh=form_vehicle(self.vehicle),
                     energy=self.energy.value(), pos_y=self.height.value(),
@@ -309,12 +384,30 @@ class HostPanel(QWidget):
                     ai={**{key: spin.value() for key, spin in self.ai_spins.items()},
                         'preset': self.ai_preset.currentText()})
 
+    def _preset_folder(self):
+        from ..core.host_ai_presets import host_ai_preset_dir
+        folder = host_ai_preset_dir()
+        try:
+            folder.mkdir(parents=True, exist_ok=True)
+        except OSError as error:
+            QMessageBox.warning(self, 'Host AI presets', str(error))
+            return None
+        return folder
+
+    def _open_preset_folder(self):
+        folder = self._preset_folder()
+        if folder is not None:
+            QDesktopServices.openUrl(QUrl.fromLocalFile(str(folder)))
+
     def _save_preset(self):
         from ..core.host_ai_presets import save_ai_preset
         name, accepted = QInputDialog.getText(self, 'Save Host AI', 'Preset name:')
         if not accepted or not name.strip():
             return
-        path, _ = QFileDialog.getSaveFileName(self, 'Save Host AI preset', name.strip() + '.json', 'Host AI (*.json)')
+        folder = self._preset_folder()
+        if folder is None:
+            return
+        path, _ = QFileDialog.getSaveFileName(self, 'Save Host AI preset', str(folder / (name.strip() + '.json')), 'Host AI (*.json)')
         if path:
             try:
                 values = save_ai_preset(path, name.strip(), {key: spin.value() for key, spin in self.ai_spins.items()})
@@ -324,7 +417,10 @@ class HostPanel(QWidget):
 
     def _load_preset(self):
         from ..core.host_ai_presets import load_ai_preset
-        path, _ = QFileDialog.getOpenFileName(self, 'Load Host AI preset', '', 'Host AI (*.json)')
+        folder = self._preset_folder()
+        if folder is None:
+            return
+        path, _ = QFileDialog.getOpenFileName(self, 'Load Host AI preset', str(folder), 'Host AI (*.json)')
         if path:
             try:
                 self._change('ai_values', load_ai_preset(path))

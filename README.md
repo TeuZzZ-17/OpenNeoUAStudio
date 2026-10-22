@@ -175,6 +175,40 @@ The Map Editor preserves every `target_level` of a beamgate and reads original l
 including `script:` includes. Vehicle and Host Station IDs come from the selected installation's
 scripts, including expansion-specific IDs.
 
+In the Map Editor, **Map > Border Walls** toggles the translucent perimeter walls (on by default).
+**Resize** links width and height until unchecked; **Sector height: Default** preserves existing
+heights, while a numeric value sets the entire map to that height. Palette previews follow the
+camera orientation continuously, fitting complete models at screen resolution. Sector preview
+levels use three, two and one columns respectively. Use **Ctrl+left drag** to select an area, then click a selected cell to apply
+the current sector, building or faction to the whole selection. In **Terrain**, select **Raise**,
+**Lower**, **Flatten**, **Smooth** or **Noise** and sculpt with the left button. Right drag rotates
+the camera. Noise adds gentle coherent variations, limited to one height step per stroke; **Sample from Map** displays the sampled sector's height.
+**Overwrite** becomes available after opening or saving a level. Buildings placed by Studio
+remember their underlying sector across saves through comments ignored by the game. Moving or
+removing gates, Super Items, gems and Super Item keys also restores their recorded original sector.
+Older levels without this history cannot recover a sector already overwritten before loading.
+LDF exports use the OpenNeoUA Studio header and keep this editor history in a labelled footer.
+World coordinates use at most five decimal places, without trailing zeroes or floating-point tails.
+
+The **Vehicle** and **Host station** fields include a compact search beside the manual picker.
+Type a name or ID to filter its choices; typing alone does not change the selected unit.
+
+**Map > Close Roads (Experimental)** proposes replacements using the selected set's ground
+textures, for the selected cells or the whole map when nothing is selected. It preserves buildings
+and special objects, reports unavailable pieces, asks before applying changes, and supports Undo.
+Road detection assumes dark roads on lighter ground; unusual replacement textures need manual checks.
+The extra road stubs between sectors are the game's terrain transitions and remain visible here.
+
+**Level Info > Generate Briefing** exports PNG by default or palette-based ILBM (`.IFF`).
+Gems require at least one effect before placement. A rejected placement briefly turns the whole
+preview a muted red and shows a small tooltip explaining the missing effect, without a modal dialog.
+**Custom sky** validates and previews a `.bas` archive or a complete external `.BASE` family inside
+`Data` before Apply. Archives are installed without replacing existing files in `Data/Objects`
+and keep the legacy level reference; external BASE skies retain a `Data/...` reference and require
+OpenNeoUA. Choose the sky file directly with **Choose sky file**; the dialog does not accept
+folders. Sky validation checks the geometry and referenced textures. Palette and remap tables
+belong to the map's active set and are not required inside each sky archive.
+
 The collapsible **Map issues** indicator in the left panel lists missing sector/building/model
 references, inactive buildings owned by faction `0`, and flak without a matching Host Station.
 Click an entry to find its sector. A power station owned by a faction without a Host is listed as
@@ -229,3 +263,28 @@ OpenNeoUA Studio is provided without warranty.
 Use it at your own risk.
 
 The full warranty disclaimer and limitation of liability are contained in the GNU GPL v3 license text.
+
+Unplaced squad cards are grey but remain editable. Placed squads have thicker faction-coloured
+silhouettes and a matching round squad badge; selected silhouettes are white.
+
+During squad and Host Station placement, left click confirms the grey preview; right drag
+continues to rotate the camera.
+
+Squad and Host Station panels offer **Enter POV** beside **Delete all** and in the map context
+menu. In first-person view it becomes **Exit POV**; Esc and the context menu also exit.
+
+Tech previews start at **2/3**. Only faction names in the faction selector are coloured;
+counts and enabled-list headings stay white. **Show Special Buildings**, off by default,
+reveals the same special buildings as the placement palette without clearing permissions.
+
+Host AI **Open Preset Folder** opens `Presets/HostAI` beside Studio; Save/Load preset start in
+the same folder. Advanced Settings follows Host AI. New actor placement keeps map keyboard focus.
+
+Host badges use the original faction glyphs from MAPROBO. A second human-shaped badge marks
+the actual player host selected by the level save order. The player-faction button is above New/Delete/Find.
+
+Host **Energy** offers eight editable presets calibrated against 310 hosts in 98 installed levels
+(median 800,000; 90th percentile 1,200,000). Custom integer values remain exact in the LDF.
+
+Padlock buttons protect actor/special/Terrain/Tech fields and freeze sector/building/faction
+palette choices while keeping list scrolling and map navigation available. Locks start open.

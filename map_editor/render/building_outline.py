@@ -3,7 +3,8 @@
 import numpy as np
 
 
-def building_outline_pixels(ids, building_grid, *, selected=None, previews=(), owners=None, owner_colors=None):
+def building_outline_pixels(ids, building_grid, *, selected=None, previews=(), owners=None, owner_colors=None,
+                            preview_color=(160, 160, 160)):
     """Return faction-coloured (yellow without owners) model edges, grey drag edges and a white selection border."""
     height, width = ids.shape
     rgba = np.zeros((height, width, 4), np.uint8)
@@ -30,7 +31,7 @@ def building_outline_pixels(ids, building_grid, *, selected=None, previews=(), o
     previews = set(previews)
     for col, row in previews:
         if 0 <= col < cols and 0 <= row < rows:
-            rgba[inner & (ids == -(row * cols + col + 1))] = (160, 160, 160, 255)
+            rgba[inner & (ids == -(row * cols + col + 1))] = (*preview_color, 255)
 
     if selected is not None and selected not in previews:
         col, row = selected
