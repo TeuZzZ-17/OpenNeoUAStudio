@@ -2499,7 +2499,21 @@ def read_script_file(path: str | Path) -> tuple[str, str, bool]:
 def write_script_file(
     path: str | Path, text: str, encoding: str, bom: bool,
 ) -> None:
-    data = text.encode(encoding)
+    try:
+        data = text.encode(encoding)
+    except UnicodeEncodeError:
+        # A new Unicode icon can be written into an unchanged legacy script.
+        # Escape only its key; all other fields keep their original encoding.
+        def icon_escape(match):
+            key = match.group(2)
+            if len(key) == 1:
+                try:
+                    key.encode(encoding)
+                except UnicodeEncodeError:
+                    return match.group(1) + f"U+{ord(key):04X}"
+            return match.group(0)
+        text = re.sub(r"(?im)^(\s*type_icon\s*=\s*)([^\s;]+)", icon_escape, text)
+        data = text.encode(encoding)
     if bom and encoding == "utf-8":
         data = b"\xef\xbb\xbf" + data
     backup_existing_file(path)

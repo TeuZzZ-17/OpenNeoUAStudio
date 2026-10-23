@@ -6,7 +6,7 @@ from PySide6.QtCore import QPointF, QRectF, Qt
 from PySide6.QtGui import QColor, QPainter, QImage
 from ..render.squad_scene import squad_members, host_members
 from ..render.special_scene import scene_object_styles
-from .game_icons import draw_game_badge
+from .game_icons import draw_game_badge, MAP_BADGE_SIZE
 
 
 class SquadOverlay:
@@ -112,15 +112,19 @@ class SquadOverlay:
             if member.member == 0:
                 anchor = self._badge_anchor(member, camera, terrain)
                 color = QColor(160,160,160) if preview else QColor(*view.owner_colors.get(member.owner, (150,150,150)))
-                draw_game_badge(painter, anchor, 25, 'squad', color, now + member.squad)
+                draw_game_badge(painter, anchor, MAP_BADGE_SIZE, 'squad', color, now + member.squad)
             if selected and member.member == 0:
                 painter.setPen(QColor(255, 250, 210))
                 painter.drawText(QRectF(center[0] - 70, center[1] - radius - 23, 140, 20),
                                  Qt.AlignmentFlag.AlignCenter, f"{view.doc.squads[member.squad].get('custom_name') or 'Squad '+str(member.squad+1)} · Selected")
         for index,anchor,owner,color,player in self.host_badges(camera,terrain):
-            draw_game_badge(painter,anchor,25,'host',color,now+index,owner=owner)
+            vehicle = view.doc.host_stations[index].get('veh', 0)
+            definition = view.lib.vehicles.get(vehicle)
+            icon = definition.type_icon if definition else None
+            draw_game_badge(painter, anchor, MAP_BADGE_SIZE, 'host', color,
+                            now + index, owner=owner, glyph_key=icon)
             if player:
-                draw_game_badge(painter,anchor+QPointF(30,0),25,'player',QColor(255,220,100),now+index)
+                draw_game_badge(painter,anchor+QPointF(30,0),MAP_BADGE_SIZE,'player',QColor(255,220,100),now+index)
         painter.restore()
 
     def pick_host_badge(self, x, y):

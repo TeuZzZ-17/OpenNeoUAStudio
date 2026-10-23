@@ -64,6 +64,7 @@ class VehicleVisual:
     energy: int = 0
     guns: list[GunMount] = field(default_factory=list)
     viewer: tuple[float, float, float] = (0.0, 0.0, 0.0)
+    type_icon: str = ""
 
 
 def parse_vehicle_text(text: str, result=None):
@@ -111,7 +112,7 @@ def parse_vehicle_text(text: str, result=None):
                         active.enabled_factions.add(faction)
                     else:
                         active.enabled_factions.discard(faction)
-                elif key in ('name', 'model'):
+                elif key in ('name', 'model', 'type_icon'):
                     setattr(active, key, value.strip('"'))
                 elif key in ('unit_num_guns', 'robo_num_guns'):
                     count = max(0, min(ROBO_GUN_MAX_COUNT,
