@@ -5,18 +5,35 @@ from pathlib import Path
 
 import numpy as np
 from PySide6.QtCore import QRectF, Qt
-from PySide6.QtGui import QImage, QColor, QPainter, QPen
+from PySide6.QtGui import QImage, QColor, QPainter
 
 from .. import bootstrap
 from ..core.resource_catalog import preview_image
 
 
-def game_icon(kind, owner=1, tight=True, grey=False, outlined=False):
-    if kind in ('squad', 'player'):
-        return _badge_symbol(kind).copy()
+MAP_BADGE_SIZE = 17.0 * 1.35
+
+
+def game_icon(kind, owner=1, tight=True, grey=False, outlined=False, glyph_key=None):
+    if kind == 'player':
+        return _player_symbol().copy()
+    if kind == 'squad':
+        root = bootstrap.game_data_dir()
+        return _glyph(str(root), 'TYPE_NS', ord('!'), tight, grey, outlined)
     if kind == 'host':
         root = bootstrap.game_data_dir()
-        # The strategic map uses MAPROBO's largest owner group (0x18 + owner).
+        if glyph_key:
+            try:
+                code = _glyph_key(glyph_key.encode('utf-8'))
+                image = _glyph(str(root), 'TYPE_NS', code, tight, grey, outlined)
+                if image.isNull() and code > 255:
+                    legacy = chr(code).encode('cp1252')
+                    image = _glyph(str(root), 'TYPE_NS', legacy[0], tight, grey, outlined)
+                if not image.isNull():
+                    return image
+            except (ValueError, UnicodeError):
+                pass
+        # Vanilla fallback when the placed vehicle has no authored type icon.
         return _glyph(str(root), 'MAPROBO', 24 + max(0,min(7,int(owner))), tight, grey, outlined)
     if kind in ('power', 'gate', 'gem', 'item', 'gate_key', 'item_key', 'wave', 'wave_key'):
         font, code = 'MAPCUR64', dict(power=137, gate=147, gem=136, item=139,
@@ -27,21 +44,16 @@ def game_icon(kind, owner=1, tight=True, grey=False, outlined=False):
     return _glyph(str(root), font, code, tight, grey, outlined)
 
 
-@lru_cache(maxsize=2)
-def _badge_symbol(kind):
+@lru_cache(maxsize=1)
+def _player_symbol():
     image = QImage(32,32,QImage.Format.Format_ARGB32_Premultiplied)
     image.fill(Qt.GlobalColor.transparent)
     painter = QPainter(image)
     painter.setRenderHint(QPainter.RenderHint.Antialiasing)
     painter.setPen(Qt.PenStyle.NoPen)
     painter.setBrush(Qt.GlobalColor.white)
-    if kind == 'player':
-        painter.drawEllipse(QRectF(11,3,10,10))
-        painter.drawRoundedRect(QRectF(6,16,20,12),5,5)
-    else:
-        for x,y in ((5,18),(20,18),(12,4)):
-            painter.drawRoundedRect(QRectF(x,y,8,9),2,2)
-            painter.drawRect(QRectF(x+3,y-4,2,8))
+    painter.drawEllipse(QRectF(11,3,10,10))
+    painter.drawRoundedRect(QRectF(6,16,20,12),5,5)
     painter.end()
     return image
 
@@ -57,19 +69,21 @@ def _glyph(root, font, code, tight, grey, outlined):
     path = bootstrap.find_ci(definitions, font + '.FON', font + '.font') if definitions else None
     if path is None:
         return QImage()
-    lines = path.read_text(encoding='cp1252').splitlines()
-    page, height = lines[0].split(';')[0].split()[:2]
+    lines = path.read_bytes().splitlines()
+    page, height = lines[0].removeprefix(b'\xef\xbb\xbf').split(b';')[0].decode('latin-1').split()[:2]
     stem = Path(page).stem
     image_path = bootstrap.find_ci(directory, stem+'.PNG', page, stem+'.ILB', stem+'.ILBM')
     if image_path is None:
         return QImage()
     image = preview_image(image_path).convertToFormat(QImage.Format.Format_RGBA8888)
     for line in lines[1:]:
-        parts = line.split(';')[0].split()
+        parts = line.split(b';')[0].split()
         if len(parts) < 4:
             continue
-        token = parts[0]
-        index = int(token[1:], 0) if token.startswith('#') else ord(token[0])
+        try:
+            index = _glyph_key(parts[0])
+        except (ValueError, UnicodeError):
+            continue
         if index != code:
             continue
         x, y, width = map(int, parts[1:4])
@@ -102,64 +116,36 @@ def _glyph(root, font, code, tight, grey, outlined):
     return QImage()
 
 
-def _unit_color(color):
-    """Keep dark faction colours readable on the dark backing disc."""
-    value = QColor(color)
-    if value.lightness() < 125:
-        mix = .32
-        value = QColor(round(value.red()*(1-mix) + 255*mix),
-                       round(value.green()*(1-mix) + 255*mix),
-                       round(value.blue()*(1-mix) + 255*mix))
-    return value
+def _glyph_key(token):
+    """Match the engine's legacy byte, UTF-8 and explicit Unicode font keys."""
+    if token.startswith(b'U+'):
+        key = int(token[2:], 16)
+    elif token.startswith(b'#') and len(token) > 1:
+        digits = token[1:]
+        key = int(digits, 8 if len(digits) > 1 and digits.startswith(b'0') and digits.isdigit() else 0)
+    elif len(token) == 1:
+        key = token[0]
+    else:
+        key = ord(token.decode('utf-8'))
+    if not 0 <= key <= 0x10ffff or 0xd800 <= key <= 0xdfff or key == 0xfffd:
+        raise ValueError('Invalid glyph key')
+    return key
 
 
-def _draw_unit_badge(painter, center, size, image, color, moment):
-    radius = max(8.0, size*.63)
-    ring = _unit_color(color)
-    shadow = QRectF(center.x()-radius-1, center.y()-radius+1.5,
-                    (radius+1)*2, (radius+1)*2)
-    disc = QRectF(center.x()-radius, center.y()-radius, radius*2, radius*2)
-    painter.save()
-    painter.setRenderHint(QPainter.RenderHint.Antialiasing)
-    painter.setPen(Qt.PenStyle.NoPen)
-    painter.setBrush(QColor(0, 0, 0, 115))
-    painter.drawEllipse(shadow)
-    painter.setBrush(QColor(9, 15, 21, 225))
-    painter.setPen(QPen(QColor(0, 0, 0, 220), 4))
-    painter.drawEllipse(disc)
-    pulse = .85 + .15*math.sin(moment*3.2)
-    ring_color = QColor(ring)
-    ring_color.setAlpha(int(225 + 30*pulse))
-    painter.setBrush(Qt.BrushStyle.NoBrush)
-    painter.setPen(QPen(ring_color, 2))
-    painter.drawEllipse(disc.adjusted(.6, .6, -.6, -.6))
-    painter.setPen(QPen(QColor(255, 255, 255, 85), 1))
-    painter.drawArc(disc.adjusted(3.2, 3.2, -3.2, -3.2), 45*16, 100*16)
-    factor = radius*1.30/max(1, image.width(), image.height())
-    w, h = image.width()*factor, image.height()*factor
-    painter.drawImage(QRectF(center.x()-w/2, center.y()-h/2, w, h), image)
-    painter.restore()
-
-
-def draw_game_badge(painter, center, size, kind, color, moment, owner=1):
-    image = game_icon(kind, owner, grey=color.red() == color.green() == color.blue())
+def draw_game_badge(painter, center, size, kind, color, moment, owner=1, glyph_key=None):
+    grey = kind not in ('host', 'squad') and color.red() == color.green() == color.blue()
+    image = game_icon(kind, owner, grey=grey,
+                      glyph_key=glyph_key)
     if image.isNull():
         return False
-    if kind in ('squad', 'host', 'player'):
-        tint = QPainter(image)
-        tint.setCompositionMode(QPainter.CompositionMode.CompositionMode_SourceIn)
-        tint.fillRect(image.rect(), _unit_color(color))
-        tint.end()
-    if kind in ('squad', 'host', 'player'):
-        _draw_unit_badge(painter, center, size, image, color, moment)
-        return True
     size *= .75
     painter.save()
     pulse = .85 + .15*math.sin(moment*3.2)
     glow = QColor(color); glow.setAlpha(int(65 + 35*pulse))
     painter.setPen(QColor(color)); painter.setBrush(glow)
     painter.drawEllipse(center, size*.75, size*.75)
-    painter.setOpacity(pulse)
+    # Faction colour belongs to the circle; original icon pixels stay opaque.
+    painter.setOpacity(1.0)
     factor = size/max(image.width(), image.height())
     w, h = image.width()*factor, image.height()*factor
     painter.drawImage(QRectF(center.x()-w/2, center.y()-h/2, w, h), image)

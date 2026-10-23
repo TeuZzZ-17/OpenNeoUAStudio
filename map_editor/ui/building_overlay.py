@@ -9,7 +9,7 @@ from PySide6.QtGui import QBrush, QColor, QImage, QPainter, QPainterPath, QPen, 
 from PySide6.QtWidgets import QWidget
 
 from ..core.ldf_model import SECTOR_SIZE
-from .game_icons import draw_game_badge
+from .game_icons import draw_game_badge, MAP_BADGE_SIZE
 from ..render.building_outline import building_outline_pixels
 
 
@@ -142,7 +142,7 @@ class BuildingOverlay(QObject):
         y = anchor[1] - size
         for kind in icons:
             center = QPointF(x + size / 2, y + size / 2)
-            if draw_game_badge(painter, center, size*1.35, kind, color, now+phase):
+            if draw_game_badge(painter, center, MAP_BADGE_SIZE*pulse, kind, color, now+phase):
                 x += size + gap
                 continue
             if kind == "power":
