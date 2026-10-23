@@ -86,10 +86,11 @@ def test_modern_briefing_extension_is_preserved():
     assert lm.briefing_for_export("MB_02.PNG") == "MB_02.PNG"
     assert lm.briefing_for_export("DB_02.IFF") == "DB_02.IFF"
     assert lm.briefing_for_export("MB_02") == "MB_02.IFF"
-    modern = bootstrap.game_data_dir() / "Levels" / "Single" / "L0101.LDF"
-    if modern.is_file():
-        output = lm.dumps_ldf(lm.load_ldf(modern))
-        assert "MB_02.PNG" in output and "DB_02.PNG" in output
+    # Keep this contract independent of the user's editable test mission.
+    doc = lm.LdfDocument(mw=6, mh=6)
+    doc.lvl_info.update(mbmap="MB_02.PNG", dbmap="DB_02.PNG")
+    output = lm.dumps_ldf(lm.loads_ldf(lm.dumps_ldf(doc)))
+    assert "MB_02.PNG" in output and "DB_02.PNG" in output
 
 
 def test_atomic_save(tmp_path):

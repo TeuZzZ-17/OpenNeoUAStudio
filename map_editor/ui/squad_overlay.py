@@ -125,9 +125,10 @@ class SquadOverlay:
 
     def pick_host_badge(self, x, y):
         for index,anchor,_owner,_color,player in self.host_badges(self.viewport.camera,self.viewport.terrain):
-            if math.hypot(x-anchor.x(),y-anchor.y())<=15:
+            # The player badge is drawn on top of the host badge, so it wins the overlap.
+            if player and math.hypot(x-anchor.x()-30,y-anchor.y())<=19:
                 return index
-            if player and math.hypot(x-anchor.x()-30,y-anchor.y())<=15:
+            if math.hypot(x-anchor.x(),y-anchor.y())<=19:
                 return index
         return None
 
@@ -135,7 +136,7 @@ class SquadOverlay:
         for member in self._members(self.viewport.terrain):
             if member.member == 0:
                 anchor = self._badge_anchor(member, self.viewport.camera, self.viewport.terrain)
-                if math.hypot(x - anchor.x(), y - anchor.y()) <= 15:
+                if math.hypot(x - anchor.x(), y - anchor.y()) <= 19:
                     return member.squad
         candidates = [(math.hypot(x - p[0], y - p[1]), member.squad)
                       for member, p, radius in self.circles(self.viewport.camera, self.viewport.terrain)
