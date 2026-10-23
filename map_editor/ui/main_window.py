@@ -45,6 +45,7 @@ from .dialogs import LevelInfoPanel, NewMapDialog, ResizeDialog
 from .music_preview import MusicPreview
 from .building_overlay import BuildingOverlay, CapabilityPreview
 from .settings_lock import SettingsLockButton
+from .location_panel import LocationPanel, LocationTools
 from .thumbnail_delegate import ThumbnailDelegate, PaletteCardDelegate
 from .squad_panel import SquadPanel
 from .host_panel import HostPanel
@@ -582,6 +583,9 @@ class MainWindow(QMainWindow):
                 special.keys.currentRowChanged.connect(lambda _i, k=kind: self._special_selected(k, self.special_panels[k].slot))
         self.script_tab_index = tabs.addTab(self.script_page, "Script")
         self.level_tab_index = tabs.addTab(self.level_scroll, "Level Info")
+        self.location_panel = LocationPanel()
+        self.location_tab_index = tabs.addTab(self.location_panel, 'Locations')
+        self.location_tools = LocationTools(self, self.location_panel, self.location_tab_index)
         for card_list in self._resource_lists():
             card_list.previewsRequested.connect(lambda: self._icons.start())
         self._brush_params()
@@ -841,6 +845,7 @@ class MainWindow(QMainWindow):
             self.view.set_sky_image(image)
 
     def _sync_side_panels(self):
+        self.location_panel.refresh()
         self._refresh_script_catalog()
         self._refresh_specials()
         self.script_edit.blockSignals(True)
@@ -2110,6 +2115,8 @@ class MainWindow(QMainWindow):
             self._refresh_hosts()
 
     def _cancel_operation(self, clear=True):
+        if hasattr(self, "location_tools"):
+            self.location_tools.cancel()
         if self._building_drag is not None:
             self._building_drag = None
             self._refresh_squads(fields=False)
@@ -2502,6 +2509,11 @@ class MainWindow(QMainWindow):
         menu.addAction(self.copy_action)
         menu.addAction(self.paste_action)
         menu.addSeparator()
+        if self.location_tools.active():
+            draft = self.location_tools.draft
+            points = len(draft['points']) if draft is not None else 0
+            action = menu.addAction('Close Area', lambda: self.location_tools.close())
+            action.setEnabled(points >= 3 and not self.location_panel.lock.isChecked())
         hit = None if painting else self.view.pick_scene_object(position.x(), position.y())
         if hit is not None and hit[0] == 'special':
             kind, slot, key = hit[1]
@@ -3015,6 +3027,7 @@ class MainWindow(QMainWindow):
         self._finish_script()
         self._released(-1, -1, Qt.KeyboardModifier.NoModifier)
         self.doc, self.path, self.dirty = doc, path, False
+        self.location_tools.selected = -1
         self._original_level = doc.snapshot()
         self.history.clear()
         self._draft_squads = []
@@ -3070,6 +3083,9 @@ class MainWindow(QMainWindow):
     def closeEvent(self, event):
         if self._confirm_discard():
             self.music_preview.stop()
+            self.location_panel.player.stop()
+            if hasattr(self.location_panel, "_preview_dialog"):
+                self.location_panel._preview_dialog.close()
             self._icons.stop()
             self._icon_queue.clear()
             self._bicon_queue.clear()
@@ -3336,6 +3352,8 @@ class MainWindow(QMainWindow):
                 widget.setCurrentItem(first)
 
     def _palette_changed(self, index):
+        if index != self.location_tab_index:
+            self.location_tools.cancel()
         self._finish_script()
         if index != 1 and self._building_drag is None:
             self.view.selected_building = None
@@ -3343,6 +3361,8 @@ class MainWindow(QMainWindow):
                        self.squad_tab_index: "squad"}.get(index, "select"))
         if index in self.special_tab_indices.values():
             self.view.active_tool = 'special'
+        if index == self.location_tab_index:
+            self.view.active_tool = 'location'
         if index in (0, 1):
             self._queue_visible_previews()
             self._icons.start()

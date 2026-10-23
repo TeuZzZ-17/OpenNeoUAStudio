@@ -115,7 +115,7 @@ class ResizeDialog(_Form):
         if any(counts.values()):
             labels = {'gate_objects': "gates", 'item_objects': "items", 'gems': "gems",
                       'squads': "squads", 'hosts': "host stations",
-                      'gate_keys': "gate keys", 'item_keys': "item keys"}
+                      'gate_keys': "gate keys", 'item_keys': "item keys", 'locations': "locations"}
             text = ", ".join(f"{labels[k]}: {v}" for k, v in counts.items() if v)
             answer = QMessageBox.question(
                 parent, "Objects outside map",

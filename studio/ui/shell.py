@@ -296,7 +296,9 @@ def compatibility_entries(window, key):
         rows = []
         for i in range(tabs.count()):
             title = tabs.tabText(i)
-            if title == "Script":
+            if title == 'Locations':
+                rows.append((title, OPENNEOUA, 'Optional begin_location polygons, entry titles and sounds require OpenNeoUA. Levels without locations contain no new blocks.'))
+            elif title == "Script":
                 rows.append((title, MIXED, "Vanilla level script sections remain compatible. Custom script text can contain OpenNeoUA-only parameters; this reference does not validate those lines."))
             else:
                 rows.append((title, VANILLA, "Edits existing vanilla LDF level data. Referenced units, buildings, sectors and SET assets must also exist in the target game's installation."))
@@ -347,6 +349,8 @@ def install_compatibility_markers(window, key):
         for button in map_tabs._buttons:
             level, note = by_title[button.text().casefold()]
             button.marker = compat_color(level)
+            if key == 'map_editor' and button.text() == 'Locations':
+                button.marker = QColor('#e75f60')
             button.setToolTip(f"{COMPAT_STYLES[level].title}. {note}")
             button.update()
 

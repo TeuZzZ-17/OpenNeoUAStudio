@@ -864,6 +864,9 @@ class MapViewport(QWidget):
         return (255, 220, 60) if self.sample_active or time.monotonic() < self.sample_flash_until else self.cursor_color
 
     def draw_interaction_overlay(self, painter):
+        locations = getattr(self, 'location_tools', None)
+        if locations is not None:
+            locations.draw(painter)
         painter.save()
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
         if self.camera.perspective:

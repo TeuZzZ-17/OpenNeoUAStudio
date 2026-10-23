@@ -319,6 +319,7 @@ class LdfDocument:
     gems: dict = field(default_factory=dict)
     squads: list = field(default_factory=list)
     host_stations: list = field(default_factory=list)
+    locations: list = field(default_factory=list)
     player_owner: int = 1
     tech: dict = field(default_factory=new_tech)
     # Empty begin_enable blocks carry a reset that cannot be inferred from lists.
@@ -363,6 +364,7 @@ class LdfDocument:
         self.tech = new_tech()
         self.custom_tech_names.clear()
         self.building_underlays.clear()
+        self.locations.clear()
 
     def snapshot(self) -> dict:
         return self._copy_state(self.__dict__)
@@ -472,6 +474,10 @@ class LdfDocument:
                              if g['x'] != -1 and not inb(g['x'], g['y']))
         counts['squads'] = sum(1 for s in self.squads if not inb(s['x'], s['y']))
         counts['hosts'] = sum(1 for h in self.host_stations if not inb(h['x'], h['y']))
+        outside_locations = sum(any(not (0 <= x <= width * 1200 and -height * 1200 <= z <= 0)
+                                    for x, z in value['points']) for value in self.locations)
+        if outside_locations:
+            counts['locations'] = outside_locations
         return counts
 
     def remove_out_of_bounds(self, width: int, height: int) -> None:
@@ -486,6 +492,9 @@ class LdfDocument:
         for g in self.gems.values():
             if g['x'] != -1 and not inb(g['x'], g['y']):
                 g['x'] = g['y'] = -1
+        self.locations = [value for value in self.locations
+                          if all(0 <= x <= width * 1200 and -height * 1200 <= z <= 0
+                                 for x, z in value['points'])]
         self.squads = [s for s in self.squads if inb(s['x'], s['y'])]
         self.host_stations = [h for h in self.host_stations if inb(h['x'], h['y'])]
 
@@ -558,6 +567,8 @@ def _parse_tokens(text: str) -> list[str]:
 def loads_ldf(raw_text: str, encoding: str = DEFAULT_LDF_ENCODING) -> LdfDocument:
     newline = "\r\n" if "\r\n" in raw_text else "\n"
     script, parse_text = split_user_script_block(raw_text)
+    from .locations import parse_location_blocks
+    locations, parse_text = parse_location_blocks(parse_text)
     raw_title = _level_line_value(parse_text, 'title_default')
     squad_names = _block_vehicle_comment_names(parse_text, 'begin_squad')
     host_names = _block_vehicle_comment_names(parse_text, 'begin_robo')
@@ -582,6 +593,7 @@ def loads_ldf(raw_text: str, encoding: str = DEFAULT_LDF_ENCODING) -> LdfDocumen
 
     doc = LdfDocument(mw=w, mh=h)
     doc.script_content = script
+    doc.locations = locations
     doc.lvl_info = new_lvl_info()
     doc.tech = new_tech()
     doc.encoding, doc.newline = encoding, newline
@@ -954,6 +966,9 @@ def dumps_ldf(doc: LdfDocument, defs: dict | None = None) -> str:
             w("   size_y        = 480")
             w("end")
             w(sep)
+    from .locations import location_lines
+    for line in location_lines(doc.locations, _ldf_position):
+        w(line)
     for i in range(1, doc.visible_gate_slots + 1):
         g = doc.gates[i]
         if g['x'] != -1:

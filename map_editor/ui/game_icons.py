@@ -1,10 +1,11 @@
 """Original UA font glyphs, decoded once per selected installation."""
+import math
 from functools import lru_cache
 from pathlib import Path
 
 import numpy as np
 from PySide6.QtCore import QRectF, Qt
-from PySide6.QtGui import QImage, QColor, QPainter
+from PySide6.QtGui import QImage, QColor, QPainter, QPen
 
 from .. import bootstrap
 from ..core.resource_catalog import preview_image
@@ -101,16 +102,57 @@ def _glyph(root, font, code, tight, grey, outlined):
     return QImage()
 
 
+def _unit_color(color):
+    """Keep dark faction colours readable on the dark backing disc."""
+    value = QColor(color)
+    if value.lightness() < 125:
+        mix = .32
+        value = QColor(round(value.red()*(1-mix) + 255*mix),
+                       round(value.green()*(1-mix) + 255*mix),
+                       round(value.blue()*(1-mix) + 255*mix))
+    return value
+
+
+def _draw_unit_badge(painter, center, size, image, color, moment):
+    radius = max(8.0, size*.63)
+    ring = _unit_color(color)
+    shadow = QRectF(center.x()-radius-1, center.y()-radius+1.5,
+                    (radius+1)*2, (radius+1)*2)
+    disc = QRectF(center.x()-radius, center.y()-radius, radius*2, radius*2)
+    painter.save()
+    painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+    painter.setPen(Qt.PenStyle.NoPen)
+    painter.setBrush(QColor(0, 0, 0, 115))
+    painter.drawEllipse(shadow)
+    painter.setBrush(QColor(9, 15, 21, 225))
+    painter.setPen(QPen(QColor(0, 0, 0, 220), 4))
+    painter.drawEllipse(disc)
+    pulse = .85 + .15*math.sin(moment*3.2)
+    ring_color = QColor(ring)
+    ring_color.setAlpha(int(225 + 30*pulse))
+    painter.setBrush(Qt.BrushStyle.NoBrush)
+    painter.setPen(QPen(ring_color, 2))
+    painter.drawEllipse(disc.adjusted(.6, .6, -.6, -.6))
+    painter.setPen(QPen(QColor(255, 255, 255, 85), 1))
+    painter.drawArc(disc.adjusted(3.2, 3.2, -3.2, -3.2), 45*16, 100*16)
+    factor = radius*1.30/max(1, image.width(), image.height())
+    w, h = image.width()*factor, image.height()*factor
+    painter.drawImage(QRectF(center.x()-w/2, center.y()-h/2, w, h), image)
+    painter.restore()
+
+
 def draw_game_badge(painter, center, size, kind, color, moment, owner=1):
-    import math
     image = game_icon(kind, owner, grey=color.red() == color.green() == color.blue())
     if image.isNull():
         return False
-    if kind in ('squad', 'player'):
+    if kind in ('squad', 'host', 'player'):
         tint = QPainter(image)
         tint.setCompositionMode(QPainter.CompositionMode.CompositionMode_SourceIn)
-        tint.fillRect(image.rect(), color)
+        tint.fillRect(image.rect(), _unit_color(color))
         tint.end()
+    if kind in ('squad', 'host', 'player'):
+        _draw_unit_badge(painter, center, size, image, color, moment)
+        return True
     size *= .75
     painter.save()
     pulse = .85 + .15*math.sin(moment*3.2)
