@@ -12,6 +12,7 @@ from PySide6.QtWidgets import (
 # Colors and button style are shared with every Studio workspace palette;
 # TAB_COLORS stays importable from here for the Map Editor.
 from studio.ui.tabs import TAB_COLORS, _PaletteButton, palette_columns
+import math
 
 
 class PaletteTabs(QWidget):
@@ -67,6 +68,21 @@ class PaletteTabs(QWidget):
 
     def _reflow_buttons(self):
         count = len(self._buttons)
+        if count == 13:
+            # Every row fills the panel; a thirteenth tab must not leave a single button below.
+            rows = (4, 3, 3, 3)
+            columns = math.lcm(*rows)
+            for button in self._buttons:
+                self._button_grid.removeWidget(button)
+            index = 0
+            for row, size in enumerate(rows):
+                span = columns // size
+                for column in range(size):
+                    self._button_grid.addWidget(self._buttons[index], row, column * span, 1, span)
+                    index += 1
+            for column in range(self._button_grid.columnCount()):
+                self._button_grid.setColumnStretch(column, 1 if column < columns else 0)
+            return
         columns = palette_columns(count)
         for button in self._buttons:
             self._button_grid.removeWidget(button)

@@ -263,28 +263,3 @@ OpenNeoUA Studio is provided without warranty.
 Use it at your own risk.
 
 The full warranty disclaimer and limitation of liability are contained in the GNU GPL v3 license text.
-
-Unplaced squad cards are grey but remain editable. Placed squads have thicker faction-coloured
-silhouettes and a matching round squad badge; selected silhouettes are white.
-
-During squad and Host Station placement, left click confirms the grey preview; right drag
-continues to rotate the camera.
-
-Squad and Host Station panels offer **Enter POV** beside **Delete all** and in the map context
-menu. In first-person view it becomes **Exit POV**; Esc and the context menu also exit.
-
-Tech previews start at **2/3**. Only faction names in the faction selector are coloured;
-counts and enabled-list headings stay white. **Show Special Buildings**, off by default,
-reveals the same special buildings as the placement palette without clearing permissions.
-
-Host AI **Open Preset Folder** opens `Presets/HostAI` beside Studio; Save/Load preset start in
-the same folder. Advanced Settings follows Host AI. New actor placement keeps map keyboard focus.
-
-Host badges use the original faction glyphs from MAPROBO. A second human-shaped badge marks
-the actual player host selected by the level save order. The player-faction button is above New/Delete/Find.
-
-Host **Energy** offers eight editable presets calibrated against 310 hosts in 98 installed levels
-(median 800,000; 90th percentile 1,200,000). Custom integer values remain exact in the LDF.
-
-Padlock buttons protect actor/special/Terrain/Tech fields and freeze sector/building/faction
-palette choices while keeping list scrolling and map navigation available. Locks start open.

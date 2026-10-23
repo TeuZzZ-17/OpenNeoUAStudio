@@ -233,8 +233,6 @@ class CollisionEditorWindow(QMainWindow):
         self.setWindowTitle(WINDOW_TITLE)
         self.resize(1100, 720)
         self.project = CollisionProject()
-        self._hide_splitter_grip = False
-        self._splitter_grip_filtered = False
         self.family: AssetFamily | None = None
         self._vp_embedded: EmbeddedVPSet | None = None
         self._vp_table: VPTable | None = None
@@ -835,15 +833,6 @@ class CollisionEditorWindow(QMainWindow):
         self.renderer_badge.add_viewport(self.briefing_preview)
         self.viewport_layout.addWidget(self.briefing_preview, 0, 0)
         self.briefing_preview.hide()
-        # Al posto dell'anteprima, nella tab Collision Shape delle armi.
-        self.shape_weapon_notice = QLabel(
-            "Collision Shape mode is not intended for, or available on, "
-            "weapons.\nIt is available only for vehicles.")
-        self.shape_weapon_notice.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.shape_weapon_notice.setWordWrap(True)
-        self.shape_weapon_notice.setMinimumSize(0, 0)
-        self.viewport_layout.addWidget(self.shape_weapon_notice, 0, 0)
-        self.shape_weapon_notice.hide()
         self.fx_panel = DestructionFxPanel(self)
         self.fx_tab_index = self.properties_tabs.addTab(
             self.fx_panel, "Visuals && FX")
@@ -1880,10 +1869,6 @@ class CollisionEditorWindow(QMainWindow):
         splitter.setSizes([230, 850, 430])
 
     def eventFilter(self, watched, event):
-        if (self._hide_splitter_grip
-                and event.type() == QEvent.Type.Paint
-                and watched is self.main_splitter.handle(2)):
-            return True
         if (hasattr(self, "gun_point_tree")
                 and watched is self.gun_point_tree.viewport()
                 and event.type() == QEvent.Type.Resize):
@@ -3097,49 +3082,7 @@ class CollisionEditorWindow(QMainWindow):
             if widget is not None:
                 widget.setEnabled(not process_running)
 
-    def _collision_shape_blocked_for_weapon(self, warn: bool = False) -> bool:
-        """Collision Shape is a vehicle-only tool: weapons never get one."""
-
-        blocked = self.project.target_category == WEAPON
-        if blocked and warn:
-            QMessageBox.warning(
-                self, "Collision Shape not available for weapons",
-                "Collision Shape is intended exclusively for creating "
-                "shapes for vehicles, not weapons.")
-        return blocked
-
-    def _sync_collision_shape_weapon_block(self) -> None:
-        """In the Collision Shape tab of a weapon, hide the model and the panel."""
-
-        if not hasattr(self, "shape_weapon_notice"):
-            return
-        blocked = self._collision_shape_blocked_for_weapon()
-        on_tab = (self.properties_tabs.currentIndex()
-                  == self.collision_shape_tab_index)
-        self.collision_shape_box.setVisible(not blocked)
-        self.collision_geometry_widget.setVisible(not blocked)
-        self.export_collision_shape_action.setEnabled(
-            not blocked and self.export_collision_shape_button.isEnabled())
-        show_notice = blocked and on_tab
-        # No resize grip next to the empty weapon panel. QSplitter re-shows
-        # its handles on every layout, so the handle is made inert and its
-        # painting is suppressed (see eventFilter) instead of hiding it.
-        handle = self.main_splitter.handle(2)
-        if not self._splitter_grip_filtered:
-            handle.installEventFilter(self)
-            self._splitter_grip_filtered = True
-        handle.setEnabled(not show_notice)
-        self._hide_splitter_grip = show_notice
-        handle.update()
-        self.shape_weapon_notice.setVisible(show_notice)
-        if show_notice:
-            self.viewport.setVisible(False)
-        elif self.properties_tabs.currentIndex() != self.briefing_tab_index:
-            self.viewport.setVisible(True)
-
     def generate_collision_shape(self) -> None:
-        if self._collision_shape_blocked_for_weapon(warn=True):
-            return
         if self._collision_bake_process is not None:
             return
         self._refresh_collision_geometry_widget()
@@ -3386,8 +3329,6 @@ class CollisionEditorWindow(QMainWindow):
         self.statusBar().showMessage("Collision shape deleted.", 4500)
 
     def import_collision_shape(self) -> None:
-        if self._collision_shape_blocked_for_weapon(warn=True):
-            return
         if self._current_set_bas_path() is None:
             QMessageBox.information(
                 self, "SET required",
@@ -3435,8 +3376,6 @@ class CollisionEditorWindow(QMainWindow):
                 9000)
 
     def export_collision_shape(self) -> None:
-        if self._collision_shape_blocked_for_weapon(warn=True):
-            return
         if self.collision_geometry_widget._selection_timer.isActive():
             self.collision_geometry_widget._flush_selection_changed()
         shape = self.project.collision_shape
@@ -3464,8 +3403,6 @@ class CollisionEditorWindow(QMainWindow):
     def overwrite_collision_shape(self) -> None:
         """Rewrite the .collision file the shape came from, without a file dialog."""
 
-        if self._collision_shape_blocked_for_weapon(warn=True):
-            return
         if self.collision_geometry_widget._selection_timer.isActive():
             self.collision_geometry_widget._flush_selection_changed()
         shape = self.project.collision_shape
@@ -5131,7 +5068,6 @@ class CollisionEditorWindow(QMainWindow):
             self.viewport.setFocus(Qt.FocusReason.OtherFocusReason)
         if not self._syncing:
             self._sync_all()
-        self._sync_collision_shape_weapon_block()
         tree = {
             self.fire_points_tab_index: self.fire_point_tree,
             self.gun_points_tab_index: self.gun_point_tree,
@@ -7323,17 +7259,17 @@ class CollisionEditorWindow(QMainWindow):
         self.viewport.set_ground_alignment(
             vehicle_mode, self.project.overeof_enabled,
             self.project.overeof)
-        for index in (
-                self.ground_tab_index,
-                self.fire_points_tab_index, self.gun_points_tab_index,
-                self.cockpit_tab_index):
-            self.properties_tabs.setTabEnabled(index, vehicle_mode)
         # Weapons keep the tabs that also apply to projectiles.
         if (not vehicle_mode
                 and self.properties_tabs.currentIndex()
                 not in (self.collision_tab_index, self.collision_shape_tab_index,
-                        self.fx_tab_index)):
+                        self.fx_tab_index, self.wireframe_tab_index)):
             self.properties_tabs.setCurrentIndex(self.collision_tab_index)
+        for index in (
+                self.ground_tab_index,
+                self.fire_points_tab_index, self.gun_points_tab_index,
+                self.cockpit_tab_index, self.briefing_tab_index):
+            self.properties_tabs.setTabEnabled(index, vehicle_mode)
 
         cockpit_enabled = vehicle_mode and self.project.cockpit_camera_enabled
         self.cockpit_camera_button.setEnabled(vehicle_mode)
@@ -7844,7 +7780,6 @@ class CollisionEditorWindow(QMainWindow):
         self.briefing_tab.sync()
         if self.briefing_preview.isVisible():
             self.briefing_preview.refresh()
-        self._sync_collision_shape_weapon_block()
 
     def _validate_for_output(self) -> bool:
         errors, warnings = validate_project(
