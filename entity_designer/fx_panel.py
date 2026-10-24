@@ -891,14 +891,12 @@ class DestructionFxPanel(QWidget):
             self.sound.resume(self._sound_events, self.time_ms)
 
     def set_scene(self, origin, ground_y: float, unit_radius: float, *, transform=None, overeof=None,
-                  scale=None, euler=None, model_diameter=None) -> None:
+                  scale=None, euler=None) -> None:
         values = (tuple(origin), float(ground_y), float(unit_radius))
         unit = replace(self.unit, transform=transform if transform is not None else self.unit.transform,
                        overeof=overeof if overeof is not None else self.unit.overeof,
                        scale=scale if scale is not None else self.unit.scale,
-                       euler=euler if euler is not None else self.unit.euler,
-                       model_diameter=(model_diameter if model_diameter is not None
-                                       else self.unit.model_diameter))
+                       euler=euler if euler is not None else self.unit.euler)
         if values == (self.origin, self.ground_y, self.unit_radius) and unit == self.unit:
             return
         self.origin, self.ground_y, self.unit_radius = values
@@ -1441,6 +1439,8 @@ class DestructionFxPanel(QWidget):
         vps = {vp for vp in (vehicle.vp_dead, vehicle.vp_megadeth) if vp > 0}
         if vehicle.scale_fx is not None:
             vps.update(vehicle.scale_fx.vps)
+        for effect in vehicle.chain_fx:
+            vps.update(visual.vp for visual in effect.visuals if visual.vp > 0)
         for child in vehicle.dest_fx:
             vps.update(self._legacy_vps(child.vehicle_id, depth + 1))
         return vps

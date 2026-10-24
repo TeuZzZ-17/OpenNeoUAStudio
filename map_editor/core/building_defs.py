@@ -33,6 +33,8 @@ class BuildingDef:
     power: int = 0
     energy: int = 0
     production_cost: int = 0
+    description: str = ""
+    script_class: str = ""
     type_icon: str = ""
     source: str = ""
     debug_note: str = ""
@@ -181,6 +183,8 @@ def parse_building_text(text: str, source: str = "", result=None) -> dict[int, B
             power=_number(values.get("power", "0")),
             energy=_number(values.get("energy", "0")),
             production_cost=_number(values.get("production_cost", "0")),
+            description=values.get("building_description", values.get("description", "")),
+            script_class=values.get("model", ""),
             type_icon=values.get("type_icon", "").strip(),
             source=source,
             debug_note=debug_note.strip(),
