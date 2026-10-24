@@ -842,6 +842,11 @@ class FxSpec:
     permanent: bool = False
     # Smoke rising from the decal (None = the block has no smoke).
     smoke: decal_smoke.SmokeSpec | None = None
+    fire: decal_smoke.SmokeSpec | None = None
+    fire_propagation_chance: float = 0.0
+    fire_propagation_radius: float = 0.0
+    fire_propagation_count: int = 0
+    fire_propagation_delay: int = 1500
     # Physical fragments: normal / goingdown / explode sounds.
     sounds: dict = field(default_factory=dict)
 
@@ -1249,50 +1254,27 @@ def interpret_block(block: FxBlock, context: str) -> FxSpec:
 
 @dataclass(frozen=True)
 class DecalProfile:
-    """One ``new_decal <id>`` block of the decal scripts.
-
-    ``spec`` is the decal template (texture, stretch, tint, fades, smoke). Its
-    size is filled in per vehicle/weapon by ``resolve``: ``size_by_model_%`` is a
-    percentage of the diameter of the unit's visual model sphere.
-    """
-
+    """One reusable ``new_decal`` profile with an authored world-unit size."""
     profile_id: int
     spec: FxSpec
     name: str = ""
-    model_percent: tuple[float, float] = (100.0, 100.0)
 
-    def size_for(self, model_diameter: float,
-                 percent: tuple[float, float] | None = None) -> tuple[float, float]:
-        """Decal size range for a model sphere of this diameter (0 = no decal).
+    def resolve(self, trigger: str, size=(0.0, 0.0)) -> FxSpec:
+        return replace(self.spec, trigger=trigger, size=size)
 
-        ``percent`` is the unit's own ground_decal_size_by_model_%: when given it
-        replaces the size_by_model_% of the profile.
-        """
-
-        if not math.isfinite(model_diameter) or model_diameter <= 0:
-            return (0.0, 0.0)
-        low, high = percent or self.model_percent
-        return (model_diameter * low * 0.01, model_diameter * high * 0.01)
-
-    def resolve(self, trigger: str, model_diameter: float,
-                percent: tuple[float, float] | None = None) -> FxSpec:
-        """The ground decal a unit spawns on ``trigger`` (destroyed / impact_world)."""
-
-        return replace(self.spec, trigger=trigger,
-                       size=self.size_for(model_diameter, percent))
-
-
-def _decal_percent_range(text: str, *, strip_percent: bool = False
-                         ) -> tuple[float, float] | None:
-    """Percentage or size range (fixed or min_max), both ends > 0."""
-
-    if strip_percent:
-        # One optional '%' per value: 30, 30%, 30_40, 30%_40%, 30_40%.
-        text = "_".join(part[:-1] if part.endswith("%") else part
-                        for part in text.split("_"))
-    parsed = parse_float_range(text)
-    return parsed if parsed and parsed[0] > 0 and parsed[1] > 0 else None
-
+def _interpret_fire(values: dict[str, str], issue) -> tuple[decal_smoke.SmokeSpec | None, float, float, int, int]:
+    raw_gate = values.get("fire_change", "0").removesuffix("%")
+    parsed_gate=max(0,min(100,int(raw_gate))) if re.fullmatch(r"[+-]?\d+",raw_gate) else 0
+    if parsed_gate <= 0:
+        return None, 0.0, 0.0, 0, 1500
+    mapped = {"smoke_duration": values.get("fire_duration", "8000_16000"), "smoke_fade_inout": values.get("fire_fade_inout", "300_4000"), "smoke_count": values.get("fire_count", "2_6"), "smoke_size": values.get("fire_size", "15_35"), "smoke_growth": values.get("fire_growth", "1.4"), "smoke_rise_speed": values.get("fire_rise_speed", "60"), "smoke_puff_time": values.get("fire_puff_time", "350_900"), "smoke_drift": values.get("fire_drift", "15"), "smoke_spread": values.get("fire_spread", "65"), "smoke_intensity": values.get("fire_intensity", "180"), "smoke_tint": values.get("fire_tint", "255_140_25_220"), "smoke_chance": str(int(parsed_gate))}
+    fire = replace(_interpret_smoke(mapped, issue), flame=True)
+    chance = max(0.0, min(100.0, _full_float(values.get("fire_propagation_chance", "0").rstrip("%")) or 0.0))
+    radius = max(0.0, min(12000.0, _full_float(values.get("fire_propagation_radius", "0")) or 0.0))
+    count = max(0, min(8, int(_full_float(values.get("fire_propagation_count", "0")) or 0)))
+    raw_delay=_full_float(values.get("fire_propagation_delay","1500"))
+    delay=max(0,min(3600000,int(raw_delay if raw_delay is not None else 1500)))
+    return fire, chance, radius, count, delay
 
 def parse_decal_profile(profile_id: int, values: dict[str, str]) -> DecalProfile | None:
     """Mirror of ``DecalProfileParser``; None when the engine drops the profile."""
@@ -1302,20 +1284,12 @@ def parse_decal_profile(profile_id: int, values: dict[str, str]) -> DecalProfile
     def issue(severity: str, message: str) -> None:
         issues.append(FxIssue(severity, message))
 
-    model_percent = (100.0, 100.0)
     stretch = [(1.0, 1.0), (1.0, 1.0)]
     tint = (255, 255, 255, 255)
     edge_fade = (0.0, 0.0)
     duration, permanent, duration_valid = 0, False, False
     fade_in = fade_out = 0
 
-    if "size_by_model_%" in values:
-        parsed = _decal_percent_range(values["size_by_model_%"], strip_percent=True)
-        if parsed is None:
-            issue(SEVERITY_WARNING, f"Invalid size_by_model_% "
-                  f"'{values['size_by_model_%']}': using 100_100.")
-        else:
-            model_percent = parsed
     if "stretch_xz" in values:
         parts = split_tuple(values["stretch_xz"], 2)
         if parts is None:
@@ -1373,6 +1347,8 @@ def parse_decal_profile(profile_id: int, values: dict[str, str]) -> DecalProfile
     smoke_rows = {key: value for key, value in values.items()
                   if key in decal_smoke.SMOKE_KEYS}
     smoke = _interpret_smoke(smoke_rows, issue) if smoke_rows else None
+    fire_rows = {key: value for key, value in values.items() if key.startswith("fire_")}
+    fire, fire_chance, fire_radius, fire_count, fire_delay = _interpret_fire(fire_rows, issue) if fire_rows else (None, 0.0, 0.0, 0, 1500)
 
     spec = FxSpec(
         mode=MODE_DECAL, trigger="", active=True, issues=tuple(issues),
@@ -1380,8 +1356,8 @@ def parse_decal_profile(profile_id: int, values: dict[str, str]) -> DecalProfile
         duration=duration, fade_in=fade_in, fade_out=fade_out,
         texture=values.get("texture", ""), stretch_x=stretch[0],
         stretch_z=stretch[1], decal_tint=tint, edge_fade=edge_fade,
-        permanent=permanent, smoke=smoke)
-    return DecalProfile(profile_id, spec, values.get("name", ""), model_percent)
+        permanent=permanent, smoke=smoke, fire=fire, fire_propagation_chance=fire_chance, fire_propagation_radius=fire_radius, fire_propagation_count=fire_count, fire_propagation_delay=fire_delay)
+    return DecalProfile(profile_id, spec, values.get("name", ""))
 
 
 def decal_profiles_from_text(text: str) -> dict[int, DecalProfile]:
@@ -1476,6 +1452,10 @@ class LegacyFxVehicle:
     name: str = ""
     vp_dead: int = 0
     vp_megadeth: int = 0
+    dead_visual: VisualRef = VisualRef()
+    megadeth_visual: VisualRef = VisualRef()
+    main_visuals: tuple[VisualRef, ...] = ()
+    visual_scale: tuple[float, float, float] = (1.0, 1.0, 1.0)
     mass: float = 1.0
     airconst: float = 0.0
     maxrot: float = 0.0
@@ -1483,6 +1463,7 @@ class LegacyFxVehicle:
     scale_fx: ScaleFx | None = None
     scale_fx_text: str = ""
     dest_fx: tuple[DestFx, ...] = ()
+    chain_fx: tuple[FxSpec, ...] = ()
     source: str = ""
     sounds: dict = field(default_factory=dict)
 
@@ -1501,11 +1482,27 @@ def legacy_vehicle_from_values(vehicle_id: int, values: dict[str, str],
     dests = tuple(
         dest for dest in (parse_dest_fx(value) for value in dest_values)
         if dest is not None)
+    dead_vp = int(number("vp_dead", 4))
+    megadeth_vp = int(number("vp_megadeth", 2))
+    main_visuals = tuple(
+        VisualRef(
+            int(number(f"vp_{state}", default)),
+            values.get(f"3ds_{state}", ""),
+            values.get(f"base_{state}", ""))
+        for state, default in (("normal", 0), ("fire", 1), ("wait", 3), ("genesis", 5)))
+    dead_visual = VisualRef(
+        dead_vp, values.get("3ds_dead", ""), values.get("base_dead", ""))
+    megadeth_visual = VisualRef(
+        megadeth_vp, values.get("3ds_megadeth", ""), values.get("base_megadeth", ""))
     return LegacyFxVehicle(
         vehicle_id=vehicle_id,
         name=values.get("name", ""),
-        vp_dead=int(number("vp_dead", 0)),
-        vp_megadeth=int(number("vp_megadeth", 0)),
+        vp_dead=dead_vp,
+        vp_megadeth=megadeth_vp,
+        dead_visual=dead_visual,
+        megadeth_visual=megadeth_visual,
+        main_visuals=main_visuals,
+        visual_scale=_positive_scale(values, ""),
         mass=number("mass", 1.0),
         airconst=number("airconst", 0.0),
         maxrot=number("maxrot", 0.0),
@@ -1524,16 +1521,40 @@ def legacy_vehicle_from_text(vehicle_id: int, text: str,
 
     values: dict[str, str] = {}
     dests: list[str] = []
+    chain_fx: list[FxSpec] = []
+    lines = text.splitlines()
     depth = 0
-    for line in text.splitlines():
+    index = 0
+    while index < len(lines):
+        line = lines[index]
         token = _scope_token(line)
+        if depth == 0 and token == "begin_fx":
+            block_lines = [line]
+            block_depth = 1
+            index += 1
+            while index < len(lines) and block_depth > 0:
+                nested_line = lines[index]
+                nested_token = _scope_token(nested_line)
+                block_lines.append(nested_line)
+                if nested_token == "begin" or nested_token.startswith("begin_"):
+                    block_depth += 1
+                elif nested_token == "end":
+                    block_depth -= 1
+                index += 1
+            spec = interpret_block(FxBlock(block_lines), CONTEXT_VEHICLE)
+            if spec.active:
+                chain_fx.append(spec)
+            continue
         if token == "begin" or token.startswith("begin_"):
             depth += 1
+            index += 1
             continue
         if token == "end":
             depth = max(0, depth - 1)
+            index += 1
             continue
         if depth or not token:
+            index += 1
             continue
         code = re.split(r";", line, maxsplit=1)[0]
         key, _sep, value = code.partition("=")
@@ -1543,7 +1564,9 @@ def legacy_vehicle_from_text(vehicle_id: int, text: str,
             dests.append(value)
         elif key:
             values[key] = value
-    return legacy_vehicle_from_values(vehicle_id, values, dests, source)
+        index += 1
+    return replace(legacy_vehicle_from_values(vehicle_id, values, dests, source),
+                   chain_fx=tuple(chain_fx))
 
 
 # -- preview simulation -------------------------------------------------------
@@ -1922,6 +1945,11 @@ def parse_decoration(values: dict[str, str]) -> DecorationSpec | None:
         trail_fade_out=trail_fade[1])
 
 
+def _manual_decal_size(value):
+    size=parse_float_range(value)
+    return size if size and all(math.isfinite(n) and 0<=n<=12000 for n in size) else (0.0,0.0)
+
+
 def unit_look(values: dict[str, str], *, weapon: bool) -> dict:
     """UnitPhases keyword values read from the top-level keys of a definition."""
 
@@ -1963,9 +1991,7 @@ def unit_look(values: dict[str, str], *, weapon: bool) -> dict:
         "ground_decal_id": (lambda decal_id: decal_id if decal_id >= 0 else -1)(
             script_int(values.get("ground_decal_id"), -1)),
         # The unit's own size, written in its script; a bad value is ignored.
-        "decal_percent": (_decal_percent_range(values["ground_decal_size_by_model_%"],
-                                               strip_percent=True)
-                          if "ground_decal_size_by_model_%" in values else None),
+        "decal_size": _manual_decal_size(values.get("ground_decal_size", "0_0")),
     }
 
 
@@ -2393,15 +2419,14 @@ class UnitPhases:
     sounds: dict = field(default_factory=dict)
     # Genesis VP of the death plasma and the values that drive it.
     genesis: VisualRef = VisualRef()
+    # States that share the runtime main-model scale rule.
+    main_visuals: tuple[VisualRef, ...] = ()
     energy: float = 0.0
     maxrot: float = 0.0
-    # Reusable ground decal (new_decal) the unit spawns. Its size is a percentage
-    # of ``model_diameter``, the bounding sphere of the visual model with scale
-    # applied (the tab fills it from the loaded model; 0 = no model, no decal).
+    # Reusable decal, with a diameter authored on this source.
     ground_decal_id: int = -1
-    model_diameter: float = 0.0
-    # ground_decal_size_by_model_% of the unit's script (None = the profile's size).
-    decal_percent: tuple[float, float] | None = None
+    # Manual world-space diameter range.
+    decal_size: tuple[float, float] = (0.0, 0.0)
 
     @property
     def plasma_ms(self) -> float:
@@ -2451,6 +2476,8 @@ class UnitPhases:
         """Tint of the VP particles: weapons use vp_trail_tint on the main model."""
 
         return self.trail_tint if (self.weapon and main) else self.tint
+
+
 
 
 # Preview events of the Visuals & FX tab.
@@ -2689,7 +2716,7 @@ class PreviewSimulation:
         profile = self.decals.get(unit.ground_decal_id)
         if profile is None or trigger != ("impact_world" if unit.weapon else "destroyed"):
             return
-        spec = profile.resolve(trigger, unit.model_diameter, unit.decal_percent)
+        spec = profile.resolve(trigger, unit.decal_size)
         if spec.size[1] <= 0:
             return
         source = PROFILE_DECAL_SOURCE if definition.source is None else definition.source
@@ -3464,6 +3491,22 @@ class PreviewSimulation:
                                     0.5 * math.hypot(size * stretch_x, size * stretch_z),
                                     prefix)
 
+        if spec.fire is not None:
+            ignited=self._build_decal_smoke(source,spec.fire,rng,start,position,
+                0.5*math.hypot(size*stretch_x,size*stretch_z),prefix)
+            if ignited and spec.fire_propagation_radius>0:
+                child=replace(spec,fire_propagation_count=0,
+                              fire=replace(spec.fire,chance=100),
+                              smoke=spec.smoke or decal_smoke.SmokeSpec(enabled=True))
+                for _ in range(min(8,spec.fire_propagation_count)):
+                    if rng.random()*100>=spec.fire_propagation_chance:
+                        continue
+                    angle=rng.uniform(0,2*math.pi)
+                    distance=spec.fire_propagation_radius*math.sqrt(rng.random())
+                    origin=(position[0]+math.cos(angle)*distance,self.ground_y,
+                            position[2]+math.sin(angle)*distance)
+                    self._build_decal(source,child,rng,start+spec.fire_propagation_delay,origin,prefix)
+
     def _build_decal_smoke(self, source, smoke, rng, start, position, radius,
                            prefix) -> None:
         seed = rng.getrandbits(24)
@@ -3474,16 +3517,18 @@ class PreviewSimulation:
         if count <= 0 or real <= 0:
             return
         shown = min(float(real), SMOKE_PREVIEW_MS)
-        self._events.append((source, "decal_smoke", start, start + shown,
+        self._events.append((source, "decal_fire" if smoke.flame else "decal_smoke", start, start + shown,
                              (smoke, position, radius, seed, count, real)))
         self._tracks.append(PreviewTrack(
-            source, f"{prefix}Decal smoke", start, start + shown,
+            source, f"{prefix}Decal fire" if smoke.flame else f"{prefix}Decal smoke", start, start + shown,
             float(smoke.fade_in), float(smoke.fade_out) if real <= shown else 0.0,
             approximate=real > shown))
         if real > shown:
             self.notes.append(
                 f"Decal smoke lasts {real / 1000:.0f} s in the engine; the "
                 f"preview plays its first {shown / 1000:.0f} s.")
+
+        return True
 
     def _build_legacy(self, source, dest, origin, rng, start, depth, *,
                       random_rotation: bool = False,
@@ -3686,7 +3731,7 @@ class PreviewSimulation:
                     (1.0, 1.0, 1.0), alpha, spec.decal_tint, "decal",
                     texture=spec.texture, decal_size=(width, depth),
                     decal_edge_fade=edge))
-            elif kind == "decal_smoke":
+            elif kind in ("decal_smoke","decal_fire"):
                 smoke, position, radius, seed, count, real = payload
                 gain = smoke.intensity * 0.01 * smoke.tint[3] / 255.0
                 for slot in range(count):
@@ -3698,11 +3743,11 @@ class PreviewSimulation:
                     rgb = tuple(int(round(min(255.0, value * shade)))
                                 for value in smoke.tint[:3])
                     items.append(PreviewItem(
-                        source, "decal_smoke", 0,
+                        source, kind, 0,
                         tuple(base + offset for base, offset
                               in zip(position, puff.offset)),
-                        IDENTITY, (puff.size,) * 3,
-                        min(1.0, puff.alpha * gain), (*rgb, 255), "smoke"))
+                        IDENTITY, (puff.size*.45,puff.size*1.6,puff.size) if smoke.flame else (puff.size,)*3,
+                        min(1.0, puff.alpha * gain), (*rgb, 255), "fire" if smoke.flame else "smoke",additive=smoke.flame))
         return items
 
     def offset_boxes(self) -> list[tuple[int, tuple, tuple]]:
@@ -3731,7 +3776,7 @@ class PreviewSimulation:
                     reach = 0.5 * max(item.decal_size)
                 elif item.kind == "tracer":
                     reach = 0.5 * item.scale[2]
-                elif item.kind == "decal_smoke":
+                elif item.kind in ("decal_smoke","decal_fire"):
                     reach = 0.5 * item.scale[0]
                 else:
                     reach = 60.0 * max(item.scale)

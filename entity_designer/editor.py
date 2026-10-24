@@ -14,6 +14,7 @@ from pathlib import Path
 import re
 import sys
 import tempfile
+from types import SimpleNamespace
 
 from PySide6.QtCore import (
     QEvent,
@@ -489,6 +490,7 @@ class CollisionEditorWindow(QMainWindow):
          self.exit_action) = install_standard_file_menu_tail(
             file_menu, self, close_archive_callback=self.close_current_archive)
         edit_menu = self.menuBar().addMenu("&Edit")
+        edit_menu.addSeparator()
         self.undo_action = QAction("Undo", self)
         self.undo_action.setIconText("< Undo")
         self.undo_action.setShortcut(QKeySequence.StandardKey.Undo)
@@ -2759,6 +2761,7 @@ class CollisionEditorWindow(QMainWindow):
             self.viewport.set_cockpit_runtime_aspect(
                 self.cockpit_runtime_aspect_combo.currentData())
         self._sync_cockpit_preview_model()
+
 
     def overwrite_loaded_script(self):
         if (self._active_script_path is None
@@ -5096,13 +5099,7 @@ class CollisionEditorWindow(QMainWindow):
                 (self.project.model_rotation_x, self.project.model_rotation_y,
                  self.project.model_rotation_z))
 
-    def _fx_model_diameter(self, scale) -> float:
-        """Diameter of the bounding sphere of the unit's normal model, scale applied.
 
-        It sizes the ground decal (size_by_model_%). 0 while no model is loaded.
-        """
-
-        return self.viewport.owner_model_sphere_diameter(self._current_owner, scale)
 
     def _fx_unit_transform(self):
         """Preview scale/rotation of the unit as a matrix (static preview)."""
@@ -5190,22 +5187,28 @@ class CollisionEditorWindow(QMainWindow):
                 text, block.start_line, block.end_line, key) or ""
 
         def state(name: str) -> fx.VisualRef:
-            # Engine defaults when the key is absent: vp_dead 4, vp_megadeth 2.
+            # Engine defaults for visual states that are not in this script.
             vp = (reference.vp_normal or 0 if name == "normal"
                   else fx.script_int(value(f"vp_{name}"),
-                                     {"dead": 4, "megadeth": 2}.get(name, 0)))
+                                     {"fire": 1, "wait": 3, "genesis": 5,
+                                      "dead": 4, "megadeth": 2}.get(name, 0)))
             return fx.VisualRef(vp=vp, mesh3ds=value(f"3ds_{name}"),
                                 base_path=value(f"base_{name}"))
 
         weapon = block.kind.endswith("weapon")
         model = value("model").casefold()
         scale, euler = self._fx_unit_scale_rotation()
+        normal = state("normal")
+        fire = state("fire")
+        wait = state("wait")
+        genesis = state("genesis")
+        main_visuals = (normal, fire, wait) if weapon else (normal, fire, wait, genesis)
         look = fx.unit_look(
             fx.top_level_values(text, block.start_line, block.end_line),
             weapon=weapon)
         unit = fx.UnitPhases(
-            normal=state("normal"), dead=state("dead"),
-            megadeth=state("megadeth"), model=model, weapon=weapon,
+            normal=normal, dead=state("dead"), megadeth=state("megadeth"),
+            main_visuals=main_visuals, model=model, weapon=weapon,
             transform=self._fx_unit_transform(),
             overeof=(self.project.overeof
                      if self.project.overeof_enabled else 0.0),
@@ -5412,6 +5415,27 @@ class CollisionEditorWindow(QMainWindow):
                 visuals.extend(spec.visuals)
                 if spec.physical_model is not None:
                     visuals.append(spec.physical_model)
+        visited_legacy: set[int] = set()
+
+        def include_legacy_visuals(vehicle_id: int, depth: int = 0) -> None:
+            if (vehicle_id in visited_legacy
+                    or depth >= fx.LEGACY_NESTING_LIMIT):
+                return
+            vehicle = self.fx_panel.catalog.get(vehicle_id)
+            if vehicle is None:
+                return
+            visited_legacy.add(vehicle_id)
+            visuals.extend((vehicle.dead_visual, vehicle.megadeth_visual))
+            for effect in vehicle.chain_fx:
+                visuals.extend(effect.visuals)
+            for child in vehicle.dest_fx:
+                if child.kind in ("death", "megadeth"):
+                    include_legacy_visuals(child.vehicle_id, depth + 1)
+
+        for item in self.fx_panel.document.items:
+            if isinstance(item, fx.DestFxLine) and item.parsed is not None:
+                if item.parsed.kind in ("death", "megadeth"):
+                    include_legacy_visuals(item.parsed.vehicle_id)
         # Ground decal textures come from the linked new_decal profiles.
         for owner in (unit, *(child.unit for child in
                               fx.cluster_chain(unit, self.fx_panel.weapons))):
@@ -5612,7 +5636,8 @@ class CollisionEditorWindow(QMainWindow):
             (0.0, self.viewport.overeof_preview_offset, 0.0), 0.0,
             self._fx_unit_radius(), transform=self._fx_unit_transform(),
             overeof=self.project.overeof if self.project.overeof_enabled else 0.,
-            scale=scale, euler=euler, model_diameter=self._fx_model_diameter(scale))
+            scale=scale, euler=euler,
+            )
         self._fx_update_watcher()
         definition = (self._active_script_path, self._active_script_kind,
                       self._active_script_id)

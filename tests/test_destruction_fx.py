@@ -560,7 +560,7 @@ def test_decal_edge_fade_clears_the_corners_and_keeps_the_center():
 
 DECAL_PROFILES = fx.decal_profiles_from_text(
     "new_decal 1\n    texture = Interface/GroundDecals/impact_01.png\n"
-    "    size_by_model_% = 10_20\n    duration = permanent\nend\n")
+    "    duration = permanent\nend\n")
 
 DECAL_WEAPON = (
     "new_weapon 9\n"
@@ -574,7 +574,7 @@ def test_hit_unit_preview_also_shows_the_weapon_ground_decal():
     document = fx.extract_fx_document(
         DECAL_WEAPON, 0, DECAL_WEAPON.count("\n") - 1)
     unit = fx.UnitPhases(normal=fx.VisualRef(60), dead=fx.VisualRef(61),
-                         weapon=True, ground_decal_id=1, model_diameter=100.0)
+                         weapon=True, ground_decal_id=1, decal_size=(100.0,100.0))
     on_unit = fx.PreviewSimulation(document, fx.CONTEXT_WEAPON,
                                    fx.WEAPON_HIT_UNIT, unit=unit,
                                    decals=DECAL_PROFILES)
