@@ -715,7 +715,7 @@ def test_fx_auto_reload_handles_atomic_script_save_and_texture_update(app, tmp_p
     assert image.save(str(texture))
     # The decal comes from a reusable new_decal profile linked by ground_decal_id.
     text = UNIT.replace('    name = Weasel\n', '    name = Weasel\n    ground_decal_id = 3\n') + (
-        'new_decal 3\n    texture = Data/Textures/impact.png\n    size_by_model_% = 100\n'
+        'new_decal 3\n    texture = Data/Textures/impact.png\n    size_reduction_by_explosion_% = 0\n'
         '    duration = 1000\nend\n')
     script = script_dir / 'Vehicles.cfg'
     script.write_text(text, encoding='utf-8')

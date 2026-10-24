@@ -14,7 +14,7 @@ def _spec(profile_body: str) -> fx.FxSpec:
     return fx.decal_profiles_from_text(f"new_decal 1\n{profile_body}end\n")[1].spec
 
 
-DECAL = "    size_by_model_% = 100\n    duration = permanent\n"
+DECAL = "    duration = permanent\n"
 
 PROFILE = (
     "new_decal 1\n" + DECAL +
@@ -34,17 +34,16 @@ def test_hash_matches_the_engine_bit_for_bit():
 
 
 ENGINE_PUFFS = {
-    # (slot, age): (x, y, z, size, alpha, phase, shade) or None when the slot is off
-    (0, 1000): (-19.70844, -17.93864, -21.93082, 17.48323, 0.66790, 0.08787, 0.91781),
-    (5, 1000): (-25.33253, -142.01463, 37.73175, 29.98936, 0.14789, 0.85211, 0.94771),
+    (0, 1000): (-19.7084446, -17.9386444, -21.9308243, 30.2423496, 0.6679048, 0.0878696, 0.9178073),
+    (5, 1000): (-25.3325291, -142.0146332, 37.7317543, 64.6698074, 0.1478935, 0.8521065, 0.9477074),
     (17, 1000): None,
-    (0, 7000): (0.29065, -43.45150, 44.04598, 33.88243, 0.70719, 0.29281, 0.86036),
-    (5, 7000): (-28.90949, -133.56656, 9.22390, 58.08822, 0.20121, 0.79879, 1.08121),
-    (17, 7000): (3.21460, -43.12204, 42.79415, 30.43523, 0.70527, 0.29473, 0.99306),
-    (0, 31000): (28.72028, -21.01558, -7.45842, 21.05286, 0.83259, 0.11259, 1.02907),
-    (5, 31000): (-23.60769, -99.77426, 47.54117, 33.44664, 0.41448, 0.58552, 1.11525),
-    (17, 31000): (10.50184, -30.32071, 3.52445, 26.86207, 0.80972, 0.19028, 0.93785),
-    (0, 58000): (-8.64806, -73.57973, 51.58511, 23.21131, 0.46517, 0.53483, 0.91814),
+    (0, 7000): (0.2906466, -43.4514999, 44.0459824, 49.2587814, 0.7071867, 0.2928133, 0.8603628),
+    (5, 7000): (-28.9094887, -133.5665588, 9.2239017, 83.99646, 0.2012111, 0.7987889, 1.081212),
+    (17, 7000): (3.2145996, -43.122036, 42.7941475, 46.7361603, 0.7052712, 0.2947288, 0.9930639),
+    (0, 31000): (28.7202759, -21.0155754, -7.4584165, 33.7296677, 0.8325899, 0.1125865, 1.0290742),
+    (5, 31000): (-23.6076889, -99.7742615, 47.541172, 58.525341, 0.4144816, 0.5855184, 1.1152503),
+    (17, 31000): (10.5018387, -30.3207054, 3.5244522, 40.6329651, 0.8097205, 0.1902795, 0.9378468),
+    (0, 58000): (-8.6480608, -73.5797272, 51.5851097, 49.1875954, 0.465168, 0.534832, 0.9181426),
     (5, 58000): None,
     (17, 58000): None,
 }
@@ -53,7 +52,7 @@ ENGINE_PUFFS = {
 def test_puffs_match_the_engine_reference_values():
     spec = ds.SmokeSpec(enabled=True)
     count = ds.scaled_count(spec.count[1], 100.0)
-    assert count == 40
+    assert count == 50
     for (slot, age), expected in ENGINE_PUFFS.items():
         puff = ds.evaluate(spec, 100.0, 0x1234567, count, 60000, slot, age)
         if expected is None:
@@ -171,7 +170,7 @@ def test_smoke_keys_inside_a_begin_fx_are_unknown_keys():
 def _simulation(profile: str = PROFILE, hit=fx.WEAPON_HIT_GROUND):
     document = fx.extract_fx_document("new_weapon 9\nend\n", 0, 1)
     unit = fx.UnitPhases(normal=fx.VisualRef(60), dead=fx.VisualRef(61), weapon=True,
-                         ground_decal_id=1, model_diameter=100.0)
+                         ground_decal_id=1, decal_size=(100.0,100.0))
     return fx.PreviewSimulation(document, fx.CONTEXT_WEAPON, hit, unit=unit,
                                 decals=fx.decal_profiles_from_text(profile))
 
