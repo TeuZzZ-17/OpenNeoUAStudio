@@ -191,14 +191,14 @@ _PARAM_RE = re.compile(
     r"unit_num_guns|unit_act_gun|unit_gun_pos_xyz|unit_gun_dir_xyz|"
     r"unit_gun_type|unit_gun_name|unit_gun_icon|"
     r"coll_num|coll_act|"
-    r"coll_xyz|coll_radius)\s*=\s*(?P<value>[^;#\r\n]+)",
+    r"coll_xyz|coll_radius)\s*=\s*(?P<value>[^;#\\r\\n]+)",
     re.IGNORECASE,
 )
 
 
 _GENERIC_PARAM_RE = re.compile(
     r"^(?P<indent>\s*)(?P<key>[A-Za-z0-9_][A-Za-z0-9_]*)\s*=\s*"
-    r"(?P<value>[^;#\r\n]+)",
+    r"(?P<value>[^;#\\r\\n]+)",
     re.IGNORECASE,
 )
 
@@ -1742,7 +1742,7 @@ def export_collision_text(project: CollisionProject) -> str:
 
 
 def _line_ending(text: str) -> str:
-    return "\r\n" if "\r\n" in text else "\n"
+    return "\\r\\n" if "\\r\\n" in text else "\\n"
 
 
 def _apply_turret_limit_updates(

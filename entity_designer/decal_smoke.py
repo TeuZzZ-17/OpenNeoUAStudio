@@ -13,7 +13,7 @@ from __future__ import annotations
 import math
 from dataclasses import dataclass
 
-MAX_PUFFS = 40
+MAX_PUFFS = 50
 GROUND_LIFT = 2.0            # keeps puffs clear of the decal surface bias
 MIN_PARTICLE_SIZE = 1.0
 
@@ -36,12 +36,13 @@ class SmokeSpec:
     """
 
     enabled: bool = False
+    flame: bool = False
     chance: int = 100
     duration: tuple[int, int] = (20000, 25000)
     fade_in: int = 3000
     fade_out: int = 20000
     count: tuple[int, int] = (10, 30)     # puffs at once on a decal of radius 50, rolled per decal
-    size: tuple[float, float] = (15.0, 35.0)
+    size: tuple[float, float] = (35.0, 50.0)
     growth: float = 3.3                   # final size / initial size
     rise_speed: float = 25.0              # percent of the radius per second
     puff_time: tuple[int, int] = (4000, 7500)
@@ -150,10 +151,11 @@ def evaluate(spec: SmokeSpec, radius: float, seed: int, count: int,
 
     size = max(MIN_PARTICLE_SIZE, base_size * 0.6 * (1.0 + (spec.growth - 1.0) * phase))
     return SmokePuff(
-        offset=(math.cos(angle) * distance + math.cos(wind) * drift,
+        offset=(math.cos(angle) * distance + math.cos(wind) * drift
+                + (math.sin(age * 0.012 + slot_hash % 100) * base_size * 0.15 * phase if spec.flame else 0),
                 -(GROUND_LIFT + 0.05 * radius + rise),
                 math.sin(angle) * distance + math.sin(wind) * drift),
-        size=size,
+        size=max(MIN_PARTICLE_SIZE,size*(1-0.65*phase)) if spec.flame else size,
         alpha=min(1.0, phase / 0.12) * (1.0 - phase) * min(1.0, gate),
         phase=phase,
         shade=0.8 + 0.4 * hash_unit(hash32(cycle_hash, 7, 0)))

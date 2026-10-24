@@ -709,7 +709,7 @@ class FxPreviewViewportMixin:
             if item.kind == "ground_decal":
                 decals.append(item)
                 continue
-            if item.kind == "decal_smoke":
+            if item.kind in ("decal_smoke", "decal_fire"):
                 smokes.append(item)
                 continue
             helper = self._fx_external_for(item)
@@ -917,7 +917,20 @@ class FxPreviewViewportMixin:
             for position, weight in ((0.0, 1.0), (0.4, 0.85), (0.7, 0.45), (1.0, 0.0)):
                 gradient.setColorAt(position, QColor(red, green, blue, int(round(255 * opacity * weight))))
             painter.setBrush(QBrush(gradient))
-            painter.drawEllipse(middle, half, half)
+            if item.kind == "decal_fire":
+                painter.save()
+                painter.setCompositionMode(QPainter.CompositionMode.CompositionMode_Plus)
+                painter.translate(middle)
+                painter.scale(1, max(0.1, item.scale[1] / max(0.001, item.scale[0])))
+                flame_gradient=QRadialGradient(QPointF(0,0),half)
+                flame_gradient.setColorAt(0,QColor(red,green,blue,int(255*opacity)))
+                flame_gradient.setColorAt(0.5,QColor(red,green,blue,int(150*opacity)))
+                flame_gradient.setColorAt(1,QColor(red,green,blue,0))
+                painter.setBrush(QBrush(flame_gradient))
+                painter.drawEllipse(QPointF(0,0),half,half)
+                painter.restore()
+            else:
+                painter.drawEllipse(middle, half, half)
         painter.restore()
 
     def _draw_fx_boxes(self, painter, target, camera) -> None:

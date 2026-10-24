@@ -596,27 +596,6 @@ class CollisionViewport(FxPreviewViewportMixin, AssetViewport):
             transformed[2],
         )
 
-    def owner_model_sphere_diameter(self, owner: str | None, scale) -> float:
-        """Diameter of the bounding sphere of one owner's model, scale applied.
-
-        Same measure as the engine's ``GroundDecalModelDiameter``: the sphere is
-        centered on the middle of the scaled bounding box and reaches the farthest
-        vertex, so the model rotation does not change it. 0 = no geometry.
-        """
-
-        sx, sy, sz = scale
-        points = [
-            (x * sx, y * sy, z * sz)
-            for face, vertices in zip(self._faces, self._model_preview_base_faces)
-            if owner is None or face.owner == owner
-            for x, y, z in vertices
-        ]
-        if not points:
-            return 0.0
-        center = [(min(point[axis] for point in points)
-                   + max(point[axis] for point in points)) / 2.0
-                  for axis in range(3)]
-        return 2.0 * max(math.dist(point, center) for point in points)
 
     def local_scaled_owner_bounds(self, owner: str | None):
         """Return scaled model-space bounds without the visual ground offset.
