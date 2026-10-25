@@ -157,12 +157,12 @@ _SCRIPT_TAB_LABELS = {
     _SCRIPT_TAB_FIRE: "Fire Points",
     _SCRIPT_TAB_GUN: "Gun Points",
     _SCRIPT_TAB_COCKPIT: "Cockpit View",
-    _SCRIPT_TAB_BRIEFING: "Briefing Model Size",
+    _SCRIPT_TAB_BRIEFING: "Briefing Model Settings",
 }
 
 
 _SCRIPT_TAB_MARKER_RE = re.compile(
-    r"^\s*;\s*\[Tab:\s*(Collision|Fire Points|Gun Points|Cockpit View|Briefing Model Size|Briefing Radius)\]\s*$",
+    r"^\s*;\s*\[Tab:\s*(Collision|Fire Points|Gun Points|Cockpit View|Briefing Model Settings|Briefing Model Size|Briefing Radius)\]\s*$",
     re.IGNORECASE,
 )
 
@@ -184,21 +184,21 @@ _HEADER_RE = re.compile(
 
 _PARAM_RE = re.compile(
     r"^(?P<indent>\s*)(?P<key>radius|overeof|fire_x|fire_y|fire_z|"
-    r"num_weapons|briefing_size|cockpit_camera_offset_xyz|"
+    r"num_weapons|briefing_size|briefing_xyz|cockpit_camera_offset_xyz|"
     r"robo_num_guns|robo_act_gun|robo_gun_pos_x|robo_gun_pos_y|"
     r"robo_gun_pos_z|robo_gun_dir_x|robo_gun_dir_y|robo_gun_dir_z|"
     r"robo_gun_type|robo_gun_name|"
     r"unit_num_guns|unit_act_gun|unit_gun_pos_xyz|unit_gun_dir_xyz|"
     r"unit_gun_type|unit_gun_name|unit_gun_icon|"
     r"coll_num|coll_act|"
-    r"coll_xyz|coll_radius)\s*=\s*(?P<value>[^;#\\r\\n]+)",
+    r"coll_xyz|coll_radius)\s*=\s*(?P<value>[^;#\r\n]+)",
     re.IGNORECASE,
 )
 
 
 _GENERIC_PARAM_RE = re.compile(
     r"^(?P<indent>\s*)(?P<key>[A-Za-z0-9_][A-Za-z0-9_]*)\s*=\s*"
-    r"(?P<value>[^;#\\r\\n]+)",
+    r"(?P<value>[^;#\r\n]+)",
     re.IGNORECASE,
 )
 
@@ -579,6 +579,10 @@ class CollisionProject:
     cockpit_camera_offset_z: float = 0.0
     briefing_size_enabled: bool = False
     briefing_size: float = 0.0
+    briefing_xyz_enabled: bool = False
+    briefing_x: float = 0.0
+    briefing_y: float = 0.0
+    briefing_z: float = 0.0
     legacy: CollisionSphere | None = None
     compound: list[CollisionSphere] = field(default_factory=list)
     collision_shape: CollisionShape | None = None
@@ -617,6 +621,8 @@ class CollisionProject:
             self.cockpit_camera_offset_x, self.cockpit_camera_offset_y,
             self.cockpit_camera_offset_z,
             self.briefing_size_enabled, self.briefing_size,
+            self.briefing_xyz_enabled, self.briefing_x, self.briefing_y,
+            self.briefing_z,
             tuple((
                 point.scheme, point.x, point.y, point.z,
                 point.dir_x, point.dir_y, point.dir_z, point.gun_type,
@@ -652,7 +658,9 @@ class CollisionProject:
          self.cockpit_camera_enabled,
          self.cockpit_camera_offset_x, self.cockpit_camera_offset_y,
          self.cockpit_camera_offset_z,
-         self.briefing_size_enabled, self.briefing_size, gun_points, turret_limits,
+         self.briefing_size_enabled, self.briefing_size,
+         self.briefing_xyz_enabled, self.briefing_x, self.briefing_y,
+         self.briefing_z, gun_points, turret_limits,
          legacy, compound, self.collision_shape,
          self.collision_shape_path, self.collision_shape_file_path,
          self.collision_shape_owners,
@@ -792,7 +800,10 @@ def _parameter_rows(lines: list[str], block: ScriptBlock):
         match = _PARAM_RE.match(lines[index])
         if match is None or not code:
             continue
-        raw_value = match.group("value").strip().split()[0]
+        values = match.group("value").strip().split()
+        if not values:
+            continue
+        raw_value = values[0]
         rows.append((
             index, match.group("key").lower(), raw_value,
             match.group("indent"),
@@ -1245,10 +1256,30 @@ def import_briefing_size_block(text: str, block: ScriptBlock) -> tuple[bool, flo
     return value > 0, value
 
 
+def import_briefing_xyz_block(text: str, block: ScriptBlock) -> tuple[bool, float, float, float]:
+    value = (0.0, 0.0, 0.0)
+    for _line, key, raw, _indent in _parameter_rows(text.splitlines(), block):
+        if key != "briefing_xyz":
+            continue
+        try:
+            parts = tuple(float(part) for part in raw.split("_"))
+        except ValueError:
+            continue
+        if len(parts) == 3 and all(math.isfinite(part) and -100000 <= part <= 100000 for part in parts):
+            value = parts
+    return any(value), *value
+
+
 def briefing_size_data_lines(project: CollisionProject) -> list[str]:
     if project.target_category != VEHICLE or not project.briefing_size_enabled:
         return []
     return [f"briefing_size = {int(round(project.briefing_size))}"]
+
+
+def briefing_xyz_data_lines(project: CollisionProject) -> list[str]:
+    if project.target_category != VEHICLE or not project.briefing_xyz_enabled:
+        return []
+    return [f"briefing_xyz = {project.briefing_x:g}_{project.briefing_y:g}_{project.briefing_z:g}"]
 
 
 def import_cockpit_camera_block(
@@ -1288,7 +1319,7 @@ _GUN_POINT_KEYS = {
 
 
 _SCRIPT_TAB_KEYS = {
-    _SCRIPT_TAB_BRIEFING: {"briefing_size"},
+    _SCRIPT_TAB_BRIEFING: {"briefing_size", "briefing_xyz"},
     _SCRIPT_TAB_COLLISION: {
         "radius", "overeof", "coll_num", "coll_act", "collision_shape",
         "coll_xyz", "coll_radius",
@@ -1338,7 +1369,7 @@ _MANAGED_SCRIPT_FAMILIES = (
         "cockpit view",
         frozenset({"cockpit_camera_offset_xyz"}),
         frozenset({"cockpit camera offset", "cockpit view"})),
-    _ManagedScriptFamily("briefing size", frozenset({"briefing_size"})),
+    _ManagedScriptFamily("briefing size", frozenset({"briefing_size", "briefing_xyz"})),
     _ManagedScriptFamily(
         "turret limits", frozenset(_TURRET_LIMIT_KEY_SET),
         frozenset({"turret limits"})),
@@ -1675,6 +1706,7 @@ def collision_data_lines(project: CollisionProject) -> list[str]:
     if project.target_category == VEHICLE and project.overeof_enabled:
         lines.append(f"overeof = {_number(project.overeof)}")
     lines.extend(briefing_size_data_lines(project))
+    lines.extend(briefing_xyz_data_lines(project))
     cockpit_lines = cockpit_camera_data_lines(project)
     if cockpit_lines:
         if lines:
@@ -1742,7 +1774,7 @@ def export_collision_text(project: CollisionProject) -> str:
 
 
 def _line_ending(text: str) -> str:
-    return "\\r\\n" if "\\r\\n" in text else "\\n"
+    return "\r\n" if "\r\n" in text else "\n"
 
 
 def _apply_turret_limit_updates(
@@ -1862,7 +1894,7 @@ def _script_tab_data_lines(
     if group == _SCRIPT_TAB_COCKPIT:
         return cockpit_camera_data_lines(project)
     if group == _SCRIPT_TAB_BRIEFING:
-        return briefing_size_data_lines(project)
+        return briefing_size_data_lines(project) + briefing_xyz_data_lines(project)
     raise CollisionScriptError(f"Gruppo script sconosciuto: {group}")
 
 
@@ -1911,6 +1943,8 @@ def _script_tab_from_marker(line: str) -> str | None:
     if match is None:
         return None
     label = match.group(1).casefold()
+    if label in {'briefing model size', 'briefing radius'}:
+        return _SCRIPT_TAB_BRIEFING
     for group, candidate in _SCRIPT_TAB_LABELS.items():
         if candidate.casefold() == label:
             return group
@@ -2423,9 +2457,9 @@ def plan_script_update(
                 f"coll_radius = {_number(sphere.radius)}",
             ])
     replace_group(radius_rows, legacy_lines, "legacy radius")
-    if "vehicle" in kind and project.briefing_size_enabled:
-        briefing_rows = [row for row in rows if row[1] == "briefing_size"]
-        replace_group(briefing_rows, briefing_size_data_lines(project), "briefing size")
+    if "vehicle" in kind and (project.briefing_size_enabled or project.briefing_xyz_enabled):
+        briefing_rows = [row for row in rows if row[1] in {"briefing_size", "briefing_xyz"}]
+        replace_group(briefing_rows, briefing_size_data_lines(project) + briefing_xyz_data_lines(project), "briefing size")
     # Overeof is a separate vanilla ground-alignment parameter, not a
     # collision sphere.  Preserve existing script data unless the user has
     # explicitly enabled management of it in a vehicle project.
@@ -2548,6 +2582,9 @@ def validate_project(
     if project.target_category == VEHICLE and project.briefing_size_enabled:
         if not math.isfinite(project.briefing_size) or not 1 <= project.briefing_size <= 10000:
             errors.append("Briefing Model Size deve essere tra 1 e 10000.")
+    if project.target_category == VEHICLE and project.briefing_xyz_enabled:
+        if not all(math.isfinite(value) and -100000 <= value <= 100000 for value in (project.briefing_x, project.briefing_y, project.briefing_z)):
+            errors.append("Briefing XYZ deve restare tra -100000 e 100000.")
     if project.target_category == VEHICLE and project.fire_points_enabled:
         if not all(math.isfinite(value) for value in (
                 project.fire_x, project.fire_y, project.fire_z)):

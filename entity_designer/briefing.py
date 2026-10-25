@@ -3,6 +3,7 @@
 import math
 import re
 import time
+from contextlib import ExitStack
 from pathlib import Path
 from functools import lru_cache
 
@@ -10,7 +11,7 @@ from PySide6.QtCore import QRectF, QSize, Qt, QSignalBlocker, QTimer
 from PySide6.QtGui import QImage, QColor
 from PySide6.QtWidgets import (
     QCheckBox, QComboBox, QFileDialog, QGroupBox, QLabel, QPushButton,
-    QSizePolicy, QSlider, QSpinBox, QVBoxLayout, QWidget,
+    QSizePolicy, QSlider, QSpinBox, QDoubleSpinBox, QHBoxLayout, QVBoxLayout, QWidget,
 )
 
 from map_editor import bootstrap
@@ -105,12 +106,19 @@ class BriefingPreview(AcceleratedWidget):
                 rz = y * math.sin(pitch) + rz * math.cos(pitch)
                 distance = self.radius * 7.0
                 left, top, right, bottom = self.rectangle
-                return (rx + (left + right) * .5 * distance,
-                        -ry - (top + bottom) * .5 * distance,
-                        4.0 - (rz + distance))
+                offset = self.editor.project
+                ox = offset.briefing_x if offset.briefing_xyz_enabled else 0.0
+                oy = offset.briefing_y if offset.briefing_xyz_enabled else 0.0
+                oz = offset.briefing_z if offset.briefing_xyz_enabled else 0.0
+                # Keep the projected position independent of the size camera distance.
+                base_radius = offset.legacy.radius if offset.legacy is not None else 25.0
+                position_scale = self.radius / max(.001, base_radius)
+                return (rx + (left + right) * .5 * distance + ox * position_scale,
+                        -ry - (top + bottom) * .5 * distance - oy * position_scale,
+                        4.0 - (rz + distance + oz * position_scale))
 
             def _indexed_view_cache_signature(renderer, width, height, camera):
-                return super()._indexed_view_cache_signature(width, height, camera) + (self.angle, self.radius, self.rectangle)
+                return super()._indexed_view_cache_signature(width, height, camera) + (self.angle, self.radius, self.rectangle, self.editor.project.briefing_xyz_enabled, self.editor.project.briefing_x, self.editor.project.briefing_y, self.editor.project.briefing_z)
 
         self.renderer = PreviewRenderer(self)
         self.renderer.hide()
@@ -199,7 +207,7 @@ class BriefingPreview(AcceleratedWidget):
         if self.background.isNull() or self.error:
             painter.setPen(QColor("#e6c587"))
             painter.drawText(self.rect().adjusted(15, 15, -15, -15), Qt.TextFlag.TextWordWrap,
-                self.error or "Choose the installed Brief / Debrief background in the Briefing Model Size tab.")
+                self.error or "Choose the installed Brief / Debrief background in the Briefing Model Settings tab.")
 
 
 class BriefingControls(QWidget):
@@ -209,7 +217,7 @@ class BriefingControls(QWidget):
         layout = QVBoxLayout(self)
         layout.setContentsMargins(2, 3, 2, 3)
         layout.setSpacing(3)
-        group = QGroupBox("Briefing Model Size")
+        group = QGroupBox("Briefing Model Settings")
         group.setSizePolicy(
             QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
         group_layout = QVBoxLayout(group)
@@ -232,6 +240,53 @@ class BriefingControls(QWidget):
         group_layout.addWidget(self.enabled)
         group_layout.addWidget(self.value)
         group_layout.addWidget(self.slider)
+        xyz_label = QLabel("Position offset (camera axes; x+ right, y+ down, z+ away)")
+        xyz_label.setWordWrap(True)
+        group_layout.addWidget(xyz_label)
+        self.xyz_enabled = QCheckBox("Include briefing_xyz")
+        self.xyz_enabled.toggled.connect(self._xyz_enabled)
+        group_layout.addWidget(self.xyz_enabled)
+        self.xyz_step = QDoubleSpinBox()
+        self.xyz_step.setRange(0.01, 10000.0)
+        self.xyz_step.setValue(1.0)
+        self.xyz_step.setSingleStep(0.5)
+        self.xyz_step.setDecimals(2)
+        self.xyz_step.setSuffix(" units")
+        step_label = QLabel("Movement step")
+        group_layout.addWidget(step_label)
+        group_layout.addWidget(self.xyz_step)
+        self.xyz_step_slider = QSlider(Qt.Orientation.Horizontal)
+        self.xyz_step_slider.setRange(0, 600)
+        self.xyz_step_slider.setValue(200)
+        self.xyz_step_slider.setToolTip("Arrow movement step: 0.01 to 10000 model units")
+        self.xyz_step_slider.valueChanged.connect(self._step_slider)
+        self.xyz_step.valueChanged.connect(self._step_value)
+        group_layout.addWidget(self.xyz_step_slider)
+        self.xyz_values = {}
+        row = QHBoxLayout()
+        for axis, title in (("x", "X"), ("y", "Y"), ("z", "Z")):
+            spin = QDoubleSpinBox()
+            spin.setRange(-100000.0, 100000.0)
+            spin.setDecimals(2)
+            spin.setSingleStep(1.0)
+            spin.setPrefix(f"{title}: ")
+            self.xyz_values[axis] = spin
+            row.addWidget(spin)
+            spin.valueChanged.connect(lambda value, key=axis: self._xyz_value(key, value))
+        group_layout.addLayout(row)
+        self.xyz_buttons = {}
+        arrows = QHBoxLayout()
+        for axis, title, sign in (("y", "↑", -1), ("y", "↓", 1), ("x", "←", -1), ("x", "→", 1)):
+            button = QPushButton(title)
+            button.setToolTip(f"Move {axis} by the current step")
+            button.setAutoRepeat(True)
+            self.xyz_buttons[(axis, sign)] = button
+            button.clicked.connect(lambda _checked=False, key=axis, amount=sign: self._nudge(key, amount))
+            arrows.addWidget(button)
+        reset = QPushButton("Reset position")
+        reset.clicked.connect(self._reset_xyz)
+        arrows.addWidget(reset)
+        group_layout.addLayout(arrows)
         self.mode = QComboBox()
         self.mode.addItem("Brief", "brief")
         self.mode.addItem("Debrief", "debrief")
@@ -260,8 +315,61 @@ class BriefingControls(QWidget):
                 project.legacy.radius if project.legacy else 25.0)
             self.value.setValue(size)
             self.slider.setValue(briefing_size_to_slider(size))
+        with ExitStack() as blockers:
+            blockers.enter_context(QSignalBlocker(self.xyz_enabled))
+            for spin in self.xyz_values.values():
+                blockers.enter_context(QSignalBlocker(spin))
+            self.xyz_enabled.setChecked(project.briefing_xyz_enabled)
+            for axis, value in (("x", project.briefing_x), ("y", project.briefing_y), ("z", project.briefing_z)):
+                self.xyz_values[axis].setValue(value)
         self.setEnabled(project.target_category == "vehicle")
-        self.output.setText(f"briefing_size = {round(project.briefing_size)}" if project.briefing_size_enabled else "Uses the vehicle's radius.")
+        size_text = f"briefing_size = {round(project.briefing_size)}" if project.briefing_size_enabled else "Uses the vehicle's radius."
+        position_text = (f"briefing_xyz = {project.briefing_x:g}_{project.briefing_y:g}_{project.briefing_z:g}"
+                         if project.briefing_xyz_enabled else "Classic model position.")
+        self.output.setText(size_text + "\n" + position_text)
+
+    def _xyz_value(self, axis, value):
+        if self.editor._syncing:
+            return
+        self.editor._push_undo()
+        setattr(self.editor.project, f"briefing_{axis}", value)
+        self.editor.project.briefing_xyz_enabled = True
+        with QSignalBlocker(self.xyz_enabled):
+            self.xyz_enabled.setChecked(True)
+        self.editor._set_modified()
+        self.editor.briefing_preview.refresh()
+
+    def _xyz_enabled(self, enabled):
+        if self.editor._syncing:
+            return
+        self.editor._push_undo()
+        self.editor.project.briefing_xyz_enabled = enabled
+        self.editor._set_modified()
+        self.editor.briefing_preview.refresh()
+
+    def _nudge(self, axis, amount):
+        self.xyz_values[axis].setValue(self.xyz_values[axis].value() + amount * self.xyz_step.value())
+
+    def _reset_xyz(self):
+        self.editor._push_undo()
+        self.editor.project.briefing_xyz_enabled = False
+        with ExitStack() as blockers:
+            blockers.enter_context(QSignalBlocker(self.xyz_enabled))
+            self.xyz_enabled.setChecked(False)
+            for axis, spin in self.xyz_values.items():
+                blockers.enter_context(QSignalBlocker(spin))
+                spin.setValue(0.0)
+                setattr(self.editor.project, f"briefing_{axis}", 0.0)
+        self.editor._set_modified()
+        self.editor.briefing_preview.refresh()
+
+    def _step_slider(self, value):
+        with QSignalBlocker(self.xyz_step):
+            self.xyz_step.setValue(10 ** (value / 100.0 - 2))
+
+    def _step_value(self, value):
+        with QSignalBlocker(self.xyz_step_slider):
+            self.xyz_step_slider.setValue(round((math.log10(max(.01, value)) + 2) * 100))
 
     def _enabled(self, enabled):
         if self.editor._syncing:
