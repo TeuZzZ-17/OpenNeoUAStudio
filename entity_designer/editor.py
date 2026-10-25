@@ -122,6 +122,7 @@ from entity_designer.script_model import (
     GUN_POINT_TABLE_GROWTH,
     GunPoint,
     import_briefing_size_block,
+    import_briefing_xyz_block,
     import_cockpit_camera_block,
     import_collision_block,
     import_collision_shape_reference,
@@ -830,7 +831,7 @@ class CollisionEditorWindow(QMainWindow):
             self.cockpit_tab, "Cockpit View")
         from entity_designer.briefing import BriefingControls, BriefingPreview
         self.briefing_tab = BriefingControls(self)
-        self.briefing_tab_index = self.properties_tabs.addTab(self.briefing_tab, "Briefing Model Size")
+        self.briefing_tab_index = self.properties_tabs.addTab(self.briefing_tab, "Briefing Model Settings")
         self.briefing_preview = BriefingPreview(self)
         self.renderer_badge.add_viewport(self.briefing_preview)
         self.viewport_layout.addWidget(self.briefing_preview, 0, 0)
@@ -2622,6 +2623,10 @@ class CollisionEditorWindow(QMainWindow):
             cockpit_camera_offset_z=cockpit_z,
             briefing_size_enabled=import_briefing_size_block(text, block)[0] if target_category == VEHICLE else False,
             briefing_size=import_briefing_size_block(text, block)[1] if target_category == VEHICLE else 0.0,
+            briefing_xyz_enabled=import_briefing_xyz_block(text, block)[0] if target_category == VEHICLE else False,
+            briefing_x=import_briefing_xyz_block(text, block)[1] if target_category == VEHICLE else 0.0,
+            briefing_y=import_briefing_xyz_block(text, block)[2] if target_category == VEHICLE else 0.0,
+            briefing_z=import_briefing_xyz_block(text, block)[3] if target_category == VEHICLE else 0.0,
             legacy=legacy,
             compound=compounds,
             collision_shape=shape,
@@ -6207,6 +6212,8 @@ class CollisionEditorWindow(QMainWindow):
                 bool(project.briefing_size_enabled),
                 int(round(project.briefing_size))
                 if project.briefing_size_enabled else None,
+                bool(project.briefing_xyz_enabled),
+                project.briefing_x, project.briefing_y, project.briefing_z,
             )
         if group == _SCRIPT_TAB_COCKPIT:
             if not project.cockpit_camera_enabled:
@@ -6292,6 +6299,8 @@ class CollisionEditorWindow(QMainWindow):
                     (baseline.briefing_size_enabled,
                      baseline.briefing_size) = import_briefing_size_block(
                         text, block)
+                    (baseline.briefing_xyz_enabled, baseline.briefing_x,
+                     baseline.briefing_y, baseline.briefing_z) = import_briefing_xyz_block(text, block)
                 if _SCRIPT_TAB_COCKPIT in groups:
                     (baseline.cockpit_camera_enabled,
                      baseline.cockpit_camera_offset_x,
@@ -6394,7 +6403,9 @@ class CollisionEditorWindow(QMainWindow):
                     project.turret_limits.items())),
             )
         if tab_index == self.briefing_tab_index:
-            return project.briefing_size_enabled, project.briefing_size
+            return (project.briefing_size_enabled, project.briefing_size,
+                    project.briefing_xyz_enabled, project.briefing_x,
+                    project.briefing_y, project.briefing_z)
         if tab_index == self.cockpit_tab_index:
             return (
                 project.cockpit_camera_enabled,
@@ -6485,6 +6496,10 @@ class CollisionEditorWindow(QMainWindow):
         elif tab_index == self.briefing_tab_index:
             self.project.briefing_size_enabled = baseline.briefing_size_enabled
             self.project.briefing_size = baseline.briefing_size
+            self.project.briefing_xyz_enabled = baseline.briefing_xyz_enabled
+            self.project.briefing_x = baseline.briefing_x
+            self.project.briefing_y = baseline.briefing_y
+            self.project.briefing_z = baseline.briefing_z
         elif tab_index == self.cockpit_tab_index:
             self.project.cockpit_camera_enabled = (
                 baseline.cockpit_camera_enabled)
@@ -7879,6 +7894,8 @@ class CollisionEditorWindow(QMainWindow):
         vehicle_block = self.project.target_category == VEHICLE
         self.project.briefing_size_enabled, self.project.briefing_size = (
             import_briefing_size_block(text, block) if vehicle_block else (False, 0.0))
+        xyz = import_briefing_xyz_block(text, block) if vehicle_block else (False, 0.0, 0.0, 0.0)
+        self.project.briefing_xyz_enabled, self.project.briefing_x, self.project.briefing_y, self.project.briefing_z = xyz
         self.project.fire_points_enabled = vehicle_block and fire_enabled
         self.project.fire_x = fire_x if vehicle_block else 0.0
         self.project.fire_y = fire_y if vehicle_block else 0.0
