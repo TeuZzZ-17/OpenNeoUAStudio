@@ -137,7 +137,7 @@ def new_gem() -> dict:
 
 def new_lvl_info() -> dict:
     return {'title': "Untitled Map", 'sky': "objects/x7.bas", 'mbmap': "",
-            'dbmap': "", 'music': "None", 'movie': "None"}
+            'dbmap': "", 'briefing_text': "", 'music': "None", 'movie': "None"}
 
 
 def new_tech() -> dict:
@@ -373,7 +373,7 @@ class LdfDocument:
     def _copy_state(state: dict) -> dict:
         # Grid cells are immutable int/string values. Copy rows in C instead of
         # walking hundreds of thousands of scalar values in Python on each click.
-        result = copy.deepcopy({k: v for k, v in state.items() if k != 'grids'})
+        result = copy.deepcopy({k: v for k, v in state.items() if k not in ('grids', '_disk_versions')})
         result['grids'] = {key: [row[:] for row in grid] for key, grid in state['grids'].items()}
         return result
 
@@ -566,7 +566,15 @@ def _parse_tokens(text: str) -> list[str]:
 
 def loads_ldf(raw_text: str, encoding: str = DEFAULT_LDF_ENCODING) -> LdfDocument:
     newline = "\r\n" if "\r\n" in raw_text else "\n"
-    script, parse_text = split_user_script_block(raw_text)
+    briefing_text = ""
+    def read_briefing(match):
+        nonlocal briefing_text
+        lines = match.group(1).replace('\r\n', '\n').splitlines()
+        briefing_text = '\n'.join(line[1:] if line.startswith('\\') else line for line in lines)
+        return ''
+    parse_text = re.sub(r'(?im)^[ \t]*begin_briefing_text[ \t]*\r?\n(.*?)^[ \t]*end[ \t]*\r?$',
+                        read_briefing, raw_text, flags=re.DOTALL)
+    script, parse_text = split_user_script_block(parse_text)
     from .locations import parse_location_blocks
     locations, parse_text = parse_location_blocks(parse_text)
     raw_title = _level_line_value(parse_text, 'title_default')
@@ -595,6 +603,7 @@ def loads_ldf(raw_text: str, encoding: str = DEFAULT_LDF_ENCODING) -> LdfDocumen
     doc.script_content = script
     doc.locations = locations
     doc.lvl_info = new_lvl_info()
+    doc.lvl_info["briefing_text"] = briefing_text
     doc.tech = new_tech()
     doc.encoding, doc.newline = encoding, newline
     set_match = re.search(r'set\s*=\s*(\d+)', parse_text, re.IGNORECASE)
@@ -909,13 +918,23 @@ def loads_ldf(raw_text: str, encoding: str = DEFAULT_LDF_ENCODING) -> LdfDocumen
         doc.lvl_info['title'] = raw_title
     doc.custom_tech_names.update(tech_names)
     doc.player_owner = doc.host_stations[0]['owner'] if doc.host_stations else 1
+    from .ldf_source import SourceRecord, record_orders
+    doc.squads = [SourceRecord(value, ('squad',i)) for i,value in enumerate(doc.squads)]
+    doc.host_stations = [SourceRecord(value, ('host',i)) for i,value in enumerate(doc.host_stations)]
+    doc._source_orders = record_orders(doc)
+    doc._source_text = raw_text
+    doc._source_generated = _dumps_generated(doc)
+    doc._source_script = doc.script_content
     return doc
 
 
 def load_ldf(path) -> LdfDocument:
     with open(path, "rb") as fh:
-        text, encoding = decode_ldf_bytes(fh.read())
-    return loads_ldf(text, encoding)
+        payload = fh.read()
+        text, encoding = decode_ldf_bytes(payload)
+    doc = loads_ldf(text, encoding)
+    doc._disk_versions = {os.path.normcase(os.path.abspath(path)): payload}
+    return doc
 
 
 def _ldf_position(value) -> str:
@@ -925,6 +944,17 @@ def _ldf_position(value) -> str:
 
 
 def dumps_ldf(doc: LdfDocument, defs: dict | None = None) -> str:
+    generated = _dumps_generated(doc, defs)
+    if not hasattr(doc, '_source_text'):
+        return generated
+    from .ldf_source import patch_source, record_orders
+    current = record_orders(doc)
+    orders = {key: (old, current[key]) for key,old in doc._source_orders.items()}
+    return patch_source(doc._source_generated, generated, doc._source_text,
+                        doc._source_script, doc.script_content, orders)
+
+
+def _dumps_generated(doc: LdfDocument, defs: dict | None = None) -> str:
     defs = defs or {}
     veh_names, blg_names = defs.get('veh', {}), defs.get('blg', {})
     host_names = defs.get('host', {})
@@ -966,6 +996,13 @@ def dumps_ldf(doc: LdfDocument, defs: dict | None = None) -> str:
             w("   size_y        = 480")
             w("end")
             w(sep)
+    briefing_text = str(info.get('briefing_text', '')).replace('\r\n', '\n').replace('\r', '\n')
+    if briefing_text.strip():
+        w('begin_briefing_text')
+        for line in briefing_text.split('\n'):
+            w('\\' + line if line.strip().lower() == 'end' or line.startswith('\\') else line)
+        w('end')
+        w(sep)
     from .locations import location_lines
     for line in location_lines(doc.locations, _ldf_position):
         w(line)
@@ -1115,5 +1152,18 @@ def dumps_ldf(doc: LdfDocument, defs: dict | None = None) -> str:
 
 
 def save_ldf(doc: LdfDocument, path, defs: dict | None = None) -> None:
+    target = os.path.normcase(os.path.abspath(path))
+    versions = getattr(doc, '_disk_versions', {})
+    if target in versions:
+        try:
+            with open(path, 'rb') as stream:
+                current = stream.read()
+        except FileNotFoundError:
+            current = None
+        if current != versions[target]:
+            raise ValueError('The level changed on disk after it was opened or saved. '
+                             'Reopen it to preserve external edits, or use Save As for a separate copy.')
     payload = dumps_ldf(doc, defs).encode(doc.encoding, errors="strict")
     atomic_write_bytes(str(path), payload)
+    versions[target] = payload
+    doc._disk_versions = versions

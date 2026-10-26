@@ -303,3 +303,23 @@ def test_location_comments_cp1252_and_invalid_sound_components():
     for sound in ('Data/', 'Data/./a.wav', 'Data//a.wav', 'Data/a.wav/'):
         with pytest.raises(ValueError):
             validate_location(area() | {'sound': sound})
+
+
+def test_location_overlay_visible_outside_tab_and_subtle(win, monkeypatch):
+    from PySide6.QtCore import QPointF
+    from PySide6.QtGui import QColor, QImage, QPainter
+    tools = win.location_tools
+    win.doc.locations = [area() | {'color': 'yellow'}]
+    tools.selected = 0
+    win.palette_tabs.setCurrentIndex(0)
+    screen = dict(zip(area()['points'], [QPointF(20, 30), QPointF(140, 30), QPointF(140, 140), QPointF(20, 140)]))
+    monkeypatch.setattr(tools, '_screen', lambda point: screen[point])
+    image = QImage(180, 180, QImage.Format.Format_ARGB32)
+    image.fill(QColor(20, 20, 20))
+    painter = QPainter(image)
+    tools.draw(painter)
+    painter.end()
+    center = image.pixelColor(80, 80)
+    assert center.red() > 20
+    assert center.red() < 35
+    assert not tools.active()

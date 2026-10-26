@@ -705,13 +705,60 @@ def generate_collision_shape(
             "Selected part(s) contain no non-degenerate triangles: "
             + ", ".join(empty_owners))
     warnings = list(_source_topology_warnings(prepared))
-    from entity_designer.mesh_parts import prepare_component_mesh
+    from entity_designer.mesh_parts import (
+        prepare_component_mesh, split_triangle_components)
 
     prepared_for_bake = []
+    planar_component_groups = {}
     for owner, triangles in prepared:
         repaired, repair_warnings = prepare_component_mesh(triangles)
+        components = split_triangle_components([(owner, repaired)])
+        model_owner, separator, component_id = owner.rpartition("#component:")
+        if (separator and component_id and components
+                and all(component.planar for component in components)):
+            planar_component_groups.setdefault(model_owner, []).append(
+                (owner, list(repaired), repair_warnings))
+            continue
         prepared_for_bake.append((owner, list(repaired)))
         warnings.extend(f"{owner}: {warning}" for warning in repair_warnings)
+    for model_owner, component_group in planar_component_groups.items():
+        if len(component_group) == 1:
+            owner, triangles, repair_warnings = component_group[0]
+            prepared_for_bake.append((owner, triangles))
+            warnings.extend(
+                f"{owner}: {warning}" for warning in repair_warnings)
+            continue
+        points = sorted({
+            point for _owner, triangles, _repair_warnings in component_group
+            for triangle in triangles for point in triangle
+        })
+        extent = max(
+            max(point[axis] for point in points)
+            - min(point[axis] for point in points)
+            for axis in range(3)
+        )
+        tolerance = max(1e-10, extent * 1e-7)
+        point_array = np.asarray(points, dtype=np.float64)
+        if np.linalg.matrix_rank(point_array - point_array[0], tol=tolerance) < 3:
+            raise ValueError(
+                f"{model_owner}: selected planar components do not define "
+                "a three-dimensional collision volume.")
+        # Disconnected flat render pieces can together describe a 3D object.
+        # Keep that union intact so CoACD sees its volume instead of three sheets.
+        group_ids = "\0".join(sorted(
+            owner for owner, _triangles, _repair_warnings in component_group))
+        group_digest = hashlib.sha256(group_ids.encode("utf-8")).hexdigest()[:16]
+        group_owner = (
+            f"{model_owner}#planar-group:{len(component_group)}:{group_digest}")
+        group_triangles = [
+            triangle
+            for _owner, triangles, _repair_warnings in component_group
+            for triangle in triangles
+        ]
+        prepared_for_bake.append((group_owner, group_triangles))
+        warnings.append(
+            f"{model_owner}: Combined {len(component_group)} planar "
+            "components into one collision input.")
     prepared = prepared_for_bake
     if quality not in {"low", "normal", "high"}:
         raise ValueError(f"Unsupported collision-shape quality: {quality}.")

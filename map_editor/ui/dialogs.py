@@ -8,7 +8,7 @@ from PySide6.QtCore import QEvent, QObject, QRunnable, QSize, Qt, QThreadPool, Q
 from PySide6.QtGui import QIcon, QImage, QPixmap
 from PySide6.QtWidgets import (QCheckBox, QComboBox, QDialog, QDialogButtonBox,
                                QFormLayout, QHBoxLayout, QLabel,
-                               QLineEdit, QListWidget, QListWidgetItem, QMessageBox, QPushButton, QSpinBox,
+                               QLineEdit, QPlainTextEdit, QListWidget, QListWidgetItem, QMessageBox, QPushButton, QSpinBox,
                                QStyle, QVBoxLayout, QWidget)
 
 from .. import bootstrap
@@ -175,6 +175,28 @@ class LevelInfoPanel(QWidget):
         title_form.addRow("Level Title", self.title_edit)
         layout.addLayout(title_form)
         self.title_edit.editingFinished.connect(self._emit_values_changed)
+
+        briefing_header = QHBoxLayout()
+        briefing_header.setSpacing(6)
+        briefing_header.addWidget(QLabel("Briefing text"))
+        self.briefing_marker = QLabel()
+        self.briefing_marker.setObjectName("briefingCompatibilityMarker")
+        self.briefing_marker.setFixedSize(8, 8)
+        self.briefing_marker.setStyleSheet(
+            "QLabel#briefingCompatibilityMarker { background:#e75f60; border-radius:4px; }")
+        self.briefing_marker.setToolTip("OpenNeoUA only: optional briefing stored in the level. Overrides the language file.")
+        briefing_header.addWidget(self.briefing_marker)
+        briefing_header.addStretch()
+        layout.addLayout(briefing_header)
+        self.briefing_edit = QPlainTextEdit()
+        self.briefing_edit.setPlaceholderText("Optional mission briefing…\nLeave empty to use the language file.")
+        self.briefing_edit.setMinimumHeight(120)
+        self.briefing_edit.setMaximumHeight(190)
+        self.briefing_edit.setTabChangesFocus(True)
+        self.briefing_edit.setPlainText(str(doc.lvl_info.get("briefing_text", "")))
+        self.briefing_edit.setToolTip(self.briefing_marker.toolTip())
+        self.briefing_edit.textChanged.connect(self._emit_values_changed)
+        layout.addWidget(self.briefing_edit)
 
         self.art_boxes = {}
         self.art_previews = {}
@@ -545,6 +567,7 @@ class LevelInfoPanel(QWidget):
 
     def values(self) -> dict:
         return {"title": self.title_edit.text().strip(), "sky": self.sky_value,
+                "briefing_text": self.briefing_edit.toPlainText(),
                 "mbmap": self._art_value("mbmap"),
                 "dbmap": self._art_value("dbmap"),
                 "music": self.music_value(),

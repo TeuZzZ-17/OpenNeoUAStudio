@@ -3,7 +3,7 @@ import copy
 from pathlib import Path
 
 from PySide6.QtCore import QObject, QEvent, QPointF, QRectF, QSize, Qt, QTimer, QElapsedTimer, QUrl
-from PySide6.QtGui import QColor, QIcon, QPainter, QPalette, QPen, QPixmap, QPolygonF, QFont, QFontDatabase
+from PySide6.QtGui import QColor, QIcon, QPainter, QPalette, QPen, QPixmap, QPolygonF, QFont, QFontDatabase, QPainterPath
 from PySide6.QtWidgets import (QApplication, QComboBox, QStyledItemDelegate, QStyle,
     QStyleOptionViewItem, QWidget, QVBoxLayout, QHBoxLayout, QFormLayout, QListWidget,
     QListWidgetItem, QLineEdit, QSpinBox, QPushButton, QLabel, QFileDialog, QDialog)
@@ -518,9 +518,28 @@ class LocationTools(QObject):
         rgb = LOCATION_COLORS.get(location_color(value), LOCATION_COLORS[DEFAULT_LOCATION_COLOR])
         return QColor(*rgb)
 
+    def _polygon(self, points):
+        view = self.window.view
+        if not view.camera.perspective:
+            return QPolygonF([self._screen(p) for p in points])
+        vertices = []
+        for x, z in points:
+            col, row = int(x // 1200), int(-z // 1200)
+            y = view.terrain.cell_y(col, row) if 0 <= col < view.terrain.width and 0 <= row < view.terrain.height else 0
+            vertices.append(view.camera.to_camera((x, y - 4, z)))
+        # Clip against the near plane before projecting; never draw behind-camera polygons.
+        clipped = []
+        for a, b in zip(vertices, vertices[1:] + vertices[:1]):
+            inside_a, inside_b = a[2] < 3.99, b[2] < 3.99
+            if inside_a:
+                clipped.append(a)
+            if inside_a != inside_b:
+                t = (3.99 - a[2]) / (b[2] - a[2])
+                clipped.append(tuple(a[i] + t * (b[i] - a[i]) for i in range(3)))
+        return QPolygonF([QPointF(*view.camera.to_screen(p)) for p in clipped])
+
     def draw(self, painter):
-        if not self.active() or self.window.view.camera.perspective:
-            return
+        editing = self.active() and not self.window.view.camera.perspective
         painter.save()
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
         for index, value in enumerate(self.window.doc.locations):
@@ -528,38 +547,41 @@ class LocationTools(QObject):
                 continue
             if self.drag is not None and index == self.selected:
                 value = self.drag[1]
-            polygon = QPolygonF([self._screen(p) for p in value['points']])
+            polygon = self._polygon(value['points'])
             base = self._color(value)
-            selected = index == self.selected
+            selected = editing and index == self.selected
             line = QColor(base)
-            if not selected:
-                line.setAlpha(205)
+            line.setAlpha(230 if selected else 220)
             fill = QColor(base)
-            fill.setAlpha(42 if selected else 22)
-            outline = QColor(8, 12, 16, 210 if selected else 150)
-            painter.setPen(QPen(outline, 4 if selected else 2))
+            fill.setAlpha(12 if selected else 8)
+            outline = QColor(8, 12, 16, 130 if selected else 85)
+            painter.setPen(QPen(outline, 2.8 if selected else 2.2))
             painter.setBrush(fill)
             painter.drawPolygon(polygon)
-            painter.setPen(QPen(line, 2 if selected else 1.4))
+            painter.setPen(QPen(line, 1.5 if selected else 1.4))
             painter.setBrush(Qt.BrushStyle.NoBrush)
             painter.drawPolygon(polygon)
             if polygon.count():
                 position = polygon[0] + QPointF(8, -9)
-                painter.setPen(QColor(10, 14, 18, 190))
-                painter.drawText(position + QPointF(1, 1), value['name'])
-                painter.setPen(base)
-                painter.drawText(position, value['name'])
+                font = QFont(painter.font())
+                font.setBold(True)
+                label = QPainterPath()
+                label.addText(position, font, value['name'])
+                border = QPen(QColor(8, 12, 18, 235), 3, Qt.PenStyle.SolidLine,
+                              Qt.PenCapStyle.RoundCap, Qt.PenJoinStyle.RoundJoin)
+                painter.strokePath(label, border)
+                painter.fillPath(label, base)
             if selected:
                 painter.setPen(QPen(QColor(8, 12, 18, 220), 1.5))
                 painter.setBrush(line)
                 for point in polygon:
                     painter.drawEllipse(point, 4, 4)
-        if self.draft is not None and self.draft['points']:
+        if editing and self.draft is not None and self.draft['points']:
             polygon = QPolygonF([self._screen(p) for p in self.draft['points']])
             base = self._color(self.draft)
             if len(polygon) >= 3:
                 painter.setPen(QPen(QColor(8, 12, 16, 160), 2))
-                painter.setBrush(QColor(base.red(), base.green(), base.blue(), 26))
+                painter.setBrush(QColor(base.red(), base.green(), base.blue(), 12))
                 painter.drawPolygon(polygon)
             painter.setBrush(Qt.BrushStyle.NoBrush)
             painter.setPen(QPen(base, 2))
