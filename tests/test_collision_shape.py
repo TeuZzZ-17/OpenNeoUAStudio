@@ -83,6 +83,35 @@ def _l_prism():
     return [tuple(vertices[index] for index in face) for face in faces]
 
 
+def _rakt5_planar_components():
+    top = (
+        (-2.0, 0.0, 16.0), (2.0, 0.0, 16.0),
+        (2.0, 0.0, -16.0), (-2.0, 0.0, -16.0),
+    )
+    side = (
+        (-1.0, -2.0, 16.0), (1.0, 1.0, 16.0),
+        (1.0, 1.0, -16.0), (-1.0, -2.0, -16.0),
+    )
+    tail = (
+        (-0.5, -0.5, 0.0), (0.5, -0.5, 0.0),
+        (0.5, 0.5, 0.0), (-0.5, 0.5, 0.0),
+    )
+
+    def two_sided_quad(points):
+        a, b, c, d = points
+        return ((a, b, c), (a, c, d), (b, a, d), (b, d, c))
+
+    def one_sided_quad(points):
+        a, b, c, d = points
+        return ((a, b, c), (a, c, d))
+
+    return (
+        ("root/VP_RAKT5#component:top", two_sided_quad(top)),
+        ("root/VP_RAKT5#component:side", two_sided_quad(side)),
+        ("root/VP_RAKT5#component:tail", one_sided_quad(tail)),
+    )
+
+
 class CollisionShapeTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
@@ -203,6 +232,103 @@ class CollisionShapeTests(unittest.TestCase):
                 triangles, result.shape.hulls))
         for hull in result.shape.hulls:
             validate_hull(hull)
+
+    def test_planar_rakt5_components_are_combined_before_coacd(self):
+        tetra = _tetrahedron()
+        meshes = []
+
+        def make_mesh(vertices, faces):
+            mesh = types.SimpleNamespace(vertices=vertices, faces=faces)
+            meshes.append(mesh)
+            return mesh
+
+        def run_coacd(mesh, **_settings):
+            if len(mesh.vertices) < 8:
+                vertices = tuple(tuple(point) for point in mesh.vertices)
+                open_faces = ((0, 1, 2), (0, 2, 3), (1, 0, 3), (0, 1, 2))
+                return [(vertices, open_faces)]
+            return [(tetra.vertices, tetra.faces)]
+
+        fake_coacd = types.SimpleNamespace(
+            Mesh=make_mesh,
+            run_coacd=run_coacd,
+            set_log_level=lambda _level: None,
+        )
+        parts = _rakt5_planar_components()
+        self.assertEqual([len(triangles) for _owner, triangles in parts],
+                         [4, 4, 2])
+
+        with patch.dict(sys.modules, {"coacd": fake_coacd}):
+            result = generate_collision_shape(
+                parts, source="VP_RAKT5", quality="low")
+
+        self.assertEqual(len(meshes), 1)
+        self.assertEqual(len(meshes[0].vertices), 12)
+        self.assertEqual(len(result.shape.hulls), 1)
+        self.assertTrue(result.shape.hulls[0].source_component.startswith(
+            "root/VP_RAKT5#planar-group:"))
+        validate_hull(result.shape.hulls[0])
+
+    def test_real_coacd_generates_a_valid_rakt5_shape_from_planar_components(self):
+        try:
+            import coacd  # noqa: F401
+        except ImportError:
+            self.skipTest("CoACD is supplied by the packaged worker runtime")
+
+        parts = _rakt5_planar_components()
+        result = generate_collision_shape(
+            parts, source="VP_RAKT5", quality="low")
+
+        self.assertTrue(result.shape.hulls)
+        self.assertEqual(result.shape.quality, "low")
+        self.assertTrue(math.isfinite(result.metrics.sampled_surface_distance))
+        for hull in result.shape.hulls:
+            validate_hull(hull)
+
+    def test_planar_components_without_combined_volume_are_rejected(self):
+        first = (
+            ((0.0, 0.0, 0.0), (1.0, 0.0, 0.0), (1.0, 1.0, 0.0)),
+            ((0.0, 0.0, 0.0), (1.0, 1.0, 0.0), (0.0, 1.0, 0.0)),
+        )
+        second = (
+            ((2.0, 0.0, 0.0), (3.0, 0.0, 0.0), (3.0, 1.0, 0.0)),
+            ((2.0, 0.0, 0.0), (3.0, 1.0, 0.0), (2.0, 1.0, 0.0)),
+        )
+        calls = []
+        fake_coacd = types.SimpleNamespace(
+            Mesh=lambda *_args, **_kwargs: calls.append("Mesh"),
+            run_coacd=lambda *_args, **_kwargs: calls.append("run_coacd"),
+        )
+
+        with patch.dict(sys.modules, {"coacd": fake_coacd}):
+            with self.assertRaisesRegex(
+                    ValueError, "do not define a three-dimensional"):
+                generate_collision_shape(
+                    [
+                        ("root/flat#component:first", first),
+                        ("root/flat#component:second", second),
+                    ],
+                    source="Flat_Components", quality="low")
+
+        self.assertEqual(calls, [])
+
+    def test_planar_group_has_one_named_collision_component_toggle(self):
+        window = CollisionEditorWindow()
+        self.addCleanup(lambda: (window._set_modified(False), window.close()))
+        group_key = "root/VP_RAKT5#planar-group:3:abc123"
+        hull = replace(_tetrahedron(), source_component=group_key)
+        window.project.collision_shape = CollisionShape(
+            "VP_RAKT5", "a" * 64, (1, 1, 1), (0, 0, 0), (hull,),
+            quality="low")
+        window._sync_all()
+
+        widget = window.collision_geometry_widget
+        self.assertIsNotNone(widget._shape_root)
+        item = widget._shape_root.child(0)
+        self.assertEqual(item.text(0), "Combined planar components (3)")
+        item.setCheckState(0, Qt.CheckState.Unchecked)
+        self.app.processEvents()
+        self.assertFalse(window.project.collision_shape.hulls[0].enabled)
 
     def test_low_quality_uses_the_requested_coacd_settings(self):
         tetra = _tetrahedron()

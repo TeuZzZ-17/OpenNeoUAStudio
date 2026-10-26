@@ -83,6 +83,15 @@ It is not affiliated with, endorsed by, sponsored by, or approved by Microsoft, 
 
 Microsoft Urban Assault, its name, trademarks, logos, artwork, game data, audiovisual material, and other proprietary content remain the property of their respective owners.
 
+## Level source preservation
+
+Saving an opened level applies only editor changes to its original LDF source.
+Unchanged blocks, unknown parameters, manual scripts, comments and formatting remain intact.
+Squad and Host edits retain the original object's custom fields; terrain edits update only changed cells.
+New maps are generated normally. Save and Save As both preserve an opened level's source.
+If the file changes on disk after opening or saving, Studio refuses to overwrite it: reopen it or save a separate copy.
+Locations remain visible across Map Editor tabs with a faint color tint and outlined names; editing controls stay in Locations.
+
 ## Safety and data handling
 
 Treat original game files as read-only whenever possible.
