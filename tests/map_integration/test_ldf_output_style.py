@@ -47,7 +47,7 @@ def test_editor_backups_are_in_a_footer_and_still_restore_after_reopen():
     assert restored.grids['type'][4][4] == 'a1'
 
 
-def test_old_header_backups_are_still_loaded_and_resaved_in_the_footer():
+def test_old_header_backups_are_loaded_without_relocating_source_comments():
     doc = LdfDocument(mw=9, mh=9)
     doc.grids['type'][3][3], doc.grids['blg'][3][3] = '08', '08'
     text = dumps_ldf(doc)
@@ -55,7 +55,7 @@ def test_old_header_backups_are_still_loaded_and_resaved_in_the_footer():
     restored = loads_ldf(text)
     assert restored.building_underlays[3, 3] == ('1b', '08')
     output = dumps_ldf(restored)
-    assert output.index('Studio building ground') > output.index('begin_maps')
+    assert output == text
 
 
 def test_clean_output_preserves_windows_newlines_and_named_definition_comments():

@@ -1259,7 +1259,8 @@ class MainWindow(QMainWindow):
                 self._released(-1, -1, Qt.KeyboardModifier.NoModifier)
                 self.history.begin(self.doc)
                 self._live_pending = True
-            self.doc.host_stations[index] = host
+            from ..core.ldf_source import replace_record
+            self.doc.host_stations[index] = replace_record(self.doc.host_stations[index], host)
             self.dirty = True
             self._live_timer.start()
         self._refresh_squads(fields=False)
@@ -1953,7 +1954,8 @@ class MainWindow(QMainWindow):
             self.history.begin(self.doc)
             self._live_pending = True
         for index, squad in updates.items():
-            self.doc.squads[index] = squad
+            from ..core.ldf_source import replace_record
+            self.doc.squads[index] = replace_record(self.doc.squads[index], squad)
         self.dirty = True
         self._refresh_squads(fields=False)
         self._live_timer.start()
