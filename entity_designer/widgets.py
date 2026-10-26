@@ -255,7 +255,16 @@ class GeometryPartSelectionWidget(QWidget):
                             self._shape_root.flags() | Qt.ItemFlag.ItemIsUserCheckable
                             | Qt.ItemFlag.ItemIsAutoTristate)
                     item = QTreeWidgetItem(self._shape_root)
-                    item.setText(0, f"Component {self._shape_root.childCount()}")
+                    group_count = key.partition("#planar-group:")[2].partition(":")[0]
+                    if group_count.isdigit():
+                        item.setText(
+                            0, f"Combined planar components ({group_count})")
+                        item.setToolTip(
+                            0, "This collision part represents the selected "
+                            "planar geometry components together.")
+                    else:
+                        item.setText(
+                            0, f"Component {self._shape_root.childCount()}")
                     item.setData(0, _GEOMETRY_COMPONENT_ROLE, key)
                     item.setFlags(item.flags() | Qt.ItemFlag.ItemIsUserCheckable)
                     item.setText(1, str(sum(len(h.faces) for h in hulls)))
