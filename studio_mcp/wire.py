@@ -242,7 +242,7 @@ def w_delete_polygons(ctx, select=None, drop_orphan_points: bool = True):
 def w_transform(ctx, select=None, translate=None, rotate_deg: float = 0.0, scale=1.0, pivot="center",
                 mirror: bool = False):
     """Move / rotate (degrees, in the x-z plane) / scale chosen points. translate = [dx, dz]; pivot = [x, z] or
-    'center'|'origin'. mirror=true keeps the shape symmetric left/right across the x=0 axis like the editor's Mirror Symmetry."""
+    'center'|'origin'. mirror=true keeps the shape symmetric like the editor's Mirror Symmetry (axis auto-detected: x=0 left/right or z=0 top/bottom)."""
     wm = ctx.wm
     _need_poo2(wm)
     chosen = ctx.points(select)
@@ -265,9 +265,12 @@ def w_transform(ctx, select=None, translate=None, rotate_deg: float = 0.0, scale
         x, z = x * math.cos(angle) - z * math.sin(angle), x * math.sin(angle) + z * math.cos(angle)
         moved[i] = (px + x + dx, pz + z + dz)
     if mirror:
-        from wireframe_editor.window import _apply_mirror_positions, _match_mirror_vertices
-        pairs, centre = _match_mirror_vertices([(p[0], p[2]) for p in wm.points], 1.0)
-        moved, _guides = _apply_mirror_positions(moved, pairs, centre, start)
+        from wireframe_editor.window import _apply_mirror_positions, _choose_mirror_axis, _swap_axes
+        axis, pairs, centre = _choose_mirror_axis([(p[0], p[2]) for p in wm.points], 1.0)
+        flip = _swap_axes if axis == 1 else (lambda point: point)
+        moved, _guides = _apply_mirror_positions(
+            {i: flip(p) for i, p in moved.items()}, pairs, centre, {i: flip(p) for i, p in start.items()})
+        moved = {i: flip(p) for i, p in moved.items()}
     for i, (x, z) in moved.items():
         wm.points[i] = (round(x, 3), wm.points[i][1], round(z, 3))
     return {"moved": sorted(moved), "points": sorted(moved)}
