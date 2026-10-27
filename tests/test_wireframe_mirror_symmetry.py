@@ -13,6 +13,7 @@ from studio.formats.sklt import create_minimal_sklt_model
 from wireframe_editor.window import (
     WireframeEditorWindow,
     _apply_mirror_positions,
+    _choose_mirror_axis,
     _match_mirror_vertices,
 )
 
@@ -63,6 +64,19 @@ class MirrorHelperTests(unittest.TestCase):
         )
         self.assertEqual(set(moved), {1})
         self.assertFalse(guides[0][2])
+
+    def test_sideways_shape_uses_the_top_bottom_axis(self):
+        # Missile lying sideways: top/bottom pairs around Z=0, nothing left/right.
+        points = [(-300.0, 80.0), (-300.0, -80.0), (400.0, 40.0), (400.0, -40.0), (500.0, 0.0)]
+        axis, pairs, _centre = _choose_mirror_axis(points, 1.0)
+        self.assertEqual(axis, 1)
+        self.assertEqual(pairs.get(0), 1)
+        self.assertEqual(pairs.get(2), 3)
+
+    def test_upright_shape_keeps_the_left_right_axis(self):
+        points = [(-100.0, 50.0), (100.0, 50.0), (-60.0, -50.0), (60.0, -50.0)]
+        axis, _pairs, _centre = _choose_mirror_axis(points, 1.0)
+        self.assertEqual(axis, 0)
 
 
 class MirrorDragTests(unittest.TestCase):
@@ -123,6 +137,25 @@ class MirrorDragTests(unittest.TestCase):
         self.assertAlmostEqual(points[0][0], -points[1][0], places=4)
         self.assertAlmostEqual(points[0][2], points[1][2], places=4)
         self.assertGreater(points[1][0], 100.0)
+
+    def test_sideways_shape_follows_across_the_horizontal_axis(self):
+        model = create_minimal_sklt_model()
+        model.points = [
+            (-300.0, 0.0, 80.0), (-300.0, 0.0, -80.0),
+            (400.0, 0.0, 40.0), (400.0, 0.0, -40.0),
+            (500.0, 0.0, 0.0),
+        ]
+        model.polygons = [[0, 2], [1, 3], [2, 4], [3, 4]]
+        self.window._show_model(model, Path("sideways.SKL"))
+        self.app.processEvents()
+        self.editor.auto_align_check.setChecked(False)
+        self.window.mirror_symmetry_check.setChecked(True)
+        self.drag((400.0, 40.0), (430.0, 70.0))
+        points = self.editor.projected_points
+        self.assertAlmostEqual(points[2][0], 430.0, delta=1.0)
+        self.assertAlmostEqual(points[2][2], 70.0, delta=1.0)
+        self.assertAlmostEqual(points[3][0], points[2][0], places=4)
+        self.assertAlmostEqual(points[3][2], -points[2][2], places=4)
 
     def test_mirror_off_moves_only_the_dragged_vertex(self):
         self.editor.auto_align_check.setChecked(False)

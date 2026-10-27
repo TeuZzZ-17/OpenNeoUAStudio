@@ -107,6 +107,28 @@ def _match_mirror_vertices(
     return pairs, center_indices
 
 
+def _swap_axes(point: tuple[float, float]) -> tuple[float, float]:
+    """Swap (x, z) <-> (z, x): lets the X=0 mirror code also work on the Z=0 axis."""
+    return (point[1], point[0])
+
+
+def _choose_mirror_axis(
+    points: list[tuple[float, float]], scale: float
+) -> tuple[int, dict[int, int], set[int]]:
+    """Pick the mirror axis that matches the shape.
+
+    Axis 0 mirrors left <-> right (X=0, vehicles drawn nose up). Axis 1 mirrors
+    top <-> bottom (Z=0, shapes drawn lying sideways, e.g. missiles). The axis
+    with more mirrored vertex pairs wins; on a tie axis 0 is kept.
+    """
+    pairs_x, center_x = _match_mirror_vertices(points, scale)
+    swapped = [_swap_axes(point) for point in points]
+    pairs_z, center_z = _match_mirror_vertices(swapped, scale)
+    if len(pairs_z) > len(pairs_x):
+        return 1, pairs_z, center_z
+    return 0, pairs_x, center_x
+
+
 def _apply_mirror_positions(
     source_positions: dict[int, tuple[float, float]],
     pair_map: dict[int, int],
@@ -237,13 +259,14 @@ class WireframeEditorWindow(QMainWindow):
         self.outline_editor = OutlineEditor()
         self._mirror_pair_map: dict[int, int] = {}
         self._mirror_center_indices: set[int] = set()
+        self._mirror_axis = 0
         self._mirror_drag_start_points: dict[int, tuple[float, float]] = {}
         self._mirror_guide_overlay = MirrorGuideOverlay(self.outline_editor.canvas)
         self.mirror_symmetry_check = QCheckBox("Mirror Symmetry")
         self.mirror_symmetry_check.setChecked(True)
         self.mirror_symmetry_check.setToolTip(
-            "Move mode: keep existing mirrored vertices symmetric between left and right "
-            "(around the vertical X=0 axis). "
+            "Move mode: keep existing mirrored vertices symmetric. The axis is detected "
+            "automatically: left/right (X=0) or top/bottom (Z=0), whichever matches the shape. "
             "Thin guide lines show the mirrored target while dragging."
         )
         self.mirror_symmetry_check.toggled.connect(self._mirror_symmetry_toggled)
@@ -591,17 +614,23 @@ class WireframeEditorWindow(QMainWindow):
         points = self.outline_editor._projected_points()
         transform = self.outline_editor.canvas._make_transform()
         scale = max(abs(transform[1]), 1.0e-9)
-        self._mirror_pair_map, self._mirror_center_indices = _match_mirror_vertices(
-            points, scale
+        self._mirror_axis, self._mirror_pair_map, self._mirror_center_indices = (
+            _choose_mirror_axis(points, scale)
         )
+        # Points are stored already swapped when mirroring around Z=0.
         self._mirror_drag_start_points = {
-            index: point for index, point in enumerate(points)
+            index: self._to_mirror_space(point) for index, point in enumerate(points)
         }
+
+    def _to_mirror_space(self, point: tuple[float, float]) -> tuple[float, float]:
+        """Convert (x, z) to the space where the mirror axis is always X=0 (and back)."""
+        return _swap_axes(point) if self._mirror_axis == 1 else point
 
     def _finish_mirror_drag(self) -> None:
         self._mirror_pair_map.clear()
         self._mirror_center_indices.clear()
         self._mirror_drag_start_points.clear()
+        self._mirror_axis = 0
         self._mirror_guide_overlay.clear_guides()
 
     def _move_points_with_mirror(self, point_positions: object, commit_undo: bool) -> None:
@@ -647,11 +676,18 @@ class WireframeEditorWindow(QMainWindow):
             auto_align_message = editor._last_auto_align_message
 
         mirrored_positions, guides = _apply_mirror_positions(
-            source_positions,
+            {i: self._to_mirror_space(p) for i, p in source_positions.items()},
             self._mirror_pair_map,
             self._mirror_center_indices,
             self._mirror_drag_start_points,
         )
+        mirrored_positions = {
+            i: self._to_mirror_space(p) for i, p in mirrored_positions.items()
+        }
+        guides = [
+            (self._to_mirror_space(a), self._to_mirror_space(b), linked)
+            for a, b, linked in guides
+        ]
 
         # Auto Align was already applied to the user's side above. Temporarily
         # leave Move mode so the normal move handler does not snap a second
