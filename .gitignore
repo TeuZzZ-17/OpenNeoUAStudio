@@ -1,0 +1,33 @@
+# Build, cache and local work files.
+/build/
+/dist/
+/work/
+/.pytest_cache/
+/.pytest-tmp/
+/.ruff_cache/
+__pycache__/
+*.py[cod]
+*.pyo
+*.log
+/OpenNeoUAStudio_Git_GC-(.Git Resize)
+/Riduci_Spazio_Git.bat
+/Build_OpenNeoUAStudio.bat
+/desktop.ini
+/.codex/
+/AGENTS.md
+
+# Local game installations and imported game data must stay outside this repository.
+/Data/
+/Res/
+/Models/
+/Wireless/
+/Sounds/
+/Levels/
+/Fonts/
+/Locale/
+/Scripts/
+/Set/
+/Sets/
+*.cur
+
+# Source, tests, documentation and Studio-owned icons remain available to Git.
