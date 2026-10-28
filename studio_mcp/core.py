@@ -358,6 +358,24 @@ def export_model(source: Source, out_dir: str, base_name: str, skeleton_stem: st
             "use_in_cfg": "Data/" + base_file.relative_to(data_root()).as_posix() if _is_under(base_file, data_root()) else str(base_file)}
 
 
+# Small Set1 vehicles used as an empty starting shell, one per skeleton-name length (the BASE stores that length).
+NEW_MODEL_DONORS = {6: "set1:VP_MIG", 7: "set1:VP_JET1", 8: "set1:VP_FLSML"}
+
+
+def new_model(out_dir: str, base_name: str, skeleton_stem: str) -> dict:
+    """An empty loose model (no polygons, plain material blocks kept) to build a new design from scratch."""
+    donor = NEW_MODEL_DONORS.get(len(skeleton_stem))
+    if donor is None:
+        raise McpToolError(f"skeleton_stem must have 6, 7 or 8 characters (e.g. 'VPNBOMB1'), got '{skeleton_stem}'")
+    result = export_model(resolve_source(donor), out_dir, base_name, skeleton_stem)
+    from studio_mcp import edit, history
+    edit.run(result["base_file"], [{"op": "clear"}], label="new empty model")
+    history.clear(Path(result["base_file"]))   # the empty shell is the first state: undo never goes back to the donor
+    result["note"] = ("Empty model ready. Build with loft / create_primitive / add_polygons / import_geometry "
+                      "(swatch='faction.part' paints, see studio_swatches), then auto_shade.")
+    return result
+
+
 def _is_under(path: Path, root: Path) -> bool:
     try:
         path.relative_to(root)

@@ -168,6 +168,7 @@ from entity_designer.widgets import (
 )
 from studio.assets.dependencies import filter_tree as filter_asset_tree
 from studio.assets.family import AssetFamily, load_asset_family, load_manual_family
+from studio.exchange.portable import DirectoryIndex
 from studio.assets.visproto import (
     EmbeddedVPSet,
     normalize_base_name,
@@ -223,6 +224,63 @@ def _fx_item_state(item) -> str | None:
         return "normal" if state == "attached" else state
     return {"plasma": "genesis", "decoration": "normal",
             "tracer": "normal", "cluster": "normal", "laser": "normal"}.get(item.kind)
+
+
+def _vp_ids_per_model(family: AssetFamily, embedded, table) -> list[list[int]]:
+    """VP ids of every model with a skeleton, in family order.
+
+    ``embedded`` / ``table`` are the SET.BAS VP reconstruction and the active
+    VP table; without them (a loose BASE) the model order itself is the VP id.
+    """
+
+    vp_ids_by_offset: dict[int, list[int]] = {}
+    vp_ids_by_skeleton: dict[str, list[int]] = {}
+    if embedded is not None and table is not None:
+        embedded_by_base: dict[str, list] = {}
+        for entry in embedded.entries:
+            embedded_by_base.setdefault(
+                normalize_base_name(entry.base_name), []).append(entry)
+        for active_entry in table.entries:
+            candidates = embedded_by_base.get(
+                normalize_base_name(active_entry.base_name), [])
+            selected_entry = None
+            # Repeated dummy/BASE assignments are common.  Preserve the
+            # positional match when the active table and embedded table
+            # agree at this slot; otherwise accept only a unique match.
+            if active_entry.index < len(embedded.entries):
+                positional = embedded.entries[active_entry.index]
+                if (normalize_base_name(positional.base_name)
+                        == normalize_base_name(active_entry.base_name)):
+                    selected_entry = positional
+            if selected_entry is None and len(candidates) == 1:
+                selected_entry = candidates[0]
+            if selected_entry is None:
+                continue
+            if selected_entry.source_objt_offset >= 0:
+                vp_ids_by_offset.setdefault(
+                    selected_entry.source_objt_offset, []).append(
+                        active_entry.index)
+            key = normalize_skeleton_name(selected_entry.skeleton_name)
+            if key:
+                vp_ids_by_skeleton.setdefault(key, []).append(
+                    active_entry.index)
+    result: list[list[int]] = []
+    for obj in family.all_objects():
+        if obj.skeleton is None:
+            continue
+        source_offset = int(getattr(
+            obj.base_object, "source_objt_offset", -1))
+        vp_ids = list(vp_ids_by_offset.get(source_offset, []))
+        if not vp_ids and not vp_ids_by_offset:
+            skeleton_key = normalize_skeleton_name(
+                obj.base_object.skeleton_name or "")
+            candidates = vp_ids_by_skeleton.get(skeleton_key, [])
+            if candidates:
+                vp_ids = list(dict.fromkeys(candidates))
+        if not vp_ids and embedded is None:
+            vp_ids = [len(result)]
+        result.append(sorted(set(vp_ids)))
+    return result
 
 
 class CollisionEditorWindow(QMainWindow):
@@ -324,6 +382,8 @@ class CollisionEditorWindow(QMainWindow):
         self._fx_catalog: dict[int, fx.LegacyFxVehicle] = {}
         self._fx_scope: set[str] | None = None
         self._fx_owner_map: dict[int, str] = {}
+        # (SET.BAS path, (family, {vp: owner})) read on demand for loose-BASE units.
+        self._fx_set_cache = None
         self._fx_fitted_definition = None
         self._fx_edit_camera = None
         self._fx_source_from_catalog = False
@@ -2169,6 +2229,8 @@ class CollisionEditorWindow(QMainWindow):
             owners = {self._owner_for_vp(ref.vp) for ref in (unit.normal, unit.dead, unit.megadeth)
                       if ref.vp > 0}
             owners.add(self._current_owner)
+            # A loose BASE unit is not in the VP list: its owner comes from here.
+            owners.add(self._collision_shape_root_owner())
             has_anim = any(self.viewport._materials[face.material].anim_frames
                            for face in self.viewport._faces if face.owner in owners)
         # Destruction FX: the animation starts playing by itself on entering
@@ -2357,8 +2419,86 @@ class CollisionEditorWindow(QMainWindow):
             return None
         return Path(self._vp_embedded.source_path)
 
+    @staticmethod
+    def _load_family(path: Path, **kwargs) -> AssetFamily:
+        """Load a BASE family after rereading the folders it searches.
+
+        Folder listings are cached for the session, so a texture or animation
+        added beside the BASE after its first load would stay unseen (and the
+        set's copy would be used instead of the external file).
+        """
+
+        if path.name.casefold() != "set.bas":
+            for root in (path.parent, path.parent.parent):
+                DirectoryIndex.get(root, refresh=True)
+        return _public_dependency("load_asset_family", load_asset_family)(path, **kwargs)
+
+    def _resource_set_bas_path(self) -> Path | None:
+        """SET.BAS that holds the textures/animations of a loose BASE.
+
+        A loose BASE (base_normal, base_* of FX) names resources such as
+        FAERROBO.ILBM or 29119601.ANM that only exist inside the SET.BAS; the
+        engine finds them through the current set, which is the one selected
+        in the game browser (Change Set only switches it, it is always there).
+        """
+
+        from studio.assets.catalog import set_assets
+        try:
+            path = set_assets(self.game_object_browser.set_number).setbas_path
+        except (ValueError, OSError, RuntimeError):
+            path = None
+        if path is not None:
+            return Path(path)
+        current = self._current_set_bas_path()
+        if current is not None:
+            return current
+        family = self.family
+        return getattr(family, "setbas_path", None) if family is not None else None
+
+    def _loose_unit_uses_set(self) -> bool:
+        """True when the unit is a loose BASE of a script and a set is active.
+
+        Its effects name SET VPs, which the loose BASE family does not hold.
+        """
+
+        return (self._vp_embedded is None and self._active_script_path is not None
+                and self._resource_set_bas_path() is not None)
+
+    def _fx_set_vp_source(self, vp: int):
+        """(family, owner) of a SET VP for the effects of a loose-BASE unit."""
+
+        # Called for every item and particle of every frame: the set is looked
+        # up once and kept until the script link or the set changes.
+        if self._vp_embedded is not None or self._active_script_path is None:
+            return None
+        if self._fx_set_cache is None:
+            path = self._resource_set_bas_path()
+            self._fx_set_cache = (path, self._load_fx_set_vps(path)
+                                  if path is not None else (None, {}))
+        family, owners = self._fx_set_cache[1]
+        owner = owners.get(int(vp))
+        return (family, owner) if owner is not None else None
+
+    @staticmethod
+    def _load_fx_set_vps(path: Path):
+        """The SET.BAS family and the owner of each VP, like opening the set."""
+
+        try:
+            embedded = reconstruct_embedded_vps(path)
+            table, _source, _warnings = runtime_vp_table(path, embedded)
+            family = _public_dependency("load_asset_family", load_asset_family)(path)
+        except (VPEmbeddedError, OSError, ValueError, CollisionScriptError):
+            return None, {}
+        owners: dict[int, str] = {}
+        models = [obj for obj in family.all_objects() if obj.skeleton is not None]
+        for obj, vp_ids in zip(models, _vp_ids_per_model(family, embedded, table)):
+            for vp_id in vp_ids:
+                owners.setdefault(vp_id, obj.owner_path)
+        return family, owners
+
     def _clear_script_link(self) -> None:
         self._active_script_path = None
+        self._fx_set_cache = None
         if hasattr(self, "fx_panel"):
             self.fx_panel.set_context(fx.CONTEXT_VEHICLE, fx.FxDocument())
         self._active_script_kind = ""
@@ -2381,6 +2521,7 @@ class CollisionEditorWindow(QMainWindow):
 
     def _game_set_changed(self, number):
         from studio.ui.widgets import loading_resources
+        self._fx_set_cache = None
         with loading_resources(self, f"Loading Set {number}. Please wait…"):
             if self._load_game_set(number):
                 from studio.ui.shell import remember_set
@@ -2499,7 +2640,7 @@ class CollisionEditorWindow(QMainWindow):
             if (self._active_base_path is None
                     or self._active_base_path.resolve(strict=False)
                     != chosen_asset.resolve(strict=False)):
-                if not self.open_base(chosen_asset):
+                if not self.open_base(chosen_asset, setbas=chosen_set):
                     return False
             source_model = chosen_asset.stem
         else:
@@ -3455,9 +3596,13 @@ class CollisionEditorWindow(QMainWindow):
             f"Shape exported: {canonical or target.name}.", 5000)
 
 
-    def open_base(self, path: str | Path):
+    def open_base(self, path: str | Path, setbas: str | Path | None = None):
+        """Open a BASE, SET.BAS or 3DS. ``setbas`` is the set that supplies the
+        textures/animations of a loose BASE (default: the set already open)."""
+
         if not self.fx_panel.confirm_text_changes():
             return False
+        resource_set = setbas if setbas is not None else self._resource_set_bas_path()
         self._clear_script_link()
         path = Path(path)
         embedded = None
@@ -3502,8 +3647,10 @@ class CollisionEditorWindow(QMainWindow):
                     f"not be reconstructed.\n\n{exc}")
                 return False
         try:
-            family = _public_dependency(
-                "load_asset_family", load_asset_family)(path)
+            if resource_set is not None and path.name.casefold() != "set.bas":
+                family = self._load_family(path, setbas=resource_set)
+            else:
+                family = self._load_family(path)
         except Exception as exc:
             QMessageBox.critical(
                 self, "Load failed", f"No file was modified.\n\n{exc}")
@@ -3572,52 +3719,12 @@ class CollisionEditorWindow(QMainWindow):
         self._script_unit_references = []
         self._script_unit_visual_reference = None
         model_index = 0
-        vp_ids_by_offset: dict[int, list[int]] = {}
-        vp_ids_by_skeleton: dict[str, list[int]] = {}
-        if self._vp_embedded is not None and self._vp_table is not None:
-            embedded_by_base: dict[str, list] = {}
-            for entry in self._vp_embedded.entries:
-                embedded_by_base.setdefault(
-                    normalize_base_name(entry.base_name), []).append(entry)
-            for active_entry in self._vp_table.entries:
-                candidates = embedded_by_base.get(
-                    normalize_base_name(active_entry.base_name), [])
-                selected_entry = None
-                # Repeated dummy/BASE assignments are common.  Preserve the
-                # positional match when the active table and embedded table
-                # agree at this slot; otherwise accept only a unique match.
-                if active_entry.index < len(self._vp_embedded.entries):
-                    positional = self._vp_embedded.entries[active_entry.index]
-                    if (normalize_base_name(positional.base_name)
-                            == normalize_base_name(active_entry.base_name)):
-                        selected_entry = positional
-                if selected_entry is None and len(candidates) == 1:
-                    selected_entry = candidates[0]
-                if selected_entry is None:
-                    continue
-                if selected_entry.source_objt_offset >= 0:
-                    vp_ids_by_offset.setdefault(
-                        selected_entry.source_objt_offset, []).append(
-                            active_entry.index)
-                key = normalize_skeleton_name(selected_entry.skeleton_name)
-                if key:
-                    vp_ids_by_skeleton.setdefault(key, []).append(
-                        active_entry.index)
+        vp_ids_per_model = _vp_ids_per_model(
+            family, self._vp_embedded, self._vp_table)
         for obj in family.all_objects():
             if obj.skeleton is None:
                 continue
-            source_offset = int(getattr(
-                obj.base_object, "source_objt_offset", -1))
-            vp_ids = list(vp_ids_by_offset.get(source_offset, []))
-            if not vp_ids and not vp_ids_by_offset:
-                skeleton_key = normalize_skeleton_name(
-                    obj.base_object.skeleton_name or "")
-                candidates = vp_ids_by_skeleton.get(skeleton_key, [])
-                if candidates:
-                    vp_ids = list(dict.fromkeys(candidates))
-            if not vp_ids and self._vp_embedded is None:
-                vp_ids = [model_index]
-            vp_ids = sorted(set(vp_ids))
+            vp_ids = vp_ids_per_model[model_index]
             exact_vp = bool(vp_ids)
             if exact_vp:
                 # First family object wins a VP, matching the first-match
@@ -5225,6 +5332,11 @@ class CollisionEditorWindow(QMainWindow):
             unit = replace(unit, altitude=unit.altitude or fx.WEAPON_LAUNCH_HEIGHT)
         return unit
 
+    def wireframe_export_name(self) -> str:
+        """Name the exported wireframe after the vehicle or weapon being edited."""
+
+        return self.project.name
+
     def _sync_wireframe_current(self, text: str, block: ScriptBlock) -> None:
         """Give the Wireframe tab the file named by ``wireframe =`` of the loaded definition."""
 
@@ -5511,6 +5623,10 @@ class CollisionEditorWindow(QMainWindow):
         paths.update(self._fx_asset_paths)
         self._fx_tracked = set(paths)
         self._fx_watch_signatures = {path: self._fx_file_signature(path) for path in paths}
+        # A file tracked for the first time (an external model or the set read
+        # while painting) was loaded just now: it is not an edit to reload for.
+        for path, signature in self._fx_watch_signatures.items():
+            self._fx_loaded_signatures.setdefault(path, signature)
         if not self._fx_poll_timer.isActive():
             self._fx_poll_timer.start()
         # Files edited while the tab was away are picked up right now.
@@ -5560,7 +5676,7 @@ class CollisionEditorWindow(QMainWindow):
             if path.suffix.casefold() == ".3ds":
                 refreshed = _load_3ds_family(path)
             else:
-                refreshed = _public_dependency("load_asset_family", load_asset_family)(
+                refreshed = self._load_family(
                     path, extra_roots=family.search_roots, overrides=family.overrides,
                     setbas=family.setbas_path)
             references = list(self._script_unit_references)
@@ -5582,6 +5698,7 @@ class CollisionEditorWindow(QMainWindow):
             if helper is not None:
                 helper.close()
         self.viewport._fx_external_cache.clear()
+        self._fx_set_cache = None
         self.viewport._fx_decal_cache.clear()
         self.viewport._fx_emitter_cache.clear()
         self.viewport._fx_tinted_stage_cache.clear()
@@ -5614,7 +5731,8 @@ class CollisionEditorWindow(QMainWindow):
         if active and self._fx_edit_camera is None:
             self._fx_edit_camera = self.viewport._camera_state()
         self.fx_panel.transport_bar.setVisible(active)
-        self._fx_owner_map = {
+        # A loose-BASE unit has no VP table: its effects use the set's VPs.
+        self._fx_owner_map = {} if self._loose_unit_uses_set() else {
             vp: owner for vp in self.fx_panel.required_vps()
             if (owner := self._owner_for_vp(vp)) is not None}
         if active and self.family is not None:
@@ -5770,7 +5888,9 @@ class CollisionEditorWindow(QMainWindow):
             if path.suffix.casefold() == ".3ds":
                 family = _load_3ds_family(path)
             else:
-                family = _public_dependency("load_asset_family", load_asset_family)(path)
+                resource_set = self._resource_set_bas_path()
+                family = (self._load_family(path, setbas=resource_set)
+                          if resource_set is not None else self._load_family(path))
             QTimer.singleShot(0, self._fx_update_watcher)
             return family
         except (OSError, ValueError, RuntimeError):
@@ -5799,9 +5919,8 @@ class CollisionEditorWindow(QMainWindow):
         phased = panel.simulation is not None and panel.simulation.shows_unit
         particles = []
         if panel.simulation is not None:
-            emitters = {
-                vp: self.viewport.fx_emitter_specs(owner)
-                for vp, owner in self._fx_owner_map.items()}
+            emitters = {vp: self.viewport.fx_vp_emitter_specs(vp)
+                        for vp in panel.required_vps()}
             particles = panel.simulation.particles_at(panel.time_ms, emitters)
             if not show_unit:
                 # Decorations and the tracer belong to the normal model and hide with it.
@@ -5816,7 +5935,9 @@ class CollisionEditorWindow(QMainWindow):
                 self._active_script_path, self._active_base_path),
             highlight=panel.highlight, particles=particles,
             external_loader=self._load_fx_external_model,
-            palette=self._fx_palette(), shake=panel.shake_angles())
+            palette=self._fx_palette(), shake=panel.shake_angles(),
+            vp_source=self._fx_set_vp_source, required_vps=panel.required_vps(),
+            damage=panel.damage_marks())
         self.viewport.set_fx_follow_unit(
             panel.follow_unit.isChecked(), tracked_unit, self._current_owner)
 

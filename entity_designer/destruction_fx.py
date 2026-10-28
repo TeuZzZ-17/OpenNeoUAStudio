@@ -61,6 +61,15 @@ LEGACY_DEAD_LIFETIME_MS = 5000
 # The engine shows the impact/megadeth VP on the terminal frame of a dead
 # vehicle. The preview keeps it visible briefly so it can be inspected.
 IMPACT_PREVIEW_MS = 600
+# Damage overlay of weapons (area sphere and numbers): shown for a short
+# time after the hit, with a soft fade in and fade out.
+DAMAGE_MARK_MS = 2200.0
+DAMAGE_FADE_IN_MS = 180.0
+DAMAGE_FADE_OUT_MS = 700.0
+# The game shows combat values as the script value / 100 (F9 DMG row).
+DAMAGE_DISPLAY_DIVISOR = 100.0
+# Largest blast_radius the engine accepts.
+BLAST_RADIUS_MAX = 12000.0
 # Decal smoke lasts minutes in the engine; the preview plays only its first part
 # so the timeline stays usable.
 SMOKE_PREVIEW_MS = 20000.0
@@ -1706,6 +1715,41 @@ class PreviewTrack:
     approximate: bool = False
 
 
+DAMAGE_AREA = "area"
+DAMAGE_DIRECT = "direct"
+
+
+@dataclass(frozen=True)
+class DamageMark:
+    """Damage of a weapon hit, drawn over the scene (not an engine object).
+
+    ``area`` is the blast sphere (``radius``) with its damage at the center;
+    ``direct`` is the damage of the hit itself, next to the impact point.
+    ``amount`` is already in the game's display scale (script value / 100).
+    """
+
+    kind: str
+    position: tuple[float, float, float]
+    start: float
+    amount: float
+    radius: float = 0.0
+
+
+@dataclass(frozen=True)
+class DamageSample:
+    """A DamageMark at one preview time: ``alpha`` is the fade, ``age`` the ms since the hit."""
+
+    mark: DamageMark
+    alpha: float
+    age: float
+
+
+def damage_text(amount: float) -> str:
+    """Damage number as the player sees it: no needless decimals (150, 12.5)."""
+
+    return f"{amount:.2f}".rstrip("0").rstrip(".")
+
+
 # -- visual look of the definition itself --------------------------------------
 # Main-model tint/spin, weapon mesh tracer and decoration_fx. They are plain
 # top-level keys of the vehicle/weapon, not begin_fx blocks.
@@ -1950,6 +1994,13 @@ def _manual_decal_size(value):
     return size if size and all(math.isfinite(n) and 0<=n<=12000 for n in size) else (0.0,0.0)
 
 
+def _blast_radius(value: str | None) -> float:
+    """blast_radius as the engine reads it: finite, 0..BLAST_RADIUS_MAX, else 0."""
+
+    radius = _stof(value) if value else 0.0
+    return radius if math.isfinite(radius) and 0.0 < radius <= BLAST_RADIUS_MAX else 0.0
+
+
 def unit_look(values: dict[str, str], *, weapon: bool) -> dict:
     """UnitPhases keyword values read from the top-level keys of a definition."""
 
@@ -1987,6 +2038,9 @@ def unit_look(values: dict[str, str], *, weapon: bool) -> dict:
             mesh3ds=values.get("3ds_genesis", ""),
             base_path=values.get("base_genesis", "")),
         "energy": max(0.0, _stof(values.get("energy", "0"))),
+        "blast_energy": (max(0, min(100000000, script_int(values.get("blast_energy"), 0)))
+                         if weapon else 0),
+        "blast_radius": (_blast_radius(values.get("blast_radius")) if weapon else 0.0),
         "maxrot": _stof(values.get("maxrot", "0")),
         "ground_decal_id": (lambda decal_id: decal_id if decal_id >= 0 else -1)(
             script_int(values.get("ground_decal_id"), -1)),
@@ -2421,7 +2475,11 @@ class UnitPhases:
     genesis: VisualRef = VisualRef()
     # States that share the runtime main-model scale rule.
     main_visuals: tuple[VisualRef, ...] = ()
+    # Vehicles: energy of the unit. Weapons: damage of a direct hit.
     energy: float = 0.0
+    # Weapons: area damage (blast_*), shown as a sphere with its value.
+    blast_energy: int = 0
+    blast_radius: float = 0.0
     maxrot: float = 0.0
     # Reusable decal, with a diameter authored on this source.
     ground_decal_id: int = -1
@@ -2623,6 +2681,7 @@ class PreviewSimulation:
         self.unit = self._unit_with_authored_audio(self.unit, document, enabled)
         self.notes: list[str] = []
         self._events: list[tuple] = []
+        self._damage_marks: list[DamageMark] = []
         # Wreck fall [(ms, position, landed)] while air_destroyed blocks are
         # built; physical fragments with follow_carcass copy it.
         self._wreck_path: list[tuple] | None = None
@@ -3123,6 +3182,7 @@ class PreviewSimulation:
         blast = end
         if not hit_ground:
             self._hit_unit_effects(unit, target, end)
+            self._add_direct_damage(unit, target, end)
             if unit.delay_time > 0 and unit.laser is None:
                 # delay_time: the projectile sticks to the unit and explodes later.
                 blast = end + min(float(unit.delay_time), DELAY_PREVIEW_MAX_MS)
@@ -3134,6 +3194,7 @@ class PreviewSimulation:
                         f"detonates {unit.delay_time} ms after the hit.")
         self._add_sound(unit.sounds, "hit", blast, label=who, salt=definition.salt)
         end = blast
+        self._add_area_damage(unit, target, end)
         if hit_ground:
             # DEATH2: vp_megadeth, impact_world chain, dest_fx megadeth.
             self._build_event("impact_world", end, target, "Ground hit · ",
@@ -3171,6 +3232,37 @@ class PreviewSimulation:
             self._spawn_cluster(cluster, definition, target, look, end, speed,
                                 generation)
         return stop
+
+    # -- damage overlay ----------------------------------------------------------------------
+
+    def _add_direct_damage(self, unit: "UnitPhases", position, at: float) -> None:
+        """Damage of the hit itself. Only a unit takes it (a ground hit has none)."""
+
+        if unit.laser is None and unit.energy > 0:
+            self._damage_marks.append(DamageMark(
+                DAMAGE_DIRECT, tuple(position), at,
+                unit.energy / DAMAGE_DISPLAY_DIVISOR))
+
+    def _add_area_damage(self, unit: "UnitPhases", position, at: float) -> None:
+        """Blast sphere at the detonation, like the F9 blast ring of the engine."""
+
+        if unit.laser is None and unit.blast_radius > 0 and unit.blast_energy > 0:
+            self._damage_marks.append(DamageMark(
+                DAMAGE_AREA, tuple(position), at,
+                unit.blast_energy / DAMAGE_DISPLAY_DIVISOR, unit.blast_radius))
+
+    def damage_at(self, time_ms: float) -> list[DamageSample]:
+        """Damage marks alive at ``time_ms``, with their fade in / fade out."""
+
+        samples = []
+        for mark in self._damage_marks:
+            age = time_ms - mark.start
+            if age < 0 or age >= DAMAGE_MARK_MS:
+                continue
+            alpha = min(1.0, age / DAMAGE_FADE_IN_MS,
+                        (DAMAGE_MARK_MS - age) / DAMAGE_FADE_OUT_MS)
+            samples.append(DamageSample(mark, max(0.0, alpha), age))
+        return samples
 
     # -- laser beam and debuffs --------------------------------------------------------------
 

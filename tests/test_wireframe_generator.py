@@ -50,6 +50,19 @@ class WireframeGeneratorTests(unittest.TestCase):
             self.assertEqual(model.rendered_polygon_line_count, 4)
         self.assertFalse(output.preview_image(QSize(128,128)).isNull())
 
+    def test_effect_cards_are_left_out_unless_asked(self):
+        hull = quad(-1, 0, y0=-0.5, y1=0.5)
+        flame = ViewFace([(1.2, 0.5, 0), (1.2, -0.5, 0), (0.2, -0.5, 0), (0.2, 0.5, 0)], [], 1,
+                         poly_id=1, animated=True)
+        view = self.viewport([hull, flame])
+        view._materials = [ViewMaterial('geometry'), ViewMaterial('flame', tracy_mode='flat')]
+        plain = generate_wireframe(view, respect_transparency=False)
+        self.assertEqual(len(plain.segments), 4)
+        self.assertEqual(len(generate_wireframe(view, respect_transparency=False, include_effects=True).segments), 8)
+        # an opaque animated part (a track) is real geometry and stays
+        view._materials[1] = ViewMaterial('track')
+        self.assertEqual(len(generate_wireframe(view, respect_transparency=False).segments), 8)
+
     def test_assembly_instances_with_repeated_polyids_remain_distinct(self):
         view = self.viewport([quad(-1.2,-0.2,y0=-0.5,y1=0.5,poly_id=7,owner='left'),
                               quad(0.2,1.2,y0=-0.5,y1=0.5,poly_id=7,owner='right')])

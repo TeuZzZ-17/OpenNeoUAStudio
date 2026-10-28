@@ -36,12 +36,12 @@ def project(points, natural: bool = False) -> list[tuple[float, float]]:
     return [(p[axes[0]], p[axes[1]]) for p in points]
 
 
-def fit(points, rect=DEFAULT_RECT, keep_aspect: bool = False) -> list[tuple[int, int]]:
-    """Stretch the planar projection of ``points`` over ``rect`` = (u0, v0, u1, v1)."""
+def fit(points, rect=DEFAULT_RECT, keep_aspect: bool = False, natural: bool = False) -> list[tuple[int, int]]:
+    """Stretch the planar projection of ``points`` over ``rect`` = (u0, v0, u1, v1) (natural: see ``project``)."""
     if len(points) < 3:
         raise core.McpToolError("UVs need at least 3 corners")
     u0, v0, u1, v1 = (float(x) for x in rect)
-    coords = project(points)
+    coords = project(points, natural)
     us, vs = [c[0] for c in coords], [c[1] for c in coords]
     du, dv = (max(us) - min(us)) or 1.0, (max(vs) - min(vs)) or 1.0
     su, sv = (u1 - u0) / du, (v1 - v0) / dv

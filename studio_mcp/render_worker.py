@@ -47,6 +47,7 @@ def _draw_overlays(image, viewport, request: dict, fam_obj) -> None:
         return viewport._project(cam_point, rect, camera), cam_point[2]
 
     highlighted = select_polygons(request["highlight_polygons"], view) if request.get("highlight_polygons") is not None else []
+    highlighted = sorted(set(highlighted) | set(request.get("unmapped_polygons", [])))
     labelled_points = select_points(request["label_points"], view) if request.get("label_points") is not None else []
     labelled_polys = select_polygons(request["label_polygons"], view) if request.get("label_polygons") is not None else []
     if not (highlighted or labelled_points or labelled_polys or request.get("show_wire")):
@@ -102,6 +103,27 @@ def main() -> int:
         viewport = AssetViewport()
         viewport.resize(width, height)
         viewport.load_family(family)
+        # The Retail renderer refuses a model with polygons that have no material. Draw the rest and paint those
+        # magenta instead, so a missing material is visible rather than blocking every picture.
+        unmapped = [face for face in viewport._faces if not face.mapped]
+        if unmapped:
+            viewport._faces = [face for face in viewport._faces if face.mapped]
+            viewport._invalidate_indexed_view_cache()
+            root = next(o for o in family.all_objects() if o.skeleton is not None).owner_path
+            request["unmapped_polygons"] = [face.poly_id for face in unmapped if face.owner == root]
+            result["warnings"].append(f"{len(unmapped)} polygon(s) without material are not textured (magenta "
+                                      "outline): fix them with studio_map_polygons or studio_paint")
+        if request.get("task") == "wireframe":
+            from entity_designer.wireframe_generator import generate_wireframe
+            projection = generate_wireframe(
+                viewport, request["preset"],
+                respect_transparency=bool(viewport.indexed_renderer_info().get("available")),
+                detail=float(request.get("detail", 3.0)),
+                include_effects=bool(request.get("include_effects", False)))
+            projection.save(request["wire_out"])
+            result.update(ok=True, points=len(projection.points), lines=len(projection.segments))
+            print("RESULT_JSON " + json.dumps(result))
+            return 0
         viewport.begin_snapshot_mode(background)
         for name in request.get("views", ["iso"]):
             preset = VIEW_ALIASES.get(name.lower(), name)
@@ -116,7 +138,7 @@ def main() -> int:
             image.save(str(path))
             result["images"].append({"view": name, "path": str(path)})
         viewport.end_snapshot_mode()
-        result["warnings"] = [w for w in family.warnings if "palette" not in w.lower()]
+        result["warnings"] += [w for w in family.warnings if "palette" not in w.lower()]
         result["renderer"] = getattr(viewport, "_last_effective_renderer", "")
         result["ok"] = True
     except Exception as exc:  # report to the server instead of crashing silently

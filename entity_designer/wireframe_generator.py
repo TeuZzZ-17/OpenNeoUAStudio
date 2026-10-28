@@ -290,15 +290,27 @@ def _geometry_ownership(viewport, pieces, camera, face_ids):
     return (rgb[:, :, 0] << 16) + (rgb[:, :, 1] << 8) + rgb[:, :, 2] - 1
 
 
+def _is_effect(viewport, face) -> bool:
+    """Flames, smoke, rotor discs, lightning and particles: see-through animated cards.
+
+    The original game outlines never draw them; opaque animated parts (tracks) stay."""
+    if face.billboard_center is not None:
+        return True
+    material = viewport._materials[face.material] if 0 <= face.material < len(viewport._materials) else None
+    return bool(face.animated and material is not None and material.tracy_mode != "none")
+
+
 def generate_wireframe(viewport, preset: str = "Current View", *,
                        respect_transparency: bool = True,
                        simplification: float = 3.0,
-                       detail: float = DEFAULT_DETAIL) -> WireframeProjection:
+                       detail: float = DEFAULT_DETAIL,
+                       include_effects: bool = False) -> WireframeProjection:
     """Freeze visible scene geometry, project it and remove hidden edge runs.
 
     ``detail`` runs from 0 (every line of the model) to 4 (the fewest, straightest lines,
     like the original game outlines). Whole numbers are the rows of ``DETAIL_LEVELS``;
-    values in between blend two neighbouring rows.
+    values in between blend two neighbouring rows. ``include_effects`` keeps flames, smoke,
+    rotor discs and particles, which otherwise are left out like in the original outlines.
     """
     settings = detail_settings(detail)
     if not viewport._faces:
@@ -316,6 +328,8 @@ def generate_wireframe(viewport, preset: str = "Current View", *,
     finally:
         viewport._set_camera_state(original_camera)
     pieces = viewport.capture_wireframe_geometry(SOURCE_SIZE, camera)
+    if not include_effects:
+        pieces = [piece for piece in pieces if not _is_effect(viewport, piece.payload.face)]
     if not pieces:
         raise ValueError("The current view contains no visible faces.")
     faces = {id(piece.payload.face): piece.payload.face for piece in pieces}

@@ -110,6 +110,17 @@ class ModelEditorWindow(EntityListMixin, SetBasMixin, AssemblyWindow):
             self._sync_model_wireframe()
         return opened
 
+    def wireframe_export_name(self) -> str:
+        """Name the exported wireframe after the model it was drawn from (its VP name)."""
+
+        obj = self._owner_to_obj.get(self._selected_owner) if self._selected_owner else None
+        if obj is not None and getattr(obj, "skeleton", None) is not None:
+            name = getattr(getattr(obj, "base_object", None), "name", "")
+            return name or Path(obj.display_name).stem
+        path = self._family.base_path if self._family is not None else None
+        # A SET.BAS has no single model to name the file after.
+        return path.stem if path is not None and path.name.casefold() != "set.bas" else ""
+
     def _sync_model_wireframe(self) -> None:
         """Give the Wireframe tab the file named by the loaded game entity."""
 

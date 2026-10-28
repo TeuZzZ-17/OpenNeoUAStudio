@@ -546,7 +546,7 @@ class EntityDesignerWireframeTabTests(unittest.TestCase):
     def test_the_wireframe_tab_follows_the_visuals_and_fx_tab(self):
         window = self._window()
         tabs = window.properties_tabs
-        self.assertEqual(tabs.tabText(window.wireframe_tab_index), "Wireframe")
+        self.assertEqual(tabs.tabText(window.wireframe_tab_index), "Wireframe Generator")
         self.assertEqual(window.wireframe_tab_index, window.fx_tab_index+1)
         self.assertIs(tabs.widget(window.wireframe_tab_index), window.wireframe_panel)
 
@@ -586,3 +586,29 @@ class EntityDesignerWireframeTabTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class WireframeExportNameTests(unittest.TestCase):
+    """The export dialog offers the name of the model the wireframe comes from."""
+
+    class _Host:
+        def __init__(self, name):
+            self._name = name
+
+        def wireframe_export_name(self):
+            return self._name
+
+    def test_the_host_names_the_file(self):
+        name = WireframePanel._export_name
+        self.assertEqual(name(self._Host("5_Kilotons_Bomb")), "5_Kilotons_Bomb")
+        self.assertEqual(name(self._Host("Mnosjetz")), "Mnosjetz")
+
+    def test_characters_a_file_name_cannot_hold_are_dropped(self):
+        name = WireframePanel._export_name
+        self.assertEqual(name(self._Host('Big Bomb: "v2"/x')), "Big_Bomb_v2x")
+
+    def test_without_a_name_the_old_default_is_kept(self):
+        name = WireframePanel._export_name
+        self.assertEqual(name(self._Host("")), "Wireframe")
+        self.assertEqual(name(self._Host(None)), "Wireframe")
+        self.assertEqual(name(object()), "Wireframe")

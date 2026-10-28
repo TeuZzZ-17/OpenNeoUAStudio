@@ -8,7 +8,7 @@ import unittest
 from studio.assets.family import load_asset_family
 
 DATA = Path(__file__).resolve().parents[2].parent / "UA Rising" / "Data"
-BASE = DATA / "Models" / "Base" / "ALPHA_LEOPARD_FIRE" / "ALPHA_LEOPARD_FIRE.BASE"
+BASE = DATA / "Models" / "Base" / "Alpha_Models" / "Leopard_Fire" / "ALPHA_LEOPARD_FIRE.BASE"
 SETBAS = DATA / "Sets" / "Set1" / "Objects" / "Set.BAS"
 
 
@@ -23,7 +23,7 @@ class ForeignModelFolderAssetsTest(unittest.TestCase):
         self.assertEqual(bad, [])
 
     def test_own_folder_files_still_win(self):
-        own = DATA / "Models" / "Base" / "ALPHA_VP_SIMP2_FIRE" / "ALPHA_VP_SIMP2_FIRE.BASE"
+        own = DATA / "Models" / "Base" / "Alpha_Models" / "Weasel_Alpha_Fire" / "ALPHA_VP_SIMP2_FIRE.BASE"
         if not own.is_file():
             self.skipTest("ALPHA_VP_SIMP2_FIRE not available")
         family = load_asset_family(own, setbas=SETBAS)
