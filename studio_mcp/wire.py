@@ -1,8 +1,10 @@
 """Wireframe skeletons (.SKL / .sklt without a BASE): the Wireframe Editor's work, for assistants.
 
-A wireframe is a skeleton whose POO2 points are seen from above (x across, z up/down; y is kept) and whose POL2
-entries are lines (2 points) or closed outlines (3+ points). Files with an OTL2 outline only allow moving the
-outline points (their count is fixed by the format). Operations are chained like studio_edit_batch and written once.
+A wireframe is a skeleton whose POO2 points are drawn flat (x across, +z UP on screen; y is kept) and whose POL2
+entries are lines. The game (yw_RenderVector2D) draws ONLY the first segment of every POL2 entry and maps
+x/1000, -z/1000 onto the screen, so +-1000 is the edge of a full-screen HUD frame: every visible line must be its own
+2-point entry. Files with an OTL2 outline only allow moving the outline points (their count is fixed by the format).
+Operations are chained like studio_edit_batch and written once.
 """
 
 from __future__ import annotations
@@ -28,7 +30,8 @@ from studio_mcp.select import MeshView, select_points, select_polygons
 
 MAX_POINTS = 0x10000
 WIRE_OPS: dict = {}
-SHAPES = {"triangle": 3, "square": 4, "pentagon": 5, "circle": 16}
+SHAPES = {"triangle": 3, "square": 4, "pentagon": 5, "hexagon": 6, "octagon": 8, "circle": 24}
+SPECIAL_SHAPES = ("arc", "rect", "cross", "x", "brackets")
 
 
 def wire_op(name: str):
@@ -168,10 +171,27 @@ def w_add_points(ctx, points=None, save_as=None):
     return {"points": created}
 
 
+def _add_lines(wm, chain: list[int], closed: bool) -> list[int]:
+    """One 2-point POL2 entry per segment of the chain (the game draws nothing else)."""
+    pairs = list(zip(chain, chain[1:])) + ([(chain[-1], chain[0])] if closed and len(chain) > 2 else [])
+    existing = {tuple(sorted(ring)) for ring in wm.polygons if len(ring) == 2}
+    created = []
+    for a, b in pairs:
+        if a == b or tuple(sorted((a, b))) in existing:
+            continue
+        if len(wm.polygons) >= 0x7FFF:
+            raise core.McpToolError("Polygon limit reached")
+        wm.polygons.append([a, b])
+        existing.add(tuple(sorted((a, b))))
+        created.append(len(wm.polygons) - 1)
+    return created
+
+
 @wire_op("add_polygons")
 def w_add_polygons(ctx, polygons=None, close_loops: bool = False, save_as=None):
-    """Link existing points: each entry is a list of point indices. 2 points = a line, 3+ = an outline.
-    close_loops=true turns every list of 3+ points into a closed outline (the usual form for shapes)."""
+    """Link existing points with lines: each entry is a list of point indices; [a, b] is one line, [a, b, c, ...]
+    a chain of lines a-b, b-c, ... (close_loops=true also closes c-a). Every segment becomes its own 2-point line,
+    because the game draws only the first segment of a longer entry."""
     wm = ctx.wm
     _need_poo2(wm)
     created = []
@@ -179,31 +199,92 @@ def w_add_polygons(ctx, polygons=None, close_loops: bool = False, save_as=None):
         ring = [int(i) for i in ring]
         if len(ring) < 2 or len(set(ring)) != len(ring) or any(not 0 <= i < len(wm.points) for i in ring):
             raise core.McpToolError(f"Polygon {ring} needs 2+ different, existing points")
-        if len(wm.polygons) >= 0x7FFF:
-            raise core.McpToolError("Polygon limit reached")
-        wm.polygons.append(ring)
-        created.append(len(wm.polygons) - 1)
+        created += _add_lines(wm, ring, close_loops and len(ring) > 2)
     if not created:
-        raise core.McpToolError("give `polygons`: [[a, b], [a, b, c], ...]")
+        raise core.McpToolError("give `polygons`: [[a, b], [a, b, c], ...] (lines that do not exist yet)")
     return {"polygons": created}
 
 
-@wire_op("add_shape")
-def w_add_shape(ctx, shape: str = "square", center=None, radius: float = 80.0, rotate_deg: float = 0.0, save_as=None):
-    """Add a closed shape (triangle, square, pentagon, circle) around center [x, z] with the given radius."""
+def _new_point(wm, x: float, z: float, y: float | None = None) -> int:
+    if len(wm.points) >= MAX_POINTS:
+        raise core.McpToolError("Point limit reached")
+    wm.points.append((round(x, 3), _default_y(wm) if y is None else y, round(z, 3)))
+    return len(wm.points) - 1
+
+
+@wire_op("add_lines")
+def w_add_lines(ctx, points=None, closed: bool = False, save_as=None):
+    """Draw a polyline from coordinates: points = [[x, z], ...] (+z is UP on screen), closed=true joins the last
+    point to the first. The quickest way to trace a silhouette, a sight or a frame."""
     wm = ctx.wm
     _need_poo2(wm)
-    if shape not in SHAPES:
-        raise core.McpToolError(f"shape must be one of {sorted(SHAPES)}")
+    if not points or len(points) < 2:
+        raise core.McpToolError("give `points`: [[x, z], [x, z], ...] (2 or more)")
+    chain = []
+    for p in points:
+        x, z, y = _xz(p, "point")
+        chain.append(_new_point(wm, x, z, y))
+    return {"points": chain, "polygons": _add_lines(wm, chain, closed)}
+
+
+@wire_op("add_shape")
+def w_add_shape(ctx, shape: str = "square", center=None, radius: float = 80.0, rotate_deg: float = 0.0, size=None,
+                segments: int = 0, start_deg: float = 0.0, end_deg: float = 360.0, dashes: bool = False, save_as=None):
+    """Add a shape made of separate lines around center [x, z] (+z up). Regular: triangle, square, pentagon,
+    hexagon, octagon, circle (radius; segments overrides the corner count; rotate_deg turns it). arc: from start_deg
+    to end_deg (0 = right, 90 = up). rect: size [w, h]. cross: + with arms of `radius`; x: diagonal cross.
+    brackets: the four corners of a rect `size` with arms `radius` long (a classic sight frame).
+    dashes=true keeps every other piece of a circle/arc (a dashed ring)."""
+    wm = ctx.wm
+    _need_poo2(wm)
+    if shape not in SHAPES and shape not in SPECIAL_SHAPES:
+        raise core.McpToolError(f"shape must be one of {sorted(SHAPES) + list(SPECIAL_SHAPES)}")
     cx, cz, _ = _xz(center or [0, 0], "center")
-    count, y = SHAPES[shape], _default_y(wm)
-    start = -math.pi / 2 + math.radians(rotate_deg)
-    first = len(wm.points)
-    for step in range(count):
-        angle = start + math.tau * step / count
-        wm.points.append((round(cx + math.cos(angle) * radius, 3), y, round(cz + math.sin(angle) * radius, 3)))
-    wm.polygons.append(list(range(first, first + count)))
-    return {"points": list(range(first, first + count)), "polygons": [len(wm.polygons) - 1]}
+    turn = math.radians(rotate_deg)
+
+    def at(x: float, z: float) -> int:
+        rx, rz = x * math.cos(turn) - z * math.sin(turn), x * math.sin(turn) + z * math.cos(turn)
+        return _new_point(wm, cx + rx, cz + rz)
+
+    lines: list[int] = []
+    if shape in SHAPES or shape == "arc":
+        count = int(segments) or (SHAPES.get(shape) or 24)
+        if count < 3 or count > 256:
+            raise core.McpToolError("segments must be 3..256")
+        if shape == "arc":
+            span = math.radians(float(end_deg) - float(start_deg))
+            first = math.radians(float(start_deg))
+            steps = max(1, round(count * abs(span) / math.tau))
+            chain = [at(math.cos(first + span * k / steps) * radius, math.sin(first + span * k / steps) * radius)
+                     for k in range(steps + 1)]
+            closed = False
+        else:
+            first = math.pi / 2          # one corner straight up, like the editor's shapes
+            chain = [at(math.cos(first + math.tau * k / count) * radius, math.sin(first + math.tau * k / count) * radius)
+                     for k in range(count)]
+            closed = True
+        pieces = list(zip(chain, chain[1:])) + ([(chain[-1], chain[0])] if closed else [])
+        if dashes:
+            pieces = pieces[::2]
+        for a, b in pieces:
+            lines += _add_lines(wm, [a, b], False)
+    elif shape == "rect":
+        w, h = (size or [radius * 2, radius * 2])
+        chain = [at(-w / 2, h / 2), at(w / 2, h / 2), at(w / 2, -h / 2), at(-w / 2, -h / 2)]
+        lines = _add_lines(wm, chain, True)
+    elif shape in ("cross", "x"):
+        angle = math.pi / 4 if shape == "x" else 0.0
+        for k in range(2):
+            a = angle + k * math.pi / 2
+            lines += _add_lines(wm, [at(math.cos(a) * radius, math.sin(a) * radius),
+                                     at(-math.cos(a) * radius, -math.sin(a) * radius)], False)
+    else:  # brackets
+        w, h = (size or [radius * 4, radius * 4])
+        for sx, sz in ((-1, 1), (1, 1), (1, -1), (-1, -1)):
+            corner = at(sx * w / 2, sz * h / 2)
+            lines += _add_lines(wm, [at(sx * (w / 2 - radius), sz * h / 2), corner, at(sx * w / 2, sz * (h / 2 - radius))], False)
+    used = sorted({i for pid in lines for i in wm.polygons[pid]})
+    return {"points": used, "polygons": lines}
 
 
 @wire_op("delete_points")
@@ -344,6 +425,109 @@ def w_mirror_copy(ctx, select=None, axis: str = "z", plane: float = 0.0, toleran
     return {"points": created, "polygons": new_polys}
 
 
+@wire_op("split_outlines")
+def w_split_outlines(ctx, select=None, closed: bool = True):
+    """Turn every POL2 entry of 3+ points into separate 2-point lines (closed=true also joins last to first).
+    In the game only the first segment of a longer entry is drawn, so an old or imported outline shows one line."""
+    wm = ctx.wm
+    _need_poo2(wm)
+    chosen = set(ctx.polygons(select)) if select is not None else set(range(len(wm.polygons)))
+    rings = [ring for i, ring in enumerate(wm.polygons) if i in chosen and len(ring) > 2]
+    wm.polygons = [ring for i, ring in enumerate(wm.polygons) if not (i in chosen and len(ring) > 2)]
+    created = []
+    for ring in rings:
+        created += _add_lines(wm, ring, closed)
+    ctx.named_polygons = {}
+    return {"split": len(rings), "lines_added": len(created)}
+
+
+@wire_op("normalize")
+def w_normalize(ctx, size: float = 1000.0, center: bool = True):
+    """Scale the whole drawing so its larger half-extent is `size` (1000 = like the original unit and weapon
+    outlines) and, with center=true, put the middle of its bounding box at 0, 0."""
+    wm = ctx.wm
+    _need_poo2(wm)
+    used = sorted({i for ring in wm.polygons for i in ring}) or list(range(len(wm.points)))
+    if not used:
+        raise core.McpToolError("The wireframe is empty")
+    xs, zs = [wm.points[i][0] for i in used], [wm.points[i][2] for i in used]
+    mx, mz = ((max(xs) + min(xs)) / 2, (max(zs) + min(zs)) / 2) if center else (0.0, 0.0)
+    half = max(max(abs(x - mx) for x in xs), max(abs(z - mz) for z in zs), 1e-9)
+    factor = float(size) / half
+    wm.points = [(round((p[0] - mx) * factor, 3), p[1], round((p[2] - mz) * factor, 3)) for p in wm.points]
+    return {"scale": round(factor, 5), "bbox": meshmath.bbox(wm.points)}
+
+
+@wire_op("trace_image")
+def w_trace_image(ctx, image=None, size: float = 1000.0, center=None, detail: float = 3.0, threshold: int = 0,
+                  invert: bool = False, save_as=None):
+    """Trace the silhouette of a picture (PNG/JPG path) into lines: a transparent background, or the colour of the
+    picture's border, is 'outside'. size = larger half-extent of the result (1000 fills the frame), center = [x, z].
+    detail 0..4 like Studio's wireframe generator (0 = every pixel step, 4 = fewest straight lines). threshold =
+    colour distance that counts as background (0 = automatic); invert=true traces the dark/background part instead."""
+    import numpy as np
+    from PIL import Image
+    from entity_designer.wireframe_cleanup import clean_segments
+    from entity_designer.wireframe_detail import detail_settings
+    from entity_designer.wireframe_generator import _mask_contours, _simplify, _smooth_mask, _visvalingam
+    wm = ctx.wm
+    _need_poo2(wm)
+    source = Path(str(image or ""))
+    if not source.is_file():
+        raise core.McpToolError(f"Picture not found: {source}")
+    picture = Image.open(source).convert("RGBA")
+    scale_down = max(picture.size) / 1024.0
+    if scale_down > 1:
+        picture = picture.resize((round(picture.width / scale_down), round(picture.height / scale_down)))
+    rgba = np.asarray(picture).astype(np.int32)
+    alpha = rgba[:, :, 3]
+    if (alpha < 128).mean() > 0.02:
+        mask = alpha >= 128
+    else:
+        border = np.concatenate([rgba[0, :, :3], rgba[-1, :, :3], rgba[:, 0, :3], rgba[:, -1, :3]])
+        background = np.median(border, axis=0)
+        distance = np.sqrt(((rgba[:, :, :3] - background) ** 2).sum(axis=2))
+        limit = float(threshold) if threshold else max(24.0, float(np.percentile(np.sqrt(((border - background) ** 2).sum(axis=1)), 95)) * 1.5)
+        mask = distance > limit
+    if invert:
+        mask = ~mask
+    if mask.sum() < 16:
+        raise core.McpToolError("Nothing to trace: the picture looks empty against its background (try threshold)")
+    settings = detail_settings(float(detail))
+    covered = np.argwhere(mask)
+    span = float((covered.max(axis=0) - covered.min(axis=0)).max())
+    tolerance = max(1.5, span * max(settings.contour_fraction, 0.004))
+    shaped = _smooth_mask(mask, max(1, min(8, int(round(tolerance / 2))))) if settings.smooth else mask
+    segments = []
+    for loop in _mask_contours(shaped):
+        simple = _simplify(loop, tolerance * 0.5)
+        if settings.smooth:
+            simple = _visvalingam(simple, tolerance * tolerance * max(settings.tooth_area, 1.0))
+        if len(simple) < 3 or sum(np.linalg.norm(np.subtract(a, b)) for a, b in zip(simple, simple[1:])) < tolerance * 6:
+            continue
+        segments += [(np.array(a, float), np.array(b, float)) for a, b in zip(simple, simple[1:])
+                     if np.linalg.norm(np.subtract(a, b)) >= 1]
+    if settings.tidy and segments:
+        segments = clean_segments(segments, span)
+    if not segments:
+        raise core.McpToolError("No outline found: try a lower detail or another threshold")
+    flat = np.array([p for pair in segments for p in pair])
+    low, high = flat.min(axis=0), flat.max(axis=0)
+    middle, factor = (low + high) / 2, float(size) / max(float((high - low).max()) / 2, 1e-9)
+    cx, cz, _ = _xz(center or [0, 0], "center")
+    index, created = {}, []
+    for pair in segments:
+        ids = []
+        for px, py in pair:
+            key = (round((px - middle[0]) * factor + cx, 1), round(-(py - middle[1]) * factor + cz, 1))   # image y down -> z up
+            if key not in index:
+                index[key] = _new_point(wm, key[0], key[1])
+            ids.append(index[key])
+        created += _add_lines(wm, ids, False)
+    used = sorted({i for pid in created for i in wm.polygons[pid]})
+    return {"points": used, "polygons": created, "lines": len(created)}
+
+
 @wire_op("weld")
 def w_weld(ctx, select=None, tolerance: float = 0.5):
     """Merge points closer than tolerance; lines that collapse disappear."""
@@ -428,6 +612,14 @@ def run(target: str, operations: list[dict], label: str = "", dry_run: bool = Fa
     return {"results": outputs, **summary}
 
 
+def _is_under_data(path: Path) -> bool:
+    try:
+        path.resolve().relative_to(core.data_root())
+        return True
+    except ValueError:
+        return False
+
+
 def get(target: str) -> dict:
     wm = WireModel(resolve_skeleton(target), writable=False)
     degree = defaultdict(int)
@@ -437,7 +629,10 @@ def get(target: str) -> dict:
     return {**wm.summary(), "points_xz": [[round(p[0], 3), round(p[2], 3)] for p in wm.points], "y": sorted({round(p[1], 3) for p in wm.points})[:5],
             "polygons_list": wm.polygons, "outline": [list(p) for p in wm.outline],
             "outline_groups": [list(g) for g in wm.model.outline_groups], "sensors": len(wm.model.sensors),
-            "note": "points_xz are [x, z] pairs (y is kept separately); polygons are point-index lists (2 = line)"}
+            "long_entries": sum(1 for ring in wm.polygons if len(ring) > 2),
+            "note": "points_xz are [x, z] pairs, +z is UP on screen (y is kept separately); polygons are point-index "
+                    "lists. The game draws only the first segment of each entry: long_entries > 0 means lines are "
+                    "missing in game (fix: split_outlines)"}
 
 
 def new(target: str) -> dict:
@@ -453,8 +648,10 @@ def new(target: str) -> dict:
     return {"created": str(path), "next": "studio_wire_edit with add_points / add_shape / add_polygons"}
 
 
-def render_png(target: str, size: int = 520, labels: bool = True, highlight=None) -> bytes:
-    """Draw a wireframe (x across, z down) with point numbers; highlight = point selector to colour."""
+def render_png(target: str, size: int = 520, labels: bool = True, highlight=None, frame: bool = False) -> bytes:
+    """Draw a wireframe as the game does (x across, +z UP, only the first segment of each entry) with point numbers;
+    the unused part of a 3+ point entry is drawn dim red. highlight = point selector to colour; frame=true keeps the
+    real HUD scale: the box is the +-1000 screen frame."""
     from PIL import Image, ImageDraw
     wm = WireModel(resolve_skeleton(target), writable=False)
     pts = [(p[0], p[2]) for p in wm.points] if wm.mode == "poo2" else [(float(u), float(v)) for u, v in wm.outline]
@@ -464,20 +661,33 @@ def render_png(target: str, size: int = 520, labels: bool = True, highlight=None
     if not pts:
         return _png(image)
     xs, ys = [p[0] for p in pts], [p[1] for p in pts]
+    if frame and wm.mode == "poo2":
+        xs, ys = xs + [-1000.0, 1000.0], ys + [-1000.0, 1000.0]
     span = max(max(xs) - min(xs), max(ys) - min(ys), 1e-6)
     margin = 30
     scale = (size - 2 * margin) / span
     cx, cy = (max(xs) + min(xs)) / 2, (max(ys) + min(ys)) / 2
+    flip = -1 if wm.mode == "poo2" else 1      # POO2: +z is up on screen (game and editor); OTL2 rows grow down
 
     def to_screen(p):
-        return (size / 2 + (p[0] - cx) * scale, size / 2 + (p[1] - cy) * scale)
+        return (size / 2 + (p[0] - cx) * scale, size / 2 + flip * (p[1] - cy) * scale)
 
+    if frame and wm.mode == "poo2":
+        corners = [to_screen(c) for c in ((-1000, 1000), (1000, 1000), (1000, -1000), (-1000, -1000))]
+        draw.line(corners + [corners[0]], fill=(70, 80, 95), width=1)
+        draw.line([to_screen((-1000, 0)), to_screen((1000, 0))], fill=(45, 52, 62), width=1)
+        draw.line([to_screen((0, -1000)), to_screen((0, 1000))], fill=(45, 52, 62), width=1)
     for ring in groups:
         if len(ring) >= 2:
             line = [to_screen(pts[i]) for i in ring if i < len(pts)]
-            draw.line(line + ([line[0]] if len(line) > 2 else []), fill=(120, 200, 255), width=1)
+            if wm.mode == "poo2" and len(line) > 2:
+                draw.line(line[1:] + [line[0]], fill=(140, 60, 70), width=1)   # not drawn by the game
+            draw.line(line[:2] if wm.mode == "poo2" else line + ([line[0]] if len(line) > 2 else []),
+                      fill=(120, 200, 255), width=1)
     marked = set(select_points(highlight, wm.view())) if highlight is not None else set()
     for i, p in enumerate(pts):
+        if not labels and i not in marked:
+            continue            # without labels the picture shows only what the game draws
         x, y = to_screen(p)
         colour = (255, 80, 200) if i in marked else (255, 220, 60)
         draw.ellipse((x - 3, y - 3, x + 3, y + 3), fill=colour)

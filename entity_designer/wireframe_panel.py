@@ -6,6 +6,7 @@ and exports the new one.
 
 from __future__ import annotations
 
+import re
 import tempfile
 import time
 from pathlib import Path
@@ -14,6 +15,7 @@ from PySide6.QtCore import QSignalBlocker, QSize, Qt, QTimer
 from PySide6.QtGui import QColor, QPalette, QPixmap
 from PySide6.QtWidgets import (
     QApplication,
+    QCheckBox,
     QComboBox,
     QFileDialog,
     QFormLayout,
@@ -49,7 +51,7 @@ CAMERA_SETTLE_S = 0.25
 ACTION_BUTTON_HEIGHT = 30
 
 # Title shared by the Entity Designer and Model Editor tabs.
-TAB_TITLE = "Wireframe"
+TAB_TITLE = "Wireframe Generator"
 
 # Smallest contour simplification, in pixels of the 1024 px source view.
 DEFAULT_SIMPLIFICATION = 3.0
@@ -177,6 +179,12 @@ class WireframePanel(QWidget):
         detail_layout.addWidget(self.detail_label)
         settings.addRow("Detail:", detail_row)
 
+        self.effects_check = QCheckBox(self)
+        self.effects_check.setToolTip(
+            "Also outline flames, smoke, rotor discs and particles. Off, like the original "
+            "game outlines, which never draw them.")
+        settings.addRow("Effects:", self.effects_check)
+
         layout.addLayout(settings)
 
         preview_box = QGroupBox("Preview", self)
@@ -248,6 +256,7 @@ class WireframePanel(QWidget):
         self._style_path_label()
 
         self.view_preset_combo.currentTextChanged.connect(self.refresh)
+        self.effects_check.toggled.connect(self.refresh)
         self._preview_timer = QTimer(self)
         self._preview_timer.setSingleShot(True)
         self._preview_timer.setInterval(PREVIEW_DELAY_MS)
@@ -411,7 +420,7 @@ class WireframePanel(QWidget):
         showing = self._showing_current()
         self._update_current_glow()
         # The new wireframe's settings only matter while the new wireframe is shown.
-        for widget in (self.view_preset_combo, self.detail_slider, self.detail_label):
+        for widget in (self.view_preset_combo, self.detail_slider, self.detail_label, self.effects_check):
             widget.setEnabled(not showing)
         if showing:
             self._show_error("")
@@ -479,6 +488,7 @@ class WireframePanel(QWidget):
                     bool(self.viewport.indexed_renderer_info().get("available"))),
                 simplification=DEFAULT_SIMPLIFICATION,
                 detail=self.detail_position(),
+                include_effects=self.effects_check.isChecked(),
             )
             image = projection.preview_image(size=self.PREVIEW_SIZE)
             if image is None or image.isNull():
@@ -546,12 +556,25 @@ class WireframePanel(QWidget):
             notify(f"Wireframe overwritten: {target.name}."
                    + (f" Backup: {backup.name}." if backup else ""), 8000)
 
+    @staticmethod
+    def _export_name(host) -> str:
+        """File name offered on export: the model the wireframe was drawn from.
+
+        The host (Entity Designer, Model Editor) names it through
+        ``wireframe_export_name``; characters a file name cannot hold are dropped.
+        """
+
+        getter = getattr(host, "wireframe_export_name", None)
+        name = getter() if callable(getter) else ""
+        name = re.sub(r"[^\w.\- ]+", "", str(name or "")).strip().replace(" ", "_")
+        return name or "Wireframe"
+
     def _save_projection(self) -> None:
         if self.projection is None or self._showing_current():
             return
 
-        suggested = Path("Wireframe.SKL")
         host = self.window()
+        suggested = Path(f"{self._export_name(host)}.SKL")
         last_directory = getattr(host, "_last_directory", None)
         if last_directory:
             suggested = Path(last_directory) / suggested.name

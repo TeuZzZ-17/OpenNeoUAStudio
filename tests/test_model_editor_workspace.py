@@ -87,7 +87,7 @@ class ModelEditorWorkspaceTests(unittest.TestCase):
             # One flat level of palette buttons: no sub-tab bars.
             self.assertEqual(
                 [button.text() for button in strip.buttons()],
-                ["Models and Textures", "Wireframe", "Bas Manager",
+                ["Models and Textures", "Wireframe Generator", "Bas Manager",
                  "Entity List", "Asset Dependencies", "Asset Textures"])
             self.assertTrue(window._right_tabs.tabBar().isHidden())
             self.assertTrue(window._resources_tabs.tabBar().isHidden())

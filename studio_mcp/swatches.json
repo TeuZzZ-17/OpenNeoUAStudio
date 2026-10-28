@@ -1,0 +1,48 @@
+{
+ "_about": "Named texture patches of the Set1 vehicle atlases, read from where the original units map their faces (2026-10-28). rect = [u0, v0, u1, v1] in texture pixels (0..255). swatches.png shows every patch. Yellow/black key areas of the atlases are left out on purpose.",
+
+ "_donors": {"BAGGER.ILBM": ["set1:71", 13], "MTL.ILBM": ["set1:201", 9], "HUBI.ILBM": ["set1:12", 3],
+             "FAERROBO.ILBM": ["set1:163", 4], "AIR1TXT.ILBM": ["set1:116", 7], "FBAGGER.ILBM": ["set1:212", 0],
+             "ROBONEU.ILBM": ["set1:VP_BSECT", 18]},
+ "_donors_about": "Original block (source model, block number) copied when a model has no opaque block with that texture: a texture name can only be renamed to one that is not longer, so copying is the safe route.",
+
+ "resistance.hull":         {"texture": "BAGGER.ILBM", "rect": [4, 4, 88, 30],     "use": "light blue-grey hull plating (Falcon, Jaguar, Tiger)"},
+ "resistance.hull_slot":    {"texture": "BAGGER.ILBM", "rect": [4, 30, 88, 110],   "use": "hull plate with a dark slot / vent"},
+ "resistance.hull_plain":   {"texture": "BAGGER.ILBM", "rect": [16, 136, 124, 196], "use": "large smooth hull or wing panel"},
+ "resistance.panel_wide":   {"texture": "BAGGER.ILBM", "rect": [138, 146, 252, 220], "use": "wide wing / side panel"},
+ "resistance.light_bar":    {"texture": "BAGGER.ILBM", "rect": [136, 228, 254, 250], "use": "bright edge strip (leading edges, trims)"},
+ "resistance.canopy":       {"texture": "BAGGER.ILBM", "rect": [150, 46, 200, 80],  "use": "cockpit glass"},
+ "resistance.wheels":       {"texture": "BAGGER.ILBM", "rect": [132, 110, 200, 140], "use": "side wheels strip (static)"},
+ "resistance.ordnance":     {"texture": "BAGGER.ILBM", "rect": [96, 42, 144, 104],  "use": "painted bombs / missiles (racks, bomb bays)"},
+ "resistance.station":      {"texture": "MTL.ILBM",    "rect": [4, 34, 88, 124],    "use": "heavy station panel (host station, flak, buildings)"},
+ "resistance.station_vent": {"texture": "MTL.ILBM",    "rect": [132, 40, 212, 124], "use": "riveted frame panel"},
+ "resistance.lamp":         {"texture": "MTL.ILBM",    "rect": [54, 132, 92, 154],  "use": "white-blue lamp / glowing window"},
+
+ "ghorkov.hull":            {"texture": "HUBI.ILBM",   "rect": [2, 2, 84, 46],      "use": "mottled bronze-brown plating (every Ghorkov unit)"},
+ "ghorkov.hull_dark":       {"texture": "HUBI.ILBM",   "rect": [2, 150, 84, 250],   "use": "darker mottled plating: belly, sides, big panels"},
+ "ghorkov.canopy":          {"texture": "HUBI.ILBM",   "rect": [4, 50, 80, 142],    "use": "large green-grey cockpit glass"},
+ "ghorkov.grille":          {"texture": "HUBI.ILBM",   "rect": [90, 2, 174, 34],    "use": "four black windows in a frame (fronts, turret slits)"},
+ "ghorkov.exhaust":         {"texture": "HUBI.ILBM",   "rect": [92, 38, 172, 70],   "use": "red-hot exhaust / engine glow"},
+ "ghorkov.vents":           {"texture": "HUBI.ILBM",   "rect": [120, 86, 178, 158], "use": "rows of small dark vents (engine decks)"},
+
+ "taerkasten.plate":        {"texture": "FAERROBO.ILBM", "rect": [186, 4, 252, 104], "use": "dark riveted iron plate (Mnosjetz, Zeppelin, Bronsteijn)"},
+ "taerkasten.plate2":       {"texture": "FAERROBO.ILBM", "rect": [188, 118, 236, 196], "use": "second dark plate patch (variety on big hulls)"},
+ "taerkasten.window":       {"texture": "FAERROBO.ILBM", "rect": [86, 190, 180, 252], "use": "dark frame with a blue glow (canopy, porthole)"},
+ "taerkasten.masonry":      {"texture": "FAERROBO.ILBM", "rect": [2, 2, 134, 84],   "use": "stone facade with small windows (fortress walls)"},
+ "taerkasten.arches":       {"texture": "FAERROBO.ILBM", "rect": [2, 92, 88, 168],  "use": "gothic arches facade"},
+ "taerkasten.stone":        {"texture": "FAERROBO.ILBM", "rect": [4, 172, 80, 250], "use": "plain purple-grey stone"},
+ "taerkasten.armor":        {"texture": "HUBI.ILBM",   "rect": [188, 150, 252, 252], "use": "dark grey tank armour (Eisenhans, Leonid, Thor's Hammer)"},
+ "taerkasten.hull_metal":   {"texture": "MTL.ILBM",    "rect": [144, 178, 196, 250], "use": "blue-grey ribbed metal (Serp flying bomb)"},
+
+ "mykonian.veins":          {"texture": "AIR1TXT.ILBM", "rect": [124, 132, 252, 250], "use": "dark alien cable / bio-vein lattice (every Mykonian unit)"},
+ "mykonian.veins_small":    {"texture": "AIR1TXT.ILBM", "rect": [150, 160, 220, 230], "use": "tighter crop of the vein lattice (small faces)"},
+
+ "sulgogar.flesh":          {"texture": "FBAGGER.ILBM", "rect": [100, 6, 250, 96],   "use": "olive organic flesh (Queen, Slime Lord, Mean Green)"},
+ "sulgogar.flesh_dark":     {"texture": "FBAGGER.ILBM", "rect": [100, 60, 250, 110], "use": "darker lower flesh band"},
+
+ "blacksect.hull_lights":   {"texture": "ROBONEU.ILBM", "rect": [2, 2, 166, 60],    "use": "dark steel with rows of small lights"},
+ "blacksect.slots":         {"texture": "ROBONEU.ILBM", "rect": [50, 66, 254, 124], "use": "steel with long glowing slots"},
+ "blacksect.panel":         {"texture": "ROBONEU.ILBM", "rect": [94, 132, 150, 174], "use": "plain dark steel panel"},
+ "blacksect.glow":          {"texture": "ROBONEU.ILBM", "rect": [152, 132, 200, 230], "use": "bright blue-white glow panel"},
+ "blacksect.light_strip":   {"texture": "ROBONEU.ILBM", "rect": [2, 130, 90, 154],  "use": "glowing light strip"}
+}

@@ -116,7 +116,7 @@ def test_the_model_editor_uses_the_shared_wireframe_tab(app):
         assert isinstance(window.wireframe_panel, WireframePanel)
         assert "Generate Wireframe" not in [a.text() for a in window.file_menu.actions()]
         titles = [window._editor_tabs.tabText(i) for i in range(window._editor_tabs.count())]
-        assert titles == ["Models and Textures", "Wireframe"]
+        assert titles == ["Models and Textures", "Wireframe Generator"]
         assert window._editor_tabs.widget(1) is window.wireframe_panel
     finally:
         window.close()
