@@ -33,7 +33,7 @@ def test_level_info_briefing_edit_and_compatibility(app, win):
     assert win.doc.lvl_info['briefing_text'] == panel.briefing_edit.toPlainText()
     assert win.dirty
     assert 'OpenNeoUA only' in panel.briefing_marker.toolTip()
-    assert '#e75f60' in panel.briefing_marker.styleSheet()
+    assert '#e8873a' in panel.briefing_marker.styleSheet()
     rows = compatibility_entries(win, 'map_editor')
     assert next(row for row in rows if row[0] == 'Level Info')[1] == MIXED
     assert loads_ldf(dumps_ldf(win.doc)).lvl_info['briefing_text'] == panel.briefing_edit.toPlainText()

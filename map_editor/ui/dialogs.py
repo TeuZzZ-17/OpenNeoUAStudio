@@ -16,6 +16,7 @@ from ..core.ldf_model import EDITOR_HEIGHT_MAX, LdfDocument, briefing_for_export
 from ..core.game_installation import (GameInstallation)
 from ..core.resource_catalog import ResourceCatalog, preview_image, sky_key
 from studio.ui.shell import ResourcesDialog as GameInstallationDialog  # noqa: F401 - used by map_editor.editor, replaced by tests
+from studio.ui.shell import COMPAT_STYLES, OPENNEOUA
 from .thumbnail_delegate import PLACEHOLDER_ROLE, ThumbnailDelegate
 
 MIN_SIZE, MAX_SIZE = 5, 255
@@ -183,7 +184,7 @@ class LevelInfoPanel(QWidget):
         self.briefing_marker.setObjectName("briefingCompatibilityMarker")
         self.briefing_marker.setFixedSize(8, 8)
         self.briefing_marker.setStyleSheet(
-            "QLabel#briefingCompatibilityMarker { background:#e75f60; border-radius:4px; }")
+            f"QLabel#briefingCompatibilityMarker {{ background:{COMPAT_STYLES[OPENNEOUA].color}; border-radius:4px; }}")
         self.briefing_marker.setToolTip("OpenNeoUA only: optional briefing stored in the level. Overrides the language file.")
         briefing_header.addWidget(self.briefing_marker)
         briefing_header.addStretch()
