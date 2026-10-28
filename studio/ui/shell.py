@@ -351,8 +351,6 @@ def install_compatibility_markers(window, key):
         for button in map_tabs._buttons:
             level, note = by_title[button.text().casefold()]
             button.marker = compat_color(level)
-            if key == 'map_editor' and button.text() == 'Locations':
-                button.marker = QColor('#e75f60')
             button.setToolTip(f"{COMPAT_STYLES[level].title}. {note}")
             button.update()
 
