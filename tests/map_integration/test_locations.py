@@ -219,7 +219,7 @@ def test_locations_tab_checker_and_complete_rows(win):
     rows = compatibility_entries(win, 'map_editor')
     assert next(row for row in rows if row[0] == 'Locations')[1] == OPENNEOUA
     install_compatibility_markers(win, 'map_editor')
-    assert win.palette_tabs._buttons[win.location_tab_index].marker.name() == '#e75f60'
+    assert win.palette_tabs._buttons[win.location_tab_index].marker.name() == '#e8873a'
     grid = win.palette_tabs._button_grid
     rows = {}
     for index in range(grid.count()):
