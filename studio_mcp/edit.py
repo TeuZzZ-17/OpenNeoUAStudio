@@ -417,15 +417,16 @@ def _find_or_add_point(lm, position, tolerance: float) -> int:
 
 @op("add_polygons")
 def op_add_polygons(ctx, polygons=None, material=None, uv=None, weld_tolerance: float = 0.001,
-                    double_sided: bool = False, flip: bool = False, save_as=None):
+                    double_sided: bool = False, flip: bool = False, swatch=None, save_as=None):
     """Add polygons. Each polygon is a list of corners; a corner is a point index or a new [x,y,z] position.
     material: {'block': N} or {'like_polygon': ID} (plus optional 'atts': {color, shade, tracy}).
-    uv: a UV spec (see studio_help('uv')); default copies the UVs of like_polygon, else planar."""
+    uv: a UV spec (see studio_help('uv')); default copies the UVs of like_polygon, else planar.
+    swatch='faction.part' paints them at once (see studio_swatches)."""
     lm = ctx.lm
     lm.require_topology_edit()
     if not polygons:
         raise core.McpToolError("give 'polygons': [[corner, corner, corner, ...], ...]")
-    choice = _reference_for(lm, material)
+    choice = _reference_for(lm, edit_build._placeholder_block(lm, material) if swatch else material)
     block_index, atts = choice.block, choice.atts
     spec, reference_uvs = _uv_spec(lm, uv, choice.reference_uvs, choice.density, choice.region)
     first_new_point = len(lm.points)
@@ -447,20 +448,24 @@ def op_add_polygons(ctx, polygons=None, material=None, uv=None, weld_tolerance: 
             pts = [lm.points[i] for i in ring_try]
             group = uvtools.compute(spec, pts, reference=reference_uvs, notes=ctx.notes)
             created_polys.append(lm.append_polygon(ring_try, block_index, atts, group))
-    return {"polygons": created_polys, "points": list(range(first_new_point, len(lm.points))), "block": block_index}
+    result = {"polygons": created_polys, "points": list(range(first_new_point, len(lm.points))), "block": block_index}
+    if swatch:
+        result["paint"] = edit_build.paint_polygons(ctx, created_polys, swatch=swatch)
+    return result
 
 
 @op("create_primitive")
 def op_create_primitive(ctx, shape: str = "box", center=None, size=None, segments: int = 8, rings: int = 4,
                         top_scale=1.0, taper=1.0, caps: str = "both", rotate_deg=None, phase_deg=None, cells=(1, 1),
-                        material=None, uv=None, flip: bool = False, save_as=None):
+                        material=None, uv=None, flip: bool = False, swatch=None, save_as=None):
     """Add a ready-made solid: box (taper for pyramids/trapezoids), wedge, prism (cylinder, cone via top_scale=0),
-    sphere, plane. size is the full extent [sx, sy, sz]; y down, so the 'top' is negative y."""
+    sphere, plane. size is the full extent [sx, sy, sz]; y down, so the 'top' is negative y.
+    swatch='faction.part' paints it at once (see studio_swatches)."""
     lm = ctx.lm
     lm.require_topology_edit()
     points, polygons = shapes.make(shape, _vec(center, "center", (0, 0, 0)), _vec(size, "size", (2, 2, 2)), segments, rings,
                                    top_scale, taper, caps, _vec(rotate_deg, "rotate_deg", (0, 0, 0)), phase_deg, cells)
-    choice = _reference_for(lm, material)
+    choice = _reference_for(lm, edit_build._placeholder_block(lm, material) if swatch else material)
     block_index, atts = choice.block, choice.atts
     spec, reference_uvs = _uv_spec(lm, uv, choice.reference_uvs, choice.density, choice.region)
     first = len(lm.points)
@@ -471,7 +476,10 @@ def op_create_primitive(ctx, shape: str = "box", center=None, size=None, segment
         ring = [first + i for i in (reversed(ring) if flip else ring)]
         group = uvtools.compute(spec, [lm.points[i] for i in ring], reference=reference_uvs, notes=ctx.notes)
         created.append(lm.append_polygon(ring, block_index, atts, group))
-    return {"polygons": created, "points": list(range(first, len(lm.points))), "block": block_index}
+    result = {"polygons": created, "points": list(range(first, len(lm.points))), "block": block_index}
+    if swatch:
+        result["paint"] = edit_build.paint_polygons(ctx, created, swatch=swatch)
+    return result
 
 
 @op("delete_polygons")
@@ -1057,3 +1065,4 @@ def run(target: str, operations: list[dict], label: str = "", owner_path: str = 
 
 
 from studio_mcp import edit_materials  # noqa: E402,F401  (registers the material / effect operations)
+from studio_mcp import edit_build  # noqa: E402  (registers loft / paint / auto_shade; used for `swatch` above)

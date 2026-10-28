@@ -14,7 +14,7 @@ from pathlib import Path
 from time import perf_counter
 
 from PySide6.QtCore import QPointF, QRectF, QSignalBlocker, QSize, Qt, QTimer, Signal, QItemSelectionModel
-from PySide6.QtGui import QAction, QColor, QIcon, QPainter, QPainterPath, QPen, QPixmap
+from PySide6.QtGui import QAction, QColor, QIcon, QPainter, QPainterPath, QPen, QPixmap, QPolygonF
 from PySide6.QtWidgets import (
     QAbstractItemView, QButtonGroup, QCheckBox, QComboBox, QFrame, QGridLayout, QGroupBox, QHBoxLayout, QLabel, QListWidget, QMenu,
     QListWidgetItem, QPushButton, QScrollArea, QSizePolicy, QSlider, QSpinBox, QStyle, QStyledItemDelegate, QStyleOptionButton, QStyleOptionViewItem,
@@ -71,6 +71,31 @@ def _palette_icon(muted: bool) -> QIcon:
 
 
 KEY_GROUP_LABELS = {"sound": "Sound", "palette": "PAL", "shake": "Shake"}
+
+
+def _damage_icon(hidden: bool) -> QIcon:
+    """A burst (the area-damage mark); a white slash when switched off."""
+
+    pixmap = QPixmap(20, 20)
+    pixmap.fill(Qt.GlobalColor.transparent)
+    painter = QPainter(pixmap)
+    painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+    burst = QPolygonF()
+    for index in range(16):
+        angle = math.pi * index / 8.0 - math.pi / 2.0
+        reach = 8.5 if index % 2 == 0 else 4.2
+        burst.append(QPointF(10 + math.cos(angle) * reach, 10 + math.sin(angle) * reach))
+    painter.setPen(QPen(QColor("#6e7782" if hidden else "#ff9646"), 0.8))
+    painter.setBrush(QColor("#6e7782" if hidden else "#ff6038"))
+    painter.drawPolygon(burst)
+    painter.setPen(Qt.PenStyle.NoPen)
+    painter.setBrush(QColor("#8d96a3" if hidden else "#ffe28c"))
+    painter.drawEllipse(QPointF(10, 10), 2.6, 2.6)
+    if hidden:
+        painter.setPen(QPen(QColor("#eef0f4"), 2.0, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap))
+        painter.drawLine(QPointF(3, 17), QPointF(17, 3))
+    painter.end()
+    return QIcon(pixmap)
 
 
 def _shake_icon(muted: bool) -> QIcon:
@@ -758,6 +783,8 @@ class DestructionFxPanel(QWidget):
         self.mute_button = button("Mute", "Mute the preview sounds", True)
         self.shake_button = button("Shake", "Switch off the view shake (shk_*)", True)
         self.pal_button = button("Palette", "Switch off the palette flashes (pal_*)", True)
+        self.damage_button = button(
+            "Damage", "Hide the damage sphere and numbers of the weapon", True)
         for widget, symbol in (
                 (self.restart_button, QStyle.StandardPixmap.SP_MediaSkipBackward),
                 (self.play_button, QStyle.StandardPixmap.SP_MediaPlay),
@@ -787,6 +814,17 @@ class DestructionFxPanel(QWidget):
         self.pal_button.setMinimumWidth(28)
         self.pal_button.toggled.connect(self._palette_toggled)
         self.pal_button.setAccessibleName("Mute palette flashes")
+        self.damage_button.setText("")
+        self.damage_button.setIcon(_damage_icon(False))
+        self.damage_button.setIconSize(QSize(20, 20))
+        self.damage_button.setMinimumWidth(28)
+        self.damage_button.toggled.connect(self._damage_toggled)
+        self.damage_button.setAccessibleName("Hide damage marks")
+        # Eight icon buttons must fit the narrow right panel.
+        for icon_button in (self.restart_button, self.play_button, self.stop_button,
+                            self.loop_button, self.mute_button, self.shake_button,
+                            self.pal_button, self.damage_button):
+            icon_button.setMinimumWidth(24)
         self.restart_button.clicked.connect(self.restart)
         self.play_button.toggled.connect(self._play_toggled)
         self.stop_button.clicked.connect(self.stop)
@@ -1311,6 +1349,20 @@ class DestructionFxPanel(QWidget):
             "Palette flashes switched off: click to show them" if muted
             else "Switch off the palette flashes (pal_*)")
         self.frameChanged.emit()
+
+    def _damage_toggled(self, hidden: bool) -> None:
+        self.damage_button.setIcon(_damage_icon(hidden))
+        self.damage_button.setToolTip(
+            "Damage marks hidden: click to show them" if hidden
+            else "Hide the damage sphere and numbers of the weapon")
+        self.frameChanged.emit()
+
+    def damage_marks(self) -> list:
+        """Damage spheres and numbers to draw now; none when switched off."""
+
+        if self.simulation is None or self.damage_button.isChecked():
+            return []
+        return self.simulation.damage_at(self.time_ms)
 
     def _shake_toggled(self, muted: bool) -> None:
         self.shake_button.setIcon(_shake_icon(muted))

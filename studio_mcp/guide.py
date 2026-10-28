@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import inspect
 
-TOPICS = ("start", "conventions", "selectors", "uv", "recipes", "wireframe", "ops")
+TOPICS = ("start", "design", "conventions", "selectors", "uv", "recipes", "wireframe", "ops")
 
 START = """WORKFLOW (read-only steps are always safe)
 1. Find a model: studio_list_vp (Set.BAS models) or studio_list_models (loose models under Data/Models).
@@ -12,12 +12,39 @@ START = """WORKFLOW (read-only steps are always safe)
    Add label_points / label_polygons / highlight_polygons (selectors) to SEE the numbers the edit tools need.
 3. Make an editable copy: studio_export_model('set1:VPwGLID2', out_dir, base_name, skeleton_stem).
    The skeleton_stem must be as long as the original (VPWGLID2 -> VPKGLID2) and different.
+   A NEW design instead starts empty: studio_new_model(out_dir, base_name, skeleton_stem) - see studio_help('design').
 4. Edit. studio_edit_batch(model, operations=[...]) runs several steps on one in-memory copy and writes ONCE,
    after verification; if any step fails nothing is written. Every single-purpose tool (studio_extrude, ...) is the
    same engine with one step.
 5. Check: studio_render_model again, studio_analyze_model, studio_validate_model. Wrong? studio_undo / studio_redo.
 `model` is the .BASE path, or a folder holding exactly one .BASE; relative paths start at the game Data folder.
 Writes are only allowed under Data/Models. Every write keeps an undo snapshot (studio_history lists them).
+"""
+
+DESIGN = """NEW DESIGNS IN THE URBAN ASSAULT LOOK (measured on the original Set1 units)
+1. Start empty: studio_new_model(out_dir, 'MYUNIT', 'VPNUNIT1')  (stem: 6-8 characters, new and unique).
+2. Shape with few big flat faces. Original units have 6-65 polygons (tanks 10-35, aircraft 25-55, host stations
+   ~100); faceted, angular, no rounded detail, no greebles.
+   - loft = one closed hull from cross-sections (fuselage, tank hull, bomb, missile, pod). half=true + mirror.
+   - create_primitive = boxes/wedges/prisms for turrets, barrels, fins, skids.
+   - import_geometry = reuse original parts (tracks, rotors, turrets, cockpits) from a faction donor:
+     the surest way to the faction look. Animated parts (tracks, rotors, glows) travel with add_fx.
+3. Texture with faction swatches: studio_swatches() lists them with a picture; pass swatch='ghorkov.hull' to
+   loft / create_primitive / add_polygons, or studio_paint later. Every face shows one whole panel (like the
+   originals). Use the faction's own atlas only: Resistance BAGGER/MTL, Ghorkov HUBI, Taerkasten FAERROBO + dark
+   HUBI armour, Mykonian AIR1TXT veins, Sulgogar FBAGGER flesh, Black Sect ROBONEU.
+4. Light: the engine has none, every face carries a baked shade. End with {"op":"auto_shade"} (top bright,
+   sides mid, belly dark). Without it the model looks flat and wrong.
+5. Check scale and look: studio_render_model(model, views=[...], compare_with='set1:<similar unit>') puts the
+   reference beside it AT THE SAME SCALE; studio_analyze_model must report no problems.
+Example (a bomb, 72 long):
+  {"op":"loft","half":true,"swatch":"taerkasten.plate","sections":[
+     {"at":40,"points":[[0,0]]},
+     {"at":28,"points":[[0,-6],[4,-4],[6,0],[4,4],[0,6]]},
+     {"at":-18,"points":[[0,-9],[6,-6],[9,0],[6,6],[0,9]]},
+     {"at":-32,"points":[[0,-5],[3.5,-3.5],[5,0],[3.5,3.5],[0,5]]}]}
+  {"op":"create_primitive","shape":"box","center":[0,-11,-30],"size":[1.5,10,12],"swatch":"taerkasten.plate2"}
+  {"op":"auto_shade"}
 """
 
 CONVENTIONS = """CONVENTIONS
@@ -35,7 +62,7 @@ CONVENTIONS = """CONVENTIONS
 - Limits: 65536 points and 32768 polygons per skeleton.
 - Renumbering: delete_polygons, subdivide, weld and cleanup shift indices. Inside a batch use save_as/named
   selections; across separate calls re-run studio_select.
-- New model folders follow Data/Models/Base/[ALPHA_]VP_<CODE>_<STATE>/ with the .BASE named like the folder.
+- Organize model folders under Data/Models/Base/Alpha_Models, Original_Refined or New; use descriptive unit and state folder names, while preserving the BASE filename.
 """
 
 SELECTORS = """SELECTORS (which points / polygons an operation affects)
@@ -83,20 +110,34 @@ More detail:        {"op":"subdivide","select":{"facing":"up"}}  then move singl
 Fix inside-out:     studio_analyze_model says which; {"op":"flip","select":[ids]}
 Chain with names:   [{"op":"duplicate","select":{"connected_to":5},"translate":[30,0,0],"save_as":"copy"},
                      {"op":"transform","select":{"named":"copy"},"scale":0.5}]
+Hull from sections: {"op":"loft","half":true,"swatch":"ghorkov.hull","sections":[{"at":60,"points":[[0,0]]},
+                     {"at":30,"points":[[0,-10],[12,-6],[14,6],[0,10]]},{"at":-40,"points":[[0,-12],[16,-8],[18,8],[0,12]]}]}
+Repaint a part:     {"op":"paint","select":{"facing":"up"},"swatch":"ghorkov.canopy"}
+Bake the light:     {"op":"auto_shade"}   (last step; offset=+20 darkens a selection, -20 lightens it)
+New model from scratch: studio_new_model (empty, plain blocks kept), then loft / primitives with `swatch`.
 New model from an old one: export it, {"op":"clear"}, then build with create_primitive/add_polygons using
 `material` blocks the exported copy kept (studio_materials shows them; they keep their textures).
 """
 
 
-WIREFRAME = """WIREFRAMES (bare .SKL skeletons such as Data/Wireless/ARROW.SKL; writable under Data/Models and Data/Wireless)
-Seen from above: points are [x, z] (y is kept), lines have 2 points, outlines 3+. Typical flow:
-  studio_wire_new('Wireless/MYSHIP.SKL')  ->  studio_wire_edit(..., operations=[...])  ->  studio_wire_render(...)
-Operations: add_points, add_shape(shape=triangle|square|pentagon|circle, center, radius, rotate_deg), add_polygons
-([[a,b],[a,b,c,..]]), delete_points, delete_polygons, transform(select, translate=[dx,dz], rotate_deg, scale, pivot,
-mirror=true for symmetric edits across z=0), set_points, align(axis,value), mirror_copy(axis,plane), weld(tolerance),
-outline_move (OTL2 files: only moving, the count is fixed). Selectors work on points (x/y/z ranges, indices ...).
-Example: [{"op":"add_shape","shape":"triangle","center":[0,0],"radius":120,"save_as":"hull"},
-          {"op":"add_points","points":[[0,-160]],"save_as":"tip"}, {"op":"add_polygons","polygons":[[0,3]]}]
+WIREFRAME = """WIREFRAMES (bare .SKL skeletons in Data/Wireless; new ones go in Data/Wireless/New/)
+How the game draws them: screen x = x/1000, screen y = -z/1000, so +z is UP and +-1000 is the HUD frame edge.
+ONLY THE FIRST SEGMENT of each line entry is drawn: every visible line is its own 2-point entry. The tools below
+build lines only; studio_wire_get reports long_entries (fix with split_outlines). y is ignored on screen.
+Conventions of the originals: unit outlines (OTL*) = isometric view from the front-left, larger half-extent 1000;
+weapon outlines (OTLW*) = side view, nose at +x, x -1000..1000; sights/HUD (NH*, *VIS*) = symmetric, centred.
+Tools: studio_wire_new -> studio_wire_edit(..., operations=[...]) -> studio_wire_render(frame=true for HUD).
+studio_wire_from_model(source, skeleton, view='unit'|'weapon', detail=3) runs Studio's generator on a 3D model
+(flames, smoke, rotors and particles left out unless include_effects=true).
+Operations: add_lines(points=[[x,z],...], closed), add_shape(shape=circle|hexagon|octagon|triangle|square|
+pentagon|arc|rect|cross|x|brackets, center, radius, size=[w,h], segments, start_deg, end_deg, rotate_deg, dashes),
+trace_image(image=path, size=1000, detail 0..4, threshold, invert), add_points, add_polygons([[a,b],[a,b,c]] ->
+lines; close_loops), delete_points, delete_polygons, transform(select, translate=[dx,dz], rotate_deg, scale, pivot,
+mirror=true), set_points, align(axis,value), mirror_copy(axis 'x' = left/right copy, 'z' = up/down, plane),
+weld(tolerance), normalize(size=1000), split_outlines, outline_move (OTL2 files: only moving, the count is fixed).
+Example sight: [{"op":"add_shape","shape":"circle","radius":220,"dashes":true},
+          {"op":"add_shape","shape":"brackets","size":[700,500],"radius":90},
+          {"op":"add_lines","points":[[-160,0],[-60,0]]}, {"op":"add_lines","points":[[60,0],[160,0]]}]
 Undo works the same way: studio_undo / studio_redo / studio_history with the .SKL path.
 """
 
@@ -121,8 +162,10 @@ def help_text(topic: str = "start") -> str:
     if topic == "all":
         return "\n\n".join(help_text(t) for t in TOPICS)
     if topic == "start":
-        return START + "\nMore: studio_help('conventions' | 'selectors' | 'uv' | 'recipes' | 'wireframe' | 'ops' | 'all')"
-    texts = {"conventions": CONVENTIONS, "selectors": SELECTORS, "uv": UV, "recipes": RECIPES, "wireframe": WIREFRAME}
+        return START + ("\nMore: studio_help('design' | 'conventions' | 'selectors' | 'uv' | 'recipes' | 'wireframe' | "
+                        "'ops' | 'all')")
+    texts = {"design": DESIGN, "conventions": CONVENTIONS, "selectors": SELECTORS, "uv": UV, "recipes": RECIPES,
+             "wireframe": WIREFRAME}
     if topic == "ops":
         return _ops_text()
     if topic in texts:

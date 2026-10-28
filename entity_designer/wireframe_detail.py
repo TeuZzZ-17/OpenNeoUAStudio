@@ -33,7 +33,7 @@ class DetailLevel:
 
 DETAIL_LEVELS = (
     DetailLevel("Maximum", False, False, 0.0, 0.0, False, False, 0.0),
-    DetailLevel("High", True, True, 0.0, 0.006, False, False, 0.0),
+    DetailLevel("High", True, True, 0.0, 0.006, True, False, 0.0),
     DetailLevel("Medium", True, True, 12.0, 0.015, False, True, 1.5),
     DetailLevel("Simple", True, True, 12.0, 0.03, True, True, 3.0),
     DetailLevel("Minimal", True, True, 20.0, 0.05, True, True, 6.0),
