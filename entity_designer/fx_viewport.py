@@ -18,11 +18,14 @@ from pathlib import Path
 
 from PySide6.QtCore import QPointF, QRectF, Qt
 from PySide6.QtGui import (
-    QBrush, QColor, QImage, QPainter, QPen, QPolygonF, QRadialGradient, QTransform,
+    QBrush, QColor, QFont, QFontMetricsF, QImage, QPainter, QPainterPath, QPen,
+    QPolygonF, QRadialGradient, QTransform,
 )
 
 from studio.rendering.asset_viewport import AssetViewport, ViewFace, _apply, _rotation_matrix
-from entity_designer.destruction_fx import EmitterSpec
+from entity_designer.destruction_fx import (
+    DAMAGE_AREA, DAMAGE_DIRECT, EmitterSpec, damage_text,
+)
 
 try:  # numpy is already required by the indexed renderer.
     import numpy as _np
@@ -35,6 +38,14 @@ _BOX_EDGES = (
     (0, 1), (1, 3), (3, 2), (2, 0), (4, 5), (5, 7), (7, 6), (6, 4),
     (0, 4), (1, 5), (2, 6), (3, 7),
 )
+# Damage overlay: the area sphere keeps the engine's F9 blast-ring red.
+_BLAST_RING_COLOR = (255, 40, 40)
+_DAMAGE_COLOR = {DAMAGE_AREA: (255, 96, 56), DAMAGE_DIRECT: (255, 206, 70)}
+_BLAST_RING_SEGMENTS = 64
+_BLAST_RING_ALPHA = 105
+# How far a damage label floats up while it is visible, in pixels.
+_DAMAGE_LABEL_RISE = {DAMAGE_AREA: 14.0, DAMAGE_DIRECT: 10.0}
+_DAMAGE_RISE_MS = 1200.0
 
 
 def anim_state_at(frames, anim_type: int, time_ms: float) -> tuple[int, int]:
@@ -177,17 +188,24 @@ class FxPreviewViewportMixin:
         self._fx_decal_cache: dict[tuple, QImage | None] = {}
         self._fx_highlight: int | None = None
         self._fx_particles = []
-        # owner -> [(EmitterSpec, [stage look])]; rebuilt with the family.
+        # (family id, owner) -> [(EmitterSpec, [stage look])]; rebuilt with the family.
         self._fx_emitter_cache: dict[str, list] = {}
         self._fx_emitter_family = None
         self._fx_tinted_stage_cache: dict[tuple, QImage] = {}
         # External 3DS/BASE models: path -> hidden renderer (None = failed).
         self._fx_external_loader = None
         self._fx_external_cache: dict[str, AssetViewport | None] = {}
+        # vp -> (family, owner) of a SET VP the unit's own family does not hold
+        # (a loose BASE unit); None when every VP lives in the unit's family.
+        self._fx_set_vp_source = None
+        # Every VP the preview may show, so one set renderer can hold them all.
+        self._fx_required_vps: set[int] = set()
         # Palette flash (normclr, invclr) of the whole view.
         self._fx_palette = None
         # Turn of the view caused by shk_* (radians around X, Y, Z).
         self._fx_shake = (0.0, 0.0, 0.0)
+        # Weapon damage overlay (DamageSample list): blast sphere and numbers.
+        self._fx_damage = []
 
     def set_fx_preview(self, *, active: bool, items=(), owner_by_vp=None,
                        unit_owners=None, boxes=(), time_ms: float = 0.0,
@@ -195,8 +213,13 @@ class FxPreviewViewportMixin:
                        highlight: int | None = None, particles=(),
                        external_loader=None,
                        weapon_context: bool = False, palette=None,
-                       shake=(0.0, 0.0, 0.0)) -> None:
+                       shake=(0.0, 0.0, 0.0), damage=(), vp_source=None,
+                       required_vps=()) -> None:
         self._fx_active = bool(active)
+        if vp_source is not None:
+            self._fx_set_vp_source = vp_source
+            self._fx_required_vps = set(required_vps)
+        self._fx_damage = list(damage) if active else []
         self._fx_palette = palette if active else None
         self._fx_shake = tuple(shake) if active else (0.0, 0.0, 0.0)
         self._fx_weapon_context = bool(active and weapon_context)
@@ -282,20 +305,38 @@ class FxPreviewViewportMixin:
 
     # -- particle emitters -------------------------------------------------------
 
-    def fx_emitter_specs(self, owner: str | None) -> list[EmitterSpec]:
-        """particle.class emitters of a VP owner, in model space."""
+    def _fx_vp_source(self, vp: int):
+        """(family, owner) a VP is drawn from, or None when it cannot be found.
 
-        return [spec for spec, _stages in self._fx_emitters(owner)]
+        Normally the unit's own family; a loose BASE unit takes the VPs of its
+        effects from the active set instead.
+        """
 
-    def _fx_emitters(self, owner: str | None) -> list:
-        family = self._family_ref
+        owner = self._fx_owner_by_vp.get(int(vp))
+        if owner is not None and self._family_ref is not None:
+            return self._family_ref, owner
+        if self._fx_set_vp_source is not None:
+            return self._fx_set_vp_source(int(vp))
+        return None
+
+    def fx_vp_emitter_specs(self, vp: int) -> list[EmitterSpec]:
+        """particle.class emitters of a VP, in model space."""
+
+        source = self._fx_vp_source(vp)
+        if source is None:
+            return []
+        return [spec for spec, _stages in self._fx_emitters(source[1], source[0])]
+
+    def _fx_emitters(self, owner: str | None, family=None) -> list:
+        family = family if family is not None else self._family_ref
         if owner is None or family is None:
             return []
-        if family is not self._fx_emitter_family:
+        key = (id(family), owner)
+        if family is self._family_ref and family is not self._fx_emitter_family:
             self._fx_emitter_family = family
             self._fx_emitter_cache.clear()
             self._fx_tinted_stage_cache.clear()
-        cached = self._fx_emitter_cache.get(owner)
+        cached = self._fx_emitter_cache.get(key)
         if cached is not None:
             return cached
         emitters = []
@@ -323,7 +364,7 @@ class FxPreviewViewportMixin:
                           for stage in block.particle_stages]
                 emitters.append((EmitterSpec.from_attributes(
                     point, attributes, max(1, len(stages))), stages))
-        self._fx_emitter_cache[owner] = emitters
+        self._fx_emitter_cache[key] = emitters
         return emitters
 
     def _particle_stage_look(self, family, stage) -> dict | None:
@@ -398,8 +439,8 @@ class FxPreviewViewportMixin:
         scale = float(camera["scale"])
         drawn = []
         for sprite in self._fx_particles:
-            owner = self._fx_owner_by_vp.get(int(sprite.vp))
-            emitters = self._fx_emitters(owner)
+            source = self._fx_vp_source(sprite.vp)
+            emitters = self._fx_emitters(source[1], source[0]) if source else []
             if not 0 <= sprite.emitter < len(emitters):
                 continue
             stages = emitters[sprite.emitter][1]
@@ -469,7 +510,52 @@ class FxPreviewViewportMixin:
             helper = self._fx_external_cache[path]
             if helper is not None:
                 return helper
+        if item.vp and int(item.vp) not in self._fx_owner_by_vp:
+            return self._fx_set_vp_helper(int(item.vp))
         return None
+
+    def _fx_set_vp_helper(self, vp: int) -> AssetViewport | None:
+        """Hidden renderer shared by the SET VP models the unit's family lacks.
+
+        One renderer per set means one layer per tint/fade group instead of
+        one per VP, which keeps the preview fast. None for a VP without mesh
+        (emitter-only): its particles are drawn elsewhere.
+        """
+
+        source = self._fx_vp_source(vp)
+        if source is None:
+            return None
+        family, owner = source
+        key = f"set:{id(family)}"
+        shared = self._fx_external_cache.get(key)
+        if shared is None or owner not in shared._fx_owners:
+            if shared is not None:
+                shared.close()
+            owners = {owner}
+            for other in self._fx_required_vps:
+                other_source = self._fx_vp_source(other)
+                if other_source is not None and other_source[0] is family:
+                    owners.add(other_source[1])
+            shared = AssetViewport()
+            shared.load_family(family, owners)
+            shared._fx_owners = owners
+            shared._fx_flat = False
+            shared._fx_base_faces = []
+            shared._fx_owner_faces = {}
+            for face in shared._faces:
+                shared._fx_owner_faces.setdefault(face.owner, []).append(
+                    (face, [tuple(vertex) for vertex in face.vertices]))
+            self._fx_external_cache[key] = shared
+        return shared if owner in shared._fx_owner_faces else None
+
+    def _fx_helper_faces(self, helper, item) -> list:
+        """(face, vertices) of the model an item draws from a hidden renderer."""
+
+        by_owner = getattr(helper, "_fx_owner_faces", None)
+        if by_owner is None:
+            return helper._fx_base_faces
+        source = self._fx_vp_source(int(item.vp)) if item.vp else None
+        return by_owner.get(source[1], ()) if source is not None else ()
 
     def _draw_fx_external(self, painter, target, camera, helper, items, *,
                           opacity: float = 1.0, rgb=None,
@@ -486,7 +572,25 @@ class FxPreviewViewportMixin:
                      poly_id=face.poly_id, animated=face.animated,
                      mapped=face.mapped, primary=False, owner=face.owner,
                      block_index=face.block_index)
-            for item in items for face, vertices in helper._fx_base_faces]
+            for item in items
+            for face, vertices in self._fx_helper_faces(helper, item)]
+        # The hidden renderer has no animation timer. The unit's own BASE
+        # follows the toolbar (Play / Speed) like a SET unit; every other model
+        # follows the preview clock like the effects.
+        family, own = helper._family_ref, self._family_ref
+        follows_toolbar = (
+            any(item.kind == "unit" for item in items)
+            and family is not None and own is not None
+            and family.base_path == own.base_path
+            and len(helper._materials) == len(self._materials))
+        for material_id, material in enumerate(helper._materials):
+            if not material.anim_frames:
+                continue
+            if follows_toolbar and material_id in self._anim_states:
+                helper._anim_states[material_id] = self._anim_states[material_id]
+            else:
+                helper._anim_states[material_id] = anim_state_at(
+                    material.anim_frames, material.anim_type, self._fx_time_ms)
         width = max(1, int(round(target.width())))
         height = max(1, int(round(target.height())))
         layer = QImage(width, height, QImage.Format.Format_RGBA8888)
@@ -731,7 +835,7 @@ class FxPreviewViewportMixin:
                 # A VP found in the SET but without faces is either drawn by
                 # its particle emitters or is an intentionally empty model
                 # (DUMMY). Only VPs missing from the SET get a marker.
-                if not item.vp or int(item.vp) not in self._fx_owner_by_vp:
+                if not item.vp or self._fx_vp_source(int(item.vp)) is None:
                     markers.append(item)
                 continue
             tinted, rgb, opacity, step = self._fx_item_look(item)
@@ -789,6 +893,7 @@ class FxPreviewViewportMixin:
         self._draw_fx_particles(painter, target, camera)
         self._draw_fx_boxes(painter, target, camera)
         self._draw_fx_markers(painter, target, camera, markers)
+        self._draw_fx_damage(painter, target, camera)
 
     def _draw_fx_layer(self, painter, target, camera, opacity, rgb) -> None:
         width = max(1, int(round(target.width())))
@@ -973,3 +1078,119 @@ class FxPreviewViewportMixin:
             painter.drawText(point + QPointF(size + 3, 4),
                              item.label or "model unavailable")
         painter.restore()
+
+    def _draw_fx_damage(self, painter, target, camera) -> None:
+        """Blast spheres first, then the damage labels on top of everything."""
+
+        if not self._fx_damage:
+            return
+        painter.save()
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+        painter.setRenderHint(QPainter.RenderHint.TextAntialiasing, True)
+        try:
+            for sample in self._fx_damage:
+                if sample.mark.kind == DAMAGE_AREA:
+                    self._draw_blast_sphere(painter, target, camera, sample)
+            for sample in self._fx_damage:
+                self._draw_damage_label(painter, target, camera, sample)
+        finally:
+            painter.restore()
+
+    def _draw_blast_sphere(self, painter, target, camera, sample) -> None:
+        """Blast radius like the engine's F9 ring: three thin, faint axis rings.
+
+        No filled shell: the sphere must not hide the explosion being judged.
+        """
+
+        mark = sample.mark
+        radius = mark.radius
+        painter.setOpacity(max(0.0, min(1.0, sample.alpha)))
+        painter.setBrush(Qt.BrushStyle.NoBrush)
+        painter.setPen(QPen(QColor(*_BLAST_RING_COLOR, _BLAST_RING_ALPHA), 1.0))
+        x, y, z = mark.position
+        for axis in range(3):
+            previous = None
+            for index in range(_BLAST_RING_SEGMENTS + 1):
+                angle = 2.0 * math.pi * index / _BLAST_RING_SEGMENTS
+                a, b = math.cos(angle) * radius, math.sin(angle) * radius
+                # Same planes as the engine: XY, XZ and YZ.
+                world = ((x + a, y + b, z), (x + a, y, z + b), (x, y + a, z + b))[axis]
+                point = self._fx_project(world, target, camera)
+                if point is not None and previous is not None:
+                    painter.drawLine(previous, point)
+                previous = point
+
+    def _draw_damage_label(self, painter, target, camera, sample) -> None:
+        """Icon + damage number, floating next to the impact point or sphere center."""
+
+        mark = sample.mark
+        anchor = self._fx_project(mark.position, target, camera)
+        if anchor is None:
+            return
+        kind = mark.kind
+        rise = _DAMAGE_LABEL_RISE[kind] * min(1.0, sample.age / _DAMAGE_RISE_MS)
+        font = QFont(painter.font())
+        font.setPixelSize(15)
+        font.setBold(True)
+        text = damage_text(mark.amount)
+        text_width = QFontMetricsF(font).horizontalAdvance(text)
+        icon = 18.0
+        pad = 6.0
+        width = pad + icon + 4.0 + text_width + pad
+        height = 26.0
+        if kind == DAMAGE_AREA:
+            # Above the sphere center, so it stays inside the sphere.
+            left = anchor.x() - width * 0.5
+            top = anchor.y() - 42.0 - rise
+        else:
+            # Below and to the right of the impact point: never over the area label.
+            left = anchor.x() + 14.0
+            top = anchor.y() + 6.0 - rise
+        red, green, blue = _DAMAGE_COLOR[kind]
+        painter.save()
+        painter.setOpacity(max(0.0, min(1.0, sample.alpha)))
+        painter.setPen(QPen(QColor(red, green, blue, 170), 1.2))
+        painter.setBrush(QColor(12, 16, 22, 200))
+        painter.drawRoundedRect(QRectF(left, top, width, height), 7.0, 7.0)
+        _paint_damage_icon(painter, kind, QPointF(left + pad + icon * 0.5, top + height * 0.5))
+        text_left = left + pad + icon + 4.0
+        painter.setPen(QColor(255, 244, 226))
+        painter.setFont(font)
+        painter.drawText(QRectF(text_left, top, text_width + 2.0, height),
+                         Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft, text)
+        painter.restore()
+
+
+def _paint_damage_icon(painter: QPainter, kind: str, center: QPointF) -> None:
+    """Small colored icon: a burst for area damage, a crosshair for a direct hit."""
+
+    painter.save()
+    painter.translate(center)
+    red, green, blue = _DAMAGE_COLOR[kind]
+    if kind == DAMAGE_AREA:
+        burst = QPainterPath()
+        for index in range(16):
+            angle = math.pi * index / 8.0 - math.pi / 2.0
+            reach = 8.5 if index % 2 == 0 else 4.2
+            point = QPointF(math.cos(angle) * reach, math.sin(angle) * reach)
+            if index == 0:
+                burst.moveTo(point)
+            else:
+                burst.lineTo(point)
+        burst.closeSubpath()
+        painter.setPen(QPen(QColor(255, 150, 70), 0.8))
+        painter.setBrush(QColor(red, green, blue))
+        painter.drawPath(burst)
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.setBrush(QColor(255, 226, 140))
+        painter.drawEllipse(QPointF(0, 0), 2.6, 2.6)
+    else:
+        painter.setPen(QPen(QColor(red, green, blue), 1.6))
+        painter.setBrush(Qt.BrushStyle.NoBrush)
+        painter.drawEllipse(QPointF(0, 0), 5.6, 5.6)
+        for dx, dy in ((1, 0), (-1, 0), (0, 1), (0, -1)):
+            painter.drawLine(QPointF(dx * 4.0, dy * 4.0), QPointF(dx * 8.5, dy * 8.5))
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.setBrush(QColor(255, 244, 200))
+        painter.drawEllipse(QPointF(0, 0), 1.9, 1.9)
+    painter.restore()

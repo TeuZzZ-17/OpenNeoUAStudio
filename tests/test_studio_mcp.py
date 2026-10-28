@@ -13,7 +13,7 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 STUDIO = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(STUDIO))
 
-from studio_mcp import analysis, core, edit, guide, history, meshmath, shapes, uvs, wire  # noqa: E402
+from studio_mcp import analysis, core, edit, edit_build, guide, history, meshmath, shapes, uvs, wire  # noqa: E402
 from studio_mcp.loose import LooseModel  # noqa: E402
 from studio_mcp.select import MeshView, select_points, select_polygons  # noqa: E402
 
@@ -87,6 +87,35 @@ class PureHelperTests(unittest.TestCase):
         self.assertEqual(sorted(u for u, _ in moved), [15, 15, 25])
         with self.assertRaises(core.McpToolError):
             uvs.compute({"mode": "explicit"}, square)
+
+    def test_loft_builds_a_closed_outward_hull(self):
+        half = [[0, -6], [5, -4], [6, 0], [5, 4], [0, 6]]
+        points, faces = edit_build.loft_mesh([{"at": 30, "points": [[0, 0]]}, {"at": 10, "points": half},
+                                              {"at": -20, "points": half}], half=True)
+        directed = {}
+        for ring in faces:
+            for k, a in enumerate(ring):
+                directed[(a, ring[(k + 1) % len(ring)])] = directed.get((a, ring[(k + 1) % len(ring)]), 0) + 1
+        self.assertTrue(all(directed.get((b, a)) == 1 and n == 1 for (a, b), n in directed.items()))   # closed, one winding
+        center = meshmath.centroid(points)
+        for ring in faces:
+            pts = [points[i] for i in ring]
+            self.assertGreater(meshmath.dot(meshmath.outward_normal(pts), meshmath.sub(meshmath.centroid(pts), center)), 0)
+        self.assertEqual(meshmath.bbox(points)["size"], [12.0, 12.0, 50.0])
+        with self.assertRaises(core.McpToolError):
+            edit_build.loft_mesh([{"at": 0, "points": half}, {"at": 5, "points": half[:3]}], half=True)
+        with self.assertRaises(core.McpToolError):
+            edit_build.loft_mesh([{"at": 0, "points": [[1, 1], [2, 2], [3, 1]]}], axis="q")
+
+    def test_swatches_are_valid(self):
+        table = edit_build.swatches()
+        self.assertGreater(len(table), 20)
+        for name, entry in table.items():
+            u0, v0, u1, v1 = entry["rect"]
+            self.assertTrue(0 <= u0 < u1 <= 255 and 0 <= v0 < v1 <= 255, name)
+            self.assertIsNotNone(edit_build.donor_block(entry["texture"]), name)
+        with self.assertRaises(core.McpToolError):
+            edit_build.swatch_entry("nobody.hull")
 
     def test_guide_lists_every_operation(self):
         text = guide.help_text("ops")
@@ -314,6 +343,40 @@ class CoreTests(unittest.TestCase):
         self.assertTrue(all(row["class"] != "amesh.class" or row["polygons"] == 0
                             for row in analysis.materials(core.resolve_source(base))["blocks"]))
 
+    def test_new_design_loft_paint_shade_and_compare_render(self):
+        shutil.rmtree(self.out, ignore_errors=True)
+        base = core.new_model(str(self.out), "Probe", "VPNPROB1")["base_file"]
+        self.assertEqual(len(LooseModel.open(base, writable=False).polygons), 0)
+        half = [[0, -6], [5, -4], [6, 0], [5, 4], [0, 6]]
+        self.run_ops(base,
+                     {"op": "loft", "half": True, "swatch": "taerkasten.plate", "save_as": "body", "sections": [
+                         {"at": 30, "points": [[0, 0]]}, {"at": 10, "points": half}, {"at": -20, "points": half}]},
+                     {"op": "create_primitive", "shape": "box", "center": [0, -9, -15], "size": [1, 6, 8],
+                      "swatch": "ghorkov.hull"},
+                     {"op": "paint", "select": {"facing": "back"}, "swatch": "taerkasten.window"},
+                     {"op": "auto_shade"})
+        source = core.resolve_source(base)
+        self.assertEqual(analysis.analyze(source)["problems"], [])
+        self.assertTrue(core.validate(source)["ok"])
+        blocks = [b for b in analysis.materials(source)["blocks"] if b["polygons"]]
+        self.assertEqual(sorted({b["texture"] for b in blocks}), ["FAERROBO.ILBM", "HUBI.ILBM"])
+        self.assertTrue(all("tracy=none" in b["material"] for b in blocks))
+        loaded = LooseModel.open(base, writable=False)
+        shades = {}
+        for block in loaded.blocks:
+            for entry in block.atts:
+                normal = meshmath.outward_normal(loaded.polygon_points(entry.poly_id))
+                shades[entry.poly_id] = (normal, entry.shade_val)
+        top = [s for n, s in shades.values() if n[1] < -0.9]
+        bottom = [s for n, s in shades.values() if n[1] > 0.9]
+        self.assertTrue(top and bottom and max(top) < min(bottom))
+        from studio_mcp import server
+        render = server.studio_render_model(base, views=["iso", "left"], compare_with="set1:201", compare_axis="z")
+        self.assertIn("Same scale", render[0])
+        self.assertFalse(any(p.name.startswith("compare_") for p in core.work_dir().iterdir()))
+        unmapped = server.studio_render_model("set1:127", views=["iso"])   # vanilla model with one unmapped polygon
+        self.assertIn("without material", unmapped[0])
+
     def test_emitters_survive_clear_and_renumbering(self):
         base = self.export("set1:2", "VPKBRGR1")       # a dead model: polygons plus three emitters on points 3, 7, 15
         source = core.resolve_source(base)
@@ -364,6 +427,84 @@ class WireframeTests(unittest.TestCase):
         with self.assertRaises(core.McpToolError):
             wire.run(path, [{"op": "nonsense"}])
 
+    def test_shapes_and_polylines_are_lines_the_game_can_draw(self):
+        path = str(self.dir / "HUD.SKL")
+        wire.new(path)
+        wire.run(path, [
+            {"op": "add_shape", "shape": "circle", "radius": 300, "segments": 16},
+            {"op": "add_shape", "shape": "arc", "radius": 500, "start_deg": 30, "end_deg": 150, "segments": 24},
+            {"op": "add_shape", "shape": "brackets", "size": [800, 600], "radius": 100},
+            {"op": "add_shape", "shape": "cross", "radius": 60, "center": [0, 0]},
+            {"op": "add_shape", "shape": "circle", "radius": 700, "segments": 16, "dashes": True},
+            {"op": "add_lines", "points": [[-900, -100], [-700, -100], [-700, 100]], "closed": True},
+            {"op": "add_points", "points": [[0, 900], [100, 950], [200, 900]]},
+        ])
+        last = wire.get(path)["points"]
+        wire.run(path, [{"op": "add_polygons", "polygons": [[last - 3, last - 2, last - 1]], "close_loops": True}])
+        data = wire.get(path)
+        self.assertTrue(all(len(ring) == 2 for ring in data["polygons_list"]))
+        self.assertEqual(data["long_entries"], 0)
+        self.assertEqual(len(data["polygons_list"]), 16 + 8 + 8 + 2 + 8 + 3 + 3)
+        top = max(data["points_xz"], key=lambda p: p[1])
+        self.assertEqual(top, [0.0, 950.0] if top[0] == 0 else top)      # the arc and the circle top sit at +z
+        # +z is drawn UP: a mark at z=+900 lands in the upper half of the picture
+        from PIL import Image
+        import io
+        dot = str(self.dir / "DOT.SKL")
+        wire.new(dot)
+        wire.run(dot, [{"op": "add_lines", "points": [[0, 900], [0, 1000]]}, {"op": "add_lines", "points": [[0, -1000], [0, -1000.5]]}])
+        picture = Image.open(io.BytesIO(wire.render_png(dot, 200, True))).convert("RGB")
+        marks = [(x, y) for x in range(200) for y in range(200) if picture.getpixel((x, y)) == (255, 220, 60)]
+        upper = [y for _, y in marks if y < 100]
+        lower = [y for _, y in marks if y >= 100]
+        self.assertTrue(upper and lower and len(upper) > len(lower))     # two marks up (z 900, 1000), one down
+
+    def test_split_normalize_and_trace_image(self):
+        path = str(self.dir / "OUT.SKL")
+        wire.new(path)
+        model = wire.WireModel(Path(path))
+        model.points = [(0.0, 0.0, 0.0), (10.0, 0.0, 0.0), (10.0, 0.0, 5.0)]
+        model.polygons = [[0, 1, 2]]
+        model.commit("an old-style outline")
+        self.assertEqual(wire.get(path)["long_entries"], 1)
+        wire.run(path, [{"op": "split_outlines"}, {"op": "normalize"}])
+        data = wire.get(path)
+        self.assertEqual((data["long_entries"], len(data["polygons_list"])), (0, 3))
+        xs = [p[0] for p in data["points_xz"]]
+        self.assertEqual((min(xs), max(xs)), (-1000.0, 1000.0))
+        from PIL import Image, ImageDraw
+        picture = Image.new("RGB", (400, 200), (255, 255, 255))
+        ImageDraw.Draw(picture).polygon([(40, 80), (300, 80), (360, 100), (300, 120), (40, 120)], fill=(30, 30, 30))
+        image = self.dir / "missile.png"
+        picture.save(image)
+        traced = str(self.dir / "TRACE.SKL")
+        wire.new(traced)
+        result = wire.run(traced, [{"op": "trace_image", "image": str(image), "size": 1000, "detail": 3}])
+        lines = result["results"][0]["lines"]
+        self.assertTrue(4 <= lines <= 8, lines)
+        data = wire.get(traced)
+        xs, zs = [p[0] for p in data["points_xz"]], [p[1] for p in data["points_xz"]]
+        self.assertAlmostEqual(max(xs) - min(xs), 2000, delta=40)
+        self.assertLess(max(zs) - min(zs), 400)
+        with self.assertRaises(core.McpToolError):
+            wire.run(traced, [{"op": "trace_image", "image": str(self.dir / "missing.png")}])
+
+    @unittest.skipUnless(HAVE_DATA, "game Data folder not available")
+    def test_wireframe_from_model(self):
+        from studio_mcp import server
+        target = self.dir / "Falcon.SKL"
+        result = server.studio_wire_from_model("set1:71", str(target), view="unit", detail=3)
+        self.assertIn("lines", result[0])
+        data = wire.get(str(target))
+        self.assertGreater(len(data["polygons_list"]), 15)
+        self.assertEqual(data["long_entries"], 0)
+        self.assertIn("already exists", server.studio_wire_from_model("set1:71", str(target))[0])
+        rocket = self.dir / "Rocket.SKL"
+        server.studio_wire_from_model("set1:224", str(rocket), view="weapon", detail=3)
+        with_smoke = self.dir / "RocketSmoke.SKL"
+        server.studio_wire_from_model("set1:224", str(with_smoke), view="weapon", detail=3, include_effects=True)
+        self.assertLess(len(wire.get(str(rocket))["polygons_list"]), len(wire.get(str(with_smoke))["polygons_list"]))
+
     @unittest.skipUnless(HAVE_DATA, "game Data folder not available")
     def test_edit_existing_wireless_file(self):
         copy = self.dir / "ARROW.SKL"
@@ -400,17 +541,21 @@ class ServerRoundTripTests(unittest.TestCase):
                         "model": base, "select": {"facing": "up"}, "distance": 2.0, "dry_run": True})
                     batch = await session.call_tool("studio_edit_batch", {
                         "model": base, "operations": [{"op": "flip", "select": [0]}], "dry_run": True})
-                    return tools, listing, render, helped, edited, batch
+                    swatches = await session.call_tool("studio_swatches", {"faction": "ghorkov"})
+                    return tools, listing, render, helped, edited, batch, swatches
 
-        tools, listing, render, helped, edited, batch = asyncio.run(run())
+        tools, listing, render, helped, edited, batch, swatches = asyncio.run(run())
         for expected in ("studio_render_model", "studio_export_model", "studio_edit_batch", "studio_undo",
-                         "studio_extrude_polygons", "studio_import_geometry", "studio_add_emitter", "studio_help"):
+                         "studio_extrude_polygons", "studio_import_geometry", "studio_add_emitter", "studio_help",
+                         "studio_new_model", "studio_swatches", "studio_loft", "studio_paint", "studio_auto_shade"):
             self.assertIn(expected, tools)
         self.assertIn("VP_GLID2", json.dumps([c.model_dump() for c in listing.content]))
         self.assertIn("image", [c.type for c in render.content])
         self.assertIn("SELECTORS", helped.content[0].text)
         self.assertIn('"dry_run": true', edited.content[0].text)
         self.assertIn('"flip"', batch.content[0].text)
+        self.assertIn("ghorkov.hull", swatches.content[0].text)
+        self.assertIn("image", [c.type for c in swatches.content])
 
 
 if __name__ == "__main__":

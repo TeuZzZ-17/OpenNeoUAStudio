@@ -170,19 +170,63 @@ def studio_validate_model(source: str, set_hint: str = "") -> str:
     return _guard(lambda: core.validate(core.resolve_source(source, set_hint)))
 
 
+def _compare_scene(source: str, compare_with: str, axis: str, set_hint: str) -> tuple[str, str]:
+    """A throw-away copy of `source` with `compare_with` pasted beside it, both standing on the same ground,
+    so one render shows them at the same scale. Returns (copy, placement note)."""
+    if axis not in ("x", "z"):
+        raise core.McpToolError("compare_axis must be 'x' (side by side: front/top/iso views) or 'z' (one behind "
+                                "the other: left/right/top views)")
+    folder = core.work_dir() / f"compare_{uuid.uuid4().hex[:8]}"
+    folder.mkdir(parents=True)
+    main = core.resolve_source(source, set_hint)
+    if main.set_object is not None:
+        old = Path(main.set_object.skeleton_name.replace("\\", "/")).stem
+        stem = ("Q" if old[0].upper() != "Q" else "Z") + old[1:]
+        base = core.export_model(main, str(folder), "COMPARE", stem)["base_file"]
+    else:
+        for item in main.base_path.parent.iterdir():
+            if item.is_file() and item.suffix.lower() in (".base", ".sklt", ".anm", ".ilbm", ".iff"):
+                shutil.copy2(item, folder / item.name)
+        base = str(folder / main.base_path.name)
+    first = core.geometry(core.resolve_source(base, set_hint))["bbox"]
+    other = core.geometry(core.resolve_source(compare_with, set_hint))["bbox"]
+    along = 0 if axis == "x" else 2
+    across = 2 if along == 0 else 0
+    gap = 0.15 * max(first["size"][along], other["size"][along], 10.0)
+    shift = [0.0, first["max"][1] - other["max"][1], 0.0]          # same ground: equal lowest point (y down)
+    shift[along] = first["min"][along] - gap - other["max"][along]
+    shift[across] = (first["min"][across] + first["max"][across] - other["min"][across] - other["max"][across]) / 2
+    edit.run(base, [{"op": "import_geometry", "source": compare_with, "translate": shift, "exclude_fx": True}],
+             label="compare", set_hint=set_hint)
+    side = "left (-x)" if axis == "x" else "behind (-z)"
+    return base, (f"Same scale: {compare_with} stands {side} of {source}. Size {source} = {first['size']}, "
+                  f"{compare_with} = {other['size']} (x wide, y tall, z long).")
+
+
 @mcp.tool()
 def studio_render_model(source: str, views: list[str] | None = None, width: int = 480, height: int = 360,
                         zoom_percent: int = 100, background: str = "#1f2228", set_hint: str = "",
                         highlight_polygons: Annotated[Any, Field(description="Selector of polygons to paint magenta")] = None,
                         label_points: Annotated[Any, Field(description="Selector of points to mark with their index number")] = None,
                         label_polygons: Annotated[Any, Field(description="Selector of polygons to mark with P<id>")] = None,
-                        show_wire: bool = False) -> list:
+                        show_wire: bool = False, compare_with: str = "", compare_axis: str = "x") -> list:
     """Render a model with Studio's own textured Retail renderer. Views: iso, iso_left, iso_back, iso_back_left,
     front, back, left, right, top, bottom. Several views come back as one labelled contact sheet.
-    highlight_polygons / label_points / label_polygons / show_wire draw on top so you can read indices off the image."""
+    highlight_polygons / label_points / label_polygons / show_wire draw on top so you can read indices off the image.
+    compare_with='set1:201' shows a reference model next to this one AT THE SAME SCALE (compare_axis 'x' = side by
+    side for front/top/iso, 'z' = in a row for left/right): the quickest proportion check for a new design."""
     views = views or ["iso"]
     if not 64 <= width <= 1600 or not 64 <= height <= 1600:
         return ["ERROR: width and height must be between 64 and 1600"]
+    compare_note, scene_dir = "", None
+    if compare_with:
+        if highlight_polygons is not None or label_points is not None or label_polygons is not None:
+            return ["ERROR: compare_with cannot be combined with highlight/label overlays (the indices would mix)"]
+        try:
+            scene, compare_note = _compare_scene(source, compare_with, compare_axis, set_hint)
+        except core.McpToolError as exc:
+            return ["ERROR: " + str(exc)]
+        scene_dir, source = Path(scene).parent, scene
     out_dir = Path(tempfile.gettempdir()) / "onua_studio_mcp" / f"render_{uuid.uuid4().hex[:8]}"
     request = {"spec": source, "views": views, "size": [width, height], "zoom": zoom_percent,
                "background": background, "out_dir": str(out_dir), "set_hint": set_hint,
@@ -197,6 +241,9 @@ def studio_render_model(source: str, views: list[str] | None = None, width: int 
             cwd=str(core.STUDIO_ROOT), capture_output=True, text=True, timeout=180)
     except subprocess.TimeoutExpired:
         return ["ERROR: render timed out after 180 s"]
+    finally:
+        if scene_dir is not None:
+            shutil.rmtree(scene_dir, ignore_errors=True)
     line = next((ln for ln in process.stdout.splitlines() if ln.startswith("RESULT_JSON ")), None)
     if line is None:
         return ["ERROR: render worker failed:\n" + (process.stderr or process.stdout)[-1500:]]
@@ -211,6 +258,8 @@ def studio_render_model(source: str, views: list[str] | None = None, width: int 
             f"Image file (for clients that cannot show images): {sheet_file}")
     if result["warnings"]:
         note += "\nWarnings: " + "; ".join(result["warnings"][:4])
+    if compare_note:
+        note += "\n" + compare_note
     return [note, Image(data=sheet, format="png")]
 
 
@@ -238,6 +287,27 @@ def _contact_sheet(images: list[dict], width: int, height: int) -> bytes:
 
 
 # --- making an editable copy, history -------------------------------------------------------
+
+
+@mcp.tool()
+def studio_new_model(out_dir: str, base_name: str, skeleton_stem: str) -> str:
+    """Start a NEW design: an empty loose model (no polygons) in out_dir, ready for loft / create_primitive /
+    add_polygons / import_geometry. skeleton_stem: a new unique name of 6, 7 or 8 characters (e.g. 'VPNBOMB1').
+    Writable folders: Data/Models/... for the game, or the server temp folder for drafts."""
+    return _guard(lambda: core.new_model(out_dir, base_name, skeleton_stem))
+
+
+@mcp.tool()
+def studio_swatches(faction: str = "") -> list:
+    """Named faction texture patches for paint / loft / create_primitive (swatch='ghorkov.hull'): texture, rect
+    and what the original units use them for, plus a picture of every patch. faction filters
+    (resistance, ghorkov, taerkasten, mykonian, sulgogar, blacksect)."""
+    info = edit.edit_build.describe_swatches(faction)
+    result = [_json(info)]
+    board = Path(info["board"])
+    if board.is_file():
+        result.append(Image(data=board.read_bytes(), format="png"))
+    return result
 
 
 @mcp.tool()
@@ -284,12 +354,67 @@ def studio_wire_get(skeleton: str) -> str:
 
 @mcp.tool()
 def studio_wire_render(skeleton: str, labels: bool = True,
-                       highlight: Annotated[Any, Field(description=SELECTOR_HELP)] = None) -> list:
-    """Picture of a wireframe with point numbers (x across, z down); highlight = point selector to colour."""
+                       highlight: Annotated[Any, Field(description=SELECTOR_HELP)] = None,
+                       frame: bool = False) -> list:
+    """Picture of a wireframe as the game draws it (x across, +z UP, only the first segment of each entry; unused
+    parts of longer entries dim red) with point numbers. frame=true shows the real HUD scale: the box is the
+    +-1000 screen frame (use it for sights and cockpit frames)."""
     try:
-        return [Image(data=wire.render_png(skeleton, 520, labels, highlight), format="png")]
+        return [Image(data=wire.render_png(skeleton, 520, labels, highlight, frame), format="png")]
     except core.McpToolError as exc:
         return ["ERROR: " + str(exc)]
+
+
+@mcp.tool()
+def studio_wire_from_model(source: str, skeleton: str, view: str = "unit", detail: float = 3.0,
+                           include_effects: bool = False, overwrite: bool = False, set_hint: str = "") -> list:
+    """Generate a HUD wireframe from a 3D model with Studio's wireframe generator and save it as `skeleton`
+    (e.g. 'Wireless/New/My_Tank.SKL'). view: 'unit' (Isometric Front Left, like the original unit outlines),
+    'weapon' (Left: side view, nose to the right, like the weapon outlines) or any render view name.
+    detail 0..4: 0 = every edge, 1 = High (keeps panel seams), 3 = Simple (default), 4 = Minimal.
+    Flames, smoke, rotor discs and particles are left out unless include_effects=true. Edit the result with
+    studio_wire_edit; undo with studio_undo."""
+    presets = {"unit": "Isometric Front Left", "weapon": "Left"}
+    from studio_mcp.render_worker import VIEW_ALIASES
+    preset = presets.get(view) or VIEW_ALIASES.get(view, view)
+    try:
+        target = wire.resolve_skeleton(skeleton, must_exist=False)
+        core.ensure_writable(target)
+        if target.exists() and not overwrite:
+            return [f"ERROR: {target} already exists (overwrite=true replaces it; studio_undo brings it back)"]
+        if not 0 <= float(detail) <= 4:
+            return ["ERROR: detail must be between 0 and 4"]
+    except core.McpToolError as exc:
+        return ["ERROR: " + str(exc)]
+    out_dir = Path(tempfile.gettempdir()) / "onua_studio_mcp" / f"render_{uuid.uuid4().hex[:8]}"
+    staged = out_dir / target.name
+    request = {"task": "wireframe", "spec": source, "set_hint": set_hint, "out_dir": str(out_dir),
+               "preset": preset, "detail": float(detail), "include_effects": include_effects,
+               "wire_out": str(staged), "size": [480, 360], "views": []}
+    request_file = out_dir.with_suffix(".json")
+    request_file.parent.mkdir(parents=True, exist_ok=True)
+    request_file.write_text(json.dumps(request), encoding="utf-8")
+    try:
+        process = subprocess.run([sys.executable, "-m", "studio_mcp.render_worker", str(request_file)],
+                                 cwd=str(core.STUDIO_ROOT), capture_output=True, text=True, timeout=240)
+    except subprocess.TimeoutExpired:
+        return ["ERROR: wireframe generation timed out after 240 s"]
+    line = next((ln for ln in process.stdout.splitlines() if ln.startswith("RESULT_JSON ")), None)
+    result = json.loads(line[len("RESULT_JSON "):]) if line else {"ok": False, "error": (process.stderr or "")[-1500:]}
+    if not result.get("ok"):
+        return ["ERROR: " + result.get("error", "unknown generator error")]
+    if target.exists():
+        history.snapshot(target, [target], "wire_from_model")
+    else:
+        target.parent.mkdir(parents=True, exist_ok=True)
+    shutil.move(str(staged), str(target))
+    shutil.rmtree(out_dir, ignore_errors=True)
+    request_file.unlink(missing_ok=True)
+    note = f"Wireframe of {source} ({preset}, detail {detail}) saved: {target} - {result['points']} points, " \
+           f"{result['lines']} lines."
+    if wire._is_under_data(target):
+        note += f" Script path: Data/{target.relative_to(core.data_root()).as_posix()}"
+    return [note, Image(data=wire.render_png(str(target), 520, False), format="png")]
 
 
 @mcp.tool()
@@ -302,9 +427,11 @@ def studio_wire_new(skeleton: str) -> str:
 def studio_wire_edit(skeleton: str, operations: Annotated[list[dict], Field(description="Steps {'op': name, ...}; "
                      "see studio_help('wireframe'). Add 'save_as' to name new points/polygons.")],
                      label: str = "", dry_run: bool = False) -> str:
-    """Edit a wireframe skeleton: add_points, add_shape, add_polygons (lines/outlines), delete_points,
-    delete_polygons, transform (move/rotate/scale, mirror symmetry), set_points, align, mirror_copy, weld,
-    outline_move. Steps run on one copy and are written once; undo with studio_undo."""
+    """Edit a wireframe skeleton: add_lines (polyline from [x, z] points), add_shape (circle, arc, rect, cross,
+    brackets, regular shapes), add_points, add_polygons (lines between points), trace_image (silhouette of a
+    picture), delete_points, delete_polygons, transform (move/rotate/scale, mirror symmetry), set_points, align,
+    mirror_copy, weld, normalize (fit to +-1000), split_outlines, outline_move. +z is UP. Steps run on one copy and
+    are written once; undo with studio_undo. See studio_help('wireframe')."""
     return _guard(wire.run, skeleton, operations, label, dry_run)
 
 
