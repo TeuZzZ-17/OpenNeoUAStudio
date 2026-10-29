@@ -6,6 +6,7 @@ as the 3D/SET.BAS workbench.
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from pathlib import Path
 import sys
 
@@ -38,7 +39,13 @@ from PySide6.QtWidgets import (
 )
 
 from studio.ui.widgets import configure_operation_status_bar, install_standard_file_menu_tail
-from studio.workbench.outline import OutlineEditor
+from studio.workbench.outline import (
+    HUD_PROJECTION_AXES,
+    EditorState,
+    OutlineEditor,
+    OutlineSession,
+    ReferenceLayer,
+)
 from studio.formats.sklt import (
     SkltModel,
     SkltParseError,
@@ -49,6 +56,146 @@ from studio.formats.sklt import (
     save_sklt_with_poo2_points,
 )
 APP_TITLE = "OpenNeoUA Studio - Wireframe Editor"
+
+# Wireframe keys of a definition and their short names, in display order.
+# mgun_wireframe is the OpenNeoUA MGUN info wireframe, separate from mg_wireframe.
+VEHICLE_WIREFRAME_KEYS = (
+    ("hud_wireframe", "HUD"),
+    ("wpn_wireframe_1", "Weapon 1"),
+    ("wpn_wireframe_2", "Weapon 2"),
+    ("mg_wireframe", "MG"),
+    ("mgun_wireframe", "MGUN"),
+    ("wireframe", "Unit"),
+)
+WEAPON_WIREFRAME_KEYS = (("wireframe", "Weapon"),)
+
+# The visor is drawn as on a 4:3 screen (GFXEngine::ApplyResolution keeps that
+# ratio on wide screens): one wireframe unit is 4/3 wider than it is tall.
+VISOR_ASPECT = 4.0 / 3.0
+# Half the screen in wireframe units: yw_RenderVector2D maps 1000 units to 1.0.
+VISOR_HALF_HEIGHT = 1000.0
+# Scale of each visor part as yw_RenderHUDTarget draws it, centred, with no target
+# locked: the HUD fills the screen, the weapon and MG sights are small.
+VISOR_SCALES = {
+    "hud_wireframe": (0.99, 0.99),
+    "wpn_wireframe_1": (0.3, 0.4),
+    "wpn_wireframe_2": (0.3, 0.4),
+    "mg_wireframe": (0.3, 0.4),
+}
+
+Placement = tuple[float, float, float, float]
+
+
+@dataclass
+class WireComponent:
+    """One wireframe file of the open vehicle or weapon.
+
+    ``placement`` (scale x, scale y, offset x, offset y) puts it into the shared
+    preview: the visor parts as the game assembles them, the others below.
+    ``session`` is out of date while the part is the one being edited.
+    """
+
+    label: str
+    path: Path
+    session: OutlineSession
+    key: str = ""
+    placement: Placement = (1.0, 1.0, 0.0, 0.0)
+
+
+def wireframe_parts(obj) -> tuple[list[tuple[str, Path, str]], list[str]]:
+    """Wireframe files of a game object (label, path, first key) and the keys that point to no file.
+
+    One entry per file: keys that share a file (often both weapon slots)
+    are edited once, with both names in the label.
+    """
+    from entity_designer.wireframe_panel import resolve_wireframe_path
+
+    keys = VEHICLE_WIREFRAME_KEYS if obj.kind == "vehicle" else WEAPON_WIREFRAME_KEYS
+    found: dict[Path, tuple[list[str], str]] = {}
+    missing: list[str] = []
+    for key, label in keys:
+        value = obj.values.get(key)
+        if not value:
+            continue
+        path = resolve_wireframe_path(value, obj.source)
+        if path is None:
+            missing.append(f"{key} = {value}")
+            continue
+        found.setdefault(path.resolve(), ([], key))[0].append(label)
+    return [(" + ".join(names), path, key) for path, (names, key) in found.items()], missing
+
+
+def _state_points(state: EditorState) -> list[tuple[float, float]]:
+    """Points of a document as the canvas shows them."""
+    if state.mode == "otl2":
+        return [(float(x), float(y)) for x, y in state.points_2d]
+    if state.mode == "poo2":
+        first, second = HUD_PROJECTION_AXES
+        return [(point[first], point[second]) for point in state.points_3d]
+    return []
+
+
+def _placed(points, placement: Placement) -> tuple[tuple[float, float], ...]:
+    scale_x, scale_y, offset_x, offset_y = placement
+    return tuple((x * scale_x + offset_x, y * scale_y + offset_y) for x, y in points)
+
+
+def visor_frame() -> ReferenceLayer:
+    """The 4:3 screen the visor parts are drawn on."""
+    half_width = VISOR_HALF_HEIGHT * VISOR_ASPECT
+    corners = (
+        (-half_width, VISOR_HALF_HEIGHT), (half_width, VISOR_HALF_HEIGHT),
+        (half_width, -VISOR_HALF_HEIGHT), (-half_width, -VISOR_HALF_HEIGHT),
+    )
+    return ReferenceLayer("Screen", corners, ((0, 1, 2, 3),), selectable=False)
+
+
+def assemble_parts(keys: list[str], point_sets: list[list[tuple[float, float]]]) -> list[Placement]:
+    """Place the wireframes of one definition like the game shows them.
+
+    Visor parts (HUD, weapon and MG sights) are drawn over each other in the
+    4:3 screen, with the engine's scales. The other wireframes (unit outline,
+    MGUN, a weapon's own wireframe) keep their size and sit in a row below the
+    screen, or centred when there is no visor.
+    """
+    placements: list[Placement] = [(1.0, 1.0, 0.0, 0.0)] * len(keys)
+    has_visor = any(key in VISOR_SCALES for key in keys)
+    for index, key in enumerate(keys):
+        if key in VISOR_SCALES:
+            scale_x, scale_y = VISOR_SCALES[key]
+            placements[index] = (scale_x * VISOR_ASPECT, scale_y, 0.0, 0.0)
+
+    others = [index for index, key in enumerate(keys) if key not in VISOR_SCALES]
+    if not has_visor and len(others) <= 1:
+        return placements
+    boxes = {}
+    for index in others:
+        points = point_sets[index] or [(0.0, 0.0)]
+        boxes[index] = (min(x for x, _ in points), max(x for x, _ in points),
+                        min(y for _, y in points), max(y for _, y in points))
+    gap = VISOR_HALF_HEIGHT * 0.25
+    total_width = sum(box[1] - box[0] for box in boxes.values()) + gap * (len(boxes) - 1)
+    top = -VISOR_HALF_HEIGHT - gap if has_visor else 0.0
+    cursor = -total_width * 0.5
+    for index in others:
+        min_x, max_x, min_y, max_y = boxes[index]
+        # Canvas Y grows upwards: the row hangs below the screen.
+        placements[index] = (1.0, 1.0, cursor - min_x, top - max_y)
+        cursor += max_x - min_x + gap
+    return placements
+
+
+def _write_wireframe(model: SkltModel, state: EditorState, output_path: Path) -> Path | None:
+    """Write one edited document; the single writer of the Overwrite and Export paths."""
+    if state.mode == "otl2":
+        return save_sklt_with_otl2_points(model, list(state.points_2d), output_path)
+    if state.mode == "poo2":
+        points = list(state.points_3d)
+        polygons = [list(group) for group in state.groups]
+        if len(points) != len(model.points) or polygons != model.polygons:
+            return save_sklt_with_poo2_pol2_structure(model, points, polygons, output_path)
+        return save_sklt_with_poo2_points(model, points, output_path)
+    raise SkltParseError("No editable data is available to export.")
 
 
 MirrorGuide = tuple[tuple[float, float], tuple[float, float], bool]
@@ -251,12 +398,19 @@ class WireframeEditorWindow(QMainWindow):
         from studio.ui.style import apply_studio_style
         apply_studio_style()
         self.setWindowTitle(APP_TITLE)
-        self.resize(1100, 720)
+        self.resize(1400, 760)
         self._last_directory = Path.cwd()
         self._current_model: SkltModel | None = None
         self._current_file_path: Path | None = None
+        # Vehicle/weapon mode: every wireframe of ``_game_object`` is open at once.
+        # Empty when a single file is edited.
+        self._game_object = None
+        self._components: list[WireComponent] = []
+        self._active_component = -1
+        self._layer_components: list[int] = []
 
         self.outline_editor = OutlineEditor()
+        self.outline_editor.canvas.referenceLayerActivated.connect(self._activate_layer)
         self._mirror_pair_map: dict[int, int] = {}
         self._mirror_center_indices: set[int] = set()
         self._mirror_axis = 0
@@ -353,7 +507,7 @@ class WireframeEditorWindow(QMainWindow):
         from studio.ui.browsers import GameFileBrowser
         self.game_file_browser = GameFileBrowser({".skl", ".sklt"}, self, allow_folder=True)
         self.game_file_browser.selected.connect(self._open_game_file)
-        side_layout.addWidget(self.game_file_browser, 4)
+        side_layout.addWidget(self.game_file_browser, 8)
 
         title = QLabel("Wireframe Overview")
         title.setObjectName("panelTitle")
@@ -414,7 +568,7 @@ class WireframeEditorWindow(QMainWindow):
         self.selected_elements_list.setAlternatingRowColors(False)
         from studio.ui.widgets import use_standard_list_style
         use_standard_list_style(self.selected_elements_list)
-        self.selected_elements_list.setMinimumHeight(150)
+        self.selected_elements_list.setMinimumHeight(60)
         self.selected_elements_list.setSizePolicy(
             QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding
         )
@@ -425,7 +579,7 @@ class WireframeEditorWindow(QMainWindow):
         selected_elements_box.setSizePolicy(
             QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding
         )
-        side_layout.addWidget(selected_elements_box, 3)
+        side_layout.addWidget(selected_elements_box, 1)
 
         transform_box = QGroupBox("Transform")
         transform_layout = QHBoxLayout(transform_box)
@@ -447,12 +601,20 @@ class WireframeEditorWindow(QMainWindow):
         from studio.rendering.gpu import add_renderer_badge
         self.renderer_badge = add_renderer_badge(self, self.outline_editor.canvas)
 
+        # Same vehicle/weapon list as the Entity Designer.
+        from studio.ui.browsers import GameObjectBrowser
+        self.game_object_browser = GameObjectBrowser(self, kinds=("vehicle", "weapon"))
+        self.game_object_browser.setMinimumWidth(200)
+        self.game_object_browser.selected.connect(self._open_game_object)
+
         splitter = QSplitter(Qt.Orientation.Horizontal)
+        splitter.addWidget(self.game_object_browser)
         splitter.addWidget(self.outline_editor)
         splitter.addWidget(side_panel)
-        splitter.setStretchFactor(0, 4)
-        splitter.setStretchFactor(1, 1)
-        splitter.setSizes([820, 280])
+        splitter.setStretchFactor(0, 1)
+        splitter.setStretchFactor(1, 4)
+        splitter.setStretchFactor(2, 1)
+        splitter.setSizes([260, 820, 280])
         self.setCentralWidget(splitter)
 
     def _build_menu(self) -> None:
@@ -612,8 +774,7 @@ class WireframeEditorWindow(QMainWindow):
             return
 
         points = self.outline_editor._projected_points()
-        transform = self.outline_editor.canvas._make_transform()
-        scale = max(abs(transform[1]), 1.0e-9)
+        scale = self.outline_editor.canvas.pixels_per_unit()
         self._mirror_axis, self._mirror_pair_map, self._mirror_center_indices = (
             _choose_mirror_axis(points, scale)
         )
@@ -716,10 +877,27 @@ class WireframeEditorWindow(QMainWindow):
             })
             self._mirror_guide_overlay.set_guides(guides)
 
-    def _maybe_save_dirty(self) -> bool:
+    def _component_dirty(self, index: int) -> bool:
+        if index == self._active_component:
+            return self.outline_editor.is_dirty
+        return self._components[index].session.is_dirty
+
+    def _dirty_names(self) -> list[str]:
+        """Names of the open wireframes with unsaved changes."""
+        if self._components:
+            return [
+                component.path.name for index, component in enumerate(self._components)
+                if self._component_dirty(index)
+            ]
         if not self.outline_editor.is_dirty:
+            return []
+        return [self._current_file_path.name if self._current_file_path else "current file"]
+
+    def _maybe_save_dirty(self) -> bool:
+        names = self._dirty_names()
+        if not names:
             return True
-        title = self._current_file_path.name if self._current_file_path else "current file"
+        title = ", ".join(names)
         message_box = QMessageBox(self)
         message_box.setIcon(QMessageBox.Icon.Question)
         message_box.setWindowTitle("Overwrite changes?")
@@ -739,7 +917,7 @@ class WireframeEditorWindow(QMainWindow):
         if reply == QMessageBox.StandardButton.Discard:
             return True
         self.save_current_file()
-        return not self.outline_editor.is_dirty
+        return not self._dirty_names()
 
     def closeEvent(self, event) -> None:  # noqa: N802 - Qt override
         if self._maybe_save_dirty():
@@ -755,6 +933,7 @@ class WireframeEditorWindow(QMainWindow):
         so importing a real file does not trigger an unnecessary save prompt.
         """
         model = create_minimal_sklt_model("Untitled.SKL")
+        self._leave_game_object()
         self._current_file_path = None
         self._current_model = model
         self.game_file_browser.select_path(None)
@@ -788,6 +967,9 @@ class WireframeEditorWindow(QMainWindow):
         if self.outline_editor.canvas._dragging_point:
             self.outline_editor.cancel_operation()
         if not self._current_model:
+            return
+        if self._components:
+            self._overwrite_components()
             return
         if not self.outline_editor.can_save or not self.outline_editor.is_dirty:
             return
@@ -853,6 +1035,11 @@ class WireframeEditorWindow(QMainWindow):
         QMessageBox.information(self, "Outline exported", message)
 
         self._last_directory = output_path.parent
+        if self._components:
+            # The vehicle keeps editing the files its script names; the copy is only listed.
+            self.game_file_browser.reload()
+            self.game_file_browser.select_path(self._current_file_path)
+            return
         # The editor continues on the exported file (new or overwritten). The
         # previous file is left untouched on disk; the list is reloaded so a
         # brand-new file shows up and gets selected.
@@ -863,24 +1050,8 @@ class WireframeEditorWindow(QMainWindow):
     def _write_edited_file(self, output_path: Path) -> Path | None:
         if not self._current_model:
             raise SkltParseError("No SKLT file is imported.")
-
-        save_mode = self.outline_editor.save_mode
-        if save_mode == "otl2":
-            return save_sklt_with_otl2_points(
-                self._current_model, self.outline_editor.outline_points, output_path
-            )
-        if save_mode == "poo2":
-            if self.outline_editor.has_structural_changes:
-                return save_sklt_with_poo2_pol2_structure(
-                    self._current_model,
-                    self.outline_editor.projected_points,
-                    self.outline_editor.polygons,
-                    output_path,
-                )
-            return save_sklt_with_poo2_points(
-                self._current_model, self.outline_editor.projected_points, output_path
-            )
-        raise SkltParseError("No editable data is available to export.")
+        return _write_wireframe(
+            self._current_model, self.outline_editor.capture_session().state, output_path)
 
     def open_file(self, path: str | Path) -> None:
         if not self._maybe_save_dirty():
@@ -901,6 +1072,7 @@ class WireframeEditorWindow(QMainWindow):
             self.statusBar().showMessage("Import failed safely")
             return
 
+        self._leave_game_object()
         self._last_directory = file_path.parent
         self._current_file_path = file_path
         self._show_model(model, file_path)
@@ -908,19 +1080,178 @@ class WireframeEditorWindow(QMainWindow):
     def reload_game_resources(self):
         self.game_file_browser.reload()
         self.game_file_browser.select_path(self._current_file_path)
+        self.game_object_browser.reload()
+        self.game_object_browser.select_object(self._game_object)
+        self._refresh_component_rows()
 
     def _open_game_file(self, path):
+        index = self._component_index(path)
+        if index >= 0:
+            self._activate_component(index)
+            return
         previous = self._current_file_path
         self.open_file(path)
         if self._current_file_path != Path(path):
             self.game_file_browser.select_path(previous)
 
+    # -- Vehicle / weapon mode -------------------------------------------------
+
+    def _open_game_object(self, obj) -> None:
+        """Open every wireframe of a vehicle or weapon together."""
+        current = self._game_object
+        if current is not None and (current.kind, current.object_id) == (obj.kind, obj.object_id):
+            return
+        if not self._maybe_save_dirty():
+            self.game_object_browser.select_object(current)
+            return
+        parts, problems = wireframe_parts(obj)
+        components = []
+        for label, path, key in parts:
+            try:
+                model = parse_sklt_file(path)
+            except (SkltParseError, OSError) as exc:
+                problems.append(f"{path.name}: {exc}")
+                continue
+            components.append(WireComponent(label, path, OutlineEditor.new_session(model), key))
+        if not components:
+            details = "\n".join(problems) or "The definition names no wireframe."
+            QMessageBox.information(
+                self, "No wireframe", f"{obj.name} has no wireframe that can be opened.\n\n{details}")
+            self.game_object_browser.select_object(current)
+            return
+
+        placements = assemble_parts(
+            [part.key for part in components],
+            [_state_points(part.session.state) for part in components])
+        for component, placement in zip(components, placements):
+            component.placement = placement
+        self._game_object = obj
+        self._components = components
+        self._active_component = 0
+        first = components[0]
+        self._current_file_path = first.path
+        self._current_model = first.session.model
+        self._finish_mirror_drag()
+        self.outline_editor.restore_session(first.session)
+        self._update_reference_layers()
+        self.outline_editor.canvas.reset_view(fit_content=True)
+        self.game_file_browser.set_pinned([(part.path, part.label) for part in components])
+        self._refresh_document_panels(first.session.model, first.path)
+        message = f"{obj.name}: {len(components)} wireframe(s) open"
+        if problems:
+            message += " · not found: " + "; ".join(problems)
+        self.statusBar().showMessage(message)
+
+    def _leave_game_object(self) -> None:
+        """Back to editing a single file: forget the vehicle/weapon parts."""
+        if self._game_object is None and not self._components:
+            return
+        self._game_object = None
+        self._components = []
+        self._active_component = -1
+        self._layer_components = []
+        self.outline_editor.canvas.set_reference_layers([])
+        self.outline_editor.canvas.set_placement(1.0, 1.0, 0.0, 0.0)
+        self.game_file_browser.set_pinned([])
+        self.game_file_browser.set_modified([])
+        self.game_object_browser.select_object(None)
+
+    def _component_index(self, path) -> int:
+        if path is None:
+            return -1
+        target = Path(path).resolve()
+        return next(
+            (index for index, part in enumerate(self._components) if part.path == target), -1)
+
+    def _activate_layer(self, layer: int) -> None:
+        index = self._layer_components[layer]
+        if index >= 0:
+            self._activate_component(index)
+
+    def _activate_component(self, index: int) -> None:
+        """Edit another part of the open vehicle; the view stays where it is."""
+        if not (0 <= index < len(self._components)) or index == self._active_component:
+            return
+        self.outline_editor.cancel_operation()
+        previous = self._components[self._active_component]
+        previous.session = self.outline_editor.capture_session()
+        component = self._components[index]
+        self._active_component = index
+        self._current_file_path = component.path
+        self._current_model = component.session.model
+        self._finish_mirror_drag()
+        self.outline_editor.restore_session(component.session)
+        self._update_reference_layers()
+        self._refresh_document_panels(component.session.model, component.path)
+        self.statusBar().showMessage(f"Editing {component.label}: {component.path.name}")
+
+    def _update_reference_layers(self) -> None:
+        """Place the edited part and draw the other parts of the definition around it."""
+        active = self._components[self._active_component]
+        layers = []
+        self._layer_components = []
+        if any(part.key in VISOR_SCALES for part in self._components):
+            layers.append(visor_frame())
+            self._layer_components.append(-1)
+        for index, component in enumerate(self._components):
+            if index == self._active_component:
+                continue
+            layers.append(ReferenceLayer(
+                component.label,
+                _placed(_state_points(component.session.state), component.placement),
+                component.session.state.groups,
+            ))
+            self._layer_components.append(index)
+        canvas = self.outline_editor.canvas
+        canvas.set_placement(*active.placement)
+        canvas.set_reference_layers(layers, active.label if len(self._components) > 1 else "")
+
+    def _overwrite_components(self) -> None:
+        """Overwrite every part of the vehicle that has unsaved changes."""
+        active = self._components[self._active_component]
+        active.session = self.outline_editor.capture_session()
+        written = []
+        for component in self._components:
+            if not component.session.is_dirty:
+                continue
+            try:
+                _write_wireframe(component.session.model, component.session.state, component.path)
+                saved_model = parse_sklt_file(component.path)
+            except (SkltParseError, OSError) as exc:
+                QMessageBox.warning(
+                    self, "Could not overwrite file", f"{component.path.name}: {exc}")
+                self.statusBar().showMessage("Overwrite failed")
+                break
+            component.session = OutlineEditor.new_session(saved_model)
+            written.append(component.path.name)
+        self.outline_editor.restore_session(active.session)
+        self._current_model = active.session.model
+        self._update_reference_layers()
+        self._refresh_document_panels(active.session.model, active.path)
+        if written:
+            QMessageBox.information(
+                self, "File overwritten", "Overwrote " + ", ".join(written) + ".")
+
+    def _refresh_component_rows(self) -> None:
+        self.game_file_browser.set_modified([
+            component.path for index, component in enumerate(self._components)
+            if self._component_dirty(index)
+        ])
+
     def _show_model(self, model: SkltModel, file_path: Path) -> None:
+        self.outline_editor.set_model(model)
+        self._refresh_document_panels(model, file_path)
+
+    def _refresh_document_panels(self, model: SkltModel, file_path: Path) -> None:
         self.game_file_browser.select_path(self._current_file_path)
         self._current_model = model
-        self.outline_editor.set_model(model)
-        self.file_value.setText(file_path.name)
+        if self._components:
+            label = self._components[self._active_component].label
+            self.file_value.setText(f"{label}  ·  {file_path.name}")
+        else:
+            self.file_value.setText(file_path.name)
         self.file_value.setToolTip(str(file_path))
+        self._refresh_component_rows()
         self.sensors_value.setText(str(len(model.sensors)))
         self._update_metadata_from_editor()
 
@@ -943,6 +1274,7 @@ class WireframeEditorWindow(QMainWindow):
     def _outline_dirty_changed(self, dirty: bool) -> None:
         self._update_window_title()
         self._update_save_controls()
+        self._refresh_component_rows()
 
     def _outline_selection_changed(self, index: int) -> None:
         self._update_edit_controls()
@@ -1016,7 +1348,8 @@ class WireframeEditorWindow(QMainWindow):
         # available for any editable wireframe so an imported file can always
         # be copied to a different destination.
         can_export = bool(self._current_model and self.outline_editor.can_save)
-        can_overwrite = can_export and self.outline_editor.is_dirty
+        can_overwrite = bool(self._dirty_names()) if self._components else (
+            can_export and self.outline_editor.is_dirty)
         if self.save_action:
             self.save_action.setEnabled(can_overwrite)
         if self.save_as_action:
@@ -1026,7 +1359,7 @@ class WireframeEditorWindow(QMainWindow):
     def _update_status_value(self) -> None:
         if self._current_model is None:
             self.status_value.setText("Ready to import a file")
-        elif self.outline_editor.is_dirty:
+        elif self._dirty_names():
             self.status_value.setText("Unsaved changes")
         else:
             self.status_value.setText("Ready")
@@ -1086,7 +1419,13 @@ class WireframeEditorWindow(QMainWindow):
         self._update_selected_elements()
 
     def _update_window_title(self) -> None:
-        dirty_marker = " *" if self.outline_editor.is_dirty else ""
+        dirty_marker = " *" if self._dirty_names() else ""
+        if self._game_object is not None and self._components:
+            label = self._components[self._active_component].label
+            self.setWindowTitle(
+                f"{APP_TITLE} - {self._game_object.name} - {label}: "
+                f"{self._current_file_path.name}{dirty_marker}")
+            return
         if self._current_file_path:
             full_path = self._current_file_path.expanduser().resolve(
                 strict=False
