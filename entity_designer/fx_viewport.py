@@ -583,11 +583,20 @@ class FxPreviewViewportMixin:
             and family is not None and own is not None
             and family.base_path == own.base_path
             and len(helper._materials) == len(self._materials))
+        # A unit taken from another family (the firing unit of a loose-BASE weapon in
+        # Fire Area) cannot copy the toolbar states: its materials are numbered
+        # differently. It samples its own frames at the toolbar clock instead.
+        toolbar_clock_materials = {
+            face.material for item in items if item.kind == "unit"
+            for face, _vertices in self._fx_helper_faces(helper, item)}
         for material_id, material in enumerate(helper._materials):
             if not material.anim_frames:
                 continue
             if follows_toolbar and material_id in self._anim_states:
                 helper._anim_states[material_id] = self._anim_states[material_id]
+            elif material_id in toolbar_clock_materials:
+                helper._anim_states[material_id] = anim_state_at(
+                    material.anim_frames, material.anim_type, self._anim_clock_ms)
             else:
                 helper._anim_states[material_id] = anim_state_at(
                     material.anim_frames, material.anim_type, self._fx_time_ms)
@@ -813,7 +822,7 @@ class FxPreviewViewportMixin:
             if item.kind == "ground_decal":
                 decals.append(item)
                 continue
-            if item.kind in ("decal_smoke", "decal_fire"):
+            if item.kind == "decal_smoke":
                 smokes.append(item)
                 continue
             helper = self._fx_external_for(item)
@@ -1024,20 +1033,7 @@ class FxPreviewViewportMixin:
             for position, weight in ((0.0, 1.0), (0.4, 0.85), (0.7, 0.45), (1.0, 0.0)):
                 gradient.setColorAt(position, QColor(red, green, blue, int(round(255 * opacity * weight))))
             painter.setBrush(QBrush(gradient))
-            if item.kind == "decal_fire":
-                painter.save()
-                painter.setCompositionMode(QPainter.CompositionMode.CompositionMode_Plus)
-                painter.translate(middle)
-                painter.scale(1, max(0.1, item.scale[1] / max(0.001, item.scale[0])))
-                flame_gradient=QRadialGradient(QPointF(0,0),half)
-                flame_gradient.setColorAt(0,QColor(red,green,blue,int(255*opacity)))
-                flame_gradient.setColorAt(0.5,QColor(red,green,blue,int(150*opacity)))
-                flame_gradient.setColorAt(1,QColor(red,green,blue,0))
-                painter.setBrush(QBrush(flame_gradient))
-                painter.drawEllipse(QPointF(0,0),half,half)
-                painter.restore()
-            else:
-                painter.drawEllipse(middle, half, half)
+            painter.drawEllipse(middle, half, half)
         painter.restore()
 
     def _draw_fx_boxes(self, painter, target, camera) -> None:

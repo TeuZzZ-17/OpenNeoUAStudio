@@ -20,7 +20,7 @@ WEAPON_SCRIPT = (
     "    name = Bomb\n"
     "    model = bomb\n"
     "    ai_fire_trigger_cone_below_xyz = 30_20_1200\n"
-    "    ai_fire_trigger_min_depth = 150\n"
+    "    ai_fire_trigger_dead_zone = 150\n"
     "    begin_fx\n"
     "        offset_xyz = 9_8_7\n"
     "    end\n"
@@ -35,7 +35,7 @@ def _read(text):
 def test_import_reads_values_like_the_engine():
     area = _read(WEAPON_SCRIPT)
     assert area.cone_below == (30.0, 20.0, 1200.0)
-    assert area.min_depth == 150.0
+    assert area.dead_zone == 150.0
     assert area.active_shape() == fa.CONE_BELOW
 
 
@@ -62,25 +62,25 @@ def test_several_volumes_have_no_active_shape():
 
 
 def test_with_only_keeps_one_volume_and_uses_the_guide_default():
-    area = fa.FireArea(box_below=(1, 2, 3), min_depth=5.0)
+    area = fa.FireArea(box_below=(1, 2, 3), dead_zone=5.0)
     forward = area.with_only(fa.BOX_FORWARD)
     assert forward.authored_shapes() == (fa.BOX_FORWARD,)
     assert forward.box_forward == fa.DEFAULT_SIZES[fa.BOX_FORWARD]
-    assert forward.min_depth == 5.0
+    assert forward.dead_zone == 5.0
     assert area.with_only(fa.BOX_BELOW).box_below == (1.0, 2.0, 3.0)
 
 
 def test_writers_replace_only_the_fire_area_and_keep_nested_blocks():
     project = CollisionProject(
         name="Bomb", source_model="m", target_category=WEAPON,
-        fire_area=fa.FireArea(box_below=(200, 1200, 400), min_depth=100,
+        fire_area=fa.FireArea(box_below=(200, 1200, 400), dead_zone=100,
                               max_inclination=0))
     for canonical in (False, True):
         text, _, _ = plan_script_update(
             WEAPON_SCRIPT, "new_weapon", 7, project, replace_all_managed=canonical)
         assert "ai_fire_trigger_box_below_xyz = 200_1200_400" in text
         assert "ai_fire_trigger_cone_below_xyz" not in text
-        assert text.count("ai_fire_trigger_min_depth = 100") == 1
+        assert text.count("ai_fire_trigger_dead_zone = 100") == 1
         assert "offset_xyz = 9_8_7" in text
         assert _read(text) == project.fire_area
 
@@ -143,7 +143,7 @@ def test_handles_drag_values():
     assert size == (200.0, 1200.0, 450.0)
     size, near = fa.dragged(fa.BOX_BELOW, (200, 1200, 400), 0.0, "depth", -200.0)
     assert size == (200.0, 1000.0, 400.0)
-    size, near = fa.dragged(fa.CONE_FORWARD, (30, 20, 1000), 0.0, "min_depth", 5000.0)
+    size, near = fa.dragged(fa.CONE_FORWARD, (30, 20, 1000), 0.0, "dead_zone", 5000.0)
     assert near == 999.0
     size, _ = fa.dragged(fa.CONE_FORWARD, (30, 20, 1000), 0.0, "angle_x", 0.0)
     assert size[0] == 30.0
@@ -210,8 +210,8 @@ def test_tab_is_only_for_weapons_and_drag_nudge_undo_work():
         # Choosing another volume keeps only that one.
         window._fire_area_shape_chosen(fa.CONE_FORWARD)
         assert window.project.fire_area.authored_shapes() == (fa.CONE_FORWARD,)
-        window._fire_area_value_edited("min_depth", 200.0)
-        assert window.project.fire_area.min_depth == 200.0
+        window._fire_area_value_edited("dead_zone", 200.0)
+        assert window.project.fire_area.dead_zone == 200.0
         window._fire_area_value_edited("size0", 44.0)
         assert window.project.fire_area.cone_forward[0] == 44.0
 
@@ -221,16 +221,24 @@ def test_tab_is_only_for_weapons_and_drag_nudge_undo_work():
         _close(app, window)
 
 
-def test_vehicle_can_open_fire_area_but_cannot_edit_weapon_values():
-    app, window, _pytest = _weapon_window(fa.FireArea(box_forward=(1, 2, 3)))
+def test_fire_area_tab_is_open_when_empty_and_grey_on_a_loaded_vehicle():
+    from PySide6.QtWidgets import QApplication
+    from entity_designer.editor import CollisionEditorWindow
+
+    app = QApplication.instance() or QApplication([])
+    window = CollisionEditorWindow()
     try:
-        window.project.target_category = VEHICLE
-        window._sync_all()
+        # Nothing loaded yet: the tab is open (empty), like Visuals & FX.
+        assert window.project.target_category == VEHICLE
         assert window.properties_tabs.isTabEnabled(window.fire_area_tab_index)
-        assert not window.fire_area_panel.isEnabled()
         window.properties_tabs.setCurrentIndex(window.fire_area_tab_index)
+        window._sync_all()
         assert window.properties_tabs.currentIndex() == window.fire_area_tab_index
-        assert window.transform_box.isHidden()
+        # A loaded vehicle definition owns no ai_fire_trigger_*: the tab goes grey.
+        window._active_script_kind = "new_vehicle"
+        window._sync_all()
+        assert not window.properties_tabs.isTabEnabled(window.fire_area_tab_index)
+        assert window.properties_tabs.currentIndex() != window.fire_area_tab_index
         assert window.viewport._fire_area_shape is None
     finally:
         _close(app, window)
@@ -244,22 +252,32 @@ def test_fire_area_sliders_and_double_click_deselect():
     try:
         window.properties_tabs.setCurrentIndex(window.fire_area_tab_index)
         panel = window.fire_area_panel
+        # Default edit step is 10: sliders land on multiples of it.
+        assert panel.step_slider.value() == 10
         panel.size_sliders[0].setValue(425)
-        assert window.project.fire_area.cone_forward[0] == 42.5
-        panel.min_depth_slider.setValue(150)
-        assert window.project.fire_area.min_depth == 150
-        panel.inclination_slider.setValue(255)
-        assert window.project.fire_area.max_inclination == 25.5
+        assert window.project.fire_area.cone_forward[0] == 40
+        assert panel.size_sliders[0].value() == 400
+        panel.dead_zone_slider.setValue(150)
+        assert window.project.fire_area.dead_zone == 150
+        panel.dead_zone_slider.setValue(153)
+        assert window.project.fire_area.dead_zone == 150
+        panel.step_slider.setValue(1)
+        panel.dead_zone_slider.setValue(153)
+        assert window.project.fire_area.dead_zone == 153
+        assert panel.dead_zone_spin.singleStep() == 1
+        panel.step_slider.setValue(10)
+        panel.inclination_slider.setValue(300)
+        assert window.project.fire_area.max_inclination == 30.0
         panel.size_spins[2].setValue(7500)
         assert window.project.fire_area.cone_forward[2] == 7500
         assert panel.size_sliders[2].value() == 75000
-        window._fire_area_handle_picked("min_depth")
-        window.viewport._hit_fire_area_handle = lambda _point: "min_depth"
+        window._fire_area_handle_picked("dead_zone")
+        window.viewport._hit_fire_area_handle = lambda _point: "dead_zone"
         event = QMouseEvent(QEvent.Type.MouseButtonDblClick, QPointF(5, 5), QPointF(5, 5),
                             Qt.MouseButton.LeftButton, Qt.MouseButton.LeftButton,
                             Qt.KeyboardModifier.NoModifier)
         window.viewport.mouseDoubleClickEvent(event)
-        assert window._fire_area_handle == "min_depth"
+        assert window._fire_area_handle == "dead_zone"
         window.viewport._hit_fire_area_handle = lambda _point: ""
         window.viewport.mouseDoubleClickEvent(event)
         assert window._fire_area_handle == ""
@@ -405,7 +423,7 @@ def test_edits_keep_the_camera_and_a_new_definition_focuses_the_volume():
             moved["center"], moved["scale"], moved["zoom"])
         edits = (
             lambda: window._fire_area_value_edited("size0", 44.0),
-            lambda: window._fire_area_value_edited("min_depth", 200.0),
+            lambda: window._fire_area_value_edited("dead_zone", 200.0),
             lambda: window._fire_area_value_edited("height", 300.0),
             lambda: window._fire_area_shape_chosen(fa.BOX_FORWARD),
             lambda: window._fire_area_unit_chosen(None),
@@ -540,13 +558,13 @@ def test_forward_shot_can_go_to_the_low_or_the_high_zone():
 
 
 def test_reset_brings_back_every_value_of_the_tab():
-    area = fa.FireArea(cone_forward=(30, 20, 1200), min_depth=100.0, max_inclination=20.0)
+    area = fa.FireArea(cone_forward=(30, 20, 1200), dead_zone=100.0, max_inclination=20.0)
     app, window, _pytest = _weapon_window(area)
     try:
         window._fire_area_loaded = area
         window.properties_tabs.setCurrentIndex(window.fire_area_tab_index)
         window._fire_area_value_edited("size0", 5.0)
-        window._fire_area_value_edited("min_depth", 350.0)
+        window._fire_area_value_edited("dead_zone", 350.0)
         window._fire_area_value_edited("max_inclination", 42.3)
         window._fire_area_value_edited("height", 1260.0)
         window._fire_area_aim_chosen(fa.AIM_HIGH)
@@ -561,5 +579,74 @@ def test_reset_brings_back_every_value_of_the_tab():
         window._fire_area_reset_all()
         assert window.project.fire_area == fa.FireArea()
         assert window.fire_area_panel.reset_button.isEnabled()
+    finally:
+        _close(app, window)
+
+
+def test_middle_click_keeps_the_camera_and_double_click_switches_focus():
+    from PySide6.QtCore import QPointF, Qt, QEvent
+    from PySide6.QtGui import QMouseEvent
+
+    app, window, _pytest = _weapon_window(fa.FireArea(cone_below=(15, 15, 1800)))
+    try:
+        window.properties_tabs.setCurrentIndex(window.fire_area_tab_index)
+        viewport = window.viewport
+        assert window._fire_area_focus_on_unit
+        before = (viewport._center, viewport._scale, viewport._zoom, viewport._pan)
+
+        def middle(kind):
+            return QMouseEvent(kind, QPointF(5, 5), QPointF(5, 5), Qt.MouseButton.MiddleButton,
+                               Qt.MouseButton.MiddleButton, Qt.KeyboardModifier.NoModifier)
+
+        # A single middle click must not run the viewport's Reset View.
+        viewport.mousePressEvent(middle(QEvent.Type.MouseButtonPress))
+        assert (viewport._center, viewport._scale, viewport._zoom, viewport._pan) == before
+        # Double middle click: Focus Unit -> Focus Volume -> Focus Unit.
+        viewport.mouseDoubleClickEvent(middle(QEvent.Type.MouseButtonDblClick))
+        assert not window._fire_area_focus_on_unit
+        wide = viewport._scale
+        viewport.mouseDoubleClickEvent(middle(QEvent.Type.MouseButtonDblClick))
+        assert window._fire_area_focus_on_unit and viewport._scale > wide
+    finally:
+        _close(app, window)
+
+
+def test_edit_step_does_not_touch_the_3d_grips():
+    app, window, _pytest = _weapon_window(fa.FireArea(box_forward=(100, 80, 1200)))
+    try:
+        window.properties_tabs.setCurrentIndex(window.fire_area_tab_index)
+        panel = window.fire_area_panel
+        panel.step_slider.setValue(25)
+        assert panel.size_spins[2].singleStep() == 25
+        window._fire_area_drag_started("depth")
+        window._fire_area_dragged("depth", 7.0)
+        # Dragging a grip in the 3D view keeps its own precision.
+        assert window.project.fire_area.box_forward == (100.0, 80.0, 1207.0)
+    finally:
+        _close(app, window)
+
+
+def test_labels_of_close_grips_do_not_overlap():
+    from PySide6.QtCore import QPointF, QRectF
+    from PySide6.QtGui import QImage, QPainter
+
+    app, window, _pytest = _weapon_window(fa.FireArea(cone_forward=(30, 20, 1200)))
+    try:
+        viewport = window.viewport
+        image = QImage(400, 300, QImage.Format.Format_ARGB32)
+        painter = QPainter(image)
+        handles = [fa.AreaHandle(key, "9999", (0.0, 0.0, 0.0), (1.0, 0.0, 0.0))
+                   for key in ("angle_x", "angle_y", "depth", "dead_zone")]
+        # Four grips almost on top of each other, as seen from a flat camera angle.
+        visible = [(handle, QPointF(200 + index * 4, 150)) for index, handle in enumerate(handles)]
+        viewport._fire_area_visible = True
+        positions = viewport._fire_area_label_positions(painter, visible)
+        metrics = painter.fontMetrics()
+        boxes = [QRectF(point.x(), point.y() - metrics.ascent(),
+                        metrics.horizontalAdvance(text), metrics.height())
+                 for text, point in positions.values()]
+        painter.end()
+        assert len(boxes) == 4
+        assert not any(a.intersects(b) for i, a in enumerate(boxes) for b in boxes[i + 1:])
     finally:
         _close(app, window)

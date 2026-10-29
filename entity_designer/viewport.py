@@ -242,6 +242,8 @@ class CollisionViewport(FxPreviewViewportMixin, AssetViewport):
     fireAreaHandlePicked = Signal(str)
     fireAreaDragStarted = Signal(str)
     fireAreaDragged = Signal(str, float)
+    # Double middle click in Fire Area: switch between Focus Unit and Focus Volume.
+    fireAreaFocusToggled = Signal()
     RING_SEGMENTS = 12
     # Same orange as the engine's New Debug fire volume (yw_debug.cpp).
     FIRE_AREA_COLOR = QColor(255, 150, 30)
@@ -1261,7 +1263,7 @@ class CollisionViewport(FxPreviewViewportMixin, AssetViewport):
         if size is None:
             return []
         return fa.volume_handles(
-            shape, size, self._fire_area.min_depth, self._fire_area_origin(),
+            shape, size, self._fire_area.dead_zone, self._fire_area_origin(),
             self._fire_area_x_span)
 
     def _fire_area_lines(self) -> list[tuple[fa.Segment, QColor, bool]]:
@@ -1272,12 +1274,12 @@ class CollisionViewport(FxPreviewViewportMixin, AssetViewport):
         for shape in area.authored_shapes():
             size = area.size(shape)
             for segment in fa.volume_segments(
-                    shape, size, area.min_depth, origin, 0.0, self._fire_area_x_span):
+                    shape, size, area.dead_zone, origin, 0.0, self._fire_area_x_span):
                 lines.append((segment, self.FIRE_AREA_COLOR, False))
             if not fa.is_below(shape) and area.max_inclination > 0.0:
                 # Furthest the engine tilts the volume toward a ground target.
                 for segment in fa.volume_segments(
-                        shape, size, area.min_depth, origin, area.max_inclination,
+                        shape, size, area.dead_zone, origin, area.max_inclination,
                         self._fire_area_x_span):
                     lines.append((segment, self.FIRE_AREA_TILT_COLOR, True))
         return lines
@@ -1325,12 +1327,15 @@ class CollisionViewport(FxPreviewViewportMixin, AssetViewport):
             painter.setPen(pen)
             painter.drawLine(*screen)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+        radius = self.FIRE_AREA_HANDLE_RADIUS
+        visible = []
         for handle in self._fire_area_handles():
             screen = self._project_visible_world(handle.point)
-            if screen is None:
-                continue
+            if screen is not None:
+                visible.append((handle, screen))
+        labels = self._fire_area_label_positions(painter, visible)
+        for handle, screen in visible:
             selected = handle.key == self._fire_area_handle
-            radius = self.FIRE_AREA_HANDLE_RADIUS
             if selected:
                 painter.setPen(QPen(QColor(255, 255, 255), 3.0))
                 painter.setBrush(QColor(255, 255, 255, 235))
@@ -1344,11 +1349,57 @@ class CollisionViewport(FxPreviewViewportMixin, AssetViewport):
                 radius * 1.4, radius * 1.4))
             painter.setPen(QPen(
                 QColor(255, 255, 255) if selected else self.FIRE_AREA_COLOR, 1.5))
-            painter.drawText(
-                screen + QPointF(10.0, -8.0),
-                f"{handle.key} {round(self._fire_area.min_depth)}"
-                if handle.key == "min_depth" else f"{handle.key} {handle.label}")
+            text, baseline = labels[handle.key]
+            painter.drawText(baseline, text)
         painter.restore()
+
+    def _fire_area_handle_text(self, handle: fa.AreaHandle) -> str:
+        if handle.key == "dead_zone":
+            return f"{handle.key} {round(self._fire_area.dead_zone)}"
+        return f"{handle.key} {handle.label}"
+
+    def _fire_area_label_positions(self, painter: QPainter, visible) -> dict:
+        """{handle key: (text, baseline point)} with labels kept apart.
+
+        Grips can sit close together on screen (depending on the camera angle), so each
+        label tries a few spots around its grip and takes the first one that touches
+        no grip square, no earlier label and stays inside the view. The selected grip
+        chooses first so its label stays next to it.
+        """
+
+        metrics = painter.fontMetrics()
+        radius = self.FIRE_AREA_HANDLE_RADIUS
+        taken = [QRectF(s.x() - radius - 2, s.y() - radius - 2, 2 * radius + 4, 2 * radius + 4)
+                 for _handle, s in visible]
+        view = QRectF(self.rect())
+        height = metrics.height()
+        placed = {}
+        ordered = sorted(visible, key=lambda item: item[0].key != self._fire_area_handle)
+        for handle, screen in ordered:
+            text = self._fire_area_handle_text(handle)
+            width = metrics.horizontalAdvance(text)
+            gap = radius + 3.0
+            spots = [(gap, -gap + height * .3), (gap, gap + height * .7),
+                     (-gap - width, -gap + height * .3), (-gap - width, gap + height * .7),
+                     (-width / 2, -gap - 2), (-width / 2, gap + height)]
+            for level in range(1, 6):
+                spots += [(gap, -gap + height * .3 - level * height),
+                          (-gap - width, -gap + height * .3 - level * height),
+                          (gap, gap + height * .7 + level * height),
+                          (-gap - width, gap + height * .7 + level * height)]
+            choice = None
+            for dx, dy in spots:
+                baseline = screen + QPointF(dx, dy)
+                box = QRectF(baseline.x(), baseline.y() - metrics.ascent(), width, height)
+                if view.contains(box) and not any(box.adjusted(-2, -1, 2, 1).intersects(t) for t in taken):
+                    choice = baseline, box
+                    break
+            if choice is None:
+                baseline = screen + QPointF(*spots[0])
+                choice = baseline, QRectF(baseline.x(), baseline.y() - metrics.ascent(), width, height)
+            taken.append(choice[1])
+            placed[handle.key] = (text, choice[0])
+        return placed
 
     def _hit_fire_area_handle(self, point: QPointF) -> str:
         if not (self._fire_area_visible and self._ground_alignment_source_loaded):
@@ -1842,6 +1893,12 @@ class CollisionViewport(FxPreviewViewportMixin, AssetViewport):
             self.setFocus(Qt.FocusReason.MouseFocusReason)
             event.accept()
             return
+        if event.button() == Qt.MouseButton.MiddleButton and self._fire_area_visible:
+            # The base viewport sends the camera to its Reset View here, which in
+            # Fire Area is far from the volume. The camera stays where it is.
+            self.setFocus(Qt.FocusReason.MouseFocusReason)
+            event.accept()
+            return
         if event.button() == Qt.MouseButton.LeftButton:
             if self._collision_shape_overlay_visible and self._collision_shape is not None:
                 self._shape_press_pos = QPointF(event.position())
@@ -1921,6 +1978,10 @@ class CollisionViewport(FxPreviewViewportMixin, AssetViewport):
         super().mousePressEvent(event)
 
     def mouseDoubleClickEvent(self, event: QMouseEvent) -> None:  # noqa: N802
+        if event.button() == Qt.MouseButton.MiddleButton and self._fire_area_visible:
+            self.fireAreaFocusToggled.emit()
+            event.accept()
+            return
         if event.button() == Qt.MouseButton.LeftButton:
             if self._fire_area_visible:
                 self._fire_area_drag = None

@@ -24,9 +24,9 @@ SHAPE_KEYS = {
     BOX_FORWARD: "ai_fire_trigger_box_forward_xyz",
     CONE_FORWARD: "ai_fire_trigger_cone_forward_xyz",
 }
-MIN_DEPTH_KEY = "ai_fire_trigger_min_depth"
+DEAD_ZONE_KEY = "ai_fire_trigger_dead_zone"
 MAX_INCLINATION_KEY = "ai_fire_trigger_forward_max_inclination"
-FIRE_AREA_KEYS = frozenset(SHAPE_KEYS.values()) | {MIN_DEPTH_KEY, MAX_INCLINATION_KEY}
+FIRE_AREA_KEYS = frozenset(SHAPE_KEYS.values()) | {DEAD_ZONE_KEY, MAX_INCLINATION_KEY}
 
 SHAPE_LABELS = {
     BOX_BELOW: "Box below",
@@ -48,7 +48,7 @@ SIZE_FIELDS = {
     BOX_FORWARD: (("Width", 0), ("Height", 1), ("Depth", 2)),
     CONE_FORWARD: (("Angle horizontal", 0), ("Angle vertical", 1), ("Depth", 2)),
 }
-MAX_MIN_DEPTH = 30000.0
+MAX_DEAD_ZONE = 30000.0
 MAX_INCLINATION_LIMIT = 90.0
 CONE_ANGLE_LIMIT = 180.0
 CONE_SEGMENTS = 32
@@ -126,8 +126,8 @@ def valid_size(shape: str, size) -> bool:
     return not (is_cone(shape) and (size[0] >= CONE_ANGLE_LIMIT or size[1] >= CONE_ANGLE_LIMIT))
 
 
-def valid_min_depth(value: float) -> bool:
-    return math.isfinite(value) and 0.0 <= value <= MAX_MIN_DEPTH
+def valid_dead_zone(value: float) -> bool:
+    return math.isfinite(value) and 0.0 <= value <= MAX_DEAD_ZONE
 
 
 def valid_max_inclination(value: float) -> bool:
@@ -142,7 +142,7 @@ class FireArea:
     cone_below: tuple[float, float, float] | None = None
     box_forward: tuple[float, float, float] | None = None
     cone_forward: tuple[float, float, float] | None = None
-    min_depth: float = 0.0
+    dead_zone: float = 0.0
     max_inclination: float = 0.0
 
     def size(self, shape: str):
@@ -170,7 +170,7 @@ class FireArea:
         return self.with_only(None).with_size(shape, size)
 
     def is_empty(self) -> bool:
-        return (not self.authored_shapes() and self.min_depth <= 0.0
+        return (not self.authored_shapes() and self.dead_zone <= 0.0
                 and self.max_inclination <= 0.0)
 
 
@@ -193,7 +193,7 @@ def fire_area_from_values(values: dict[str, str]) -> FireArea:
             continue
         if valid_size(shape, size):
             area = area.with_size(shape, size)
-    for key, field, check in ((MIN_DEPTH_KEY, "min_depth", valid_min_depth),
+    for key, field, check in ((DEAD_ZONE_KEY, "dead_zone", valid_dead_zone),
                               (MAX_INCLINATION_KEY, "max_inclination", valid_max_inclination)):
         raw = values.get(key)
         if raw is None:
@@ -247,7 +247,7 @@ def x_span_of(fire_x: float) -> tuple[float, float]:
     return -side, side
 
 
-def volume_segments(shape: str, size, min_depth: float, origin: Vec3 = (0.0, 0.0, 0.0),
+def volume_segments(shape: str, size, dead_zone: float, origin: Vec3 = (0.0, 0.0, 0.0),
                     tilt_deg: float = 0.0,
                     x_span: tuple[float, float] = (0.0, 0.0)) -> list[Segment]:
     """Lines of one volume, the same set the engine's New Debug draws.
@@ -260,7 +260,7 @@ def volume_segments(shape: str, size, min_depth: float, origin: Vec3 = (0.0, 0.0
         return []
     axes = _axes(shape, tilt_deg)
     half_w, half_s, depth, cone_y = _layout(shape, size)
-    near = min_depth if 0.0 <= min_depth < depth else 0.0
+    near = dead_zone if 0.0 <= dead_zone < depth else 0.0
     min_x, max_x = x_span
     segments: list[Segment] = []
     if not is_cone(shape):
@@ -305,14 +305,14 @@ class AreaHandle:
     axis: Vec3
 
 
-def volume_handles(shape: str, size, min_depth: float,
+def volume_handles(shape: str, size, dead_zone: float,
                    origin: Vec3 = (0.0, 0.0, 0.0),
                    x_span: tuple[float, float] = (0.0, 0.0)) -> list[AreaHandle]:
     if not valid_size(shape, size):
         return []
     axes = _axes(shape)
     half_w, half_s, depth, cone_y = _layout(shape, size)
-    near = min_depth if 0.0 <= min_depth < depth else 0.0
+    near = dead_zone if 0.0 <= dead_zone < depth else 0.0
     max_x = x_span[1]
     if is_cone(shape):
         grips = [
@@ -327,7 +327,7 @@ def volume_handles(shape: str, size, min_depth: float,
         ]
     depth_index = 1 if shape == BOX_BELOW else 2
     grips.append(("depth", f"{size[depth_index]:g}", (0.0, 0.0, depth), axes[2]))
-    grips.append(("min_depth", f"{near:g}", (0.0, 0.0, near), axes[2]))
+    grips.append(("dead_zone", f"{near:g}", (0.0, 0.0, near), axes[2]))
     return [AreaHandle(key, label, _point(origin, axes, along), axis)
             for key, label, along, axis in grips]
 
@@ -342,13 +342,13 @@ def _size_index(shape: str, key: str) -> int:
     return 1 if shape == BOX_BELOW else 2  # depth
 
 
-def dragged(shape: str, size, min_depth: float, key: str, delta: float):
-    """(size, min_depth) after moving handle ``key`` by ``delta`` along its axis."""
+def dragged(shape: str, size, dead_zone: float, key: str, delta: float):
+    """(size, dead_zone) after moving handle ``key`` by ``delta`` along its axis."""
 
     values = list(size)
-    if key == "min_depth":
+    if key == "dead_zone":
         depth = values[_size_index(shape, "depth")]
-        return tuple(values), max(0.0, min(min_depth + delta, depth - 1.0))
+        return tuple(values), max(0.0, min(dead_zone + delta, depth - 1.0))
     index = _size_index(shape, key)
     if key == "depth":
         values[index] = max(1.0, round(values[index] + delta))
@@ -360,7 +360,7 @@ def dragged(shape: str, size, min_depth: float, key: str, delta: float):
         half = math.tan(math.radians(values[index]) / 2.0) * depth + delta
         values[index] = max(1.0, min(round(math.degrees(2.0 * math.atan2(half, depth))),
                                      CONE_ANGLE_LIMIT - 1.0))
-    return tuple(values), min_depth
+    return tuple(values), dead_zone
 
 
 def bounds_of(segments) -> tuple[Vec3, float]:

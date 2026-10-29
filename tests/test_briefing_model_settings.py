@@ -50,7 +50,7 @@ def test_arrows_step_slider_single_undo_and_reset():
     app=QApplication.instance() or QApplication([])
     e=Editor();c=BriefingControls(e);c.sync();e._syncing=False
     c.xyz_step_slider.setValue(300)
-    assert c.xyz_step.value()==10
+    assert c.arrow_step()==10
     c.xyz_buttons[('x',1)].click();assert e.project.briefing_x==10 and e.project.briefing_xyz_enabled and len(e.undo)==1
     c.xyz_buttons[('y',-1)].click();assert e.project.briefing_y==-10 and len(e.undo)==2
     c.xyz_values['z'].setValue(25);assert e.project.briefing_z==25
@@ -80,3 +80,16 @@ def test_preview_camera_axes_and_depth_match_engine():
     e.project.briefing_xyz_enabled=False
     assert view.renderer._camera_vertex((1,2,3))==classic
     view.close();e.close()
+
+
+def test_briefing_xyz_written_with_six_digits_is_not_reported_as_unsaved():
+    from entity_designer.editor import CollisionEditorWindow
+    from entity_designer.script_model import _SCRIPT_TAB_BRIEFING
+
+    # The arrow step is logarithmic, so positions are long decimals: -5.347505628802473.
+    project = CollisionProject(target_category=VEHICLE, briefing_xyz_enabled=True,
+                               briefing_y=-5.347505628802473)
+    reloaded = CollisionProject(target_category=VEHICLE, briefing_xyz_enabled=True,
+                                briefing_y=float(f"{project.briefing_y:g}"))
+    state = CollisionEditorWindow._script_tab_state
+    assert state(project, _SCRIPT_TAB_BRIEFING) == state(reloaded, _SCRIPT_TAB_BRIEFING)

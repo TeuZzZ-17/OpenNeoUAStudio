@@ -81,6 +81,82 @@ def test_animation_controls_and_frames_of_a_loose_unit(window):
     assert unit_helper._anim_states[animated[0]] == (2, 1)
 
 
+def test_firing_unit_in_fire_area_follows_the_toolbar_play(window):
+    """The Mnosjetz propellers must turn with the toolbar Play, not only with the shot."""
+
+    _mnojet(window)
+    window.properties_tabs.setCurrentIndex(window.fire_area_tab_index)
+    window._sync_animation_controls()
+    viewport = window.viewport
+    unit = next(item for item in viewport._fx_items if item.kind == "unit" and item.vp == 163)
+    window.viewport._anim_clock_ms = 0.0
+    seen = set()
+    for clock in (0.0, 70.0, 130.0, 200.0, 330.0, 470.0):
+        # Only the toolbar clock moves: the shot timeline stays at 0.
+        viewport._anim_clock_ms = clock
+        viewport.grab()
+        helper = next(h for key, h in viewport._fx_external_cache.items()
+                      if key.startswith("set:") and h is not None)
+        materials = {face.material for face, _vertices in viewport._fx_helper_faces(helper, unit)
+                     if helper._materials[face.material].anim_frames}
+        assert materials
+        seen.add(tuple(sorted(helper._anim_states[m] for m in materials)))
+    assert len(seen) > 1
+
+
+def test_fire_area_tab_is_grey_on_a_vehicle_and_open_on_its_weapon(window):
+    from map_editor import bootstrap
+    from studio.assets.catalog import load_game_objects
+    objects = load_game_objects(bootstrap.installation())
+    vehicle = next(o for o in objects if o.kind == "vehicle" and o.object_id == 38)
+    tabs = window.properties_tabs
+    _mnojet(window)
+    assert tabs.isTabEnabled(window.fire_area_tab_index)
+    tabs.setCurrentIndex(window.fire_area_tab_index)
+    # Opening the vehicle leaves Fire Area: its parameters belong to the weapon.
+    assert window._open_game_object(vehicle)
+    assert not tabs.isTabEnabled(window.fire_area_tab_index)
+    assert tabs.currentIndex() != window.fire_area_tab_index
+
+
+def test_gizmo_rises_under_the_short_cockpit_tab(window):
+    import time
+    from map_editor import bootstrap
+    from studio.assets.catalog import load_game_objects
+
+    vehicle = next(o for o in load_game_objects(bootstrap.installation())
+                   if o.kind == "vehicle" and o.object_id == 38)
+    assert window._open_game_object(vehicle)
+    # Tall window: any leftover space would show up as gaps in the column.
+    window.resize(1500, 1500)
+    window.show()
+
+    def settle():
+        end = time.time() + 0.4
+        while time.time() < end:
+            QApplication.processEvents()
+
+    tabs = window.properties_tabs
+    tabs.setCurrentIndex(window.collision_tab_index)
+    settle()
+    full_height = tabs.height()
+    tabs.setCurrentIndex(window.cockpit_tab_index)
+    settle()
+    box = window.cockpit_box
+    gap = (window.transform_box.mapTo(window, window.transform_box.rect().topLeft()).y()
+           - box.mapTo(window, box.rect().bottomLeft()).y())
+    strip = tabs._palette_strip
+    gap_above = (tabs.mapTo(window, tabs.rect().topLeft()).y()
+                 - strip.mapTo(window, strip.rect().bottomLeft()).y())
+    # Buttons, Cockpit View rows and gizmo form one compact block.
+    assert tabs.height() < full_height
+    assert 0 <= gap < 30 and 0 <= gap_above < 30
+    tabs.setCurrentIndex(window.fire_points_tab_index)
+    settle()
+    assert tabs.height() == full_height
+    window._modified = False
+
+
 def test_loose_texture_beside_the_base_wins_over_the_set(tmp_path):
     """External files are read first; the SET.BAS only fills in what is missing.
 

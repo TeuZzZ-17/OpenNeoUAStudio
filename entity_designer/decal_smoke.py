@@ -36,7 +36,6 @@ class SmokeSpec:
     """
 
     enabled: bool = False
-    flame: bool = False
     chance: int = 100
     duration: tuple[int, int] = (20000, 25000)
     fade_in: int = 3000
@@ -151,11 +150,10 @@ def evaluate(spec: SmokeSpec, radius: float, seed: int, count: int,
 
     size = max(MIN_PARTICLE_SIZE, base_size * 0.6 * (1.0 + (spec.growth - 1.0) * phase))
     return SmokePuff(
-        offset=(math.cos(angle) * distance + math.cos(wind) * drift
-                + (math.sin(age * 0.012 + slot_hash % 100) * base_size * 0.15 * phase if spec.flame else 0),
+        offset=(math.cos(angle) * distance + math.cos(wind) * drift,
                 -(GROUND_LIFT + 0.05 * radius + rise),
                 math.sin(angle) * distance + math.sin(wind) * drift),
-        size=max(MIN_PARTICLE_SIZE,size*(1-0.65*phase)) if spec.flame else size,
+        size=size,
         alpha=min(1.0, phase / 0.12) * (1.0 - phase) * min(1.0, gate),
         phase=phase,
         shade=0.8 + 0.4 * hash_unit(hash32(cycle_hash, 7, 0)))

@@ -15,13 +15,13 @@ import sys
 from entity_designer.fire_area import (
     FIRE_AREA_KEYS,
     MAX_INCLINATION_KEY,
-    MIN_DEPTH_KEY,
+    DEAD_ZONE_KEY,
     SHAPE_KEYS,
     SHAPE_LABELS,
     FireArea,
     fire_area_from_values,
     valid_max_inclination,
-    valid_min_depth,
+    valid_dead_zone,
     valid_size,
 )
 from entity_designer.shape import (
@@ -1369,8 +1369,8 @@ def fire_area_data_lines(project: "CollisionProject") -> list[str]:
     ]
     if area.max_inclination > 0.0:
         lines.append(f"{MAX_INCLINATION_KEY} = {_number(area.max_inclination)}")
-    if area.min_depth > 0.0:
-        lines.append(f"{MIN_DEPTH_KEY} = {_number(area.min_depth)}")
+    if area.dead_zone > 0.0:
+        lines.append(f"{DEAD_ZONE_KEY} = {_number(area.dead_zone)}")
     return lines
 
 
@@ -1394,8 +1394,8 @@ def fire_area_problems(area: FireArea) -> tuple[list[str], list[str]]:
             errors.append(
                 f"Fire Area: {SHAPE_LABELS[shape]} non valido (tre valori "
                 "positivi, angoli del cono sotto 180).")
-    if not valid_min_depth(area.min_depth):
-        errors.append("Fire Area: min_depth deve stare tra 0 e 30000.")
+    if not valid_dead_zone(area.dead_zone):
+        errors.append("Fire Area: dead_zone deve stare tra 0 e 30000.")
     if not valid_max_inclination(area.max_inclination):
         errors.append("Fire Area: max_inclination deve essere da 0 a meno di 90.")
     return errors, warnings
