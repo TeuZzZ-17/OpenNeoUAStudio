@@ -106,7 +106,8 @@ def test_item_type_picker_offers_only_supported_values_and_preserves_unknown(app
     picker = panel.fields['type']
     assert picker.itemText(0) == 'Default'
     assert any('parasite' in picker_text.lower() and 'available only for some sets' in picker_text.lower()
-               for picker_text in (panel.preset.itemText(index) for index in range(panel.preset.count())))
+               for picker_text in (panel.preset.itemData(index, Qt.ItemDataRole.ToolTipRole) or ''
+                                   for index in range(panel.preset.count())))
     selectable = [picker.itemData(index) for index in range(picker.count())
                   if picker.model().item(index).isEnabled()]
     assert ITEM_TYPES[0][0] == 1

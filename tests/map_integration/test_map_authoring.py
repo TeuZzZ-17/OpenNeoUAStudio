@@ -113,7 +113,9 @@ def test_save_as_text_filter_adds_extension_and_reloads_ldf(win, tmp_path, monke
     assert win.path == str(path.with_suffix('.txt'))
     assert not win.dirty
     loaded = load_ldf(str(path.with_suffix('.txt')))
-    assert loaded.snapshot() == win.doc.snapshot()
+    # A loaded document also keeps its source text (_source_*) to patch it on save.
+    content = {key: value for key, value in loaded.snapshot().items() if not key.startswith('_source')}
+    assert content == win.doc.snapshot()
 
 
 def test_script_pending_keyboard_undo_save_and_reload(win, tmp_path):

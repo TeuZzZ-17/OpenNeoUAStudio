@@ -302,13 +302,18 @@ class WireframePanel(QWidget):
         super().hideEvent(event)
 
     def _view_signature(self):
-        """What the preview depends on besides its own settings: the model and the camera."""
+        """What the preview depends on besides its own settings: the model, its preview scale and
+        rotation, and the camera."""
 
         camera = getattr(self.viewport, "_camera_state", None)
         if camera is None:
             return None
         faces = getattr(self.viewport, "_faces", None)
-        return (id(faces), len(faces) if faces is not None else 0, repr(camera()))
+        # The preview scale and rotation move the vertices inside the same face list, so the
+        # list alone would not show them.
+        placement = (getattr(self.viewport, "model_preview_scale", None),
+                     getattr(self.viewport, "model_preview_rotation", None))
+        return (id(faces), len(faces) if faces is not None else 0, placement, repr(camera()))
 
     def _live_tick(self) -> None:
         """Rebuild the preview once the camera or the model has changed and stopped moving."""
