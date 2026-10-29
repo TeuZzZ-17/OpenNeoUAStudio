@@ -24,6 +24,10 @@ class _EmptyCatalog:
     def briefing(_prefix, _value):
         return None
 
+    @staticmethod
+    def include_sky(value):
+        return value
+
 
 def test_level_info_sky_label_and_removed_helper_copy(monkeypatch, tmp_path):
     app = QApplication.instance() or QApplication([])

@@ -558,7 +558,6 @@ class CollisionEditorWindow(FireAreaEditingMixin, QMainWindow):
          self.exit_action) = install_standard_file_menu_tail(
             file_menu, self, close_archive_callback=self.close_current_archive)
         edit_menu = self.menuBar().addMenu("&Edit")
-        edit_menu.addSeparator()
         self.undo_action = QAction("Undo", self)
         self.undo_action.setIconText("< Undo")
         self.undo_action.setShortcut(QKeySequence.StandardKey.Undo)

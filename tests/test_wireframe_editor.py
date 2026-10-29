@@ -184,7 +184,8 @@ class WireframeEditorUiTests(unittest.TestCase):
 
     def test_selected_elements_panel_remains_readable(self):
         window = self._window()
-        self.assertGreaterEqual(window.selected_elements_list.minimumHeight(), 150)
+        # Small on purpose: the wireframe browser above it gets the space.
+        self.assertGreaterEqual(window.selected_elements_list.minimumHeight(), 60)
 
 
     def test_empty_editor_does_not_show_obsolete_no_data_message(self):
@@ -716,6 +717,106 @@ class WireframeEditorUiTests(unittest.TestCase):
             Qt.KeyboardModifier.NoModifier,
         )
         canvas.mouseReleaseEvent(release)
+
+
+class WireframeVehicleModeTests(unittest.TestCase):
+    """A vehicle or weapon opens all of its wireframes together."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.app = QApplication.instance() or QApplication([])
+
+    @staticmethod
+    def _write_square(path, size):
+        from studio.workbench.outline import EditorState
+        from wireframe_editor.window import _write_wireframe
+
+        points = ((-size, 0.0, -size), (size, 0.0, -size), (size, 0.0, size), (-size, 0.0, size))
+        state = EditorState("poo2", (), points, ((0, 1, 2, 3),), -1, (), ())
+        _write_wireframe(create_minimal_sklt_model(), state, path)
+
+    def _open_vehicle(self, directory):
+        from types import SimpleNamespace
+
+        directory = Path(directory)
+        for name, size in (("hud.SKL", 300.0), ("wpn.SKL", 500.0), ("unit.SKL", 900.0)):
+            self._write_square(directory / name, size)
+        vehicle = SimpleNamespace(
+            kind="vehicle", object_id=1, name="Test", source=directory / "Vehicles.cfg",
+            values={
+                "hud_wireframe": str(directory / "hud.SKL"),
+                "wpn_wireframe_1": str(directory / "wpn.SKL"),
+                "wpn_wireframe_2": str(directory / "wpn.SKL"),
+                "wireframe": str(directory / "unit.SKL"),
+                "mg_wireframe": str(directory / "missing.SKL"),
+            },
+        )
+        window = WireframeEditorWindow()
+        self.addCleanup(window.close)
+        self.addCleanup(window.outline_editor.mark_clean)
+        window.outline_editor.auto_align_check.setChecked(False)
+        window.mirror_symmetry_check.setChecked(False)
+        window._open_game_object(vehicle)
+        return window
+
+    def test_parts_are_assembled_like_the_game_visor(self):
+        from wireframe_editor.window import VISOR_ASPECT, assemble_parts
+
+        keys = ["hud_wireframe", "wpn_wireframe_1", "mg_wireframe", "wireframe"]
+        square = [(-500.0, -500.0), (500.0, 500.0)]
+        hud, weapon, mg, unit = assemble_parts(keys, [square] * 4)
+        self.assertEqual(hud, (0.99 * VISOR_ASPECT, 0.99, 0.0, 0.0))
+        self.assertEqual(weapon, (0.3 * VISOR_ASPECT, 0.4, 0.0, 0.0))
+        self.assertEqual(mg, weapon)
+        # The unit outline keeps its size and hangs below the 4:3 screen.
+        self.assertEqual(unit[:2], (1.0, 1.0))
+        self.assertLess(unit[3] + 500.0, -1000.0)
+        self.assertEqual(assemble_parts(["wireframe"], [square]), [(1.0, 1.0, 0.0, 0.0)])
+
+    def test_vehicle_opens_each_file_once_and_shows_the_others(self):
+        with tempfile.TemporaryDirectory() as directory:
+            window = self._open_vehicle(directory)
+            labels = [part.label for part in window._components]
+            self.assertEqual(labels, ["HUD", "Weapon 1 + Weapon 2", "Unit"])
+            self.assertEqual(window._current_file_path.name, "hud.SKL")
+            layers = window.outline_editor.canvas._reference_layers
+            self.assertEqual(
+                [layer.label for layer in layers], ["Screen", "Weapon 1 + Weapon 2", "Unit"])
+            self.assertFalse(layers[0].selectable)
+            self.assertIn("missing.SKL", window.statusBar().currentMessage())
+
+    def test_switching_parts_keeps_edits_and_overwrite_saves_them_all(self):
+        from studio.formats.sklt import parse_sklt_file
+
+        with tempfile.TemporaryDirectory() as directory:
+            window = self._open_vehicle(directory)
+            editor = window.outline_editor
+            editor.move_projected_points({0: (-250.0, -250.0)}, True)
+            window._activate_component(2)
+            self.assertFalse(editor.is_dirty)
+            self.assertEqual(window._dirty_names(), ["hud.SKL"])
+            editor.move_projected_points({0: (-800.0, -800.0)}, True)
+            self.assertTrue(window.save_action.isEnabled())
+
+            window._activate_component(0)
+            self.assertTrue(editor.can_undo)
+            self.assertEqual(editor.projected_points[0], (-250.0, 0.0, -250.0))
+
+            with patch("wireframe_editor.window.QMessageBox"):
+                window.save_current_file()
+            self.assertEqual(window._dirty_names(), [])
+            hud = parse_sklt_file(Path(directory) / "hud.SKL")
+            unit = parse_sklt_file(Path(directory) / "unit.SKL")
+            self.assertEqual(tuple(hud.points[0]), (-250.0, 0.0, -250.0))
+            self.assertEqual(tuple(unit.points[0]), (-800.0, 0.0, -800.0))
+
+    def test_opening_a_single_file_leaves_vehicle_mode(self):
+        with tempfile.TemporaryDirectory() as directory:
+            window = self._open_vehicle(directory)
+            window.open_file(Path(directory) / "wpn.SKL")
+            self.assertEqual(window._components, [])
+            self.assertEqual(window.outline_editor.canvas._reference_layers, [])
+            self.assertEqual(window.file_value.text(), "wpn.SKL")
 
 
 if __name__ == "__main__":
