@@ -349,7 +349,7 @@ def test_checker_is_between_resources_and_change_editor(app, key):
         actions = [action.text() for action in window.menuBar().actions()]
         # Change Set belongs to the three set-based tools only.
         with_set = key in ('model_editor', 'snapshot_studio', 'entity_designer')
-        assert actions == ['Resources', 'Theme',
+        assert actions == ['Resources', 'File Backup', 'Theme',
                            *(['Change Set'] if with_set else []), 'Change Editor',
                            'Vanilla Compatibility Checker']
         with patch('studio.ui.shell.CompatibilityDialog.exec', return_value=0) as opened:
@@ -874,10 +874,11 @@ def test_four_effect_visibility_buttons_and_menu_share_actions(app):
         panel.hide_all_button.click()
         assert panel.hidden_items == {0, 1, 2, 3}
         menu = panel._create_effects_context_menu()
-        assert menu.actions()[0].text() == 'Edit Effect Code'
-        assert menu.actions()[1] is panel.effects_view.delete_action
-        assert menu.actions()[3:] == panel._visibility_actions
-        menu.actions()[6].trigger()
+        assert menu.actions()[0] is panel.effects_view.add_action
+        assert menu.actions()[1].text() == 'Edit Effect Code'
+        assert menu.actions()[2] is panel.effects_view.delete_action
+        assert menu.actions()[4:] == panel._visibility_actions
+        menu.actions()[7].trigger()
         assert panel.hidden_items == {1, 3}
         with patch.object(panel, '_create_effects_context_menu') as created:
             panel._show_effects_context_menu(tree.visualItemRect(tree.item(0)).center())
