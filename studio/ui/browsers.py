@@ -5,6 +5,7 @@ import os
 from pathlib import Path
 
 from PySide6.QtCore import QEvent, QSignalBlocker, Qt, Signal
+from PySide6.QtGui import QBrush
 from PySide6.QtWidgets import (
     QApplication,
     QComboBox,
@@ -242,6 +243,8 @@ class GameFileBrowser(QWidget):
         super().__init__(parent)
         self.suffixes = set(suffixes)
         self.folder = None
+        # Files in use by the open document: listed first and tinted, with a short label.
+        self._pinned: list[tuple[Path, str]] = []
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
         # The folder picker is opt-in so other tools keep the plain game list.
@@ -307,7 +310,51 @@ class GameFileBrowser(QWidget):
                 item.setData(0, Qt.ItemDataRole.UserRole, path)
                 item.setToolTip(0, str(path))
                 self.tree.addTopLevelItem(item)
+            self._apply_pins()
         self._filter(self.search.text())
+
+    def set_pinned(self, entries):
+        """Show ``(path, label)`` entries first, tinted like the files a model uses."""
+        self._pinned = [(Path(path).resolve(), label) for path, label in entries]
+        with QSignalBlocker(self.tree):
+            current = self.tree.currentItem()
+            self._apply_pins()
+            self.tree.setCurrentItem(current)
+        self._filter(self.search.text())
+
+    def set_modified(self, paths):
+        """Paint the rows of ``paths`` as modified (unsaved changes)."""
+        from studio.ui.widgets import mark_resource_modified
+        modified = {Path(path).resolve() for path in paths}
+        for index in range(self.tree.topLevelItemCount()):
+            item = self.tree.topLevelItem(index)
+            mark_resource_modified(item, Path(item.data(0, Qt.ItemDataRole.UserRole)) in modified)
+
+    def _apply_pins(self):
+        from studio.ui.style import theme_list_color
+        labels = {path: label for path, label in self._pinned}
+        items = [self.tree.takeTopLevelItem(0) for _ in range(self.tree.topLevelItemCount())]
+        pinned, others = [], []
+        for item in items:
+            # Listed paths are already resolved by game_files/folder_files.
+            path = Path(item.data(0, Qt.ItemDataRole.UserRole))
+            base_text = item.data(0, Qt.ItemDataRole.UserRole + 1) or item.text(0)
+            item.setData(0, Qt.ItemDataRole.UserRole + 1, base_text)
+            label = labels.get(path)
+            font = item.font(0)
+            font.setBold(label is not None)
+            item.setFont(0, font)
+            if label is None:
+                item.setText(0, base_text)
+                item.setBackground(0, QBrush())
+                others.append(item)
+            else:
+                item.setText(0, f"{label}  ·  {base_text}")
+                item.setBackground(0, QBrush(theme_list_color("DependencySelected")))
+                pinned.append(item)
+        order = {path: index for index, (path, _label) in enumerate(self._pinned)}
+        pinned.sort(key=lambda item: order[Path(item.data(0, Qt.ItemDataRole.UserRole))])
+        self.tree.addTopLevelItems(pinned + others)
 
     def _filter(self, text):
         for index in range(self.tree.topLevelItemCount()):

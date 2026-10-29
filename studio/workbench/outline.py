@@ -75,6 +75,56 @@ class HistoryEdit:
     after: EditorState
 
 
+def _state_signature(state: EditorState) -> tuple:
+    """Geometry part of a state: what decides whether a document is dirty."""
+    return (state.mode, state.points_2d, state.points_3d, state.groups)
+
+
+@dataclass
+class OutlineSession:
+    """One complete wireframe document, kept aside while another one is edited.
+
+    The editor shows one document at a time; a session holds everything it
+    needs to resume another one later (geometry, undo/redo, saved state).
+    """
+
+    model: SkltModel
+    state: EditorState
+    loaded_state: EditorState
+    clean_signature: tuple
+    undo_stack: list[HistoryEdit]
+    redo_stack: list[HistoryEdit]
+
+    @property
+    def is_dirty(self) -> bool:
+        return _state_signature(self.state) != self.clean_signature
+
+
+@dataclass(frozen=True)
+class ReferenceLayer:
+    """A wireframe drawn read-only beside the edited one (points already placed).
+
+    A layer that is not ``selectable`` is only a guide (dashed, never activated).
+    """
+
+    label: str
+    points: tuple[ProjectedPoint, ...]
+    groups: tuple[tuple[int, ...], ...]
+    selectable: bool = True
+
+
+def _group_edges(groups, point_count: int) -> list[tuple[int, int]]:
+    """Connections of polygon groups: a group of 3+ vertices is closed."""
+    edges: list[tuple[int, int]] = []
+    for group in groups:
+        valid_group = [index for index in group if 0 <= index < point_count]
+        pairs = list(zip(valid_group, valid_group[1:]))
+        if len(valid_group) > 2:
+            pairs.append((valid_group[-1], valid_group[0]))
+        edges.extend(pairs)
+    return edges
+
+
 class OutlineCanvas(AcceleratedWidget):
     pointSelected = Signal(int)
     pointMoved = Signal(int, float, float, bool)
@@ -93,6 +143,7 @@ class OutlineCanvas(AcceleratedWidget):
     selectionDragStarted = Signal()
     selectionDragFinished = Signal()
     pointerMoved = Signal(object)
+    referenceLayerActivated = Signal(int)
 
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
@@ -137,6 +188,9 @@ class OutlineCanvas(AcceleratedWidget):
         self._auto_align_enabled = True
         self._snap_preview_pairs: list[tuple[ProjectedPoint, ProjectedPoint]] = []
         self._link_mode_active = False
+        self._reference_layers: list[ReferenceLayer] = []
+        self._active_label = ""
+        self._placement = (1.0, 1.0, 0.0, 0.0)
         self.setMinimumSize(360, 360)
         self.setMouseTracking(True)
 
@@ -176,7 +230,7 @@ class OutlineCanvas(AcceleratedWidget):
             or self._view_bounds_fixed != fixed_byte_space
         ):
             self._view_bounds = self._calculate_view_bounds(
-                self._points, fixed_byte_space)
+                self._framing_points(), fixed_byte_space)
             self._view_bounds_fixed = fixed_byte_space
         self.update()
 
@@ -198,6 +252,107 @@ class OutlineCanvas(AcceleratedWidget):
         self._selected_edge = sorted(self._selected_edges)[0] if self._selected_edges else None
         self.update()
 
+    def set_reference_layers(self, layers: list[ReferenceLayer], active_label: str = "") -> None:
+        """Draw other wireframes beside the edited one; ``active_label`` names the edited one."""
+        self._reference_layers = list(layers)
+        self._active_label = active_label
+        self.update()
+
+    def set_placement(self, scale_x: float, scale_y: float, offset_x: float, offset_y: float) -> None:
+        """Show the edited wireframe scaled and moved inside a larger picture.
+
+        Its vertices keep their own coordinates: only the drawing and the mouse
+        mapping go through the placement. Reference layers are already placed.
+        """
+        self._placement = (float(scale_x), float(scale_y), float(offset_x), float(offset_y))
+        self.update()
+
+    def _place(self, point: ProjectedPoint) -> ProjectedPoint:
+        scale_x, scale_y, offset_x, offset_y = self._placement
+        return (point[0] * scale_x + offset_x, point[1] * scale_y + offset_y)
+
+    def pixels_per_unit(self, transform=None) -> float:
+        """Screen pixels per unit of the edited wireframe (the smaller axis)."""
+        transform = transform or self._make_transform()
+        scale_x, scale_y, _offset_x, _offset_y = self._placement
+        return max(abs(transform[1]) * min(abs(scale_x), abs(scale_y)), 1.0e-9)
+
+    def _framing_points(self) -> list[ProjectedPoint]:
+        """Points that an automatic framing must keep visible (placed)."""
+        points = [self._place(point) for point in self._points]
+        for layer in self._reference_layers:
+            points.extend(layer.points)
+        return points
+
+    def reference_layer_at(self, screen_pos: QPointF, radius: float = 12.0) -> int:
+        """Index of the reference wireframe drawn closest to ``screen_pos``, or -1."""
+        transform = self._make_transform()
+        best_index = -1
+        best_distance_sq = radius * radius
+        for index, layer in enumerate(self._reference_layers):
+            if not layer.selectable:
+                continue
+            screens = [self._view_to_screen(point, transform) for point in layer.points]
+            for first, second in _group_edges(layer.groups, len(screens)):
+                distance_sq = _distance_sq_to_segment(screen_pos, screens[first], screens[second])
+                if distance_sq <= best_distance_sq:
+                    best_index, best_distance_sq = index, distance_sq
+            for screen in screens:
+                delta = screen - screen_pos
+                distance_sq = delta.x() * delta.x() + delta.y() * delta.y()
+                if distance_sq <= best_distance_sq:
+                    best_index, best_distance_sq = index, distance_sq
+        return best_index
+
+    @staticmethod
+    def _screen_box(screens: list[QPointF]) -> QRectF | None:
+        if not screens:
+            return None
+        left = min(point.x() for point in screens)
+        right = max(point.x() for point in screens)
+        top = min(point.y() for point in screens)
+        bottom = max(point.y() for point in screens)
+        return QRectF(left, top, right - left, bottom - top)
+
+    def _draw_reference_layers(self, painter: QPainter, transform) -> None:
+        painter.save()
+        line_pen = QPen(QColor(100, 210, 255, 75), 1.0)
+        guide_pen = QPen(QColor(170, 180, 190, 70), 1.0, Qt.PenStyle.DashLine)
+        labels = []
+        for layer in self._reference_layers:
+            screens = [self._view_to_screen(point, transform) for point in layer.points]
+            painter.setPen(line_pen if layer.selectable else guide_pen)
+            for first, second in _group_edges(layer.groups, len(screens)):
+                painter.drawLine(screens[first], screens[second])
+            if layer.selectable:
+                painter.setPen(Qt.PenStyle.NoPen)
+                painter.setBrush(QColor(255, 230, 0, 60))
+                for screen in screens:
+                    painter.drawEllipse(screen, 1.8, 1.8)
+            labels.append((layer.label, self._screen_box(screens), QColor(170, 180, 190, 170)))
+        if self._active_label:
+            screens = [self._to_screen(point, transform) for point in self._points]
+            labels.append((self._active_label, self._screen_box(screens), QColor(255, 204, 70, 230)))
+        self._draw_layer_labels(painter, labels)
+        painter.restore()
+
+    @staticmethod
+    def _draw_layer_labels(painter: QPainter, labels) -> None:
+        """Name every wireframe above its box; parts drawn on top of each other stack their names."""
+        metrics = painter.fontMetrics()
+        occupied: list[QRectF] = []
+        for text, box, color in labels:
+            if not text or box is None:
+                continue
+            width = float(metrics.horizontalAdvance(text))
+            rect = QRectF(box.center().x() - width * 0.5, box.top() - 8.0 - metrics.height(),
+                          width, float(metrics.height()))
+            while any(rect.intersects(other) for other in occupied):
+                rect.translate(0.0, -float(metrics.height()))
+            occupied.append(rect)
+            painter.setPen(color)
+            painter.drawText(QPointF(rect.left(), rect.top() + metrics.ascent()), text)
+
     def set_show_vertex_indices(self, enabled: bool) -> None:
         self._show_vertex_indices = enabled
         self.update()
@@ -216,7 +371,7 @@ class OutlineCanvas(AcceleratedWidget):
         self._pan = QPointF(0.0, 0.0)
         if fit_content:
             self._view_bounds = self._calculate_view_bounds(
-                self._points, self._fixed_byte_space)
+                self._framing_points(), self._fixed_byte_space)
             self._view_bounds_fixed = self._fixed_byte_space
         else:
             self._view_bounds = None
@@ -283,6 +438,7 @@ class OutlineCanvas(AcceleratedWidget):
         # when the current wireframe contains no vertices yet.
         transform = self._make_transform()
         self._draw_grid(painter, transform)
+        self._draw_reference_layers(painter, transform)
 
         self._draw_transform_overlay(painter, transform)
 
@@ -699,6 +855,20 @@ class OutlineCanvas(AcceleratedWidget):
         self.update()
         event.accept()
 
+    def mouseDoubleClickEvent(self, event: QMouseEvent) -> None:  # noqa: N802 - Qt override
+        # Double click on a reference wireframe (away from the edited vertices) edits it.
+        if (
+            event.button() == Qt.MouseButton.LeftButton
+            and not self.ghost_points
+            and self._nearest_point(event.position()) < 0
+        ):
+            layer = self.reference_layer_at(event.position())
+            if layer >= 0:
+                self.referenceLayerActivated.emit(layer)
+                event.accept()
+                return
+        super().mouseDoubleClickEvent(event)
+
     def _nearest_point(self, screen_pos: QPointF, radius: float = 12.0) -> int:
         if not self._points:
             return -1
@@ -732,15 +902,7 @@ class OutlineCanvas(AcceleratedWidget):
         return best_edge
 
     def _iter_edges(self) -> list[tuple[int, int]]:
-        edges: list[tuple[int, int]] = []
-        point_count = len(self._points)
-        for group in self._groups:
-            valid_group = [index for index in group if 0 <= index < point_count]
-            pairs = list(zip(valid_group, valid_group[1:]))
-            if len(valid_group) > 2:
-                pairs.append((valid_group[-1], valid_group[0]))
-            edges.extend(pairs)
-        return edges
+        return _group_edges(self._groups, len(self._points))
 
     def _validated_edge(self, edge: tuple[int, int] | None) -> tuple[int, int] | None:
         if edge is None:
@@ -813,8 +975,8 @@ class OutlineCanvas(AcceleratedWidget):
         scale = max(0.000001, transform[1])
         delta = event.position() - self._drag_start_screen
         precision = 0.25 if event.modifiers() & Qt.KeyboardModifier.ShiftModifier else 1.0
-        delta_x = (delta.x() / scale) * precision
-        delta_y = -(delta.y() / scale) * precision
+        delta_x = (delta.x() / (scale * self._placement[0])) * precision
+        delta_y = -(delta.y() / (scale * self._placement[1])) * precision
         pivot = self.selection_pivot()
         angle = 0.0
         factor = 1.0
@@ -928,8 +1090,7 @@ class OutlineCanvas(AcceleratedWidget):
             self.update()
             return
         stable_indices = [index for index in range(len(self._points)) if index not in moved_indices]
-        transform = self._make_transform()
-        scale = max(abs(transform[1]), 1.0e-9)
+        scale = self.pixels_per_unit()
         # Screen-space sensitivity stays stable when model extents change.
         line_threshold = 10.0 / scale
         edges = self._iter_edges()
@@ -991,7 +1152,7 @@ class OutlineCanvas(AcceleratedWidget):
             or self._view_bounds_fixed != self._fixed_byte_space
         ):
             self._view_bounds = self._calculate_view_bounds(
-                self._points, self._fixed_byte_space)
+                self._framing_points(), self._fixed_byte_space)
             self._view_bounds_fixed = self._fixed_byte_space
         if self._view_bounds is None:
             if self._fixed_byte_space:
@@ -1013,6 +1174,13 @@ class OutlineCanvas(AcceleratedWidget):
     def _to_screen(
         self, point: ProjectedPoint, transform: tuple[QRectF, float, float, float, float, float]
     ) -> QPointF:
+        """Screen position of a point of the edited wireframe."""
+        return self._view_to_screen(self._place(point), transform)
+
+    def _view_to_screen(
+        self, point: ProjectedPoint, transform: tuple[QRectF, float, float, float, float, float]
+    ) -> QPointF:
+        """Screen position of an already placed point (reference layers)."""
         rect, scale, min_x, min_y, offset_x, offset_y = transform
         x, y = point
         return QPointF(
@@ -1024,6 +1192,9 @@ class OutlineCanvas(AcceleratedWidget):
         rect, scale, min_x, min_y, offset_x, offset_y = self._make_transform()
         x = min_x + (screen_pos.x() - self._pan.x() - rect.left() - offset_x) / scale
         y = min_y + (rect.bottom() - offset_y + self._pan.y() - screen_pos.y()) / scale
+        place_x, place_y, place_offset_x, place_offset_y = self._placement
+        x = (x - place_offset_x) / place_x
+        y = (y - place_offset_y) / place_y
         if self._fixed_byte_space:
             return (_clamp_byte(round(x)), _clamp_byte(round(y)))
         return (x, y)
@@ -1208,13 +1379,7 @@ class OutlineEditor(QWidget):
     def can_reset(self) -> bool:
         if self._loaded_state is None:
             return False
-        loaded_signature = (
-            self._loaded_state.mode,
-            self._loaded_state.points_2d,
-            self._loaded_state.points_3d,
-            self._loaded_state.groups,
-        )
-        return self._current_signature() != loaded_signature
+        return self._current_signature() != _state_signature(self._loaded_state)
 
     @property
     def selected_index(self) -> int:
@@ -1278,43 +1443,65 @@ class OutlineEditor(QWidget):
         return _outline_line_count(self._groups)
 
     def set_model(self, model: SkltModel) -> None:
-        self.cancel_operation()
-        self._model = model
-        self._points_2d = list(model.outline_points)
-        self._points_3d = [(point[0], point[1], point[2]) for point in model.points]
-
-        if model.has_outline_data:
-            self._mode = "otl2"
-            self._groups = [list(group) for group in model.outline_groups]
-            self._selected_index = 0 if self._points_2d else -1
-            self._selected_indices = {self._selected_index} if self._selected_index >= 0 else set()
-        elif model.poo2_payload_offset is not None and model.pol2_payload_offset is not None:
-            # Empty POO2/POL2 is a valid editable New document.  Do not require
-            # a synthetic origin vertex just to enter wireframe edit mode.
-            self._mode = "poo2"
-            self._groups = [list(group) for group in model.polygons]
-            self._selected_index = 0 if self._points_3d else -1
-            self._selected_indices = {self._selected_index} if self._selected_index >= 0 else set()
-        else:
-            self._mode = "none"
-            self._groups = []
-            self._selected_index = -1
-            self._selected_indices.clear()
-
-        self._undo_stack.clear()
-        self._redo_stack.clear()
-        self._drag_start_state = None
-        self._link_start_index = -1
-        self._selected_link = None
-        self._selected_edges.clear()
-        self._last_auto_align_message = ""
-        self._loaded_state = self._snapshot()
-        self.mark_clean()
+        self.restore_session(self.new_session(model))
         self.canvas.reset_view(fit_content=False)
         self._refresh_canvas()
         if self._mode == "poo2" and not self._points_3d:
             self.canvas.set_empty_workspace_view()
         self._update_controls()
+
+    @staticmethod
+    def new_session(model: SkltModel) -> OutlineSession:
+        """A freshly loaded, clean document for ``model``."""
+        points_2d = tuple((int(x), int(y)) for x, y in model.outline_points)
+        points_3d = tuple((point[0], point[1], point[2]) for point in model.points)
+        if model.has_outline_data:
+            mode, groups, count = "otl2", model.outline_groups, len(points_2d)
+        elif model.poo2_payload_offset is not None and model.pol2_payload_offset is not None:
+            # Empty POO2/POL2 is a valid editable New document.  Do not require
+            # a synthetic origin vertex just to enter wireframe edit mode.
+            mode, groups, count = "poo2", model.polygons, len(points_3d)
+        else:
+            mode, groups, count = "none", [], 0
+        selected = 0 if count else -1
+        state = EditorState(
+            mode=mode,
+            points_2d=points_2d,
+            points_3d=points_3d,
+            groups=tuple(tuple(group) for group in groups),
+            selected_index=selected,
+            selected_indices=(selected,) if selected >= 0 else (),
+            selected_edges=(),
+        )
+        return OutlineSession(model, state, state, _state_signature(state), [], [])
+
+    def capture_session(self) -> OutlineSession:
+        """The document being edited, to be resumed later with ``restore_session``."""
+        return OutlineSession(
+            model=self._model,
+            state=self._snapshot(),
+            loaded_state=self._loaded_state,
+            clean_signature=self._clean_signature,
+            undo_stack=list(self._undo_stack),
+            redo_stack=list(self._redo_stack),
+        )
+
+    def restore_session(self, session: OutlineSession) -> None:
+        """Edit ``session``'s document; the canvas framing is left to the caller."""
+        self.cancel_operation()
+        self._model = session.model
+        self._restore_state(session.state)
+        self._loaded_state = session.loaded_state
+        self._undo_stack = list(session.undo_stack)
+        self._redo_stack = list(session.redo_stack)
+        self._clean_signature = session.clean_signature
+        self._drag_start_state = None
+        self._link_start_index = -1
+        self._last_auto_align_message = ""
+        self._update_dirty_from_signature()
+        self._refresh_canvas()
+        self._update_controls()
+        self.undoRedoChanged.emit()
 
     def prepare_selection_drag(self) -> None:
         self._close_clipboard_preview()
@@ -1429,15 +1616,12 @@ class OutlineEditor(QWidget):
         self.canvas.set_link_mode_active(self._link_start_index >= 0)
 
     def _iter_edges(self) -> list[tuple[int, int]]:
-        edges: list[tuple[int, int]] = []
         point_count = len(self._points_3d) if self._mode == "poo2" else len(self._points_2d)
-        for group in self._groups:
-            valid_group = [index for index in group if 0 <= index < point_count]
-            pairs = list(zip(valid_group, valid_group[1:]))
-            if len(valid_group) > 2:
-                pairs.append((valid_group[-1], valid_group[0]))
-            edges.extend((_edge_key(left, right) for left, right in pairs if left != right))
-        return edges
+        return [
+            _edge_key(left, right)
+            for left, right in _group_edges(self._groups, point_count)
+            if left != right
+        ]
 
 
 
@@ -1517,8 +1701,7 @@ class OutlineEditor(QWidget):
             return positions
         center_x = sum(point[0] for point in positions.values()) / len(positions)
         center_z = sum(point[1] for point in positions.values()) / len(positions)
-        transform = self.canvas._make_transform()
-        scale = max(abs(transform[1]), 1.0e-9)
+        scale = self.canvas.pixels_per_unit()
         threshold = 12.0 / scale
         if math.hypot(center_x, center_z) > threshold:
             return positions
@@ -1852,8 +2035,7 @@ class OutlineEditor(QWidget):
             return first_axis_value, second_axis_value
 
         projected = self._projected_points()
-        transform = self.canvas._make_transform()
-        scale = max(abs(transform[1]), 1.0e-9)
+        scale = self.canvas.pixels_per_unit()
 
         # Keep the magnetic feel stable in screen space, independent of model
         # dimensions or current zoom.  Point snapping is intentionally a touch
@@ -2641,12 +2823,7 @@ class OutlineEditor(QWidget):
         self.undoRedoChanged.emit()
 
     def _current_signature(self) -> tuple:
-        return (
-            self._mode,
-            tuple((int(x), int(y)) for x, y in self._points_2d),
-            tuple((x, y, z) for x, y, z in self._points_3d),
-            tuple(tuple(group) for group in self._groups),
-        )
+        return _state_signature(self._snapshot())
 
     def _update_dirty_from_signature(self) -> None:
         dirty = self._current_signature() != self._clean_signature
