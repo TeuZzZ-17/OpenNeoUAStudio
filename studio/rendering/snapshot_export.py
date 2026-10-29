@@ -8,11 +8,31 @@ import tempfile
 from pathlib import Path
 from typing import Callable
 
-from PySide6.QtCore import QIODevice, QSaveFile
-from PySide6.QtGui import QImage, QImageWriter
+from PySide6.QtCore import QIODevice, QPoint, QRect, QSaveFile, Qt
+from PySide6.QtGui import (
+    QColor, QFont, QGuiApplication, QImage, QImageWriter, QPainter)
 
 from studio.exchange.portable import backup_existing_file
 
+
+# Contact sheet: (label drawn in the cell, canonical view preset), row by row.
+CONTACT_SHEET_VIEWS = (
+    ("iso", "Isometric Front Right"),
+    ("iso_left", "Isometric Front Left"),
+    ("iso_back", "Isometric Back Right"),
+    ("iso_back_left", "Isometric Back Left"),
+    ("left", "Left"),
+    ("right", "Right"),
+    ("top", "Top"),
+    ("bottom", "Bottom"),
+)
+# 4 columns fit the 8 views with no empty cell: the isometric views on the
+# first row, then left, right, top, bottom.
+CONTACT_SHEET_COLUMNS = 4
+# Used when no Snapshot background is picked: the label text must stay readable,
+# which a transparent sheet would not guarantee.
+CONTACT_SHEET_BACKGROUND = QColor("#1d2027")
+CONTACT_SHEET_LABEL_COLOR = QColor("#c8cbd2")
 
 FORMAT_EXTENSIONS = {
     "png": "png",
@@ -122,6 +142,44 @@ def write_static_image_atomic(
     del writer
     if not target.commit():
         raise OSError(target.errorString() or f"Could not commit {path}")
+
+
+def compose_contact_sheet(
+        cells: list[tuple[str, QImage]], background: QColor,
+        columns: int = CONTACT_SHEET_COLUMNS) -> QImage:
+    """Tile labelled views into one image, filling the grid row by row.
+
+    Every cell takes the size of the first image, so the caller renders all
+    views at the same size."""
+
+    if not cells or any(image.isNull() for _label, image in cells):
+        raise ValueError("Contact sheet needs at least one rendered view")
+    cell_width = cells[0][1].width()
+    cell_height = cells[0][1].height()
+    rows = -(-len(cells) // columns)
+    sheet = QImage(
+        cell_width * columns, cell_height * rows,
+        QImage.Format.Format_ARGB32_Premultiplied)
+    sheet.fill(background)
+    painter = QPainter(sheet)
+    try:
+        font = QFont(QGuiApplication.font())
+        font.setPixelSize(max(10, cell_height // 32))
+        painter.setFont(font)
+        painter.setPen(CONTACT_SHEET_LABEL_COLOR)
+        margin = max(4, cell_height // 64)
+        for index, (label, image) in enumerate(cells):
+            left = (index % columns) * cell_width
+            top = (index // columns) * cell_height
+            painter.drawImage(QPoint(left, top), image)
+            painter.drawText(
+                QRect(left + margin, top + margin,
+                      cell_width - 2 * margin, cell_height - 2 * margin),
+                int(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignTop),
+                label)
+    finally:
+        painter.end()
+    return sheet
 
 
 def animation_frame_count(

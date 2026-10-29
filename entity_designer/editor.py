@@ -76,6 +76,8 @@ from entity_designer.dialogs import (
     ImportCollisionDialog,
     OpenScriptObjectDialog,
 )
+from entity_designer.fire_area import SHAPE_KEYS, FireArea
+from entity_designer.fire_area_editing import FireAreaEditingMixin
 from entity_designer.fx_panel import DestructionFxPanel
 from entity_designer.script_model import (
     _clamp_gun_angle,
@@ -101,6 +103,7 @@ from entity_designer.script_model import (
     _SCRIPT_TAB_COCKPIT,
     _SCRIPT_TAB_COLLISION,
     _SCRIPT_TAB_FIRE,
+    _SCRIPT_TAB_FIRE_AREA,
     _SCRIPT_TAB_GUN,
     _SCRIPT_TAB_LABELS,
     _SCRIPT_TAB_ORDER,
@@ -126,6 +129,7 @@ from entity_designer.script_model import (
     import_cockpit_camera_block,
     import_collision_block,
     import_collision_shape_reference,
+    import_fire_area_block,
     import_fire_points_block,
     import_gun_points_block,
     import_overeof_block,
@@ -283,7 +287,7 @@ def _vp_ids_per_model(family: AssetFamily, embedded, table) -> list[list[int]]:
     return result
 
 
-class CollisionEditorWindow(QMainWindow):
+class CollisionEditorWindow(FireAreaEditingMixin, QMainWindow):
     """Manual collision editor built on OpenNeoUAStudio's existing systems."""
 
     def __init__(self, parent=None) -> None:
@@ -293,6 +297,7 @@ class CollisionEditorWindow(QMainWindow):
         self.setWindowTitle(WINDOW_TITLE)
         self.resize(1100, 720)
         self.project = CollisionProject()
+        self._init_fire_area()
         self.family: AssetFamily | None = None
         self._vp_embedded: EmbeddedVPSet | None = None
         self._vp_table: VPTable | None = None
@@ -912,6 +917,9 @@ class CollisionEditorWindow(QMainWindow):
         self.viewport_layout.setRowStretch(0, 1)
         self.viewport_layout.setRowStretch(1, 0)
         self.fx_panel.transport_bar.hide()
+        self.fire_area_tab = self._build_fire_area_tab()
+        self.fire_area_tab_index = self.properties_tabs.addTab(
+            self.fire_area_tab, "Fire Area")
         # Wireframe: the one the definition has now, or a new one generated from its model.
         from entity_designer.wireframe_panel import TAB_TITLE, WireframePanel
         self.wireframe_panel = WireframePanel(self.viewport, self)
@@ -960,6 +968,10 @@ class CollisionEditorWindow(QMainWindow):
                 VANILLA, "The wireframe is the vanilla SKLT file named by the "
                 "wireframe key. Export writes only that file: the script must "
                 "still reference it."),
+            self.fire_area_tab: (
+                COMPAT_OPENNEOUA, "ai_fire_trigger_* of a weapon are read "
+                "only by OpenNeoUA, and only by the AI: they decide where "
+                "it opens fire. Vanilla ignores them."),
         }
         self.properties_tab_strip = PaletteTabStrip.install(
             self.properties_tabs, markers={
@@ -2545,6 +2557,10 @@ class CollisionEditorWindow(QMainWindow):
             result = self.open_vehicle_script(obj.source, object_id=obj.object_id,
                 object_kind=f"new_{obj.kind}", set_bas_path=assets.setbas_path,
                 resolved_text=obj.effective_text)
+            if (result is not False and obj.kind == "vehicle"
+                    and hasattr(self, "fire_area_tab_index")
+                    and self.properties_tabs.currentIndex() == self.fire_area_tab_index):
+                self._show_linked_fire_area_weapon(obj)
             return result is not False
         except (OSError, ValueError, RuntimeError) as exc:
             QMessageBox.warning(self, "Game object unavailable", str(exc))
@@ -2574,6 +2590,7 @@ class CollisionEditorWindow(QMainWindow):
         script_path = Path(path)
         if not self.fx_panel.confirm_text_changes():
             return False
+        self._fire_area_owner_vehicle = None
         try:
             text, _encoding, _bom = read_script_file(script_path)
             if resolved_text is not None:
@@ -2705,6 +2722,7 @@ class CollisionEditorWindow(QMainWindow):
                  cockpit_z) = import_cockpit_camera_block(text, block)
                 (gun_enabled, gun_points,
                  unit_gun_default_icon) = import_gun_points_block(text, block)
+                fire_area = FireArea()
             else:
                 overeof_enabled, overeof = False, 0.0
                 fire_enabled, fire_x, fire_y, fire_z = False, 0.0, 0.0, 0.0
@@ -2712,6 +2730,7 @@ class CollisionEditorWindow(QMainWindow):
                 cockpit_enabled, cockpit_x, cockpit_y, cockpit_z = (
                     False, 0.0, 0.0, 0.0)
                 gun_enabled, gun_points, unit_gun_default_icon = False, [], ""
+                fire_area = import_fire_area_block(text, block)
         except CollisionScriptError as exc:
             QMessageBox.critical(
                 self, "Script parameter import failed", str(exc))
@@ -2768,6 +2787,7 @@ class CollisionEditorWindow(QMainWindow):
             briefing_x=import_briefing_xyz_block(text, block)[1] if target_category == VEHICLE else 0.0,
             briefing_y=import_briefing_xyz_block(text, block)[2] if target_category == VEHICLE else 0.0,
             briefing_z=import_briefing_xyz_block(text, block)[3] if target_category == VEHICLE else 0.0,
+            fire_area=fire_area,
             legacy=legacy,
             compound=compounds,
             collision_shape=shape,
@@ -2814,6 +2834,7 @@ class CollisionEditorWindow(QMainWindow):
         self._model_state_vps = self._script_model_state_vps(text, block, reference)
         self._show_model_item(self._select_script_unit_item(reference))
         self._load_fx_context(text, block, reference)
+        self._fire_area_load_defaults(text, block)
         self._set_modified(False)
         self.source_label.setText(
             (f"Visual override: {visual_override}" if visual_override
@@ -5105,6 +5126,7 @@ class CollisionEditorWindow(QMainWindow):
         shape_tab = active == self.collision_shape_tab_index
         fire_tab = active == self.fire_points_tab_index
         gun_tab = active == self.gun_points_tab_index
+        fire_area_tab = self._is_fire_area_tab_active()
 
         def wanted(label: str) -> bool:
             action = self.viewpoint_actions.get(label)
@@ -5116,9 +5138,12 @@ class CollisionEditorWindow(QMainWindow):
             OPENNEOUA, collision_tab and wanted("Show OpenNeoUA Collisions"))
         # The ground plane is also the reference surface of Destruction FX:
         # wrecks, fragments and decals land on it.
+        # The fire volume is judged against the floor, so it shows the ground too.
         self.viewport.set_ground_simulation_visible(
-            (collision_tab or ground_tab or self._is_fx_tab_active())
+            (collision_tab or ground_tab or fire_area_tab
+             or self._is_fx_tab_active())
             and wanted("Show Ground Simulation"))
+        self.viewport.set_fire_area_visible(fire_area_tab)
         self.viewport.set_overeof_visible(
             ground_tab and wanted("Show Overeof"))
         self.viewport.set_collision_shape_overlay_visible(shape_tab)
@@ -5143,9 +5168,34 @@ class CollisionEditorWindow(QMainWindow):
         # so leaving the tab restores the exact previous editor view.
         return self._is_cockpit_tab_selected()
 
+    def _show_linked_fire_area_weapon(self, vehicle) -> None:
+        """Open the vehicle's weapon in Fire Area while keeping the vehicle selected."""
+
+        objects = self.game_object_browser.objects
+        weapon_ids = (fx.script_int(vehicle.values.get(key), -1)
+                      for key in ("weapon", "weapon_2"))
+        linked = next((obj for weapon_id in weapon_ids for obj in objects
+                       if obj.kind == "weapon" and obj.object_id == weapon_id), None)
+        if linked is None or not self._open_game_object(linked):
+            return
+        self._fire_area_owner_vehicle = vehicle
+        self._fire_area_unit_id = vehicle.object_id
+        self._fire_area_reset_height()
+        self._fire_area_frame_pending = True
+        self._sync_all()
+
     def _properties_tab_changed(self, _index: int) -> None:
         # Changing workspace must never modify authored data. It only switches
         # the viewport presentation and which object the shared gizmo moves.
+        if self._fire_area_owner_vehicle is not None and self._fire_area_restore_vehicle():
+            return
+        if (self.properties_tabs.currentIndex() == self.fire_area_tab_index
+                and self._active_script_kind == "new_vehicle"):
+            vehicle = next((obj for obj in self.game_object_browser.objects
+                            if obj.kind == "vehicle"
+                            and obj.object_id == self._active_script_id), None)
+            if vehicle is not None:
+                self._show_linked_fire_area_weapon(vehicle)
         briefing_active = self.properties_tabs.currentIndex() == self.briefing_tab_index
         self.renderer_badge.set_viewport(self.briefing_preview if briefing_active else self.viewport)
         self.briefing_preview.setVisible(briefing_active)
@@ -5159,6 +5209,7 @@ class CollisionEditorWindow(QMainWindow):
             and self.properties_tabs.currentIndex()
             == self.collision_shape_tab_index)
         self._sync_workspace_overlay_visibility()
+        self._fire_area_enter_leave()
         self.viewport.set_cockpit_preview_active(cockpit_active)
         if hasattr(self, "toolbar_view_preset_combo"):
             self.toolbar_view_preset_combo.setEnabled(not cockpit_active)
@@ -5168,9 +5219,12 @@ class CollisionEditorWindow(QMainWindow):
                 not shape_tab_active and not briefing_active
                 and self.properties_tabs.currentIndex() != self.ground_tab_index
                 and self.properties_tabs.currentIndex() != self.wireframe_tab_index
-                and not self._is_fx_tab_active())
+                and not self._is_fx_tab_active()
+                and self.properties_tabs.currentIndex() != self.fire_area_tab_index)
             self.transform_box.setTitle(
-                "Move Cockpit Camera" if cockpit_selected else "Move Element")
+                "Move Cockpit Camera" if cockpit_selected
+                else "Move Fire Area Grip" if self._is_fire_area_tab_active()
+                else "Move Element")
         if hasattr(self, "cockpit_runtime_aspect_combo"):
             self.viewport.set_cockpit_runtime_aspect(
                 self.cockpit_runtime_aspect_combo.currentData())
@@ -5727,13 +5781,16 @@ class CollisionEditorWindow(QMainWindow):
 
         if not hasattr(self, "fx_panel"):
             return
-        active = self._is_fx_tab_active()
+        fx_tab = self._is_fx_tab_active()
+        # Visuals & FX and Fire Area share the scene preview (unit, ground, shot).
+        active = fx_tab or self._is_fire_area_tab_active()
         if active and self._fx_edit_camera is None:
             self._fx_edit_camera = self.viewport._camera_state()
         self.fx_panel.transport_bar.setVisible(active)
         # A loose-BASE unit has no VP table: its effects use the set's VPs.
         self._fx_owner_map = {} if self._loose_unit_uses_set() else {
-            vp: owner for vp in self.fx_panel.required_vps()
+            vp: owner for vp in (self.fx_panel.required_vps()
+                                 | self._fire_area_extra_vps())
             if (owner := self._owner_for_vp(vp)) is not None}
         if active and self.family is not None:
             owners = set(self._fx_owner_map.values())
@@ -5764,7 +5821,7 @@ class CollisionEditorWindow(QMainWindow):
         self._fx_update_watcher()
         definition = (self._active_script_path, self._active_script_kind,
                       self._active_script_id)
-        if (active and self.family is not None
+        if (fx_tab and self.family is not None
                 and definition != self._fx_fitted_definition):
             # Effects are usually far larger than the unit: frame them once
             # on entry or a definition change; later camera moves stay manual.
@@ -5901,12 +5958,15 @@ class CollisionEditorWindow(QMainWindow):
 
         if not hasattr(self, "fx_panel"):
             return
-        if not self._is_fx_tab_active():
+        fire_area_tab = self._is_fire_area_tab_active()
+        if not (self._is_fx_tab_active() or fire_area_tab):
             if self.viewport.fx_preview_active:
                 self.viewport.set_fx_preview(active=False)
             return
         panel = self.fx_panel
         items = panel.preview_items()
+        if fire_area_tab:
+            items = items + self._fire_area_unit_items()
         tracked_unit = next((item for item in items if item.kind == "unit"), None)
         # A model state whose row is unchecked in the list is not drawn.
         hidden_states = panel.hidden_states
@@ -5936,10 +5996,13 @@ class CollisionEditorWindow(QMainWindow):
             highlight=panel.highlight, particles=particles,
             external_loader=self._load_fx_external_model,
             palette=self._fx_palette(), shake=panel.shake_angles(),
-            vp_source=self._fx_set_vp_source, required_vps=panel.required_vps(),
+            vp_source=self._fx_set_vp_source,
+            required_vps=panel.required_vps() | self._fire_area_extra_vps(),
             damage=panel.damage_marks())
+        # The Fire Area camera stays on the volume instead of following the shot.
         self.viewport.set_fx_follow_unit(
-            panel.follow_unit.isChecked(), tracked_unit, self._current_owner)
+            panel.follow_unit.isChecked() and not fire_area_tab, tracked_unit,
+            self._current_owner)
 
     def _toggle_cockpit_camera(self) -> None:
         if self._syncing or self.project.target_category != VEHICLE:
@@ -6345,6 +6408,15 @@ class CollisionEditorWindow(QMainWindow):
                 authored_number(project.cockpit_camera_offset_y),
                 authored_number(project.cockpit_camera_offset_z),
             )
+        if group == _SCRIPT_TAB_FIRE_AREA:
+            area = project.fire_area
+            return (
+                tuple(None if area.size(shape) is None else tuple(
+                    authored_number(value) for value in area.size(shape))
+                    for shape in SHAPE_KEYS),
+                authored_number(area.min_depth),
+                authored_number(area.max_inclination),
+            )
         raise ValueError(group)
 
     def _changed_script_tabs(self) -> set[str]:
@@ -6355,6 +6427,8 @@ class CollisionEditorWindow(QMainWindow):
         if self.project.target_category == VEHICLE:
             groups.update((
                 _SCRIPT_TAB_FIRE, _SCRIPT_TAB_GUN, _SCRIPT_TAB_COCKPIT, _SCRIPT_TAB_BRIEFING))
+        else:
+            groups.add(_SCRIPT_TAB_FIRE_AREA)
         return {
             group for group in groups
             if self._script_tab_state(self.project, group)
@@ -6470,6 +6544,9 @@ class CollisionEditorWindow(QMainWindow):
                     baseline.cockpit_camera_offset_y,
                     baseline.cockpit_camera_offset_z,
                 )
+            if (baseline.target_category == WEAPON
+                    and _SCRIPT_TAB_FIRE_AREA in groups):
+                baseline.fire_area = import_fire_area_block(text, block)
             self._tab_reset_baseline = baseline.snapshot()
             self._set_modified(bool(self._changed_script_tabs()))
             return True
@@ -6534,6 +6611,8 @@ class CollisionEditorWindow(QMainWindow):
                 project.cockpit_camera_offset_y,
                 project.cockpit_camera_offset_z,
             )
+        if tab_index == self.fire_area_tab_index:
+            return (project.fire_area,)
         return ()
 
     def _current_tab_has_changes(self) -> bool:
@@ -6630,6 +6709,8 @@ class CollisionEditorWindow(QMainWindow):
                 baseline.cockpit_camera_offset_y)
             self.project.cockpit_camera_offset_z = (
                 baseline.cockpit_camera_offset_z)
+        elif tab_index == self.fire_area_tab_index:
+            self.project.fire_area = baseline.fire_area
 
         self._set_modified(
             self.project.snapshot() != self._tab_reset_baseline)
@@ -6810,6 +6891,10 @@ class CollisionEditorWindow(QMainWindow):
             return
         step = float(self.move_strength_spin.value())
         active_tab = self.properties_tabs.currentIndex()
+
+        if active_tab == self.fire_area_tab_index:
+            self._fire_area_nudge(direction, step)
+            return
 
         if active_tab == self.collision_tab_index:
             spheres = self.project.spheres()
@@ -7424,13 +7509,29 @@ class CollisionEditorWindow(QMainWindow):
         if (not vehicle_mode
                 and self.properties_tabs.currentIndex()
                 not in (self.collision_tab_index, self.collision_shape_tab_index,
-                        self.fx_tab_index, self.wireframe_tab_index)):
+                        self.fx_tab_index, self.wireframe_tab_index,
+                        self.fire_area_tab_index)):
             self.properties_tabs.setCurrentIndex(self.collision_tab_index)
         for index in (
                 self.ground_tab_index,
                 self.fire_points_tab_index, self.gun_points_tab_index,
                 self.cockpit_tab_index, self.briefing_tab_index):
-            self.properties_tabs.setTabEnabled(index, vehicle_mode)
+            self.properties_tabs.setTabEnabled(
+                index, vehicle_mode or self._fire_area_owner_vehicle is not None)
+        fire_area_available = not vehicle_mode or not self._active_script_kind
+        if self._active_script_kind == "new_vehicle":
+            vehicle = next((obj for obj in self.game_object_browser.objects
+                            if obj.kind == "vehicle"
+                            and obj.object_id == self._active_script_id), None)
+            if vehicle is not None:
+                weapon_ids = {fx.script_int(vehicle.values.get(key), -1)
+                              for key in ("weapon", "weapon_2")}
+                fire_area_available = any(
+                    obj.kind == "weapon" and obj.object_id in weapon_ids
+                    for obj in self.game_object_browser.objects)
+        self.properties_tabs.setTabEnabled(
+            self.fire_area_tab_index, fire_area_available)
+        self._sync_fire_area()
 
         cockpit_enabled = vehicle_mode and self.project.cockpit_camera_enabled
         self.cockpit_camera_button.setEnabled(vehicle_mode)
@@ -7503,8 +7604,12 @@ class CollisionEditorWindow(QMainWindow):
             not shape_tab_active and not briefing_active
             and self.properties_tabs.currentIndex() != self.ground_tab_index
             and self.properties_tabs.currentIndex() != self.wireframe_tab_index
-            and not self._is_fx_tab_active())
+            and not self._is_fx_tab_active()
+            and self.properties_tabs.currentIndex() != self.fire_area_tab_index)
         self._sync_fx_preview()
+        if self._fire_area_frame_pending and self._is_fire_area_tab_active():
+            self._fire_area_frame_pending = False
+            self.viewport.frame_fire_area(unit_only=True)
 
         self.ground_alignment_box.setVisible(vehicle_mode)
         self.overeof_check.setChecked(
@@ -7999,6 +8104,9 @@ class CollisionEditorWindow(QMainWindow):
             gun_enabled, gun_points, unit_gun_default_icon = (
                 import_gun_points_block(text, block))
             script_turret_limits = import_turret_limits(text)
+            imported_fire_area = (
+                import_fire_area_block(text, block)
+                if "weapon" in block.kind else FireArea())
         except CollisionScriptError as exc:
             QMessageBox.warning(self, "Import failed", str(exc))
             return
@@ -8006,6 +8114,7 @@ class CollisionEditorWindow(QMainWindow):
         self._push_undo()
         self.project.legacy = legacy
         self.project.compound = compound
+        self.project.fire_area = imported_fire_area
         self.project.target_category = (
             WEAPON if "weapon" in block.kind else VEHICLE)
         self.project.overeof_enabled = (

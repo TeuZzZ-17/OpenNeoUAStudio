@@ -657,6 +657,11 @@ class DestructionFxPanel(QWidget):
         self.hidden_items: set[int] = set()
         self.highlight: int | None = None
         self.simulation: fx.PreviewSimulation | None = None
+        # (launch, target) set by the Fire Area tab: the weapon is then fired from
+        # its muzzle onto the ground instead of following the Visuals & FX trigger.
+        self.shot: tuple[tuple, tuple] | None = None
+        # Other projectiles of the same firing event (fire_x positions).
+        self.volley: tuple = ()
         self.sound = FxSoundPlayer()
         self._sound_events: list = []
         # Clock position the sounds were last advanced to (-1 = before 0 ms).
@@ -1267,14 +1272,30 @@ class DestructionFxPanel(QWidget):
 
     # -- simulation and clock -----------------------------------------------------------------
 
+    def set_shot(self, shot, volley=()) -> None:
+        """Fire the weapon along ``shot`` = (launch, target), or None for the normal
+        preview; ``volley`` are more projectiles fired at the same time."""
+
+        shot = None if shot is None else tuple(tuple(point) for point in shot)
+        volley = tuple(tuple(tuple(point) for point in extra) for extra in volley)
+        if shot == self.shot and volley == self.volley:
+            return
+        self.shot = shot
+        self.volley = volley if shot is not None else ()
+        self._rebuild_simulation()
+        self.seek(0.0)
+
     def _rebuild_simulation(self) -> None:
         enabled = set(range(len(self.document.items))) - self.hidden_items
+        shot = self.shot if self.context == fx.CONTEXT_WEAPON else None
         self.simulation = fx.PreviewSimulation(
-            self.document, self.context, self.current_trigger, seed=self.seed,
+            self.document, self.context,
+            fx.WEAPON_HIT_GROUND if shot else self.current_trigger, seed=self.seed,
             origin=self.origin, ground_y=self.ground_y,
             unit_radius=self.unit_radius, legacy_catalog=self.catalog,
             enabled=enabled, unit=self.unit, weapons=self.weapons,
-            debuffs=self.debuffs, decals=self.decals, settings=self.settings)
+            debuffs=self.debuffs, decals=self.decals, settings=self.settings,
+            shot=shot, volley=self.volley if shot else ())
         self.timeline.set_tracks(self.simulation.tracks, self._length())
         self.sound.stop_all()
         self._sound_events = self.simulation.sound_events

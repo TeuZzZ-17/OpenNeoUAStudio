@@ -137,8 +137,11 @@ from studio.rendering.asset_viewport import (
     VIEW_PRESETS,
 )
 from studio.rendering.snapshot_export import (
+    CONTACT_SHEET_BACKGROUND,
+    CONTACT_SHEET_VIEWS,
     AnimationExportCancelled,
     animation_frame_count,
+    compose_contact_sheet,
     export_animation_atomic,
     is_animated_format,
     pillow_supports_animated_webp,
@@ -2191,6 +2194,16 @@ class AssemblyWindow(QMainWindow):
         self.snapshot_figurine_button.clicked.connect(
             self._export_figurine_set)
         export_layout.addWidget(self.snapshot_figurine_button, 8, 0, 1, 2)
+        self.snapshot_contact_sheet_button = QPushButton(
+            "Export Contact Sheet")
+        self.snapshot_contact_sheet_button.setToolTip(
+            "Export the current model as one PNG that tiles the standard "
+            "views (iso, iso_left, iso_back, iso_back_left, left, right, "
+            "top, bottom), each with its name in the corner. Uses the "
+            "selected background color, or dark grey when none is selected.")
+        self.snapshot_contact_sheet_button.clicked.connect(
+            self._export_contact_sheet)
+        export_layout.addWidget(self.snapshot_contact_sheet_button, 9, 0, 1, 2)
         self._snapshot_export_layout = export_layout
         self._snapshot_export_box = export_box
         self._on_snapshot_format_changed(
@@ -5182,16 +5195,8 @@ class AssemblyWindow(QMainWindow):
             finally:
                 if progress is not None:
                     progress.close()
-                self.snapshot_view_combo.blockSignals(True)
-                self.snapshot_view_combo.setCurrentText(preset)
-                self.snapshot_view_combo.blockSignals(False)
-                self._snapshot_zoom_percent = zoom_percent
-                self._snapshot_zoom_reference = zoom_reference
-                for widget in (
-                        self.snapshot_zoom_spin, self.snapshot_zoom_slider):
-                    widget.blockSignals(True)
-                    widget.setValue(zoom_percent)
-                    widget.blockSignals(False)
+                self._restore_snapshot_view_controls(
+                    preset, zoom_percent, zoom_reference)
 
         self._last_directory = root
         background_label = (
@@ -5200,6 +5205,78 @@ class AssemblyWindow(QMainWindow):
         self.statusBar().showMessage(
             f"Image Set exported: {len(written)} {extension.upper()} file(s), "
             f"{background_label}.", 10000)
+
+    def _restore_snapshot_view_controls(
+            self, preset: str, zoom_percent: int,
+            zoom_reference: float | None) -> None:
+        """Put the view and zoom controls back after a multi-view export."""
+
+        self.snapshot_view_combo.blockSignals(True)
+        self.snapshot_view_combo.setCurrentText(preset)
+        self.snapshot_view_combo.blockSignals(False)
+        self._snapshot_zoom_percent = zoom_percent
+        self._snapshot_zoom_reference = zoom_reference
+        for widget in (self.snapshot_zoom_spin, self.snapshot_zoom_slider):
+            widget.blockSignals(True)
+            widget.setValue(zoom_percent)
+            widget.blockSignals(False)
+
+    def _export_contact_sheet(self) -> None:
+        """Export the canonical views of the current model as one PNG sheet."""
+
+        if not self.viewport.has_model:
+            QMessageBox.information(
+                self, "No model loaded",
+                "Load a model before exporting a Contact Sheet.")
+            return
+        suggested = self._last_directory / (
+            f"{self._snapshot_name()}_ContactSheet.png")
+        path_text, _selected_filter = QFileDialog.getSaveFileName(
+            self, "Export Contact Sheet", str(suggested), "PNG (*.png)",
+            options=QFileDialog.Option.DontConfirmOverwrite)
+        if not path_text:
+            return
+        path = Path(path_text)
+        if path.suffix.lower() != ".png":
+            path = path.with_suffix(".png")
+        if path.exists():
+            answer = QMessageBox.question(
+                self, "Replace existing file?",
+                f"The file already exists:\n{path}\n\nReplace it?",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                QMessageBox.StandardButton.No)
+            if answer != QMessageBox.StandardButton.Yes:
+                return
+
+        camera = self.viewport._camera_state()
+        preset = self.snapshot_view_combo.currentText()
+        zoom_percent = self._snapshot_zoom_percent
+        zoom_reference = self._snapshot_zoom_reference
+        size = self._snapshot_output_size()
+        background = self._snapshot_background() or CONTACT_SHEET_BACKGROUND
+        include_guides = self._snapshot_include_guides()
+        try:
+            cells = []
+            for label, view in CONTACT_SHEET_VIEWS:
+                self.viewport.apply_snapshot_preset(view, size, zoom_percent)
+                cells.append((label, self.viewport.render_snapshot(
+                    size, background, include_guides=include_guides)))
+            sheet = compose_contact_sheet(cells, background)
+            write_static_image_atomic(sheet, path, "png")
+        except Exception as exc:
+            QMessageBox.warning(self, "Contact Sheet export failed", str(exc))
+            return
+        finally:
+            try:
+                self._restore_snapshot_export_state(camera)
+            finally:
+                self._restore_snapshot_view_controls(
+                    preset, zoom_percent, zoom_reference)
+
+        self._last_directory = path.parent
+        self.statusBar().showMessage(
+            f"Contact Sheet written to {path} "
+            f"({sheet.width()} x {sheet.height()}).", 10000)
 
     # -- texture resolution (session-only overrides) -----------------------------
 

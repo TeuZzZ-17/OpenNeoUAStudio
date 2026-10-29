@@ -894,6 +894,8 @@ class FxPreviewViewportMixin:
         self._draw_fx_boxes(painter, target, camera)
         self._draw_fx_markers(painter, target, camera, markers)
         self._draw_fx_damage(painter, target, camera)
+        # Fire Area tab: its volume is drawn over the unit and the shot.
+        self._draw_fire_area_overlay(painter)
 
     def _draw_fx_layer(self, painter, target, camera, opacity, rgb) -> None:
         width = max(1, int(round(target.width())))
