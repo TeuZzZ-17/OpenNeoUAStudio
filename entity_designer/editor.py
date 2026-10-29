@@ -201,6 +201,8 @@ from entity_designer.widgets import (
 )
 
 
+# Qt's QWIDGETSIZE_MAX: no maximum height.
+_NO_HEIGHT_LIMIT = 16777215
 _MODEL_NAME_ROLE = int(Qt.ItemDataRole.UserRole) + 1
 
 
@@ -917,14 +919,14 @@ class CollisionEditorWindow(FireAreaEditingMixin, QMainWindow):
         self.viewport_layout.setRowStretch(0, 1)
         self.viewport_layout.setRowStretch(1, 0)
         self.fx_panel.transport_bar.hide()
-        self.fire_area_tab = self._build_fire_area_tab()
-        self.fire_area_tab_index = self.properties_tabs.addTab(
-            self.fire_area_tab, "Fire Area")
         # Wireframe: the one the definition has now, or a new one generated from its model.
         from entity_designer.wireframe_panel import TAB_TITLE, WireframePanel
         self.wireframe_panel = WireframePanel(self.viewport, self)
         self.wireframe_tab_index = self.properties_tabs.addTab(
             self.wireframe_panel, TAB_TITLE)
+        self.fire_area_tab = self._build_fire_area_tab()
+        self.fire_area_tab_index = self.properties_tabs.addTab(
+            self.fire_area_tab, "Fire Area")
         self.properties_tabs.currentChanged.connect(
             self._properties_tab_changed)
         self.properties_tabs.setMinimumHeight(0)
@@ -1902,6 +1904,9 @@ class CollisionEditorWindow(FireAreaEditingMixin, QMainWindow):
         # below the tabs avoids four duplicate widgets and uses the newly freed
         # lower-right area for a much larger, easier-to-read control.
         right.addWidget(transform_box, 0)
+        # Free space below the gizmo; only Cockpit View uses it (see _fit_cockpit_tab_height).
+        right.addStretch(0)
+        self._properties_tail_index = right.count() - 1
         properties_scroll = QScrollArea()
         properties_scroll.setWidgetResizable(True)
         properties_scroll.setFrameShape(QFrame.Shape.NoFrame)
@@ -2117,12 +2122,18 @@ class CollisionEditorWindow(FireAreaEditingMixin, QMainWindow):
     def _unsaved_changes_message(self, action) -> str:
         baseline = CollisionProject()
         baseline.restore(self._export_baseline)
+        # Tabs whose values are not yet written to the script, so the user can see
+        # what is still pending (e.g. Fire Area is never written by the shape export).
+        pending = self._changed_script_tabs()
+        names = ", ".join(_SCRIPT_TAB_LABELS[group]
+                          for group in _SCRIPT_TAB_ORDER if group in pending)
+        detail = f" Not written to the script yet: {names}." if names else ""
         if (self.project.collision_shape is not None
                 and self.project.collision_shape == baseline.collision_shape
                 and self.project.collision_shape_file_path):
             return ("The collision shape file is saved, but other project or script "
-                    f"changes are unsaved. {action} anyway?")
-        return f"The collision project has unexported changes. {action} anyway?"
+                    f"changes are unsaved.{detail} {action} anyway?")
+        return f"The collision project has unexported changes.{detail} {action} anyway?"
 
     def undo(self):
         if not self._undo:
@@ -2557,10 +2568,6 @@ class CollisionEditorWindow(FireAreaEditingMixin, QMainWindow):
             result = self.open_vehicle_script(obj.source, object_id=obj.object_id,
                 object_kind=f"new_{obj.kind}", set_bas_path=assets.setbas_path,
                 resolved_text=obj.effective_text)
-            if (result is not False and obj.kind == "vehicle"
-                    and hasattr(self, "fire_area_tab_index")
-                    and self.properties_tabs.currentIndex() == self.fire_area_tab_index):
-                self._show_linked_fire_area_weapon(obj)
             return result is not False
         except (OSError, ValueError, RuntimeError) as exc:
             QMessageBox.warning(self, "Game object unavailable", str(exc))
@@ -2590,7 +2597,6 @@ class CollisionEditorWindow(FireAreaEditingMixin, QMainWindow):
         script_path = Path(path)
         if not self.fx_panel.confirm_text_changes():
             return False
-        self._fire_area_owner_vehicle = None
         try:
             text, _encoding, _bom = read_script_file(script_path)
             if resolved_text is not None:
@@ -5168,34 +5174,33 @@ class CollisionEditorWindow(FireAreaEditingMixin, QMainWindow):
         # so leaving the tab restores the exact previous editor view.
         return self._is_cockpit_tab_selected()
 
-    def _show_linked_fire_area_weapon(self, vehicle) -> None:
-        """Open the vehicle's weapon in Fire Area while keeping the vehicle selected."""
+    def _fit_cockpit_tab_height(self) -> None:
+        """Keep the shared gizmo right under the Cockpit View rows.
 
-        objects = self.game_object_browser.objects
-        weapon_ids = (fx.script_int(vehicle.values.get(key), -1)
-                      for key in ("weapon", "weapon_2"))
-        linked = next((obj for weapon_id in weapon_ids for obj in objects
-                       if obj.kind == "weapon" and obj.object_id == weapon_id), None)
-        if linked is None or not self._open_game_object(linked):
-            return
-        self._fire_area_owner_vehicle = vehicle
-        self._fire_area_unit_id = vehicle.object_id
-        self._fire_area_reset_height()
-        self._fire_area_frame_pending = True
-        self._sync_all()
+        That tab has only a few rows, so letting it fill the column would leave a
+        large empty gap above the gizmo. Its height is capped to its content and
+        the free space moves below the gizmo. Other tabs keep the full height.
+        """
+
+        tabs = self.properties_tabs
+        # The button strip and the tabs share one container that holds their slot in
+        # the column: the container, not the tabs, is what must be capped.
+        strip = getattr(tabs, "_palette_strip", None)
+        slot = strip.container if strip is not None and strip.container is not None else tabs
+        on_cockpit = tabs.currentIndex() == self.cockpit_tab_index
+        if on_cockpit and not slot.isVisible():
+            return  # Not laid out yet: the sizes below would be meaningless.
+        if on_cockpit:
+            # Everything around the page (button strip, spacing, frame) plus the page rows.
+            chrome = slot.height() - self.cockpit_tab.height()
+            wanted = chrome + self.cockpit_tab_layout.sizeHint().height()
+        slot.setMaximumHeight(wanted if on_cockpit else _NO_HEIGHT_LIMIT)
+        self._properties_layout.setStretch(self._properties_tail_index, int(on_cockpit))
 
     def _properties_tab_changed(self, _index: int) -> None:
         # Changing workspace must never modify authored data. It only switches
         # the viewport presentation and which object the shared gizmo moves.
-        if self._fire_area_owner_vehicle is not None and self._fire_area_restore_vehicle():
-            return
-        if (self.properties_tabs.currentIndex() == self.fire_area_tab_index
-                and self._active_script_kind == "new_vehicle"):
-            vehicle = next((obj for obj in self.game_object_browser.objects
-                            if obj.kind == "vehicle"
-                            and obj.object_id == self._active_script_id), None)
-            if vehicle is not None:
-                self._show_linked_fire_area_weapon(vehicle)
+        QTimer.singleShot(0, self._fit_cockpit_tab_height)
         briefing_active = self.properties_tabs.currentIndex() == self.briefing_tab_index
         self.renderer_badge.set_viewport(self.briefing_preview if briefing_active else self.viewport)
         self.briefing_preview.setVisible(briefing_active)
@@ -6397,7 +6402,9 @@ class CollisionEditorWindow(FireAreaEditingMixin, QMainWindow):
                 int(round(project.briefing_size))
                 if project.briefing_size_enabled else None,
                 bool(project.briefing_xyz_enabled),
-                project.briefing_x, project.briefing_y, project.briefing_z,
+                # briefing_xyz is written with ``:g`` (6 digits): compare at that precision.
+                float(f"{project.briefing_x:g}"), float(f"{project.briefing_y:g}"),
+                float(f"{project.briefing_z:g}"),
             )
         if group == _SCRIPT_TAB_COCKPIT:
             if not project.cockpit_camera_enabled:
@@ -6414,7 +6421,7 @@ class CollisionEditorWindow(FireAreaEditingMixin, QMainWindow):
                 tuple(None if area.size(shape) is None else tuple(
                     authored_number(value) for value in area.size(shape))
                     for shape in SHAPE_KEYS),
-                authored_number(area.min_depth),
+                authored_number(area.dead_zone),
                 authored_number(area.max_inclination),
             )
         raise ValueError(group)
@@ -7516,21 +7523,13 @@ class CollisionEditorWindow(FireAreaEditingMixin, QMainWindow):
                 self.ground_tab_index,
                 self.fire_points_tab_index, self.gun_points_tab_index,
                 self.cockpit_tab_index, self.briefing_tab_index):
-            self.properties_tabs.setTabEnabled(
-                index, vehicle_mode or self._fire_area_owner_vehicle is not None)
-        fire_area_available = not vehicle_mode or not self._active_script_kind
-        if self._active_script_kind == "new_vehicle":
-            vehicle = next((obj for obj in self.game_object_browser.objects
-                            if obj.kind == "vehicle"
-                            and obj.object_id == self._active_script_id), None)
-            if vehicle is not None:
-                weapon_ids = {fx.script_int(vehicle.values.get(key), -1)
-                              for key in ("weapon", "weapon_2")}
-                fire_area_available = any(
-                    obj.kind == "weapon" and obj.object_id in weapon_ids
-                    for obj in self.game_object_browser.objects)
-        self.properties_tabs.setTabEnabled(
-            self.fire_area_tab_index, fire_area_available)
+            self.properties_tabs.setTabEnabled(index, vehicle_mode)
+        # ai_fire_trigger_* belong to the weapon: the tab is grey once a vehicle
+        # definition is loaded. With nothing loaded yet it stays open and empty.
+        vehicle_loaded = vehicle_mode and self._active_script_kind == "new_vehicle"
+        if vehicle_loaded and self.properties_tabs.currentIndex() == self.fire_area_tab_index:
+            self.properties_tabs.setCurrentIndex(self.collision_tab_index)
+        self.properties_tabs.setTabEnabled(self.fire_area_tab_index, not vehicle_loaded)
         self._sync_fire_area()
 
         cockpit_enabled = vehicle_mode and self.project.cockpit_camera_enabled
@@ -7539,6 +7538,8 @@ class CollisionEditorWindow(FireAreaEditingMixin, QMainWindow):
             "Disable Cockpit Camera Offset" if cockpit_enabled
             else "Enable Cockpit Camera Offset")
         self.cockpit_controls.setVisible(cockpit_enabled)
+        # The rows above changed: the Cockpit View height follows them.
+        QTimer.singleShot(0, self._fit_cockpit_tab_height)
         self.cockpit_x_spin.setValue(self.project.cockpit_camera_offset_x)
         self.cockpit_y_spin.setValue(self.project.cockpit_camera_offset_y)
         self.cockpit_z_spin.setValue(self.project.cockpit_camera_offset_z)
@@ -7609,7 +7610,7 @@ class CollisionEditorWindow(FireAreaEditingMixin, QMainWindow):
         self._sync_fx_preview()
         if self._fire_area_frame_pending and self._is_fire_area_tab_active():
             self._fire_area_frame_pending = False
-            self.viewport.frame_fire_area(unit_only=True)
+            self._fire_area_frame(unit_only=True)
 
         self.ground_alignment_box.setVisible(vehicle_mode)
         self.overeof_check.setChecked(

@@ -12,6 +12,7 @@ import math
 from PySide6.QtCore import QSignalBlocker, Qt, Signal
 from PySide6.QtWidgets import (
     QComboBox,
+    QFrame,
     QGridLayout,
     QGroupBox,
     QLabel,
@@ -30,6 +31,12 @@ TAB_TITLE = "Fire Area"
 _NO_VOLUME = "No volume (vanilla fire control)"
 _NOTE_STYLE = "font-size: 10px; color: #aeb6c2;"
 _WARNING_STYLE = "font-size: 10px; color: #e0a860;"
+# Same orange as the fire volume in the 3D view.
+_STEP_BOX_STYLE = (
+    "QFrame#fireAreaStepBox { border: 1px solid #ff961e; border-radius: 4px; "
+    "background: rgba(255, 150, 30, 24); }")
+_DEFAULT_STEP = 10
+_MAX_STEP = 100
 
 
 def _spin(low: float, high: float, step: float, decimals: int = 3) -> CompactScaleSpinBox:
@@ -107,17 +114,17 @@ class FireAreaPanel(QGroupBox):
             lambda _index: self.unitChosen.emit(self.unit_combo.currentData()))
         grid.addWidget(self.unit_combo, 4, 1, 1, 2)
 
-        grid.addWidget(QLabel("Dead zone (min_depth)"), 5, 0)
-        self.min_depth_spin = _spin(0.0, fa.MAX_MIN_DEPTH, 10.0)
-        self.min_depth_spin.setDecimals(0)
-        self.min_depth_spin.setToolTip(
-            "ai_fire_trigger_min_depth: distance from the fire point before the "
+        grid.addWidget(QLabel("Dead zone"), 5, 0)
+        self.dead_zone_spin = _spin(0.0, fa.MAX_DEAD_ZONE, 10.0)
+        self.dead_zone_spin.setDecimals(0)
+        self.dead_zone_spin.setToolTip(
+            "ai_fire_trigger_dead_zone: distance from the fire point before the "
             "target can trigger the shot. 0 = no dead zone.")
-        self.min_depth_spin.valueChanged.connect(
-            lambda value: self.valueEdited.emit("min_depth", value))
-        self.min_depth_spin.editingFinished.connect(
-            lambda: self.editFinished.emit("min_depth"))
-        self.min_depth_slider = self._add_slider(grid, 5, self.min_depth_spin, "min_depth")
+        self.dead_zone_spin.valueChanged.connect(
+            lambda value: self.valueEdited.emit("dead_zone", value))
+        self.dead_zone_spin.editingFinished.connect(
+            lambda: self.editFinished.emit("dead_zone"))
+        self.dead_zone_slider = self._add_slider(grid, 5, self.dead_zone_spin, "dead_zone")
 
         grid.addWidget(QLabel("Max tilt (forward)"), 6, 0)
         self.inclination_spin = _spin(0.0, fa.MAX_INCLINATION_LIMIT - 0.1, 1.0, 1)
@@ -146,10 +153,8 @@ class FireAreaPanel(QGroupBox):
         height_row = QHBoxLayout()
         height_row.addWidget(self.height_slider, 1)
         height_row.addWidget(self.height_value)
-        self.height_slider.valueChanged.connect(self.height_value.setValue)
-        self.height_value.valueChanged.connect(self.height_slider.setValue)
-        self.height_value.valueChanged.connect(
-            lambda value: self.valueEdited.emit("height", float(value)))
+        self.height_slider.valueChanged.connect(self._height_slider_moved)
+        self.height_value.valueChanged.connect(self._height_value_changed)
         grid.addLayout(height_row, 7, 1, 1, 2)
 
         grid.addWidget(QLabel("Shot goes to"), 8, 0)
@@ -187,6 +192,27 @@ class FireAreaPanel(QGroupBox):
         buttons.addWidget(self.reset_button, 0, 2)
         layout.addLayout(buttons)
 
+        # Highlighted on purpose: it changes how every arrow and slider above behaves.
+        step_box = QFrame()
+        step_box.setObjectName("fireAreaStepBox")
+        step_box.setStyleSheet(_STEP_BOX_STYLE)
+        step_layout = QVBoxLayout(step_box)
+        step_layout.setContentsMargins(8, 6, 8, 6)
+        step_layout.setSpacing(4)
+        self.step_label = QLabel("")
+        self.step_label.setStyleSheet("font-weight: bold;")
+        self.step_slider = QSlider(Qt.Orientation.Horizontal)
+        self.step_slider.setRange(1, _MAX_STEP)
+        self.step_slider.setValue(_DEFAULT_STEP)
+        self.step_slider.setToolTip(
+            "How much one click on an arrow, or one notch of a slider, changes the "
+            "values above. It does not change dragging the squares in the 3D view.")
+        self.step_slider.valueChanged.connect(self._step_changed)
+        step_layout.addWidget(self.step_label)
+        step_layout.addWidget(self.step_slider)
+        layout.addWidget(step_box)
+        self._step_changed(_DEFAULT_STEP)
+
         self.warning = QLabel("")
         self.warning.setWordWrap(True)
         self.warning.setStyleSheet(_WARNING_STYLE)
@@ -206,13 +232,43 @@ class FireAreaPanel(QGroupBox):
         layout.addStretch(1)
         self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
 
+    def _snap(self, value: float) -> float:
+        """Nearest multiple of the edit step."""
+        step = self.step_slider.value()
+        return round(value / step) * step
+
+    def _step_changed(self, step: int) -> None:
+        """Apply the edit step to the arrows (and keys) of the fields and their sliders."""
+        self.step_label.setText(f"Edit step (arrows and sliders): {step}")
+        spins = (*self.size_spins, self.dead_zone_spin, self.inclination_spin, self.height_value)
+        for spin in spins:
+            spin.setSingleStep(step)
+        for slider in (*self.size_sliders, self.dead_zone_slider,
+                       self.inclination_slider, self.height_slider):
+            slider.setSingleStep(max(1, round(step * (slider.property("factor") or 1))))
+
+    def _height_slider_moved(self, value: int) -> None:
+        self.height_value.setValue(round(self._snap(value)))
+
+    def _height_value_changed(self, value: int) -> None:
+        # Typing a value is never snapped: the slider follows without echoing back.
+        with QSignalBlocker(self.height_slider):
+            self.height_slider.setValue(value)
+        self.valueEdited.emit("height", float(value))
+
     def _add_slider(self, grid, row, spin, field):
         """Add a slider beside an existing editable numeric field."""
         slider = QSlider(Qt.Orientation.Horizontal)
         slider.setProperty("factor", 1)
         slider.setRange(0, 5000)
         def change(value):
-            spin.setValue(value / slider.property("factor"))
+            factor = slider.property("factor")
+            spin.setValue(self._snap(value / factor))
+            snapped = round(spin.value() * factor)
+            if snapped != value:
+                # Show the snapped position; the spin already holds the value.
+                with QSignalBlocker(slider):
+                    slider.setValue(snapped)
             if not slider.isSliderDown():
                 self.editFinished.emit(field)
         slider.valueChanged.connect(change)
@@ -228,9 +284,9 @@ class FireAreaPanel(QGroupBox):
         """Show the project's area without sending edit signals back."""
 
         blocked = [QSignalBlocker(widget) for widget in (
-            self.shape_combo, self.unit_combo, self.aim_combo, self.min_depth_spin,
+            self.shape_combo, self.unit_combo, self.aim_combo, self.dead_zone_spin,
             self.inclination_spin, self.height_slider, self.height_value,
-            self.min_depth_slider, self.inclination_slider,
+            self.dead_zone_slider, self.inclination_slider,
             *self.size_spins, *self.size_sliders)]
         self.setEnabled(available)
         self.unit_combo.clear()
@@ -262,11 +318,11 @@ class FireAreaPanel(QGroupBox):
                             int((fa.CONE_ANGLE_LIMIT - 0.1) * 10)
                             if is_angle else max(50000, math.ceil(spin.value() * 10)))
             slider.setValue(round(spin.value() * slider.property("factor")))
-        self.min_depth_spin.setValue(area.min_depth)
-        self.min_depth_spin.setEnabled(shape is not None)
-        self.min_depth_slider.setEnabled(shape is not None)
-        self.min_depth_slider.setMaximum(max(5000, math.ceil(self.min_depth_spin.value())))
-        self.min_depth_slider.setValue(round(self.min_depth_spin.value()))
+        self.dead_zone_spin.setValue(area.dead_zone)
+        self.dead_zone_spin.setEnabled(shape is not None)
+        self.dead_zone_slider.setEnabled(shape is not None)
+        self.dead_zone_slider.setMaximum(max(5000, math.ceil(self.dead_zone_spin.value())))
+        self.dead_zone_slider.setValue(round(self.dead_zone_spin.value()))
         self.inclination_spin.setValue(area.max_inclination)
         self.inclination_spin.setEnabled(shape is not None and not fa.is_below(shape))
         self.inclination_slider.setProperty("factor", 10)
@@ -284,4 +340,6 @@ class FireAreaPanel(QGroupBox):
         self.warning.setText(warning)
         self.warning.setVisible(bool(warning))
         self.output.setText("\n".join(lines))
+        # Slider factors may have changed with the volume: refresh their key steps.
+        self._step_changed(self.step_slider.value())
         del blocked
