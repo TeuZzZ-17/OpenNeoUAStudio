@@ -110,7 +110,8 @@ def test_squad_badge_uses_faction_and_can_be_picked(win, monkeypatch):
     monkeypatch.setattr(module, 'draw_game_badge', lambda painter,anchor,size,kind,color,moment: badge.append((anchor,size,kind,color)))
     image=QImage(win.view.size(),QImage.Format.Format_RGBA8888);image.fill(0)
     painter=QPainter(image);win.squad_overlay.draw(painter);painter.end()
-    assert len(badge)==1 and badge[0][1:3]==(25,'squad')
+    from map_editor.ui.game_icons import MAP_BADGE_SIZE
+    assert len(badge)==1 and badge[0][1:3]==(MAP_BADGE_SIZE,'squad')
     assert badge[0][3].getRgb()[:3] == win.view.owner_colors[1]
     anchor=badge[0][0]
     assert win.squad_overlay.pick(anchor.x(),anchor.y()) == 0

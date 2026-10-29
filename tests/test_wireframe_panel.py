@@ -305,6 +305,27 @@ class WireframePanelTests(unittest.TestCase):
         panel._live_tick()
         self.assertEqual(len(calls), count+2)
 
+    def test_the_preview_follows_the_model_preview_scale_and_rotation(self):
+        viewport = _Viewport()
+        viewport.model_preview_scale = (1.0, 1.0, 1.0)
+        viewport.model_preview_rotation = (0.0, 0.0, 0.0)
+        calls = []
+        panel = self.make_panel(lambda vp, **kw: calls.append(1) or _Projection(), viewport)
+        now = [100.0]
+        panel._clock = lambda: now[0]
+        panel.show()
+        self.app.processEvents()
+        panel._live_tick()                                    # nothing moved yet
+        count = len(calls)
+        for name, value in (("model_preview_scale", (1.2, 1.2, 2.4)),
+                            ("model_preview_rotation", (0.0, 45.0, 0.0))):
+            setattr(viewport, name, value)                    # same faces, moved vertices
+            panel._live_tick()
+            now[0] += 0.3
+            panel._live_tick()                                # settled: built once
+            count += 1
+            self.assertEqual(len(calls), count, name)
+
     def test_a_fixed_view_does_not_follow_the_camera_and_a_hidden_tab_does_not_work(self):
         viewport = _Viewport()
         calls = []

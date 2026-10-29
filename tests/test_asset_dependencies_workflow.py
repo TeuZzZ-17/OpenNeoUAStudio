@@ -12,6 +12,7 @@ from PySide6.QtCore import Qt
 from PySide6.QtWidgets import QApplication, QDialogButtonBox, QLineEdit
 
 from studio.workbench.window import AssemblyWindow
+from tests.window_helpers import dispose_window
 from studio.assets.family import AssetFamily, FamilyObject
 from studio.exchange.portable import ResolvedFile, set_backup_enabled
 from studio.assets.dependencies import AssetDependency
@@ -86,7 +87,7 @@ class AssetDependenciesWorkflowTests(unittest.TestCase):
                 colors[status] = item.foreground(1).color().name()
             self.assertEqual(len(set(colors.values())), 3)
         finally:
-            window.close()
+            dispose_window(window)
 
     def test_missing_asset_can_select_candidate_or_browse_for_a_file(self):
         family, obj = _memory_family("FX1")
@@ -122,7 +123,7 @@ class AssetDependenciesWorkflowTests(unittest.TestCase):
                 window._select_dependency_resource()
             browse.assert_called_once_with()
         finally:
-            window.close()
+            dispose_window(window)
 
     def test_exact_vp_base_entry_is_current_and_focused(self):
         family, obj = _memory_family("FX1")
@@ -140,7 +141,7 @@ class AssetDependenciesWorkflowTests(unittest.TestCase):
             self.assertEqual(
                 current.data(0, Qt.ItemDataRole.UserRole)[0], "base")
         finally:
-            window.close()
+            dispose_window(window)
 
     def test_switching_archive_base_discards_the_previous_root_context(self):
         family, previous = _memory_family("FX1")
@@ -168,7 +169,7 @@ class AssetDependenciesWorkflowTests(unittest.TestCase):
                 window.asset_tree.topLevelItem(0).text(0),
                 "Root BASE: VP_NEW.BASE")
         finally:
-            window.close()
+            dispose_window(window)
 
     def test_base_dependency_specs_save_revert_and_writer_limits(self):
         set_backup_enabled(True)
@@ -218,7 +219,7 @@ class AssetDependenciesWorkflowTests(unittest.TestCase):
                         [TextureNameEdit(
                             "root", 0, "TOO_LONG.ILBM", "texture")])
             finally:
-                window.close()
+                dispose_window(window)
 
     def test_archive_editable_copy_never_modifies_setbas(self):
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -243,7 +244,7 @@ class AssetDependenciesWorkflowTests(unittest.TestCase):
                 self.assertEqual(
                     hashlib.sha256(archive.read_bytes()).digest(), before)
             finally:
-                window.close()
+                dispose_window(window)
 
     def test_archive_entry_is_editable_in_memory_but_stays_read_only(self):
         window = AssemblyWindow()
@@ -276,7 +277,7 @@ class AssetDependenciesWorkflowTests(unittest.TestCase):
             self.assertFalse(window._selected_model_is_archive_read_only())
             self.assertTrue(window._has_editable_model())
         finally:
-            window.close()
+            dispose_window(window)
 
     def test_active_model_texture_names_include_all_subtree_textures(self):
         root_obj = FamilyObject(
@@ -310,7 +311,7 @@ class AssetDependenciesWorkflowTests(unittest.TestCase):
             self.assertEqual(
                 window._active_model_texture_names(), {"child.ilbm"})
         finally:
-            window.close()
+            dispose_window(window)
 
 
     def test_asset_dependencies_are_always_scoped_to_selected_model(self):
@@ -336,7 +337,7 @@ class AssetDependenciesWorkflowTests(unittest.TestCase):
             self.assertIn("CHILD.BASE", root.text(0))
             self.assertNotIn("ROOT.BASE", root.text(0))
         finally:
-            window.close()
+            dispose_window(window)
 
     def test_dependency_focus_includes_kids_and_nested_components(self):
         root_obj = FamilyObject(
@@ -369,7 +370,7 @@ class AssetDependenciesWorkflowTests(unittest.TestCase):
             self.assertIn("ROOT.ILBM", labels)
             self.assertIn("CHILD.ILBM", labels)
         finally:
-            window.close()
+            dispose_window(window)
 
     def test_used_asset_textures_are_stably_prioritized_and_green(self):
         entries = [
@@ -432,7 +433,7 @@ class AssetDependenciesWorkflowTests(unittest.TestCase):
                 Qt.BrushStyle.NoBrush)
             self.assertEqual(window.asset_tree.property("studioList"), "dependency")
         finally:
-            window.close()
+            dispose_window(window)
 
     def test_asset_dependencies_context_menu_has_no_obsolete_actions(self):
         source = (Path(__file__).resolve().parents[1] /
@@ -497,7 +498,7 @@ class AssetDependenciesWorkflowTests(unittest.TestCase):
             self.assertEqual(owner, "root/kid[0]")
             chooser.assert_called_once()
         finally:
-            window.close()
+            dispose_window(window)
 
 
 if __name__ == "__main__":

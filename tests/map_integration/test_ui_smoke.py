@@ -29,7 +29,8 @@ def test_window_edit_and_undo(app, tmp_path):
     win.show()
     app.processEvents()
     win.view.grab()
-    assert win.sector_list.count() == 177
+    # One row per sector of the set (the count follows the installed set data).
+    assert win.sector_list.count() == len(win._lib().assets.sdf.sectors)
     before = win.doc.grids['hgt'][5][5]
     win.set_tool("terrain")
     win._pressed(5, 5, Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier)
@@ -74,7 +75,7 @@ def test_palette_selection_click_apply_hold_undo_and_save(app, tmp_path):
     win.show()
     _wait_frame(app, win.view)
     assert [win.palette_tabs.tabText(i) for i in range(win.palette_tabs.count())] == [
-        "Sectors", "Buildings", "Factions", "Terrain", "Squad", "Hosts", "Tech", "Beamgates", "Super Items", "Gems", "Script", "Level Info"]
+        "Sectors", "Buildings", "Factions", "Terrain", "Squad", "Hosts", "Tech", "Beamgates", "Super Items", "Gems", "Script", "Level Info", "Locations"]
     assert not win.findChildren(QToolBar)
     assert not hasattr(win.view, 'overlay')
     assert not hasattr(win.view, 'mode_isometric_lock')
@@ -488,10 +489,10 @@ def test_sector_preview_buttons_choose_three_fitted_grids(app):
     win.show()
     app.processEvents()
     assert win._icon_level == 1 and win._icon_scale == module.SECTOR_PREVIEW_SCALES[1]
-    # Levels 2 and 3 keep two columns; the third only zooms the picture inside its card.
+    # Three, two and one preview per row (SECTOR_PREVIEW_COLUMNS).
     for button, level, columns in ((win.sector_zoom_out, 0, 3),
                                    (win.sector_zoom_in, 1, 2),
-                                   (win.sector_zoom_in, 2, 2)):
+                                   (win.sector_zoom_in, 2, 1)):
         button.click()
         app.processEvents()
         assert win._icon_level == level

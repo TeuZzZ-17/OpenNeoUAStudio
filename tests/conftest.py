@@ -1,5 +1,4 @@
 import pytest
-from PySide6.QtCore import QEvent
 from PySide6.QtWidgets import QApplication
 
 
@@ -11,14 +10,13 @@ def isolated_studio_session():
         app.setProperty('studioSelectedSets', {})
     before = set(app.topLevelWidgets()) if app is not None else set()
     yield
-    # Windows a test leaves open would live on for the whole run: a later theme
-    # change refreshes them (with their fake data) and every processEvents()
-    # repaints all of them. Delete them without close(), which could ask to save.
+    # A window a test leaves on screen would be repainted by every later
+    # processEvents(), so a long run slows down and grows without limit. Hide it:
+    # close() could ask to save, and deleting a workspace can crash a background
+    # job (preview, loader) that still reports to it.
     app = QApplication.instance()
     if app is None:
         return
     for widget in app.topLevelWidgets():
-        if widget not in before:
+        if widget not in before and widget.isVisible():
             widget.hide()
-            widget.deleteLater()
-    QApplication.sendPostedEvents(None, QEvent.Type.DeferredDelete)

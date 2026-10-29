@@ -28,8 +28,13 @@ def _empty(doc, cell):
     assert (doc.grids['type'][y][x], doc.grids['blg'][y][x]) == ('00', '00')
 
 
+def _power_kept(doc, cell=(3, 3)):
+    x, y = cell
+    assert (doc.grids['type'][y][x], doc.grids['blg'][y][x]) == ('b2', '01')
+
+
 @pytest.mark.parametrize('kind', ('gem', 'gate', 'item'))
-def test_special_over_power_moves_twice_and_removes_without_leaving_building(kind):
+def test_special_over_power_moves_twice_and_gives_the_building_back(kind):
     doc = LdfDocument(mw=10, mh=10)
     _power_below(doc)
     slot = add_special(doc, kind)
@@ -39,7 +44,8 @@ def test_special_over_power_moves_twice_and_removes_without_leaving_building(kin
                                'param': 'enable', 'val': '1'}]
     assert update_special(doc, kind, slot, changes)
     assert update_special(doc, kind, slot, {'x': 4, 'y': 4})
-    _empty(doc, (3, 3))
+    # A special never destroys the building it was placed on.
+    _power_kept(doc)
     assert update_special(doc, kind, slot, {'x': 5, 'y': 5})
     _empty(doc, (4, 4))
     remove_special(doc, kind, slot)
@@ -48,7 +54,7 @@ def test_special_over_power_moves_twice_and_removes_without_leaving_building(kin
 
 
 @pytest.mark.parametrize('kind', ('gem', 'gate', 'item'))
-def test_special_removal_from_first_placement_flattens_underlay(kind):
+def test_special_removal_from_first_placement_keeps_underlay(kind):
     doc = LdfDocument(mw=10, mh=10)
     _power_below(doc)
     slot = add_special(doc, kind)
@@ -58,7 +64,7 @@ def test_special_removal_from_first_placement_flattens_underlay(kind):
                               'param': 'enable', 'val': '1'}]
     update_special(doc, kind, slot, values)
     remove_special(doc, kind, slot)
-    _empty(doc, (3, 3))
+    _power_kept(doc)
 
 
 def test_building_drag_flatten_source_and_replace_sector():
