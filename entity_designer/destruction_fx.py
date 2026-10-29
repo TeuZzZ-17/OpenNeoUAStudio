@@ -2667,11 +2667,18 @@ class PreviewSimulation:
                  weapons: dict[int, WeaponDef] | None = None,
                  debuffs: dict[int, DebuffSpec] | None = None,
                  decals: dict[int, DecalProfile] | None = None,
-                 settings: EffectSettings | None = None) -> None:
+                 settings: EffectSettings | None = None,
+                 shot: tuple[tuple, tuple] | None = None,
+                 volley: tuple = ()) -> None:
         self.document = document
         self.context = context
         self.trigger = trigger
         self.seed = seed
+        # (launch, target) of a weapon fired from a muzzle instead of dropped
+        # from above its target; None keeps the vertical fall.
+        self.shot = shot
+        # Further (launch, target) projectiles fired together with ``shot``.
+        self.volley = tuple(volley)
         self.origin = tuple(origin)
         self.ground_y = ground_y
         self.unit_radius = unit_radius
@@ -3111,13 +3118,10 @@ class PreviewSimulation:
             -1, "Unit · killed", death, land_ms,
             marks=(land_ms,) if land_ms > death else ()))
 
-    def _build_weapon_sequence(self, hit_ground: bool) -> None:
+    def _flight_ms(self, height: float) -> float:
+        """Time a projectile needs to cover ``height`` (its flight length)."""
+
         unit = self.unit
-        height = unit.altitude if unit.altitude > 0 else WEAPON_LAUNCH_HEIGHT
-        target = (self.origin[0],
-                  self.ground_y if hit_ground else self.origin[1],
-                  self.origin[2])
-        launch = (target[0], target[1] - height, target[2])
         # Constant speed: a higher launch point takes proportionally longer.
         impact = max(WEAPON_FLIGHT_MS * height / WEAPON_LAUNCH_HEIGHT,
                      self._decoration_window())
@@ -3128,8 +3132,28 @@ class PreviewSimulation:
         if cluster is not None and cluster.trigger_time > 0:
             # A cluster that splits in flight needs a flight long enough.
             impact = max(impact, cluster.trigger_time * 1.3)
-        stop = self._build_flight(self._root, 0.0, launch, target, impact,
+        return impact
+
+    def _build_weapon_sequence(self, hit_ground: bool) -> None:
+        unit = self.unit
+        if self.shot is not None:
+            launch, target = self.shot
+            # The flight length stands in for the fall height in the timing below.
+            height = max(math.dist(launch, target), 1.0)
+        else:
+            height = unit.altitude if unit.altitude > 0 else WEAPON_LAUNCH_HEIGHT
+            target = (self.origin[0],
+                      self.ground_y if hit_ground else self.origin[1],
+                      self.origin[2])
+            launch = (target[0], target[1] - height, target[2])
+        stop = self._build_flight(self._root, 0.0, launch, target,
+                                  self._flight_ms(height),
                                   hit_ground=hit_ground, generation=0, root=True)
+        for extra_launch, extra_target in self.volley:
+            self._build_flight(
+                self._root, 0.0, extra_launch, extra_target,
+                self._flight_ms(max(math.dist(extra_launch, extra_target), 1.0)),
+                hit_ground=hit_ground, generation=0, root=False)
         self._tracks.insert(0, PreviewTrack(
             -1, "Projectile flight", 0.0, stop, marks=(stop,)))
         if unit.tracer is not None:

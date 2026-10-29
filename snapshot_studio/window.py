@@ -237,7 +237,7 @@ class SnapshotStudioWindow(EntityListMixin, SetBasMixin, AssemblyWindow):
 
         self.vp_batch_panel = VPSnapshotBatchPanel(self)
         self._snapshot_export_layout.addWidget(
-            self.vp_batch_panel, 9, 0, 1, 2)
+            self.vp_batch_panel, 10, 0, 1, 2)
         self._snapshot_panel.adjustSize()
 
     def open_setbas(self, path: str | Path) -> None:

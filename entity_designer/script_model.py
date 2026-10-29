@@ -12,6 +12,18 @@ import re
 import sys
 
 
+from entity_designer.fire_area import (
+    FIRE_AREA_KEYS,
+    MAX_INCLINATION_KEY,
+    MIN_DEPTH_KEY,
+    SHAPE_KEYS,
+    SHAPE_LABELS,
+    FireArea,
+    fire_area_from_values,
+    valid_max_inclination,
+    valid_min_depth,
+    valid_size,
+)
 from entity_designer.shape import (
     CollisionShape,
 )
@@ -146,9 +158,13 @@ _SCRIPT_TAB_COCKPIT = "cockpit"
 _SCRIPT_TAB_BRIEFING = "briefing"
 
 
+_SCRIPT_TAB_FIRE_AREA = "fire_area"
+
+
 _SCRIPT_TAB_ORDER = (
     _SCRIPT_TAB_COLLISION, _SCRIPT_TAB_FIRE,
     _SCRIPT_TAB_GUN, _SCRIPT_TAB_COCKPIT, _SCRIPT_TAB_BRIEFING,
+    _SCRIPT_TAB_FIRE_AREA,
 )
 
 
@@ -158,11 +174,24 @@ _SCRIPT_TAB_LABELS = {
     _SCRIPT_TAB_GUN: "Gun Points",
     _SCRIPT_TAB_COCKPIT: "Cockpit View",
     _SCRIPT_TAB_BRIEFING: "Briefing Model Settings",
+    _SCRIPT_TAB_FIRE_AREA: "Fire Area",
 }
 
 
+# Tabs a weapon definition can carry; every other tab belongs to vehicles.
+_WEAPON_TAB_GROUPS = (_SCRIPT_TAB_COLLISION, _SCRIPT_TAB_FIRE_AREA)
+
+
+def _tab_applies(kind: str, group: str) -> bool:
+    """Whether a tab writes into this kind of definition (weapon or vehicle)."""
+
+    if "weapon" in kind:
+        return group in _WEAPON_TAB_GROUPS
+    return group != _SCRIPT_TAB_FIRE_AREA
+
+
 _SCRIPT_TAB_MARKER_RE = re.compile(
-    r"^\s*;\s*\[Tab:\s*(Collision|Fire Points|Gun Points|Cockpit View|Briefing Model Settings|Briefing Model Size|Briefing Radius)\]\s*$",
+    r"^\s*;\s*\[Tab:\s*(Collision|Fire Points|Gun Points|Cockpit View|Fire Area|Briefing Model Settings|Briefing Model Size|Briefing Radius)\]\s*$",
     re.IGNORECASE,
 )
 
@@ -583,6 +612,8 @@ class CollisionProject:
     briefing_x: float = 0.0
     briefing_y: float = 0.0
     briefing_z: float = 0.0
+    # Weapon-only AI fire area (ai_fire_trigger_*); immutable, so snapshots share it.
+    fire_area: FireArea = field(default_factory=FireArea)
     legacy: CollisionSphere | None = None
     compound: list[CollisionSphere] = field(default_factory=list)
     collision_shape: CollisionShape | None = None
@@ -640,6 +671,7 @@ class CollisionProject:
             self.collision_shape_components,
             self.collision_shape_warnings,
             self.sphere_isolation_active,
+            self.fire_area,
         )
 
     def restore(self, state: tuple) -> None:
@@ -666,7 +698,7 @@ class CollisionProject:
          self.collision_shape_owners,
          self.collision_shape_components,
          self.collision_shape_warnings,
-         self.sphere_isolation_active) = state
+         self.sphere_isolation_active, self.fire_area) = state
         self.gun_points = [GunPoint(*values) for values in gun_points]
         self.turret_limits = {
             values[0]: TurretLimits(*values) for values in turret_limits
@@ -1307,6 +1339,68 @@ def import_cockpit_camera_block(
     return (enabled, *offset)
 
 
+def import_fire_area_block(text: str, block: ScriptBlock) -> FireArea:
+    """Read a weapon's ai_fire_trigger_* values; the last assignment of a key wins.
+
+    Invalid values are ignored like the engine does (it logs a warning and
+    disables that value), so a damaged line never blocks loading the weapon.
+    """
+
+    if not block.complete:
+        raise CollisionScriptError(
+            f"Parsing incompleto: manca end per {block.kind} "
+            f"{block.object_id}.")
+    values = {
+        key: raw for _line, key, raw, _indent
+        in _top_level_assignment_rows(text, block) if key in FIRE_AREA_KEYS
+    }
+    return fire_area_from_values(values)
+
+
+def fire_area_data_lines(project: "CollisionProject") -> list[str]:
+    """Script lines of the Fire Area tab (weapons only), in the guide's order."""
+
+    area = project.fire_area
+    if project.target_category != WEAPON:
+        return []
+    lines = [
+        f"{SHAPE_KEYS[shape]} = {_tuple_text(*area.size(shape))}"
+        for shape in SHAPE_KEYS if area.size(shape) is not None
+    ]
+    if area.max_inclination > 0.0:
+        lines.append(f"{MAX_INCLINATION_KEY} = {_number(area.max_inclination)}")
+    if area.min_depth > 0.0:
+        lines.append(f"{MIN_DEPTH_KEY} = {_number(area.min_depth)}")
+    return lines
+
+
+def fire_area_problems(area: FireArea) -> tuple[list[str], list[str]]:
+    """(errors, warnings) of an area.
+
+    Several volumes are only a warning: the script may already be like that and
+    the engine simply ignores the whole area, it does not break.
+    """
+
+    errors = []
+    warnings = []
+    shapes = area.authored_shapes()
+    if len(shapes) > 1:
+        names = ", ".join(SHAPE_LABELS[shape] for shape in shapes)
+        warnings.append(
+            f"Fire Area: più volumi attivi ({names}). Il gioco li ignora tutti: "
+            "ne serve uno solo.")
+    for shape in shapes:
+        if not valid_size(shape, area.size(shape)):
+            errors.append(
+                f"Fire Area: {SHAPE_LABELS[shape]} non valido (tre valori "
+                "positivi, angoli del cono sotto 180).")
+    if not valid_min_depth(area.min_depth):
+        errors.append("Fire Area: min_depth deve stare tra 0 e 30000.")
+    if not valid_max_inclination(area.max_inclination):
+        errors.append("Fire Area: max_inclination deve essere da 0 a meno di 90.")
+    return errors, warnings
+
+
 _GUN_POINT_KEYS = {
     "robo_num_guns", "robo_act_gun",
     "robo_gun_pos_x", "robo_gun_pos_y", "robo_gun_pos_z",
@@ -1327,6 +1421,7 @@ _SCRIPT_TAB_KEYS = {
     _SCRIPT_TAB_FIRE: {"fire_x", "fire_y", "fire_z", "num_weapons"},
     _SCRIPT_TAB_GUN: set(_GUN_POINT_KEYS),
     _SCRIPT_TAB_COCKPIT: {"cockpit_camera_offset_xyz"},
+    _SCRIPT_TAB_FIRE_AREA: set(FIRE_AREA_KEYS),
 }
 
 
@@ -1370,6 +1465,8 @@ _MANAGED_SCRIPT_FAMILIES = (
         frozenset({"cockpit_camera_offset_xyz"}),
         frozenset({"cockpit camera offset", "cockpit view"})),
     _ManagedScriptFamily("briefing size", frozenset({"briefing_size", "briefing_xyz"})),
+    _ManagedScriptFamily(
+        "fire area", frozenset(FIRE_AREA_KEYS), frozenset({"fire area"})),
     _ManagedScriptFamily(
         "turret limits", frozenset(_TURRET_LIMIT_KEY_SET),
         frozenset({"turret limits"})),
@@ -1895,6 +1992,8 @@ def _script_tab_data_lines(
         return cockpit_camera_data_lines(project)
     if group == _SCRIPT_TAB_BRIEFING:
         return briefing_size_data_lines(project) + briefing_xyz_data_lines(project)
+    if group == _SCRIPT_TAB_FIRE_AREA:
+        return fire_area_data_lines(project)
     raise CollisionScriptError(f"Gruppo script sconosciuto: {group}")
 
 
@@ -1909,9 +2008,9 @@ def build_editable_overwrite_preview(
     source data already present in the script.
     """
 
-    groups = [group for group in _SCRIPT_TAB_ORDER if group in changed_groups]
-    if project.target_category != VEHICLE:
-        groups = [group for group in groups if group == _SCRIPT_TAB_COLLISION]
+    groups = [
+        group for group in _SCRIPT_TAB_ORDER
+        if group in changed_groups and _tab_applies(kind, group)]
     if not groups:
         return ""
 
@@ -1990,6 +2089,8 @@ def _validate_editable_tab_lines(
         import_cockpit_camera_block(text, block)
     elif group == _SCRIPT_TAB_BRIEFING:
         import_briefing_size_block(text, block)
+    elif group == _SCRIPT_TAB_FIRE_AREA:
+        import_fire_area_block(text, block)
 
 
 def _resolve_patch_target_block(
@@ -2289,10 +2390,10 @@ def apply_editable_overwrite_preview(
         for group in _SCRIPT_TAB_ORDER:
             if group not in main_sections:
                 continue
-            if "weapon" in expected_kind and group != _SCRIPT_TAB_COLLISION:
+            if not _tab_applies(expected_kind, group):
                 raise CollisionScriptError(
                     f"La tab {_SCRIPT_TAB_LABELS[group]} non è valida per "
-                    "una definizione weapon.")
+                    f"una definizione {expected_kind.split('_')[-1]}.")
             replacement = main_sections[group]
             _validate_editable_tab_lines(
                 group, replacement, expected_kind, expected_id)
@@ -2402,7 +2503,7 @@ def plan_script_update(
             and not source_has_fire_offsets)
         updated = text
         for group in _SCRIPT_TAB_ORDER:
-            if "weapon" in kind and group != _SCRIPT_TAB_COLLISION:
+            if not _tab_applies(kind, group):
                 continue
             group_keys = set(_SCRIPT_TAB_KEYS[group])
             if group == _SCRIPT_TAB_FIRE and preserve_standalone_num_weapons:
@@ -2494,6 +2595,11 @@ def plan_script_update(
         if line.startswith("collision_shape = ")
     ]
     replace_group(shape_rows, shape_lines, "collision shape")
+    if "weapon" in kind and not project.fire_area.is_empty():
+        replace_group(
+            [row for row in _top_level_assignment_rows(text, block)
+             if row[1] in FIRE_AREA_KEYS],
+            fire_area_data_lines(project), "fire area")
 
     output: list[str] = []
     for index, line in enumerate(lines):
@@ -2573,6 +2679,10 @@ def validate_project(
     if (project.target_category == VEHICLE and project.overeof_enabled
             and not math.isfinite(project.overeof)):
         errors.append("Overeof deve essere un numero finito.")
+    if project.target_category == WEAPON:
+        area_errors, area_warnings = fire_area_problems(project.fire_area)
+        errors.extend(area_errors)
+        warnings.extend(area_warnings)
     if project.target_category == VEHICLE and project.cockpit_camera_enabled:
         if not all(math.isfinite(value) for value in (
                 project.cockpit_camera_offset_x,
