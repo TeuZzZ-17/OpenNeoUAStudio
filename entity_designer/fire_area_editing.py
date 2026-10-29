@@ -9,7 +9,6 @@ from __future__ import annotations
 
 from dataclasses import replace
 
-from PySide6.QtCore import QSignalBlocker
 from PySide6.QtWidgets import QSizePolicy, QVBoxLayout, QWidget
 
 from entity_designer import destruction_fx as fx
@@ -32,7 +31,9 @@ class FireAreaEditingMixin:
         # or the tab is entered, never after an edit. The request waits for the next
         # sync because the muzzle height must be applied first.
         self._fire_area_frame_pending = False
-        # (volume, size, min_depth) when a grip drag starts: the drag is always
+        # The pending frame closes in on the unit, so that is the first state.
+        self._fire_area_focus_on_unit = True
+        # (volume, size, dead_zone) when a grip drag starts: the drag is always
         # computed from it, so rounding never accumulates.
         self._fire_area_drag_start = None
         self._fire_area_weapon_family: str | None = None
@@ -46,9 +47,6 @@ class FireAreaEditingMixin:
         # script, the target of the Reset button.
         self._fire_area_drafts: dict[str, tuple] = {}
         self._fire_area_loaded = fa.FireArea()
-        # The vehicle the user selected while the tab shows its weapon: the vehicle
-        # tabs stay available and leaving Fire Area brings the vehicle back.
-        self._fire_area_owner_vehicle = None
         # Preview-only: where a forward shot flies (fa.AIM_LOW / fa.AIM_HIGH).
         self._fire_area_aim = fa.AIM_LOW
 
@@ -66,9 +64,8 @@ class FireAreaEditingMixin:
         panel.valueEdited.connect(self._fire_area_value_edited)
         panel.editFinished.connect(
             lambda field: self._finish_vehicle_preview_edit(f"fire_area_{field}"))
-        panel.frameRequested.connect(self.viewport.frame_fire_area)
-        panel.frameUnitRequested.connect(
-            lambda: self.viewport.frame_fire_area(unit_only=True))
+        panel.frameRequested.connect(lambda: self._fire_area_frame(unit_only=False))
+        panel.frameUnitRequested.connect(lambda: self._fire_area_frame(unit_only=True))
         panel.resetRequested.connect(self._fire_area_reset_all)
         panel.aimChosen.connect(self._fire_area_aim_chosen)
         # The unit's own animation runs and pauses with the shot.
@@ -78,6 +75,7 @@ class FireAreaEditingMixin:
         viewport.fireAreaHandlePicked.connect(self._fire_area_handle_picked)
         viewport.fireAreaDragStarted.connect(self._fire_area_drag_started)
         viewport.fireAreaDragged.connect(self._fire_area_dragged)
+        viewport.fireAreaFocusToggled.connect(self._fire_area_toggle_focus)
         return page
 
     # -- state ----------------------------------------------------------------------
@@ -222,7 +220,7 @@ class FireAreaEditingMixin:
         preview_lines = []
         for line in lines:
             key, separator, value = line.partition(" = ")
-            if key == "ai_fire_trigger_min_depth" and separator:
+            if key == "ai_fire_trigger_dead_zone" and separator:
                 line = f"{key} = {round(float(value))}"
             preview_lines.append(line)
         self.fire_area_panel.set_state(
@@ -297,12 +295,8 @@ class FireAreaEditingMixin:
             return
         area, current = self._fire_area_loaded, self.project.fire_area
         self._fire_area_drafts.clear()
-        # The vehicle the user selected, else the first one that fires the weapon.
-        owner = self._fire_area_owner_vehicle
-        ids = [unit.vehicle_id for unit in self._fire_area_units]
         self._fire_area_unit_id = (
-            owner.object_id if owner is not None and owner.object_id in ids
-            else ids[0] if ids else None)
+            self._fire_area_units[0].vehicle_id if self._fire_area_units else None)
         self._fire_area_aim = fa.AIM_LOW
         self._fire_area_reset_height()
         self._fire_area_handle = ""
@@ -323,8 +317,8 @@ class FireAreaEditingMixin:
             return
         area = self.project.fire_area
         shape = self._fire_area_edit_shape()
-        if field == "min_depth":
-            new = replace(area, min_depth=float(value))
+        if field == "dead_zone":
+            new = replace(area, dead_zone=float(value))
         elif field == "max_inclination":
             new = replace(area, max_inclination=float(value))
         else:
@@ -349,7 +343,7 @@ class FireAreaEditingMixin:
         area = self.project.fire_area
         size = area.size(shape) if shape else None
         self._fire_area_drag_start = (
-            None if size is None else (shape, size, area.min_depth))
+            None if size is None else (shape, size, area.dead_zone))
         self._vehicle_preview_active_edits.clear()
         self._push_undo()
 
@@ -357,10 +351,10 @@ class FireAreaEditingMixin:
         start = self._fire_area_drag_start
         if start is None or self.project.target_category != WEAPON:
             return
-        shape, size, min_depth = start
-        new_size, new_min = fa.dragged(shape, size, min_depth, key, delta)
+        shape, size, dead_zone = start
+        new_size, new_min = fa.dragged(shape, size, dead_zone, key, delta)
         area = self.project.fire_area.with_size(shape, new_size)
-        area = replace(area, min_depth=new_min)
+        area = replace(area, dead_zone=new_min)
         if area != self.project.fire_area:
             self._set_fire_area(area)
 
@@ -371,7 +365,7 @@ class FireAreaEditingMixin:
         area = self.project.fire_area
         size = area.size(shape) if shape else None
         handle = next((h for h in fa.volume_handles(
-            shape, size, area.min_depth) if h.key == self._fire_area_handle), None) \
+            shape, size, area.dead_zone) if h.key == self._fire_area_handle), None) \
             if size is not None else None
         if handle is None:
             self.statusBar().showMessage(
@@ -380,8 +374,8 @@ class FireAreaEditingMixin:
         delta = step * sum(float(direction[i]) * handle.axis[i] for i in range(3))
         if not delta:
             return
-        new_size, new_min = fa.dragged(shape, size, area.min_depth, handle.key, delta)
-        new = replace(area.with_size(shape, new_size), min_depth=new_min)
+        new_size, new_min = fa.dragged(shape, size, area.dead_zone, handle.key, delta)
+        new = replace(area.with_size(shape, new_size), dead_zone=new_min)
         if new == area:
             return
         self._vehicle_preview_active_edits.clear()
@@ -389,6 +383,18 @@ class FireAreaEditingMixin:
         self._set_fire_area(new)
 
     # -- camera -----------------------------------------------------------------------
+
+    def _fire_area_frame(self, unit_only: bool) -> None:
+        """Frame the unit or the whole volume and remember which one is shown."""
+
+        self._fire_area_focus_on_unit = unit_only
+        self.viewport.frame_fire_area(unit_only=unit_only)
+
+    def _fire_area_toggle_focus(self) -> None:
+        """Double middle click: Focus Unit and Focus Volume, one after the other."""
+
+        if self._is_fire_area_tab_active():
+            self._fire_area_frame(unit_only=not self._fire_area_focus_on_unit)
 
     def _fire_area_enter_leave(self) -> None:
         """Focus the unit the first time the tab opens for a definition.
@@ -405,26 +411,6 @@ class FireAreaEditingMixin:
                 self._fire_area_frame_pending = True
         else:
             self._fire_area_framed_definition = None
-
-    def _fire_area_restore_vehicle(self) -> bool:
-        """Leaving Fire Area gives the selected vehicle back to the other tabs.
-
-        Declining the unsaved-changes question of the weapon keeps the tab. True
-        when the tab change was handled here.
-        """
-
-        if self.properties_tabs.currentIndex() == self.fire_area_tab_index:
-            return False
-        vehicle, target = self._fire_area_owner_vehicle, self.properties_tabs.currentIndex()
-        self._fire_area_owner_vehicle = None
-        with QSignalBlocker(self.properties_tabs):
-            opened = self._open_game_object(vehicle)
-            self.properties_tabs.setCurrentIndex(
-                target if opened else self.fire_area_tab_index)
-        if not opened:
-            self._fire_area_owner_vehicle = vehicle
-        self._properties_tab_changed(self.properties_tabs.currentIndex())
-        return True
 
     def _fire_area_aim_chosen(self, aim: str) -> None:
         """Preview-only choice: nothing is written to the script."""
