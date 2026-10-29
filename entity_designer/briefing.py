@@ -8,7 +8,7 @@ from pathlib import Path
 from functools import lru_cache
 
 from PySide6.QtCore import QRectF, QSize, Qt, QSignalBlocker, QTimer
-from PySide6.QtGui import QImage, QColor
+from PySide6.QtGui import QColor, QFontMetrics, QImage
 from PySide6.QtWidgets import (
     QCheckBox, QComboBox, QFileDialog, QGroupBox, QLabel, QPushButton,
     QSizePolicy, QSlider, QSpinBox, QDoubleSpinBox, QHBoxLayout, QVBoxLayout, QWidget,
@@ -27,6 +27,46 @@ BRIEFING_SIZE_REFERENCE = 4000.0
 BRIEFING_SIZE_MIN = 1
 BRIEFING_SIZE_MAX = 10000
 _SIZE_SLIDER_STEPS = 10000
+_STEP_SLIDER_MAX = 600
+_STEP_SLIDER_DEFAULT = 200  # 1.0 model unit per arrow press
+
+
+class _OneLineLabel(QLabel):
+    """Label that always stays on a single line.
+
+    A long text first shrinks the font (down to a readable minimum) and only then is
+    cut in the middle, so the panel keeps the same height for every path.
+    """
+
+    _MAX_POINTS = 8.0
+    _MIN_POINTS = 6.0
+
+    def __init__(self):
+        super().__init__()
+        self._full_text = ""
+        self.setWordWrap(False)
+        self.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
+
+    def setText(self, text):
+        self._full_text = text
+        self.setToolTip(text)
+        self._fit()
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        self._fit()
+
+    def _fit(self):
+        font = self.font()
+        points = self._MAX_POINTS
+        while True:
+            font.setPointSizeF(points)
+            metrics = QFontMetrics(font)
+            if metrics.horizontalAdvance(self._full_text) <= self.width() or points <= self._MIN_POINTS:
+                break
+            points -= 0.5
+        self.setFont(font)
+        super().setText(metrics.elidedText(self._full_text, Qt.TextElideMode.ElideMiddle, max(1, self.width())))
 
 
 def radius_to_briefing_size(radius):
@@ -246,21 +286,14 @@ class BriefingControls(QWidget):
         self.xyz_enabled = QCheckBox("Include briefing_xyz")
         self.xyz_enabled.toggled.connect(self._xyz_enabled)
         group_layout.addWidget(self.xyz_enabled)
-        self.xyz_step = QDoubleSpinBox()
-        self.xyz_step.setRange(0.01, 10000.0)
-        self.xyz_step.setValue(1.0)
-        self.xyz_step.setSingleStep(0.5)
-        self.xyz_step.setDecimals(2)
-        self.xyz_step.setSuffix(" units")
-        step_label = QLabel("Movement step")
+        step_label = QLabel("Arrow speed (how fast the model moves in the image)")
+        step_label.setWordWrap(True)
         group_layout.addWidget(step_label)
-        group_layout.addWidget(self.xyz_step)
         self.xyz_step_slider = QSlider(Qt.Orientation.Horizontal)
-        self.xyz_step_slider.setRange(0, 600)
-        self.xyz_step_slider.setValue(200)
-        self.xyz_step_slider.setToolTip("Arrow movement step: 0.01 to 10000 model units")
-        self.xyz_step_slider.valueChanged.connect(self._step_slider)
-        self.xyz_step.valueChanged.connect(self._step_value)
+        self.xyz_step_slider.setRange(0, _STEP_SLIDER_MAX)
+        self.xyz_step_slider.setValue(_STEP_SLIDER_DEFAULT)
+        self.xyz_step_slider.setToolTip(
+            "Distance covered by one press of the arrow buttons: 0.01 to 10000 model units.")
         group_layout.addWidget(self.xyz_step_slider)
         self.xyz_values = {}
         row = QHBoxLayout()
@@ -278,7 +311,7 @@ class BriefingControls(QWidget):
         arrows = QHBoxLayout()
         for axis, title, sign in (("y", "↑", -1), ("y", "↓", 1), ("x", "←", -1), ("x", "→", 1)):
             button = QPushButton(title)
-            button.setToolTip(f"Move {axis} by the current step")
+            button.setToolTip(f"Move {axis} by the current arrow speed")
             button.setAutoRepeat(True)
             self.xyz_buttons[(axis, sign)] = button
             button.clicked.connect(lambda _checked=False, key=axis, amount=sign: self._nudge(key, amount))
@@ -297,8 +330,7 @@ class BriefingControls(QWidget):
             self.aspect.addItem(text, ratio)
         self.aspect.currentIndexChanged.connect(lambda: editor.briefing_preview.update())
         group_layout.addWidget(self.aspect)
-        self.background_label = QLabel()
-        self.background_label.setWordWrap(True)
+        self.background_label = _OneLineLabel()
         group_layout.addWidget(self.background_label)
         choose = QPushButton("Choose Background")
         choose.clicked.connect(self.choose_background)
@@ -348,7 +380,7 @@ class BriefingControls(QWidget):
         self.editor.briefing_preview.refresh()
 
     def _nudge(self, axis, amount):
-        self.xyz_values[axis].setValue(self.xyz_values[axis].value() + amount * self.xyz_step.value())
+        self.xyz_values[axis].setValue(self.xyz_values[axis].value() + amount * self.arrow_step())
 
     def _reset_xyz(self):
         self.editor._push_undo()
@@ -363,13 +395,9 @@ class BriefingControls(QWidget):
         self.editor._set_modified()
         self.editor.briefing_preview.refresh()
 
-    def _step_slider(self, value):
-        with QSignalBlocker(self.xyz_step):
-            self.xyz_step.setValue(10 ** (value / 100.0 - 2))
-
-    def _step_value(self, value):
-        with QSignalBlocker(self.xyz_step_slider):
-            self.xyz_step_slider.setValue(round((math.log10(max(.01, value)) + 2) * 100))
+    def arrow_step(self):
+        """Model units moved by one arrow press (logarithmic slider: 0.01 to 10000)."""
+        return 10 ** (self.xyz_step_slider.value() / 100.0 - 2)
 
     def _enabled(self, enabled):
         if self.editor._syncing:
