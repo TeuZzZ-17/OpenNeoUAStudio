@@ -24,7 +24,10 @@ from snapshot_studio.batch_export import (
     drawable_polygon_count,
 )
 from studio.rendering.snapshot_export import (
+    CONTACT_SHEET_COLUMNS,
+    CONTACT_SHEET_VIEWS,
     AnimationExportCancelled,
+    compose_contact_sheet,
     export_animation_atomic,
     pillow_supports_animated_webp,
     pillow_supports_static_webp,
@@ -236,6 +239,19 @@ class SnapshotExportTests(unittest.TestCase):
                              "Export Image")
             self.assertEqual(window.snapshot_figurine_button.text(),
                              "Export Image Set")
+            self.assertEqual(window.snapshot_contact_sheet_button.text(),
+                             "Export Contact Sheet")
+            layout = window._snapshot_export_layout
+            self.assertLess(
+                layout.getItemPosition(layout.indexOf(
+                    window.snapshot_figurine_button))[0],
+                layout.getItemPosition(layout.indexOf(
+                    window.snapshot_contact_sheet_button))[0])
+            self.assertLess(
+                layout.getItemPosition(layout.indexOf(
+                    window.snapshot_contact_sheet_button))[0],
+                layout.getItemPosition(layout.indexOf(
+                    window.vp_batch_panel))[0])
             self.assertEqual(window.vp_batch_panel.export_button.text(),
                              "Export All VP")
             self.assertTrue(window.vp_batch_panel.zip_check.isChecked())
@@ -243,6 +259,32 @@ class SnapshotExportTests(unittest.TestCase):
             self.assertEqual(window.snapshot_export_speed_box.value(), 1.0)
         finally:
             window.close()
+
+    def test_contact_sheet_tiles_views_row_by_row_with_labels(self):
+        background = QColor("#1d2027")
+        cells = []
+        for index, (label, _preset) in enumerate(CONTACT_SHEET_VIEWS):
+            image = QImage(200, 100, QImage.Format.Format_ARGB32_Premultiplied)
+            image.fill(QColor(10 * (index + 1), 0, 0))
+            cells.append((label, image))
+        sheet = compose_contact_sheet(cells, background)
+        columns = CONTACT_SHEET_COLUMNS
+        rows = -(-len(cells) // columns)
+        self.assertEqual(
+            (sheet.width(), sheet.height()), (200 * columns, 100 * rows))
+        for index in range(len(cells)):
+            # A pixel away from the label corner shows that cell's own colour.
+            x = (index % columns) * 200 + 150
+            y = (index // columns) * 100 + 80
+            self.assertEqual(
+                sheet.pixelColor(x, y), QColor(10 * (index + 1), 0, 0))
+        # The label is drawn in the top-left corner of the first cell only.
+        corner = sheet.copy(0, 0, 60, 20)
+        self.assertTrue(any(
+            corner.pixelColor(x, y) != QColor(10, 0, 0)
+            for x in range(60) for y in range(20)))
+        with self.assertRaises(ValueError):
+            compose_contact_sheet([], background)
 
     def test_batch_running_keeps_cancel_enabled_and_restores_export_controls(self):
         window = SnapshotStudioWindow()
