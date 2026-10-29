@@ -209,8 +209,9 @@ def test_terrain_preset_ignores_previous_selection(win,shape):
     assert win.doc.snapshot()==before
 
 def test_script_is_penultimate_and_list_focus_moves_only_camera(win,app):
-    assert win.palette_tabs.tabText(win.palette_tabs.count()-2)=='Script'
-    assert win.palette_tabs.tabText(win.palette_tabs.count()-1)=='Level Info'
+    # Script and Level Info stay together near the end; Locations follows them.
+    tabs=[win.palette_tabs.tabText(i) for i in range(win.palette_tabs.count())]
+    assert tabs[-3:]==['Script','Level Info','Locations']
     win.doc.squads=[dict(owner=1,veh=1,num=2,x=3,y=3,hidden=False,useable=False,custom_name=None)]
     win._refresh_squads({0})
     win.set_tool('squad')

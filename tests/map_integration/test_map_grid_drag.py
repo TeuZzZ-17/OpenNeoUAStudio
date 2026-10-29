@@ -65,11 +65,12 @@ def test_relocating_specials_always_clears_the_origin_sector():
     doc.grids['type'][6][6] = 'ab'
     doc.grids['blg'][6][6] = '80'
     update_special(doc, 'gate', slot, {'x': 7, 'y': 6})
-    assert (doc.grids['type'][6][6], doc.grids['blg'][6][6]) == ('00', '00')
+    # A building drawn over the gate later is the user's: moving the gate keeps it.
+    assert (doc.grids['type'][6][6], doc.grids['blg'][6][6]) == ('ab', '80')
 
 
-def test_special_move_clears_every_sector_it_leaves():
-    """All three kinds leave flat empty ground after every move."""
+def test_special_move_gives_back_every_sector_it_leaves():
+    """All three kinds give back what was under them; a loaded cell has no memory and goes flat."""
     from map_editor.core.building_defs import BuildingDef
     from map_editor.core.special_objects import special_store
 
@@ -93,16 +94,18 @@ def test_special_move_clears_every_sector_it_leaves():
         history = History()
         history.push(doc)
 
+        # A loaded gem's terrain is the map's own sector: only its building leaves.
+        loaded_origin = (first_visual[0], '00') if kind == 'gem' else ('00', '00')
         assert update_special(doc, kind, slot, {'x': 3, 'y': 3}, definitions)
-        assert (doc.grids['type'][2][2], doc.grids['blg'][2][2]) == ('00', '00')
+        assert (doc.grids['type'][2][2], doc.grids['blg'][2][2]) == loaded_origin
         assert update_special(doc, kind, slot, {'x': 4, 'y': 4}, definitions)
-        assert (doc.grids['type'][3][3], doc.grids['blg'][3][3]) == ('00', '00')
+        assert (doc.grids['type'][3][3], doc.grids['blg'][3][3]) == ('a1', '00')
         assert update_special(doc, kind, slot, {'x': 5, 'y': 5}, definitions)
-        assert (doc.grids['type'][4][4], doc.grids['blg'][4][4]) == ('00', '00')
-        assert (doc.grids['type'][2][2], doc.grids['blg'][2][2]) == ('00', '00')
+        assert (doc.grids['type'][4][4], doc.grids['blg'][4][4]) == ('b2', '00')
+        assert (doc.grids['type'][2][2], doc.grids['blg'][2][2]) == loaded_origin
         saved = loads_ldf(dumps_ldf(doc))
-        assert (saved.grids['type'][3][3], saved.grids['blg'][3][3]) == ('00', '00')
-        assert (saved.grids['type'][4][4], saved.grids['blg'][4][4]) == ('00', '00')
+        assert (saved.grids['type'][3][3], saved.grids['blg'][3][3]) == ('a1', '00')
+        assert (saved.grids['type'][4][4], saved.grids['blg'][4][4]) == ('b2', '00')
         assert history.undo(doc)
         assert (doc.grids['type'][2][2], doc.grids['blg'][2][2]) == first_visual
 

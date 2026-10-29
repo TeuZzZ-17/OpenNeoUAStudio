@@ -522,8 +522,10 @@ def install_workspace_shell(window, key):
     change = menu_bar.addMenu("Change Editor")
     for option in TOOL_OPTIONS:
         action = change.addAction(option.title)
-        action.setCheckable(True)
         current = option.key == key
+        # Only the current editor is checkable: a checkable entry ticks itself on click and
+        # would stay ticked when the old editor refuses to close and the switch is cancelled.
+        action.setCheckable(current)
         action.setChecked(current)
         action.setEnabled(not current)
         action.triggered.connect(lambda _checked=False, target=option.key: switch_workspace(window, target))
