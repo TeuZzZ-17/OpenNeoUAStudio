@@ -204,6 +204,9 @@ class SpecialPanel(QWidget):
         elif kind == 'item':
             self.preset.addItem('Standard · 35 / 36 / 37', {'inactive_bp': 35, 'active_bp': 36, 'trigger_bp': 37})
             self.preset.addItem('Parasite*', {'inactive_bp': 68, 'active_bp': 69, 'trigger_bp': 70})
+            # The asterisk: buildings 68-70 exist only in some sets.
+            self.preset.setItemData(self.preset.count() - 1, 'Parasite: available only for some sets',
+                                    Qt.ItemDataRole.ToolTipRole)
             self.preset.setSizeAdjustPolicy(QComboBox.SizeAdjustPolicy.AdjustToMinimumContentsLengthWithIcon)
             self.preset.setMinimumContentsLength(12)
             specs = [('countdown', 'Countdown (MM:SS)', 0, 2147483647), ('type', 'Type', 1, 2),

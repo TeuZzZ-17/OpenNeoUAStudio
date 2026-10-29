@@ -118,6 +118,9 @@ def test_switching_editor_is_cancelled_when_the_old_one_refuses_to_close():
     _switch_to(source, target)
     assert source.isVisible()
     assert not target.isVisible()
+    # The tick stays on the editor that is still open, not on the one that was refused.
+    ticked = [a.text() for a in source.studio_change_menu.actions() if a.isChecked()]
+    assert ticked == ["Wireframe Editor"]
     source.accept_close = True
     source.close()
 

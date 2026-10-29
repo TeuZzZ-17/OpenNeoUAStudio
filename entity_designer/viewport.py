@@ -326,6 +326,10 @@ class CollisionViewport(FxPreviewViewportMixin, AssetViewport):
         return self._model_preview_scale
 
     @property
+    def model_preview_rotation(self) -> tuple[float, float, float]:
+        return self._model_preview_rotation
+
+    @property
     def overeof_preview_offset(self) -> float:
         """World-Y translation matching ``ground_y - overeof``."""
 

@@ -12,6 +12,7 @@ from PySide6.QtCore import Qt
 from PySide6.QtWidgets import QApplication, QMessageBox
 
 from studio.workbench.window import AssemblyWindow
+from tests.window_helpers import dispose_window
 from studio.assets.family import AssetFamily, FamilyObject, rebuild_materials
 from studio.formats.animation import parse_anm_bytes
 from studio.assets.mapping import MappingIndex
@@ -288,7 +289,7 @@ class AreaFxStructuralTests(unittest.TestCase):
                 self.assertEqual(len(obj.skeleton.polygons), 20)
                 self.assertEqual(len(obj.base_object.ades), 5)
             finally:
-                window.close()
+                dispose_window(window)
 
     def test_copy_cut_paste_and_add_clone_typed_area_blocks(self):
         with tempfile.TemporaryDirectory() as temp:
@@ -397,7 +398,7 @@ class AreaFxStructuralTests(unittest.TestCase):
                 self.assertEqual(family.base_asset.tree.data, original_base)
                 self.assertEqual(family.base_path.read_bytes(), original_base)
             finally:
-                window.close()
+                dispose_window(window)
 
     def test_area_fx_capability_label_tooltip_and_context_menu(self):
         with tempfile.TemporaryDirectory() as temp:
@@ -432,7 +433,7 @@ class AreaFxStructuralTests(unittest.TestCase):
                 self.assertIn("Delete FX Element", labels)
                 self.assertIn("Add FX", labels)
             finally:
-                window.close()
+                dispose_window(window)
 
     def test_select_all_fx_selects_every_fx_element_and_no_other_polygon(self):
         with tempfile.TemporaryDirectory() as temp:
@@ -493,7 +494,7 @@ class AreaFxStructuralTests(unittest.TestCase):
                     window.delete_fx_button.click()
                 self.assertLess(len(window._fx_elements), fx_count)
             finally:
-                window.close()
+                dispose_window(window)
 
 
 if __name__ == "__main__":
