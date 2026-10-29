@@ -25,6 +25,7 @@ from PySide6.QtGui import (
     QPolygonF,
 )
 
+from entity_designer import fire_area as fa
 from entity_designer.widgets import _point_segment_distance, FIRE_POINT_COLOR, GUN_POINT_COLOR, TURRET_DOWN_COLOR, TURRET_SIDE_COLOR, TURRET_UP_COLOR, TYPE_COLORS
 from entity_designer.fx_viewport import FxPreviewViewportMixin
 from entity_designer.script_model import (
@@ -237,7 +238,15 @@ class CollisionViewport(FxPreviewViewportMixin, AssetViewport):
     sphereContextMenuRequested = Signal(int, QPoint)
     sphereNudgeRequested = Signal(object)
     cockpitNudgeRequested = Signal(object)
+    # Fire Area grips: picked key, drag start, and the total drag (key, world delta).
+    fireAreaHandlePicked = Signal(str)
+    fireAreaDragStarted = Signal(str)
+    fireAreaDragged = Signal(str, float)
     RING_SEGMENTS = 12
+    # Same orange as the engine's New Debug fire volume (yw_debug.cpp).
+    FIRE_AREA_COLOR = QColor(255, 150, 30)
+    FIRE_AREA_TILT_COLOR = QColor(255, 220, 130)
+    FIRE_AREA_HANDLE_RADIUS = 7.0
     SELECTED_HALO_WIDTH = 6.0
     SELECTED_COLOR_WIDTH = 3.4
 
@@ -287,6 +296,16 @@ class CollisionViewport(FxPreviewViewportMixin, AssetViewport):
             int, int, int,
         ] | None = None
         self._turret_limits_visible = True
+        self._fire_area_visible = False
+        self._fire_area = fa.FireArea()
+        # Volume whose grips can be dragged, and the grip currently selected.
+        self._fire_area_shape: str | None = None
+        self._fire_area_handle = ""
+        self._fire_area_muzzle = (0.0, 0.0, 0.0)
+        self._fire_area_x_span = (0.0, 0.0)
+        self._fire_area_focus: list[tuple[float, float, float]] = []
+        # (key, press position, screen pixels per world unit) while dragging a grip.
+        self._fire_area_drag: tuple[str, QPointF, QPointF] | None = None
         self._cockpit_preview_active = False
         self._cockpit_offset = (0.0, 0.0, 0.0)
         # Cockpit preview always fills the editor viewport. The only aspect
@@ -859,16 +878,17 @@ class CollisionViewport(FxPreviewViewportMixin, AssetViewport):
         self.set_mode("textured" if visible else "solid")
 
     def _ground_grid_spec(self) -> tuple[float, float, float]:
+        if self._fx_active or self._fire_area_visible:
+            return 0.0, 0.0, 2000.0
         size = 1.4 / max(abs(self._scale), 1e-9)
-        if self._fx_active and self._fx_weapon_context:
-            size *= 4.0
         return self._center[0], self._center[2], size
 
     def _draw_grid(self, painter: QPainter, target: QRectF, camera: dict) -> None:
         """Draw a fixed Y=0 ground plane instead of a model-centered grid."""
 
         # Destruction FX always needs the ground, weapons included.
-        if not ((self._ground_alignment_available or self._fx_active)
+        if not ((self._ground_alignment_available or self._fx_active
+                 or self._fire_area_visible)
                 and self._ground_alignment_source_loaded
                 and self._ground_simulation_visible):
             return
@@ -1061,7 +1081,8 @@ class CollisionViewport(FxPreviewViewportMixin, AssetViewport):
                 return
         if (self._collision_selected >= 0
                 or self._fire_point_selected >= 0
-                or self._gun_point_selected >= 0) and not (
+                or self._gun_point_selected >= 0
+                or (self._fire_area_visible and self._fire_area_handle)) and not (
                 event.modifiers() & (
                     Qt.KeyboardModifier.ControlModifier
                     | Qt.KeyboardModifier.AltModifier
@@ -1208,6 +1229,161 @@ class CollisionViewport(FxPreviewViewportMixin, AssetViewport):
             painter.drawText(
                 screen + QPointF(9.0, -9.0), f"F{index + 1}")
 
+
+    # -- Fire Area (ai_fire_trigger_*) ----------------------------------------------------
+
+    def set_fire_area(self, area: fa.FireArea, shape: str | None,
+                      handle: str = "", *, origin=(0.0, 0.0, 0.0),
+                      x_span=(0.0, 0.0), focus=()) -> None:
+        """Volume to draw; ``origin`` is the muzzle, ``x_span`` the muzzle range
+        sideways and ``focus`` extra points (unit, target) kept in frame."""
+
+        self._fire_area = area
+        self._fire_area_shape = shape
+        self._fire_area_handle = handle
+        self._fire_area_muzzle = tuple(origin)
+        self._fire_area_x_span = tuple(x_span)
+        self._fire_area_focus = [tuple(point) for point in focus]
+        self.update()
+
+    def set_fire_area_visible(self, visible: bool) -> None:
+        self._fire_area_visible = bool(visible)
+        if not visible:
+            self._fire_area_drag = None
+        self.update()
+
+    def _fire_area_origin(self) -> tuple[float, float, float]:
+        return self._fire_area_muzzle
+
+    def _fire_area_handles(self) -> list[fa.AreaHandle]:
+        shape = self._fire_area_shape
+        size = self._fire_area.size(shape) if shape else None
+        if size is None:
+            return []
+        return fa.volume_handles(
+            shape, size, self._fire_area.min_depth, self._fire_area_origin(),
+            self._fire_area_x_span)
+
+    def _fire_area_lines(self) -> list[tuple[fa.Segment, QColor, bool]]:
+        """(segment, colour, dashed) of every authored volume and its tilt limit."""
+
+        area, origin = self._fire_area, self._fire_area_origin()
+        lines = []
+        for shape in area.authored_shapes():
+            size = area.size(shape)
+            for segment in fa.volume_segments(
+                    shape, size, area.min_depth, origin, 0.0, self._fire_area_x_span):
+                lines.append((segment, self.FIRE_AREA_COLOR, False))
+            if not fa.is_below(shape) and area.max_inclination > 0.0:
+                # Furthest the engine tilts the volume toward a ground target.
+                for segment in fa.volume_segments(
+                        shape, size, area.min_depth, origin, area.max_inclination,
+                        self._fire_area_x_span):
+                    lines.append((segment, self.FIRE_AREA_TILT_COLOR, True))
+        return lines
+
+    def frame_fire_area(self, unit_only: bool = False) -> None:
+        """Move the camera so the whole volume, the unit and the ground are visible;
+        ``unit_only`` closes in on the unit and its fire point instead."""
+
+        segments = [line[0] for line in self._fire_area_lines()]
+        if not segments:
+            return
+        points = [(point, point) for point in self._fire_area_focus]
+        if unit_only:
+            center, radius = fa.bounds_of(
+                [(point, point) for point in (*self._fire_area_focus[:1], self._fire_area_muzzle)])
+            radius = max(radius * 2.5, 120.0)
+        else:
+            center, radius = fa.bounds_of(segments + points)
+        self._center = center
+        self._scale = 1.0 / radius
+        self._zoom = 1.0
+        self._pan = QPointF(0.0, 0.0)
+        self.update()
+
+    def _fire_area_segment_screen(self, start, end):
+        clipped = _near_clip_segment(
+            self._camera_vertex(start), self._camera_vertex(end))
+        if clipped is None:
+            return None
+        return self._project(clipped[0]), self._project(clipped[1])
+
+    def _draw_fire_area_overlay(self, painter: QPainter) -> None:
+        if not (self._fire_area_visible and self._ground_alignment_source_loaded):
+            return
+        painter.save()
+        # Crisp one-pixel style lines, like the engine's debug overlay.
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing, False)
+        for (start, end), color, dashed in self._fire_area_lines():
+            screen = self._fire_area_segment_screen(start, end)
+            if screen is None:
+                continue
+            pen = QPen(color, 1.5)
+            if dashed:
+                pen.setStyle(Qt.PenStyle.DashLine)
+            painter.setPen(pen)
+            painter.drawLine(*screen)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+        for handle in self._fire_area_handles():
+            screen = self._project_visible_world(handle.point)
+            if screen is None:
+                continue
+            selected = handle.key == self._fire_area_handle
+            radius = self.FIRE_AREA_HANDLE_RADIUS
+            if selected:
+                painter.setPen(QPen(QColor(255, 255, 255), 3.0))
+                painter.setBrush(QColor(255, 255, 255, 235))
+                painter.drawRect(QRectF(
+                    screen.x() - radius - 2, screen.y() - radius - 2,
+                    2 * radius + 4, 2 * radius + 4))
+            painter.setPen(QPen(QColor(30, 22, 12), 1.5))
+            painter.setBrush(self.FIRE_AREA_COLOR)
+            painter.drawRect(QRectF(
+                screen.x() - radius * 0.7, screen.y() - radius * 0.7,
+                radius * 1.4, radius * 1.4))
+            painter.setPen(QPen(
+                QColor(255, 255, 255) if selected else self.FIRE_AREA_COLOR, 1.5))
+            painter.drawText(
+                screen + QPointF(10.0, -8.0),
+                f"{handle.key} {round(self._fire_area.min_depth)}"
+                if handle.key == "min_depth" else f"{handle.key} {handle.label}")
+        painter.restore()
+
+    def _hit_fire_area_handle(self, point: QPointF) -> str:
+        if not (self._fire_area_visible and self._ground_alignment_source_loaded):
+            return ""
+        best = (self.FIRE_AREA_HANDLE_RADIUS + 5.0, "")
+        for handle in self._fire_area_handles():
+            screen = self._project_visible_world(handle.point)
+            if screen is None:
+                continue
+            distance = math.hypot(point.x() - screen.x(), point.y() - screen.y())
+            if distance <= best[0]:
+                best = (distance, handle.key)
+        return best[1]
+
+    def _begin_fire_area_drag(self, key: str, position: QPointF) -> None:
+        handle = next(h for h in self._fire_area_handles() if h.key == key)
+        # Pixels covered on screen by one world unit along the grip's axis.
+        reach = 100.0
+        start = self._project(self._camera_vertex(handle.point))
+        end = self._project(self._camera_vertex(tuple(
+            handle.point[i] + handle.axis[i] * reach for i in range(3))))
+        per_unit = (end - start) / reach
+        self._fire_area_handle = key
+        self._fire_area_drag = (key, QPointF(position), per_unit)
+        self.fireAreaHandlePicked.emit(key)
+        self.fireAreaDragStarted.emit(key)
+
+    def _update_fire_area_drag(self, position: QPointF) -> None:
+        key, press, per_unit = self._fire_area_drag
+        length_sq = per_unit.x() ** 2 + per_unit.y() ** 2
+        if length_sq < 1e-9:
+            return
+        moved = position - press
+        delta = (moved.x() * per_unit.x() + moved.y() * per_unit.y()) / length_sq
+        self.fireAreaDragged.emit(key, delta)
 
     def _gun_point_screen_positions(self):
         return [self._project_visible_world(point) for point in self._gun_points]
@@ -1554,6 +1730,7 @@ class CollisionViewport(FxPreviewViewportMixin, AssetViewport):
         self._draw_fire_points_overlay(painter)
         self._draw_turret_limits_overlay(painter)
         self._draw_gun_points_overlay(painter)
+        self._draw_fire_area_overlay(painter)
         if self._sphere_box_rect is not None:
             painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
             painter.setPen(QPen(
@@ -1565,6 +1742,15 @@ class CollisionViewport(FxPreviewViewportMixin, AssetViewport):
         if self._cockpit_preview_active:
             event.accept()
             return
+        if self._fire_area_drag is not None:
+            if event.buttons() & Qt.MouseButton.LeftButton:
+                self._update_fire_area_drag(event.position())
+            event.accept()
+            return
+        if (self._fire_area_visible and not event.buttons()):
+            over = self._hit_fire_area_handle(event.position())
+            self.setCursor(Qt.CursorShape.SizeAllCursor if over
+                           else Qt.CursorShape.ArrowCursor)
         if self._collision_shape_overlay_visible and self._collision_shape is not None:
             if not event.buttons():
                 self._update_shape_component_cursor(event.position())
@@ -1596,6 +1782,11 @@ class CollisionViewport(FxPreviewViewportMixin, AssetViewport):
         super().mouseMoveEvent(event)
 
     def mouseReleaseEvent(self, event: QMouseEvent) -> None:  # noqa: N802
+        if (event.button() == Qt.MouseButton.LeftButton
+                and self._fire_area_drag is not None):
+            self._fire_area_drag = None
+            event.accept()
+            return
         if event.button() == Qt.MouseButton.LeftButton and self._shape_press_pos is not None:
             delta = event.position() - self._shape_press_pos
             self._shape_press_pos = None
@@ -1655,6 +1846,16 @@ class CollisionViewport(FxPreviewViewportMixin, AssetViewport):
             if self._collision_shape_overlay_visible and self._collision_shape is not None:
                 self._shape_press_pos = QPointF(event.position())
                 super().mousePressEvent(event)
+                return
+            area_handle = self._hit_fire_area_handle(event.position())
+            if area_handle:
+                self.setFocus(Qt.FocusReason.MouseFocusReason)
+                self._camera_interacting = False
+                self._press_pos = None
+                self._last_mouse = event.position().toPoint()
+                self._begin_fire_area_drag(area_handle, event.position())
+                self.update()
+                event.accept()
                 return
             gun_index = self._hit_gun_point(event.position())
             if gun_index >= 0:
@@ -1721,6 +1922,14 @@ class CollisionViewport(FxPreviewViewportMixin, AssetViewport):
 
     def mouseDoubleClickEvent(self, event: QMouseEvent) -> None:  # noqa: N802
         if event.button() == Qt.MouseButton.LeftButton:
+            if self._fire_area_visible:
+                self._fire_area_drag = None
+                if not self._hit_fire_area_handle(event.position()):
+                    self._fire_area_handle = ""
+                    self.fireAreaHandlePicked.emit("")
+                    self.update()
+                event.accept()
+                return
             if self._collision_shape_overlay_visible:
                 self._shape_press_pos = None
                 key = self._hit_shape_component(event.position())
