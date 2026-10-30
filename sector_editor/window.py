@@ -470,7 +470,7 @@ class SectorEditorWindow(QMainWindow):
         numbers = install.available_sets() if install else []
         if not numbers:
             try:
-                root = bootstrap.game_data_dir() / "Sets"
+                root = bootstrap.find_ci(bootstrap.game_data_dir(), "Sets") or bootstrap.game_data_dir() / "Sets"
                 numbers = sorted(int(p.name[3:]) for p in root.iterdir()
                                  if p.is_dir() and p.name.lower().startswith("set") and p.name[3:].isdigit())
             except (OSError, RuntimeError):
@@ -861,7 +861,7 @@ class SectorEditorWindow(QMainWindow):
     def import_definitions(self):
         if self.document is None or not self._commit_forms():
             return
-        path, _ = QFileDialog.getOpenFileName(self, "Import native SDF definitions using this set's assets", "", "Set definitions (*.sdf)")
+        path, _ = QFileDialog.getOpenFileName(self, "Import native SDF definitions using this set's assets", "", "Set definitions (*.sdf *.SDF)")
         if not path:
             return
         def apply():

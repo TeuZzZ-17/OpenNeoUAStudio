@@ -45,7 +45,7 @@ def wire_op(name: str):
 def resolve_skeleton(target: str, must_exist: bool = True) -> Path:
     path = Path(target)
     if not path.is_absolute():
-        path = core.data_root() / path
+        path = core.under_data(path)
     path = path.resolve()
     if must_exist and not path.is_file():
         raise core.McpToolError(f"Skeleton not found: {path}")

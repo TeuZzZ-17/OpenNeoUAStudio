@@ -1,1 +1,4 @@
 OpenNeoUAStudio.exe filter=lfs diff=lfs merge=lfs -text
+
+# Shell scripts must keep Unix line endings or the shebang breaks on Linux.
+*.sh text eol=lf

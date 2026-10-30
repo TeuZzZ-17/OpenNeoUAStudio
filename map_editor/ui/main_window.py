@@ -52,6 +52,7 @@ from .host_panel import HostPanel
 from .tech_panel import TechPanel
 from .special_panel import SpecialPanel
 from .special_overlay import SpecialOverlay
+from .cloud_overlay import CloudOverlay
 from ..core.special_objects import (SPECIAL_KINDS, special_store, special_slots, special_cell,
                                     add_special, update_special, remove_special, set_item_key_road)
 from .preview_cards import PREVIEW_PIXELS, RESOURCE_ROLE, COLOR_ROLE
@@ -171,6 +172,7 @@ class MainWindow(QMainWindow):
         self.building_overlay = BuildingOverlay(self.view, self._overlay_state)
         self.squad_overlay = SquadOverlay(self.view)
         self.special_overlay = SpecialOverlay(self)
+        self.cloud_overlay = CloudOverlay(self)
         self.view.squadPressed.connect(self._select_squad)
         self.view.hostPressed.connect(self._select_host)
         self.view.actorDragStarted.connect(self._begin_actor_drag)
