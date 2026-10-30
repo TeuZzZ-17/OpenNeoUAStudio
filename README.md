@@ -43,10 +43,21 @@ Requirements: Python 3.10 or newer and `pip`.
    python main.py
    ```
 
+On Linux and macOS, `run_OpenNeoUAStudio.sh` does steps 2-4 for you: it creates `.venv`, installs
+`requirements.txt` (again only when that file changes) and starts the Studio. Any arguments are passed to `main.py`:
+
+```bash
+chmod +x run_OpenNeoUAStudio.sh      # only needed once
+./run_OpenNeoUAStudio.sh
+./run_OpenNeoUAStudio.sh --map-editor path/to/level.ldf
+```
+
 On Linux, PySide6 (Qt) may need a few system libraries that are not installed by `pip`.
 If the application does not start and Qt reports that the `xcb` platform plugin could not be loaded,
 install the XCB cursor library from your distribution (for example `xcb-util-cursor` on Fedora,
 `libxcb-cursor0` on Debian/Ubuntu).
+Music and sounds use Qt Multimedia, which needs GStreamer or FFmpeg on the system
+(for example `gstreamer1.0-plugins-good` on Debian/Ubuntu).
 
 ### Choosing the game installation
 
@@ -83,14 +94,6 @@ It is not affiliated with, endorsed by, sponsored by, or approved by Microsoft, 
 
 Microsoft Urban Assault, its name, trademarks, logos, artwork, game data, audiovisual material, and other proprietary content remain the property of their respective owners.
 
-## Level source preservation
-
-Saving an opened level applies only editor changes to its original LDF source.
-Unchanged blocks, unknown parameters, manual scripts, comments and formatting remain intact.
-Squad and Host edits retain the original object's custom fields; terrain edits update only changed cells.
-New maps are generated normally. Save and Save As both preserve an opened level's source.
-If the file changes on disk after opening or saving, Studio refuses to overwrite it: reopen it or save a separate copy.
-Locations remain visible across Map Editor tabs with a faint color tint and outlined names; editing controls stay in Locations.
 
 ## Safety and data handling
 
