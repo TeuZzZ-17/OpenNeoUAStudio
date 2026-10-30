@@ -20,6 +20,7 @@ from studio.rendering.indexed import (
     IndexedTables,
     retail_source_face_front_facing,
 )
+from tests.split_source import module_source
 
 
 def _palette():
@@ -120,8 +121,7 @@ def _ua_tracy() -> bytes:
 class IndexedViewerPolicySourceTests(unittest.TestCase):
     @classmethod
     def _method_source(cls, name: str) -> str:
-        path = Path(__file__).resolve().parents[1] / "studio/rendering/asset_viewport.py"
-        source = path.read_text(encoding="utf-8")
+        source = module_source("studio/rendering/asset_viewport.py")
         tree = ast.parse(source)
         for node in ast.walk(tree):
             if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) \
@@ -147,8 +147,8 @@ class IndexedViewerPolicySourceTests(unittest.TestCase):
 
     def test_old_rgb_textured_renderer_and_ui_choice_are_removed(self):
         root = Path(__file__).resolve().parents[1]
-        viewer = (root / "studio/rendering/asset_viewport.py").read_text(encoding="utf-8")
-        window = (root / "studio/workbench/window.py").read_text(encoding="utf-8")
+        viewer = module_source("studio/rendering/asset_viewport.py")
+        window = module_source("studio/workbench/window.py")
         batch = (root / "snapshot_studio" / "batch_export.py").read_text(
             encoding="utf-8")
         self.assertNotIn("def _draw_textured", viewer)

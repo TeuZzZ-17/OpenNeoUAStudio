@@ -16,7 +16,7 @@ from studio.exchange.portable import backup_existing_file
 from studio.ui.widgets import loading_set
 
 from PySide6.QtCore import QEvent, QObject, QRunnable, QSize, Qt, QThreadPool, QTimer, Signal
-from PySide6.QtGui import (QAction, QActionGroup, QColor, QIcon, QImage, QKeySequence,
+from PySide6.QtGui import (QAction, QActionGroup, QColor, QIcon, QKeySequence,
                            QPainter, QPen, QPixmap)
 from PySide6.QtWidgets import (QApplication, QAbstractItemView, QComboBox, QDockWidget, QFileDialog,
                                QAbstractSpinBox, QFormLayout, QHBoxLayout, QLabel, QLineEdit, QListView, QListWidget,

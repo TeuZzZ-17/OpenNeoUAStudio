@@ -106,7 +106,7 @@ class DepthRendererTests(unittest.TestCase):
         viewport = self._editable_triangle_viewport()
         try:
             with patch(
-                    "studio.rendering.asset_viewport.order_camera_polygons",
+                    "studio.rendering.asset_viewport_paint.order_camera_polygons",
                     wraps=order_camera_polygons) as exact:
                 self._render(viewport)
                 self.assertEqual(exact.call_count, 1)
@@ -164,7 +164,7 @@ class DepthRendererTests(unittest.TestCase):
         try:
             self.assertTrue(viewport.enter_edit_mode("root"))
             with patch(
-                    "studio.rendering.asset_viewport.resolve_visible_edit_vertices",
+                    "studio.rendering.asset_viewport_edit.resolve_visible_edit_vertices",
                     wraps=resolve_visible_edit_vertices) as resolve:
                 self._render(viewport)
                 self._render(viewport)
