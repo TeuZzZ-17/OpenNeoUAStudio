@@ -555,11 +555,18 @@ class WireframePanel(QWidget):
             self.current_projection = self._load_projection(target)
         except Exception:
             self.current_projection = None
+        self._notify_host(f"Wireframe overwritten: {target.name}."
+                          + (f" Backup: {backup.name}." if backup else ""), 8000)
+
+    def _notify_host(self, text: str, timeout: int) -> None:
+        """Show a message in the host window (Studio notice or status bar)."""
+
         host = self.window()
         notify = getattr(host, "_notify", None)
         if callable(notify):
-            notify(f"Wireframe overwritten: {target.name}."
-                   + (f" Backup: {backup.name}." if backup else ""), 8000)
+            notify(text, timeout)
+        elif callable(getattr(host, "statusBar", None)):
+            host.statusBar().showMessage(text, timeout)
 
     @staticmethod
     def _export_name(host) -> str:
@@ -602,6 +609,9 @@ class WireframePanel(QWidget):
         self._show_error("")
         if host is not None and hasattr(host, "_last_directory"):
             host._last_directory = target.parent
-        notify = getattr(host, "_notify", None)
-        if callable(notify):
-            notify(f"Wireframe exported to {target}", 6000)
+        # The exported file becomes the wireframe this definition uses: shown as
+        # current here, and handed to the host so its script can point to it.
+        self.set_current_wireframe(target)
+        exported = getattr(host, "wireframe_exported", None)
+        message = exported(target) if callable(exported) else None
+        self._notify_host(message or f"Wireframe exported to {target}", 8000)

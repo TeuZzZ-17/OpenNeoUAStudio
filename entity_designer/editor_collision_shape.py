@@ -142,8 +142,11 @@ class _CollisionShapeMixin:
         if shape is None or self.collision_geometry_widget._shape is not shape:
             return
         keys = self.collision_geometry_widget.enabled_shape_keys()
-        hulls = tuple(replace(hull, enabled=(
-            hull.source_component or f"@hull:{index}") in keys)
+        # A convex part with its own row follows that row; otherwise the
+        # component row switches all parts it owns.
+        states = self.collision_geometry_widget.hull_row_states()
+        hulls = tuple(replace(hull, enabled=states.get(index, (
+            hull.source_component or f"@hull:{index}") in keys))
             for index, hull in enumerate(shape.hulls))
         if hulls == shape.hulls:
             return
@@ -189,11 +192,12 @@ class _CollisionShapeMixin:
             self._collision_shape_root_owner(), self._current_owner,
             self.project.source_model)
 
-    def _set_collision_geometry_preview(self, triangles) -> None:
+    def _set_collision_geometry_preview(
+            self, triangles, highlighted=None, excluded=None) -> None:
         self._collision_geometry_preview = (
             tuple(triangles) if triangles else None)
         self.viewport.set_geometry_component_preview(
-            self._collision_geometry_preview)
+            self._collision_geometry_preview, highlighted, excluded)
 
     def _refresh_collision_geometry_widget(self) -> None:
         widget = getattr(self, "collision_geometry_widget", None)
@@ -251,7 +255,7 @@ class _CollisionShapeMixin:
             components = split_triangle_components([
                 (owner, triangles)
                 for owner, triangles in owner_triangles.items()
-            ])
+            ], split_regions=True)
         except (TypeError, ValueError, RuntimeError) as exc:
             error = str(exc)
         finally:
@@ -324,6 +328,7 @@ class _CollisionShapeMixin:
                     "owner": _geometry_component_key(component),
                     "model_owner": component.owner,
                     "component_id": component.component_id,
+                    "group": component.group_id,
                     "triangles": component.triangles,
                 }
                 for component in selected_components

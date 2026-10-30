@@ -38,9 +38,6 @@ from entity_designer.sphere_generator import (
     generate_collision_spheres,
     UNIT_COLL_MAX_COUNT,
 )
-from entity_designer.widgets import (
-    _GEOMETRY_COMPONENT_ROLE,
-)
 from studio.rendering.asset_viewport import (
     VIEW_PRESETS,
 )
@@ -495,8 +492,7 @@ class _SpheresMixin:
         menu = QMenu(self)
         if component_key is not None:
             widget = self.collision_geometry_widget
-            item = next((row for row in widget._items()
-                         if row.data(0, _GEOMETRY_COMPONENT_ROLE) == component_key), None)
+            item = widget.row_for_pick(component_key)
             if item is not None:
                 if not item.isSelected():
                     widget.select_shape_component(component_key)
@@ -663,7 +659,7 @@ class _SpheresMixin:
             return
         if (self.properties_tabs.currentIndex()
                 == self.collision_shape_tab_index):
-            key = self.viewport._hit_shape_component(
+            key = self.viewport._hit_shape_hull(
                 QPointF(self.viewport.mapFromGlobal(global_pos)))
             self._create_collision_shape_context_menu(key).exec(global_pos)
             return
@@ -1143,11 +1139,15 @@ class _SpheresMixin:
         # the viewport presentation and which object the shared gizmo moves.
         QTimer.singleShot(0, self._fit_cockpit_tab_height)
         briefing_active = self.properties_tabs.currentIndex() == self.briefing_tab_index
+        icon_active = self.properties_tabs.currentIndex() == self.icon_tab_index
         self.renderer_badge.set_viewport(self.briefing_preview if briefing_active else self.viewport)
         self.briefing_preview.setVisible(briefing_active)
-        self.viewport.setVisible(not briefing_active)
+        self.icon_tab.view.setVisible(icon_active)
+        self.viewport.setVisible(not briefing_active and not icon_active)
         if briefing_active:
             self.briefing_preview.refresh()
+        if icon_active:
+            self.icon_tab.activate()
         cockpit_selected = self._is_cockpit_tab_selected()
         cockpit_active = self._is_cockpit_tab_active()
         shape_tab_active = (
@@ -1162,7 +1162,7 @@ class _SpheresMixin:
         self._update_reset_view_controls()
         if hasattr(self, "transform_box"):
             self.transform_box.setVisible(
-                not shape_tab_active and not briefing_active
+                not shape_tab_active and not briefing_active and not icon_active
                 and self.properties_tabs.currentIndex() != self.ground_tab_index
                 and self.properties_tabs.currentIndex() != self.wireframe_tab_index
                 and not self._is_fx_tab_active()

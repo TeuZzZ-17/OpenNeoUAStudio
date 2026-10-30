@@ -2701,6 +2701,18 @@ class OutlineEditor(QWidget):
         self.x_spin.setEnabled(has_single_vertex_selection)
         self.y_spin.setEnabled(has_single_vertex_selection)
         self.z_spin.setEnabled(has_single_vertex_selection and self._mode == "poo2")
+        # set_transform_mode turns Rotate/Scale of a lone vertex into Move:
+        # grey them out so the choice is visibly unavailable, not silently ignored.
+        lone_vertex = self.selected_vertex_count == 1 and not self.selected_edge_count
+        for mode in ("rotate", "scale"):
+            action = self.transform_actions[mode]
+            action.setEnabled(not lone_vertex)
+            action.setToolTip(
+                f"{mode.title()} needs two or more vertices or a line."
+                if lone_vertex else f"{mode.title()} ({action.shortcut().toString()})")
+        if (lone_vertex and self.canvas.transform_mode != "move"
+                and not self.canvas._dragging_point):
+            self.set_transform_mode("move")
 
         if has_single_vertex_selection:
             self.selected_label.setText(str(self._selected_index))

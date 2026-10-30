@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 import hashlib
 import json
 import math
@@ -662,13 +662,61 @@ def _source_topology_warnings(parts) -> tuple[str, ...]:
     return tuple(warnings)
 
 
+def _hull_member(hull: CollisionHull, members) -> str:
+    """Name the source part that a baked hull mostly covers.
+
+    Parts of one connected piece are baked together. Each resulting hull is
+    then labelled with the part whose surface lies most inside it, falling
+    back to the part nearest to the hull centre.
+    """
+
+    if len(members) == 1:
+        return members[0][0]
+    planes = _convex_hull_planes(hull)
+    low = [min(point[axis] for point in hull.vertices) for axis in range(3)]
+    high = [max(point[axis] for point in hull.vertices) for axis in range(3)]
+    tolerance = max(max(high[axis] - low[axis] for axis in range(3)) * 0.02,
+                    1e-6)
+    center = tuple((low[axis] + high[axis]) / 2 for axis in range(3))
+    best = None
+    for name, triangles in members:
+        covered = 0.0
+        nearest = math.inf
+        for triangle in triangles:
+            ab = tuple(triangle[1][i] - triangle[0][i] for i in range(3))
+            ac = tuple(triangle[2][i] - triangle[0][i] for i in range(3))
+            area = math.sqrt(sum(value * value for value in (
+                ab[1] * ac[2] - ab[2] * ac[1],
+                ab[2] * ac[0] - ab[0] * ac[2],
+                ab[0] * ac[1] - ab[1] * ac[0])))
+            centroid = tuple(sum(point[axis] for point in triangle) / 3
+                             for axis in range(3))
+            nearest = min(nearest, math.dist(centroid, center))
+            samples = (centroid, *triangle)
+            inside = sum(
+                all(low[axis] - tolerance <= point[axis]
+                    <= high[axis] + tolerance for axis in range(3))
+                and _inside_convex_hull(point, planes, tolerance)
+                for point in samples)
+            covered += area * inside / len(samples)
+        score = (covered, -nearest)
+        if best is None or score > best[0]:
+            best = (score, name)
+    return best[1]
+
+
 def generate_collision_shape(
         parts: Iterable[tuple[str, Iterable[Triangle3]]], *, source: str,
         scale: Point3 = (1.0, 1.0, 1.0),
         rotation: Point3 = (0.0, 0.0, 0.0),
         asset_set: int = 0,
-        quality: str = "normal") -> ShapeGenerationResult:
-    """Bake each selected part separately with CoACD 1.0.14."""
+        quality: str = "normal",
+        groups: dict[str, str] | None = None) -> ShapeGenerationResult:
+    """Bake each selected part separately with CoACD 1.0.14.
+
+    Parts with the same ``groups`` value come from one connected piece: they
+    are baked together and every hull is labelled with the part it covers.
+    """
 
     try:
         import numpy as np
@@ -704,6 +752,18 @@ def generate_collision_shape(
         raise ValueError(
             "Selected part(s) contain no non-degenerate triangles: "
             + ", ".join(empty_owners))
+    # Parts of one connected piece are baked as one mesh, so selecting all of
+    # them gives the same volume as baking the whole piece.
+    members: dict[str, list] = {}
+    merged: dict[str, list] = {}
+    bake_owner_of_group: dict[tuple[str, str], str] = {}
+    for owner, triangles in prepared:
+        group = (groups or {}).get(owner)
+        bake_key = (owner.rpartition("#component:")[0], group)
+        bake_owner = bake_owner_of_group.setdefault(bake_key, owner) if group else owner
+        merged.setdefault(bake_owner, []).extend(triangles)
+        members.setdefault(bake_owner, []).append((owner, triangles))
+    prepared = list(merged.items())
     warnings = list(_source_topology_warnings(prepared))
     from entity_designer.mesh_parts import (
         prepare_component_mesh, split_triangle_components)
@@ -756,6 +816,9 @@ def generate_collision_shape(
             for triangle in triangles
         ]
         prepared_for_bake.append((group_owner, group_triangles))
+        members[group_owner] = [
+            member for owner, _triangles, _repair_warnings in component_group
+            for member in members[owner]]
         warnings.append(
             f"{model_owner}: Combined {len(component_group)} planar "
             "components into one collision input.")
@@ -827,9 +890,10 @@ def generate_collision_shape(
                       for point in baked_vertices),
                 tuple(tuple(int(index) for index in face)
                       for face in baked_faces),
-                source_component=owner,
             )
             validate_hull(candidate)
+            candidate = replace(candidate, source_component=_hull_member(
+                candidate, members.get(owner, [(owner, triangles)])))
             hulls.append(candidate)
             if len(hulls) > MAX_HULLS:
                 raise ValueError(
@@ -879,6 +943,8 @@ def _worker_response(request: dict) -> dict:
         rotation=request["rotation"],
         asset_set=request.get("asset_set", 0),
         quality=request.get("quality", "normal"),
+        groups={part["owner"]: part["group"]
+                for part in request["parts"] if part.get("group")},
     )
     return {
         "shape": collision_shape_text(result.shape),
