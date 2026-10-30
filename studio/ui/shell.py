@@ -299,7 +299,7 @@ def compatibility_entries(window, key):
             if title == 'Locations':
                 rows.append((title, OPENNEOUA, 'Optional begin_location polygons, entry titles and sounds require OpenNeoUA. Levels without locations contain no new blocks.'))
             elif title == "Level Info":
-                rows.append((title, MIXED, "Standard level properties use vanilla LDF data. Optional begin_briefing_text requires OpenNeoUA and overrides the language-file briefing. Empty text writes no extension and keeps the language fallback. Remove the text for vanilla export."))
+                rows.append((title, MIXED, "Standard level properties use vanilla LDF data. Optional begin_briefing_text requires OpenNeoUA and overrides the language-file briefing. Empty text writes no extension and keeps the language fallback. Optional cloud_id (Clouds) and ambient_sound (Ambient sound) require OpenNeoUA; None and an empty path write nothing. Remove the text, set Clouds to None and clear Ambient sound for vanilla export."))
             elif title == "Script":
                 rows.append((title, MIXED, "Vanilla level script sections remain compatible. Custom script text can contain OpenNeoUA-only parameters; this reference does not validate those lines."))
             else:

@@ -18,6 +18,7 @@ from PySide6.QtWidgets import (
     QMessageBox,
 )
 
+from studio.exchange.portable import find_existing_path
 from entity_designer.script_model import (
     _collision_shape_export_filename,
     _data_root_for_path,
@@ -600,7 +601,8 @@ class _CollisionShapeMixin:
         data_root = _data_root_for_path(
             self._active_base_path, self._active_script_path)
         if data_root is not None:
-            initial = data_root / "Models" / "Collision" / default_name
+            initial = (find_existing_path(data_root, "Models", "Collision")
+                       or data_root / "Models" / "Collision") / default_name
         elif self.project.collision_shape_file_path:
             initial = Path(self.project.collision_shape_file_path)
         else:

@@ -1,18 +1,26 @@
-"""Map Editor dialogs: new map, resize, and the Level Info panel (title, briefing art, sky, music, movie)."""
+"""Map Editor dialogs: new map, resize, and the Level Info panel (title, briefing art, sky, music, ambient sound, movie, clouds)."""
 
 from __future__ import annotations
 
 from pathlib import Path
 
-from PySide6.QtCore import QEvent, QObject, QRunnable, QSize, Qt, QThreadPool, QTimer, Signal
+import random
+
+from PySide6.QtCore import QEvent, QObject, QRunnable, QSize, Qt, QThreadPool, QTimer, QUrl, Signal
 from PySide6.QtGui import QIcon, QImage, QPixmap
-from PySide6.QtWidgets import (QCheckBox, QComboBox, QDialog, QDialogButtonBox,
+from PySide6.QtMultimedia import QAudioOutput, QMediaPlayer
+from PySide6.QtWidgets import (QCheckBox, QComboBox, QDialog, QDialogButtonBox, QFileDialog,
                                QFormLayout, QHBoxLayout, QLabel,
                                QLineEdit, QPlainTextEdit, QListWidget, QListWidgetItem, QMessageBox, QPushButton, QSpinBox,
                                QStyle, QVBoxLayout, QWidget)
 
 from .. import bootstrap
-from ..core.ldf_model import EDITOR_HEIGHT_MAX, LdfDocument, briefing_for_export, movie_filename
+from studio.exchange.portable import find_existing_path
+from ..core.ambient_sound import (AUDIO_SUFFIXES, DEFAULT_FOLDER, ambient_candidates, ambient_sound_value,
+                                  default_folder, import_into_data, relative_to_data)
+from ..core.clouds import load_cloud_profiles
+from ..core.ldf_model import (EDITOR_HEIGHT_MAX, LdfDocument, briefing_for_export, cloud_id_value,
+                              movie_filename)
 from ..core.game_installation import (GameInstallation)
 from ..core.resource_catalog import ResourceCatalog, preview_image, sky_key
 from studio.ui.shell import ResourcesDialog as GameInstallationDialog  # noqa: F401 - used by map_editor.editor, replaced by tests
@@ -301,6 +309,7 @@ class LevelInfoPanel(QWidget):
         self.music_box.activated.connect(lambda _index: self._emit_values_changed())
         self.music_box.lineEdit().editingFinished.connect(self._music_editing_finished)
         media_form.addRow("Ambience Track", self.music_box)
+        self._build_ambient_sound(media_form, doc)
         self.movie_box = QComboBox()
         self.movie_box.setEditable(True)
         self.movie_box.addItem("None")
@@ -308,7 +317,39 @@ class LevelInfoPanel(QWidget):
         self.movie_box.setCurrentText(movie_filename(doc.lvl_info.get("movie")) or "None")
         self.movie_box.activated.connect(lambda _index: self._emit_values_changed())
         self.movie_box.lineEdit().editingFinished.connect(self._emit_values_changed)
-        media_form.addRow("Intro Movie", self.movie_box)
+        # Row order: Intro Movie, Clouds, Ambience Track, Ambient sound.
+        media_form.insertRow(0, "Intro Movie", self.movie_box)
+
+        self.cloud_profiles = load_cloud_profiles(self.catalog.installation.folder("scripts"),
+                                                  doc.script_content)
+        self.cloud_box = QComboBox()
+        # The editable combos around it inset their text by 2 px more than a plain combo; match them.
+        self.cloud_box.setStyleSheet("QComboBox { padding-left: 10px; }")
+        self.cloud_box.addItem("None", -1)
+        for profile in self.cloud_profiles.values():
+            self.cloud_box.addItem(profile.label, profile.id)
+        cloud_id = cloud_id_value(doc.lvl_info.get("cloud_id", -1))
+        if cloud_id >= 0 and cloud_id not in self.cloud_profiles:
+            # Keep an ID that no script defines instead of silently dropping it on save.
+            self.cloud_box.addItem(f"{cloud_id} - not defined", cloud_id)
+        self.cloud_box.setCurrentIndex(max(0, self.cloud_box.findData(cloud_id)))
+        self.cloud_box.activated.connect(lambda _index: self._emit_values_changed())
+        cloud_tip = ("OpenNeoUA only: floating-mesh atmosphere (new_cloud profile) for the whole level. "
+                     "Previewed on the map.")
+        self.cloud_box.setToolTip(cloud_tip)
+        cloud_label = QWidget()
+        cloud_row = QHBoxLayout(cloud_label)
+        cloud_row.setContentsMargins(0, 0, 0, 0)
+        cloud_row.setSpacing(6)
+        cloud_row.addWidget(QLabel("Clouds"))
+        self.cloud_marker = QLabel()
+        self.cloud_marker.setObjectName("cloudCompatibilityMarker")
+        self.cloud_marker.setFixedSize(8, 8)
+        self.cloud_marker.setStyleSheet(
+            f"QLabel#cloudCompatibilityMarker {{ background:{COMPAT_STYLES[OPENNEOUA].color}; border-radius:4px; }}")
+        self.cloud_marker.setToolTip(cloud_tip)
+        cloud_row.addWidget(self.cloud_marker)
+        media_form.insertRow(1, cloud_label, self.cloud_box)
         layout.addLayout(media_form)
 
         for key, prefix in (("mbmap", "mb"), ("dbmap", "db")):
@@ -316,6 +357,137 @@ class LevelInfoPanel(QWidget):
         self.sky_list.verticalScrollBar().valueChanged.connect(
             lambda _value: self._schedule_visible_sky_load())
         self._schedule_sky_grid_layout()
+
+    def _build_ambient_sound(self, form: QFormLayout, doc: LdfDocument):
+        """Row under Ambience Track: a sound file, or a folder the game picks from at random."""
+        tip = ("OpenNeoUA only: ambient sound looped for the whole level, overriding the game's default "
+               "ambient sound. A file plays as it is; a folder plays one of its sounds, chosen at random "
+               "each time the level starts. It must be inside the game's Data folder. Empty = game default.")
+        label = QWidget()
+        label_row = QHBoxLayout(label)
+        label_row.setContentsMargins(0, 0, 0, 0)
+        label_row.setSpacing(6)
+        label_row.addWidget(QLabel("Ambient sound"))
+        marker = QLabel()
+        marker.setObjectName("ambientCompatibilityMarker")
+        marker.setFixedSize(8, 8)
+        marker.setStyleSheet(
+            f"QLabel#ambientCompatibilityMarker {{ background:{COMPAT_STYLES[OPENNEOUA].color}; border-radius:4px; }}")
+        marker.setToolTip(tip)
+        self.ambient_marker = marker
+        label_row.addWidget(marker)
+
+        self.ambient_edit = QLineEdit(ambient_sound_value(doc.lvl_info.get("ambient_sound", "")))
+        self.ambient_edit.setPlaceholderText("Sounds/... file or folder (empty = game default)")
+        self.ambient_edit.setToolTip(tip)
+        self.ambient_edit.editingFinished.connect(self._ambient_edited)
+        buttons = QHBoxLayout()
+        buttons.setSpacing(4)
+        for text, handler in (("File...", self._choose_ambient_file), ("Folder...", self._choose_ambient_folder),
+                              ("Listen", self._toggle_ambient_listen)):
+            button = QPushButton(text)
+            button.clicked.connect(lambda _checked=False, h=handler: h())
+            buttons.addWidget(button)
+            if text == "Listen":
+                self.ambient_listen = button
+        self.ambient_status = QLabel()
+        self.ambient_status.setWordWrap(True)
+        column = QWidget()
+        box = QVBoxLayout(column)
+        box.setContentsMargins(0, 0, 0, 0)
+        box.setSpacing(4)
+        box.addWidget(self.ambient_edit)
+        box.addLayout(buttons)
+        box.addWidget(self.ambient_status)
+        form.addRow(label, column)
+        self._ambient_audio = QAudioOutput(self)
+        self._ambient_audio.setVolume(0.35)
+        self._ambient_player = QMediaPlayer(self)
+        self._ambient_player.setAudioOutput(self._ambient_audio)
+        self._ambient_player.playbackStateChanged.connect(
+            lambda state: self.ambient_listen.setText(
+                "Stop" if state == QMediaPlayer.PlaybackState.PlayingState else "Listen"))
+        self._update_ambient_status()
+
+    def _ambient_data(self) -> Path:
+        return self.catalog.installation.data
+
+    def _update_ambient_status(self):
+        value = ambient_sound_value(self.ambient_edit.text())
+        candidates = ambient_candidates(self._ambient_data(), value) if value else []
+        if not value:
+            text = ""
+        elif not candidates:
+            text = "No sound found at this path inside Data."
+        elif Path(value).suffix.casefold() in AUDIO_SUFFIXES:
+            text = ""
+        else:
+            text = (f"Folder with {len(candidates)} sound{'s' if len(candidates) != 1 else ''}: "
+                    "one is picked at random each time the level starts.")
+        self.ambient_status.setText(text)
+
+    def _set_ambient(self, value: str):
+        self.ambient_edit.setText(value)
+        self._ambient_edited()
+
+    def _ambient_edited(self):
+        self.ambient_edit.setText(ambient_sound_value(self.ambient_edit.text()))
+        self._update_ambient_status()
+        self._emit_values_changed()
+
+    def _ambient_start_dir(self) -> str:
+        data = self._ambient_data()
+        folder = default_folder(data) or find_existing_path(data, DEFAULT_FOLDER[0]) or data
+        return str(folder)
+
+    def _choose_ambient_file(self):
+        # Linux matches name filters with case, so each extension is offered in both spellings.
+        suffixes = " ".join(f"*{s} *{s.upper()}" for s in sorted(AUDIO_SUFFIXES))
+        path, _ = QFileDialog.getOpenFileName(self, "Choose ambient sound", self._ambient_start_dir(),
+                                              f"Sounds ({suffixes});;All files (*)")
+        if not path:
+            return
+        data = self._ambient_data()
+        value = relative_to_data(data, Path(path))
+        if value is None:
+            # The engine only reads sounds from Data, so an outside file has to be copied in first.
+            target = "/".join(DEFAULT_FOLDER)
+            answer = QMessageBox.question(
+                self, "Ambient sound",
+                f"The game can only read sounds inside its Data folder.\nCopy {Path(path).name} to {target}?")
+            if answer != QMessageBox.StandardButton.Yes:
+                return
+            try:
+                value = import_into_data(data, Path(path))
+            except FileExistsError as exc:
+                QMessageBox.warning(self, "Ambient sound",
+                                    f"A different file named {exc} is already in {target}. Rename it first.")
+                return
+            except OSError as exc:
+                QMessageBox.warning(self, "Ambient sound", f"Could not copy the file: {exc}")
+                return
+        self._set_ambient(value)
+
+    def _choose_ambient_folder(self):
+        path = QFileDialog.getExistingDirectory(self, "Choose ambient sound folder", self._ambient_start_dir())
+        if not path:
+            return
+        value = relative_to_data(self._ambient_data(), Path(path))
+        if value is None or value == ".":
+            QMessageBox.warning(self, "Ambient sound", "Choose a folder inside the game's Data folder.")
+            return
+        self._set_ambient(value)
+
+    def _toggle_ambient_listen(self):
+        if self._ambient_player.playbackState() == QMediaPlayer.PlaybackState.PlayingState:
+            self._ambient_player.stop()
+            return
+        candidates = ambient_candidates(self._ambient_data(), self.ambient_edit.text())
+        if not candidates:
+            self.ambient_status.setText("No sound found at this path inside Data.")
+            return
+        self._ambient_player.setSource(QUrl.fromLocalFile(str(random.choice(candidates))))
+        self._ambient_player.play()
 
     @staticmethod
     def _set_media(box: QComboBox, value: str):
@@ -572,12 +744,15 @@ class LevelInfoPanel(QWidget):
                 "mbmap": self._art_value("mbmap"),
                 "dbmap": self._art_value("dbmap"),
                 "music": self.music_value(),
-                "movie": movie_filename(self.movie_box.currentText()) or "None"}
+                "movie": movie_filename(self.movie_box.currentText()) or "None",
+                "cloud_id": cloud_id_value(self.cloud_box.currentData()),
+                "ambient_sound": ambient_sound_value(self.ambient_edit.text())}
 
     def dispose(self):
         if self._disposed:
             return
         self._disposed = True
+        self._ambient_player.stop()
         self._preview_pool.waitForDone()
         self._preview_jobs.clear()
         self._preview_sources.clear()
