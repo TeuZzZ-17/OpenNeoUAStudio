@@ -10,14 +10,13 @@ from __future__ import annotations
 
 import math
 from dataclasses import replace
-from pathlib import Path
 from time import perf_counter
 
 from PySide6.QtCore import QPointF, QRectF, QSignalBlocker, QSize, Qt, QTimer, Signal, QItemSelectionModel
-from PySide6.QtGui import QAction, QColor, QIcon, QPainter, QPainterPath, QPen, QPixmap, QPolygonF
+from PySide6.QtGui import QAction, QColor, QIcon, QPainter, QPen, QPixmap, QPolygonF
 from PySide6.QtWidgets import (
     QAbstractItemView, QButtonGroup, QCheckBox, QComboBox, QFrame, QGridLayout, QGroupBox, QHBoxLayout, QLabel, QListWidget, QMenu,
-    QListWidgetItem, QPushButton, QScrollArea, QSizePolicy, QSlider, QSpinBox, QStyle, QStyledItemDelegate, QStyleOptionButton, QStyleOptionViewItem,
+    QListWidgetItem, QPushButton, QScrollArea, QSizePolicy, QSlider, QSpinBox, QStyle, QStyledItemDelegate, QStyleOptionViewItem,
     QVBoxLayout, QWidget, QMessageBox,
 )
 
