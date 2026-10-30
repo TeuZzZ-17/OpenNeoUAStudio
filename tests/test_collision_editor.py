@@ -22,6 +22,8 @@ from studio.formats.base_format import BaseObject
 from studio.rendering.asset_viewport import PREVIEW_SCALE
 from studio.rendering.indexed import IndexedSurface
 import entity_designer.editor as editor_module
+import entity_designer.editor_files as editor_files_module
+from tests.split_source import module_source
 import entity_designer.script_model as script_module
 import entity_designer.viewport as viewport_module
 from entity_designer import (
@@ -1978,7 +1980,7 @@ class CollisionEditorTests(unittest.TestCase):
         self.assertFalse(viewport._ground_alignment_source_loaded)
 
     def test_83_ground_simulation_is_enabled_after_family_load(self):
-        source = (Path(editor_module.__file__).read_text(encoding="utf-8")
+        source = (module_source("entity_designer/editor.py")
                   + Path(viewport_module.__file__).read_text(encoding="utf-8"))
         self.assertIn("self._ground_alignment_source_loaded = True", source)
         self.assertIn("and self._ground_alignment_source_loaded", source)
@@ -3985,7 +3987,7 @@ class CollisionEditorTests(unittest.TestCase):
         window.project.collision_shape_file_path = ""
 
         with patch.object(QMessageBox, "warning") as warning, patch.object(
-                editor_module, "ApplyScriptDialog") as apply_dialog:
+                editor_files_module, "ApplyScriptDialog") as apply_dialog:
             window.overwrite_loaded_script()
 
         apply_dialog.assert_not_called()
@@ -4025,7 +4027,7 @@ class CollisionEditorTests(unittest.TestCase):
         window.project.collision_shape_file_path = ""
 
         with patch.object(QMessageBox, "warning") as warning, patch.object(
-                editor_module, "ApplyScriptDialog") as apply_dialog:
+                editor_files_module, "ApplyScriptDialog") as apply_dialog:
             window.overwrite_loaded_script()
 
         apply_dialog.assert_not_called()

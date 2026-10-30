@@ -153,7 +153,7 @@ class StructuralSaveTests(unittest.TestCase):
                     raise OSError("simulated second-file failure")
                 return real_replace(source, target)
 
-            with patch("studio.workbench.window.os.replace", failing_replace):
+            with patch("studio.exchange.portable.os.replace", failing_replace):
                 with self.assertRaises(_BundleCommitError) as raised:
                     _commit_verified_files([
                         (source_a, target_a),

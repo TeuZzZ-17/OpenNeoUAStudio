@@ -23,6 +23,7 @@ from studio.assets.mapping import (
 )
 from studio.formats.base_format import AmeshBlock, BaseObject, TextureRef, parse_base_bytes
 from tests.test_fx_clipboard_v3 import _fx_base_bytes, _memory_family, _writable_family
+from tests.split_source import module_source
 
 
 def _find_kind(item, kind):
@@ -108,7 +109,7 @@ class AssetDependenciesWorkflowTests(unittest.TestCase):
             texture = _find_kind(window.asset_tree.topLevelItem(0), "texture")
             window.asset_tree.setCurrentItem(texture)
             with patch(
-                    "studio.workbench.window.QInputDialog.getItem",
+                    "studio.workbench.window_extraction.QInputDialog.getItem",
                     return_value=(f"Loose: {candidate}", True)), patch.object(
                         window, "_apply_dependency_candidate") as apply_choice:
                 window._select_dependency_resource()
@@ -117,7 +118,7 @@ class AssetDependenciesWorkflowTests(unittest.TestCase):
             family.texture_refs["FX1.ILBM"].candidates = []
             family.dependencies[0].candidates = []
             with patch(
-                    "studio.workbench.window.QInputDialog.getItem",
+                    "studio.workbench.window_extraction.QInputDialog.getItem",
                     return_value=("Browse for a compatible file", True)), \
                     patch.object(window, "_assign_manual_file") as browse:
                 window._select_dependency_resource()
@@ -391,7 +392,7 @@ class AssetDependenciesWorkflowTests(unittest.TestCase):
         try:
             window._family = family
             with patch(
-                    "studio.workbench.window.build_texture_catalog",
+                    "studio.workbench.window_panels.build_texture_catalog",
                     return_value=entries), patch.object(
                         window, "_active_model_texture_names",
                         return_value={"used.ilbm"}):
@@ -436,8 +437,7 @@ class AssetDependenciesWorkflowTests(unittest.TestCase):
             dispose_window(window)
 
     def test_asset_dependencies_context_menu_has_no_obsolete_actions(self):
-        source = (Path(__file__).resolve().parents[1] /
-                  "studio/workbench/window.py").read_text(encoding="utf-8")
+        source = module_source("studio/workbench/window.py")
         start = source.index("    def _show_asset_context_menu")
         end = source.index("    def _selected_texture_names", start)
         context_source = source[start:end]
@@ -446,8 +446,7 @@ class AssetDependenciesWorkflowTests(unittest.TestCase):
 
 
     def test_export_asset_family_is_available_from_resource_contexts(self):
-        source = (Path(__file__).resolve().parents[1] /
-                  "studio/workbench/window.py").read_text(encoding="utf-8")
+        source = module_source("studio/workbench/window.py")
         setbas_start = source.index("    def _show_setbas_context_menu")
         setbas_end = source.index("    def _asset_item_path", setbas_start)
         self.assertIn(
@@ -464,8 +463,7 @@ class AssetDependenciesWorkflowTests(unittest.TestCase):
             '"Export Asset Family"', source[texture_start:texture_end])
 
     def test_asset_textures_suppresses_expected_missing_cmap_noise(self):
-        source = (Path(__file__).resolve().parents[1] /
-                  "studio/workbench/window.py").read_text(encoding="utf-8")
+        source = module_source("studio/workbench/window.py")
         self.assertIn('"no cmap palette in file"', source.casefold())
         self.assertIn("ScrollBarAlwaysOff", source)
 
@@ -492,7 +490,7 @@ class AssetDependenciesWorkflowTests(unittest.TestCase):
             window._last_component_selection = ("texture", "SHARED.ILBM")
             expected_label = "KID.BASE [root/kid[0]]"
             with patch(
-                    "studio.workbench.window.QInputDialog.getItem",
+                    "studio.workbench.window_extraction.QInputDialog.getItem",
                     return_value=(expected_label, True)) as chooser:
                 owner = window._export_owner_for_selection()
             self.assertEqual(owner, "root/kid[0]")

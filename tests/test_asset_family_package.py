@@ -326,7 +326,7 @@ class CompleteAssetFamilyPackageTests(unittest.TestCase):
                 with patch.object(window, "_notify"), patch(
                         "studio.workbench.window.QMessageBox.critical") as critical, \
                         patch(
-                            "studio.workbench.window.load_asset_family",
+                            "studio.workbench.window_model_io.load_asset_family",
                             side_effect=fail_destination):
                     exported = window._write_model_files(
                         "root", family, family.root_object,

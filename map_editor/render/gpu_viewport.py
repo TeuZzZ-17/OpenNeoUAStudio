@@ -19,7 +19,7 @@ from .map_viewport import MapViewport as SoftwareMapViewport
 from .gpu_scene import WorldScene
 from .special_scene import scene_object_styles
 from .gpu_renderer import GpuRenderer
-from .camera import ISO_PITCH, ISO_YAW, IsoCamera
+from .camera import ISO_PITCH, ISO_YAW
 from .terrain_mesh import HEIGHT_UNIT
 from ..core.ldf_model import DEFAULT_HGT
 

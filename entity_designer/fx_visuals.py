@@ -194,10 +194,6 @@ MODEL_COLOR = "#a58cf0"
 MODEL_INDEX = -2
 
 
-def state_label(state: str) -> str:
-    return dict(STATES)[state]
-
-
 def model_text(values: dict[str, str]) -> str:
     """The editable lines of every state, one blank line between states."""
 

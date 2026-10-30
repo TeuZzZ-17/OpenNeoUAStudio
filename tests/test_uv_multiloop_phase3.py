@@ -162,7 +162,7 @@ class UVPhase3Tests(unittest.TestCase):
         window = _open_memory_window(family, obj)
         try:
             with patch(
-                    "studio.workbench.window.decode_texture", return_value=image):
+                    "studio.workbench.window_uv.decode_texture", return_value=image):
                 window._update_uv_editor(0)
             self.assertIsNotNone(window.uv_editor._image)
             self.assertFalse(window.uv_editor._image.isNull())
@@ -393,7 +393,7 @@ class UVPhase3Tests(unittest.TestCase):
                 raise RuntimeError("simulated writer failure")
 
             with patch(
-                    "studio.workbench.window.apply_uv_vertex_deletion",
+                    "studio.workbench.window_uv.apply_uv_vertex_deletion",
                     fail_after_mutation):
                 window._delete_uv_vertex()
 
@@ -442,7 +442,7 @@ class UVPhase3Tests(unittest.TestCase):
         try:
             window._on_polygon_picked(0)
             key = ("root", 0, 0)
-            with patch("studio.workbench.window.QMenu", CapturingMenu):
+            with patch("studio.workbench.window_uv.QMenu", CapturingMenu):
                 window._show_uv_handle_context_menu(key, 1, window.pos())
             menu = CapturingMenu.captured
             labels = [

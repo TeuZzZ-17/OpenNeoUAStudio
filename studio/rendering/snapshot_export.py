@@ -292,7 +292,6 @@ def export_animation_atomic(
             f"memory; the export limit is {budget_mib:.0f} MiB. Reduce the "
             "image size, FPS, or duration.")
 
-    from PIL import Image
 
     frames = []
     for frame_index in range(frame_count):
