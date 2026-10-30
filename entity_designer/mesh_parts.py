@@ -76,10 +76,117 @@ class GeometryComponent:
     non_manifold_edges: int
     planar: bool
     has_volume: bool
+    # ID of the vertex-connected piece this part belongs to. Parts with the
+    # same group are baked together, so splitting never loses volume.
+    group_id: str = ""
 
 
-def split_triangle_components(parts: Iterable) -> tuple[GeometryComponent, ...]:
-    """Group faces sharing vertices, retaining every face and stable IDs."""
+def _digest(triangles) -> str:
+    canonical = sorted(tuple(sorted(t)) for t in triangles)
+    return hashlib.sha256(json.dumps(canonical, separators=(",", ":"),
+                                     allow_nan=False).encode()).hexdigest()[:16]
+
+
+def _triangle_area(triangle) -> float:
+    normal = _cross(_sub(triangle[1], triangle[0]), _sub(triangle[2], triangle[0]))
+    return math.sqrt(_dot(normal, normal)) / 2
+
+
+# A part smaller than this share of its piece's area is merged into a neighbour.
+_MIN_REGION_AREA_SHARE = 0.06
+
+
+def _convex_regions(triangles):
+    """Split one connected piece where its surface folds inwards.
+
+    Neighbouring faces stay together when the edge between them is convex or
+    flat, so an engine pod attached to a hull becomes its own part. Tiny parts
+    are merged into the neighbour that shares the longest edge with them.
+    """
+    count = len(triangles)
+    if count < 2:
+        return [list(range(count))]
+    # The sign of the enclosed volume tells which side the faces point to.
+    sign = 1.0 if sum(_dot(t[0], _cross(t[1], t[2])) for t in triangles) >= 0 else -1.0
+    normals = []
+    for t in triangles:
+        normal = _cross(_sub(t[1], t[0]), _sub(t[2], t[0]))
+        length = math.sqrt(_dot(normal, normal)) or 1.0
+        normals.append(tuple(sign*n/length for n in normal))
+    edges = {}
+    for i, t in enumerate(triangles):
+        for a, b in zip(t, t[1:] + t[:1]):
+            edges.setdefault(tuple(sorted((a, b))), []).append(i)
+    parents = list(range(count))
+
+    def root(i):
+        while parents[i] != i:
+            parents[i] = parents[parents[i]]
+            i = parents[i]
+        return i
+
+    def join(i, j):
+        a, b = root(i), root(j)
+        parents[max(a, b)] = min(a, b)
+
+    def behind(face, point, origin):
+        distance = math.dist(point, origin)
+        return distance <= 0 or _dot(normals[face], _sub(point, origin))/distance <= 0.02
+
+    for (a, b), faces in edges.items():
+        if len(faces) != 2:
+            continue
+        i, j = faces
+        far_i = [p for p in triangles[i] if p not in (a, b)]
+        far_j = [p for p in triangles[j] if p not in (a, b)]
+        if far_i and far_j and behind(i, far_j[0], a) and behind(j, far_i[0], a):
+            join(i, j)
+
+    areas = [_triangle_area(t) for t in triangles]
+    total = sum(areas) or 1.0
+    while True:
+        groups = {}
+        for i in range(count):
+            groups.setdefault(root(i), []).append(i)
+        if len(groups) < 2:
+            break
+        small = sorted((sum(areas[i] for i in faces), key)
+                       for key, faces in groups.items()
+                       if sum(areas[i] for i in faces) < _MIN_REGION_AREA_SHARE*total)
+        merged = False
+        for _area, key in small:
+            shared = {}
+            for (a, b), faces in edges.items():
+                roots = {root(f) for f in faces}
+                if key in roots:
+                    for other in roots - {key}:
+                        shared[other] = shared.get(other, 0.0) + math.dist(a, b)
+            if not shared:
+                # Only a corner touches the rest: still not worth its own part.
+                points = {p for f in groups[key] for p in triangles[f]}
+                for i in range(count):
+                    if root(i) != key and points.intersection(triangles[i]):
+                        shared.setdefault(root(i), 0.0)
+            if shared:
+                other = max(shared, key=lambda value: (shared[value], -value))
+                join(key, other)
+                merged = True
+                break
+        if not merged:
+            break
+    groups = {}
+    for i in range(count):
+        groups.setdefault(root(i), []).append(i)
+    return list(groups.values())
+
+
+def split_triangle_components(parts: Iterable, *,
+                              split_regions: bool = False) -> tuple[GeometryComponent, ...]:
+    """Group faces sharing vertices, retaining every face and stable IDs.
+
+    With ``split_regions`` every connected piece is further divided at its
+    concave edges. A piece that stays whole keeps the ID it has without it.
+    """
     components = []
     for owner, source in parts:
         triangles = [tuple(_point(p) for p in t) for t in source]
@@ -104,21 +211,24 @@ def split_triangle_components(parts: Iterable) -> tuple[GeometryComponent, ...]:
         groups = {}
         for i, triangle in enumerate(triangles):
             groups.setdefault(root(i), []).append(triangle)
-        for group in groups.values():
-            points = sorted(set(p for t in group for p in t))
-            tolerance = max(1e-10, _extent(points)*1e-7)
-            plane = _plane(points, tolerance)
-            planar = plane is None or all(
-                abs(_dot(_sub(p, plane[0]), plane[1])) <= tolerance
-                for p in points)
-            counts = _edges(group)
-            canonical = sorted(tuple(sorted(t)) for t in group)
-            digest = hashlib.sha256(json.dumps(canonical, separators=(",", ":"),
-                                               allow_nan=False).encode()).hexdigest()[:16]
-            components.append(GeometryComponent(
-                str(owner), digest, tuple(group),
-                sum(len(e) == 1 for e in counts.values()),
-                sum(len(e) > 2 for e in counts.values()), planar, not planar))
+        for piece in groups.values():
+            group_id = _digest(piece)
+            regions = ([[piece[i] for i in region]
+                        for region in _convex_regions(piece)]
+                       if split_regions else [piece])
+            for group in regions:
+                points = sorted(set(p for t in group for p in t))
+                tolerance = max(1e-10, _extent(points)*1e-7)
+                plane = _plane(points, tolerance)
+                planar = plane is None or all(
+                    abs(_dot(_sub(p, plane[0]), plane[1])) <= tolerance
+                    for p in points)
+                counts = _edges(group)
+                components.append(GeometryComponent(
+                    str(owner), _digest(group), tuple(group),
+                    sum(len(e) == 1 for e in counts.values()),
+                    sum(len(e) > 2 for e in counts.values()), planar, not planar,
+                    group_id))
     return tuple(sorted(components, key=lambda c: (c.owner, c.component_id)))
 
 

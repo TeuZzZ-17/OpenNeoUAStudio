@@ -229,7 +229,8 @@ class CollisionViewport(FxPreviewViewportMixin, AssetViewport):
     """
 
     spherePicked = Signal(int)
-    shapeComponentPicked = Signal(str, bool)
+    # Emits the picked hull index and whether Ctrl extends the selection.
+    shapeComponentPicked = Signal(object, bool)
     shapeDeselectRequested = Signal()
     sphereToggleRequested = Signal(int)
     sphereBoxSelectionRequested = Signal(object, bool)
@@ -280,6 +281,8 @@ class CollisionViewport(FxPreviewViewportMixin, AssetViewport):
         self._shape_selected_indices = set()
         self._shape_press_pos = None
         self._geometry_component_preview: tuple | None = None
+        self._geometry_component_highlight: tuple | None = None
+        self._geometry_component_excluded: tuple | None = None
         self._ground_alignment_available = True
         self._ground_alignment_authored = False
         self._ground_alignment_source_loaded = False
@@ -728,6 +731,12 @@ class CollisionViewport(FxPreviewViewportMixin, AssetViewport):
         self.update()
 
     def _hit_shape_component(self, position):
+        index = self._hit_shape_hull(position)
+        if index is None:
+            return None
+        return self._collision_shape.hulls[index].source_component or f"@hull:{index}"
+
+    def _hit_shape_hull(self, position):
         if self._collision_shape is None:
             return None
         hits = []
@@ -746,14 +755,23 @@ class CollisionViewport(FxPreviewViewportMixin, AssetViewport):
                     hits.append((depth, index))
         if not hits:
             return None
-        index = min(hits)[1]
-        return self._collision_shape.hulls[index].source_component or f"@hull:{index}"
+        return min(hits)[1]
 
-    def set_geometry_component_preview(self, triangles) -> None:
-        self._geometry_component_preview = (
-            tuple(tuple(tuple(point) for point in triangle)
-                  for triangle in triangles)
-            if triangles else None)
+    def set_geometry_component_preview(
+            self, triangles, highlighted=None, excluded=None) -> None:
+        """Show the geometry the next generation uses.
+
+        ``triangles`` are the ticked components, ``highlighted`` the ticked
+        rows picked in the list and ``excluded`` the picked unticked rows.
+        """
+
+        def frozen(values):
+            return (tuple(tuple(tuple(point) for point in triangle)
+                          for triangle in values) if values else None)
+
+        self._geometry_component_preview = frozen(triangles)
+        self._geometry_component_highlight = frozen(highlighted)
+        self._geometry_component_excluded = frozen(excluded)
         self.update()
 
     def set_ground_alignment(
@@ -1653,7 +1671,8 @@ class CollisionViewport(FxPreviewViewportMixin, AssetViewport):
                        key=lambda pair: pair[0] in self._shape_selected_indices)
         for index, hull in hulls:
             selected = index in self._shape_selected_indices
-            if not hull.enabled:
+            # A switched-off part is drawn only while picked in the list.
+            if not hull.enabled and not selected:
                 continue
             edges = set()
             for a, b, c in hull.faces:
@@ -1676,30 +1695,40 @@ class CollisionViewport(FxPreviewViewportMixin, AssetViewport):
                     second_local[2]))
                 if first is not None and second is not None:
                     lines.append((first, second))
-            pens = [QPen(QColor(245, 55, 65) if selected
-                         else QColor(70, 230, 225), 1.8)]
-            for pen in pens:
-                painter.setPen(pen)
-                for first, second in lines:
-                    painter.drawLine(first, second)
+            pen = QPen(QColor(245, 55, 65) if selected
+                       else QColor(70, 230, 225), 1.8)
+            if not hull.enabled:
+                pen = QPen(QColor(150, 150, 160), 1.8)
+                pen.setStyle(Qt.PenStyle.DashLine)
+            painter.setPen(pen)
+            for first, second in lines:
+                painter.drawLine(first, second)
         painter.restore()
 
     def _draw_geometry_component_preview(self, painter: QPainter) -> None:
-        if not self._geometry_component_preview:
+        excluded_pen = QPen(QColor(150, 150, 160), 2.2)
+        excluded_pen.setStyle(Qt.PenStyle.DashLine)
+        layers = (
+            (self._geometry_component_preview, QPen(QColor(255, 255, 255), 1.6)),
+            (self._geometry_component_excluded, excluded_pen),
+            (self._geometry_component_highlight, QPen(QColor(245, 55, 65), 3.0)),
+        )
+        if not any(triangles for triangles, _pen in layers):
             return
         painter.save()
         painter.setRenderHint(QPainter.RenderHint.Antialiasing, False)
-        painter.setPen(QPen(QColor(255, 255, 255), 3.8))
-        for triangle in self._geometry_component_preview:
-            projected = [
-                self._project_visible_world(self._preview_point(point))
-                for point in triangle
-            ]
-            for index in range(3):
-                first = projected[index]
-                second = projected[(index + 1) % 3]
-                if first is not None and second is not None:
-                    painter.drawLine(first, second)
+        for triangles, pen in layers:
+            painter.setPen(pen)
+            for triangle in triangles or ():
+                projected = [
+                    self._project_visible_world(self._preview_point(point))
+                    for point in triangle
+                ]
+                for index in range(3):
+                    first = projected[index]
+                    second = projected[(index + 1) % 3]
+                    if first is not None and second is not None:
+                        painter.drawLine(first, second)
         painter.restore()
 
     def _paint_viewport(self, painter: QPainter) -> None:
@@ -1847,7 +1876,7 @@ class CollisionViewport(FxPreviewViewportMixin, AssetViewport):
             self._shape_press_pos = None
             super().mouseReleaseEvent(event)
             if abs(delta.x()) <= 4.0 and abs(delta.y()) <= 4.0:
-                key = self._hit_shape_component(event.position())
+                key = self._hit_shape_hull(event.position())
                 if key is not None:
                     self.shapeComponentPicked.emit(
                         key, bool(event.modifiers() & Qt.KeyboardModifier.ControlModifier))
@@ -1997,7 +2026,7 @@ class CollisionViewport(FxPreviewViewportMixin, AssetViewport):
                 return
             if self._collision_shape_overlay_visible:
                 self._shape_press_pos = None
-                key = self._hit_shape_component(event.position())
+                key = self._hit_shape_hull(event.position())
                 if key is None:
                     self.shapeDeselectRequested.emit()
                 else:

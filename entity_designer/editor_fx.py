@@ -189,6 +189,33 @@ class _FxPreviewMixin:
 
         return self.project.name
 
+    def wireframe_exported(self, path: Path) -> str:
+        """Point the definition's ``wireframe`` to a newly exported file.
+
+        The engine reads the value as a path inside Data, so a file saved
+        elsewhere cannot be referenced and the script value stays as it is.
+        """
+
+        from entity_designer.script_model import _data_root_for_path
+
+        data_root = _data_root_for_path(
+            self._active_script_path, self._active_base_path, path)
+        try:
+            value = path.resolve().relative_to(data_root.resolve()).as_posix()
+        except (AttributeError, ValueError):
+            return (f"Wireframe exported to {path}. It is outside the game Data "
+                    "folder, so the script wireframe was not changed.")
+        if any(character.isspace() for character in value):
+            return (f"Wireframe exported to {path}. Its path has spaces, so the "
+                    "script wireframe was not changed.")
+        if value != self.project.wireframe:
+            self._push_undo()
+            self.project.wireframe = value
+            self._set_modified()
+            self._sync_all()
+        return (f"Wireframe exported: wireframe = {value}. Overwrite, Apply to "
+                "Script or Copy writes it into the script.")
+
     def _sync_wireframe_current(self, text: str, block: ScriptBlock) -> None:
         """Give the Wireframe tab the file named by ``wireframe =`` of the loaded definition."""
 

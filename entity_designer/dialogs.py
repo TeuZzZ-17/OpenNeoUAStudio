@@ -26,7 +26,9 @@ from PySide6.QtWidgets import (
 )
 
 from entity_designer.script_model import (
+    _data_root_for_path,
     _resolve_patch_target_block,
+    _SCRIPT_TAB_ICON,
     apply_editable_overwrite_preview,
     build_editable_overwrite_preview,
     CollisionProject,
@@ -42,6 +44,7 @@ from entity_designer.script_model import (
     WEAPON,
     write_script_file,
 )
+from entity_designer.type_icons import ensure_font_key
 
 class ImportCollisionDialog(QDialog):
     def __init__(self, parent, path: Path, text: str) -> None:
@@ -479,6 +482,12 @@ class ApplyScriptDialog(QDialog):
                 return
         path = Path(self.path_edit.text())
         try:
+            self._write_type_icon_key(path)
+        except (OSError, ValueError) as exc:
+            QMessageBox.critical(
+                self, "Write failed", f"No file was modified.\n\n{exc}")
+            return
+        try:
             write_script_file(
                 path, self.updated_text,
                 self._source_encoding, self._source_bom)
@@ -488,3 +497,26 @@ class ApplyScriptDialog(QDialog):
                 f"No further file was modified.\n\n{exc}")
             return
         self.accept()
+
+    def _write_type_icon_key(self, path: Path) -> None:
+        """Add a new type_icon symbol to TYPE_NS.FON before the script uses it.
+
+        Written first: an unused symbol in the font is harmless, a script
+        symbol missing from the font shows a wrong icon.
+        """
+
+        project = self.project
+        if (project.target_category != VEHICLE or not project.type_icon
+                or project.type_icon_cell is None
+                or "vehicle" not in self.kind_combo.currentText()):
+            return
+        if (self._editable_overwrite
+                and _SCRIPT_TAB_ICON not in self.applied_groups):
+            return
+        data_root = _data_root_for_path(path)
+        if data_root is None:
+            raise ValueError(
+                "The script is not inside a game Data folder, so "
+                "TYPE_NS.FON cannot receive the new type_icon symbol.")
+        ensure_font_key(data_root, project.type_icon,
+                        project.type_icon_cell, project.name)
