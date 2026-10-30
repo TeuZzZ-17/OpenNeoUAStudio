@@ -215,3 +215,11 @@ def test_collision_shape_component_uses_open_and_closed_hand_cursors(window):
     previous_tracking = viewport._shape_cursor_mouse_tracking_previous
     viewport.set_collision_shape_overlay_visible(False)
     assert viewport.hasMouseTracking() == previous_tracking
+
+
+def test_a_loaded_shape_starts_with_no_part_highlighted(window):
+    # Nothing is red until the user picks a row or a part.
+    assert window.viewport._shape_selected_indices == set()
+    assert window.collision_geometry_widget.tree.selectedItems() == []
+    _select_rows_with_qtest(window.collision_geometry_widget, [1])
+    assert window.viewport._shape_selected_indices == {1}

@@ -18,7 +18,9 @@ from entity_designer.script_model import (
     _SCRIPT_TAB_FIRE,
     _SCRIPT_TAB_FIRE_AREA,
     _SCRIPT_TAB_GUN,
+    _SCRIPT_TAB_ICON,
     _SCRIPT_TAB_ORDER,
+    _SCRIPT_TAB_WIREFRAME,
     CollisionProject,
     CollisionScriptError,
     gun_point_families_in_block,
@@ -32,6 +34,8 @@ from entity_designer.script_model import (
     import_gun_points_block,
     import_overeof_block,
     import_turret_limits,
+    import_type_icon_block,
+    import_wireframe_block,
     OPENNEOUA,
     read_script_file,
     VEHICLE,
@@ -194,16 +198,21 @@ class _TabBaselineMixin:
                 authored_number(area.dead_zone),
                 authored_number(area.max_inclination),
             )
+        if group == _SCRIPT_TAB_ICON:
+            return (int(project.type_icon),)
+        if group == _SCRIPT_TAB_WIREFRAME:
+            return (project.wireframe.replace("\\", "/").strip(),)
         raise ValueError(group)
 
     def _changed_script_tabs(self) -> set[str]:
         """Return tabs whose script-authored state differs from the source."""
 
         baseline = self._baseline_project()
-        groups = {_SCRIPT_TAB_COLLISION}
+        groups = {_SCRIPT_TAB_COLLISION, _SCRIPT_TAB_WIREFRAME}
         if self.project.target_category == VEHICLE:
             groups.update((
-                _SCRIPT_TAB_FIRE, _SCRIPT_TAB_GUN, _SCRIPT_TAB_COCKPIT, _SCRIPT_TAB_BRIEFING))
+                _SCRIPT_TAB_FIRE, _SCRIPT_TAB_GUN, _SCRIPT_TAB_COCKPIT,
+                _SCRIPT_TAB_BRIEFING, _SCRIPT_TAB_ICON))
         else:
             groups.add(_SCRIPT_TAB_FIRE_AREA)
         return {
@@ -273,6 +282,9 @@ class _TabBaselineMixin:
                         text, block)
                     (baseline.briefing_xyz_enabled, baseline.briefing_x,
                      baseline.briefing_y, baseline.briefing_z) = import_briefing_xyz_block(text, block)
+                if _SCRIPT_TAB_ICON in groups:
+                    baseline.type_icon = import_type_icon_block(text, block)
+                    baseline.type_icon_cell = self.project.type_icon_cell
                 if _SCRIPT_TAB_COCKPIT in groups:
                     (baseline.cockpit_camera_enabled,
                      baseline.cockpit_camera_offset_x,
@@ -321,6 +333,8 @@ class _TabBaselineMixin:
                     baseline.cockpit_camera_offset_y,
                     baseline.cockpit_camera_offset_z,
                 )
+            if _SCRIPT_TAB_WIREFRAME in groups:
+                baseline.wireframe = import_wireframe_block(text, block)
             if (baseline.target_category == WEAPON
                     and _SCRIPT_TAB_FIRE_AREA in groups):
                 baseline.fire_area = import_fire_area_block(text, block)
@@ -390,6 +404,10 @@ class _TabBaselineMixin:
             )
         if tab_index == self.fire_area_tab_index:
             return (project.fire_area,)
+        if tab_index == self.icon_tab_index:
+            return (project.type_icon, project.type_icon_cell)
+        if tab_index == self.wireframe_tab_index:
+            return (project.wireframe,)
         return ()
 
     def _current_tab_has_changes(self) -> bool:
@@ -488,6 +506,11 @@ class _TabBaselineMixin:
                 baseline.cockpit_camera_offset_z)
         elif tab_index == self.fire_area_tab_index:
             self.project.fire_area = baseline.fire_area
+        elif tab_index == self.icon_tab_index:
+            self.project.type_icon = baseline.type_icon
+            self.project.type_icon_cell = baseline.type_icon_cell
+        elif tab_index == self.wireframe_tab_index:
+            self.project.wireframe = baseline.wireframe
 
         self._set_modified(
             self.project.snapshot() != self._tab_reset_baseline)

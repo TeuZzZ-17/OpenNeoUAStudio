@@ -94,6 +94,8 @@ from entity_designer.script_model import (
     import_cockpit_camera_block,
     import_collision_block,
     import_fire_area_block,
+    import_type_icon_block,
+    import_wireframe_block,
     import_fire_points_block,
     import_gun_points_block,
     import_overeof_block,
@@ -806,6 +808,14 @@ class CollisionEditorWindow(
         self.wireframe_panel = WireframePanel(self.viewport, self)
         self.wireframe_tab_index = self.properties_tabs.addTab(
             self.wireframe_panel, TAB_TITLE)
+        # Icon Selector: the font page replaces the viewport while the tab is open.
+        from entity_designer.icon_selector_panel import (
+            TAB_TITLE as ICON_TAB_TITLE, IconSelectorControls)
+        self.icon_tab = IconSelectorControls(self)
+        self.icon_tab_index = self.properties_tabs.addTab(
+            self.icon_tab, ICON_TAB_TITLE)
+        self.viewport_layout.addWidget(self.icon_tab.view, 0, 0)
+        self.icon_tab.view.hide()
         self.fire_area_tab = self._build_fire_area_tab()
         self.fire_area_tab_index = self.properties_tabs.addTab(
             self.fire_area_tab, "Fire Area")
@@ -850,12 +860,18 @@ class CollisionEditorWindow(
                 "as labelled in the list. Camera shake (shk_*) is not shown."),
             self.wireframe_panel: (
                 VANILLA, "The wireframe is the vanilla SKLT file named by the "
-                "wireframe key. Export writes only that file: the script must "
-                "still reference it."),
+                "wireframe key. An exported file inside Data becomes the new "
+                "wireframe value, written by Overwrite, Apply to Script and Copy."),
             self.fire_area_tab: (
                 COMPAT_OPENNEOUA, "ai_fire_trigger_* of a weapon are read "
                 "only by OpenNeoUA, and only by the AI: they decide where "
                 "it opens fire. Vanilla ignores them."),
+            self.icon_tab: (
+                MIXED, "type_icon is vanilla. New symbols are one byte in "
+                "TYPE_NS.FON, as vanilla reads them. Plain ASCII symbols work "
+                "in vanilla from any script; other symbols are written as "
+                "U+XXXX, which only OpenNeoUA reads. Weapons can browse the "
+                "page but get no icon."),
         }
         self.properties_tab_strip = PaletteTabStrip.install(
             self.properties_tabs, markers={
@@ -2212,7 +2228,7 @@ class CollisionEditorWindow(
                 and self.properties_tabs.currentIndex()
                 not in (self.collision_tab_index, self.collision_shape_tab_index,
                         self.fx_tab_index, self.wireframe_tab_index,
-                        self.fire_area_tab_index)):
+                        self.icon_tab_index, self.fire_area_tab_index)):
             self.properties_tabs.setCurrentIndex(self.collision_tab_index)
         for index in (
                 self.ground_tab_index,
@@ -2295,7 +2311,9 @@ class CollisionEditorWindow(
         shape_tab_active = (
             self.properties_tabs.currentIndex()
             == self.collision_shape_tab_index)
-        briefing_active = self.properties_tabs.currentIndex() == self.briefing_tab_index
+        # Briefing and Icon Selector pages replace the viewport: nothing to move.
+        briefing_active = self.properties_tabs.currentIndex() in (
+            self.briefing_tab_index, self.icon_tab_index)
         self.transform_box.setVisible(
             not shape_tab_active and not briefing_active
             and self.properties_tabs.currentIndex() != self.ground_tab_index
@@ -2742,6 +2760,7 @@ class CollisionEditorWindow(
         self.briefing_tab.sync()
         if self.briefing_preview.isVisible():
             self.briefing_preview.refresh()
+        self.icon_tab.sync()
 
     def _validate_for_output(self) -> bool:
         errors, warnings = validate_project(
@@ -2813,6 +2832,11 @@ class CollisionEditorWindow(
         self.project.fire_area = imported_fire_area
         self.project.target_category = (
             WEAPON if "weapon" in block.kind else VEHICLE)
+        self.project.type_icon = (
+            import_type_icon_block(text, block)
+            if self.project.target_category == VEHICLE else 0)
+        self.project.type_icon_cell = None
+        self.project.wireframe = import_wireframe_block(text, block)
         self.project.overeof_enabled = (
             self.project.target_category == VEHICLE and overeof_enabled)
         self.project.overeof = (

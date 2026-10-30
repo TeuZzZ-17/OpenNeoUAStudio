@@ -2796,7 +2796,7 @@ class CollisionEditorTests(unittest.TestCase):
             ["Collision Spheres", "Collision Shape", "Ground Alignment",
              "Fire Points", "Gun Points", "Cockpit View",
              "Briefing Model Settings", "Visuals && FX", "Wireframe Generator",
-             "Fire Area"])
+             "Icon Selector", "Fire Area"])
         self.assertIs(
             window.ground_alignment_box.parentWidget(), window.ground_tab)
         self.assertIs(window.spheres_box.parentWidget(), window.collision_tab)
@@ -2847,7 +2847,7 @@ class CollisionEditorTests(unittest.TestCase):
                          ["Collision Spheres", "Collision Shape", "Ground Alignment",
              "Fire Points", "Gun Points", "Cockpit View",
              "Briefing Model Settings", "Visuals && FX", "Wireframe Generator",
-             "Fire Area"])
+             "Icon Selector", "Fire Area"])
         self.assertGreaterEqual(strip.row_count(), 2)
         strip.buttons()[window.ground_tab_index].click()
         self.assertEqual(
