@@ -87,6 +87,10 @@ def _type_button_stylesheet(category: str) -> str:
 
 
 _GEOMETRY_COMPONENT_ROLE = int(Qt.ItemDataRole.UserRole) + 1
+# Index of one convex part in the collision shape.
+_SHAPE_HULL_ROLE = int(Qt.ItemDataRole.UserRole) + 2
+# Topology text of a component row, shown again when no shape is loaded.
+_DIAGNOSTIC_ROLE = int(Qt.ItemDataRole.UserRole) + 3
 
 
 class GeometryPartSelectionWidget(QWidget):
@@ -103,6 +107,7 @@ class GeometryPartSelectionWidget(QWidget):
         self._source_key = None
         self._shape = None
         self._shape_root = None
+        self._objects_count = 0
         self._on_component_highlight = on_component_highlight
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
@@ -186,19 +191,59 @@ class GeometryPartSelectionWidget(QWidget):
             yield item
             stack.extend(item.child(i) for i in range(item.childCount()))
 
-    def select_shape_component(self, key, additive=False) -> None:
+    @staticmethod
+    def _subtree(item):
+        stack = [item]
+        while stack:
+            row = stack.pop()
+            yield row
+            stack.extend(row.child(i) for i in range(row.childCount()))
+
+    def _hull_rows(self):
+        return [item for item in self._items()
+                if item.data(0, _SHAPE_HULL_ROLE) is not None]
+
+    def row_for_pick(self, pick):
+        """Return the row of a viewport pick: a hull index or a component key."""
+
+        if isinstance(pick, int):
+            for item in self._items():
+                if item.data(0, _SHAPE_HULL_ROLE) == pick:
+                    return item
+            if self._shape is None or not 0 <= pick < len(self._shape.hulls):
+                return None
+            pick = self._shape.hulls[pick].source_component or f"@hull:{pick}"
         for item in self._items():
-            if item.data(0, _GEOMETRY_COMPONENT_ROLE) == key:
-                self.tree.setCurrentItem(item, 0,
-                    QItemSelectionModel.SelectionFlag.Toggle if additive
-                    else QItemSelectionModel.SelectionFlag.ClearAndSelect)
-                self.tree.scrollToItem(item)
-                return
+            if item.data(0, _GEOMETRY_COMPONENT_ROLE) == pick:
+                return item
+        return None
+
+    def select_shape_component(self, pick, additive=False) -> None:
+        item = self.row_for_pick(pick)
+        if item is None:
+            return
+        self.tree.setCurrentItem(item, 0,
+            QItemSelectionModel.SelectionFlag.Toggle if additive
+            else QItemSelectionModel.SelectionFlag.ClearAndSelect)
+        self.tree.scrollToItem(item)
 
     def enabled_shape_keys(self):
         return {item.data(0, _GEOMETRY_COMPONENT_ROLE)
                 for item in self._items()
                 if item.checkState(0) == Qt.CheckState.Checked}
+
+    def hull_row_states(self) -> dict[int, bool]:
+        """Enabled state of every convex part that has its own row."""
+
+        return {item.data(0, _SHAPE_HULL_ROLE):
+                item.checkState(0) == Qt.CheckState.Checked
+                for item in self._hull_rows()}
+
+    @staticmethod
+    def _row_identity(row):
+        return (row.data(0, _GEOMETRY_COMPONENT_ROLE),
+                row.data(0, Qt.ItemDataRole.UserRole),
+                row.data(0, _SHAPE_HULL_ROLE))
 
     def set_shape(self, shape) -> None:
         if shape is self._shape:
@@ -212,13 +257,18 @@ class GeometryPartSelectionWidget(QWidget):
                                   for h in self._shape.hulls))
         self._shape = shape
         current = self.tree.currentItem()
-        current_key = ((current.data(0, _GEOMETRY_COMPONENT_ROLE),
-                        current.data(0, Qt.ItemDataRole.UserRole))
+        current_key = (self._row_identity(current)
                        if current is not None else None)
-        selected_keys = {(row.data(0, _GEOMETRY_COMPONENT_ROLE),
-                          row.data(0, Qt.ItemDataRole.UserRole))
+        selected_keys = {self._row_identity(row)
                          for row in self.tree.selectedItems()}
         blocker = QSignalBlocker(self.tree)
+        for row in self._hull_rows():
+            parent = row.parent()
+            # Keep the state the convex parts gave their component row: it
+            # is the generation selection once the parts are gone.
+            parent.setData(0, Qt.ItemDataRole.CheckStateRole,
+                           parent.checkState(0))
+            parent.removeChild(row)
         if self._shape_root is not None and not same_geometry:
             index = self.tree.indexOfTopLevelItem(self._shape_root)
             self.tree.takeTopLevelItem(index)
@@ -227,25 +277,29 @@ class GeometryPartSelectionWidget(QWidget):
             self.tree.topLevelItem(index).setHidden(False)
         for row in self._items():
             if row.data(0, _GEOMETRY_COMPONENT_ROLE) in self._components_by_key:
-                row.setHidden(False)
+                row.setText(2, row.data(0, _DIAGNOSTIC_ROLE) or "")
+                row.setToolTip(2, row.data(0, _DIAGNOSTIC_ROLE) or "")
         if shape is not None:
             by_key = {item.data(0, _GEOMETRY_COMPONENT_ROLE): item
                       for item in self._items()}
             grouped = {}
             for index, hull in enumerate(shape.hulls):
                 key = hull.source_component or f"@hull:{index}"
-                grouped.setdefault(key, []).append(hull)
+                grouped.setdefault(key, []).append((index, hull))
             for row in self._items():
                 key = row.data(0, _GEOMETRY_COMPONENT_ROLE)
-                if key in self._components_by_key:
-                    # An old export may have permanently omitted this component's hulls.
-                    row.setHidden(key not in grouped)
+                if key in self._components_by_key and key not in grouped:
+                    row.setText(2, "no collision part")
+                    row.setToolTip(
+                        2, "The current shape has no convex part for this "
+                        "geometry: it was not selected, or a neighbouring "
+                        "part already covers it.")
             if not any(key in self._components_by_key for key in grouped):
                 # Old files have no source mapping: expose their actual hulls.
                 for index in range(self.tree.topLevelItemCount()):
                     item = self.tree.topLevelItem(index)
                     item.setHidden(item is not self._shape_root)
-            for key, hulls in grouped.items():
+            for key, entries in grouped.items():
                 item = by_key.get(key)
                 if item is None:
                     if self._shape_root is None:
@@ -266,23 +320,44 @@ class GeometryPartSelectionWidget(QWidget):
                         item.setText(
                             0, f"Component {self._shape_root.childCount()}")
                     item.setData(0, _GEOMETRY_COMPONENT_ROLE, key)
-                    item.setFlags(item.flags() | Qt.ItemFlag.ItemIsUserCheckable)
-                    item.setText(1, str(sum(len(h.faces) for h in hulls)))
-                    item.setText(2, f"{len(hulls)} convex parts")
-                item.setCheckState(0, Qt.CheckState.Checked if any(
-                    hull.enabled for hull in hulls) else Qt.CheckState.Unchecked)
+                    item.setFlags(item.flags() | Qt.ItemFlag.ItemIsUserCheckable
+                                  | Qt.ItemFlag.ItemIsAutoTristate)
+                    item.setText(1, str(sum(len(h.faces) for _, h in entries)))
+                item.setText(2, f"{len(entries)} convex part"
+                             + ("s" if len(entries) != 1 else ""))
+                item.setToolTip(2, item.text(2))
+                if len(entries) == 1:
+                    item.setCheckState(0, Qt.CheckState.Checked
+                                       if entries[0][1].enabled
+                                       else Qt.CheckState.Unchecked)
+                    continue
+                # Several convex parts: each one can be switched on its own.
+                for number, (index, hull) in enumerate(entries, 1):
+                    child = QTreeWidgetItem(item)
+                    child.setText(0, f"Convex part {number}")
+                    child.setText(1, str(len(hull.faces)))
+                    child.setData(0, _SHAPE_HULL_ROLE, index)
+                    child.setFlags(
+                        child.flags() | Qt.ItemFlag.ItemIsUserCheckable)
+                    child.setCheckState(0, Qt.CheckState.Checked
+                                        if hull.enabled
+                                        else Qt.CheckState.Unchecked)
             self.tree.expandAll()
             for row in self._items():
-                key = (row.data(0, _GEOMETRY_COMPONENT_ROLE),
-                       row.data(0, Qt.ItemDataRole.UserRole))
+                key = self._row_identity(row)
                 row.setSelected(key in selected_keys)
                 if key == current_key:
                     self.tree.setCurrentItem(row, 0, QItemSelectionModel.SelectionFlag.NoUpdate)
             if not had_shape and self._shape_root is not None and self.tree.currentItem() is None:
-                self.tree.setCurrentItem(self._shape_root.child(0))
+                self.tree.setCurrentItem(
+                    self._shape_root.child(0), 0,
+                    QItemSelectionModel.SelectionFlag.NoUpdate)
             self.summary_label.setText(
                 f"{len(grouped)} shape components; "
-                f"{sum(h.enabled for h in shape.hulls)} active convex parts.")
+                f"{sum(h.enabled for h in shape.hulls)} of "
+                f"{len(shape.hulls)} convex parts active.")
+        else:
+            self._update_summary()
         del blocker
         self._update_component_highlight(self.tree.currentItem(), None)
 
@@ -326,46 +401,70 @@ class GeometryPartSelectionWidget(QWidget):
                     | Qt.ItemFlag.ItemIsAutoTristate)
                 by_path[owner] = item
 
-        components_by_owner = {}
+        pieces_by_owner = {}
         for component in self._components:
-            components_by_owner.setdefault(component.owner, []).append(
+            pieces_by_owner.setdefault(component.owner, {}).setdefault(
+                component.group_id or component.component_id, []).append(
                 component)
-        for owner, owner_components in components_by_owner.items():
+        for owner, pieces in pieces_by_owner.items():
             owner_item = by_path.get(owner)
             if owner_item is None:
                 continue
             owner_item.setText(
                 1, str(sum(len(component.triangles)
-                           for component in owner_components)))
-            for index, component in enumerate(owner_components, 1):
-                key = _geometry_component_key(component)
-                child = QTreeWidgetItem(owner_item)
-                child.setText(0, f"Component {index}")
-                child.setText(1, str(len(component.triangles)))
-                diagnostic = _geometry_component_diagnostic(component)
-                child.setText(2, diagnostic)
-                child.setData(0, _GEOMETRY_COMPONENT_ROLE, key)
-                points = [
-                    point for triangle in component.triangles
-                    for point in triangle
-                ]
-                if points:
-                    axes = ("X", "Y", "Z")
-                    bounds = "\n".join(
-                        f"{axes[axis]}: "
-                        f"{min(point[axis] for point in points):.3f} … "
-                        f"{max(point[axis] for point in points):.3f}"
-                        for axis in range(3))
-                    child.setToolTip(
-                        0, "Model-local bounds before visual scale and "
-                        f"rotation:\n{bounds}")
-                child.setToolTip(2, diagnostic)
-                child.setFlags(
-                    child.flags() | Qt.ItemFlag.ItemIsUserCheckable)
-                child.setCheckState(
-                    0, Qt.CheckState.Checked if (
-                        not preserve or key in selected_keys)
-                    else Qt.CheckState.Unchecked)
+                           for parts in pieces.values()
+                           for component in parts)))
+            for index, (_piece, parts) in enumerate(sorted(pieces.items()), 1):
+                parent = owner_item
+                if len(parts) > 1:
+                    # One connected piece split where it folds inwards.
+                    parent = QTreeWidgetItem(owner_item)
+                    parent.setText(0, f"Component {index}")
+                    parent.setText(
+                        1, str(sum(len(part.triangles) for part in parts)))
+                    parent.setText(2, f"{len(parts)} parts")
+                    parent.setToolTip(
+                        2, "One connected piece, split where its surface "
+                        "folds inwards. Parts of the same piece are baked "
+                        "together.")
+                    parent.setFlags(
+                        parent.flags() | Qt.ItemFlag.ItemIsUserCheckable
+                        | Qt.ItemFlag.ItemIsAutoTristate)
+                    parts = sorted(parts, key=lambda part: (
+                        -len(part.triangles), part.component_id))
+                for number, component in enumerate(parts, 1):
+                    key = _geometry_component_key(component)
+                    child = QTreeWidgetItem(parent)
+                    child.setText(0, f"Component {index}" if parent is owner_item
+                                  else f"Part {number}")
+                    child.setText(1, str(len(component.triangles)))
+                    diagnostic = _geometry_component_diagnostic(component)
+                    child.setText(2, diagnostic)
+                    child.setData(0, _DIAGNOSTIC_ROLE, diagnostic)
+                    child.setData(0, _GEOMETRY_COMPONENT_ROLE, key)
+                    points = [
+                        point for triangle in component.triangles
+                        for point in triangle
+                    ]
+                    if points:
+                        axes = ("X", "Y", "Z")
+                        bounds = "\n".join(
+                            f"{axes[axis]}: "
+                            f"{min(point[axis] for point in points):.3f} … "
+                            f"{max(point[axis] for point in points):.3f}"
+                            for axis in range(3))
+                        child.setToolTip(
+                            0, "Model-local bounds before visual scale and "
+                            f"rotation:\n{bounds}")
+                    child.setToolTip(2, diagnostic)
+                    # Tristate only matters once a shape adds convex parts below.
+                    child.setFlags(
+                        child.flags() | Qt.ItemFlag.ItemIsUserCheckable
+                        | Qt.ItemFlag.ItemIsAutoTristate)
+                    child.setCheckState(
+                        0, Qt.CheckState.Checked if (
+                            not preserve or key in selected_keys)
+                        else Qt.CheckState.Unchecked)
 
         if not self._components:
             for owner, item in by_path.items():
@@ -376,28 +475,32 @@ class GeometryPartSelectionWidget(QWidget):
         self.tree.expandAll()
         first = self.tree.topLevelItem(0)
         if first is not None:
-            self.tree.setCurrentItem(first)
+            # Current for the keyboard, but not selected: a newly loaded unit
+            # starts with nothing highlighted until the user picks a row.
+            self.tree.setCurrentItem(
+                first, 0, QItemSelectionModel.SelectionFlag.NoUpdate)
         del blocker
-        self.summary_label.setText(
-            "No collision triangles in the selected model." if not objects
-            else f"{len(objects)} geometry parts; "
-            f"{len(self.selected_components())} components selected.")
+        self._objects_count = len(objects)
+        self._update_summary()
         self._update_component_highlight(self.tree.currentItem(), None)
         self.selectionChanged.emit()
 
+    def _update_summary(self) -> None:
+        self.summary_label.setText(
+            "No collision triangles in the selected model."
+            if not self._objects_count
+            else f"{self._objects_count} geometry parts; "
+            f"{len(self.selected_components())} of {len(self._components)} "
+            "components selected.")
+
     def selected_components(self):
-        selected = []
-        stack = [self.tree.topLevelItem(index)
-                 for index in range(self.tree.topLevelItemCount())]
-        while stack:
-            item = stack.pop()
-            key = item.data(0, _GEOMETRY_COMPONENT_ROLE)
-            component = self._components_by_key.get(key)
-            if (component is not None
-                    and item.checkState(0) == Qt.CheckState.Checked):
-                selected.append(component)
-            stack.extend(
-                item.child(index) for index in range(item.childCount()))
+        # A component whose convex parts are only partly enabled still
+        # belongs to the generation selection.
+        selected = [
+            self._components_by_key[key] for item in self._items()
+            if (key := item.data(0, _GEOMETRY_COMPONENT_ROLE))
+            in self._components_by_key
+            and item.checkState(0) != Qt.CheckState.Unchecked]
         return tuple(sorted(
             selected, key=lambda value: _geometry_component_key(value)))
 
@@ -411,15 +514,10 @@ class GeometryPartSelectionWidget(QWidget):
         if components:
             return tuple(sorted({component.owner for component in components}))
         selected = []
-        stack = [self.tree.topLevelItem(index)
-                 for index in range(self.tree.topLevelItemCount())]
-        while stack:
-            item = stack.pop()
+        for item in self._items():
             owner = item.data(0, Qt.ItemDataRole.UserRole)
             if owner and item.checkState(0) == Qt.CheckState.Checked:
                 selected.append(str(owner))
-            stack.extend(
-                item.child(index) for index in range(item.childCount()))
         return tuple(sorted(selected))
 
     def _selection_changed(self, _item, _column) -> None:
@@ -429,45 +527,70 @@ class GeometryPartSelectionWidget(QWidget):
 
     def _flush_selection_changed(self) -> None:
         self._selection_timer.stop()
-        self.summary_label.setText(
-            f"{len(self._triangles_by_owner)} geometry parts; "
-            f"{len(self.selected_components())} components selected.")
+        if self._shape is None:
+            self._update_summary()
         self._update_component_highlight(self.tree.currentItem(), None)
         self.selectionChanged.emit()
 
-    def _update_component_highlight(self, item, _previous) -> None:
-        indices = set()
-        for item in self.tree.selectedItems() if self._shape is not None else ():
-            key = item.data(0, _GEOMETRY_COMPONENT_ROLE)
-            owner = item.data(0, Qt.ItemDataRole.UserRole)
-            indices.update(index for index, hull in enumerate(self._shape.hulls)
-                       if (hull.source_component or f"@hull:{index}") == key
-                       or (owner and (hull.source_component.startswith(str(owner) + "#")
-                           or hull.source_component.startswith(str(owner).rstrip("/") + "/")))
-                       or item is self._shape_root)
-        self.shapeHighlightChanged.emit(indices)
+    def _update_component_highlight(self, _item, _previous) -> None:
+        rows = [row for item in self.tree.selectedItems()
+                for row in self._subtree(item)]
         if self._shape is not None:
+            indices = set()
+            keys = set()
+            owners = set()
+            for row in rows:
+                hull_index = row.data(0, _SHAPE_HULL_ROLE)
+                if hull_index is not None:
+                    indices.add(hull_index)
+                    continue
+                key = row.data(0, _GEOMETRY_COMPONENT_ROLE)
+                owner = row.data(0, Qt.ItemDataRole.UserRole)
+                if key:
+                    keys.add(key)
+                if owner:
+                    owners.add(str(owner).rstrip("/"))
+            indices.update(
+                index for index, hull in enumerate(self._shape.hulls)
+                if (hull.source_component or f"@hull:{index}") in keys
+                or any(hull.source_component.startswith(owner + "#")
+                       or hull.source_component.startswith(owner + "/")
+                       for owner in owners))
+            self.shapeHighlightChanged.emit(indices)
             if self._on_component_highlight is not None:
                 self._on_component_highlight(None)
             return
+        self.shapeHighlightChanged.emit(set())
         if self._on_component_highlight is None:
             return
-        triangles = []
-        for item in self.tree.selectedItems():
-            key = item.data(0, _GEOMETRY_COMPONENT_ROLE)
-            component = self._components_by_key.get(key)
-            if component is not None:
-                if item.checkState(0) == Qt.CheckState.Checked:
-                    triangles.extend(component.triangles)
-                continue
-            owner = item.data(0, Qt.ItemDataRole.UserRole)
-            if owner:
-                prefix = str(owner).rstrip("/")
-                triangles.extend(triangle
-                    for path, owner_triangles in self._triangles_by_owner.items()
-                    if path == prefix or path.startswith(prefix + "/")
-                    for triangle in owner_triangles)
-        self._on_component_highlight(tuple(triangles) or None)
+        # Without a shape the viewport shows which geometry the next
+        # generation uses: ticked parts thin, rows picked in the list bold.
+        if self._components:
+            included = [triangle for component in self.selected_components()
+                        for triangle in component.triangles]
+            picked = {}
+            for row in rows:
+                key = row.data(0, _GEOMETRY_COMPONENT_ROLE)
+                if key in self._components_by_key:
+                    picked[key] = row.checkState(0) != Qt.CheckState.Unchecked
+            highlighted, excluded = [], []
+            for component in self._components:
+                ticked = picked.get(_geometry_component_key(component))
+                if ticked is not None:
+                    (highlighted if ticked else excluded).extend(
+                        component.triangles)
+        else:
+            ticked = set(self.selected_owners())
+            included = [triangle for owner in ticked
+                        for triangle in self._triangles_by_owner.get(owner, ())]
+            highlighted, excluded = [], []
+            for row in rows:
+                owner = row.data(0, Qt.ItemDataRole.UserRole)
+                target = highlighted if owner in ticked else excluded
+                target.extend(self._triangles_by_owner.get(owner, ()))
+        self._on_component_highlight(
+            tuple(included) or None, tuple(highlighted) or None,
+            tuple(excluded) or None)
 
 
 def _geometry_component_key(component) -> str:

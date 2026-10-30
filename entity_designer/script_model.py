@@ -40,6 +40,7 @@ from studio.assets.visproto import (
 )
 from studio.exchange.portable import backup_existing_file, find_existing_path
 from studio.formats.base_format import BaseObject
+from studio.formats.font_def import glyph_token, script_glyph_key
 from studio.formats.sklt import SkltModel
 
 _PUBLIC_DEPENDENCY_DEFAULTS = {
@@ -161,10 +162,16 @@ _SCRIPT_TAB_BRIEFING = "briefing"
 _SCRIPT_TAB_FIRE_AREA = "fire_area"
 
 
+_SCRIPT_TAB_ICON = "icon"
+
+
+_SCRIPT_TAB_WIREFRAME = "wireframe"
+
+
 _SCRIPT_TAB_ORDER = (
     _SCRIPT_TAB_COLLISION, _SCRIPT_TAB_FIRE,
     _SCRIPT_TAB_GUN, _SCRIPT_TAB_COCKPIT, _SCRIPT_TAB_BRIEFING,
-    _SCRIPT_TAB_FIRE_AREA,
+    _SCRIPT_TAB_ICON, _SCRIPT_TAB_WIREFRAME, _SCRIPT_TAB_FIRE_AREA,
 )
 
 
@@ -175,11 +182,14 @@ _SCRIPT_TAB_LABELS = {
     _SCRIPT_TAB_COCKPIT: "Cockpit View",
     _SCRIPT_TAB_BRIEFING: "Briefing Model Settings",
     _SCRIPT_TAB_FIRE_AREA: "Fire Area",
+    _SCRIPT_TAB_ICON: "Icon Selector",
+    _SCRIPT_TAB_WIREFRAME: "Wireframe Generator",
 }
 
 
 # Tabs a weapon definition can carry; every other tab belongs to vehicles.
-_WEAPON_TAB_GROUPS = (_SCRIPT_TAB_COLLISION, _SCRIPT_TAB_FIRE_AREA)
+_WEAPON_TAB_GROUPS = (
+    _SCRIPT_TAB_COLLISION, _SCRIPT_TAB_WIREFRAME, _SCRIPT_TAB_FIRE_AREA)
 
 
 def _tab_applies(kind: str, group: str) -> bool:
@@ -191,7 +201,7 @@ def _tab_applies(kind: str, group: str) -> bool:
 
 
 _SCRIPT_TAB_MARKER_RE = re.compile(
-    r"^\s*;\s*\[Tab:\s*(Collision|Fire Points|Gun Points|Cockpit View|Fire Area|Briefing Model Settings|Briefing Model Size|Briefing Radius)\]\s*$",
+    r"^\s*;\s*\[Tab:\s*(Collision|Fire Points|Gun Points|Cockpit View|Fire Area|Briefing Model Settings|Briefing Model Size|Briefing Radius|Icon Selector|Wireframe Generator)\]\s*$",
     re.IGNORECASE,
 )
 
@@ -614,6 +624,12 @@ class CollisionProject:
     briefing_z: float = 0.0
     # Weapon-only AI fire area (ai_fire_trigger_*); immutable, so snapshots share it.
     fire_area: FireArea = field(default_factory=FireArea)
+    # Vehicle type_icon key (0 = not written). type_icon_cell is the font page
+    # cell (x, y) chosen for a key that TYPE_NS.FON does not map yet.
+    type_icon: int = 0
+    type_icon_cell: tuple[int, int] | None = None
+    # ``wireframe`` value of the definition, as written in the script.
+    wireframe: str = ""
     legacy: CollisionSphere | None = None
     compound: list[CollisionSphere] = field(default_factory=list)
     collision_shape: CollisionShape | None = None
@@ -672,6 +688,7 @@ class CollisionProject:
             self.collision_shape_warnings,
             self.sphere_isolation_active,
             self.fire_area,
+            self.type_icon, self.type_icon_cell, self.wireframe,
         )
 
     def restore(self, state: tuple) -> None:
@@ -698,7 +715,8 @@ class CollisionProject:
          self.collision_shape_owners,
          self.collision_shape_components,
          self.collision_shape_warnings,
-         self.sphere_isolation_active, self.fire_area) = state
+         self.sphere_isolation_active, self.fire_area,
+         self.type_icon, self.type_icon_cell, self.wireframe) = state
         self.gun_points = [GunPoint(*values) for values in gun_points]
         self.turret_limits = {
             values[0]: TurretLimits(*values) for values in turret_limits
@@ -1339,6 +1357,41 @@ def import_cockpit_camera_block(
     return (enabled, *offset)
 
 
+def _last_top_level_value(text: str, block: ScriptBlock, key: str) -> str:
+    value = ""
+    for _line, row_key, raw, _indent in _top_level_assignment_rows(text, block):
+        if row_key == key:
+            value = raw.split(None, 1)[0] if raw.split() else ""
+    return value
+
+
+def import_type_icon_block(text: str, block: ScriptBlock) -> int:
+    """Key of the definition's type_icon (0 when absent or invalid)."""
+
+    raw = _last_top_level_value(text, block, "type_icon")
+    return (script_glyph_key(raw) or 0) if raw else 0
+
+
+def type_icon_data_lines(project: CollisionProject) -> list[str]:
+    if project.target_category != VEHICLE or not project.type_icon:
+        return []
+    return [f"type_icon = {glyph_token(project.type_icon)}"]
+
+
+def import_wireframe_block(text: str, block: ScriptBlock) -> str:
+    return _last_top_level_value(text, block, "wireframe")
+
+
+def wireframe_data_lines(project: CollisionProject) -> list[str]:
+    value = project.wireframe.replace("\\", "/").strip()
+    if not value:
+        return []
+    if any(character.isspace() for character in value) or ";" in value:
+        raise CollisionScriptError(
+            "Il percorso del wireframe non può contenere spazi o ';'.")
+    return [f"wireframe = {value}"]
+
+
 def import_fire_area_block(text: str, block: ScriptBlock) -> FireArea:
     """Read a weapon's ai_fire_trigger_* values; the last assignment of a key wins.
 
@@ -1422,6 +1475,8 @@ _SCRIPT_TAB_KEYS = {
     _SCRIPT_TAB_GUN: set(_GUN_POINT_KEYS),
     _SCRIPT_TAB_COCKPIT: {"cockpit_camera_offset_xyz"},
     _SCRIPT_TAB_FIRE_AREA: set(FIRE_AREA_KEYS),
+    _SCRIPT_TAB_ICON: {"type_icon"},
+    _SCRIPT_TAB_WIREFRAME: {"wireframe"},
 }
 
 
@@ -1467,6 +1522,8 @@ _MANAGED_SCRIPT_FAMILIES = (
     _ManagedScriptFamily("briefing size", frozenset({"briefing_size", "briefing_xyz"})),
     _ManagedScriptFamily(
         "fire area", frozenset(FIRE_AREA_KEYS), frozenset({"fire area"})),
+    _ManagedScriptFamily("type icon", frozenset({"type_icon"})),
+    _ManagedScriptFamily("wireframe", frozenset({"wireframe"})),
     _ManagedScriptFamily(
         "turret limits", frozenset(_TURRET_LIMIT_KEY_SET),
         frozenset({"turret limits"})),
@@ -1804,6 +1861,8 @@ def collision_data_lines(project: CollisionProject) -> list[str]:
         lines.append(f"overeof = {_number(project.overeof)}")
     lines.extend(briefing_size_data_lines(project))
     lines.extend(briefing_xyz_data_lines(project))
+    lines.extend(type_icon_data_lines(project))
+    lines.extend(wireframe_data_lines(project))
     cockpit_lines = cockpit_camera_data_lines(project)
     if cockpit_lines:
         if lines:
@@ -1994,6 +2053,10 @@ def _script_tab_data_lines(
         return briefing_size_data_lines(project) + briefing_xyz_data_lines(project)
     if group == _SCRIPT_TAB_FIRE_AREA:
         return fire_area_data_lines(project)
+    if group == _SCRIPT_TAB_ICON:
+        return type_icon_data_lines(project)
+    if group == _SCRIPT_TAB_WIREFRAME:
+        return wireframe_data_lines(project)
     raise CollisionScriptError(f"Gruppo script sconosciuto: {group}")
 
 
@@ -2091,6 +2154,10 @@ def _validate_editable_tab_lines(
         import_briefing_size_block(text, block)
     elif group == _SCRIPT_TAB_FIRE_AREA:
         import_fire_area_block(text, block)
+    elif group == _SCRIPT_TAB_ICON:
+        for _line, _key, raw, _indent in _top_level_assignment_rows(text, block):
+            if script_glyph_key(raw.split(None, 1)[0] if raw.split() else "") is None:
+                raise CollisionScriptError(f"type_icon non valido: {raw}")
 
 
 def _resolve_patch_target_block(
@@ -2595,6 +2662,15 @@ def plan_script_update(
         if line.startswith("collision_shape = ")
     ]
     replace_group(shape_rows, shape_lines, "collision shape")
+    top_rows = list(_top_level_assignment_rows(text, block))
+    if "vehicle" in kind and project.type_icon:
+        replace_group(
+            [row for row in top_rows if row[1] == "type_icon"],
+            type_icon_data_lines(project), "type icon")
+    if project.wireframe:
+        replace_group(
+            [row for row in top_rows if row[1] == "wireframe"],
+            wireframe_data_lines(project), "wireframe")
     if "weapon" in kind and not project.fire_area.is_empty():
         replace_group(
             [row for row in _top_level_assignment_rows(text, block)

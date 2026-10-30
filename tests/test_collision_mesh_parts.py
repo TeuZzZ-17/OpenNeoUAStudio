@@ -63,3 +63,40 @@ def test_inconsistent_source_winding_is_oriented_for_closed_body():
             edges.setdefault(tuple(sorted((a,b))),[]).append(a<b)
     assert all(sorted(directions)==[False,True] for directions in edges.values())
 
+
+
+def box_with_tower():
+    """A 4x4x1 box with a 2x2x2 tower: one connected piece, two parts."""
+    def quad(a, b, c, d):
+        return [(a, b, c), (a, c, d)]
+    o = [(0., 0., 1.), (4., 0., 1.), (4., 4., 1.), (0., 4., 1.)]
+    i = [(1., 1., 1.), (3., 1., 1.), (3., 3., 1.), (1., 3., 1.)]
+    t = [(x, y, 3.) for x, y, _ in i]
+    b = [(x, y, 0.) for x, y, _ in o]
+    box = quad(b[0], b[3], b[2], b[1])
+    for k in range(4):
+        n = (k + 1) % 4
+        box += quad(b[k], b[n], o[n], o[k])
+        box += quad(o[k], o[n], i[n], i[k])
+    tower = quad(t[0], t[1], t[2], t[3])
+    for k in range(4):
+        n = (k + 1) % 4
+        tower += quad(i[k], i[n], t[n], t[k])
+    return box, tower
+
+
+def test_split_regions_separates_a_part_attached_through_folds():
+    box, tower = box_with_tower()
+    whole = split_triangle_components([('body', box + tower)])
+    parts = split_triangle_components([('body', box + tower)], split_regions=True)
+    assert len(whole) == 1 and len(parts) == 2
+    assert sorted(len(c.triangles) for c in parts) == [len(tower), len(box)]
+    assert {c.group_id for c in parts} == {whole[0].component_id}
+    assert sum(len(c.triangles) for c in parts) == len(box + tower)
+
+
+def test_split_regions_keeps_a_convex_piece_and_its_old_id():
+    whole = split_triangle_components([('body', tetrahedron())])
+    parts = split_triangle_components([('body', tetrahedron())], split_regions=True)
+    assert [c.component_id for c in parts] == [c.component_id for c in whole]
+    assert parts[0].group_id == parts[0].component_id

@@ -266,8 +266,9 @@ class CollisionShapeTests(unittest.TestCase):
         self.assertEqual(len(meshes), 1)
         self.assertEqual(len(meshes[0].vertices), 12)
         self.assertEqual(len(result.shape.hulls), 1)
-        self.assertTrue(result.shape.hulls[0].source_component.startswith(
-            "root/VP_RAKT5#planar-group:"))
+        # The combined hull is labelled with the source part it covers most.
+        self.assertIn(result.shape.hulls[0].source_component,
+                      {owner for owner, _triangles in parts})
         validate_hull(result.shape.hulls[0])
 
     def test_real_coacd_generates_a_valid_rakt5_shape_from_planar_components(self):
@@ -285,6 +286,38 @@ class CollisionShapeTests(unittest.TestCase):
         self.assertTrue(math.isfinite(result.metrics.sampled_surface_distance))
         for hull in result.shape.hulls:
             validate_hull(hull)
+
+    def test_parts_of_one_piece_are_baked_together_and_labelled(self):
+        from tests.test_collision_mesh_parts import box_with_tower
+
+        def box_hull(low, high):
+            vertices = tuple(
+                (x, y, z) for x in (low[0], high[0])
+                for y in (low[1], high[1]) for z in (low[2], high[2]))
+            faces = ((0, 1, 3), (0, 3, 2), (4, 6, 7), (4, 7, 5),
+                     (0, 4, 5), (0, 5, 1), (2, 3, 7), (2, 7, 6),
+                     (0, 2, 6), (0, 6, 4), (1, 5, 7), (1, 7, 3))
+            return vertices, faces
+
+        meshes = []
+        fake_coacd = types.SimpleNamespace(
+            Mesh=lambda vertices, faces: meshes.append(vertices) or object(),
+            run_coacd=lambda _mesh, **_settings: [
+                box_hull((0, 0, 0), (4, 4, 1)),
+                box_hull((1, 1, 1), (3, 3, 3))],
+            set_log_level=lambda _level: None,
+        )
+        box, tower = box_with_tower()
+        parts = [("root#component:box", box), ("root#component:tower", tower)]
+        with patch.dict(sys.modules, {"coacd": fake_coacd}):
+            result = generate_collision_shape(
+                parts, source="Tower", quality="low",
+                groups={"root#component:box": "piece",
+                        "root#component:tower": "piece"})
+        self.assertEqual(len(meshes), 1)
+        self.assertEqual(
+            [hull.source_component for hull in result.shape.hulls],
+            ["root#component:box", "root#component:tower"])
 
     def test_planar_components_without_combined_volume_are_rejected(self):
         first = (
@@ -312,6 +345,35 @@ class CollisionShapeTests(unittest.TestCase):
                     source="Flat_Components", quality="low")
 
         self.assertEqual(calls, [])
+
+    def test_component_with_several_convex_parts_lists_each_part(self):
+        window = CollisionEditorWindow()
+        self.addCleanup(lambda: (window._set_modified(False), window.close()))
+        hull = replace(_tetrahedron(), source_component="root#component:body")
+        window.project.collision_shape = CollisionShape(
+            "Model", "a" * 64, (1, 1, 1), (0, 0, 0), (hull, hull, hull),
+            quality="low")
+        window._sync_all()
+
+        widget = window.collision_geometry_widget
+        item = widget._shape_root.child(0)
+        self.assertEqual(item.text(2), "3 convex parts")
+        self.assertEqual(
+            [item.child(i).text(0) for i in range(item.childCount())],
+            ["Convex part 1", "Convex part 2", "Convex part 3"])
+        item.child(1).setCheckState(0, Qt.CheckState.Unchecked)
+        self.app.processEvents()
+        self.assertEqual(
+            [h.enabled for h in window.project.collision_shape.hulls],
+            [True, False, True])
+        self.assertEqual(item.checkState(0), Qt.CheckState.PartiallyChecked)
+        widget.select_shape_component(1)
+        self.assertIs(widget.tree.currentItem().data(
+            0, widgets_module._SHAPE_HULL_ROLE), 1)
+        item.setCheckState(0, Qt.CheckState.Unchecked)
+        self.app.processEvents()
+        self.assertFalse(any(
+            h.enabled for h in window.project.collision_shape.hulls))
 
     def test_planar_group_has_one_named_collision_component_toggle(self):
         window = CollisionEditorWindow()
@@ -691,17 +753,17 @@ class CollisionShapeTests(unittest.TestCase):
         face = ((0, 0, 0), (1, 0, 0), (0, 1, 0))
         components = (
             types.SimpleNamespace(
-                owner="root/kid[0]", component_id="body-hash",
+                owner="root/kid[0]", component_id="body-hash", group_id="",
                 triangles=(face,), boundary_edges=0,
                 non_manifold_edges=0, planar=False, has_volume=True),
             types.SimpleNamespace(
-                owner="root/kid[0]", component_id="fx-hash",
+                owner="root/kid[0]", component_id="fx-hash", group_id="",
                 triangles=(face,), boundary_edges=3,
                 non_manifold_edges=0, planar=True, has_volume=False),
         )
         previews = []
         widget = GeometryPartSelectionWidget(
-            on_component_highlight=previews.append)
+            on_component_highlight=lambda *layers: previews.append(layers))
         widget.set_geometry(
             AssetFamily(root_object=root), "root/kid[0]", components,
             {"root/kid[0]": (face,)}, source_key=("fixture", "parts"))
@@ -713,9 +775,13 @@ class CollisionShapeTests(unittest.TestCase):
         self.assertIn("no volume", fx_item.text(2))
         self.assertIn("X: 0.000", fx_item.toolTip(0))
         widget.tree.setCurrentItem(fx_item)
-        self.assertEqual(previews[-1], (face,))
+        # Ticked geometry, picked ticked rows, picked unticked rows.
+        self.assertEqual(previews[-1], ((face, face), (face,), None))
         self.assertEqual(len(widget.selected_components()), 2)
         fx_item.setCheckState(0, Qt.CheckState.Unchecked)
+        widget._flush_selection_changed()
+        # The unticked row leaves the generation preview at once.
+        self.assertEqual(previews[-1], ((face,), None, (face,)))
         selected = widget.selected_components()
         self.assertEqual(
             [component.component_id for component in selected],
@@ -731,6 +797,34 @@ class CollisionShapeTests(unittest.TestCase):
             AssetFamily(root_object=root), "root/kid[0]", components,
             {"root/kid[0]": (face,)}, source_key=("fixture", "other"))
         self.assertEqual(len(widget.selected_components()), 2)
+
+    def test_geometry_widget_nests_parts_of_one_connected_piece(self):
+        from entity_designer.mesh_parts import split_triangle_components
+        from tests.test_collision_mesh_parts import box_with_tower
+
+        box, tower = box_with_tower()
+        body = FamilyObject(BaseObject(name="Body", skeleton_name="body"),
+                            skeleton=types.SimpleNamespace(polygons=[[0, 1, 2]]),
+                            owner_path="root")
+        components = split_triangle_components(
+            [("root", box + tower)], split_regions=True)
+        previews = []
+        widget = GeometryPartSelectionWidget(
+            on_component_highlight=lambda *layers: previews.append(layers))
+        self.addCleanup(widget.close)
+        widget.set_geometry(AssetFamily(root_object=body), "root", components,
+                            {"root": tuple(box + tower)}, ("fixture", "tower"))
+        piece = widget.tree.topLevelItem(0).child(0)
+        self.assertEqual(piece.text(0), "Component 1")
+        self.assertEqual(piece.text(2), "2 parts")
+        self.assertEqual([piece.child(i).text(0) for i in range(2)],
+                         ["Part 1", "Part 2"])
+        self.assertEqual(piece.child(1).text(1), str(len(tower)))
+        piece.child(1).setCheckState(0, Qt.CheckState.Unchecked)
+        widget._flush_selection_changed()
+        self.assertEqual(len(widget.selected_components()), 1)
+        self.assertEqual(piece.checkState(0), Qt.CheckState.PartiallyChecked)
+        self.assertEqual(len(previews[-1][0]), len(box))
 
     def test_parent_sklt_highlight_includes_cached_subtree_triangles(self):
         root = FamilyObject(BaseObject(name="Set"), owner_path="root")
@@ -748,17 +842,17 @@ class CollisionShapeTests(unittest.TestCase):
         wing_triangle = ((2, 0, 0), (3, 0, 0), (2, 1, 0))
         components = (
             types.SimpleNamespace(
-                owner="root/kid[0]", component_id="body",
+                owner="root/kid[0]", component_id="body", group_id="",
                 triangles=(body_triangle,), boundary_edges=0,
                 non_manifold_edges=0, planar=False, has_volume=True),
             types.SimpleNamespace(
-                owner="root/kid[0]/kid[0]", component_id="wing",
+                owner="root/kid[0]/kid[0]", component_id="wing", group_id="",
                 triangles=(wing_triangle,), boundary_edges=0,
                 non_manifold_edges=0, planar=False, has_volume=True),
         )
         previews = []
         widget = GeometryPartSelectionWidget(
-            on_component_highlight=previews.append)
+            on_component_highlight=lambda *layers: previews.append(layers))
         self.addCleanup(widget.close)
         widget.set_geometry(
             AssetFamily(root_object=root), "root/kid[0]", components,
@@ -767,7 +861,7 @@ class CollisionShapeTests(unittest.TestCase):
             source_key=("fixture", "subtree-highlight"))
         parent_item = widget.tree.topLevelItem(0)
         widget.tree.setCurrentItem(parent_item)
-        self.assertEqual(previews[-1], (body_triangle, wing_triangle))
+        self.assertEqual(previews[-1][1], (body_triangle, wing_triangle))
 
     def test_sync_uses_cached_geometry_instead_of_reextracting_triangles(self):
         from studio.formats.sklt import SkltModel
@@ -810,7 +904,7 @@ class CollisionShapeTests(unittest.TestCase):
         window.project.legacy = CollisionSphere(LEGACY, radius=14)
         window.project.compound = [CollisionSphere(OPENNEOUA, radius=5)]
         component = types.SimpleNamespace(
-            owner="root", component_id="body", triangles=(face,),
+            owner="root", component_id="body", group_id="", triangles=(face,),
             boundary_edges=3, non_manifold_edges=0,
             planar=True, has_volume=False)
         source_key = window._current_collision_geometry_source_key()
@@ -1464,7 +1558,7 @@ class CollisionShapeTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "disabled-hull"):
                 parse_collision_shape("\n".join(lines))
 
-    def test_imported_shape_list_restores_disabled_parts_and_hides_old_missing_parts(self):
+    def test_imported_shape_list_restores_disabled_parts_and_marks_missing_parts(self):
         window = CollisionEditorWindow()
         self.addCleanup(lambda: (window._set_modified(False), window.close()))
         body = FamilyObject(BaseObject(name="Body", skeleton_name="body"),
@@ -1472,7 +1566,7 @@ class CollisionShapeTests(unittest.TestCase):
                             owner_path="root")
         triangle = ((0,0,0), (1,0,0), (0,1,0))
         components = tuple(types.SimpleNamespace(
-            owner="root", component_id=name, triangles=(triangle,),
+            owner="root", component_id=name, group_id="", triangles=(triangle,),
             boundary_edges=0, non_manifold_edges=0, planar=False, has_volume=True)
             for name in ("one", "two"))
         widget = window.collision_geometry_widget
@@ -1491,10 +1585,12 @@ class CollisionShapeTests(unittest.TestCase):
         self.assertTrue(window.project.collision_shape.hulls[1].enabled)
         window.project.collision_shape = replace(shape, hulls=(first,))
         window._sync_all()
-        self.assertTrue(row.isHidden())
+        self.assertFalse(row.isHidden())
+        self.assertEqual(row.text(2), "no collision part")
         window.project.collision_shape = None
         window._sync_all()
         self.assertFalse(row.isHidden())
+        self.assertEqual(row.text(2), "closed volume")
 
     def test_disable_shape_component_is_undoable_and_selection_does_not_enable(self):
         window = CollisionEditorWindow()
@@ -1587,7 +1683,7 @@ class CollisionShapeTests(unittest.TestCase):
         window.redo()
         self.assertTrue(window.project.collision_shape.hulls[0].enabled)
 
-    def test_shape_render_keeps_cyan_and_never_draws_disabled_parts(self):
+    def test_shape_render_keeps_cyan_and_draws_disabled_parts_only_when_picked(self):
         viewport = viewport_module.CollisionViewport()
         self.addCleanup(viewport.close)
         hull = _tetrahedron()
@@ -1616,6 +1712,12 @@ class CollisionShapeTests(unittest.TestCase):
             hulls=(hull, replace(hull, enabled=False))))
         painter.lines.clear()
         viewport.set_shape_selected_indices({1})
+        viewport._draw_collision_shape_overlay(painter)
+        # A picked switched-off part is dashed grey, so the pick stays visible.
+        self.assertEqual(painter.lines, [((70, 230, 225), 1.8)] * 6
+                         + [((150, 150, 160), 1.8)] * 6)
+        painter.lines.clear()
+        viewport.set_shape_selected_indices(set())
         viewport._draw_collision_shape_overlay(painter)
         self.assertEqual(painter.lines, [((70, 230, 225), 1.8)] * 6)
         viewport.set_collision_shape(replace(viewport._collision_shape,

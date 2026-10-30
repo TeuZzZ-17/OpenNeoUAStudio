@@ -286,15 +286,6 @@ class BriefingControls(QWidget):
         self.xyz_enabled = QCheckBox("Include briefing_xyz")
         self.xyz_enabled.toggled.connect(self._xyz_enabled)
         group_layout.addWidget(self.xyz_enabled)
-        step_label = QLabel("Arrow speed (how fast the model moves in the image)")
-        step_label.setWordWrap(True)
-        group_layout.addWidget(step_label)
-        self.xyz_step_slider = QSlider(Qt.Orientation.Horizontal)
-        self.xyz_step_slider.setRange(0, _STEP_SLIDER_MAX)
-        self.xyz_step_slider.setValue(_STEP_SLIDER_DEFAULT)
-        self.xyz_step_slider.setToolTip(
-            "Distance covered by one press of the arrow buttons: 0.01 to 10000 model units.")
-        group_layout.addWidget(self.xyz_step_slider)
         self.xyz_values = {}
         row = QHBoxLayout()
         for axis, title in (("x", "X"), ("y", "Y"), ("z", "Z")):
@@ -320,6 +311,15 @@ class BriefingControls(QWidget):
         reset.clicked.connect(self._reset_xyz)
         arrows.addWidget(reset)
         group_layout.addLayout(arrows)
+        # Arrow speed sits under the arrow buttons it controls.
+        group_layout.addWidget(QLabel("Arrow speed"))
+        self.xyz_step_slider = QSlider(Qt.Orientation.Horizontal)
+        self.xyz_step_slider.setRange(0, _STEP_SLIDER_MAX)
+        self.xyz_step_slider.setValue(_STEP_SLIDER_DEFAULT)
+        self.xyz_step_slider.setToolTip(
+            "How fast the model moves in the image: distance covered by one press "
+            "of the arrow buttons, 0.01 to 10000 model units.")
+        group_layout.addWidget(self.xyz_step_slider)
         self.mode = QComboBox()
         self.mode.addItem("Brief", "brief")
         self.mode.addItem("Debrief", "debrief")

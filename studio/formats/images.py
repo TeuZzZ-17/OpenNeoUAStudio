@@ -967,6 +967,39 @@ def _qimage_to_indices(qimage, palette: Palette) -> tuple[bytes, bool]:
     return bytes(out), warned
 
 
+def convert_png_to_new_ilbm(png_path: str | Path,
+                            out_path: str | Path) -> ConvertResult:
+    """Write an ILBM from a PNG of at most 256 colours, with its own palette.
+
+    Used when no ILBM exists to serve as a template; the palette keeps the
+    PNG colour table, or the colours in order of first appearance.
+    """
+
+    QImage = _require_qimage()
+    png_path = Path(png_path)
+    out_path = Path(out_path)
+    _require_separate_output(out_path, png_path)
+    qimage = QImage(str(png_path))
+    if qimage.isNull():
+        raise TextureConvertError(f"Could not read PNG: {png_path}")
+    if qimage.format() == QImage.Format.Format_Indexed8:
+        colors = list(qimage.colorTable())
+    else:
+        rgb = qimage.convertToFormat(QImage.Format.Format_RGB32)
+        colors = list(dict.fromkeys(
+            rgb.pixel(x, y) for y in range(rgb.height())
+            for x in range(rgb.width())))
+    if len(colors) > 256:
+        raise TextureConvertError(
+            f"{png_path.name} has {len(colors)} colours; an ILBM holds 256.")
+    palette = [((c >> 16) & 255, (c >> 8) & 255, c & 255) for c in colors]
+    pixels, _nearest = _qimage_to_indices(qimage, palette)
+    image = IlbmImage(source_name=str(png_path), kind="ILBM",
+                      width=qimage.width(), height=qimage.height(),
+                      palette=palette, pixels=pixels)
+    return write_image_as_ilbm(image, out_path, source=png_path)
+
+
 def convert_png_to_ilbm(png_path: str | Path, template_path: str | Path,
                         out_path: str | Path) -> ConvertResult:
     """Rebuild an ILBM from an edited PNG, using a template ILBM.

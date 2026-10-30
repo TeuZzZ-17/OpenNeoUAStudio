@@ -38,6 +38,8 @@ from entity_designer.script_model import (
     import_collision_block,
     import_collision_shape_reference,
     import_fire_area_block,
+    import_type_icon_block,
+    import_wireframe_block,
     import_fire_points_block,
     import_gun_points_block,
     import_overeof_block,
@@ -579,6 +581,9 @@ class _ScriptFilesMixin:
             briefing_y=import_briefing_xyz_block(text, block)[2] if target_category == VEHICLE else 0.0,
             briefing_z=import_briefing_xyz_block(text, block)[3] if target_category == VEHICLE else 0.0,
             fire_area=fire_area,
+            type_icon=(import_type_icon_block(text, block)
+                       if target_category == VEHICLE else 0),
+            wireframe=import_wireframe_block(text, block),
             legacy=legacy,
             compound=compounds,
             collision_shape=shape,
