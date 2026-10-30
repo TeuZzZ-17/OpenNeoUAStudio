@@ -9,13 +9,14 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 from PySide6.QtCore import QPoint, Qt
 from PySide6.QtTest import QTest
 from PySide6.QtWidgets import (
-    QApplication, QHeaderView, QTreeWidgetItem,
+    QApplication, QHeaderView, QProgressDialog, QTreeWidgetItem,
 )
 
 import studio.workbench.window as assembly_window_module
 from studio.rendering.asset_viewport import VIEW_MODES
 from studio.workbench.window import AssemblyWindow
 from studio.assets.visproto import parse_visproto_text
+from tests.split_source import module_source
 
 
 class _FakeSignal:
@@ -191,8 +192,7 @@ class WindowContractV5Tests(unittest.TestCase):
                 window.setbas_edit_dependencies_button.isEnabled())
             self.assertEqual(
                 window.statusBar().objectName(), "operationStatusBar")
-            source = (Path(__file__).resolve().parents[1] /
-                      "studio/workbench/window.py").read_text(encoding="utf-8")
+            source = module_source("studio/workbench/window.py")
             self.assertNotIn("Source (always read-only):", source)
             self.assertNotIn("Dry run / validate only (write no files)", source)
             self.assertNotIn(
@@ -205,7 +205,7 @@ class WindowContractV5Tests(unittest.TestCase):
             self.assertNotIn("Please wait until completion.", source)
             self.assertNotIn("runtimeLooseWaitDialog", source)
             self.assertEqual(
-                window.findChildren(assembly_window_module.QProgressDialog), [])
+                window.findChildren(QProgressDialog), [])
             self.assertFalse(hasattr(window, "import_vp_package_action"))
             self.assertEqual(
                 window.save_asset_family_action.text(), "Export BASE")
@@ -920,7 +920,7 @@ class WindowContractV5Tests(unittest.TestCase):
             window._selected_polys = {0, 1}
             window._selected_poly = 0
             with patch(
-                    "studio.workbench.window.classify_texture_assignment") as classify:
+                    "studio.workbench.window_uv.classify_texture_assignment") as classify:
                 window._load_model_texture()
             classify.assert_not_called()
             self.assertFalse(window._editing_allowed())

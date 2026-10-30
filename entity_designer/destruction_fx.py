@@ -4,7 +4,7 @@ The Visuals & FX tab previews effects and provides live script-text editing
 through the same parser. Two effect systems are read:
 
 * OpenNeoUA ``begin_fx ... end`` blocks (Chain FX). Parsing and validation
-  mirror ``ParseChainFXBlock`` in ``world/parsers.cpp``; the visual timeline
+  mirror ``ParseChainFXBlock`` in ``world/parsers_fx.cpp``; the visual timeline
   mirrors ``SpawnChainFX`` and the transient VP update in ``yw_game.cpp``.
 * Vanilla ``dest_fx = type_vehicle_x_y_z[_accel]`` lines. Each line spawns an
   FX *vehicle*; that vehicle either runs its own ``scale_fx`` animation

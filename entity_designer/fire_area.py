@@ -105,17 +105,6 @@ def shot_path(shape: str, size, muzzle: Vec3, ground_y: float = 0.0,
     return launch, (launch[0], ground_y, launch[2] + reach)
 
 
-def default_height(shape: str | None, size) -> float:
-    """Preview height of the muzzle: a dropped weapon starts one volume depth up
-    so the volume ends on the floor; a fired one starts a little above the ground."""
-
-    if shape is None or size is None:
-        return 0.0
-    if is_below(shape):
-        return float(size[1 if shape == BOX_BELOW else 2])
-    return 80.0
-
-
 def valid_size(shape: str, size) -> bool:
     """The engine's rule: three positive finite values, cone angles below 180."""
 

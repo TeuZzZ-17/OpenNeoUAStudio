@@ -9,7 +9,7 @@ the window or a splitter moves it.
 from PySide6.QtCore import (
     QEasingCurve, QEvent, QPoint, QRectF, QSignalBlocker, Qt, QTimer, QVariantAnimation,
 )
-from PySide6.QtGui import QColor, QKeySequence, QPainter, QPainterPath, QPalette, QPen
+from PySide6.QtGui import QKeySequence, QPainter, QPainterPath, QPalette, QPen
 from PySide6.QtWidgets import (
     QAbstractButton, QFrame, QHBoxLayout, QLabel, QMessageBox, QPushButton, QVBoxLayout,
 )

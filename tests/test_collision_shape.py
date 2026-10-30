@@ -18,6 +18,7 @@ from PySide6.QtWidgets import QApplication, QMessageBox
 from studio.assets.family import AssetFamily, FamilyObject
 from studio.formats.base_format import BaseObject
 import entity_designer.editor as editor_module
+import entity_designer.editor_collision_shape as editor_shape_module
 import entity_designer.script_model as script_module
 import entity_designer.viewport as viewport_module
 import entity_designer.widgets as widgets_module
@@ -824,7 +825,7 @@ class CollisionShapeTests(unittest.TestCase):
         with patch.object(
                 editor_module.QMessageBox, "question",
                 return_value=QMessageBox.StandardButton.No) as confirm, \
-                patch.object(editor_module, "QProcess") as process_type:
+                patch.object(editor_shape_module, "QProcess") as process_type:
             window.generate_collision_shape()
 
         self.assertIn("Legacy and OpenNeoUA", confirm.call_args.args[2])
@@ -1444,7 +1445,7 @@ class CollisionShapeTests(unittest.TestCase):
             window._set_modified()
             with patch.object(editor_module.QFileDialog, "getSaveFileName",
                               return_value=(str(target), "")), \
-                    patch.object(editor_module, "write_collision_shape", side_effect=OSError("fail")), \
+                    patch.object(editor_shape_module, "write_collision_shape", side_effect=OSError("fail")), \
                     patch.object(QMessageBox, "critical"):
                 window.export_collision_shape()
             self.assertTrue(window._modified)
