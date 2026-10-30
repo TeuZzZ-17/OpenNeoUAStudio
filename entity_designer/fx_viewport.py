@@ -22,6 +22,7 @@ from PySide6.QtGui import (
     QPolygonF, QRadialGradient, QTransform,
 )
 
+from studio.exchange.portable import find_existing_path
 from studio.rendering.asset_viewport import AssetViewport, ViewFace, _apply, _rotation_matrix
 from entity_designer.destruction_fx import (
     DAMAGE_AREA, DAMAGE_DIRECT, EmitterSpec, damage_text,
@@ -948,7 +949,7 @@ class FxPreviewViewportMixin:
             relative = texture.replace("\\", "/")
             if relative.casefold().startswith("data/"):
                 relative = relative[5:]
-            candidate = root / relative
+            candidate = find_existing_path(root, relative) or root / relative
             if candidate.is_file():
                 loaded = QImage(str(candidate))
                 image = None if loaded.isNull() else loaded.convertToFormat(

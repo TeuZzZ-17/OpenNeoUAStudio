@@ -9,6 +9,8 @@ from PySide6.QtWidgets import (QApplication, QComboBox, QStyledItemDelegate, QSt
     QListWidgetItem, QLineEdit, QSpinBox, QPushButton, QLabel, QFileDialog, QDialog)
 from PySide6.QtMultimedia import QMediaPlayer, QAudioOutput
 
+from studio.exchange.portable import find_existing_path
+
 from .. import bootstrap
 from ..core.locations import (DEFAULT_LOCATION_COLOR, LOCATION_COLORS, new_location,
                                validate_location, contains_point, location_color, notice_opacity)
@@ -174,7 +176,7 @@ class LocationPanel(QWidget):
         play = QPushButton('Listen')
         play.clicked.connect(self.play_sound)
         sound_row.addWidget(play)
-        form.addRow('Sound', sound_row)
+        form.addRow('Entering sound', sound_row)
         self.times = {}
         for key, text, maximum in (('fade_in_ms', 'Fade in (ms)', 10000),
                                     ('hold_ms', 'Hold (ms)', 60000), ('fade_out_ms', 'Fade out (ms)', 10000)):
@@ -298,7 +300,8 @@ class LocationPanel(QWidget):
 
     def choose_sound(self):
         data = bootstrap.game_data_dir().resolve()
-        path, _ = QFileDialog.getOpenFileName(self, 'Choose location sound', str(data / 'Sounds'),
+        start = find_existing_path(data, 'Sounds') or data
+        path, _ = QFileDialog.getOpenFileName(self, 'Choose location sound', str(start),
                                              'Wave sound (*.wav *.WAV)')
         if path:
             try:
@@ -312,7 +315,8 @@ class LocationPanel(QWidget):
     def play_sound(self):
         value = self.values()['sound']
         data = bootstrap.game_data_dir().resolve()
-        path = (data / value[5:]).resolve() if value.startswith('Data/') else data
+        path = ((find_existing_path(data, value[5:]) or data / value[5:]).resolve()
+                if value.startswith('Data/') else data)
         if not path.is_relative_to(data) or not path.is_file():
             self.status.setText('Choose an existing sound inside Data.')
             return

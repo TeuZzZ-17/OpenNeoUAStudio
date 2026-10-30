@@ -13,6 +13,7 @@ import re
 import tempfile
 from dataclasses import dataclass, field
 from studio.exchange.portable import backup_existing_file
+from .ambient_sound import ambient_sound_value
 from .host_ai_presets import HOST_AI_PRESETS, CUSTOM_AI_PRESETS
 
 SECTOR_STEP = 1200
@@ -137,7 +138,17 @@ def new_gem() -> dict:
 
 def new_lvl_info() -> dict:
     return {'title': "Untitled Map", 'sky': "objects/x7.bas", 'mbmap': "",
-            'dbmap': "", 'briefing_text': "", 'music': "None", 'movie': "None"}
+            'dbmap': "", 'briefing_text': "", 'music': "None", 'movie': "None",
+            'cloud_id': -1, 'ambient_sound': ""}
+
+
+def cloud_id_value(value) -> int:
+    """Level cloud_id as the engine reads it: a non-negative integer, anything else means no cloud (-1)."""
+    try:
+        number = int(str(value).strip(), 0)
+    except (TypeError, ValueError):
+        return -1
+    return number if 0 <= number <= 2147483647 else -1
 
 
 def new_tech() -> dict:
@@ -604,6 +615,9 @@ def loads_ldf(raw_text: str, encoding: str = DEFAULT_LDF_ENCODING) -> LdfDocumen
     doc.locations = locations
     doc.lvl_info = new_lvl_info()
     doc.lvl_info["briefing_text"] = briefing_text
+    # Read as a whole line: unlike the other level values, a path may contain spaces.
+    doc.lvl_info["ambient_sound"] = ambient_sound_value(
+        (_level_line_value(parse_text, 'ambient_sound') or '').split(';', 1)[0])
     doc.tech = new_tech()
     doc.encoding, doc.newline = encoding, newline
     set_match = re.search(r'set\s*=\s*(\d+)', parse_text, re.IGNORECASE)
@@ -796,6 +810,10 @@ def loads_ldf(raw_text: str, encoding: str = DEFAULT_LDF_ENCODING) -> LdfDocumen
                     doc.lvl_info['music'] = raw.split('_')[0] if '_' in raw else raw
                 elif t == 'movie':
                     doc.lvl_info['movie'] = movie_filename(get_val()) or "None"
+                elif t == 'cloud_id':
+                    doc.lvl_info['cloud_id'] = cloud_id_value(get_val())
+                elif t == 'ambient_sound':
+                    get_val()
             elif reading_mb:
                 if t == 'name':
                     doc.lvl_info['mbmap'] = briefing_for_export(get_val())
@@ -985,6 +1003,10 @@ def _dumps_generated(doc: LdfDocument, defs: dict | None = None) -> str:
         w(f"   movie                = {movie}")
     if info.get('music') and info['music'] != "None":
         w(f"   ambiencetrack        = {info['music']}")
+    if ambient_sound_value(info.get('ambient_sound')):
+        w(f"   ambient_sound        = {ambient_sound_value(info.get('ambient_sound'))}")
+    if cloud_id_value(info.get('cloud_id')) >= 0:
+        w(f"   cloud_id             = {cloud_id_value(info.get('cloud_id'))}")
     w("end")
     w(sep)
     for key, tag in (('mbmap', 'begin_mbmap'), ('dbmap', 'begin_dbmap')):

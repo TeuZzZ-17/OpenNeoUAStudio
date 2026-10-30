@@ -360,6 +360,9 @@ class MapViewport(QWidget):
         overlay = getattr(self, 'special_overlay', None)
         if overlay is not None and self._frame is not None and not self.clear_view:
             overlay.draw(painter, cam, self._display_terrain)
+        overlay = getattr(self, 'cloud_overlay', None)
+        if overlay is not None and self._frame is not None and not self.clear_view:
+            overlay.draw(painter, self.camera)
         self.draw_interaction_overlay(painter)
         if self._job is not None or self._render_timer.isActive():
             painter.setPen(QColor(160, 170, 180))

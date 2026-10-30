@@ -428,7 +428,7 @@ class BriefingControls(QWidget):
         install = bootstrap.installation()
         if install is None:
             return
-        path, _ = QFileDialog.getOpenFileName(self, "Choose installed briefing background", str(install.folder("levels")), "Images (*.png *.jpg *.bmp *.iff *.ilbm *.lbm *.vbmp)")
+        path, _ = QFileDialog.getOpenFileName(self, "Choose installed briefing background", str(install.folder("levels")), "Images (*.png *.jpg *.bmp *.iff *.ilbm *.lbm *.vbmp *.PNG *.JPG *.BMP *.IFF *.ILBM *.LBM *.VBMP);;All files (*)")
         if path:
             install.preview_backgrounds[self.mode.currentData()] = Path(path)
             save_remembered(install)

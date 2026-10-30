@@ -9,6 +9,7 @@ from PySide6.QtGui import (
     QAction,
     QColor,
     QFont,
+    QFontDatabase,
     QFontMetricsF,
     QKeyEvent,
     QKeySequence,
@@ -312,6 +313,9 @@ class ScriptCodeEditor(QWidget):
 
         self.editor = _ScriptTextEdit(self)
         font = QFont("Consolas")
+        if "Consolas" not in QFontDatabase.families():
+            # Linux and macOS have no Consolas: use the system monospace font instead of a proportional one.
+            font = QFontDatabase.systemFont(QFontDatabase.SystemFont.FixedFont)
         font.setStyleHint(QFont.StyleHint.Monospace)
         font.setPointSize(self._zoom)
         self.editor.setFont(font)

@@ -19,7 +19,7 @@ if str(STUDIO_ROOT) not in sys.path:
     sys.path.insert(0, str(STUDIO_ROOT))
 
 from studio.assets.family import load_asset_family  # noqa: E402
-from studio.exchange.portable import DirectoryIndex  # noqa: E402
+from studio.exchange.portable import DirectoryIndex, find_existing_path  # noqa: E402
 from studio.assets.mapping import export_base_object_bytes  # noqa: E402
 from studio.formats.base_format import parse_base_file  # noqa: E402
 from studio.formats.setbas import SetBasArchive, read_setbas  # noqa: E402
@@ -49,17 +49,29 @@ def work_dir() -> Path:
 
 def writable_roots() -> list[Path]:
     """Folders the MCP may write to: game models and wireframes, plus any extra roots from ONUA_MCP_WRITE_ROOTS."""
-    roots = [data_root() / "Models", data_root() / "Wireless", work_dir()]
+    roots = [under_data("Models"), under_data("Wireless"), work_dir()]
     for extra in os.environ.get("ONUA_MCP_WRITE_ROOTS", "").split(os.pathsep):
         if extra.strip():
             roots.append(Path(extra.strip()).resolve())
     return roots
 
 
+def under_data(relative: str | Path) -> Path:
+    """Data/<relative>, matching the folders that exist without case (Linux file systems are case-sensitive)."""
+    current = data_root()
+    parts = Path(str(relative).replace("\\", "/")).parts
+    for index, part in enumerate(parts):
+        found = find_existing_path(current, part)
+        if found is None:
+            return current.joinpath(*parts[index:])
+        current = found
+    return current
+
+
 def ensure_writable(path: str | Path) -> Path:
     target = Path(path)
     if not target.is_absolute():
-        target = data_root() / target
+        target = under_data(target)
     target = target.resolve()
     for root in writable_roots():
         try:
@@ -74,7 +86,7 @@ def ensure_writable(path: str | Path) -> Path:
 def resolve_existing(path: str | Path) -> Path:
     target = Path(path)
     if not target.is_absolute():
-        target = data_root() / target
+        target = under_data(target)
     if not target.exists():
         raise McpToolError(f"File not found: {target}")
     return target.resolve()
@@ -91,7 +103,7 @@ def _find_child(parent: Path, name: str) -> Path | None:
 
 
 def list_sets() -> list[dict]:
-    sets_dir = data_root() / "Sets"
+    sets_dir = under_data("Sets")
     result = []
     if not sets_dir.is_dir():
         return result

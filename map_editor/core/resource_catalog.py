@@ -73,7 +73,8 @@ class ResourceCatalog:
         """Keep a level's external sky selectable after reopening it."""
         key = sky_key(value)
         if str(value).casefold().startswith('data/') and str(value).casefold().endswith('.base'):
-            path = self.installation.data / str(value)[5:]
+            path = (find_existing_path(self.installation.data, str(value)[5:])
+                    or self.installation.data / str(value)[5:])
             try:
                 path.resolve().relative_to(self.installation.data.resolve())
             except ValueError:

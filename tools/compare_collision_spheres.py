@@ -103,7 +103,7 @@ def run_comparison(script, set_bas, ids, output, baseline=None, verify=False):
         "provenance_note": "Caller-selected manual references; authenticity must be established separately.",
         "models": [],
     }
-    old = json.loads(baseline.read_text()) if baseline else []
+    old = json.loads(baseline.read_text(encoding="utf-8")) if baseline else []
     try:
         for object_id in ids:
             ref = refs[object_id]
