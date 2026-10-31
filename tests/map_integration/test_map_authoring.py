@@ -3,6 +3,7 @@ os.environ.setdefault('QT_QPA_PLATFORM', 'offscreen')
 
 import numpy as np
 import pytest
+from studio.ui.cursor_themes import cursor_kind
 from PySide6.QtCore import Qt, QPoint
 from PySide6.QtTest import QSignalSpy, QTest
 from PySide6.QtWidgets import QApplication, QFileDialog, QMessageBox, QPushButton
@@ -285,20 +286,20 @@ def test_squad_group_drag_cancel_and_one_undo(win, app, monkeypatch):
 
     QTest.mousePress(win.view, Qt.MouseButton.LeftButton, pos=QPoint(100, 100))
     QTest.mouseMove(win.view, QPoint(160, 160), 10)
-    assert win.view.cursor().shape() == Qt.CursorShape.ClosedHandCursor
+    assert cursor_kind(win.view.cursor()) == "closed"
     assert win.doc.squads[0]['pos_x'] == original[0]['pos_x'] + 1200
     assert win.doc.squads[1]['pos_z'] == original[1]['pos_z'] - 1200
     QTest.keyClick(win.view, Qt.Key.Key_Escape)
-    assert win.view.cursor().shape() == Qt.CursorShape.ArrowCursor
+    assert cursor_kind(win.view.cursor()) == "point"
     QTest.mouseRelease(win.view, Qt.MouseButton.LeftButton, pos=QPoint(160, 160))
     assert win.doc.squads == original
     assert win.history._pending is None
 
     QTest.mousePress(win.view, Qt.MouseButton.LeftButton, pos=QPoint(100, 100))
     QTest.mouseMove(win.view, QPoint(160, 160), 10)
-    assert win.view.cursor().shape() == Qt.CursorShape.ClosedHandCursor
+    assert cursor_kind(win.view.cursor()) == "closed"
     QTest.mouseRelease(win.view, Qt.MouseButton.LeftButton, pos=QPoint(160, 160))
-    assert win.view.cursor().shape() == Qt.CursorShape.ArrowCursor
+    assert cursor_kind(win.view.cursor()) == "point"
     moved = [dict(squad) for squad in win.doc.squads]
     assert moved[0]['pos_x'] == original[0]['pos_x'] + 1200
     assert moved[1]['pos_z'] == original[1]['pos_z'] - 1200

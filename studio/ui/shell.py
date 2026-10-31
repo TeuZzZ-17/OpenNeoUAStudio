@@ -28,6 +28,7 @@ from PySide6.QtWidgets import (
 )
 
 from map_editor import bootstrap
+from studio.ui.cursor_themes import studio_cursor
 from map_editor.core.game_installation import (
     FOLDERS,
     forget_remembered,
@@ -633,7 +634,7 @@ class _ToolCard(QFrame):
         self._key = option.key
         self.setObjectName("toolCard")
         self.setProperty("selected", False)
-        self.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.setCursor(studio_cursor("point"))
         self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
         self.setToolTip(option.description)
         self.setFixedHeight(72)

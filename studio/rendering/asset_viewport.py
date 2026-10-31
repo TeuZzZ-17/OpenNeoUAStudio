@@ -12,6 +12,7 @@ from PySide6.QtGui import (
 
 from studio.assets.family import AssetFamily
 from studio.rendering.gpu import AcceleratedWidget
+from studio.ui.cursor_themes import studio_cursor
 from studio.rendering.indexed import (
     IndexedFamilyAdapter,
 )
@@ -62,6 +63,11 @@ class AssetViewport(
     AcceleratedWidget,
 ):
     """3D preview of an asset family with polygon picking."""
+
+    def unsetCursor(self) -> None:  # noqa: N802
+        """Back to the idle cursor: the pointing hand, never the system arrow."""
+
+        self.setCursor(studio_cursor("point"))
 
     RESET_YAW = -35.0
     RESET_PITCH = 20.0

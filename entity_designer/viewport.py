@@ -21,7 +21,6 @@ from PySide6.QtGui import (
     QMouseEvent,
     QPainter,
     QPen,
-    QPixmap,
     QPolygonF,
 )
 
@@ -49,6 +48,7 @@ from studio.rendering.asset_viewport import (
     PickShape,
 )
 from studio.rendering.gizmo import ModelSpaceGizmo
+from studio.ui.cursor_themes import studio_cursor
 
 class CollisionMoveGizmo(ModelSpaceGizmo):
     """Move gizmo with an independently orbitable presentation.
@@ -118,7 +118,7 @@ class CollisionMoveGizmo(ModelSpaceGizmo):
             self._repeat_timer.stop()
             self._view_dragging = True
             self._view_drag_last = QPointF(event.position())
-            self.setCursor(Qt.CursorShape.ClosedHandCursor)
+            self.setCursor(studio_cursor("closed"))
             event.accept()
             return
         super().mousePressEvent(event)
@@ -160,30 +160,6 @@ class CollisionMoveGizmo(ModelSpaceGizmo):
             event.accept()
             return
         super().mouseDoubleClickEvent(event)
-
-
-def _make_shape_component_idle_cursor() -> QCursor:
-    pixmap = QPixmap(23, 23)
-    pixmap.fill(Qt.GlobalColor.transparent)
-    painter = QPainter(pixmap)
-    painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
-    painter.setPen(QPen(QColor(18, 25, 35), 3.0))
-    painter.drawRect(7.0, 7.0, 9.0, 9.0)
-    painter.drawLine(11, 1, 11, 6)
-    painter.drawLine(11, 17, 11, 22)
-    painter.drawLine(1, 11, 6, 11)
-    painter.drawLine(17, 11, 22, 11)
-    painter.setPen(QPen(QColor(83, 224, 255), 1.5))
-    painter.drawRect(7.0, 7.0, 9.0, 9.0)
-    painter.drawLine(11, 1, 11, 6)
-    painter.drawLine(11, 17, 11, 22)
-    painter.drawLine(1, 11, 6, 11)
-    painter.drawLine(17, 11, 22, 11)
-    painter.setPen(Qt.PenStyle.NoPen)
-    painter.setBrush(QColor(255, 255, 255))
-    painter.drawEllipse(QPointF(11, 11), 1.0, 1.0)
-    painter.end()
-    return QCursor(pixmap, 11, 11)
 
 
 # Camera-space depth beyond which AssetViewport's projection folds points
@@ -277,7 +253,6 @@ class CollisionViewport(FxPreviewViewportMixin, AssetViewport):
         self._collision_shape: CollisionShape | None = None
         self._collision_shape_overlay_visible = False
         self._shape_cursor_mouse_tracking_previous = None
-        self._shape_component_idle_cursor = _make_shape_component_idle_cursor()
         self._shape_selected_indices = set()
         self._shape_press_pos = None
         self._geometry_component_preview: tuple | None = None
@@ -704,9 +679,9 @@ class CollisionViewport(FxPreviewViewportMixin, AssetViewport):
         if not self._collision_shape_overlay_visible:
             self.unsetCursor()
         elif self._hit_shape_component(position) is not None:
-            self.setCursor(Qt.CursorShape.OpenHandCursor)
+            self.setCursor(studio_cursor("open"))
         else:
-            self.setCursor(self._shape_component_idle_cursor)
+            self.setCursor(studio_cursor("place"))
 
     def set_collision_shape_overlay_visible(self, visible: bool) -> None:
         visible = bool(visible)
@@ -1833,8 +1808,7 @@ class CollisionViewport(FxPreviewViewportMixin, AssetViewport):
             return
         if (self._fire_area_visible and not event.buttons()):
             over = self._hit_fire_area_handle(event.position())
-            self.setCursor(Qt.CursorShape.SizeAllCursor if over
-                           else Qt.CursorShape.ArrowCursor)
+            self.setCursor(studio_cursor("move" if over else "point"))
         if self._collision_shape_overlay_visible and self._collision_shape is not None:
             if not event.buttons():
                 self._update_shape_component_cursor(event.position())
@@ -1843,7 +1817,7 @@ class CollisionViewport(FxPreviewViewportMixin, AssetViewport):
                 delta = event.position() - self._shape_press_pos
                 if abs(delta.x()) > 4.0 or abs(delta.y()) > 4.0:
                     # A held drag orbits the view; it does not move the shape.
-                    self.setCursor(Qt.CursorShape.ClosedHandCursor)
+                    self.setCursor(studio_cursor("closed"))
         if self._sphere_press_pos is not None \
                 and event.buttons() & Qt.MouseButton.LeftButton:
             current = event.position()

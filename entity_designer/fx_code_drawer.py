@@ -15,6 +15,7 @@ from PySide6.QtWidgets import (
 )
 
 from studio.ui.code_editor import ScriptCodeEditor
+from studio.ui.cursor_themes import studio_cursor
 
 DRAWER_WIDTH = 640
 DRAWER_MIN_WIDTH = 360
@@ -39,7 +40,7 @@ class FxDrawerTab(QAbstractButton):
     def __init__(self, parent):
         super().__init__(parent)
         self.setFixedSize(*TAB_SIZE)
-        self.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.setCursor(studio_cursor("point"))
         self.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         self._open = False
         self.set_open(False)

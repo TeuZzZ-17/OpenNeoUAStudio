@@ -2,14 +2,18 @@
 
 One application-wide filter covers every editor: buttons, check and radio boxes, drop-down
 lists and tab bars get the pointing hand; sliders get the open hand, which closes while the
-handle is held. A cursor set by a widget itself (the 3D views, the code drawer tab, ...) is
-never touched, and a disabled control gets the normal arrow back.
+handle is held. The hands are the shared set of ``studio.ui.cursor_themes``. A cursor set by a
+widget itself (the 3D views, the code drawer tab, ...) is never touched, and a disabled
+control gets the normal arrow back.
 """
 
 from __future__ import annotations
 
 from PySide6.QtCore import QEvent, QObject, Qt
+from PySide6.QtGui import QCursor
 from PySide6.QtWidgets import QAbstractButton, QApplication, QComboBox, QSlider, QTabBar, QWidget
+
+from studio.ui.cursor_themes import studio_cursor
 
 POINTER_TYPES = (QAbstractButton, QComboBox, QSlider, QTabBar)
 # Marks a cursor that this module set, so it can be told apart from one a widget chose itself.
@@ -17,9 +21,8 @@ _OWN_CURSOR = "studioPointerCursor"
 _INSTALLED = "studioPointerCursorsInstalled"
 
 
-def hover_cursor(widget: QWidget) -> Qt.CursorShape:
-    return (Qt.CursorShape.OpenHandCursor if isinstance(widget, QSlider)
-            else Qt.CursorShape.PointingHandCursor)
+def hover_cursor(widget: QWidget) -> QCursor:
+    return studio_cursor("open" if isinstance(widget, QSlider) else "point")
 
 
 def update_pointer_cursor(widget: QWidget) -> None:
@@ -49,9 +52,9 @@ class PointerCursorFilter(QObject):
                 and getattr(event, "button", lambda: None)() == Qt.MouseButton.LeftButton:
             # The hand closes while a slider handle is held.
             if kind == QEvent.Type.MouseButtonPress:
-                watched.setCursor(Qt.CursorShape.ClosedHandCursor)
+                watched.setCursor(studio_cursor("closed"))
             elif kind == QEvent.Type.MouseButtonRelease:
-                watched.setCursor(Qt.CursorShape.OpenHandCursor)
+                watched.setCursor(studio_cursor("open"))
         return False
 
 

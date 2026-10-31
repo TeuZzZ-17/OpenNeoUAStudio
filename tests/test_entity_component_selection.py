@@ -3,6 +3,7 @@ import os
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 import pytest
+from studio.ui.cursor_themes import cursor_kind
 from PySide6.QtCore import QEvent, QPoint, QPointF, Qt, QTimer
 from PySide6.QtGui import QMouseEvent
 from PySide6.QtTest import QTest
@@ -158,7 +159,7 @@ def test_context_clicking_unselected_component_changes_only_that_component(windo
     assert _selected_keys(widget) == {"component-2"}
 
 
-def test_collision_shape_component_uses_open_and_closed_hand_cursors(window):
+def test_collision_shape_component_uses_open_and_closed_studio_cursors(window):
     viewport = window.viewport
     assert viewport._collision_shape_overlay_visible
     hull = window.project.collision_shape.hulls[0]
@@ -169,27 +170,15 @@ def test_collision_shape_component_uses_open_and_closed_hand_cursors(window):
     assert viewport._hit_shape_component(QPointF(point)) == "component-0"
 
     QTest.mouseMove(viewport, point)
-    assert viewport.cursor().shape() == Qt.CursorShape.OpenHandCursor
+    assert cursor_kind(viewport.cursor()) == "open"
 
     blank = QPoint(2, 2)
     assert viewport._hit_shape_component(QPointF(blank)) is None
     QTest.mouseMove(viewport, blank)
-    idle_cursor = viewport.cursor()
-    assert idle_cursor.shape() not in (
-        Qt.CursorShape.ArrowCursor,
-        Qt.CursorShape.OpenHandCursor,
-        Qt.CursorShape.ClosedHandCursor,
-    )
-    idle_pixmap = idle_cursor.pixmap()
-    assert not idle_pixmap.isNull()
-    image = idle_pixmap.toImage()
-    assert any(image.pixelColor(x, y).alpha()
-               for x in range(image.width())
-               for y in range(image.height()))
-    assert idle_cursor.hotSpot() == QPoint(11, 11)
+    assert cursor_kind(viewport.cursor()) == "place"
 
     QTest.mouseMove(viewport, point)
-    assert viewport.cursor().shape() == Qt.CursorShape.OpenHandCursor
+    assert cursor_kind(viewport.cursor()) == "open"
 
     target = point + QPoint(12, 8)
     local = QPointF(target)
@@ -205,13 +194,13 @@ def test_collision_shape_component_uses_open_and_closed_hand_cursors(window):
         Qt.MouseButton.NoButton, Qt.MouseButton.LeftButton,
         Qt.KeyboardModifier.NoModifier)
     QApplication.sendEvent(viewport, move)
-    assert viewport.cursor().shape() == Qt.CursorShape.ClosedHandCursor
+    assert cursor_kind(viewport.cursor()) == "closed"
     release = QMouseEvent(
         QEvent.Type.MouseButtonRelease, local, global_pos,
         Qt.MouseButton.LeftButton, Qt.MouseButton.NoButton,
         Qt.KeyboardModifier.NoModifier)
     QApplication.sendEvent(viewport, release)
-    assert viewport.cursor().shape() != Qt.CursorShape.ClosedHandCursor
+    assert cursor_kind(viewport.cursor()) != "closed"
     previous_tracking = viewport._shape_cursor_mouse_tracking_previous
     viewport.set_collision_shape_overlay_visible(False)
     assert viewport.hasMouseTracking() == previous_tracking

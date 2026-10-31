@@ -12,6 +12,7 @@ from PySide6.QtGui import (
     QPainter,
 )
 
+from studio.ui.cursor_themes import studio_cursor
 from studio.rendering.indexed import (
     IndexedRasterizer,
     VANILLA_FADE_LENGTH,
@@ -157,7 +158,7 @@ class _ViewControlsMixin:
             self._snapshot_current_camera = camera.copy()
             self._snapshot_current_camera["pan"] = QPointF(camera["pan"])
         self._snapshot_active = True
-        self.setCursor(Qt.CursorShape.OpenHandCursor)
+        self.setCursor(studio_cursor("open"))
         self._snapshot_show_guides = False
         self._snapshot_background = (QColor(background)
                                      if background is not None else None)

@@ -3,6 +3,7 @@ os.environ.setdefault('QT_QPA_PLATFORM', 'offscreen')
 import copy
 import json
 import pytest
+from studio.ui.cursor_themes import cursor_kind
 from PySide6.QtCore import QPoint, Qt
 from PySide6.QtTest import QTest, QSignalSpy
 from PySide6.QtWidgets import QApplication, QPushButton
@@ -289,10 +290,10 @@ def test_actor_mouse_drag_cursors_and_ground_deselection(win, app, monkeypatch, 
     monkeypatch.setattr(view, 'ground_cell', lambda x, y: (3, 3) if x < 150 else (5, 4))
     QTest.mouseMove(view, QPoint(250, 100))
     QTest.mouseMove(view, QPoint(100, 100))
-    assert view.cursor().shape() == Qt.CursorShape.OpenHandCursor
+    assert cursor_kind(view.cursor()) == "open"
     QTest.mousePress(view, Qt.MouseButton.LeftButton, pos=QPoint(100, 100))
     QTest.mouseMove(view, QPoint(250, 100))
-    assert view.cursor().shape() == Qt.CursorShape.ClosedHandCursor
+    assert cursor_kind(view.cursor()) == "closed"
     QTest.mouseRelease(view, Qt.MouseButton.LeftButton, pos=QPoint(250, 100))
     record = (win.doc.host_stations if kind == 'host' else win.doc.squads)[0]
     assert (record['x'], record['y']) == (5, 4)

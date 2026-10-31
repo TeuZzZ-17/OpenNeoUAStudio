@@ -3,6 +3,7 @@
 from copy import deepcopy
 
 import numpy as np
+from studio.ui.cursor_themes import cursor_kind
 from PySide6.QtCore import QEvent, QPoint, QPointF, Qt
 from PySide6.QtGui import QMouseEvent
 from PySide6.QtTest import QTest
@@ -71,7 +72,7 @@ def test_copy_cancellation_and_outside_pattern_do_not_edit_or_lose_clipboard(rea
     window.copy_cells()
     window.preview_cell_placement(1)
     assert not window.view.target_cells
-    assert window.view.cursor().shape() == Qt.CursorShape.ForbiddenCursor
+    assert cursor_kind(window.view.cursor()) == "forbidden"
     window.finish_cell_placement(1)
     assert window.document.sdf == before and window._placement is not None
     window.cancel_preview()

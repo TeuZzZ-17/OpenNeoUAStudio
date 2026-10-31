@@ -109,7 +109,7 @@ def test_mouse_drag_paints_existing_sectors_instead_of_grabbing_them():
              KeyboardModifier=Obj(ShiftModifier=2, ControlModifier=1),
              CursorShape=Obj(CrossCursor=1, PointingHandCursor=2, ClosedHandCursor=3,
                              OpenHandCursor=4, ForbiddenCursor=5))
-    namespace = {'Qt': qt, '__package__': 'map_editor.render'}
+    namespace = {'Qt': qt, '__package__': 'map_editor.render', 'studio_cursor': lambda name: name}
     exec(code, namespace)
 
     class Pos:

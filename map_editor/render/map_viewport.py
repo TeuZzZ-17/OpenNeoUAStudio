@@ -18,6 +18,7 @@ from .camera import ISO_PITCH, ISO_YAW, IsoCamera
 from .sector_mesh import SectorMeshLibrary
 from .map_scene import render_scene, scene_polygons
 from .terrain_mesh import TerrainMesh
+from studio.ui.cursor_themes import studio_cursor
 
 PREVIEW_TINT = (.62, .62, .62, .28)
 REJECTED_PREVIEW_TINT = (.88, .32, .34, .50)
@@ -76,11 +77,17 @@ class MapViewport(QWidget):
     statusMessage = Signal(str)
     backendChanged = Signal(str)
 
+    def unsetCursor(self):  # noqa: N802
+        """Idle cursor: the pointing hand, never the system arrow."""
+
+        self.setCursor(studio_cursor("point"))
+
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setMouseTracking(True)
         self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
         self.setMinimumSize(480, 360)
+        self.unsetCursor()
         self.setToolTip('Left drag: paint / move squad · Ctrl+click: add/remove · Right: menu · Right drag: rotate · Middle: pan')
         self.active_tool = 'sector'
         self.cursor_color = (75, 195, 220)
@@ -261,7 +268,7 @@ class MapViewport(QWidget):
         self.enter_pov_at((x,y+bounds[1]-30,z),(0,0,1))
 
     def enter_pov_at(self, eye, direction):
-        self.setCursor(Qt.CursorShape.CrossCursor)
+        self.setCursor(studio_cursor("point"))
         self.camera.center = tuple(eye)
         self.camera.perspective = True
         # La camera guarda verso -Z a yaw 0; il fronte del modello è il suo asse +Z.
@@ -628,7 +635,7 @@ class MapViewport(QWidget):
             self._marquee_origin = event.position()
         if event.button() == Qt.MouseButton.LeftButton and self._space_pan_active:
             self._space_pan_gesture = True
-            self.setCursor(Qt.CursorShape.ClosedHandCursor)
+            self.setCursor(studio_cursor("closed"))
             return
         if self.draft_active and event.button() == Qt.MouseButton.LeftButton:
             self.placementConfirmed.emit(self.ground_cell(event.position().x(), event.position().y()))
@@ -719,22 +726,22 @@ class MapViewport(QWidget):
             self.camera.yaw = (self.camera.yaw - delta.x() * 0.4) % 360
             self.camera.pitch = max(-85.0 if self.camera.perspective else 8.0,
                                     min(85.0 if self.camera.perspective else 90.0, self.camera.pitch + delta.y() * 0.3))
-            self.setCursor(Qt.CursorShape.SizeAllCursor)
+            self.setCursor(studio_cursor("closed"))
             self._begin_interaction()
             self.cameraChanged.emit()
             self.update()
             return
         if self._drag_button == Qt.MouseButton.MiddleButton:
-            self.setCursor(Qt.CursorShape.ClosedHandCursor)
+            self.setCursor(studio_cursor("closed"))
             self._pan_pixels(delta.x(), delta.y())
             return
         if self._drag_button == Qt.MouseButton.LeftButton and self._space_pan_gesture:
             if self._space_pan_active:
-                self.setCursor(Qt.CursorShape.ClosedHandCursor)
+                self.setCursor(studio_cursor("closed"))
                 self._pan_pixels(delta.x(), delta.y())
             return
         if self.camera.perspective:
-            self.setCursor(Qt.CursorShape.CrossCursor)
+            self.setCursor(studio_cursor("point"))
             return
         cell = self.ground_cell(pos.x(), pos.y())
         if cell != self.hover:
@@ -744,29 +751,29 @@ class MapViewport(QWidget):
         if self._marquee_origin is not None and self._drag_button == Qt.MouseButton.LeftButton:
             if self._moved:
                 self._marquee_rect = QRectF(self._marquee_origin, pos).normalized()
-                self.setCursor(Qt.CursorShape.CrossCursor)
+                self.setCursor(studio_cursor("place"))
                 self.update()
             return
         if (event.modifiers() & Qt.KeyboardModifier.ShiftModifier or self._sweep_gesture) and not self.draft_active and self.active_tool != 'terrain':
             self._sweep_gesture = True
-            self.setCursor(Qt.CursorShape.CrossCursor)
+            self.setCursor(studio_cursor("place"))
             self._sweep_over(cell)
             return
         self._sweep_last = None
         if self.sample_active:
-            self.setCursor(Qt.CursorShape.PointingHandCursor)
+            self.setCursor(studio_cursor("point"))
         elif self.draft_active and not self.preview_cells and not any(a.get('_preview') for a in self.doc.squads + self.doc.host_stations):
-            self.setCursor(Qt.CursorShape.ForbiddenCursor)
+            self.setCursor(studio_cursor("forbidden"))
         elif self.draft_active or self.active_tool in ('sector', 'building', 'owner', 'terrain') or event.modifiers() & Qt.KeyboardModifier.ControlModifier:
-            self.setCursor(Qt.CursorShape.CrossCursor)
+            self.setCursor(studio_cursor("place"))
         elif self.pick_squad(pos.x(), pos.y()) is not None or self.pick_host(pos.x(), pos.y()) is not None:
-            self.setCursor(Qt.CursorShape.OpenHandCursor)
+            self.setCursor(studio_cursor("open"))
         else:
-            self.setCursor(Qt.CursorShape.PointingHandCursor)
+            self.setCursor(studio_cursor("point"))
         if self._drag_button == Qt.MouseButton.LeftButton:
             if self._drag_actor:
                 if self._moved:
-                    self.setCursor(Qt.CursorShape.ClosedHandCursor)
+                    self.setCursor(studio_cursor("closed"))
                     self.actorDragged.emit(cell)
             elif self._paint_gesture:
                 if cell and not self._paint_started:
