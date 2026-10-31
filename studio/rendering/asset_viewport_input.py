@@ -15,6 +15,7 @@ from studio.rendering.asset_viewport_common import (
     VertexPressState,
     resolve_pick_shape,
 )
+from studio.ui.cursor_themes import studio_cursor
 
 
 class _InteractionMixin:
@@ -24,7 +25,7 @@ class _InteractionMixin:
 
     def mousePressEvent(self, event: QMouseEvent) -> None:  # noqa: N802
         if self._snapshot_active and event.button() == Qt.MouseButton.LeftButton:
-            self.setCursor(Qt.CursorShape.ClosedHandCursor)
+            self.setCursor(studio_cursor("closed"))
         self._camera_interacting = False
         pos = event.position().toPoint()
         if event.button() == Qt.MouseButton.RightButton:
@@ -124,10 +125,12 @@ class _InteractionMixin:
 
     def mouseReleaseEvent(self, event: QMouseEvent) -> None:  # noqa: N802
         if self._snapshot_active and event.button() == Qt.MouseButton.LeftButton:
-            self.setCursor(Qt.CursorShape.OpenHandCursor)
+            self.setCursor(studio_cursor("open"))
         was_camera_interacting = self._camera_interacting
         self._camera_interacting = False
         if was_camera_interacting:
+            if not self._snapshot_active:
+                self.unsetCursor()
             self.update()
         if self._paste_preview is not None:
             pressed_at = self._paste_left_pressed_at
@@ -430,7 +433,7 @@ class _InteractionMixin:
                 if hovered != self._gizmo_hover_axis:
                     self._gizmo_hover_axis = hovered
                     if hovered:
-                        self.setCursor(Qt.CursorShape.PointingHandCursor)
+                        self.setCursor(studio_cursor("open"))
                     else:
                         self.unsetCursor()
                     self.update()
@@ -483,11 +486,13 @@ class _InteractionMixin:
             self._pitch = max(-89.0, min(89.0, self._pitch + delta.y() * 0.6))
             if self._yaw != old_yaw or self._pitch != old_pitch:
                 self._camera_interacting = True
+                self.setCursor(studio_cursor("closed"))
                 self.manualCameraChanged.emit()
             self.update()
         elif event.buttons() & Qt.MouseButton.RightButton:
             if not delta.isNull():
                 self._camera_interacting = True
+                self.setCursor(studio_cursor("closed"))
                 # Qt emits the CustomContextMenu request after the RMB gesture
                 # on Windows.  Camera panning is a drag gesture, not a request
                 # for the contextual menu, so consume that one generated menu

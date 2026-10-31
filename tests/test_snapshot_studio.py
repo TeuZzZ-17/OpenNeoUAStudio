@@ -3,6 +3,7 @@ import unittest
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
+from studio.ui.cursor_themes import cursor_kind
 from PySide6.QtWidgets import QApplication, QTabWidget
 
 from snapshot_studio import SnapshotStudioWindow
@@ -23,11 +24,11 @@ class SnapshotStudioTests(unittest.TestCase):
             window._snapshot_custom_color = QColor(100, 20, 30, 74)
             self.assertEqual(window._snapshot_background().alpha(), 255)
             window.viewport.begin_snapshot_mode(window._snapshot_background())
-            self.assertEqual(window.viewport.cursor().shape(), Qt.CursorShape.OpenHandCursor)
+            self.assertEqual(cursor_kind(window.viewport.cursor()), "open")
             QTest.mousePress(window.viewport, Qt.MouseButton.LeftButton)
-            self.assertEqual(window.viewport.cursor().shape(), Qt.CursorShape.ClosedHandCursor)
+            self.assertEqual(cursor_kind(window.viewport.cursor()), "closed")
             QTest.mouseRelease(window.viewport, Qt.MouseButton.LeftButton)
-            self.assertEqual(window.viewport.cursor().shape(), Qt.CursorShape.OpenHandCursor)
+            self.assertEqual(cursor_kind(window.viewport.cursor()), "open")
             window._clear_snapshot_color()
             self.assertIsNone(window._snapshot_background())
         finally:
