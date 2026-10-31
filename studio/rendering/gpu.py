@@ -16,6 +16,7 @@ from PySide6.QtGui import (
 )
 from PySide6.QtOpenGLWidgets import QOpenGLWidget
 from PySide6.QtWidgets import QApplication, QPushButton, QWidget
+from studio.ui.cursor_themes import studio_cursor
 
 
 def request_desktop_opengl() -> None:
@@ -162,6 +163,8 @@ class AcceleratedWidget(QWidget):
         self._reported_backend = None
         self.renderer_error = ""
         super().__init__(parent)
+        # Every 3D/2D view starts with the shared pointing hand, never the system arrow.
+        self.setCursor(studio_cursor("point"))
         if _use_opengl_canvas():
             self._gpu_canvas = Canvas(self)
             self._gpu_canvas.setGeometry(self.rect())

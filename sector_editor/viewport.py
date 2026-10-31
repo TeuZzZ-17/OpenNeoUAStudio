@@ -11,6 +11,7 @@ from map_editor.render.gpu_viewport import GpuMapViewport, available
 from map_editor.render.sector_mesh import SectorMesh
 from map_editor.core.ldf_model import DEFAULT_HGT, LdfDocument
 from studio.rendering.asset_viewport import PickShape, resolve_pick_shape
+from studio.ui.cursor_themes import studio_cursor
 from studio.rendering.indexed import retail_source_face_front_facing
 
 
@@ -368,7 +369,7 @@ class SectorViewport(GpuMapViewport):
                     self._gesture = "marquee"
             if self._gesture == "marquee":
                 self._selection_box = QRectF(self._cell_press, event.position()).normalized()
-                self.setCursor(Qt.CursorShape.CrossCursor)
+                self.setCursor(studio_cursor("place"))
                 self.update()
             elif self._gesture in ("move", "confirm"):
                 self.placementHovered.emit(cell)
@@ -377,8 +378,9 @@ class SectorViewport(GpuMapViewport):
         if self.placement_active and not event.buttons():
             self.placementHovered.emit(cell)
         elif self._drag_button is None:
-            self.setCursor(Qt.CursorShape.OpenHandCursor if cell in (self.selected_cells | self.occupied_cells) and self._ghost_mesh is None
-                           else Qt.CursorShape.CrossCursor)
+            self.setCursor(studio_cursor(
+                "open" if cell in (self.selected_cells | self.occupied_cells) and self._ghost_mesh is None
+                else "point"))
         if self._drag_button is not None and not self.top_down:
             super().mouseMoveEvent(event)
 
@@ -406,7 +408,7 @@ class SectorViewport(GpuMapViewport):
             event.accept()
             return
         super().mouseReleaseEvent(event)
-        self.setCursor(Qt.CursorShape.CrossCursor)
+        self.setCursor(studio_cursor("point"))
 
     def mouseDoubleClickEvent(self, event):
         if event.button() == Qt.MouseButton.LeftButton and not self.model_preview:

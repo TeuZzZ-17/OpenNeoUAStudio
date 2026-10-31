@@ -30,6 +30,7 @@ from .viewport import SectorViewport
 from .interactions import KeyboardList, ModelList
 from .visual_aids import GroundPreview, SymbolPreview
 from .previews import CardPreviews, visible_items
+from studio.ui.cursor_themes import studio_cursor
 
 STATES = ("Intact", "Damaged", "Heavily damaged", "Destroyed")
 PREVIEW_ROLE = int(Qt.ItemDataRole.UserRole) + 10
@@ -642,7 +643,7 @@ class SectorEditorWindow(QMainWindow):
         for view in (self.view, self.cell_grid):
             view.placement_active = False
             view.set_ghost()
-            view.setCursor(Qt.CursorShape.CrossCursor)
+            view.setCursor(studio_cursor("point"))
 
     def _update_ghost(self):
         if self._placement is not None:
@@ -732,7 +733,7 @@ class SectorEditorWindow(QMainWindow):
                            "sources": tuple(sorted(self.selected_cells)), "target": None}
         for view in (self.view, self.cell_grid):
             view.placement_active = True
-            view.setCursor(Qt.CursorShape.SizeAllCursor)
+            view.setCursor(studio_cursor("move"))
         self.statusBar().showMessage("Move: drag or click a destination | Enter: confirm | Esc: cancel")
 
     def _arm_clipboard(self):
@@ -745,7 +746,7 @@ class SectorEditorWindow(QMainWindow):
                            "sources": self._copied_positions, "target": None}
         for view in (self.view, self.cell_grid):
             view.placement_active = True
-            view.setCursor(Qt.CursorShape.DragCopyCursor)
+            view.setCursor(studio_cursor("copy"))
         self.preview_cell_placement(min(self.selected_cells, default=4))
         self.statusBar().showMessage("Paste preview: point at a destination | Click / Enter / Ctrl+V: place | Esc: cancel")
 
@@ -789,8 +790,8 @@ class SectorEditorWindow(QMainWindow):
         hidden = operation["sources"] if cells and operation["kind"] == "move" else ()
         for view in (self.view, self.cell_grid):
             view.set_ghost(cells=cells, placements=placements, hidden=hidden)
-            view.setCursor(Qt.CursorShape.ForbiddenCursor if not cells else
-                           Qt.CursorShape.SizeAllCursor if operation["kind"] == "move" else Qt.CursorShape.DragCopyCursor)
+            view.setCursor(studio_cursor("forbidden") if not cells else
+                           studio_cursor("move") if operation["kind"] == "move" else studio_cursor("copy"))
 
     def finish_cell_placement(self, target):
         if self._placement is None:

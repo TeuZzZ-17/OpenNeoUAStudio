@@ -15,7 +15,7 @@ import tempfile
 
 from PySide6.QtCore import QPoint, QRect, QRectF, Qt, QSignalBlocker, QTimer, QUrl, Signal
 from PySide6.QtGui import (
-    QColor, QCursor, QDesktopServices, QFont, QImage, QPainter, QPalette, QPen, QPixmap,
+    QColor, QDesktopServices, QFont, QImage, QPainter, QPalette, QPen, QPixmap,
 )
 from PySide6.QtWidgets import (
     QGridLayout, QGroupBox, QHBoxLayout, QLabel, QLineEdit, QMessageBox,
@@ -31,34 +31,13 @@ from entity_designer.type_icons import (
 )
 from studio.exchange.portable import backup_enabled, backup_existing_file, find_existing_path
 from studio.formats.font_def import glyph_token
+from studio.ui.cursor_themes import studio_cursor
 from studio.formats.images import (
     TextureConvertError, convert_png_to_ilbm, convert_png_to_new_ilbm, convert_to_png,
 )
 
 TAB_TITLE = "Icon Selector"
 
-# Pointing hand drawn on the font page: '#' outline, 'w' glove, 'c' cuff.
-_HAND = (
-    ".....##.........",
-    "....#ww#........",
-    "....#ww#........",
-    "....#ww#........",
-    "....#ww###......",
-    "....#ww#ww##....",
-    "....#ww#ww#w##..",
-    ".##.#ww#ww#w#w#.",
-    "#ww##wwwwwwwwww#",
-    "#www#wwwwwwwwww#",
-    ".#wwwwwwwwwwwww#",
-    "..#wwwwwwwwwwww#",
-    "..#wwwwwwwwwww#.",
-    "...#wwwwwwwwww#.",
-    "....#cccccccc#..",
-    "....#cccccccc#..",
-    "....##########..",
-)
-_HAND_SCALE = 2
-_HAND_HOTSPOT = (5 * _HAND_SCALE + 1, 1)
 _KEY_MOVES = {
     Qt.Key.Key_Left: (-1, 0), Qt.Key.Key_A: (-1, 0),
     Qt.Key.Key_Right: (1, 0), Qt.Key.Key_D: (1, 0),
@@ -66,22 +45,6 @@ _KEY_MOVES = {
     Qt.Key.Key_Down: (0, 1), Qt.Key.Key_S: (0, 1),
 }
 _YELLOW = (255, 255, 0)
-
-
-def hand_cursor(cuff: QColor) -> QCursor:
-    """Pixel-art pointing hand whose fingertip is the hot spot."""
-
-    pixmap = QPixmap(len(_HAND[0]) * _HAND_SCALE, len(_HAND) * _HAND_SCALE)
-    pixmap.fill(Qt.GlobalColor.transparent)
-    colors = {"#": QColor(16, 16, 20), "w": QColor(250, 250, 245), "c": cuff}
-    painter = QPainter(pixmap)
-    for y, row in enumerate(_HAND):
-        for x, mark in enumerate(row):
-            if mark in colors:
-                painter.fillRect(x * _HAND_SCALE, y * _HAND_SCALE,
-                                 _HAND_SCALE, _HAND_SCALE, colors[mark])
-    painter.end()
-    return QCursor(pixmap, *_HAND_HOTSPOT)
 
 
 def page_image(path) -> QImage:
@@ -129,7 +92,7 @@ class IconAtlasView(QWidget):
         self.setMouseTracking(True)
         self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
         self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
-        self.setCursor(hand_cursor(self.palette().color(QPalette.ColorRole.Highlight)))
+        self.setCursor(studio_cursor("point"))
         # The selection frame breathes gently while the page is shown.
         self._phase = 0.0
         self._pulse = QTimer(self)
@@ -386,7 +349,14 @@ class IconSelectorControls(QWidget):
         self.view.set_atlas(self.atlas, image)
 
     def _vehicle(self) -> bool:
-        return self.editor.project.target_category == VEHICLE
+        """True when a vehicle with a loaded model can receive an icon.
+
+        Without a model the project cannot be exported, so a click on the page
+        only browses it: it must not mark the project as modified.
+        """
+
+        project = self.editor.project
+        return project.target_category == VEHICLE and bool(project.source_model)
 
     def _project_cell(self):
         project = self.editor.project

@@ -2017,6 +2017,23 @@ class CollisionEditorWindow(
         self._export_baseline = baseline.snapshot()
         self._set_modified(self.project.snapshot() != self._export_baseline)
 
+    def _has_unexported_work(self) -> bool:
+        """True only when closing or switching unit would lose real edits.
+
+        ``_modified`` is also raised by merely opening a model or picking one
+        from the list. Those only change which model is shown (source_model /
+        source_base) and can be redone with one click, so they do not count.
+        """
+
+        if not self._modified:
+            return False
+        baseline = CollisionProject()
+        baseline.restore(self._export_baseline)
+        baseline.source_model = self.project.source_model
+        baseline.source_base = self.project.source_base
+        return (self.project.snapshot() != baseline.snapshot()
+                or bool(self._changed_script_tabs()))
+
     def _unsaved_changes_message(self, action) -> str:
         baseline = CollisionProject()
         baseline.restore(self._export_baseline)
@@ -2945,7 +2962,7 @@ class CollisionEditorWindow(
         if not self.fx_panel.confirm_text_changes():
             event.ignore()
             return
-        if self._modified:
+        if self._has_unexported_work():
             answer = QMessageBox.question(
                 self, "Unsaved Entity Designer changes",
                 self._unsaved_changes_message("Close"),

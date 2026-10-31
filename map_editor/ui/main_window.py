@@ -62,6 +62,7 @@ from .colored_tabs import PaletteTabs, TAB_COLORS
 from ..render.squad_scene import squad_xz, centered_squad_position, host_position, MAX_PREVIEW_MEMBERS
 from .. import bootstrap
 from studio.rendering.asset_viewport import VIEW_PRESET_ANGLES
+from studio.ui.cursor_themes import studio_cursor
 from ..render.camera import ISO_PITCH, ISO_YAW
 
 TOOLS = (("select", "Select"), ("sector", "Sector"), ("building", "Building"),
@@ -1004,7 +1005,7 @@ class MainWindow(QMainWindow):
         lib = self._lib()
         if lib is None:
             return
-        QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
+        QApplication.setOverrideCursor(studio_cursor("busy"))
         try:
             plan = plan_road_fixes(self.doc, lib, RoadMasks(lib), self.view.selection or None)
         finally:
@@ -2277,7 +2278,7 @@ class MainWindow(QMainWindow):
             self._draft_grid = payload
             self._draft_grid_cell = self.view.hover or (self.doc.mw//2,self.doc.mh//2)
             self._refresh_squads(fields=False)
-        self.view.setCursor(Qt.CursorShape.CrossCursor)
+        self.view.setCursor(studio_cursor("place"))
         self.statusBar().showMessage('Paste preview · Left/right click: place · Esc: cancel',6000)
 
     def _confirm_placement(self, cell):

@@ -1,7 +1,8 @@
-"""Shared Studio themes, Theme menu and File Backup menu, used by every workspace.
+"""Shared Studio color themes, Theme menu (Colors, Cursors) and File Backup menu, used by every workspace.
 
-Every theme is one JSON file in ``studio/themes``. Adding a file there adds a theme
-to the Theme menu of every workspace: no code change is needed. A theme file holds:
+Every color theme is one JSON file in ``studio/themes``. Adding a file there adds a theme
+to the Theme > Colors menu of every workspace: no code change is needed. Cursor themes live in
+``studio.ui.cursor_themes``. A theme file holds:
 
 * ``id`` / ``name`` / ``description`` / ``order``: identity and menu position;
 * ``mode``: ``dark`` or ``light`` (selects the arrow/check icons and the status colors);
@@ -115,6 +116,9 @@ def apply_studio_style(theme: str | None = None, *, persist: bool = False) -> No
     app.setProperty("studioStyleLoaded", True)
     from studio.ui.pointer_cursors import install_pointer_cursors
     install_pointer_cursors(app)
+    if not app.property("studioCursorTheme"):
+        from studio.ui.cursor_themes import restore_cursor_theme
+        restore_cursor_theme()
     from studio.ui.widgets import apply_status_colors_for_mode
     apply_status_colors_for_mode(mode)
     for widget in app.allWidgets():
@@ -172,13 +176,16 @@ def install_backup_menu(window) -> None:
 
 
 def install_theme_menu(window) -> None:
-    """List every theme found in ``studio/themes`` in the workspace Theme menu."""
+    """Add the Theme menu with two submenus: Colors (``studio/themes``) and Cursors
+    (``studio.ui.cursor_themes``). Both lists are built from their registries."""
+    from studio.ui import cursor_themes
     menu = window.menuBar().addMenu("Theme")
-    group = QActionGroup(menu)
+    colors = menu.addMenu("Colors")
+    group = QActionGroup(colors)
     group.setExclusive(True)
     current = QApplication.instance().property("studioTheme")
     for theme_id, data in load_themes().items():
-        action = menu.addAction(data["name"])
+        action = colors.addAction(data["name"])
         action.setCheckable(True)
         action.setToolTip(data["description"])
         action.setProperty("studioThemeChoice", theme_id)
@@ -186,4 +193,20 @@ def install_theme_menu(window) -> None:
         group.addAction(action)
         action.triggered.connect(lambda checked=False, choice=theme_id:
                                  apply_studio_style(choice, persist=True))
+    cursors = menu.addMenu("Cursors")
+    cursor_group = QActionGroup(cursors)
+    cursor_group.setExclusive(True)
+    current_cursor = cursor_themes.active_cursor_theme()
+    for theme_id in cursor_themes.theme_ids():
+        name, description = cursor_themes.THEMES[theme_id][:2]
+        action = cursors.addAction(name)
+        action.setCheckable(True)
+        action.setToolTip(description)
+        action.setProperty("studioCursorThemeChoice", theme_id)
+        action.setChecked(current_cursor == theme_id)
+        cursor_group.addAction(action)
+        action.triggered.connect(lambda checked=False, choice=theme_id:
+                                 cursor_themes.set_cursor_theme(choice, persist=True))
     window.studio_theme_menu = menu
+    window.studio_color_menu = colors
+    window.studio_cursor_menu = cursors

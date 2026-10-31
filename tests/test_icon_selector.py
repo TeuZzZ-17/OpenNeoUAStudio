@@ -203,6 +203,14 @@ def test_icon_tab_picks_cells_and_blocks_taken_symbols(app, data, monkeypatch):
         app.processEvents()
         controls = window.icon_tab
         assert controls.view.isVisible() and not window.viewport.isVisible()
+        # No model loaded: the page can be browsed, but nothing is assigned or modified.
+        controls._cell_picked(1, 0)
+        assert controls.view.selected == (1, 0)
+        assert window.project.type_icon == 0
+        assert not window._modified
+        assert "Open a vehicle" in controls.status_label.text()
+        window.project.source_model = "Tiger"
+        window._sync_all()
         controls._cell_picked(1, 0)                         # cell of 'B'
         assert window.project.type_icon == ord("B")
         assert window.project.type_icon_cell is None
@@ -232,6 +240,23 @@ def test_icon_tab_picks_cells_and_blocks_taken_symbols(app, data, monkeypatch):
         assert controls.view.selected == (0, 0)
         assert window.project.type_icon == icon
         assert "Open a vehicle" in controls.status_label.text()
+    finally:
+        window._modified = False
+        window.close()
+
+
+def test_unsaved_prompt_ignores_model_only_changes(app):
+    window = _window(app)
+    try:
+        # Opening or picking a model raises the flag, but nothing is lost by switching.
+        window.project.source_model = "Tiger"
+        window.project.source_base = "Set.BAS"
+        window._set_modified()
+        assert window._modified and not window._has_unexported_work()
+        assert window._confirm_script_unit_switch()
+        # A real edit still asks.
+        window.project.type_icon = ord("B")
+        assert window._has_unexported_work()
     finally:
         window._modified = False
         window.close()
