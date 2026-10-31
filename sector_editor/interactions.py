@@ -4,6 +4,7 @@ from PySide6.QtCore import QMimeData, Qt, Signal
 from PySide6.QtGui import QDrag, QKeyEvent
 from PySide6.QtWidgets import QAbstractItemView
 from map_editor.ui.preview_cards import PreviewList
+from studio.ui.cursor_themes import studio_cursor
 
 
 class KeyboardList(PreviewList):
@@ -30,7 +31,7 @@ class ModelList(KeyboardList):
         if parent is not None:
             self.setParent(parent)
         self.setDragDropMode(QAbstractItemView.DragDropMode.DragOnly)
-        self.setCursor(Qt.CursorShape.OpenHandCursor)
+        self.setCursor(studio_cursor("open"))
 
     def startDrag(self, supported_actions):
         item = self.currentItem()

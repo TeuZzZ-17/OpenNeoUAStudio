@@ -38,6 +38,7 @@ from entity_designer.sphere_generator import (
     generate_collision_spheres,
     UNIT_COLL_MAX_COUNT,
 )
+from studio.ui.cursor_themes import studio_cursor
 from studio.rendering.asset_viewport import (
     VIEW_PRESETS,
 )
@@ -118,7 +119,7 @@ class _SpheresMixin:
         self.statusBar().showMessage(
             f"Generating collision spheres — {preset.label}")
         QApplication.processEvents()
-        QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
+        QApplication.setOverrideCursor(studio_cursor("busy"))
         try:
             result = generate_collision_spheres(
                 triangles, preset.key, max_spheres=UNIT_COLL_MAX_COUNT,

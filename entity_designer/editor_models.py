@@ -310,6 +310,8 @@ class _ModelBrowserMixin:
     def _confirm_script_unit_switch(self) -> bool:
         """Ask before replacing unexported work with another script unit."""
 
+        if not self._has_unexported_work():
+            return True
         answer = QMessageBox.question(
             self, "Unsaved Entity Designer changes",
             self._unsaved_changes_message("Load another unit"),

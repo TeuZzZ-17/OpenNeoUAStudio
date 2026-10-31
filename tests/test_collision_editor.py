@@ -4331,6 +4331,7 @@ class CollisionEditorTests(unittest.TestCase):
         self.assertEqual(window.project.legacy.radius, 20)
 
         # Unexported work: the guard refuses and keeps the loaded unit.
+        window.project.legacy.radius = 25
         window._set_modified(True)
         with patch("entity_designer.editor.QMessageBox.question",
                    return_value=QMessageBox.StandardButton.No):

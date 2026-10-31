@@ -37,10 +37,10 @@ def test_theme_switch_updates_open_menus_and_preserves_script_undo(app):
         assert editor.toPlainText().endswith('; retained edit')
         assert editor.editor.document().isUndoAvailable()
         for window in windows:
-            choices = [a for a in window.studio_theme_menu.actions() if a.property('studioThemeChoice')]
+            choices = [a for a in window.studio_color_menu.actions() if a.property('studioThemeChoice')]
             assert choices[0].property('studioThemeChoice') == 'resistance'
             assert choices[-1].property('studioThemeChoice') == 'dark'
-            assert not [a for a in window.studio_theme_menu.actions() if a.isSeparator()]
+            assert not [a for a in window.studio_color_menu.actions() if a.isSeparator()]
             assert {a.property('studioThemeChoice') for a in choices} == set(load_themes())
             assert [a.property('studioThemeChoice') for a in choices if a.isChecked()] == ['metropolis']
         editor.editor.undo()
@@ -134,7 +134,7 @@ def test_menu_choice_is_remembered_for_next_application_start(app, monkeypatch):
     window = QMainWindow()
     try:
         install_theme_menu(window)
-        next(a for a in window.studio_theme_menu.actions()
+        next(a for a in window.studio_color_menu.actions()
              if a.property('studioThemeChoice') == 'metropolis').trigger()
         assert values == {"ui/theme": "metropolis"}
         app.setProperty("studioStyleLoaded", False)

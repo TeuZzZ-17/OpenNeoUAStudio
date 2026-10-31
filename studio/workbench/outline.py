@@ -33,6 +33,7 @@ from PySide6.QtWidgets import (
 )
 
 from studio.formats.sklt import OutlineGroup, Point2D, Point3D, Polygon, SkltModel
+from studio.ui.cursor_themes import studio_cursor
 from studio.rendering.gizmo import choose_screen_label_rect
 from studio.rendering.gpu import AcceleratedWidget
 from studio.rendering.asset_viewport import MODEL_EDIT_SELECTION_RED
@@ -148,6 +149,7 @@ class OutlineCanvas(AcceleratedWidget):
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
         self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
+        self.setCursor(studio_cursor("point"))
         self._points: list[ProjectedPoint] = []
         self._groups: list[OutlineGroup] = []
         self._selected_index = -1
@@ -606,7 +608,7 @@ class OutlineCanvas(AcceleratedWidget):
         self._box_selecting = False
         self._box_select_moved = False
         self.transform_feedback = ""
-        self.setCursor(Qt.CursorShape.ArrowCursor)
+        self.setCursor(studio_cursor("point"))
         self.update()
 
     def mousePressEvent(self, event: QMouseEvent) -> None:  # noqa: N802 - Qt override
@@ -775,7 +777,7 @@ class OutlineCanvas(AcceleratedWidget):
             self._drag_start_points.clear()
             self._drag_transform = None
             self._snap_preview_pairs.clear()
-            self.setCursor(Qt.CursorShape.ArrowCursor)
+            self.setCursor(studio_cursor("point"))
             self.update()
             event.accept()
             return
@@ -930,7 +932,7 @@ class OutlineCanvas(AcceleratedWidget):
             drag_index: self._points[drag_index] for drag_index in self._drag_start_indices
         }
         self._drag_transform = self._make_transform()
-        self.setCursor(Qt.CursorShape.ClosedHandCursor)
+        self.setCursor(studio_cursor("closed"))
 
     def _connected_vertices(self, index: int) -> set[int]:
         connected: set[int] = set()
