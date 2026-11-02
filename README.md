@@ -11,6 +11,12 @@ The project brings together tools and workflows for inspecting, editing, convert
 
 Its structure, interface, supported formats, features, and integrated editors may change as development continues.
 
+## Companion project: OpenNeoUA
+
+[OpenNeoUA](https://github.com/TeuZzZ-17/OpenNeoUA) is a closely related, open-source engine for Urban Assault. OpenNeoUA Studio is designed not only for editing the original game, but also for working with the extended OpenNeoUA engine and its game data.
+
+We recommend visiting the companion repository and reporting bugs or other problems in the relevant project's issue tracker. Reports are appreciated and will be addressed as promptly as possible.
+
 ## Project status
 
 OpenNeoUA Studio is under active development.

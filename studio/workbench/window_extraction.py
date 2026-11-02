@@ -13,6 +13,7 @@ from PySide6.QtGui import (
     QAction,
     QColor,
     QImage,
+    QPixmap,
 )
 from PySide6.QtWidgets import (
     QApplication,
@@ -1007,6 +1008,7 @@ class _ExtractionMixin:
         self._snapshot_zoom_percent = value
         if self._snapshot_mode_active and previous > 0:
             self.viewport.adjust_snapshot_zoom(value / previous)
+        self._update_export_zoom_display()
 
     def _sync_snapshot_zoom_from_viewport(self) -> None:
         """Reflect wheel/gesture zoom in the shared Snapshot controls."""
@@ -1094,6 +1096,7 @@ class _ExtractionMixin:
             self._snapshot_zoom_reference = (
                 self.viewport.camera_zoom
                 / (self._snapshot_zoom_percent / 100.0))
+        self._update_export_zoom_display()
 
     def _on_toolbar_view_preset_changed(self, preset: str) -> None:
         if self._snapshot_mode_active:
@@ -1113,6 +1116,7 @@ class _ExtractionMixin:
         self._update_reset_camera_action()
         if self._snapshot_mode_active:
             self._sync_snapshot_zoom_from_viewport()
+            self._update_export_zoom_display()
         combo = (self.snapshot_view_combo if self._snapshot_mode_active
                  else self.toolbar_view_preset_combo)
         if combo.currentText() == "Current View":
@@ -1149,6 +1153,7 @@ class _ExtractionMixin:
         combo.blockSignals(False)
         if self._snapshot_mode_active:
             self._sync_snapshot_zoom_from_viewport()
+            self._update_export_zoom_display()
         self._sync_gizmo_camera()
         self._update_reset_camera_action()
 
@@ -1326,6 +1331,9 @@ class _ExtractionMixin:
         suggested = self._last_directory / (
             f"{self._snapshot_name(str(options['name_mode']))}_"
             f"{preset}.{extension}")
+        if not self._confirm_single_preview(
+                "Export Image", "Continue", suggested.name):
+            return
         labels = {
             "png": "PNG (*.png)",
             "jpg": "JPEG (*.jpg)",
@@ -1418,6 +1426,17 @@ class _ExtractionMixin:
 
         write_static_image_atomic(image, path, "png")
 
+    def _image_set_file_names(
+            self, extension: str, name_mode: str) -> list[tuple[str, str]]:
+        """Return (view, file name) for every image of an Image Set."""
+
+        model_name = self._snapshot_name(name_mode)
+        names = []
+        for index, view in enumerate(VIEW_PRESET_ANGLES, 1):
+            slug = re.sub(r"[^A-Za-z0-9_.-]+", "_", view).strip("._")
+            names.append((view, f"{model_name}_{index:02d}_{slug}.{extension}"))
+        return names
+
     def _export_figurine_set(self) -> None:
         """Export the current model from every canonical Snapshot angle."""
 
@@ -1435,6 +1454,13 @@ class _ExtractionMixin:
                 "The selected animated format requires an animated model.")
             return
         extension = output_extension(format_id)
+        file_names = self._image_set_file_names(
+            extension, str(options["name_mode"]))
+        if not self._confirm_multi_view_preview(
+                "Image Set",
+                tuple((view, view) for view in VIEW_PRESET_ANGLES),
+                "Continue", [f"{view}  >  {name}" for view, name in file_names]):
+            return
         output = QFileDialog.getExistingDirectory(
             self, "Choose Image Set destination folder",
             str(self._last_directory))
@@ -1442,12 +1468,7 @@ class _ExtractionMixin:
             return
         root = Path(output)
         root.mkdir(parents=True, exist_ok=True)
-        model_name = self._snapshot_name(str(options["name_mode"]))
-        targets = []
-        for index, view in enumerate(VIEW_PRESET_ANGLES, 1):
-            slug = re.sub(r"[^A-Za-z0-9_.-]+", "_", view).strip("._")
-            targets.append((
-                view, root / f"{model_name}_{index:02d}_{slug}.{extension}"))
+        targets = [(view, root / name) for view, name in file_names]
         existing = [path for _view, path in targets if path.exists()]
         if existing:
             answer = QMessageBox.question(
@@ -1463,6 +1484,7 @@ class _ExtractionMixin:
         preset = self.snapshot_view_combo.currentText()
         zoom_percent = self._snapshot_zoom_percent
         zoom_reference = self._snapshot_zoom_reference
+        export_zoom = self._snapshot_export_zoom_percent()
         size = self._snapshot_output_size()
         background = self._snapshot_background()
         if format_id == "jpg" and background is None:
@@ -1494,7 +1516,7 @@ class _ExtractionMixin:
                 self.viewport.play_animation(False)
             for view_index, (view, path) in enumerate(targets):
                 self.viewport.apply_snapshot_preset(
-                    view, size, zoom_percent)
+                    view, size, export_zoom)
                 if animated:
                     offset = view_index * frames_per_view
 
@@ -1551,6 +1573,114 @@ class _ExtractionMixin:
             f"Image Set exported: {len(written)} {extension.upper()} file(s), "
             f"{background_label}.", 10000)
 
+    def _confirm_multi_view_preview(
+            self, title: str, views: tuple[tuple[str, str], ...],
+            confirm_text: str, file_names: list[str]) -> bool:
+        """Show a small preview of a multi-view export before it is written.
+
+        The preview uses the same zoom, background, size ratio and guides as
+        the real export, only with smaller cells.
+        """
+
+        size = self._snapshot_output_size()
+        cell_long_side = 200
+        scale = cell_long_side / max(size.width(), size.height(), 1)
+        cell_size = QSize(max(1, round(size.width() * scale)),
+                          max(1, round(size.height() * scale)))
+        background = self._snapshot_background() or CONTACT_SHEET_BACKGROUND
+        include_guides = self._snapshot_include_guides()
+        export_zoom = self._snapshot_export_zoom_percent()
+        camera = self.viewport._camera_state()
+        try:
+            cells = []
+            for label, view in views:
+                self.viewport.apply_snapshot_preset(
+                    view, cell_size, export_zoom)
+                cells.append((label, self.viewport.render_snapshot(
+                    cell_size, background, include_guides=include_guides)))
+            sheet = compose_contact_sheet(cells, background)
+        except Exception as exc:
+            QMessageBox.warning(self, f"{title} preview failed", str(exc))
+            return False
+        finally:
+            self._restore_snapshot_export_state(camera)
+        return self._show_export_preview(
+            title, sheet, confirm_text, file_names)
+
+    def _confirm_single_preview(
+            self, title: str, confirm_text: str,
+            file_name: str) -> bool:
+        """Preview the single image of Export Image (current view and zoom)."""
+
+        size = self._snapshot_output_size()
+        scale = 480 / max(size.width(), size.height(), 1)
+        preview_size = QSize(max(1, round(size.width() * scale)),
+                             max(1, round(size.height() * scale)))
+        background = self._snapshot_background() or CONTACT_SHEET_BACKGROUND
+        try:
+            image = self.viewport.render_snapshot(
+                preview_size, background,
+                include_guides=self._snapshot_include_guides())
+        except Exception as exc:
+            QMessageBox.warning(self, f"{title} preview failed", str(exc))
+            return False
+        return self._show_export_preview(
+            title, image, confirm_text, [file_name])
+
+    def _show_export_preview(
+            self, title: str, image: QImage, confirm_text: str,
+            file_names: list[str]) -> bool:
+        """Show the preview with zoom, size, format and the files to write."""
+
+        size = self._snapshot_output_size()
+        format_label = self.snapshot_format_combo.currentText()
+        dialog = QDialog(self)
+        dialog.setWindowTitle(f"{title} preview")
+        layout = QVBoxLayout(dialog)
+        header = QLabel(
+            f"Export Zoom: {round(self._snapshot_export_zoom_percent())}%"
+            f"   |   Output: {size.width()} x {size.height()}"
+            f"   |   Format: {format_label}")
+        header_font = header.font()
+        header_font.setBold(True)
+        header.setFont(header_font)
+        layout.addWidget(header)
+        picture = QLabel()
+        picture.setPixmap(QPixmap.fromImage(image))
+        layout.addWidget(picture)
+        files = QLabel("Contents:\n" + "\n".join(file_names))
+        files.setTextInteractionFlags(
+            Qt.TextInteractionFlag.TextSelectableByMouse)
+        layout.addWidget(files)
+        buttons = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Ok
+            | QDialogButtonBox.StandardButton.Cancel)
+        buttons.button(
+            QDialogButtonBox.StandardButton.Ok).setText(confirm_text)
+        buttons.accepted.connect(dialog.accept)
+        buttons.rejected.connect(dialog.reject)
+        layout.addWidget(buttons)
+        return dialog.exec() == QDialog.DialogCode.Accepted
+
+    def _update_export_zoom_display(self) -> None:
+        """Show the zoom Image Set and Contact Sheet would use right now."""
+
+        label = getattr(self, "snapshot_export_zoom_label", None)
+        if label is None or not self._snapshot_mode_active:
+            return
+        label.setText(f"{round(self._snapshot_export_zoom_percent())}%")
+
+    def _snapshot_export_zoom_percent(self) -> float:
+        """Zoom to give every canonical view of a multi-view export.
+
+        It is the zoom seen in the viewport (relative to a 100% fit), not
+        the Snapshot control value, which is clamped to 25-300%.
+        """
+
+        return self.viewport.snapshot_zoom_ratio(
+            QSize(max(1, self.viewport.width()),
+                  max(1, self.viewport.height()))) * 100.0
+
     def _restore_snapshot_view_controls(
             self, preset: str, zoom_percent: int,
             zoom_reference: float | None) -> None:
@@ -1576,6 +1706,12 @@ class _ExtractionMixin:
             return
         suggested = self._last_directory / (
             f"{self._snapshot_name()}_ContactSheet.png")
+        if not self._confirm_multi_view_preview(
+                "Contact Sheet", CONTACT_SHEET_VIEWS, "Continue",
+                [suggested.name,
+                 "Views: " + ", ".join(label for label, _view in
+                                       CONTACT_SHEET_VIEWS)]):
+            return
         path_text, _selected_filter = QFileDialog.getSaveFileName(
             self, "Export Contact Sheet", str(suggested), "PNG (*.png)",
             options=QFileDialog.Option.DontConfirmOverwrite)
@@ -1597,13 +1733,14 @@ class _ExtractionMixin:
         preset = self.snapshot_view_combo.currentText()
         zoom_percent = self._snapshot_zoom_percent
         zoom_reference = self._snapshot_zoom_reference
+        export_zoom = self._snapshot_export_zoom_percent()
         size = self._snapshot_output_size()
         background = self._snapshot_background() or CONTACT_SHEET_BACKGROUND
         include_guides = self._snapshot_include_guides()
         try:
             cells = []
             for label, view in CONTACT_SHEET_VIEWS:
-                self.viewport.apply_snapshot_preset(view, size, zoom_percent)
+                self.viewport.apply_snapshot_preset(view, size, export_zoom)
                 cells.append((label, self.viewport.render_snapshot(
                     size, background, include_guides=include_guides)))
             sheet = compose_contact_sheet(cells, background)
