@@ -2245,12 +2245,13 @@ class CollisionEditorWindow(
                 and self.properties_tabs.currentIndex()
                 not in (self.collision_tab_index, self.collision_shape_tab_index,
                         self.fx_tab_index, self.wireframe_tab_index,
-                        self.icon_tab_index, self.fire_area_tab_index)):
+                        self.fire_area_tab_index)):
             self.properties_tabs.setCurrentIndex(self.collision_tab_index)
         for index in (
                 self.ground_tab_index,
                 self.fire_points_tab_index, self.gun_points_tab_index,
-                self.cockpit_tab_index, self.briefing_tab_index):
+                self.cockpit_tab_index, self.briefing_tab_index,
+                self.icon_tab_index):
             self.properties_tabs.setTabEnabled(index, vehicle_mode)
         # ai_fire_trigger_* belong to the weapon: the tab is grey once a vehicle
         # definition is loaded. With nothing loaded yet it stays open and empty.
@@ -2258,6 +2259,7 @@ class CollisionEditorWindow(
         if vehicle_loaded and self.properties_tabs.currentIndex() == self.fire_area_tab_index:
             self.properties_tabs.setCurrentIndex(self.collision_tab_index)
         self.properties_tabs.setTabEnabled(self.fire_area_tab_index, not vehicle_loaded)
+        self.properties_tab_strip.refresh()
         self._sync_fire_area()
 
         cockpit_enabled = vehicle_mode and self.project.cockpit_camera_enabled
