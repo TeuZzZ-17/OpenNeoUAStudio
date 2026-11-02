@@ -198,8 +198,8 @@ def test_squad_live_edit_preserves_exact_coordinates_and_roundtrips_ldf(win):
     win.set_tool('squad')
     panel = win.squad_panel
     panel.count.setValue(7)
-    panel.x.setValue(4567.75)
-    panel.z.setValue(-4389.125)
+    panel._change('pos_x', 4567.75)
+    panel._change('pos_z', -4389.125)
     panel.hidden.setChecked(True)
     panel.useable.setChecked(False)
     win._finish_live()

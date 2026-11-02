@@ -65,7 +65,7 @@ def is_cone(shape: str) -> bool:
     return shape in (CONE_BELOW, CONE_FORWARD)
 
 
-def usable_family(model: str, vertical_laser: bool = False) -> str | None:
+def usable_family(model: str) -> str | None:
     """"below" or "forward": the volumes the engine accepts for this weapon class.
 
     None when the class is not known here, so no advice is shown for it
@@ -73,7 +73,7 @@ def usable_family(model: str, vertical_laser: bool = False) -> str | None:
     """
 
     model = model.strip().casefold()
-    if model in ("bomb", "homing_bomb") or (model == "laser" and vertical_laser):
+    if model in ("bomb", "homing_bomb", "vertical_laser"):
         return "below"
     if model in ("rocket", "missile", "grenade", "arc_grenade", "laser"):
         return "forward"

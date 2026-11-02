@@ -107,7 +107,6 @@ def test_level_info_and_script_clipboards_use_document_history(win):
 def test_comment_and_camera_reset_are_live_without_map_mutation(win,app):
     win.doc.squads=[dict(owner=1,veh=1,num=1,x=3,y=3,hidden=False,useable=False,custom_name=None)]
     win._refresh_squads({0})
-    win.squad_panel.advanced.setChecked(True)
     QTest.keyClicks(win.squad_panel.name,'test comment')
     assert 'test comment' in win.squad_panel.list.item(0).toolTip()
     before=win.doc.snapshot()
@@ -168,9 +167,10 @@ def test_perspective_cpu_and_gpu_projection_agree_and_ground_ray_returns_point()
 @pytest.mark.parametrize('tool,layer,value',[('sector','type','05'),('owner','own',1),('building','blg',None)])
 def test_left_drag_paints_crossed_cells_in_one_undo(win,app,tool,layer,value):
     if tool=='building':
-        win.sel_building=next(iter(win.buildings))
-        value=f'{win.buildings[win.sel_building].id:02x}'
-    win.sel_typ=5
+        bid=next(iter(win.buildings))
+        win.building_list.setCurrentItem(win._bicon_items[bid])
+        value=f'{win.buildings[bid].id:02x}'
+    win.sector_list.setCurrentItem(win._icon_items[5])
     win.sel_owner=1
     win.view.pick_cell=lambda x,y:(int(x)//20+1,2)
     win.view.ground_cell=win.view.pick_cell

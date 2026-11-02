@@ -711,6 +711,58 @@ class GpuRenderer:
         gl.glBindFramebuffer(gl.GL_READ_FRAMEBUFFER, previous)
         return data[::-1].copy()
 
+    def read_depth(self, left, top, right, bottom):
+        """Window depth of the last frame in a pixel rectangle; the first row is the top one."""
+        _, h = self.size
+        data = np.empty((bottom-top, right-left), np.float32)
+        previous = int(gl.glGetIntegerv(gl.GL_READ_FRAMEBUFFER_BINDING))
+        gl.glBindFramebuffer(gl.GL_READ_FRAMEBUFFER, self.fbo)
+        gl.glReadPixels(left, h-bottom, right-left, bottom-top, gl.GL_DEPTH_COMPONENT, gl.GL_FLOAT, data)
+        gl.glBindFramebuffer(gl.GL_READ_FRAMEBUFFER, previous)
+        return data[::-1]
+
+    def read_ids_rect(self, left, top, right, bottom):
+        """Polygon IDs of the last frame in a pixel rectangle; the first row is the top one."""
+        _, h = self.size
+        data = np.empty((bottom-top, right-left), np.int32)
+        previous = int(gl.glGetIntegerv(gl.GL_READ_FRAMEBUFFER_BINDING))
+        gl.glBindFramebuffer(gl.GL_READ_FRAMEBUFFER, self.fbo)
+        gl.glReadBuffer(gl.GL_COLOR_ATTACHMENT1)
+        gl.glReadPixels(left, h-bottom, right-left, bottom-top, gl.GL_RED_INTEGER, gl.GL_INT, data)
+        gl.glBindFramebuffer(gl.GL_READ_FRAMEBUFFER, previous)
+        return data[::-1]
+
+    def glyph_visibility(self, camera, height, rect, tolerance, own_ids=()):
+        """1/0 mask over ``rect`` (logical pixels) for a flat glyph at world ``height``.
+
+        A glyph is hidden where the last frame has geometry nearer to the camera than the
+        glyph plane by more than ``tolerance`` world units. Geometry whose polygon ID is in
+        ``own_ids`` (the glyph's own sector) never hides it.
+        """
+        left, top, right, bottom = rect
+        device_w, device_h = self.size
+        scale_x, scale_y = device_w/camera.width, device_h/camera.height
+        x0, y0 = int(left*scale_x), int(top*scale_y)
+        x1, y1 = math.ceil(right*scale_x), math.ceil(bottom*scale_y)
+        scene = self.read_depth(x0, y0, x1, y1)
+        columns = np.floor((np.arange(left, right)+.5)*scale_x).astype(int)-x0
+        rows = np.floor((np.arange(top, bottom)+.5)*scale_y).astype(int)-y0
+        # On a flat plane the orthographic depth is linear in screen x and y.
+        matrix = camera_matrix(camera, self.map_size).astype(np.float64)
+        inverse = np.linalg.inv(matrix[:2, [0, 2]])
+        gain = matrix[2, [0, 2]] @ inverse
+        offset = matrix[:2, 1]*height + matrix[:2, 3]
+        bias = matrix[2, 1]*height + matrix[2, 3] - gain @ offset
+        ndc_x = (np.arange(left, right)+.5)/camera.width*2-1
+        ndc_y = 1-(np.arange(top, bottom)+.5)/camera.height*2
+        glyph = (gain[0]*ndc_x[None, :] + gain[1]*ndc_y[:, None] + bias + 1)/2
+        slack = abs(matrix[2, 1])*tolerance/2
+        visible = scene[np.ix_(rows, columns)] >= glyph-slack
+        if len(own_ids):
+            ids = self.read_ids_rect(x0, y0, x1, y1)
+            visible |= np.isin(ids[np.ix_(rows, columns)], tuple(own_ids))
+        return visible.astype(np.uint8)
+
     def delete(self):
         for buffers, flat, _offsets in self._preview_buffers.values():
             if buffers is not self.buffers:
