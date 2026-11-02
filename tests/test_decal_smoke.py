@@ -198,7 +198,7 @@ def test_preview_plays_only_the_first_part_of_a_long_smoke():
 
 
 def test_short_smoke_is_previewed_to_its_end():
-    short = PROFILE.replace("60000_90000", "6000_6000").replace("smoke_count = 30\n",
+    short = PROFILE.replace("60000~90000", "6000~6000").replace("smoke_count = 30\n",
                                                                 "smoke_count = 30\n    smoke_fade_inout = 3000|2000\n")
     simulation = _simulation(short)
     track = next(t for t in simulation.tracks if t.label.endswith("Decal smoke"))

@@ -515,10 +515,10 @@ def test_two_new_effects_are_saved_together_in_list_order(tmp_path):
 @pytest.mark.parametrize("position", [0, 2, 4, 6, 7])
 @pytest.mark.parametrize("values,expected", [
     ([], None),
-    (["255_231_8_255"], (255, 231, 8, 255)),
-    (["255_231_8_255", "8_231_255_128"], (8, 231, 255, 128)),
+    (["255|231|8|255"], (255, 231, 8, 255)),
+    (["255|231|8|255", "8|231|255|128"], (8, 231, 255, 128)),
     (["invalid"], (255, 255, 255, 255)),
-    (["999_-3_8"], (255, 0, 8, 255)),
+    (["999|-3|8"], (255, 0, 8, 255)),
 ])
 def test_visual_block_tint_is_shared_in_preview_and_saved_text(
         tmp_path, context, kind, trigger, position, values, expected):

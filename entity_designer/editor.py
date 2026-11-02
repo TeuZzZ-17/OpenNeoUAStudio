@@ -1282,7 +1282,7 @@ class CollisionEditorWindow(
         self.num_weapons_spin.setMinimumWidth(72)
         self.num_weapons_spin.setToolTip(
             "OpenNeoUA num_weapons lower endpoint. Set Min = Max for a fixed "
-            "count; Min < Max exports the inclusive min_max range. Fixed 0 "
+            "count; Min < Max exports the inclusive min~max range. Fixed 0 "
             "keeps vanilla one-projectile semantics.")
         self.num_weapons_spin.valueChanged.connect(
             self._num_weapons_changed)

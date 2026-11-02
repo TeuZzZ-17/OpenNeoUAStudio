@@ -29,5 +29,5 @@ def test_preview_smoke_uses_round_puffs_and_stops():
 
 def test_source_size_is_bounded_and_absent_is_zero():
     assert fx.unit_look({},weapon=False)['decal_size']==(0.,0.)
-    assert fx.unit_look({'ground_decal_size':'120_80'},weapon=False)['decal_size']==(80.,120.)
+    assert fx.unit_look({'ground_decal_size':'120~80'},weapon=False)['decal_size']==(80.,120.)
     assert fx.unit_look({'ground_decal_size':'12001'},weapon=False)['decal_size']==(0.,0.)

@@ -373,8 +373,8 @@ def test_tracer_needs_path_and_valid_sizes():
     base = {"mesh_tracer_path": "Data/a.3ds"}
     assert fx.parse_tracer(base) is not None
     assert fx.parse_tracer({}) is None
-    assert fx.parse_tracer({**base, "mesh_tracer_size_xyz": "3_3_0"}) is None
-    assert fx.parse_tracer({**base, "mesh_tracer_tint": "1_2_3_0"}) is None
+    assert fx.parse_tracer({**base, "mesh_tracer_size_xyz": "3|3|0"}) is None
+    assert fx.parse_tracer({**base, "mesh_tracer_tint": "1|2|3|0"}) is None
     spec = fx.parse_tracer({**base, "mesh_tracer_head_size": "9"})
     assert spec.head_size == 9.0 and spec.tail_size is None
     assert spec.tint == (255, 210, 80, 180) and spec.size_z == 300.0
@@ -432,7 +432,7 @@ def test_tracer_trails_behind_the_projectile_and_ends_at_impact():
 def test_tapered_tracer_is_split_and_glow_adds_additive_layers():
     spec = fx.parse_tracer({
         "mesh_tracer_path": "Data/a.3ds",
-        "mesh_tracer_size_xyz": "4_4_300", "mesh_tracer_tail_size": "0",
+        "mesh_tracer_size_xyz": "4|4|300", "mesh_tracer_tail_size": "0",
         "mesh_tracer_glow_rate": "5"})
     unit = fx.UnitPhases(normal=fx.VisualRef(60), weapon=True, tracer=spec)
     pieces = [i for i in _weapon_simulation(unit).items_at(500)
@@ -448,8 +448,8 @@ def test_tapered_tracer_is_split_and_glow_adds_additive_layers():
 def test_persistent_decoration_follows_the_weapon_and_fades_when_it_stops():
     deco = fx.parse_decoration({
         "decoration_fx_vp": "224", "decoration_fx_mode": "persistent",
-        "decoration_fx_offset_xyz": "0_0_-40", "decoration_fx_fade_inout": "200_400",
-        "decoration_fx_tint": "255_0_0_255"})
+        "decoration_fx_offset_xyz": "0|0|-40", "decoration_fx_fade_inout": "200|400",
+        "decoration_fx_tint": "255|0|0|255"})
     unit = fx.UnitPhases(normal=fx.VisualRef(60), weapon=True, decoration=deco)
     simulation = _weapon_simulation(unit)
     flight = simulation.tracks[0].end
@@ -499,8 +499,8 @@ def test_vehicle_waits_long_enough_for_a_slow_decoration():
 def test_decoration_particles_use_the_trail_look():
     deco = fx.parse_decoration({
         "decoration_fx_vp": "7", "decoration_fx_mode": "persistent",
-        "decoration_fx_vp_trail_tint": "70_220_255_255",
-        "decoration_fx_vp_trail_scale_xyz": "1_1_0.1"})
+        "decoration_fx_vp_trail_tint": "70|220|255|255",
+        "decoration_fx_vp_trail_scale_xyz": "1|1|0.1"})
     unit = fx.UnitPhases(normal=fx.VisualRef(60), weapon=True, decoration=deco)
     simulation = _weapon_simulation(unit)
     emitter = fx.EmitterSpec(
@@ -677,7 +677,7 @@ def test_tracer_follows_chaos_instead_of_a_straight_line():
     motion = fx.parse_motion({"chaos_factor": "2", "chaos_radius": "30"})
     spec = fx.parse_tracer({
                             "mesh_tracer_path": "Data/a.3ds",
-                            "mesh_tracer_size_xyz": "3_3_200"})
+                            "mesh_tracer_size_xyz": "3|3|200"})
     unit = fx.UnitPhases(normal=fx.VisualRef(60), weapon=True, tracer=spec,
                          motion=motion)
     simulation = _weapon_simulation(unit)
@@ -965,7 +965,7 @@ def test_cluster_keys_are_read_like_the_engine():
     assert fx.parse_cluster({"cluster_count": "2"}) is None
     # A trigger range is not a time: the split then happens on impact.
     ranged = fx.parse_cluster({"cluster_count": "3",
-                               "cluster_weapon_id": "3", "cluster_trigger_time": "100_200"})
+                               "cluster_weapon_id": "3", "cluster_trigger_time": "100~200"})
     assert ranged.trigger_time == 0
     assert fx.parse_cluster({"cluster_count": "99",
                              "cluster_weapon_id": "3"}).count == (64, 64)
