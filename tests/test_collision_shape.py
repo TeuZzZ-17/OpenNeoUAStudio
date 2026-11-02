@@ -183,7 +183,7 @@ class CollisionShapeTests(unittest.TestCase):
             "Model", "c" * 64, (1, 1, 1), (0, 0, 0), (_tetrahedron(),))
         text = collision_shape_text(shape)
         with self.assertRaisesRegex(ValueError, "finite"):
-            parse_collision_shape(text.replace("vertex = 0|0|0", "vertex = NaN_0_0"))
+            parse_collision_shape(text.replace("vertex = 0|0|0", "vertex = NaN|0|0"))
         with self.assertRaisesRegex(ValueError, "integer"):
             parse_collision_shape(text.replace(
                 "version = 1", "version = 1\nasset_set = 1.5"))

@@ -40,7 +40,7 @@ def test_import_reads_values_like_the_engine():
 
 
 def test_invalid_and_zero_values_stay_absent():
-    for raw in ("0", "1_2", "a_b_c", "-1_2_3", "0_2_3", "nan_1_1"):
+    for raw in ("0", "1|2", "a|b|c", "-1|2|3", "0|2|3", "nan|1|1"):
         text = f"new_weapon 1\nai_fire_trigger_box_forward_xyz = {raw}\nend\n"
         assert _read(text).box_forward is None
     # A cone needs angles below 180.
@@ -532,7 +532,7 @@ def test_muzzle_positions_follow_fire_x_and_its_modes_like_the_engine():
     assert _unit().muzzle_xs() == [-30.0] and _unit().x_span == (-30.0, 30.0)
     assert _unit(num_weapons=3).muzzle_xs() == [-30.0, 0.0, 30.0]
     # num_weapons accepts a min_max range (the preview uses the minimum).
-    assert len(_unit(num_weapons="2_4").muzzle_xs()) == 2
+    assert len(_unit(num_weapons="2~4").muzzle_xs()) == 2
     # Salve modes: the whole salvo on one side, or half and half with the odd one centred.
     assert _unit(fire_x_mode="salve_sequence", num_weapons=2).muzzle_xs() == [-30.0, -30.0]
     assert _unit(fire_x_mode="salve_mirror", num_weapons=5).muzzle_xs() == [
