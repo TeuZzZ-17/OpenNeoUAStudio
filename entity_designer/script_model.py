@@ -249,14 +249,14 @@ def _number(value: float) -> str:
 
 
 def _float_tuple(raw: str, count: int, key: str) -> tuple[float, ...]:
-    """Read an OpenNeoUA compact ``a_b_c`` value holding exactly *count* numbers."""
+    """Read an OpenNeoUA compact ``a|b|c`` value holding exactly *count* numbers."""
 
     token = raw.strip().split(maxsplit=1)[0] if raw.strip() else ""
-    parts = token.split("_")
+    parts = token.split("|")
     if len(parts) != count or not all(parts):
         raise CollisionScriptError(
             f"Valore non valido per {key}: {raw} "
-            f"(attesi {count} numeri separati da _).")
+            f"(attesi {count} numeri separati da |).")
     try:
         values = tuple(float(part) for part in parts)
     except ValueError as exc:
@@ -268,9 +268,9 @@ def _float_tuple(raw: str, count: int, key: str) -> tuple[float, ...]:
 
 
 def _tuple_text(*values: float) -> str:
-    """Render numbers as an OpenNeoUA compact ``a_b_c`` value."""
+    """Render numbers as an OpenNeoUA compact ``a|b|c`` value."""
 
-    return "_".join(_number(value) for value in values)
+    return "|".join(_number(value) for value in values)
 
 
 def _data_root_for_path(*paths: str | Path | None) -> Path | None:
@@ -375,9 +375,9 @@ def _radius_number(value: float) -> str:
 
 
 def _parse_num_weapons_range(raw: str) -> tuple[int, int]:
-    """Parse OpenNeoUA's fixed ``value`` or inclusive ``min_max`` syntax."""
+    """Parse OpenNeoUA's fixed ``value`` or inclusive ``min~max`` syntax."""
 
-    parts = raw.strip().split("_")
+    parts = raw.strip().split("~")
     if len(parts) not in (1, 2) or any(not part for part in parts):
         raise ValueError(raw)
     try:
@@ -413,7 +413,7 @@ def _project_num_weapons_range(
 
 def _num_weapons_text(project: "CollisionProject") -> str:
     minimum, maximum = _project_num_weapons_range(project)
-    return str(minimum) if minimum == maximum else f"{minimum}_{maximum}"
+    return str(minimum) if minimum == maximum else f"{minimum}~{maximum}"
 
 
 def _fire_point_preview_count(project: "CollisionProject") -> int:
@@ -1312,7 +1312,7 @@ def import_briefing_xyz_block(text: str, block: ScriptBlock) -> tuple[bool, floa
         if key != "briefing_xyz":
             continue
         try:
-            parts = tuple(float(part) for part in raw.split("_"))
+            parts = tuple(float(part) for part in raw.split("|"))
         except ValueError:
             continue
         if len(parts) == 3 and all(math.isfinite(part) and -100000 <= part <= 100000 for part in parts):
@@ -1329,7 +1329,7 @@ def briefing_size_data_lines(project: CollisionProject) -> list[str]:
 def briefing_xyz_data_lines(project: CollisionProject) -> list[str]:
     if project.target_category != VEHICLE or not project.briefing_xyz_enabled:
         return []
-    return [f"briefing_xyz = {project.briefing_x:g}_{project.briefing_y:g}_{project.briefing_z:g}"]
+    return [f"briefing_xyz = {project.briefing_x:g}|{project.briefing_y:g}|{project.briefing_z:g}"]
 
 
 def import_cockpit_camera_block(

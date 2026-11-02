@@ -2305,8 +2305,8 @@ class CollisionEditorWindow(
                 "the last loaded or imported vehicle script.")
         cockpit_lines = [
             "cockpit_camera_offset_xyz = "
-            f"{_number(self.project.cockpit_camera_offset_x)}_"
-            f"{_number(self.project.cockpit_camera_offset_y)}_"
+            f"{_number(self.project.cockpit_camera_offset_x)}|"
+            f"{_number(self.project.cockpit_camera_offset_y)}|"
             f"{_number(self.project.cockpit_camera_offset_z)}",
         ]
         if not vehicle_mode:

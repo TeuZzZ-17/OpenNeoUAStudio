@@ -10,9 +10,9 @@ new_cloud 2
     name = spores
     mesh_3ds = Data/Models/3ds/Spore.3ds
     count = 900
-    lifetime_minmax = 9000_5000
-    scale_xyz = 3.2_0_3.2
-    tint = 170_255_145
+    lifetime_minmax = 9000~5000
+    scale_xyz = 3.2|0|3.2
+    tint = 170|255|145
 end
 new_cloud 7
     name = broken

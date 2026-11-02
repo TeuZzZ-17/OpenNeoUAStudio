@@ -18,8 +18,8 @@ DECAL = "    duration = permanent\n"
 
 PROFILE = (
     "new_decal 1\n" + DECAL +
-    "    smoke_duration = 60000_90000\n    smoke_count = 30\n"
-    "    smoke_size = 16_30\n    smoke_intensity = 120\n"
+    "    smoke_duration = 60000~90000\n    smoke_count = 30\n"
+    "    smoke_size = 16~30\n    smoke_intensity = 120\n"
     "end\n")
 
 
@@ -69,7 +69,7 @@ def test_puffs_match_the_engine_reference_values():
 
 
 def test_puff_count_roll_matches_the_engine():
-    # smoke_count = 10_30 rolled per decal with the same hash as the engine.
+    # smoke_count = 10~30 rolled per decal with the same hash as the engine.
     spec = ds.SmokeSpec(enabled=True)
     for seed, expected in ((0x1234567, 13), (1, 19), (99, 22), (0xABCDEF, 29)):
         assert ds.emitter_count(spec, seed) == expected
@@ -107,11 +107,11 @@ def test_profile_without_smoke_keys_stays_vanilla():
 
 
 def test_smoke_keys_are_read_and_known_to_studio():
-    spec = _spec(DECAL + "    smoke_chance = 80\n    smoke_duration = 5000_3000\n"
-                 "    smoke_fade_inout = 100_200\n    smoke_count = 30\n"
-                 "    smoke_size = 16_30\n    smoke_growth = 4\n    smoke_rise_speed = 10\n"
-                 "    smoke_puff_time = 4000_7500\n    smoke_drift = 5\n    smoke_spread = 60\n"
-                 "    smoke_intensity = 120\n    smoke_tint = 10_20_30_40\n")
+    spec = _spec(DECAL + "    smoke_chance = 80\n    smoke_duration = 5000~3000\n"
+                 "    smoke_fade_inout = 100|200\n    smoke_count = 30\n"
+                 "    smoke_size = 16~30\n    smoke_growth = 4\n    smoke_rise_speed = 10\n"
+                 "    smoke_puff_time = 4000~7500\n    smoke_drift = 5\n    smoke_spread = 60\n"
+                 "    smoke_intensity = 120\n    smoke_tint = 10|20|30|40\n")
     smoke = spec.smoke
     assert smoke is not None and smoke.enabled
     assert (smoke.chance, smoke.fade_in, smoke.fade_out) == (80, 100, 200)
@@ -124,10 +124,10 @@ def test_smoke_keys_are_read_and_known_to_studio():
 
 
 def test_smoke_count_accepts_a_min_max_range():
-    assert _spec(DECAL + "    smoke_count = 30_10\n").smoke.count == (10, 30)
-    assert _spec(DECAL + "    smoke_count = 5_9\n").smoke.count == (5, 9)
-    assert _spec(DECAL + "    smoke_count = 500_900\n").smoke.count == (ds.MAX_PUFFS, ds.MAX_PUFFS)
-    spec = _spec(DECAL + "    smoke_count = 3_x\n")
+    assert _spec(DECAL + "    smoke_count = 30~10\n").smoke.count == (10, 30)
+    assert _spec(DECAL + "    smoke_count = 5~9\n").smoke.count == (5, 9)
+    assert _spec(DECAL + "    smoke_count = 500~900\n").smoke.count == (ds.MAX_PUFFS, ds.MAX_PUFFS)
+    spec = _spec(DECAL + "    smoke_count = 3~x\n")
     assert spec.smoke.count == ds.SmokeSpec().count             # bad range keeps the default
     assert any("smoke_count" in i.message for i in spec.issues)
 
@@ -135,14 +135,14 @@ def test_smoke_count_accepts_a_min_max_range():
 def test_any_smoke_key_switches_the_smoke_on():
     # No separate "smoke = 1" switch: one smoke_* key is enough.
     assert _spec(DECAL + "    smoke_count = 40\n").smoke.enabled
-    assert _spec(DECAL + "    smoke_tint = 1_2_3\n").smoke.enabled
+    assert _spec(DECAL + "    smoke_tint = 1|2|3\n").smoke.enabled
     # smoke_count = 0 keeps the smoke block but it never produces a puff.
     assert _spec(DECAL + "    smoke_count = 0\n").smoke.count == (0, 0)
 
 
 def test_bad_values_keep_the_defaults_and_warn():
     spec = _spec(DECAL + "    smoke_count = banana\n    smoke_size = 0\n"
-                 "    smoke_duration = x_y\n    smoke_tint = 1_2\n    smoke_growth = 99\n"
+                 "    smoke_duration = x_y\n    smoke_tint = 1|2\n    smoke_growth = 99\n"
                  "    smoke_chance = 500\n    smoke_puff_time = 1\n    smoke_spread = -5\n")
     smoke = spec.smoke
     defaults = ds.SmokeSpec()
@@ -199,7 +199,7 @@ def test_preview_plays_only_the_first_part_of_a_long_smoke():
 
 def test_short_smoke_is_previewed_to_its_end():
     short = PROFILE.replace("60000_90000", "6000_6000").replace("smoke_count = 30\n",
-                                                                "smoke_count = 30\n    smoke_fade_inout = 3000_2000\n")
+                                                                "smoke_count = 30\n    smoke_fade_inout = 3000|2000\n")
     simulation = _simulation(short)
     track = next(t for t in simulation.tracks if t.label.endswith("Decal smoke"))
     assert track.end - track.start == pytest.approx(6000)

@@ -142,9 +142,24 @@ class SpecialOverlay:
 
     @staticmethod
     def _draw_key_badges(painter, anchor, doc, value, icon, color, moment):
-        """One small key icon beside the badge for each key sector placed for this object."""
+        """One key icon beside the badge, with the number of key sectors placed for this object."""
         placed = [key for key in value.get('keys', [])
                   if 1 <= key[0] < doc.mw - 1 and 1 <= key[1] < doc.mh - 1]
-        for number in range(len(placed)):
-            center = QPointF(anchor.x() + 29 + number * 23, anchor.y())
-            draw_game_badge(painter, center, 20, icon + '_key', color, moment + number)
+        if not placed:
+            return
+        center = QPointF(anchor.x() + 31, anchor.y())
+        draw_game_badge(painter, center, 24, icon + '_key', color, moment)
+        painter.save()
+        font = painter.font()
+        font.setBold(True)
+        font.setPixelSize(15)
+        painter.setFont(font)
+        text = str(len(placed))
+        width = painter.fontMetrics().horizontalAdvance(text) + 10
+        pill = QRectF(center.x() + 15, center.y() - 10, max(width, 20), 20)
+        painter.setPen(QColor(color))
+        painter.setBrush(QColor(15, 18, 24, 215))
+        painter.drawRoundedRect(pill, 10, 10)
+        painter.setPen(QColor(255, 255, 255))
+        painter.drawText(pill, Qt.AlignmentFlag.AlignCenter, text)
+        painter.restore()

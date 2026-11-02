@@ -42,9 +42,9 @@ def _script_float(value: str, default: float = 0.0) -> float:
 
 
 def _script_tuple(value: str, default: tuple) -> tuple:
-    """Read an OpenNeoUA compact ``x_y_z`` value; a malformed one keeps the default."""
+    """Read an OpenNeoUA compact ``x|y|z`` value; a malformed one keeps the default."""
     parts = value.strip().split()
-    pieces = parts[0].split('_') if parts else []
+    pieces = parts[0].split('|') if parts else []
     if len(pieces) != len(default):
         return default
     try:
