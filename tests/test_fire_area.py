@@ -19,10 +19,10 @@ WEAPON_SCRIPT = (
     "new_weapon 7\n"
     "    name = Bomb\n"
     "    model = bomb\n"
-    "    ai_fire_trigger_cone_below_xyz = 30_20_1200\n"
+    "    ai_fire_trigger_cone_below_xyz = 30|20|1200\n"
     "    ai_fire_trigger_dead_zone = 150\n"
     "    begin_fx\n"
-    "        offset_xyz = 9_8_7\n"
+    "        offset_xyz = 9|8|7\n"
     "    end\n"
     "end\n"
 )
@@ -44,15 +44,15 @@ def test_invalid_and_zero_values_stay_absent():
         text = f"new_weapon 1\nai_fire_trigger_box_forward_xyz = {raw}\nend\n"
         assert _read(text).box_forward is None
     # A cone needs angles below 180.
-    text = "new_weapon 1\nai_fire_trigger_cone_forward_xyz = 180_20_100\nend\n"
+    text = "new_weapon 1\nai_fire_trigger_cone_forward_xyz = 180|20|100\nend\n"
     assert _read(text).cone_forward is None
     text = "new_weapon 1\nai_fire_trigger_forward_max_inclination = 90\nend\n"
     assert _read(text).max_inclination == 0.0
 
 
 def test_several_volumes_have_no_active_shape():
-    text = ("new_weapon 1\nai_fire_trigger_box_below_xyz = 1_2_3\n"
-            "ai_fire_trigger_box_forward_xyz = 1_2_3\nend\n")
+    text = ("new_weapon 1\nai_fire_trigger_box_below_xyz = 1|2|3\n"
+            "ai_fire_trigger_box_forward_xyz = 1|2|3\nend\n")
     area = _read(text)
     assert area.active_shape() is None and len(area.authored_shapes()) == 2
     project = CollisionProject(name="W", source_model="m", target_category=WEAPON,
@@ -78,10 +78,10 @@ def test_writers_replace_only_the_fire_area_and_keep_nested_blocks():
     for canonical in (False, True):
         text, _, _ = plan_script_update(
             WEAPON_SCRIPT, "new_weapon", 7, project, replace_all_managed=canonical)
-        assert "ai_fire_trigger_box_below_xyz = 200_1200_400" in text
+        assert "ai_fire_trigger_box_below_xyz = 200|1200|400" in text
         assert "ai_fire_trigger_cone_below_xyz" not in text
         assert text.count("ai_fire_trigger_dead_zone = 100") == 1
-        assert "offset_xyz = 9_8_7" in text
+        assert "offset_xyz = 9|8|7" in text
         assert _read(text) == project.fire_area
 
 

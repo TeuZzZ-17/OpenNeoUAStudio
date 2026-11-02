@@ -356,7 +356,7 @@ class BriefingControls(QWidget):
                 self.xyz_values[axis].setValue(value)
         self.setEnabled(project.target_category == "vehicle")
         size_text = f"briefing_size = {round(project.briefing_size)}" if project.briefing_size_enabled else "Uses the vehicle's radius."
-        position_text = (f"briefing_xyz = {project.briefing_x:g}_{project.briefing_y:g}_{project.briefing_z:g}"
+        position_text = (f"briefing_xyz = {project.briefing_x:g}|{project.briefing_y:g}|{project.briefing_z:g}"
                          if project.briefing_xyz_enabled else "Classic model position.")
         self.output.setText(size_text + "\n" + position_text)
 

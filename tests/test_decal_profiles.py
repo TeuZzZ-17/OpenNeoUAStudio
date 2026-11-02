@@ -13,13 +13,13 @@ PROFILE = (
     "new_decal 1\n"
     "    name = destroyed\n"
     "    texture = Interface/GroundDecals/impact_01.png\n"
-    "    stretch_xz = 0.8~1.2_0.9\n"
-    "    tint = 255_255_255_180\n"
+    "    stretch_xz = 0.8~1.2|0.9\n"
+    "    tint = 255|255|255|180\n"
     "    random_rotation = 1\n"
-    "    edge_fade = 5_10\n"
+    "    edge_fade = 5~10\n"
     "    duration = permanent\n"
-    "    fade_inout = 100_1000\n"
-    "    smoke_count = 30_10\n"
+    "    fade_inout = 100|1000\n"
+    "    smoke_count = 30~10\n"
     "end\n"
 )
 
@@ -40,14 +40,14 @@ def _profile(body: str) -> fx.DecalProfile | None:
 
 def test_invalid_profiles_are_dropped():
     assert _profile("    texture = x.png\n") is None                      # no duration
-    assert _profile("    duration = permanent\n    tint = 1_2_3_0\n") is None  # clear tint
+    assert _profile("    duration = permanent\n    tint = 1|2|3|0\n") is None  # clear tint
     assert _profile("    duration = 0\n") is None
     assert _profile("    duration = 12ms\n") is None
     assert _profiles("new_decal\n    duration = permanent\nend\n") == {}
 
 
 def test_timed_decal_fades_never_exceed_the_duration():
-    spec = _profile("    duration = 5000\n    fade_inout = 9000_9000\n").spec
+    spec = _profile("    duration = 5000\n    fade_inout = 9000|9000\n").spec
     assert not spec.permanent and spec.duration == 5000
     assert (spec.fade_in, spec.fade_out) == (0, 5000)
 

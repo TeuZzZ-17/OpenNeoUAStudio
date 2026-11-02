@@ -129,7 +129,7 @@ def _projectiles(raw: str | None) -> int:
     """First number of ``N`` or ``min_max`` (the engine rolls inside the range)."""
 
     try:
-        count = int((raw or "").strip().split(maxsplit=1)[0].split("_")[0])
+        count = int((raw or "").strip().split(maxsplit=1)[0].split("~")[0])
     except (ValueError, IndexError):
         return 1
     return min(max(count, 1), MAX_PREVIEW_PROJECTILES)

@@ -19,7 +19,7 @@ def test_old_fire_keys_are_ignored():
 
 
 def test_preview_smoke_uses_round_puffs_and_stops():
-    sim=simulation(' smoke_count = 5\n smoke_duration = 2000\n smoke_fade_inout = 0_400')
+    sim=simulation(' smoke_count = 5\n smoke_duration = 2000\n smoke_fade_inout = 0|400')
     when=fx.WEAPON_FLIGHT_MS+1000
     puffs=[item for item in sim.items_at(when) if item.kind=='decal_smoke']
     assert puffs and not any(item.additive for item in puffs)
