@@ -258,8 +258,7 @@ class _PaintingMixin:
         for face_order, face in enumerate(self._faces):
             if hidden_move_owner == face.owner and face.poly_id in hidden_move_polys:
                 continue
-            if (not clean and not face.mapped
-                    and not self._mapping_diagnostics):
+            if not face.mapped and (clean or not self._mapping_diagnostics):
                 continue
             if face.billboard_center is None:
                 cam = tuple(self._camera_vertex(vertex, camera)
@@ -628,24 +627,15 @@ class _PaintingMixin:
         adapter = self._indexed_adapter
         if adapter is None:
             raise RuntimeError(self._indexed_unavailable_reason)
-        unmapped = [face for face in self._faces if not face.mapped]
-        if unmapped:
-            examples = ", ".join(
-                f"{face.owner} polygon {face.poly_id}"
-                for face in unmapped[:4])
-            more = (
-                f" (+{len(unmapped) - 4} more)"
-                if len(unmapped) > 4 else "")
-            raise RuntimeError(
-                "retail indexed rendering requires complete ATTS material "
-                f"mappings; found {len(unmapped)} unmapped polygon(s): "
-                f"{examples}{more}")
         indexed_pieces = []
         distance_scale = 1.0 / max(
             abs(float(camera.get("scale", 1.0))), 1e-12)
         for piece in ordered:
             payload = piece.payload
             face = payload.face
+            # The engine draws only polygons referenced by a material block.
+            if not face.mapped:
+                continue
             material = self._materials[face.material]
             frame_index, _direction = self._anim_states.get(
                 face.material, (0, 1))

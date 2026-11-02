@@ -5,7 +5,7 @@ from unittest.mock import MagicMock
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-from PySide6.QtCore import QRectF
+from PySide6.QtCore import QRectF, QSize
 from PySide6.QtGui import QColor, QImage, QPainter
 from PySide6.QtWidgets import QApplication
 
@@ -54,6 +54,40 @@ class RenderRegressionV3Tests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         cls.app = QApplication.instance() or QApplication([])
+
+    def test_alpha_station_renders_mapped_faces_with_unmapped_polygons(self):
+        from studio_mcp import core
+
+        source = ("Models/Base/Alpha_Models/Myko_Station_01/"
+                  "Myko_Station_Alpha_Normal_Fire_Wait/ALPHA_VP_BRGRO_NORMAL.BASE")
+        try:
+            family = core.load_family(core.resolve_source(source))
+        except core.McpToolError as exc:
+            self.skipTest(str(exc))
+        viewport = AssetViewport()
+        viewport.resize(320, 240)
+        viewport.load_family(family)
+        viewport.apply_view_preset("Isometric Front Right", QSize(320, 240), 100)
+        self.assertEqual({face.poly_id for face in viewport._faces if not face.mapped}, {31, 43})
+        image = viewport.render_snapshot(QSize(320, 240), QColor(24, 26, 32))
+        self.assertFalse(image.isNull())
+        self.assertEqual(viewport._last_render_error, "")
+        self.assertEqual(viewport._last_effective_renderer, "retail_indexed_reconstructed")
+        self.assertGreater(viewport._last_indexed_stats.get("covered_pixels", 0), 0)
+
+        faces = viewport._faces
+        viewport._faces = [face for face in faces if face.mapped]
+        viewport._invalidate_indexed_view_cache()
+        mapped_only = viewport.render_snapshot(QSize(320, 240), QColor(24, 26, 32))
+        self.assertEqual(image, mapped_only)
+
+        viewport._faces = faces
+        viewport._invalidate_indexed_view_cache()
+        viewport._mapping_diagnostics = True
+        diagnostic = viewport.render_snapshot(
+            QSize(320, 240), QColor(24, 26, 32), include_guides=True)
+        self.assertFalse(diagnostic.isNull())
+        self.assertEqual(viewport._last_render_error, "")
 
     def test_degenerate_source_uv_triangle_is_rasterized_not_skipped(self):
         output = _indexed_image(
