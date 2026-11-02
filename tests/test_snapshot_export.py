@@ -255,6 +255,8 @@ class SnapshotExportTests(unittest.TestCase):
             self.assertEqual(window.vp_batch_panel.export_button.text(),
                              "Export All VP")
             self.assertTrue(window.vp_batch_panel.zip_check.isChecked())
+            # Export Zoom is plain text, not an editable control.
+            self.assertEqual(window.snapshot_export_zoom_label.text(), "100%")
             self.assertEqual(window.snapshot_fps_box.value(), 25)
             self.assertEqual(window.snapshot_export_speed_box.value(), 1.0)
         finally:
@@ -285,6 +287,37 @@ class SnapshotExportTests(unittest.TestCase):
             for x in range(60) for y in range(20)))
         with self.assertRaises(ValueError):
             compose_contact_sheet([], background)
+
+    def test_multi_view_export_zoom_matches_the_zoom_seen_in_the_viewport(self):
+        from studio.rendering.asset_viewport import AssetViewport
+
+        viewport = AssetViewport()
+        viewport.resize(400, 300)
+        viewport._faces = [object()]
+        corners = [(x, y, z) for x in (-1, 1) for y in (-2, 2)
+                   for z in (-3, 3)]
+        viewport._framing_points = lambda: list(corners)
+        target = QSize(512, 512)
+
+        viewport.apply_view_preset("Front", target, 100)
+        fit_zoom = viewport.camera_zoom
+        # Zoom far beyond the 25-300% of the Snapshot controls, then pan.
+        viewport._zoom = fit_zoom * 5.0
+        viewport._pan.setX(0.25)
+        before = viewport._camera_state()
+
+        ratio = viewport.snapshot_zoom_ratio(QSize(400, 300))
+
+        self.assertGreater(ratio, 4.0)
+        # Measuring must not move the camera the user is looking through.
+        self.assertEqual(viewport._camera_state(), before)
+
+        # Every canonical view of the export gets that same tightness.
+        viewport.apply_snapshot_preset("Front", target, ratio * 100.0)
+        tight_zoom = viewport.camera_zoom
+        viewport.apply_snapshot_preset("Front", target, 100.0)
+        self.assertAlmostEqual(
+            tight_zoom / viewport.camera_zoom, ratio, places=6)
 
     def test_batch_running_keeps_cancel_enabled_and_restores_export_controls(self):
         window = SnapshotStudioWindow()

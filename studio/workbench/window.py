@@ -1784,6 +1784,27 @@ class AssemblyWindow(
             "Use the selected model's resource name or its VP ID when one "
             "is available. Duplicate batch resource names receive an ID.")
         export_layout.addWidget(self.snapshot_naming_combo, 3, 1)
+        # Plain text, not a control: shows the zoom that Image Set and
+        # Contact Sheet will use. It follows the Zoom control above.
+        export_zoom_label = QLabel("Export Zoom:")
+        self.snapshot_export_zoom_label = QLabel("100%")
+        self.snapshot_export_zoom_label.setAlignment(
+            Qt.AlignmentFlag.AlignCenter)
+        # Framed and bold so it reads as a value, but with no arrow or
+        # hover, so it is not mistaken for a control.
+        self.snapshot_export_zoom_label.setStyleSheet(
+            "QLabel { font-weight: bold; font-size: 14pt; padding: 4px 10px;"
+            " border: 1px dashed palette(mid); border-radius: 4px; }")
+        self.snapshot_export_zoom_label.setMinimumHeight(
+            self.snapshot_naming_combo.sizeHint().height())
+        for widget in (export_zoom_label, self.snapshot_export_zoom_label):
+            widget.setToolTip(
+                "Indicator only. Zoom used by Export Image Set and Export "
+                "Contact Sheet, measured against the automatic fit of each "
+                "view (100% = model fills the frame). Change it with the "
+                "Zoom control in View Preset.")
+        export_layout.addWidget(export_zoom_label, 4, 0)
+        export_layout.addWidget(self.snapshot_export_zoom_label, 4, 1)
         # The three animation rows open and close as one block, with a short
         # animation: hiding them one by one made the panel jump.
         self.snapshot_animation_rows = CollapsibleSection(export_box)
@@ -1821,10 +1842,10 @@ class AssemblyWindow(
         for grid in (animation_grid, export_layout):
             grid.setColumnStretch(0, 1)
             grid.setColumnStretch(1, 1)
-        export_layout.addWidget(self.snapshot_animation_rows, 4, 0, 3, 2)
+        export_layout.addWidget(self.snapshot_animation_rows, 5, 0, 3, 2)
         self.snapshot_export_button = QPushButton("Export Image")
         self.snapshot_export_button.clicked.connect(self._export_snapshot)
-        export_layout.addWidget(self.snapshot_export_button, 7, 0, 1, 2)
+        export_layout.addWidget(self.snapshot_export_button, 8, 0, 1, 2)
         self.snapshot_figurine_button = QPushButton("Export Image Set")
         self.snapshot_figurine_button.setToolTip(
             "Export the current model in the selected format from every "
@@ -1833,7 +1854,7 @@ class AssemblyWindow(
             "alpha when no background is selected.")
         self.snapshot_figurine_button.clicked.connect(
             self._export_figurine_set)
-        export_layout.addWidget(self.snapshot_figurine_button, 8, 0, 1, 2)
+        export_layout.addWidget(self.snapshot_figurine_button, 9, 0, 1, 2)
         self.snapshot_contact_sheet_button = QPushButton(
             "Export Contact Sheet")
         self.snapshot_contact_sheet_button.setToolTip(
@@ -1843,7 +1864,7 @@ class AssemblyWindow(
             "selected background color, or dark grey when none is selected.")
         self.snapshot_contact_sheet_button.clicked.connect(
             self._export_contact_sheet)
-        export_layout.addWidget(self.snapshot_contact_sheet_button, 9, 0, 1, 2)
+        export_layout.addWidget(self.snapshot_contact_sheet_button, 10, 0, 1, 2)
         self._snapshot_export_layout = export_layout
         self._snapshot_export_box = export_box
         self._on_snapshot_format_changed(
