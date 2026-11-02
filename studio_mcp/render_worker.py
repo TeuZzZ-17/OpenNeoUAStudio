@@ -103,8 +103,7 @@ def main() -> int:
         viewport = AssetViewport()
         viewport.resize(width, height)
         viewport.load_family(family)
-        # The Retail renderer refuses a model with polygons that have no material. Draw the rest and paint those
-        # magenta instead, so a missing material is visible rather than blocking every picture.
+        # Highlight unmapped polygons in MCP previews without rendering them as surfaces.
         unmapped = [face for face in viewport._faces if not face.mapped]
         if unmapped:
             viewport._faces = [face for face in viewport._faces if face.mapped]
