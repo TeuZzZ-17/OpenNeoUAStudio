@@ -91,7 +91,8 @@ class Canvas(QOpenGLWidget):
                     GL.glActiveTexture(GL.GL_TEXTURE0)
                     painter.endNativePainting()
                 if not self.owner.clear_view:
-                    for name in ('building_overlay', 'special_overlay', 'squad_overlay', 'cloud_overlay'):
+                    # Special first: building icons must stay above the key glyphs of their sector.
+                    for name in ('special_overlay', 'building_overlay', 'squad_overlay', 'cloud_overlay'):
                         overlay = getattr(self.owner, name, None)
                         if overlay is None or (name == 'building_overlay' and self.owner.camera.perspective):
                             continue

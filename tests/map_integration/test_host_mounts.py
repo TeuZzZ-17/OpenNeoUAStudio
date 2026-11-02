@@ -43,15 +43,15 @@ robo_act_gun = 0
 robo_gun_pos_x = 4
 robo_gun_type = 7
 unit_act_gun = 1
-unit_gun_pos_xyz = 0_12_0
-unit_gun_dir_xyz = 0_0_-1
+unit_gun_pos_xyz = 0|12|0
+unit_gun_dir_xyz = 0|0|-1
 unit_gun_type = 9
 end
 modify_vehicle 220
 energy = 200
 robo_viewer_y = 25
 unit_act_gun = 0
-unit_gun_pos_xyz = 4_0_14
+unit_gun_pos_xyz = 4|0|14
 end
 """)
 

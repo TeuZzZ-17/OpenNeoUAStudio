@@ -371,6 +371,10 @@ class MapViewport(QWidget):
             cam = self.camera.copy()
             cam.yaw, cam.pitch, cam.zoom, cam.center, cam.pan, cam.width, cam.height = self._frame_key[1][:7]
             cam.perspective, cam.fov = self._frame_key[1][7:]
+            # Special first: building icons must stay above the key glyphs of their sector.
+            overlay = getattr(self, 'special_overlay', None)
+            if overlay is not None and not self.clear_view:
+                overlay.draw(painter, cam, self._display_terrain)
             overlay = getattr(self, 'building_overlay', None)
             if overlay is not None and not self.camera.perspective and not self.clear_view:
                 overlay.draw(painter, cam, self._display_terrain)
@@ -379,9 +383,6 @@ class MapViewport(QWidget):
                 overlay = getattr(self, 'squad_overlay', None)
                 if overlay is not None and not self.clear_view:
                     overlay.draw(painter, cam, self._display_terrain)
-        overlay = getattr(self, 'special_overlay', None)
-        if overlay is not None and self._frame is not None and not self.clear_view:
-            overlay.draw(painter, cam, self._display_terrain)
         overlay = getattr(self, 'cloud_overlay', None)
         if overlay is not None and self._frame is not None and not self.clear_view:
             overlay.draw(painter, self.camera)

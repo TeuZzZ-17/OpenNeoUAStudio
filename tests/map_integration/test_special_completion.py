@@ -217,7 +217,8 @@ def test_key_count_badges_are_drawn_only_for_gates(app, monkeypatch):
     overlay.draw(painter)
     painter.end()
 
-    assert icons.count('gate_key') == 2
+    # Two key sectors give one key badge carrying the number.
+    assert icons.count('gate_key') == 1
     assert 'item_key' not in icons
 
 

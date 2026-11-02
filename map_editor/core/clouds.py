@@ -46,7 +46,7 @@ class CloudProfile:
 
 
 def _tuple(value: str, count: int, convert=float):
-    parts = value.split('_')
+    parts = value.split('|')
     if len(parts) != count:
         return None
     try:
@@ -57,7 +57,7 @@ def _tuple(value: str, count: int, convert=float):
 
 
 def _tint(value: str):
-    parts = value.split('_')
+    parts = value.split('|')
     if len(parts) not in (3, 4):
         return None
     try:

@@ -185,23 +185,20 @@ def _full_int(text: str) -> int | None:
 
 
 def split_tuple(text: str | None, count: int) -> list[str] | None:
-    """``SplitTupleValue``: exactly *count* non-empty ``a_b_c`` parts, else None."""
+    """``SplitTupleValue``: exactly *count* non-empty ``a|b|c`` parts, else None."""
 
     if text is None:
         return None
-    parts = text.split("_")
+    parts = text.split("|")
     if len(parts) != count or not all(parts):
         return None
     return parts
 
 
-def parse_float_range(text: str, separator: str = "_") -> tuple[float, float] | None:
-    """``ParseFloatRangeValue``: fixed ``v`` or ``min_max`` (order normalized).
+def parse_float_range(text: str) -> tuple[float, float] | None:
+    """``ParseFloatRangeValue``: fixed ``v`` or ``min~max`` (order normalized)."""
 
-    Inside a compact tuple such as ``offset_xyz`` the range separator is ``~``.
-    """
-
-    parts = text.split(separator)
+    parts = text.split("~")
     if len(parts) == 1:
         value = _full_float(text)
         return None if value is None else (value, value)
@@ -214,7 +211,7 @@ def parse_float_range(text: str, separator: str = "_") -> tuple[float, float] | 
 
 
 def parse_int_range(text: str) -> tuple[int, int] | None:
-    parts = text.split("_")
+    parts = text.split("~")
     if len(parts) == 1:
         value = _full_int(text)
         return None if value is None else (value, value)
@@ -228,9 +225,9 @@ def parse_int_range(text: str) -> tuple[int, int] | None:
 
 def parse_int_list(text: str, *, allow_zero: bool,
                    max_items: int = MAX_COUNT) -> list[int] | None:
-    """``ParseInt16ListValue``: underscore list of positive (or >=0) int16."""
+    """``ParseInt16ListValue``: ``|`` list of positive (or >=0) int16."""
 
-    parts = text.split("_")
+    parts = text.split("|")
     if not text or len(parts) > max_items:
         return None
     values = []
@@ -243,9 +240,9 @@ def parse_int_list(text: str, *, allow_zero: bool,
 
 
 def parse_tint(text: str) -> tuple[int, int, int, int] | None:
-    """R_G_B[_A], each 0..255 (clamped); None when malformed."""
+    """R|G|B[|A], each 0..255 (clamped); None when malformed."""
 
-    parts = text.split("_")
+    parts = text.split("|")
     if len(parts) not in (3, 4):
         return None
     values = []
@@ -270,7 +267,7 @@ def format_number(value: float) -> str:
 def format_range(low: float, high: float) -> str:
     if abs(low - high) < 1e-9:
         return format_number(low)
-    return f"{format_number(low)}_{format_number(high)}"
+    return f"{format_number(low)}~{format_number(high)}"
 
 
 # -- sounds --------------------------------------------------------------------
@@ -601,7 +598,8 @@ class ScaleFx:
 
 
 def parse_scale_fx(value: str) -> ScaleFx | None:
-    parts = [part for part in value.split("_") if part != ""]
+    # Vanilla key: "_" stays valid, "|" is the OpenNeoUA separator.
+    parts = [part for part in re.split(r"[_|]", value) if part != ""]
     if len(parts) < 4:
         return None
     vps = []
@@ -893,7 +891,7 @@ def _interpret_smoke(rows: dict[str, str], issue) -> decal_smoke.SmokeSpec:
         parsed = parse_int_range(rows[key])
         if parsed is None:
             issue(SEVERITY_WARNING, f"Invalid {key} '{rows[key]}': "
-                  f"using {default[0]}_{default[1]}.")
+                  f"using {default[0]}~{default[1]}.")
             return default
         return (max(low, min(parsed[0], high)), max(low, min(parsed[1], high)))
 
@@ -932,7 +930,7 @@ def _interpret_smoke(rows: dict[str, str], issue) -> decal_smoke.SmokeSpec:
         if parts is None:
             issue(SEVERITY_WARNING,
                   f"Invalid smoke_fade_inout '{rows['smoke_fade_inout']}': "
-                  f"using {fade[0]}_{fade[1]}.")
+                  f"using {fade[0]}|{fade[1]}.")
         else:
             fade = tuple(
                 bounded_int("smoke_fade_inout", 0, 3600000, default, part)
@@ -1010,13 +1008,15 @@ def interpret_block(block: FxBlock, context: str) -> FxSpec:
                       f"Unknown mode '{value}': the whole block is ignored.")
                 bad_mode = True
         elif key == "trigger":
+            # "a|b" lists several triggers; one invalid name rejects the block.
             trigger = value.casefold()
             has_trigger = True
-            if trigger not in TRIGGERS[context]:
+            if any(name not in TRIGGERS[context] for name in trigger.split("|")):
                 allowed = " / ".join(TRIGGERS[context])
                 issue(SEVERITY_IGNORED,
                       f"Trigger '{value}' is not valid for a {context} "
-                      f"(use {allowed}): the block is ignored.")
+                      f"(use {allowed}, joined with | if needed): the block "
+                      "is ignored.")
                 bad_trigger = True
         elif key == "start_size":
             start_size = _stof(value)
@@ -1056,7 +1056,7 @@ def interpret_block(block: FxBlock, context: str) -> FxSpec:
                 target_min, target_max = launch_min, launch_max
             # x_y_z where every axis is a fixed value or a "min~max" range.
             parts = split_tuple(value, 3)
-            axes = ([parse_float_range(part, "~") for part in parts]
+            axes = ([parse_float_range(part) for part in parts]
                     if parts is not None else None)
             if axes is None or any(axis is None for axis in axes):
                 issue(SEVERITY_WARNING, f"Invalid {key} '{value}': using 0_0_0.")
@@ -1287,7 +1287,7 @@ def parse_decal_profile(profile_id: int, values: dict[str, str]) -> DecalProfile
                   f"Invalid stretch_xz '{values['stretch_xz']}': expected x_z.")
         else:
             for axis, part in enumerate(parts):
-                parsed = parse_float_range(part, "~")
+                parsed = parse_float_range(part)
                 if not parsed or parsed[0] <= 0 or parsed[1] <= 0:
                     issue(SEVERITY_WARNING,
                           f"Invalid stretch_xz '{values['stretch_xz']}': using 1.0.")
@@ -2717,7 +2717,7 @@ class PreviewSimulation:
             rng = self._rng(source, trigger + definition.salt)
             if isinstance(item, FxBlock):
                 spec = definition.specs[index]
-                if not spec.active or spec.trigger != trigger:
+                if not spec.active or trigger not in spec.trigger.split("|"):
                     continue
                 if spec.mode == MODE_VISUAL:
                     self._build_visual(source, spec, rng, start, origin, prefix)

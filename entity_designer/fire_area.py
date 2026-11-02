@@ -177,7 +177,7 @@ def fire_area_from_values(values: dict[str, str]) -> FireArea:
             continue
         token = raw.strip().split(maxsplit=1)[0]
         try:
-            size = tuple(float(part) for part in token.split("_"))
+            size = tuple(float(part) for part in token.split("|"))
         except ValueError:
             continue
         if valid_size(shape, size):

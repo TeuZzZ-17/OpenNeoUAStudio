@@ -6,28 +6,28 @@ from entity_designer.script_model import *
 from entity_designer.briefing import BriefingControls,BriefingPreview
 
 def test_xyz_every_writer_and_nested_preservation():
-    source='new_vehicle 1\nname = One\nbriefing_size = 50\nbriefing_xyz = 1_2_3\nbegin_fx\noffset_xyz = 9_8_7\nend\nend\n'
+    source='new_vehicle 1\nname = One\nbriefing_size = 50\nbriefing_xyz = 1|2|3\nbegin_fx\noffset_xyz = 9|8|7\nend\nend\n'
     p=CollisionProject(name='One',target_category=VEHICLE,briefing_xyz_enabled=True,briefing_x=-12.5,briefing_y=30,briefing_z=4)
     for canonical in (False,True):
         text,_,_=plan_script_update(source,'new_vehicle',1,p,replace_all_managed=canonical)
-        assert text.count('briefing_xyz = -12.5_30_4')==1
-        assert 'offset_xyz = 9_8_7' in text
+        assert text.count('briefing_xyz = -12.5|30|4')==1
+        assert 'offset_xyz = 9|8|7' in text
         assert import_briefing_xyz_block(text,find_script_blocks(text)[0])==(True,-12.5,30,4)
     patch=build_editable_overwrite_preview('new_vehicle',1,p,{'briefing'})
     text,groups=apply_editable_overwrite_preview(source,patch,'new_vehicle',1)
-    assert groups=={'briefing'} and 'briefing_xyz = -12.5_30_4' in text
+    assert groups=={'briefing'} and 'briefing_xyz = -12.5|30|4' in text
     state=p.snapshot();p.briefing_x=88;p.restore(state);assert p.briefing_x==-12.5
     p.briefing_xyz_enabled=False
     text,_,_=plan_script_update(source,'new_vehicle',1,p,replace_all_managed=True)
-    assert 'briefing_xyz' not in text and 'offset_xyz = 9_8_7' in text
+    assert 'briefing_xyz' not in text and 'offset_xyz = 9|8|7' in text
     p.target_category=WEAPON;p.briefing_xyz_enabled=True
     assert 'briefing_xyz' not in export_collision_text(p)
 
 def test_xyz_import_bounds_and_invalid_keep_previous():
     for value in ('nan_0_0','1_2','1__3','1_2_3_4','100001_0_0','1x_0_0'):
-        text=f'new_vehicle 1\nbriefing_xyz = 3_4_5\nbriefing_xyz = {value}\nend\n'
+        text=f'new_vehicle 1\nbriefing_xyz = 3|4|5\nbriefing_xyz = {value}\nend\n'
         assert import_briefing_xyz_block(text,find_script_blocks(text)[0])==(True,3,4,5)
-    text='new_vehicle 1\nbriefing_xyz = -100000_100000_0\nend\n'
+    text='new_vehicle 1\nbriefing_xyz = -100000|100000|0\nend\n'
     assert import_briefing_xyz_block(text,find_script_blocks(text)[0])==(True,-100000,100000,0)
 
 def test_briefing_marker_backwards_compatibility():
@@ -36,7 +36,7 @@ def test_briefing_marker_backwards_compatibility():
     patch=build_editable_overwrite_preview('new_vehicle',1,p,{'briefing'})
     for label in ('Briefing Model Settings','Briefing Model Size','Briefing Radius'):
         result,_=apply_editable_overwrite_preview(text,patch.replace('Briefing Model Settings',label),'new_vehicle',1)
-        assert 'briefing_xyz = 2_0_0' in result
+        assert 'briefing_xyz = 2|0|0' in result
 
 class Editor(QWidget):
     def __init__(self):

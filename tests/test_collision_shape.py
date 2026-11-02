@@ -183,14 +183,14 @@ class CollisionShapeTests(unittest.TestCase):
             "Model", "c" * 64, (1, 1, 1), (0, 0, 0), (_tetrahedron(),))
         text = collision_shape_text(shape)
         with self.assertRaisesRegex(ValueError, "finite"):
-            parse_collision_shape(text.replace("vertex = 0_0_0", "vertex = NaN_0_0"))
+            parse_collision_shape(text.replace("vertex = 0|0|0", "vertex = NaN_0_0"))
         with self.assertRaisesRegex(ValueError, "integer"):
             parse_collision_shape(text.replace(
                 "version = 1", "version = 1\nasset_set = 1.5"))
         with self.assertRaisesRegex(ValueError, "0..255"):
             parse_collision_shape(text.replace(
-                "rotation = 0_0_0",
-                "rotation = 0_0_0\nasset_set = 256"))
+                "rotation = 0|0|0",
+                "rotation = 0|0|0\nasset_set = 256"))
         oversized = CollisionHull(
             ((0, 0, 0), (1e7 + 1, 0, 0), (0, 1, 0), (0, 0, 1)),
             _tetrahedron().faces)
@@ -622,7 +622,7 @@ class CollisionShapeTests(unittest.TestCase):
             "    radius = 45\n"
             "    coll_num = 2\n"
             "    coll_act = 0\n"
-            "    coll_xyz = 1_2_3\n"
+            "    coll_xyz = 1|2|3\n"
             "    coll_radius = 4\n"
             "    collision_shape = Data/Models/Collision/Old.collision\n"
             "end\n")
@@ -1223,8 +1223,8 @@ class CollisionShapeTests(unittest.TestCase):
                 "new_vehicle 77\n"
                 "    name = Set Mismatch Test\n"
                 "    vp_normal = 1\n"
-                "    scale_xyz = 2_3_4\n"
-                "    rotation_xyz = 0_15_0\n"
+                "    scale_xyz = 2|3|4\n"
+                "    rotation_xyz = 0|15|0\n"
                 "    collision_shape = Data/Sets/Set1/Collision/SourceSet2.collision\n"
                 "end\n",
                 encoding="utf-8")
@@ -1291,7 +1291,7 @@ class CollisionShapeTests(unittest.TestCase):
         text = (
             "new_vehicle 3\n"
             "    3ds_normal = Data/Models/3ds/Test.3ds\n"
-            "    rotation_xyz = 90_0_0\n"
+            "    rotation_xyz = 90|0|0\n"
             "    collision_shape = Data/Models/Collision/Test.collision\n"
             "end\n")
         reference = script_model_references(text)[0]

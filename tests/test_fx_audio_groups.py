@@ -188,8 +188,8 @@ def test_ini_settings_are_read_like_the_engine():
     assert fx.parse_global_fade("") == (0, 0)
     assert fx.parse_effect_settings("") == fx.EffectSettings()
     settings = fx.parse_effect_settings(
-        "game.global_shk_fade_inout = 150_300 ; shake\n"
-        "game.global_pal_fade_inout = 100_200\n"
+        "game.global_shk_fade_inout = 150|300 ; shake\n"
+        "game.global_pal_fade_inout = 100|200\n"
         "gfx.color_effects = 0\naudio.num_palfx = 20\naudio.volume = 64\n")
     assert settings == fx.EffectSettings(
         shake_fade=(150, 300), palette_fade=(100, 200), color_effects=0,

@@ -114,7 +114,7 @@ def parse_location_blocks(text):
             elif key in ('fade_in_ms', 'hold_ms', 'fade_out_ms'):
                 value[key] = int(data)
             elif key == 'point':
-                x, z = data.split('_')
+                x, z = data.split('|')
                 value['points'].append((float(x), float(z)))
             else:
                 raise ValueError('Unknown location field: ' + key)
@@ -144,6 +144,6 @@ def location_lines(values, format_number):
         for field in ('fade_in_ms', 'hold_ms', 'fade_out_ms'):
             yield f'   {field} = {value[field]}'
         for x, z in value['points']:
-            yield f'   point = {format_number(x)}_{format_number(z)}'
+            yield f'   point = {format_number(x)}|{format_number(z)}'
         yield 'end'
         yield ';------------------------------------------------------------'

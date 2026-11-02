@@ -36,7 +36,7 @@ UNIT = (
     "new_vehicle 40\n"
     "    name = FX_RING\n"
     "    maxrot = 1\n"
-    "    scale_fx = 0.5_15_-9_3000_229_230_231_0_99\n"
+    "    scale_fx = 0.5|15|-9|3000|229|230|231|0|99\n"
     "end\n"
 )
 
@@ -92,6 +92,23 @@ def test_trigger_validity_depends_on_context():
     assert not _spec(body, fx.CONTEXT_VEHICLE).active
 
 
+def test_trigger_list_with_ampersand_follows_engine_rules():
+    tail = "\nmode = visual\nduration = 100\nvp_model = 3"
+    assert _spec("trigger = detonate|impact_world" + tail, fx.CONTEXT_WEAPON).active
+    assert _spec("trigger = destroyed|air_destroyed" + tail).active
+    # One invalid, unknown or empty name rejects the whole block.
+    for bad in ("detonate|destroyed", "detonate|nonsense", "detonate|", "|detonate"):
+        assert not _spec("trigger = " + bad + tail, fx.CONTEXT_WEAPON).active
+    assert not _spec("trigger = destroyed|detonate" + tail).active
+
+
+def test_simulation_plays_a_block_on_each_listed_trigger():
+    spec = _spec("trigger = destroyed|air_destroyed\nmode = visual\n"
+                 "duration = 100\nvp_model = 3")
+    assert "air_destroyed" in spec.trigger.split("|")
+    assert "destroyed" in spec.trigger.split("|")
+
+
 def test_unknown_key_is_reported_but_previewed():
     spec = _spec("trigger = destroyed\nmode = visual\nduration = 100\n"
                  "vp_model = 3\nfuture_key = 1")
@@ -110,7 +127,7 @@ def test_dest_fx_and_scale_fx_parsing():
 
 def test_visual_chain_matches_engine_timeline():
     spec = _spec("trigger = destroyed\nmode = visual\nstart_size = 0\n"
-                 "mid_size = 4\nend_size = 2\nduration = 900\nfade_inout = 0_300\n"
+                 "mid_size = 4\nend_size = 2\nduration = 900\nfade_inout = 0|300\n"
                  "vp_model = 1\nvp_model = 2\nvp_model = 3")
     index, size, _alpha, _spin = fx.visual_chain_state(spec, 450)
     assert index == 1 and math.isclose(size, 4.0)
@@ -159,7 +176,7 @@ _CARCASS_UNIT = (
     "    radius = 10\n"
     "    maxrot = 3\n"
     "    airconst = 500\n"
-    "    launch_xyz = 0_0_0\n"
+    "    launch_xyz = 0|0|0\n"
     "    follow_carcass = {value}\n"
     "end\n"
     "end\n"
@@ -307,22 +324,22 @@ def test_particles_follow_emitter_window_and_outlive_their_vp():
 
 LOOK = (
     "new_weapon 9\n"
-    "    tint = 70_70_120_200\n"
-    "    spin_xyz = 0_0_2\n"
-    "    vp_trail_tint = 50_150_255_130\n"
-    "    vp_trail_scale_xyz = 2_1_0.4\n"
+    "    tint = 70|70|120|200\n"
+    "    spin_xyz = 0|0|2\n"
+    "    vp_trail_tint = 50|150|255|130\n"
+    "    vp_trail_scale_xyz = 2|1|0.4\n"
     "    mesh_tracer_path = Data/Models/3ds/Tracer.3ds\n"
-    "    mesh_tracer_tint = 255_180_60_120\n"
-    "    mesh_tracer_size_xyz = 1_1_80\n"
+    "    mesh_tracer_tint = 255|180|60|120\n"
+    "    mesh_tracer_size_xyz = 1|1|80\n"
     "    decoration_fx_mode = periodic\n"
     "    decoration_fx_vp = 224\n"
-    "    decoration_fx_interval = 300_300\n"
+    "    decoration_fx_interval = 300~300\n"
     "    decoration_fx_count = 2\n"
     "    decoration_fx_duration = 500\n"
-    "    decoration_fx_offset_xyz = 0_0_-40\n"
-    "    decoration_fx_tint = 255_95_70_200\n"
-    "    decoration_fx_spin_xyz = 0_1.5_0\n"
-    "begin_fx\n    trigger = detonate\n    tint = 1_2_3\nend\n"
+    "    decoration_fx_offset_xyz = 0|0|-40\n"
+    "    decoration_fx_tint = 255|95|70|200\n"
+    "    decoration_fx_spin_xyz = 0|1.5|0\n"
+    "begin_fx\n    trigger = detonate\n    tint = 1|2|3\nend\n"
     "end\n")
 
 
@@ -604,7 +621,7 @@ def test_hit_unit_preview_also_shows_the_weapon_ground_decal():
 LAUNCH_WEAPON = (
     "new_weapon 1\n"
     "begin_fx\n    trigger = launch\n    mode = visual\n"
-    "    offset_xyz = 0_0_0\n    start_size = 0.2\n    end_size = 0.2\n"
+    "    offset_xyz = 0|0|0\n    start_size = 0.2\n    end_size = 0.2\n"
     "    duration = 1000\n    vp_model = 130\nend\n"
     "end\n")
 
@@ -677,11 +694,11 @@ SOUND_UNIT = (
     "new_weapon 9\n"
     "    snd_launch_sample = sounds/launch.wav\n"
     "    snd_launch_volume = 100\n"
-    "    snd_launch_pitch = 1000_2000\n"
+    "    snd_launch_pitch = 1000~2000\n"
     "    snd_normal_sample = Data/Sounds/loop.wav\n"
     "    snd_normal_volume = 90\n"
     "    snd_hit_sample = sounds/hit.wav\n"
-    "    snd_hit_pitch = 15000_10000\n"
+    "    snd_hit_pitch = 15000~10000\n"
     "begin_fx\n    trigger = detonate\n    snd_launch_sample = no.wav\nend\n"
     "end\n")
 
@@ -909,8 +926,8 @@ def test_panel_has_a_mute_button_and_plays_sounds_while_running(app, tmp_path):
 CLUSTER_PARENT = (
     "new_weapon 28\n"
     "    vp_normal = 113\n    vp_dead = 22\n    start_speed = 100\n"
-    "    cluster_count = 2_5\n    cluster_weapon_id = 29\n"
-    "    cluster_trigger_time = 600\n    cluster_spread_xy = 10_10\n"
+    "    cluster_count = 2~5\n    cluster_weapon_id = 29\n"
+    "    cluster_trigger_time = 600\n    cluster_spread_xy = 10|10\n"
     "    cluster_vp = 112\n    cluster_generations = 1\n"
     "    snd_cluster_sample = sounds/Smex02.wav\n    snd_cluster_pitch = 0\n"
     "    snd_cluster_volume = 120\n"
@@ -1027,10 +1044,10 @@ def test_cluster_models_are_loaded_with_the_weapon():
 
 def test_spread_and_angles_shape_the_child_directions():
     weapons = _cluster_weapons(CLUSTER_PARENT.replace(
-        "cluster_spread_xy = 10_10",
-        "cluster_horizontal_angle = 0_360\n    cluster_vertical_angle = 30_30\n"
-        "    cluster_spread_xy = 0_0")
-        .replace("cluster_count = 2_5", "cluster_count = 4"))
+        "cluster_spread_xy = 10|10",
+        "cluster_horizontal_angle = 0~360\n    cluster_vertical_angle = 30~30\n"
+        "    cluster_spread_xy = 0|0")
+        .replace("cluster_count = 2~5", "cluster_count = 4"))
     simulation = _cluster_simulation(weapons)
     units = [i for i in simulation.items_at(700) if i.kind == "unit"]
     assert len(units) == 4
@@ -1044,7 +1061,7 @@ def test_spread_and_angles_shape_the_child_directions():
 
 DEBUFF_TEXT = (
     "new_debuff 2\n"
-    "    debuff_vp = 191_191\n    debuff_tint = 0_255_0_255\n    debuff_scale = 4.0\n"
+    "    debuff_vp = 191|191\n    debuff_tint = 0|255|0|255\n    debuff_scale = 4.0\n"
     "    debuff_random_max_offset = 90%\n    debuff_tick_time = 2000\n"
     "    debuff_duration = 900000\n    snd_debuff_sample = sounds/zap.wav\n"
     "end\n"
@@ -1106,8 +1123,8 @@ def test_mesh_laser_is_one_stretched_beam_with_a_glow():
     laser = fx.weapon_def_from_text(125, (
         "new_weapon 125\n    model = laser\n    vp_normal = 60\n"
         "    laser_mesh_path = Data/Models/3ds/laser.3ds\n"
-        "    laser_mesh_size_xy = 8_0\n    laser_mesh_glow_rate = 5\n"
-        "    laser_mesh_tint = 10_20_30_200\nend\n"))
+        "    laser_mesh_size_xy = 8|0\n    laser_mesh_glow_rate = 5\n"
+        "    laser_mesh_tint = 10|20|30|200\nend\n"))
     simulation = _weapon_simulation(__import__("dataclasses").replace(laser.unit, altitude=800))
     pieces = [i for i in simulation.items_at(100) if i.kind == "tracer"]
     body = [i for i in pieces if not i.additive]
@@ -1159,8 +1176,8 @@ def test_palette_colors_follow_the_engine_formula():
     assert fx.palette_colors([(9, 1.0)], {9: (1.0, 0.4, 0.03)})[0] == pytest.approx((1.0, 0.4, 0.03))
     assert fx.palette_colors([(9, 0.5)])[0] == pytest.approx((1.0, 1.0, 1.0))
     custom, powers = fx.parse_color_settings(
-        "gfx.color_eff[9]  = 255_102_7 ; Orange\ngfx.color_eff_pwr[2] = 50\n"
-        "gfx.color_eff[3] = 1_2_3\n")
+        "gfx.color_eff[9]  = 255|102|7 ; Orange\ngfx.color_eff_pwr[2] = 50\n"
+        "gfx.color_eff[3] = 1|2|3\n")
     assert custom == {9: pytest.approx((1.0, 0.4, 7 / 255))} and powers == {2: 0.5}
 
 

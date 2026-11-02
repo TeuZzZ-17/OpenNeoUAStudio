@@ -77,7 +77,7 @@ def _fmt(value: float) -> str:
 
 
 def _parse_vector(value: str, label: str) -> Point3:
-    pieces = value.strip().split("_")
+    pieces = value.strip().split("|")
     try:
         return _point3(pieces, label)
     except (TypeError, ValueError) as exc:
@@ -197,8 +197,8 @@ def collision_shape_text(shape: CollisionShape) -> str:
         f"version = {shape.version}",
         f"source = {shape.source}",
         f"source_hash = {shape.source_hash}",
-        "scale = " + "_".join(_fmt(value) for value in shape.scale),
-        "rotation = " + "_".join(
+        "scale = " + "|".join(_fmt(value) for value in shape.scale),
+        "rotation = " + "|".join(
             _fmt(value) for value in shape.rotation),
     ]
     if shape.asset_set:
@@ -217,11 +217,11 @@ def collision_shape_text(shape: CollisionShape) -> str:
     for hull in enabled_hulls:
         lines.append("begin_hull")
         lines.extend(
-            "vertex = " + "_".join(_fmt(value) for value in point)
+            "vertex = " + "|".join(_fmt(value) for value in point)
             for point in hull.vertices
         )
         lines.extend(
-            f"face = {a}_{b}_{c}" for a, b, c in hull.faces
+            f"face = {a}|{b}|{c}" for a, b, c in hull.faces
         )
         lines.append("end")
     lines.append("end")
@@ -279,7 +279,7 @@ def parse_collision_shape(text: str) -> CollisionShape:
                 if len(current_faces) >= MAX_VERTICES_PER_HULL * 4:
                     raise ValueError("Collision hull has too many faces.")
                 try:
-                    indices = tuple(int(piece) for piece in value.split("_"))
+                    indices = tuple(int(piece) for piece in value.split("|"))
                 except ValueError as exc:
                     raise ValueError(f"Invalid face indices: {value!r}.") from exc
                 if len(indices) != 3:
