@@ -22,6 +22,7 @@ from entity_designer.script_model import (
     import_type_icon_block,
     import_wireframe_block,
     plan_script_update,
+    VEHICLE,
     WEAPON,
 )
 from entity_designer.type_icons import (
@@ -230,16 +231,18 @@ def test_icon_tab_picks_cells_and_blocks_taken_symbols(app, data, monkeypatch):
         assert window.project.type_icon_cell == (4, 4)
         window.undo()
         assert window.project.type_icon == ord("B")
-        # A weapon can browse the page but gets no icon.
+        # Switching to a weapon closes the icon page and disables its tab.
         window.project.target_category = WEAPON
         window._sync_all()
+        app.processEvents()
+        assert not window.properties_tabs.isTabEnabled(window.icon_tab_index)
+        assert not window.properties_tab_strip.buttons()[window.icon_tab_index].isEnabled()
+        assert window.properties_tabs.currentIndex() == window.collision_tab_index
+        assert not controls.view.isVisible() and window.viewport.isVisible()
+        window.project.target_category = VEHICLE
+        window._sync_all()
         assert window.properties_tabs.isTabEnabled(window.icon_tab_index)
-        assert not controls.symbol_edit.isEnabled()
-        icon = window.project.type_icon
-        controls._cell_picked(0, 0)
-        assert controls.view.selected == (0, 0)
-        assert window.project.type_icon == icon
-        assert "Open a vehicle" in controls.status_label.text()
+        assert window.properties_tab_strip.buttons()[window.icon_tab_index].isEnabled()
     finally:
         window._modified = False
         window.close()

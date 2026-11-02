@@ -62,6 +62,7 @@ class FiringUnit:
     # (start, step, slots) of a valid fire_x rack, only for sequence / random.
     rack: tuple[float, float, int] | None = None
     projectiles: int = 1
+    external: tuple[str, ...] = ()
 
     @property
     def x_span(self) -> tuple[float, float]:
@@ -143,7 +144,9 @@ def unit_from_values(vehicle_id: int, values: dict[str, str],
     if key is None:
         return None
     vp = script_int(values.get("vp_normal"), 0)
-    if vp <= 0:
+    external = tuple(value for key in ("3ds_normal", "base_normal")
+                     if (value := values.get(key, "").strip()))
+    if vp <= 0 and not external:
         return None
     mode = values.get("fire_x_mode", "").strip().casefold()
     mode = mode if mode in FIRE_X_MODES else "vanilla"
@@ -160,6 +163,7 @@ def unit_from_values(vehicle_id: int, values: dict[str, str],
         fire_x_mode=mode,
         rack=_rack(values, mode),
         projectiles=_projectiles(values.get(_COUNT_KEYS[key])),
+        external=external,
     )
 
 
