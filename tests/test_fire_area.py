@@ -338,6 +338,33 @@ def test_firing_units_come_from_the_catalog_and_the_script():
     assert catalog_only.fire == (-12.0, 45.0, -10.0) and catalog_only.flies
 
 
+def test_firing_unit_preview_prefers_external_models_and_keeps_vp_fallback():
+    from entity_designer.fire_area_units import unit_from_values
+
+    values = {
+        "name": "Air Cube", "weapon": "41", "vp_normal": "6",
+        "base_normal": "Data/Models/AirCube.BASE",
+        "3ds_normal": "Data/Models/AirCube.3DS",
+    }
+    unit = unit_from_values(149, values, 41)
+    app, window, _pytest = _weapon_window(fa.FireArea(box_forward=(80, 80, 950)))
+    try:
+        window._fire_area_units = [unit]
+        window._fire_area_unit_id = 149
+        item = window._fire_area_unit_items()[0]
+        assert item.external == ("Data/Models/AirCube.3DS", "Data/Models/AirCube.BASE")
+        assert item.vp == 6
+        values.pop("3ds_normal")
+        values.pop("vp_normal")
+        external_only = unit_from_values(149, values, 41)
+        assert external_only is not None
+        window._fire_area_units = [external_only]
+        assert window._fire_area_unit_items()[0].external == ("Data/Models/AirCube.BASE",)
+        assert window._fire_area_unit_items()[0].vp == 0
+    finally:
+        _close(app, window)
+
+
 def test_simulation_fires_the_weapon_from_the_muzzle():
     from entity_designer import destruction_fx as fx
 

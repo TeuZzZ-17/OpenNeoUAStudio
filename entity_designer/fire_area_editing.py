@@ -170,7 +170,7 @@ class FireAreaEditingMixin:
         unit = self._fire_area_unit()
         if unit is None or not self._is_fire_area_tab_active():
             return set()
-        return {unit.vp}
+        return {unit.vp} if unit.vp > 0 else set()
 
     def _fire_area_unit_items(self) -> list:
         """The firing unit as a preview item, at rest on the ground or at height."""
@@ -178,8 +178,7 @@ class FireAreaEditingMixin:
         unit = self._fire_area_unit()
         if unit is None:
             return []
-        # Resolved by the scene preview: from the unit's family, or from the set
-        # when the weapon is a loose BASE (same path the effects' VPs take).
+        # The scene preview tries external models before the set VP fallback.
         columns = [visual_transform_point(axis, unit.scale, unit.rotation)
                    for axis in ((1.0, 0.0, 0.0), (0.0, 1.0, 0.0), (0.0, 0.0, 1.0))]
         rotation = tuple(tuple(columns[column][row] for column in range(3))
@@ -188,7 +187,7 @@ class FireAreaEditingMixin:
             -1, "unit", unit.vp, self._fire_area_unit_position(), rotation,
             (self.project.model_scale_x, self.project.model_scale_y,
              self.project.model_scale_z), 1.0, None,
-            f"firing unit · {unit.label}")]
+            f"firing unit · {unit.label}", external=unit.external)]
 
     def _fire_area_note(self) -> str:
         family = self._fire_area_weapon_family

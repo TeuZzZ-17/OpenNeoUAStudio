@@ -104,6 +104,25 @@ def test_firing_unit_in_fire_area_follows_the_toolbar_play(window):
     assert len(seen) > 1
 
 
+def test_fire_area_loads_air_cube_external_normal_model(window):
+    from map_editor import bootstrap
+    from studio.assets.catalog import load_game_objects
+
+    weapon = next(o for o in load_game_objects(bootstrap.installation())
+                  if o.kind == "weapon" and o.object_id == 41)
+    assert window._open_game_object(weapon)
+    window.properties_tabs.setCurrentIndex(window.fire_area_tab_index)
+    window._fire_area_unit_chosen(149)
+    window._push_fx_frame()
+    item = next(item for item in window.viewport._fx_items
+                if item.label.startswith("firing unit ·") and item.vp == 6)
+    assert item.external == (
+        "Data/Models/Base/Alpha_Models/5P0_Air_Cube_Normal/ALPHA_VP_BRGR2_NORMAL.BASE",)
+    helper = window.viewport._fx_external_for(item)
+    assert helper is not None
+    assert helper._family_ref.base_path.name == "ALPHA_VP_BRGR2_NORMAL.BASE"
+
+
 def test_fire_area_tab_is_grey_on_a_vehicle_and_open_on_its_weapon(window):
     from map_editor import bootstrap
     from studio.assets.catalog import load_game_objects
