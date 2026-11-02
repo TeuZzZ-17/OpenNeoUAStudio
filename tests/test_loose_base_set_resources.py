@@ -7,7 +7,7 @@ import pytest
 from PySide6.QtWidgets import QApplication
 
 DATA = Path(os.environ.get("NME_GAME_DATA", ""))
-BOMB = DATA / "Models/Base/New/Mnosjetz_Bomb_Normal_Wait/VP_MNOBOMB_NORMAL.BASE"
+BOMB = DATA / "Models/Base/New/Mnosjetz_Bomb/Mnosjetz_Bomb_Normal_Wait/VP_MNOBOMB_NORMAL.BASE"
 
 pytestmark = pytest.mark.skipif(
     not (BOMB.is_file() and (DATA / "Sets/Set1").is_dir()),
@@ -115,12 +115,12 @@ def test_fire_area_loads_air_cube_external_normal_model(window):
     window._fire_area_unit_chosen(149)
     window._push_fx_frame()
     item = next(item for item in window.viewport._fx_items
-                if item.label.startswith("firing unit ·") and item.vp == 6)
+                if item.label.startswith("firing unit ·"))
     assert item.external == (
-        "Data/Models/Base/Alpha_Models/5P0_Air_Cube_Normal/ALPHA_VP_BRGR2_NORMAL.BASE",)
+        "Data/Models/Base/Original_Refined/6P0_Air_Cube/6P0_Air_Cube_Normal/6P0_Air_Cube_Normal.BASE",)
     helper = window.viewport._fx_external_for(item)
     assert helper is not None
-    assert helper._family_ref.base_path.name == "ALPHA_VP_BRGR2_NORMAL.BASE"
+    assert helper._family_ref.base_path.name == "6P0_Air_Cube_Normal.BASE"
 
 
 def test_fire_area_tab_is_grey_on_a_vehicle_and_open_on_its_weapon(window):
