@@ -228,8 +228,30 @@ class _ViewControlsMixin:
             self._zoom = max(0.08, min(30.0, self._zoom * factor))
             self.update()
 
+    def snapshot_zoom_ratio(self, target_size) -> float:
+        """Return the current zoom relative to a 100% fit of this view.
+
+        Multi-view exports (Image Set, Contact Sheet) re-fit every canonical
+        view, so they need the zoom as "how much tighter than the fit", not
+        the raw camera value or the clamped Snapshot percentage.
+        """
+
+        if not self.has_model:
+            return 1.0
+        saved = self._camera_state()
+        saved["pan"] = QPointF(saved["pan"])
+        magnification = self._zoom * self._scale
+        try:
+            self._fit_view_to_model(target_size, 100)
+            fit_magnification = self._zoom * self._scale
+        finally:
+            self._set_camera_state(saved)
+        if fit_magnification <= 1e-12 or magnification <= 0:
+            return 1.0
+        return magnification / fit_magnification
+
     def apply_snapshot_preset(self, preset: str, target_size,
-                              zoom_percent: int = 100) -> None:
+                              zoom_percent: float = 100) -> None:
         """Apply a camera-only canonical view and frame visible geometry."""
 
         if preset == "Current View":
@@ -240,7 +262,7 @@ class _ViewControlsMixin:
         self.apply_view_preset(preset, target_size, zoom_percent)
 
     def apply_view_preset(self, preset: str, target_size,
-                          zoom_percent: int = 100) -> None:
+                          zoom_percent: float = 100) -> None:
         """Apply a canonical camera view in either regular or Snapshot mode."""
 
         if preset == "Current View":
@@ -252,7 +274,7 @@ class _ViewControlsMixin:
         self._fit_view_to_model(target_size, zoom_percent)
 
     def _fit_view_to_model(self, target_size,
-                           zoom_percent: int = 100) -> None:
+                           zoom_percent: float = 100) -> None:
         """Center canonical presets on all visible geometry."""
 
         points = self._framing_points()
@@ -286,7 +308,9 @@ class _ViewControlsMixin:
             if abs(y) > 1e-9:
                 limits.append(half_height * denominator
                               / (abs(y) * base_focal))
-        zoom_factor = max(25, min(300, zoom_percent)) / 100.0
+        # Wide range on purpose: exports pass the exact on-screen zoom, which
+        # can go beyond the 25-300% of the Snapshot controls.
+        zoom_factor = max(1.0, min(10000.0, zoom_percent)) / 100.0
         self._zoom = max(0.08, min(30.0, min(limits) * zoom_factor))
         self.update()
 
