@@ -242,7 +242,6 @@ def test_active_host_pov_viewangle_edit_turns_camera_without_changing_body(win):
     win.doc.host_stations = [value]
     win._refresh_squads()
     win._refresh_hosts(0)
-    win.host_panel.advanced.setChecked(True)
     body_before = copy.deepcopy(win.doc.host_stations[0])
     win._host_pov(0)
     camera = win.view.camera
@@ -303,7 +302,6 @@ def test_actor_mouse_drag_cursors_and_ground_deselection(win, app, monkeypatch, 
 
 def test_host_expanded_settings_fit_palette_width(win, app):
     win.palette_tabs.setCurrentIndex(win.host_tab_index)
-    win.host_panel.advanced.setChecked(True)
     win.host_panel.ai.setChecked(True)
     win.resize(1100, 800)
     win.show()

@@ -80,9 +80,19 @@ def test_host_uses_authored_type_icon_and_shared_badge_size(app, monkeypatch):
     assert len(set(bounds)) == 1
 
 
-def test_squad_symbol_uses_original_pixels(app):
+def test_squad_symbol_is_drawn_marker_not_game_glyph(app):
     root = game_icons.bootstrap.game_data_dir()
-    assert game_icons.game_icon('squad') == game_icons._glyph(str(root), 'TYPE_NS', 33, True, False, False)
+    squad = game_icons.game_icon('squad')
+    assert not squad.isNull()
+    assert squad != game_icons._glyph(str(root), 'TYPE_NS', 33, True, False, False)
+    assert squad.pixelColor(16, 22).red() < 60 and squad.pixelColor(16, 22).alpha() == 255
+    assert squad.pixelColor(16, 12).red() > 200 and squad.pixelColor(16, 12).alpha() == 255
+
+
+def test_squad_dot_takes_intense_faction_colour(app):
+    dot = game_icons.game_icon('squad', accent=game_icons._intense(QColor(150, 60, 60))).pixelColor(16, 12)
+    assert dot.red() == 255 and dot.green() == dot.blue() < 200
+    assert game_icons.game_icon('squad', accent=game_icons._intense(QColor(145, 145, 145))).pixelColor(16, 12).red() > 240
 
 
 def test_faction_colour_does_not_repaint_native_host_pixels(app):

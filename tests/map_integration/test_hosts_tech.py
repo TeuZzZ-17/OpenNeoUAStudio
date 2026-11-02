@@ -176,7 +176,7 @@ def test_host_comment_is_one_live_edit_and_ai_player_order(win):
     win._refresh_hosts(1)
     win.palette_tabs.setCurrentIndex(win.host_tab_index)
     count = len(win.history._undo)
-    win.host_panel.advanced.setChecked(True)
+    win.host_panel.name.selectAll()  # the field starts with the automatic comment
     QTest.keyClicks(win.host_panel.name, 'custom host')
     win._finish_live()
     assert win.doc.host_stations[1]['custom_name'] == 'custom host'

@@ -40,8 +40,8 @@ def test_window_edit_and_undo(app, tmp_path):
     assert win.doc.grids['hgt'][5][5] > before and win.dirty
     win.undo()
     assert win.doc.grids['hgt'][5][5] == before
+    win.sector_list.setCurrentItem(win._icon_items[5])
     win.set_tool("sector")
-    win.sel_typ = 5
     win._pressed(4, 4, Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier)
     win._released(4, 4, Qt.KeyboardModifier.NoModifier)
     assert win.doc.grids['type'][4][4] == "05"
@@ -84,9 +84,12 @@ def test_palette_selection_click_apply_hold_undo_and_save(app, tmp_path):
     position = QPoint(round(point[0]), round(point[1]))
     win.palette_tabs.setCurrentIndex(0)
     win.set_tool('sector')
-    win.sel_typ = 5
+    win.sector_list.setCurrentItem(win._icon_items[5])
+    # First click: grey preview only. Second click: places the sector.
     QTest.mouseClick(win.view, Qt.MouseButton.LeftButton, pos=position)
-    assert win.view.selection == {(3, 3)}
+    assert win._stamp == 'sector' and win.doc.grids['type'][3][3] == '00'
+    QTest.mouseClick(win.view, Qt.MouseButton.LeftButton, pos=position)
+    assert not win.view.selection, 'no second outline besides the pointer'
     assert win.doc.grids['type'][3][3] == '05'
     win.undo()
     assert win.doc.grids['type'][3][3] == '00'
@@ -146,9 +149,9 @@ def test_palette_single_click_applies_sector_building_owner_once(app, tmp_path):
     win.sel_building = 1
 
     actions = (
-        ('sector', (3, 3), lambda: setattr(win, 'sel_typ', 5),
+        ('sector', (3, 3), lambda: win.sector_list.setCurrentItem(win._icon_items[5]),
          lambda: win.doc.grids['type'][3][3] == '05'),
-        ('building', (4, 3), lambda: None,
+        ('building', (4, 3), lambda: (win.building_list.setCurrentRow(0), setattr(win, 'sel_building', 1)),
          lambda: win.doc.grids['type'][3][4] == '07' and win.doc.grids['blg'][3][4] == '01'),
         ('owner', (3, 4), lambda: setattr(win, 'sel_owner', 6),
          lambda: win.doc.grids['own'][4][3] == 6),
@@ -160,8 +163,13 @@ def test_palette_single_click_applies_sector_building_owner_once(app, tmp_path):
         history_length = len(win.history._undo)
         point, _ = win.view.camera.world_to_screen(win.view.terrain.cell_center(*cell))
         pos = QPoint(round(point[0]), round(point[1]))
+        if tool != 'owner':
+            # Sectors and buildings: the first click only starts the grey preview.
+            QTest.mouseClick(win.view, Qt.MouseButton.LeftButton, pos=pos)
+            assert win._stamp == tool and not changed()
+            assert len(win.history._undo) == history_length
         QTest.mouseClick(win.view, Qt.MouseButton.LeftButton, pos=pos)
-        assert win.view.selection == {cell}
+        assert win.view.selection == (set() if tool != 'owner' else {cell})
         assert changed()
         assert len(win.history._undo) == history_length + 1
         after = win.doc.snapshot()
@@ -192,7 +200,7 @@ def test_palette_ctrl_click_and_shift_sweep_only_select_without_applying(app):
     win.show()
     _wait_frame(app, win.view)
     win.set_tool('sector')
-    win.sel_typ = 5
+    win.sector_list.setCurrentItem(win._icon_items[5])
     before = win.doc.snapshot()
     history_length = len(win.history._undo)
 

@@ -4,6 +4,7 @@ import time
 import numpy as np
 from PySide6.QtCore import QPointF, QRectF, Qt
 from PySide6.QtGui import QColor, QPainter, QImage
+from ..core.actor_comments import host_comment, squad_comment
 from ..render.squad_scene import squad_members, host_members
 from ..render.special_scene import scene_object_styles
 from .game_icons import draw_game_badge, MAP_BADGE_SIZE
@@ -76,6 +77,19 @@ class SquadOverlay:
             if -60 < anchor.x() < view.width()+60 and -60 < anchor.y() < view.height()+60:
                 yield index,anchor,member.owner,color,value is player and not grey
 
+    def _draw_comment(self, painter, center_x, center_y, text):
+        """Comment of the selected actor, as wide as its text (shortened only past the view width)."""
+        metrics = painter.fontMetrics()
+        text = metrics.elidedText(text, Qt.TextElideMode.ElideRight, max(60, self.viewport.width() - 40))
+        width = metrics.horizontalAdvance(text) + 16
+        left = min(max(6, center_x - width / 2), max(6, self.viewport.width() - width - 6))
+        rect = QRectF(left, center_y - 10, width, 20)
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.setBrush(QColor(20, 16, 16, 190))
+        painter.drawRoundedRect(rect, 4, 4)
+        painter.setPen(QColor(255, 250, 210))
+        painter.drawText(rect, Qt.AlignmentFlag.AlignCenter, text)
+
     def draw(self, painter, camera=None, terrain=None):
         view = self.viewport
         camera, terrain = camera or view.camera, terrain or view.terrain
@@ -114,15 +128,17 @@ class SquadOverlay:
                 color = QColor(160,160,160) if preview else QColor(*view.owner_colors.get(member.owner, (150,150,150)))
                 draw_game_badge(painter, anchor, MAP_BADGE_SIZE, 'squad', color, now + member.squad)
             if selected and member.member == 0:
-                painter.setPen(QColor(255, 250, 210))
-                painter.drawText(QRectF(center[0] - 70, center[1] - radius - 23, 140, 20),
-                                 Qt.AlignmentFlag.AlignCenter, f"{view.doc.squads[member.squad].get('custom_name') or 'Squad '+str(member.squad+1)} · Selected")
+                self._draw_comment(painter, center[0], center[1] - radius - 13,
+                                   squad_comment(view.doc, member.squad, view.lib.vehicles))
         for index,anchor,owner,color,player in self.host_badges(camera,terrain):
             vehicle = view.doc.host_stations[index].get('veh', 0)
             definition = view.lib.vehicles.get(vehicle)
             icon = definition.type_icon if definition else None
             draw_game_badge(painter, anchor, MAP_BADGE_SIZE, 'host', color,
                             now + index, owner=owner, glyph_key=icon)
+            if index == getattr(view, 'selected_host', -1):
+                self._draw_comment(painter, anchor.x(), anchor.y() - MAP_BADGE_SIZE * .75 - 10,
+                                   host_comment(view.doc, index, view.lib.vehicles))
             if player:
                 draw_game_badge(painter,anchor+QPointF(30,0),MAP_BADGE_SIZE,'player',QColor(255,220,100),now+index)
         painter.restore()
