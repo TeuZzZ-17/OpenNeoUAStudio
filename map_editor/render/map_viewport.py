@@ -73,6 +73,12 @@ class MapViewport(QWidget):
     contextRequested = Signal(object, object)
     placementConfirmed = Signal(object)
     operationCancelled = Signal()
+    # First click of a two-click placement: a plain click (no drag) on this cell.
+    stampRequested = Signal(object)
+    # A palette entry is dragged over the map / left it / was dropped (payload dict, cell).
+    mapDragMoved = Signal(object, object)
+    mapDragLeft = Signal()
+    mapDropped = Signal(object, object)
     cameraChanged = Signal()
     statusMessage = Signal(str)
     backendChanged = Signal(str)
@@ -88,12 +94,21 @@ class MapViewport(QWidget):
         self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
         self.setMinimumSize(480, 360)
         self.unsetCursor()
-        self.setToolTip('Left drag: paint / move squad · Ctrl+click: add/remove · Right: menu · Right drag: rotate · Middle: pan')
+        self.setToolTip('Left drag: paint / move squad · Click with an entry selected: placement preview, click again to place · Ctrl+click: add/remove · Right: menu · Right drag: rotate · Middle: pan')
         self.active_tool = 'sector'
         self.cursor_color = (75, 195, 220)
         self.sample_active = False
         self.sample_flash_until = 0.0
         self.draft_active = False
+        # True while a grey placement preview waits for its confirming click; the right-click menu
+        # then offers to cancel it.
+        self.placing = False
+        # Asked on press: is a palette entry armed, so that a plain click starts a placement preview?
+        self.stamp_gate = None
+        # Asked while an entry is dragged over the map: may it be dropped on this cell?
+        self.drop_gate = None
+        self._stamp_origin = None
+        self.setAcceptDrops(True)
         self.placement_error = ''
         self._placement_error_timer = QTimer(self, singleShot=True, interval=1800)
         self._placement_error_timer.timeout.connect(self.clear_placement_error)
@@ -627,6 +642,7 @@ class MapViewport(QWidget):
         self._paint_last = None
         self._sweep_gesture = False
         self._sweep_last = None
+        self._stamp_origin = None
         self._marquee_origin = self._marquee_rect = None
         if self.camera.perspective:
             return
@@ -695,6 +711,8 @@ class MapViewport(QWidget):
                     col, row = cell
                     if 1 <= col < self.doc.mw-1 and 1 <= row < self.doc.mh-1:
                         building = int(str(self.doc.grids['blg'][row][col]), 16)
+                        if cell in self.preview_cells:
+                            building = 0  # the grey placement copy is not a placed building
                         # Ordinary sectors are painted, never moved. Only a placed building can be dragged.
                         if building:
                             self._drag_actor = True
@@ -711,6 +729,12 @@ class MapViewport(QWidget):
             self._paint_gesture = self.active_tool in ('sector','building','owner','terrain') and not bool(event.modifiers() & Qt.KeyboardModifier.ControlModifier)
             if cell and self._paint_gesture:
                 self._paint_last = cell
+                if (self.active_tool in ('sector', 'building') and self.stamp_gate is not None
+                        and self.stamp_gate()):
+                    # Armed entry: a plain click starts the placement preview, a drag still paints.
+                    # Which one it is gets decided on the first move or on release.
+                    self._stamp_origin = cell
+                    return
                 self._paint_started = True
                 self.cellPressed.emit(*cell, event.button(), event.modifiers())
 
@@ -776,6 +800,13 @@ class MapViewport(QWidget):
                     self.setCursor(studio_cursor("closed"))
                     self.actorDragged.emit(cell)
             elif self._paint_gesture:
+                if self._stamp_origin is not None:
+                    if not self._moved:
+                        return
+                    # The press turned into a drag: paint from the cell where it began.
+                    origin, self._stamp_origin = self._stamp_origin, None
+                    self._paint_started = True
+                    self.cellPressed.emit(*origin, self._drag_button, event.modifiers())
                 if cell and not self._paint_started:
                     self._paint_started = True
                     self.cellPressed.emit(*cell, self._drag_button, event.modifiers())
@@ -821,12 +852,16 @@ class MapViewport(QWidget):
                 self.actorDragFinished.emit()
                 self.unsetCursor()
             elif self._paint_gesture:
-                self.cellReleased.emit(*(cell if cell else (-1, -1)), event.modifiers())
+                if self._stamp_origin is not None and not self._moved:
+                    self.stampRequested.emit(self._stamp_origin)
+                else:
+                    self.cellReleased.emit(*(cell if cell else (-1, -1)), event.modifiers())
             elif self._drag_button is not None:
                 self.cellSelected.emit(cell, event.modifiers())
         elif (event.button() == Qt.MouseButton.RightButton and self._drag_button is not None
-              and not self._moved and not self.draft_active):
+              and not self._moved and (not self.draft_active or self.placing)):
             self.contextRequested.emit(event.position(), event.globalPosition().toPoint())
+        self._stamp_origin = None
         self._drag_button = None
         self._press_pos = None
         self._drag_actor = False
@@ -843,6 +878,45 @@ class MapViewport(QWidget):
             self.selectionCleared.emit()
         elif cell and event.button() == Qt.MouseButton.LeftButton:
             self.cellDoubleClicked.emit(*cell, event.modifiers())
+
+    def _drag_target(self, event):
+        """(payload, cell) of a palette drag, or (None, None) when it is not one of ours."""
+        from ..ui.map_drag import decode_payload
+        payload = decode_payload(event.mimeData())
+        if payload is None or self.camera.perspective or self.doc is None:
+            return None, None
+        point = event.position()
+        return payload, self.ground_cell(point.x(), point.y())
+
+    def dragEnterEvent(self, event):  # noqa: N802
+        if self._drag_target(event)[0] is None:
+            event.ignore()
+            return
+        event.acceptProposedAction()
+
+    def dragMoveEvent(self, event):  # noqa: N802
+        payload, cell = self._drag_target(event)
+        if payload is None:
+            event.ignore()
+            return
+        if cell is not None and (self.drop_gate is None or self.drop_gate(payload, cell)):
+            event.acceptProposedAction()
+        else:
+            event.ignore()
+            cell = None
+        self.mapDragMoved.emit(payload, cell)
+
+    def dragLeaveEvent(self, event):  # noqa: N802
+        self.mapDragLeft.emit()
+
+    def dropEvent(self, event):  # noqa: N802
+        payload, cell = self._drag_target(event)
+        if payload is None or cell is None or (self.drop_gate is not None and not self.drop_gate(payload, cell)):
+            event.ignore()
+            self.mapDragLeft.emit()
+            return
+        event.acceptProposedAction()
+        self.mapDropped.emit(payload, cell)
 
     def ground_cell(self, x, y):
         cell = self.pick_cell(x, y)

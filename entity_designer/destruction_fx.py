@@ -1833,7 +1833,7 @@ class TracerSpec:
 def parse_tracer(values: dict[str, str], prefix: str = "mesh_tracer_") -> TracerSpec | None:
     """Tracer the engine would start (ConfigureWeaponTracer), else None."""
 
-    if values.get(prefix + "enable") != "1" or not values.get(prefix + "path"):
+    if not values.get(prefix + "path"):
         return None
 
     def bounded(text: str | None, maximum: float, default: float) -> float:
@@ -2030,13 +2030,10 @@ def unit_look(values: dict[str, str], *, weapon: bool) -> dict:
 
 @dataclass(frozen=True)
 class MotionSpec:
-    """Render-only spiral or chaos motion of a projectile (spiral_* / chaos_*).
+    """Render-only chaos motion of a projectile (chaos_*)."""
 
-    Chaos wins when both are valid, like ``GetProjectileVisualMotionDelta``.
-    """
-
-    kind: str          # "spiral" | "chaos"
-    rate: float        # turns per second / random targets per second
+    kind: str          # "chaos"
+    rate: float        # random targets per second
     radius: float
     # Chaos picks its random targets from a per-projectile seed.
     seed: int = 0x9E3779B9 ^ 1
@@ -2045,9 +2042,6 @@ class MotionSpec:
         """Local X/Y offset from the flight line (Z is the forward axis)."""
 
         age = max(age_ms, 0.0)
-        if self.kind == "spiral":
-            phase = math.fmod(self.rate * age * 0.001, 1.0) * 2.0 * math.pi
-            return (math.cos(phase) * self.radius, -math.sin(phase) * self.radius, 0.0)
         motion = age * 0.001 * self.rate
         segment = math.floor(motion)
         fraction = motion - segment
@@ -2074,19 +2068,13 @@ class MotionSpec:
         return (math.cos(angle) * radius, math.sin(angle) * radius, 0.0)
 
     def tilt(self, age_ms: float, speed: float) -> Matrix3:
-        """Model rotation that follows the rendered curve (plus the spiral roll).
+        """Model rotation that follows the rendered curve.
 
         ``speed`` is the projectile speed in units per second.
         """
 
-        if self.kind == "spiral":
-            phase = math.fmod(self.rate * max(age_ms, 0.0) * 0.001, 1.0) * 2.0 * math.pi
-            omega = self.rate * 2.0 * math.pi
-            velocity = (-math.sin(phase) * self.radius * omega,
-                        -math.cos(phase) * self.radius * omega, 0.0)
-        else:
-            now, later = self.offset(age_ms), self.offset(age_ms + 1.0)
-            velocity = tuple((b - a) * 1000.0 for a, b in zip(now, later))
+        now, later = self.offset(age_ms), self.offset(age_ms + 1.0)
+        velocity = tuple((b - a) * 1000.0 for a, b in zip(now, later))
         tangent = (velocity[0], velocity[1], speed + velocity[2])
         length = math.sqrt(sum(value * value for value in tangent))
         rotation = IDENTITY
@@ -2099,8 +2087,6 @@ class MotionSpec:
                     tuple(value / sine for value in axis), math.atan2(sine, tangent[2]))
             elif tangent[2] < 0:
                 rotation = _rot_x(math.pi)
-        if self.kind == "spiral":
-            rotation = _mat_mul(rotation, _rot_z(phase))
         return rotation
 
 
@@ -2116,7 +2102,7 @@ def _axis_rotation(axis, angle: float) -> Matrix3:
 
 
 def parse_motion(values: dict[str, str]) -> MotionSpec | None:
-    """Spiral or chaos motion the engine would apply, else None."""
+    """Chaos motion the engine would apply, else None."""
 
     def strength(key: str) -> float:
         value = _stof(values.get(key, "0"))
@@ -2128,8 +2114,6 @@ def parse_motion(values: dict[str, str]) -> MotionSpec | None:
 
     if strength("chaos_factor") > 0 and radius("chaos_radius") > 0:
         return MotionSpec("chaos", strength("chaos_factor"), radius("chaos_radius"))
-    if strength("spiral_speed") > 0 and radius("spiral_radius") > 0:
-        return MotionSpec("spiral", strength("spiral_speed"), radius("spiral_radius"))
     return None
 
 
@@ -2144,7 +2128,7 @@ class _Flight:
     frozen_at: float | None = None   # the visual motion stops at impact
 
     def pose(self, time_ms: float):
-        """(position, rotation) with the spiral/chaos motion applied."""
+        """(position, rotation) with the chaos motion applied."""
 
         base = _path_position(self.path, time_ms)
         if self.motion is None:
@@ -2185,8 +2169,6 @@ CLUSTER_FLASH_MS = 1000.0
 def parse_cluster(values: dict[str, str]) -> ClusterSpec | None:
     """The cluster the engine would split into (TryClusterSplit), else None."""
 
-    if script_int(values.get("cluster_enable")) == 0:
-        return None
     count = parse_int_range(values.get("cluster_count", ""))
     weapon_id = script_int(values.get("cluster_weapon_id"))
     if count is None or min(count) < 1 or weapon_id <= 0:
@@ -2294,7 +2276,7 @@ class LaserSpec:
 
 
 def parse_laser(values: dict[str, str]) -> LaserSpec | None:
-    if values.get("model", "").casefold() != "laser":
+    if values.get("model", "").casefold() not in ("laser", "vertical_laser"):
         return None
     spacing = _stof(values.get("laser_spacing", "40"))
     size_parts = split_tuple(values.get("laser_mesh_size_xy"), 2) or ("5", "")
@@ -2302,7 +2284,7 @@ def parse_laser(values: dict[str, str]) -> LaserSpec | None:
     size_y = _full_float(size_parts[1])
     return LaserSpec(
         spacing=min(max(spacing, 5.0), 400.0) if math.isfinite(spacing) and spacing > 0 else 40.0,
-        mesh=values.get("laser_mesh_path", "") if values.get("laser_mesh_enable") == "1" else "",
+        mesh=values.get("laser_mesh_path", ""),
         tint=_tint_value(values, "laser_mesh_tint", WHITE),
         size_x=size_x if math.isfinite(size_x) and size_x > 0 else 5.0,
         size_y=size_y if size_y and size_y > 0 else (size_x if size_x > 0 else 5.0),
@@ -2773,8 +2755,7 @@ class PreviewSimulation:
                     main: bool = False, *, motion: MotionSpec | None = None,
                     speed: float = 0.0, frozen_at: float | None = None,
                     unit: "UnitPhases | None" = None) -> None:
-        """One phase of the unit. Only the main (normal) model carries the
-        preview scale, rotation and spin; every state gets the tint."""
+        """Each state gets scale and tint; main states also get rotation and spin."""
 
         if ref.vp <= 0 and not _external_paths(ref):
             return
@@ -2936,7 +2917,7 @@ class PreviewSimulation:
                 position, _rotate_vector(rotation, spec.pos)))
 
         # Head positions, newest first. A straight flight needs only its two
-        # ends; spiral/chaos motion is sampled like the engine (every 16 ms).
+        # ends; chaos motion is sampled like the engine (every 16 ms).
         chain = [head_at(time_ms)]
         step = 16.0 if flight.motion is not None else max(time_ms, 1.0)
         moment, length = time_ms, 0.0
@@ -3177,7 +3158,7 @@ class PreviewSimulation:
         if split is not None:
             # The projectile is replaced by its children: no impact effects.
             # Like the engine (_position), children and flash start from the real
-            # path point, not from the render-only spiral/chaos offset of the parent.
+            # path point, not from the render-only chaos offset of the parent.
             position = _path_position(path, split)
             self._spawn_cluster(cluster, definition, position, look, split,
                                 speed, generation)
@@ -3745,8 +3726,9 @@ class PreviewSimulation:
             elif kind == "unit":
                 ref, flight, label, main, owner = payload
                 position, heading = flight.pose(time_ms)
-                rotation = (_mat_mul(heading, owner.visual_matrix(time_ms))
-                            if main else heading)
+                scale_matrix = tuple(tuple(owner.scale[row] if row == col else 0.0
+                                           for col in range(3)) for row in range(3))
+                rotation = _mat_mul(heading, owner.visual_matrix(time_ms) if main else scale_matrix)
                 tint = owner.tint
                 items.append(PreviewItem(
                     -1, "unit", ref.vp, position,
@@ -3759,7 +3741,7 @@ class PreviewSimulation:
                 tint = self.unit.tint
                 items.append(PreviewItem(
                     -1, "plasma", ref.vp, position,
-                    _rot_y(maxrot * 2.0 * age * 0.001), (size, size, size), 1.0,
+                    _rot_y(maxrot * 2.0 * age * 0.001), tuple(size * value for value in self.unit.scale), 1.0,
                     None if tint in (None, WHITE) else tint,
                     f"genesis plasma · {ref.label}", _external_paths(ref)))
             elif kind == "decoration":
@@ -4093,8 +4075,10 @@ def _instances_for_event(source, kind, start, end, payload, unit=None):
             unit = owner
             vp = ref.vp
             path, heading = flight.path, flight.heading
-            rotation = (_mat_mul(heading, unit.transform)
-                        if main and unit is not None else heading)
+            scale_matrix = (tuple(tuple(unit.scale[row] if row == col else 0.0
+                                        for col in range(3)) for row in range(3))
+                            if unit is not None else IDENTITY)
+            rotation = _mat_mul(heading, unit.transform if main and unit is not None else scale_matrix)
             if unit is not None:
                 tint = unit.particle_tint(main)
                 tint = None if tint in (None, WHITE) else tint

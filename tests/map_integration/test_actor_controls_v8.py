@@ -46,21 +46,26 @@ def test_add_find_and_delete_all_follow_selection(win, monkeypatch):
         assert win.doc.snapshot() == baseline
 
 
-def test_compact_coordinates_keep_precision_and_speed_is_shared(win):
+def test_world_position_is_a_short_readout_and_arrows_move_by_speed(win):
     record = squad()
     record.update(pos_x=4201.123456789012, pos_z=-4202.987654321012)
     win.doc.squads = [record]
     win._refresh_squads({0})
     panel = win.squad_panel
     before = win.doc.snapshot()
-    assert panel.x.text() == panel.x.locale().toString(record['pos_x'], 'f', 2)
-    assert panel.x.valueFromText(panel.x.text()) == record['pos_x']
-    panel.x.interpretText()
+    assert panel.position.readout.text() == '4201 / -4203'
     assert win.doc.snapshot() == before
     for panel in (win.squad_panel, win.host_panel):
-        assert panel.x.singleStep() == panel.z.singleStep() == 50
-        panel.coordinate_speed.setValue(100)
-        assert panel.x.singleStep() == panel.z.singleStep() == 100
+        assert panel.coordinate_speed.value() == 50
+    panel = win.squad_panel
+    panel.coordinate_speed.setValue(100)
+    panel.position.buttons['right'].click()
+    panel.position.buttons['up'].click()  # forward = +Z
+    win._finish_live()
+    moved = win.doc.squads[0]
+    assert moved['pos_x'] == pytest.approx(4301.123456789012)
+    assert moved['pos_z'] == pytest.approx(-4102.987654321012)
+    assert panel.position.readout.text() == '4301 / -4103'
 
 
 def test_host_world_movement_roundtrip_and_undo(win):
@@ -68,8 +73,8 @@ def test_host_world_movement_roundtrip_and_undo(win):
     win._refresh_hosts(0)
     before = win.doc.snapshot()
     panel = win.host_panel
-    panel.x.setValue(4300.125)
-    panel.z.setValue(-4400.25)
+    panel._change('pos_x', 4300.125)
+    panel._change('pos_z', -4400.25)
     win._finish_live()
     value = win.doc.host_stations[0]
     assert (value['pos_x'], value['pos_z'], value['x'], value['y']) == (4300.125, -4400.25, 3, 3)
@@ -242,7 +247,7 @@ def test_host_preset_folder_is_shared_by_open_save_and_load(win, tmp_path, monke
     assert folder.is_dir() and [__import__("pathlib").Path(value) for value in opened]==[folder]
     assert dialogs==[str(folder/'My AI.json'),str(folder)]
     form=panel.form_widget.layout()
-    assert form.getWidgetPosition(panel.ai)[0] < form.getWidgetPosition(panel.advanced)[0]
+    assert form.getWidgetPosition(panel.name)[0] < form.getWidgetPosition(panel.ai)[0]
 
 
 def test_host_badges_follow_native_owner_glyph_and_actual_player_host(win):
@@ -314,3 +319,30 @@ def test_palette_lock_blocks_selection_but_keeps_scrolling(win, app):
     view.scrollToItem(target);app.processEvents()
     QTest.mouseClick(view.viewport(),Qt.MouseButton.LeftButton,pos=view.visualItemRect(target).center())
     assert view.currentItem()==target
+
+
+def test_squad_comment_is_automatic_until_the_user_writes_one(win):
+    win.doc.squads = [squad(), squad()]
+    win._refresh_squads({1})
+    panel = win.squad_panel
+    name = win.view.lib.vehicles[win.doc.squads[1]['veh']].name
+    assert panel.name.text() == f"Squad 2 · {name} ×{win.doc.squads[1]['num']}"
+    panel.count.setValue(3)
+    assert panel.name.text() == f"Squad 2 · {name} ×3"
+    assert not win.doc.squads[1].get('custom_name') or win.doc.squads[1]['custom_name'].casefold() == name.casefold()
+    panel.name.setText('my note')
+    panel.name.textEdited.emit('my note')
+    assert win.doc.squads[1]['custom_name'] == 'my note'
+    panel.count.setValue(4)
+    assert panel.name.text() == 'my note'
+
+
+def test_host_comment_shows_name_energy_and_ai(win):
+    win.doc.host_stations = [host(), host()]
+    win._refresh_hosts(1)
+    panel = win.host_panel
+    text = panel.name.text()
+    assert 'Energy' in text and text.count(' · ') == 2 and text.endswith(('Player', 'AI Balanced'))
+    panel.name.setText('boss')
+    panel.name.textEdited.emit('boss')
+    assert win.doc.host_stations[1]['custom_name'] == 'boss'

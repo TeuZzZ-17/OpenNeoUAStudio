@@ -110,8 +110,8 @@ def test_building_tool_paints_sector_and_script_id_with_undo(app):
     assert 1 in win.buildings
     assert [win.palette_tabs.tabText(i) for i in range(win.palette_tabs.count())][1] == "Buildings"
     assert win.palette_dock.windowTitle() == ""
+    win.building_list.setCurrentItem(win._bicon_items[54])
     win.set_tool("building")
-    win.sel_building = 54
     win._pressed(4, 4, Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier)
     win._released(4, 4, Qt.KeyboardModifier.NoModifier)
     definition = win.buildings[54]
@@ -124,8 +124,8 @@ def test_building_tool_paints_sector_and_script_id_with_undo(app):
     assert win.doc.grids["blg"][4][4] == "36"
     # Plain sectors with the same look carry no script id, so the overlay
     # leaves them alone while marked buildings glow.
+    win.sector_list.setCurrentItem(win._icon_items[definition.sec_type])
     win.set_tool("sector")
-    win.sel_typ = definition.sec_type
     win._pressed(5, 5, Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier)
     win._released(5, 5, Qt.KeyboardModifier.NoModifier)
     assert win.doc.grids["blg"][5][5] == "00"
@@ -153,6 +153,10 @@ def test_palette_selection_matches_initial_paint_values_and_blocks_unselected(ap
     from PySide6.QtCore import Qt
     win = MainWindow()
     win._icons.stop()
+    # Nothing is selected until the user picks an entry.
+    assert win.sel_typ is None and win.sel_building is None
+    win.sector_list.setCurrentItem(win.sector_list.item(0))
+    win.building_list.setCurrentItem(win.building_list.item(0))
     for tool, widget, value, grid in (
         ('sector', win.sector_list, win.sel_typ, 'type'),
         ('building', win.building_list, win.sel_building, 'blg'),

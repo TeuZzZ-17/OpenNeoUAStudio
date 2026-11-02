@@ -3,8 +3,8 @@ import math
 from functools import lru_cache
 
 import numpy as np
-from PySide6.QtCore import QRectF, Qt
-from PySide6.QtGui import QImage, QColor, QPainter
+from PySide6.QtCore import QPointF, QRectF, Qt
+from PySide6.QtGui import QImage, QColor, QPainter, QPolygonF
 
 from .. import bootstrap
 from ..core.resource_catalog import preview_image
@@ -14,12 +14,11 @@ from studio.formats.font_def import glyph_key as _glyph_key, locate_font, read_f
 MAP_BADGE_SIZE = 17.0 * 1.35
 
 
-def game_icon(kind, owner=1, tight=True, grey=False, outlined=False, glyph_key=None):
+def game_icon(kind, owner=1, tight=True, grey=False, outlined=False, glyph_key=None, accent=None):
     if kind == 'player':
         return _player_symbol().copy()
     if kind == 'squad':
-        root = bootstrap.game_data_dir()
-        return _glyph(str(root), 'TYPE_NS', ord('!'), tight, grey, outlined)
+        return _squad_symbol(accent).copy()
     if kind == 'host':
         root = bootstrap.game_data_dir()
         if glyph_key:
@@ -54,6 +53,29 @@ def _player_symbol():
     painter.setBrush(Qt.GlobalColor.white)
     painter.drawEllipse(QRectF(11,3,10,10))
     painter.drawRoundedRect(QRectF(6,16,20,12),5,5)
+    painter.end()
+    return image
+
+
+def _intense(color):
+    """Same hue as the faction circle, at full saturation and brightness."""
+    hue, _, _, _ = QColor(color).getHsvF()
+    return (QColor.fromHsvF(hue, 1.0, 1.0) if hue >= 0 else QColor(255, 255, 255)).getRgb()[:3]
+
+
+@lru_cache(maxsize=16)
+def _squad_symbol(accent=None):
+    # Drawn in code, not taken from the game font: a dark triangle pointing down, with a dot
+    # that is light by default or an intense faction colour when ``accent`` (r, g, b) is given.
+    image = QImage(32, 32, QImage.Format.Format_ARGB32_Premultiplied)
+    image.fill(Qt.GlobalColor.transparent)
+    painter = QPainter(image)
+    painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+    painter.setPen(Qt.PenStyle.NoPen)
+    painter.setBrush(QColor(28, 28, 28))
+    painter.drawPolygon(QPolygonF([QPointF(2.5, 4), QPointF(29.5, 4), QPointF(16, 28)]))
+    painter.setBrush(QColor(*accent) if accent else QColor(240, 240, 240))
+    painter.drawEllipse(QPointF(16, 11.7), 3, 3)
     painter.end()
     return image
 
@@ -98,8 +120,8 @@ def _glyph(root, font, code, tight, grey, outlined):
 
 def draw_game_badge(painter, center, size, kind, color, moment, owner=1, glyph_key=None):
     grey = kind not in ('host', 'squad') and color.red() == color.green() == color.blue()
-    image = game_icon(kind, owner, grey=grey,
-                      glyph_key=glyph_key)
+    image = game_icon(kind, owner, grey=grey, glyph_key=glyph_key,
+                      accent=_intense(color) if kind == 'squad' else None)
     if image.isNull():
         return False
     size *= .75

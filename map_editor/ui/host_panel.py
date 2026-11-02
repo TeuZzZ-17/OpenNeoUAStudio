@@ -8,7 +8,8 @@ from ..core.ldf_model import FACTIONS, HOST_AI_FIELDS, HOST_AI_BUDGET_FIELDS, ma
 from ..core.host_ai_presets import HOST_AI_PRESETS, CUSTOM_AI_PRESETS
 from .settings_lock import SettingsLockButton
 from .preview_cards import PreviewList, set_card, faction_style, DETAIL_ROLE, DRAFT_ROLE, form_vehicle, VehicleSearchRow
-from .squad_panel import WorldCoordinateSpinBox, coordinate_speed_slider
+from .squad_panel import WorldCoordinateSpinBox, PositionControls
+from ..core.actor_comments import default_host_comment, host_comment, is_custom
 from ..render.squad_scene import squad_xz
 
 
@@ -78,6 +79,7 @@ class HostPanel(QWidget):
     def __init__(self):
         super().__init__()
         self.doc = None
+        self._auto_comment = None
         self.vehicles, self.colors = {}, {}
         self._loading = False
         self.settings_lock = SettingsLockButton()
@@ -142,18 +144,10 @@ class HostPanel(QWidget):
         for title, widget in (('Faction', self.owner), ('Host station', self.vehicle_row), ('Energy', self.energy), ('Height', self.height)):
             form.addRow(title, widget)
         form.addRow(self.hidden)
-        advanced = QGroupBox('Advanced Settings', checkable=True, checked=False)
-        self.advanced = advanced
-        advanced_layout = QVBoxLayout(advanced)
-        self.advanced_fields = QWidget()
-        fields = QFormLayout(self.advanced_fields)
-        fields.setRowWrapPolicy(QFormLayout.RowWrapPolicy.WrapLongRows)
-        self.x, self.z = WorldCoordinateSpinBox(), WorldCoordinateSpinBox()
-        fields.addRow('World X', self.x)
-        fields.addRow('World Z', self.z)
-        self.coordinate_speed = coordinate_speed_slider(fields, self.x, self.z)
-        self.x.valueChanged.connect(lambda value: self._change('pos_x', value))
-        self.z.valueChanged.connect(lambda value: self._change('pos_z', value))
+        fields = form
+        self.position = PositionControls()
+        self.coordinate_speed = self.position.slider
+        self.position.moved.connect(self._move)
         self.fields = {'pos_y': self.height}
         for key, title, low, high in (('reload_const', 'Reload constant', 0, 2147483647),
                                      ('viewangle', 'View angle (POV)', -2147483647, 2147483647)):
@@ -171,11 +165,9 @@ class HostPanel(QWidget):
                 spin.setToolTip('Heading of the host view in degrees; does not rotate the host body.')
                 fields.addRow(title, spin)
             spin.valueChanged.connect(lambda value, field=key: self._change(field, value))
-        self.name = QLineEdit()
+        self.name = QLineEdit(placeholderText='Automatic comment: host name, energy and AI')
         fields.addRow('Comment', self.name)
-        self.advanced_fields.hide()
-        advanced.toggled.connect(self.advanced_fields.setVisible)
-        advanced_layout.addWidget(self.advanced_fields)
+        self.position.add_rows(fields)
         self.ai = QGroupBox('Host AI', checkable=True, checked=False)
         ai_layout = QVBoxLayout(self.ai)
         self.ai_preset = QComboBox()
@@ -210,7 +202,6 @@ class HostPanel(QWidget):
         self.ai.toggled.connect(self.ai_fields.setVisible)
         ai_layout.addWidget(self.ai_fields)
         form.addRow(self.ai)
-        form.addRow(advanced)
         layout.addWidget(self.settings_lock.wrap(self.form_widget))
         self.status = QLabel()
         self.status.setWordWrap(True)
@@ -222,7 +213,7 @@ class HostPanel(QWidget):
         self.energy.valueChanged.connect(lambda value: self._change('energy', value))
         self.height.valueChanged.connect(lambda value: self._change('pos_y', value))
         self.hidden.toggled.connect(lambda value: self._change('hidden', value))
-        self.name.textEdited.connect(lambda value: self._change('custom_name', value.strip() or None))
+        self.name.textEdited.connect(self._comment_edited)
         self._loading = True
         for key, spin in self.ai_spins.items():
             spin.setValue(make_host_ai()[key])
@@ -249,6 +240,45 @@ class HostPanel(QWidget):
         self._filter()
         self.list.previewsRequested.emit()
 
+    def _current_host(self):
+        index = self.list.currentRow()
+        if self.doc is None or not 0 <= index < len(self.doc.host_stations):
+            return None
+        return self.doc.host_stations[index]
+
+    def _comment_edited(self, text):
+        # Text equal to the automatic comment is not a user comment; it keeps following the host.
+        index = self.list.currentRow()
+        text = text.strip()
+        if self.doc is not None and 0 <= index < len(self.doc.host_stations) and                 text == default_host_comment(self.doc, index, self.vehicles):
+            text = ''
+        self._change('custom_name', text or None)
+
+    def _show_comment(self, index):
+        self.name.setText(host_comment(self.doc, index, self.vehicles))
+        # Remembered so deselecting can clear an automatic comment but keep a user one.
+        self._auto_comment = None if is_custom(self.doc.host_stations[index], self.vehicles) else self.name.text()
+
+    def _sync_comment(self):
+        # While typing, the field belongs to the user.
+        index = self.list.currentRow()
+        if self.doc is None or not 0 <= index < len(self.doc.host_stations) or self.name.hasFocus():
+            return
+        self._show_comment(index)
+
+    def _move(self, dx, dz):
+        host = self._current_host()
+        if host is None:
+            return
+        x, z = squad_xz(host)
+        self._change('pos_x', x + dx)
+        self._change('pos_z', z + dz)
+        self._show_position()
+
+    def _show_position(self):
+        host = self._current_host()
+        self.position.set_position(*(squad_xz(host) if host else (None, None)))
+
     def update_rows(self):
         ordered = self.doc.host_stations_for_save([host for host in self.doc.host_stations
                                                   if self.doc.cell_is_valid(host) and not host.get('_preview')])
@@ -266,6 +296,8 @@ class HostPanel(QWidget):
                      + (f"\n{host['custom_name']}" if host.get('custom_name') else ''),
                      (150, 150, 150) if host.get('_preview') else self.colors.get(host['owner'], (180, 180, 180)),
                      ('veh', host['veh']))
+        self._show_position()
+        self._sync_comment()
         self._filter()
 
     def _filter(self, *_args):
@@ -285,14 +317,11 @@ class HostPanel(QWidget):
         self.clear_button.setEnabled(bool(self.doc and self.doc.host_stations))
         self.total.setText(f'{len(self.doc.host_stations) if self.doc else 0} hosts')
         self.form_widget.setEnabled(True)
-        self.x.setEnabled(valid)
-        self.z.setEnabled(valid)
+        self.position.pad.setEnabled(valid)
         if valid:
             self._loading = True
             host = self.doc.host_stations[index]
-            x, z = squad_xz(host)
-            self.x.setValue(x)
-            self.z.setValue(z)
+            self.position.set_position(*squad_xz(host))
             placing = any(item.get('_preview') for item in self.doc.host_stations)
             self.form_widget.setEnabled(not placing or bool(host.get('_preview')))
             self.owner.setCurrentIndex(self.owner.findData(host['owner']))
@@ -302,7 +331,7 @@ class HostPanel(QWidget):
                 self.vehicle.setEditText(str(host['veh']))
             self.energy.setValue(host['energy'])
             self.hidden.setChecked(host.get('hidden', False))
-            self.name.setText(host.get('custom_name') or '')
+            self._show_comment(index)
             for key, spin in self.fields.items():
                 spin.setValue(host[key])
             for key, spin in self.ai_spins.items():
@@ -326,6 +355,9 @@ class HostPanel(QWidget):
                 self.status.show()
             self._loading = False
         else:
+            self.position.set_position(None, None)
+            if self.name.text() == self._auto_comment:
+                self.name.clear()
             self.ai.setEnabled(True)
             self.player.setEnabled(False)
             self.player.setText('Use This Faction as Player')

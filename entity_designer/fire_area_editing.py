@@ -98,8 +98,7 @@ class FireAreaEditingMixin:
         def value(key: str) -> str:
             return fx.top_level_value(text, block.start_line, block.end_line, key) or ""
 
-        self._fire_area_weapon_family = fa.usable_family(
-            value("model"), value("vertical_laser_enable").strip() == "1")
+        self._fire_area_weapon_family = fa.usable_family(value("model"))
         self._fire_area_handle = ""
         self._fire_area_drafts = {}
         self._fire_area_loaded = self.project.fire_area

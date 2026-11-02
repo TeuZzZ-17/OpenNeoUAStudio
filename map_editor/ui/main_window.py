@@ -59,6 +59,7 @@ from .preview_cards import PREVIEW_PIXELS, RESOURCE_ROLE, COLOR_ROLE
 from ..core.ldf_model import ensure_host_defaults, make_host_ai
 from .squad_overlay import SquadOverlay
 from .colored_tabs import PaletteTabs, TAB_COLORS
+from .map_drag import MapDragSource
 from ..render.squad_scene import squad_xz, centered_squad_position, host_position, MAX_PREVIEW_MEMBERS
 from .. import bootstrap
 from studio.rendering.asset_viewport import VIEW_PRESET_ANGLES
@@ -145,6 +146,7 @@ class MainWindow(QMainWindow):
         self._special_placement = None
         self._special_draft = None
         self._special_target_slot = 0
+        self._special_vacated = None
         self._host_pov_index = None
         self._special_drag = None
         self._key_preview_cell = None
@@ -153,6 +155,10 @@ class MainWindow(QMainWindow):
         self._clipboard = None
         self._draft_grid = None
         self._draft_grid_cell = None
+        # Sector/building placement preview: ``_stamp`` is the tool whose second click is awaited
+        # (None = no preview step); ``_ghost`` is (tool, value, cell) of the grey copy being shown.
+        self._stamp = None
+        self._ghost = None
         self._draft_origin = []
         self._draft_previous_selection = set()
         self._live_pending = False
@@ -186,6 +192,12 @@ class MainWindow(QMainWindow):
         self.view.contextRequested.connect(self._map_context_menu)
         self.view.placementConfirmed.connect(self._confirm_placement)
         self.view.operationCancelled.connect(self._cancel_operation)
+        self.view.stampRequested.connect(self._begin_stamp)
+        self.view.mapDragMoved.connect(self._map_drag_moved)
+        self.view.mapDragLeft.connect(self._map_drag_left)
+        self.view.mapDropped.connect(self._map_dropped)
+        self.view.stamp_gate = self._stamp_armed
+        self.view.drop_gate = self._drop_allowed
         self.view.terrain_brush = self.brush
         self.view.cellPressed.connect(self._pressed)
         self.view.cellDragged.connect(self._dragged)
@@ -206,6 +218,7 @@ class MainWindow(QMainWindow):
 
         self._build_actions()
         self._build_palette()
+        self._build_drag_sources()
         self.view.cameraChanged.connect(self._sync_pov_buttons)
         self.squad_panel.selected.connect(self._sync_pov_buttons)
         self.host_panel.selected.connect(self._sync_pov_buttons)
@@ -214,7 +227,7 @@ class MainWindow(QMainWindow):
         self.statusBar().addPermanentWidget(self.info)
         from studio.rendering.gpu import add_renderer_badge
         self.renderer_badge = add_renderer_badge(self, self.view)
-        self.statusBar().showMessage("Left drag: paint / move squad · Shift: select sectors · Ctrl+click: multi-select · right: menu / drag rotate · middle: pan", 8000)
+        self.statusBar().showMessage("Left drag: paint / move squad · Click: grey preview, click again to place · Drag an entry from the list onto the map · Shift: select sectors · Ctrl+click: multi-select · right: menu / drag rotate · middle: pan", 8000)
         self._new_doc(doc if doc is not None else LdfDocument(mw=15, mh=15), path)
 
     def _overlay_state(self):
@@ -603,6 +616,14 @@ class MainWindow(QMainWindow):
             widget.customContextMenuRequested.connect(lambda pos, w=widget: self._panel_context_menu(w,pos))
         dock.visibilityChanged.connect(lambda visible: self._icons.start()
                                        if visible and (self._icon_queue or self._bicon_queue) else self._icons.stop())
+
+    def _build_drag_sources(self):
+        """Sector, building and special-object entries can be dragged from their list onto the map."""
+        role = Qt.ItemDataRole.UserRole
+        MapDragSource(self.sector_list, lambda item: {'kind': 'sector', 'value': item.data(role)})
+        MapDragSource(self.building_list, lambda item: {'kind': 'building', 'value': item.data(role)})
+        for kind, panel in self.special_panels.items():
+            MapDragSource(panel.list, lambda item, k=kind: {'kind': 'special', 'object': k, 'slot': item.data(role)})
 
     @staticmethod
     def _make_list(icons: bool) -> QListWidget:
@@ -1340,11 +1361,32 @@ class MainWindow(QMainWindow):
                                     if 0 <= x < self.doc.mw and 0 <= y < self.doc.mh}
         self._special_target_slot = target
         self._special_draft = (kind, values)
+        self._special_vacated = self._vacated_special(kind, target) if target else None
         slot = target or getattr(self.doc, SPECIAL_KINDS[kind][1]) + 1
         self._special_placement = (kind, slot, 'object', -1)
         self._move_special_draft(self.view.hover or (self.doc.mw // 2, self.doc.mh // 2))
         self._refresh_specials()
         self.special_panels[kind].refresh(self.view.doc, slot)
+
+    def _vacated_special(self, kind, slot):
+        """(grids, store) of the map with the object at ``slot`` taken off it.
+
+        The preview of a move shows this instead of the real map, so the original
+        disappears while its grey copy follows the pointer. The real document is restored untouched.
+        """
+        snapshot = self.doc.snapshot()
+        try:
+            values = {'x': -1, 'y': -1}
+            if kind == 'item':
+                values['keys'] = []
+            update_special(self.doc, kind, slot, values, self.buildings)
+            grids = {key: [row[:] for row in grid] for key, grid in self.doc.grids.items()}
+            store = dict(special_store(self.doc, kind))
+        except ValueError:
+            return None
+        finally:
+            self.doc.restore(snapshot)
+        return grids, store
 
     def _move_special_draft(self, cell):
         if self._special_draft is None or cell is None:
@@ -1555,6 +1597,12 @@ class MainWindow(QMainWindow):
             panel.refresh(self.doc, slot)
             if key >= 0:
                 panel.keys.setCurrentRow(key)
+            return True
+        # Empty cell with an object selected in the list: first click of its two-click placement.
+        kind = next((k for k, tab in self.special_tab_indices.items()
+                     if self.palette_tabs.currentIndex() == tab), None)
+        if kind is not None and cell is not None and self.special_panels[kind].slot:
+            self._place_special(kind, 'object', -1)
             return True
         return False
 
@@ -1792,6 +1840,8 @@ class MainWindow(QMainWindow):
             render_doc = copy.copy(render_doc)
             name, count_name = SPECIAL_KINDS[kind][:2]
             store = dict(getattr(render_doc, name))
+            if self._special_vacated is not None:
+                render_doc.grids, store = self._special_vacated[0], dict(self._special_vacated[1])
             slot = self._special_target_slot or getattr(render_doc, count_name) + 1
             store[slot] = dict(copy.deepcopy(value), _preview=True)
             setattr(render_doc, name, store)
@@ -1806,6 +1856,12 @@ class MainWindow(QMainWindow):
                 render_doc, cell = preview
                 self.view.doc = render_doc
                 self.view.preview_cells = {cell}
+        ghost = self._ghost_doc(render_doc)
+        if ghost is not None:
+            render_doc, cell = ghost
+            self.view.doc = render_doc
+            self.view.preview_cells = {cell}
+        self.view.placing = self._stamp is not None or self._special_draft is not None
         self.view.draft_active = bool(self._draft_squads) or self._draft_grid is not None or self._draft_host is not None or self._special_draft is not None
         self.view.scene_changed()
         self.squad_overlay.invalidate()
@@ -2120,6 +2176,10 @@ class MainWindow(QMainWindow):
             self._refresh_hosts()
 
     def _cancel_operation(self, clear=True):
+        # Esc closes the placement preview first; a second Esc clears the sector selection.
+        if self._cancel_stamp() and clear:
+            self.view.unsetCursor()
+            return
         if hasattr(self, "location_tools"):
             self.location_tools.cancel()
         if self._building_drag is not None:
@@ -2495,6 +2555,10 @@ class MainWindow(QMainWindow):
             self._context_menu = menu
             return
         self._released(-1, -1, Qt.KeyboardModifier.NoModifier)
+        if self._special_draft is not None:
+            # A special object is waiting for its confirming click: right click just cancels it.
+            self._cancel_operation(clear=False)
+            return
         painting = self.tool in ('owner', 'terrain')
         squad = None if painting else self.view.pick_squad(position.x(), position.y())
         host = None if painting else self.view.pick_host(position.x(), position.y())
@@ -2506,9 +2570,12 @@ class MainWindow(QMainWindow):
             else:
                 self.set_tool('squad')
         cell = self.view.ground_cell(position.x(), position.y())
-        if cell is not None and cell not in self.view.selection and self.tool != 'squad':
+        if cell is not None and cell not in self.view.selection and self.tool != 'squad' and self._stamp is None:
             self.view.selection = {cell}
         menu = QMenu(self)
+        if self._stamp is not None:
+            menu.addAction('Cancel Placement', self._cancel_stamp)
+            menu.addSeparator()
         menu.addAction(self.undo_action)
         menu.addAction(self.redo_action)
         menu.addAction(self.copy_action)
@@ -2631,14 +2698,12 @@ class MainWindow(QMainWindow):
             else:
                 self._icon_queue.append((typ, item))
         self._layout_sector_icons()
+        # A previous choice survives the refill; otherwise nothing is selected.
         selected_sector = self._icon_items.get(self.sel_typ)
-        if selected_sector is None and self.sector_list.count():
-            selected_sector = self.sector_list.item(0)
         self.sector_list.blockSignals(True)
         self.sector_list.setCurrentItem(selected_sector)
         self.sector_list.blockSignals(False)
-        if selected_sector is not None:
-            self.sel_typ = selected_sector.data(Qt.ItemDataRole.UserRole)
+        self.sel_typ = selected_sector.data(Qt.ItemDataRole.UserRole) if selected_sector else None
         self._fill_buildings(lib)
         self.sector_list.scrollToTop()
         self._icons.start()
@@ -2835,9 +2900,8 @@ class MainWindow(QMainWindow):
         self._layout_building_rows()
         self._filter(self.building_list, self.building_filter.text())
         selected_building = self._bicon_items.get(self.sel_building)
-        if selected_building is None or selected_building.isHidden():
-            selected_building = next((self.building_list.item(i) for i in range(self.building_list.count())
-                                      if not self.building_list.item(i).isHidden()), None)
+        if selected_building is not None and selected_building.isHidden():
+            selected_building = None
         self.building_list.blockSignals(True)
         self.building_list.setCurrentItem(selected_building)
         self.building_list.blockSignals(False)
@@ -3051,17 +3115,21 @@ class MainWindow(QMainWindow):
         self._ensure_lib()
         self._rebuild_level_panel()
         self._sync_side_panels()
-        for widget, attr in ((self.sector_list, 'sel_typ'),
-                             (self.building_list, 'sel_building'),
-                             (self.owner_list, 'sel_owner')):
-            first = next((widget.item(i) for i in range(widget.count())
-                          if not widget.item(i).isHidden()), None)
+        self._stamp = self._ghost = None
+        # Sectors and buildings start unselected; only the faction list keeps a default entry.
+        for widget in (self.sector_list, self.building_list):
             blocked = widget.blockSignals(True)
-            widget.setCurrentItem(first)
+            widget.clearSelection()
+            widget.setCurrentRow(-1)
             widget.blockSignals(blocked)
-            setattr(self, attr, first.data(Qt.ItemDataRole.UserRole) if first else None)
-            if first is not None:
-                widget.scrollToItem(first)
+        first = next((self.owner_list.item(i) for i in range(self.owner_list.count())
+                      if not self.owner_list.item(i).isHidden()), None)
+        blocked = self.owner_list.blockSignals(True)
+        self.owner_list.setCurrentItem(first)
+        self.owner_list.blockSignals(blocked)
+        self.sel_owner = first.data(Qt.ItemDataRole.UserRole) if first else None
+        if first is not None:
+            self.owner_list.scrollToItem(first)
         self._refresh_sky()
         self._refresh_music()
         self.view.set_document(doc)
@@ -3341,10 +3409,9 @@ class MainWindow(QMainWindow):
         elif index == self.tech_tab_index:
             widget = self.tech_panel.list
         else:
-            kind = next((kind for kind, tab in self.special_tab_indices.items() if tab == index), None)
-            if kind is None:
-                return
-            widget = self.special_panels[kind].list
+            # Sector, building and special tabs start with nothing selected: a click on the map
+            # only starts a placement once the user has picked an entry.
+            return
         current = widget.currentItem()
         if current is not None and current.isSelected() and not current.isHidden():
             return
@@ -3387,6 +3454,11 @@ class MainWindow(QMainWindow):
             self.tool_actions["owner"].trigger()
 
     def _hovered(self, col, row):
+        menu = getattr(self, '_context_menu', None)
+        # Opening the right-click menu makes the pointer leave the map: the preview stays meanwhile.
+        menu_open = col < 0 and menu is not None and menu.isVisible()
+        if self._stamp is not None and not self._stroke_active and not menu_open:
+            self._set_ghost(self._stamp, self._stamp_value(self._stamp), (col, row) if col >= 0 else None)
         if self._special_draft is not None and col >= 0:
             self._move_special_draft((col, row))
         elif self._special_placement is not None:
@@ -3450,6 +3522,10 @@ class MainWindow(QMainWindow):
             return
         if self.tool == 'sector':
             self.view.selected_building = None
+        if self._ghost is not None:
+            # The stroke edits the real document, so the grey copy must not stay under it.
+            self._ghost = None
+            self._refresh_squads(fields=False)
         self.view.selection = {(col, row)}
         if self.tool == "select":
             self.view.update()
@@ -3494,6 +3570,12 @@ class MainWindow(QMainWindow):
                 self.dirty = True
                 self._refresh_map_issues()
             self._refresh_title()
+            if self._stamp is not None:
+                # Stamp mode: only the pointer outline stays, no leftover selection on the last cell.
+                self.view.selection.clear()
+                # The grey copy comes back under the pointer.
+                hover = self.view.hover
+                self._set_ghost(self._stamp, self._stamp_value(self._stamp), hover)
 
     def _double_clicked(self, col, row, _modifiers):
         if self.tool != "terrain":
@@ -3527,19 +3609,14 @@ class MainWindow(QMainWindow):
             item = self.sector_list.currentItem()
             if item is None or not item.isSelected() or item.isHidden():
                 return
-            changed = paint_cells(self.doc, [(col, row)], 'type', f"{self.sel_typ:02x}")
-            changed = paint_cells(self.doc, [(col, row)], 'blg', '00') or changed
+            changed = self._paint_sector(col, row, self.sel_typ)
         elif self.tool == "building":
             item = self.building_list.currentItem()
             if item is None or not item.isSelected() or item.isHidden():
                 return
             definition = self.buildings.get(self.sel_building)
             if definition is not None:
-                interior = (1 <= col < self.doc.mw - 1 and 1 <= row < self.doc.mh - 1)
-                if interior:
-                    changed = self.doc.remember_building_ground(col, row, definition.id)
-                    changed = paint_cells(self.doc, [(col, row)], 'type', f"{definition.sec_type:02x}") or changed
-                    changed = paint_cells(self.doc, [(col, row)], 'blg', f"{definition.id:02x}") or changed
+                changed = self._paint_building(col, row, definition)
         elif self.tool == "owner":
             changed = paint_cells(self.doc, [(col, row)], 'own', self.sel_owner)
         if changed:
@@ -3550,3 +3627,158 @@ class MainWindow(QMainWindow):
                 self.view.owners_changed()
             self.building_overlay.update()
             self._hovered(col, row)
+
+    def _paint_sector(self, col, row, typ):
+        changed = paint_cells(self.doc, [(col, row)], 'type', f"{typ:02x}")
+        return paint_cells(self.doc, [(col, row)], 'blg', '00') or changed
+
+    def _paint_building(self, col, row, definition):
+        if not self._interior(col, row):
+            return False
+        changed = self.doc.remember_building_ground(col, row, definition.id)
+        changed = paint_cells(self.doc, [(col, row)], 'type', f"{definition.sec_type:02x}") or changed
+        return paint_cells(self.doc, [(col, row)], 'blg', f"{definition.id:02x}") or changed
+
+    def _interior(self, col, row):
+        return 1 <= col < self.doc.mw - 1 and 1 <= row < self.doc.mh - 1
+
+    # --- Placement preview (sector / building) and palette drag & drop ---------------------------
+    # Two ways to place: drag an entry from its list and drop it on the map, or click a cell to
+    # start a grey preview that follows the pointer and click again to place. Esc or the
+    # right-click menu cancel the preview. A press-and-drag on the map still paints as before.
+
+    def _stamp_armed(self):
+        """True when a plain click on the map should start a placement preview."""
+        if self._stamp is not None or self.doc is None or self.view.draft_active:
+            return False
+        return self._stamp_value(self.tool) is not None
+
+    def _stamp_value(self, tool):
+        """Selected sector type / building id of ``tool``, or None when its list has no usable selection."""
+        widget, value = ((self.sector_list, self.sel_typ) if tool == 'sector' else
+                         (self.building_list, self.sel_building) if tool == 'building' else (None, None))
+        if widget is None or value is None:
+            return None
+        item = widget.currentItem()
+        if item is None or not item.isSelected() or item.isHidden():
+            return None
+        return value if tool == 'sector' or value in self.buildings else None
+
+    def _ghost_cell_ok(self, cell):
+        """Sectors and buildings only go on free interior cells; a placed building is grabbed instead."""
+        col, row = cell
+        return (self.doc is not None and self._interior(col, row)
+                and int(str(self.doc.grids['blg'][row][col]), 16) == 0)
+
+    def _begin_stamp(self, cell):
+        tool = self.tool
+        value = self._stamp_value(tool)
+        if value is None or self._stamp is not None:
+            return
+        self._stamp = tool
+        self._ghost = self._ghost_for(tool, value, cell)
+        self.statusBar().showMessage('Placement preview · Click: place · Right click: menu · Esc: cancel', 6000)
+        self._refresh_squads(fields=False)
+
+    def _ghost_for(self, tool, value, cell):
+        ok = cell is not None and value is not None and self._ghost_cell_ok(cell)
+        return (tool, value, cell) if ok else None
+
+    def _set_ghost(self, tool, value, cell):
+        ghost = self._ghost_for(tool, value, cell)
+        if ghost != self._ghost:
+            self._ghost = ghost
+            self._refresh_squads(fields=False)
+
+    def _ghost_doc(self, render_doc):
+        """Copy of the document with the previewed sector or building painted on its cell."""
+        if self._ghost is None:
+            return None
+        tool, value, (col, row) = self._ghost
+        if tool == 'sector':
+            sector, building = f"{value:02x}", '00'
+        else:
+            definition = self.buildings.get(value)
+            if definition is None:
+                return None
+            sector, building = f"{definition.sec_type:02x}", f"{definition.id:02x}"
+        ghost_doc = copy.copy(render_doc)
+        grids = dict(render_doc.grids)
+        # Only the previewed row is copied, so a hover move stays cheap.
+        for layer, text in (('type', sector), ('blg', building)):
+            rows = list(grids[layer])
+            rows[row] = list(rows[row])
+            rows[row][col] = text
+            grids[layer] = rows
+        ghost_doc.grids = grids
+        return ghost_doc, (col, row)
+
+    def _cancel_stamp(self):
+        """Back to 'entry selected, no preview'. Returns True when a preview was open."""
+        had = self._stamp is not None or self._ghost is not None
+        self._stamp = self._ghost = None
+        if had:
+            self._refresh_squads(fields=False)
+        return had
+
+    def _drop_allowed(self, payload, cell):
+        if payload['kind'] in ('sector', 'building'):
+            return self._ghost_cell_ok(cell)
+        return self._interior(*cell) if self.doc is not None else False
+
+    def _drag_value(self, payload):
+        """Sector type / building id carried by a list drag, or None when it is unknown to this map."""
+        value = payload.get('value')
+        if not isinstance(value, int):
+            return None
+        if payload['kind'] == 'sector':
+            return value if value in self._icon_items else None
+        return value if value in self.buildings else None
+
+    def _map_drag_moved(self, payload, cell):
+        kind = payload['kind']
+        if kind == 'special':
+            panel = self.special_panels.get(payload.get('object'))
+            if cell is None or panel is None:
+                return self._map_drag_left()
+            if self._special_draft is None:
+                # The press on the list item already selected it, so the panel holds its values.
+                if payload.get('slot') != panel.slot or panel.slot not in special_slots(self.doc, payload['object']):
+                    return
+                self._start_special_draft(payload['object'], panel.placement_values(), panel.slot)
+            self._move_special_draft(cell)
+            return
+        self._stamp = None
+        self._set_ghost(kind, self._drag_value(payload), cell)
+
+    def _map_drag_left(self):
+        """The dragged entry left the map or is over a cell where it cannot go: no preview."""
+        if self._special_draft is not None:
+            self._cancel_operation(clear=False)
+        else:
+            self._cancel_stamp()
+
+    def _map_dropped(self, payload, cell):
+        kind = payload['kind']
+        if kind == 'special':
+            if self._special_draft is not None:
+                self._confirm_special(cell)
+            return
+        value = self._drag_value(payload)
+        self._cancel_stamp()
+        if value is None:
+            return
+        self._released(-1, -1, Qt.KeyboardModifier.NoModifier)
+        self.history.begin(self.doc)
+        col, row = cell
+        changed = (self._paint_sector(col, row, value) if kind == 'sector' else
+                   self._paint_building(col, row, self.buildings[value]))
+        self.view.selection.clear()
+        if self.history.commit(self.doc, changed):
+            self.dirty = True
+            self._refresh_map_issues()
+        if changed:
+            self.view.scene_changed([cell])
+            self.building_overlay.update()
+        self._refresh_title()
+        self.view.update()

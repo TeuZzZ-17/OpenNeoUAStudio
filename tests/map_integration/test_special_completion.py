@@ -230,8 +230,11 @@ def test_special_selection_highlight_moves_between_items_gates_and_buildings(win
     window._refresh_specials()
 
     window.palette_tabs.setCurrentIndex(window.special_tab_indices['item'])
+    assert window.view.selected_special is None, 'special tabs start with nothing selected'
+    window.special_panels['item'].list.setCurrentRow(0)
     assert window.view.selected_special[:2] == ('item', item)
     window.palette_tabs.setCurrentIndex(window.special_tab_indices['gate'])
+    window.special_panels['gate'].list.setCurrentRow(0)
     assert window.view.selected_special[:2] == ('gate', gate)
 
     members = list(special_members(doc, window.view.lib))

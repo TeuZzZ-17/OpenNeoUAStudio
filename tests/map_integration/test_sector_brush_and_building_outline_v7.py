@@ -150,7 +150,7 @@ def test_mouse_drag_paints_existing_sectors_instead_of_grabbing_them():
                special_overlay=None, _press_pos=None, _last=Pos(0, 0), hover=None,
                sample_active=False, _paint_gesture=False, _paint_started=False,
                _moved=False, _sweep_gesture=False, _drag_actor=False,
-               _paint_last=None, selection=set(), preview_cells=set(),
+               _paint_last=None, selection=set(), preview_cells=set(), stamp_gate=None, _stamp_origin=None,
                cellPressed=Obj(emit=lambda *a: press.append(a)),
                cellDragged=Obj(emit=lambda *a: sweep.append(a)),
                cellReleased=Obj(emit=lambda *a: release.append(a)),

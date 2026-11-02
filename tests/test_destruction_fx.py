@@ -213,6 +213,17 @@ def test_ground_unit_goes_straight_to_megadeth():
     assert not any(item.kind == "legacy" for item in simulation.items_at(moment))
 
 
+def test_dead_state_inherits_authored_scale():
+    unit = fx.UnitPhases(normal=fx.VisualRef(10), dead=fx.VisualRef(11),
+                         megadeth=fx.VisualRef(12), model="plane", altitude=300,
+                         scale=(0.3, 0.3, 0.3))
+    simulation = fx.PreviewSimulation(
+        fx.FxDocument(), fx.CONTEXT_VEHICLE, fx.SEQUENCE_TRIGGER, unit=unit)
+    wreck = next(item for item in simulation.items_at(fx.SEQUENCE_PREROLL_MS + 200)
+                 if item.kind == "unit" and item.vp == 11)
+    assert wreck.rotation[0][0] == pytest.approx(0.3)
+
+
 def test_unit_states_carry_external_models_in_engine_order():
     unit = fx.UnitPhases(
         normal=fx.VisualRef(10),
@@ -300,7 +311,6 @@ LOOK = (
     "    spin_xyz = 0_0_2\n"
     "    vp_trail_tint = 50_150_255_130\n"
     "    vp_trail_scale_xyz = 2_1_0.4\n"
-    "    mesh_tracer_enable = 1\n"
     "    mesh_tracer_path = Data/Models/3ds/Tracer.3ds\n"
     "    mesh_tracer_tint = 255_180_60_120\n"
     "    mesh_tracer_size_xyz = 1_1_80\n"
@@ -342,11 +352,10 @@ def test_look_keys_are_read_from_the_top_level_only():
     assert vehicle.tracer is None and vehicle.trail_tint is None
 
 
-def test_tracer_needs_enable_path_and_valid_sizes():
-    base = {"mesh_tracer_enable": "1", "mesh_tracer_path": "Data/a.3ds"}
+def test_tracer_needs_path_and_valid_sizes():
+    base = {"mesh_tracer_path": "Data/a.3ds"}
     assert fx.parse_tracer(base) is not None
-    assert fx.parse_tracer({**base, "mesh_tracer_enable": "0"}) is None
-    assert fx.parse_tracer({"mesh_tracer_enable": "1"}) is None
+    assert fx.parse_tracer({}) is None
     assert fx.parse_tracer({**base, "mesh_tracer_size_xyz": "3_3_0"}) is None
     assert fx.parse_tracer({**base, "mesh_tracer_tint": "1_2_3_0"}) is None
     spec = fx.parse_tracer({**base, "mesh_tracer_head_size": "9"})
@@ -405,7 +414,7 @@ def test_tracer_trails_behind_the_projectile_and_ends_at_impact():
 
 def test_tapered_tracer_is_split_and_glow_adds_additive_layers():
     spec = fx.parse_tracer({
-        "mesh_tracer_enable": "1", "mesh_tracer_path": "Data/a.3ds",
+        "mesh_tracer_path": "Data/a.3ds",
         "mesh_tracer_size_xyz": "4_4_300", "mesh_tracer_tail_size": "0",
         "mesh_tracer_glow_rate": "5"})
     unit = fx.UnitPhases(normal=fx.VisualRef(60), weapon=True, tracer=spec)
@@ -556,7 +565,7 @@ def test_decal_edge_fade_clears_the_corners_and_keeps_the_center():
     assert disc.pixelColor(32, 32).red() < disc.pixelColor(32, 4).red()
 
 
-# -- weapon decals in unit mode, launch flash, spiral and chaos ------------------------------
+# -- weapon decals in unit mode, launch flash and chaos --------------------------------------
 
 DECAL_PROFILES = fx.decal_profiles_from_text(
     "new_decal 1\n    texture = Interface/GroundDecals/impact_01.png\n"
@@ -616,18 +625,9 @@ def test_launch_trigger_is_a_weapon_only_begin_fx_at_the_muzzle():
     assert not [i for i in simulation.items_at(1005) if i.kind == "visual"]
 
 
-def test_spiral_orbits_the_flight_line_and_chaos_wins_over_it():
+def test_removed_spiral_keys_do_not_create_motion():
     assert fx.parse_motion({}) is None
-    assert fx.parse_motion({"spiral_speed": "2", "spiral_radius": "0"}) is None
-    spiral = fx.parse_motion({"spiral_speed": "2", "spiral_radius": "30"})
-    assert spiral.kind == "spiral"
-    assert fx.parse_motion({"spiral_speed": "2", "spiral_radius": "30",
-                            "chaos_factor": "1", "chaos_radius": "10"}).kind == "chaos"
-    # Two turns per second: back on the start point after 500 ms, 30 units out.
-    start, quarter = spiral.offset(0), spiral.offset(125)
-    assert start == pytest.approx((30.0, 0.0, 0.0))
-    assert math.hypot(*quarter[:2]) == pytest.approx(30.0)
-    assert spiral.offset(500)[0] == pytest.approx(30.0, abs=1e-6)
+    assert fx.parse_motion({"spiral_speed": "2", "spiral_radius": "30"}) is None
 
 
 def test_chaos_stays_inside_its_radius_and_is_repeatable():
@@ -639,26 +639,26 @@ def test_chaos_stays_inside_its_radius_and_is_repeatable():
 
 
 def test_weapon_motion_moves_the_model_off_the_line_and_freezes_at_impact():
-    motion = fx.parse_motion({"spiral_speed": "1", "spiral_radius": "30"})
+    motion = fx.parse_motion({"chaos_factor": "1", "chaos_radius": "30"})
     unit = fx.UnitPhases(normal=fx.VisualRef(60), dead=fx.VisualRef(61),
                          weapon=True, motion=motion)
     simulation = _weapon_simulation(unit)
     flight = simulation.tracks[0].end
-    # The weapon falls straight down: the orbit is sideways (X/Z), never Y.
+    # The weapon falls straight down: visual deviation is sideways, never Y.
     for moment in (100, 250, 600):
         item = next(i for i in simulation.items_at(moment) if i.kind == "unit")
         straight = -fx.WEAPON_LAUNCH_HEIGHT + fx.WEAPON_LAUNCH_HEIGHT * moment / flight
         assert item.position[1] == pytest.approx(straight, abs=1e-6)
-        assert math.hypot(item.position[0], item.position[2]) == pytest.approx(30.0)
+        assert 0.0 < math.hypot(item.position[0], item.position[2]) <= 30.0
     # After impact the last pose stays frozen on the dead model.
     first = next(i for i in simulation.items_at(flight + 10) if i.kind == "unit")
     later = next(i for i in simulation.items_at(flight + 300) if i.kind == "unit")
     assert first.position == later.position and first.rotation == later.rotation
 
 
-def test_tracer_follows_a_spiral_instead_of_a_straight_line():
-    motion = fx.parse_motion({"spiral_speed": "2", "spiral_radius": "30"})
-    spec = fx.parse_tracer({"mesh_tracer_enable": "1",
+def test_tracer_follows_chaos_instead_of_a_straight_line():
+    motion = fx.parse_motion({"chaos_factor": "2", "chaos_radius": "30"})
+    spec = fx.parse_tracer({
                             "mesh_tracer_path": "Data/a.3ds",
                             "mesh_tracer_size_xyz": "3_3_200"})
     unit = fx.UnitPhases(normal=fx.VisualRef(60), weapon=True, tracer=spec,
@@ -909,7 +909,7 @@ def test_panel_has_a_mute_button_and_plays_sounds_while_running(app, tmp_path):
 CLUSTER_PARENT = (
     "new_weapon 28\n"
     "    vp_normal = 113\n    vp_dead = 22\n    start_speed = 100\n"
-    "    cluster_enable = 1\n    cluster_count = 2_5\n    cluster_weapon_id = 29\n"
+    "    cluster_count = 2_5\n    cluster_weapon_id = 29\n"
     "    cluster_trigger_time = 600\n    cluster_spread_xy = 10_10\n"
     "    cluster_vp = 112\n    cluster_generations = 1\n"
     "    snd_cluster_sample = sounds/Smex02.wav\n    snd_cluster_pitch = 0\n"
@@ -942,16 +942,15 @@ def test_cluster_keys_are_read_like_the_engine():
     assert cluster.trigger_time == 600 and cluster.generations == 1
     assert cluster.spread == (10.0, 10.0) and cluster.visual.vp == 112
     assert cluster.sound.sample == "sounds/Smex02.wav" and cluster.sound.volume == 120
-    assert fx.parse_cluster({"cluster_enable": "0", "cluster_count": "2",
+    assert fx.parse_cluster({"cluster_count": "2", "cluster_weapon_id": "3"}) is not None
+    assert fx.parse_cluster({"cluster_count": "0",
                              "cluster_weapon_id": "3"}) is None
-    assert fx.parse_cluster({"cluster_enable": "1", "cluster_count": "0",
-                             "cluster_weapon_id": "3"}) is None
-    assert fx.parse_cluster({"cluster_enable": "1", "cluster_count": "2"}) is None
+    assert fx.parse_cluster({"cluster_count": "2"}) is None
     # A trigger range is not a time: the split then happens on impact.
-    ranged = fx.parse_cluster({"cluster_enable": "1", "cluster_count": "3",
+    ranged = fx.parse_cluster({"cluster_count": "3",
                                "cluster_weapon_id": "3", "cluster_trigger_time": "100_200"})
     assert ranged.trigger_time == 0
-    assert fx.parse_cluster({"cluster_enable": "1", "cluster_count": "99",
+    assert fx.parse_cluster({"cluster_count": "99",
                              "cluster_weapon_id": "3"}).count == (64, 64)
 
 
@@ -1106,7 +1105,7 @@ def test_laser_draws_a_beam_of_models_from_the_muzzle_to_the_contact():
 def test_mesh_laser_is_one_stretched_beam_with_a_glow():
     laser = fx.weapon_def_from_text(125, (
         "new_weapon 125\n    model = laser\n    vp_normal = 60\n"
-        "    laser_mesh_enable = 1\n    laser_mesh_path = Data/Models/3ds/laser.3ds\n"
+        "    laser_mesh_path = Data/Models/3ds/laser.3ds\n"
         "    laser_mesh_size_xy = 8_0\n    laser_mesh_glow_rate = 5\n"
         "    laser_mesh_tint = 10_20_30_200\nend\n"))
     simulation = _weapon_simulation(__import__("dataclasses").replace(laser.unit, altitude=800))
