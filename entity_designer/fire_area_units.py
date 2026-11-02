@@ -126,7 +126,7 @@ def _rack(values: dict[str, str], mode: str) -> tuple[float, float, int] | None:
 
 
 def _projectiles(raw: str | None) -> int:
-    """First number of ``N`` or ``min_max`` (the engine rolls inside the range)."""
+    """First number of ``N`` or ``min~max`` (the engine rolls inside the range)."""
 
     try:
         count = int((raw or "").strip().split(maxsplit=1)[0].split("~")[0])

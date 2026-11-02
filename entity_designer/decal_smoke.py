@@ -106,7 +106,7 @@ def rolls_smoke(spec: SmokeSpec, seed: int) -> bool:
 
 
 def emitter_count(spec: SmokeSpec, seed: int) -> int:
-    """The puff count this decal rolled inside ``smoke_count = min_max``."""
+    """The puff count this decal rolled inside ``smoke_count = min~max``."""
 
     low, high = spec.count
     rolled = low + int(hash_unit(hash32(seed, 0x434E5452, 0)) * (high - low + 1))

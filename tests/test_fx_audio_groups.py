@@ -179,12 +179,12 @@ def test_palette_limits_of_the_game_settings():
 
 
 def test_ini_settings_are_read_like_the_engine():
-    assert fx.parse_global_fade("150_300") == (150, 300)
-    assert fx.parse_global_fade("0_300") == (0, 300)
+    assert fx.parse_global_fade("150|300") == (150, 300)
+    assert fx.parse_global_fade("0|300") == (0, 300)
     assert fx.parse_global_fade("150") == (0, 0)
-    assert fx.parse_global_fade("150_x") == (150, 0)
-    assert fx.parse_global_fade("-5_100") == (0, 100)
-    assert fx.parse_global_fade("1,5_100") == (0, 100)
+    assert fx.parse_global_fade("150|x") == (150, 0)
+    assert fx.parse_global_fade("-5|100") == (0, 100)
+    assert fx.parse_global_fade("1,5|100") == (0, 100)
     assert fx.parse_global_fade("") == (0, 0)
     assert fx.parse_effect_settings("") == fx.EffectSettings()
     settings = fx.parse_effect_settings(

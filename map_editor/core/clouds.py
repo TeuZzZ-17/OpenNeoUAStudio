@@ -45,8 +45,8 @@ class CloudProfile:
         return f'{self.id} - {self.name}' if self.name else str(self.id)
 
 
-def _tuple(value: str, count: int, convert=float):
-    parts = value.split('|')
+def _tuple(value: str, count: int, convert=float, separator='|'):
+    parts = value.split(separator)
     if len(parts) != count:
         return None
     try:
@@ -134,7 +134,8 @@ def parse_cloud_profiles(text: str) -> dict[int, CloudProfile]:
                 setattr(current, {'spawn_offset_xyz': 'spawn_offset', 'velocity_xyz': 'velocity',
                                   'spin_xyz': 'spin', 'scale_xyz': 'scale'}[key], numbers)
         elif key in ('lifetime_minmax', 'fade_inout'):
-            numbers = _tuple(value, 2)
+            # lifetime_minmax is a random range (min~max); fade_inout is a pair (in|out).
+            numbers = _tuple(value, 2, separator='~' if key == 'lifetime_minmax' else '|')
             if numbers is not None:
                 setattr(current, 'lifetime' if key == 'lifetime_minmax' else 'fade',
                         tuple(max(0, int(v)) for v in numbers))

@@ -1275,7 +1275,7 @@ def import_fire_points_block(
             except ValueError as exc:
                 raise CollisionScriptError(
                     f"Valore non valido per num_weapons: {raw}. "
-                    "Usa 0, un valore 1-255 o un range min_max 1-255."
+                    "Usa 0, un valore 1-255 o un range min~max 1-255."
                 ) from exc
             continue
         if key not in values:
@@ -1668,7 +1668,7 @@ def import_gun_points_block(
             # legacy robo_* index -1 also keeps the editor defensive.
             continue
         if leaf in {"gun_pos_xyz", "gun_dir_xyz"}:
-            # OpenNeoUA unit_* mounts use the compact x_y_z form.
+            # OpenNeoUA unit_* mounts use the compact x|y|z form.
             values = _float_tuple(raw, 3, key)
             if leaf == "gun_pos_xyz":
                 point.x, point.y, point.z = values
@@ -2780,7 +2780,7 @@ def validate_project(
                 (1 <= minimum <= maximum <= 255)):
             errors.append(
                 "Num Weapons deve essere 0, un valore 1-255 o un range "
-                "min_max interamente compreso tra 1 e 255.")
+                "min~max interamente compreso tra 1 e 255.")
     if project.target_category == VEHICLE and project.gun_points_enabled:
         if len(project.gun_points) > 40:
             errors.append(

@@ -406,7 +406,7 @@ class EffectSettings:
 
 
 def parse_global_fade(value: str) -> tuple[int, int]:
-    """``game.global_*_fade_inout = in_out`` in ms; anything malformed is 0_0."""
+    """``game.global_*_fade_inout = in|out`` in ms; anything malformed is 0|0."""
 
     parts = split_tuple(value, 2)
     if parts is None:
@@ -454,7 +454,7 @@ def parse_color_settings(text: str) -> tuple[dict[int, tuple], dict[int, float]]
         key, value = key.strip().casefold(), value.strip()
         match = re.fullmatch(r"gfx\.color_eff\[(\d+)\]", key)
         if match and 8 <= int(match[1]) <= 16:
-            parts = [part for part in re.split(r"[_,\s]+", value) if part]
+            parts = [part for part in re.split(r"[|,\s]+", value) if part]
             if len(parts) == 3 and all(p.isdigit() and int(p) <= 255 for p in parts):
                 custom[int(match[1])] = tuple(int(p) / 255.0 for p in parts)
             continue
@@ -1037,7 +1037,7 @@ def interpret_block(block: FxBlock, context: str) -> FxSpec:
             parts = split_tuple(value, 2)
             if parts is None:
                 issue(SEVERITY_WARNING,
-                      f"Invalid fade_inout '{value}': expected in_out.")
+                      f"Invalid fade_inout '{value}': expected in|out.")
             else:
                 fade_in, fade_out = _nonnegative_ms(parts[0]), _nonnegative_ms(parts[1])
         elif key == "count":
@@ -1054,7 +1054,7 @@ def interpret_block(block: FxBlock, context: str) -> FxSpec:
             else:
                 has_inline = True
                 target_min, target_max = launch_min, launch_max
-            # x_y_z where every axis is a fixed value or a "min~max" range.
+            # x|y|z where every axis is a fixed value or a "min~max" range.
             parts = split_tuple(value, 3)
             axes = ([parse_float_range(part) for part in parts]
                     if parts is not None else None)
@@ -1067,7 +1067,7 @@ def interpret_block(block: FxBlock, context: str) -> FxSpec:
             parts = split_tuple(value, 3)
             if parts is None:
                 issue(SEVERITY_WARNING,
-                      f"Invalid spin_xyz '{value}': expected x_y_z.")
+                      f"Invalid spin_xyz '{value}': expected x|y|z.")
             else:
                 for axis, part in enumerate(parts):
                     raw = _stof(part)
@@ -1284,7 +1284,7 @@ def parse_decal_profile(profile_id: int, values: dict[str, str]) -> DecalProfile
         parts = split_tuple(values["stretch_xz"], 2)
         if parts is None:
             issue(SEVERITY_WARNING,
-                  f"Invalid stretch_xz '{values['stretch_xz']}': expected x_z.")
+                  f"Invalid stretch_xz '{values['stretch_xz']}': expected x|z.")
         else:
             for axis, part in enumerate(parts):
                 parsed = parse_float_range(part)
@@ -1320,7 +1320,7 @@ def parse_decal_profile(profile_id: int, values: dict[str, str]) -> DecalProfile
         parts = split_tuple(values["fade_inout"], 2)
         if parts is None:
             issue(SEVERITY_WARNING,
-                  f"Invalid fade_inout '{values['fade_inout']}': expected in_out.")
+                  f"Invalid fade_inout '{values['fade_inout']}': expected in|out.")
         else:
             fade_in, fade_out = _nonnegative_ms(parts[0]), _nonnegative_ms(parts[1])
 
@@ -1855,7 +1855,7 @@ def parse_tracer(values: dict[str, str], prefix: str = "mesh_tracer_") -> Tracer
         value = _full_float(text)
         return 0.0 if value is None else max(-6000.0, min(6000.0, value))
 
-    # size_xyz / pos_xyz are x_y_z; a malformed tuple keeps the engine defaults.
+    # size_xyz / pos_xyz are x|y|z; a malformed tuple keeps the engine defaults.
     size_parts = split_tuple(values.get(prefix + "size_xyz"), 3) or (None, None, None)
     pos_parts = split_tuple(values.get(prefix + "pos_xyz"), 3) or ("", "", "")
     size_x = bounded(size_parts[0], 100.0, 3.0)
