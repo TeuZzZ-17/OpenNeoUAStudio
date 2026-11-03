@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections import Counter
 from copy import deepcopy
 from dataclasses import dataclass, replace
 import os
@@ -22,6 +23,8 @@ SET_FOLDERS = ("HI", "Objects", "Palette", "Remap", "Scripts")
 SECTOR_LIMIT = 256
 MODEL_LIMIT = 4096
 BUILDING_LIMIT = 4096
+# Field value meaning "choose it for me" (connection family, map symbol).
+AUTO = -1
 
 
 @dataclass(frozen=True)
@@ -163,6 +166,95 @@ class SetDocument:
                     lambda: self.sdf.sectors.__setitem__(number, sector))
         return number
 
+    def _existing_sectors(self, numbers):
+        try:
+            selected = tuple(dict.fromkeys(numbers))
+        except TypeError as error:
+            raise ValueError("Choose existing sector IDs.") from error
+        if not selected or any(type(n) is not int or n not in self.sdf.sectors for n in selected):
+            raise ValueError("Choose existing sector IDs.")
+        return selected
+
+    def wipe_sectors(self, numbers):
+        """Remove whole definitions; their slots become free."""
+        selected = self._existing_sectors(numbers)
+        self.change("Wipe sector", lambda: [self.sdf.sectors.pop(n) for n in selected])
+
+    def clear_sectors(self, numbers):
+        """Keep each definition and layout, but put building 0 in every cell."""
+        selected = self._existing_sectors(numbers)
+
+        def apply():
+            for n in selected:
+                sector = self.sdf.sectors[n]
+                self.sdf.sectors[n] = replace(sector, subsects=(0,) * len(sector.subsects))
+        self.change("Clear sector", apply)
+
+    def paste_sectors(self, sectors, target, *, remove=()):
+        """Place copied definitions at ``target``, keeping their relative slot order.
+
+        Occupied slots are overwritten. Cut sources not covered by the paste
+        become free slots in the same undo step.
+        """
+        first = min(sector.number for sector in sectors)
+        placed = {target + sector.number - first: sector for sector in sectors}
+        if any(not 0 <= n < SECTOR_LIMIT for n in placed):
+            raise ValueError("The copied sectors do not fit after this slot (last ID is 255).")
+        if any(not 0 <= b < len(self.sdf.buildings) for s in sectors for b in s.subsects):
+            raise ValueError("The copied sectors use buildings that no longer exist.")
+
+        def apply():
+            for n in remove:
+                if n not in placed:
+                    self.sdf.sectors.pop(n, None)
+            for n, sector in placed.items():
+                self.sdf.sectors[n] = replace(sector, number=n)
+        self.change("Move sectors" if remove else "Paste sectors", apply)
+        return sorted(placed)
+
+    def reset_sectors(self, *, saved=False):
+        """Empty the sector list, or return the whole set to its last saved tables."""
+        def apply():
+            if saved:
+                self.sdf = deepcopy(self.saved)
+            else:
+                self.sdf.sectors.clear()
+        self.change("Restore saved set" if saved else "Reset set", apply)
+
+    def suggest_fields(self, number):
+        """Pick connection family and map symbol from the most similar sector.
+
+        Similar means the same buildings in the cells, then the same model
+        families (the first two letters of the intact BASE, as ST/GR/GS).
+        Border slots 248-255 are never used as examples.
+        """
+        sector = self.sdf.sectors[number]
+
+        def profile(row):
+            cells = row.subsects * 9 if row.single else row.subsects
+            families = []
+            for bid in cells:
+                mid = self.sdf.buildings[bid].intact if 0 <= bid < len(self.sdf.buildings) else -1
+                families.append(self.sdf.models[mid].base[:2].casefold() if 0 <= mid < len(self.sdf.models) else "")
+            return Counter(cells), Counter(families)
+
+        mine = profile(sector)
+        scored = []
+        for other_number, other in self.sdf.sectors.items():
+            if other_number == number or other_number >= 248:
+                continue
+            theirs = profile(other)
+            score = 2 * sum((mine[0] & theirs[0]).values()) + sum((mine[1] & theirs[1]).values())
+            if score:
+                scored.append((other.kind == sector.kind, score, other))
+        if not scored:
+            return sector.ground, sector.symbol
+        best = max(scored, key=lambda row: row[:2])[:2]
+        examples = [row[2] for row in scored if row[:2] == best]
+        ground = Counter(s.ground for s in examples).most_common(1)[0][0]
+        symbol = Counter(s.symbol for s in examples).most_common(1)[0][0]
+        return ground, symbol
+
     def set_layout(self, number, single):
         sector = self.sdf.sectors[number]
         # Converting to a large cell keeps the center piece; undo restores all nine.
@@ -171,28 +263,27 @@ class SetDocument:
         self.change("Change layout", lambda: self.sdf.sectors.__setitem__(
             number, replace(sector, kind=int(single), subsects=subs)))
 
-    def set_ground(self, numbers, ground, *, replace_ground=None):
-        """Change selected sector ground values without touching their buildings."""
-        if type(ground) is not int or not 0 <= ground <= 5:
-            raise ValueError("Ground must be between 0 and 5.")
-        if (replace_ground is not None and
-                (type(replace_ground) is not int or not 0 <= replace_ground <= 5)):
-            raise ValueError("The source ground must be between 0 and 5.")
-        try:
-            selected = tuple(numbers)
-        except TypeError as error:
-            raise ValueError("Choose existing sector IDs.") from error
-        if any(type(number) is not int or number not in self.sdf.sectors
-               for number in selected):
-            raise ValueError("Choose existing sector IDs.")
+    def set_sector_fields(self, numbers, *, ground=None, symbol=None):
+        """Set connection family and/or map symbol of several sectors in one step.
+
+        AUTO picks each sector's own value from the most similar sector
+        (suggest_fields). None leaves that field unchanged.
+        """
+        selected = self._existing_sectors(numbers)
+        if ground is not None and ground != AUTO and (type(ground) is not int or not 0 <= ground <= 5):
+            raise ValueError("Connection family must be between 0 and 5.")
+        if symbol is not None and symbol != AUTO and (type(symbol) is not int or not 0 <= symbol <= 255):
+            raise ValueError("Map symbol must be between 0 and 255.")
 
         def apply():
-            for number in dict.fromkeys(selected):
+            for number in selected:
                 sector = self.sdf.sectors[number]
-                if replace_ground is None or sector.ground == replace_ground:
-                    self.sdf.sectors[number] = replace(sector, ground=ground)
-
-        self.change("Change sector ground", apply)
+                auto = self.suggest_fields(number) if AUTO in (ground, symbol) else None
+                self.sdf.sectors[number] = replace(
+                    sector,
+                    ground=sector.ground if ground is None else auto[0] if ground == AUTO else ground,
+                    symbol=sector.symbol if symbol is None else auto[1] if symbol == AUTO else symbol)
+        self.change("Sector properties", apply)
 
     def relocate_cells(self, number, source_cells, target_cell, *, move=False):
         """Move or duplicate a selected cell pattern within one 3x3 sector."""
@@ -293,25 +384,122 @@ class SetDocument:
             self.sdf.buildings[slot] = row
         return slot
 
-    def assign_model(self, number, cells, model, state=0, all_states=False):
-        """Make independent cell state rows instead of altering shared buildings."""
+    def state_chain(self, model):
+        """Damage states that follow an intact model, or None when nothing fits.
+
+        An existing building row that starts from this model wins (the most
+        used one). Otherwise the vanilla names are followed: ST_CITY1 ->
+        STxCITY1 -> STyCITY1 -> STzCITY1. A missing step repeats the previous one.
+        """
+        used = Counter(b for sector in self.sdf.sectors.values() for b in sector.subsects)
+        rows = [b for b in self.sdf.buildings
+                if b.intact == model and any(b.state(s) != model for s in range(1, 4))]
+        if rows:
+            row = max(rows, key=lambda b: (used[b.id], -b.id))
+            return tuple(row.state(s) for s in range(4)), row.destructible
+        name = Path(self.sdf.models[model].base.replace("\\", "/")).name
+        if len(name) < 4 or name[2] != "_":
+            return None
+        by_name = {}
+        for row in self.sdf.models:
+            by_name.setdefault(Path(row.base.replace("\\", "/")).name.casefold(), row.id)
+        states = [model]
+        for mark in "xyz":
+            states.append(by_name.get((name[:2] + mark + name[3:]).casefold(), states[-1]))
+        return (tuple(states), 1) if states != [model] * 4 else None
+
+    def assign_model(self, number, cells, model, state=0, *, whole=False):
+        """Make independent cell state rows instead of altering shared buildings.
+
+        A model placed as Intact also brings its damage states (state_chain);
+        without a chain it fills all four states. ``whole`` is for a model that
+        covers the full sector: the sector becomes one large cell, so the
+        model is centered instead of shifted into a 3 x 3 cell.
+        """
         if not 0 <= model < len(self.sdf.models):
             raise ValueError("Choose an existing model.")
+        chain = self.state_chain(model) if state == 0 else None
 
         def apply():
             sector = self.sdf.sectors[number]
             values = list(sector.subsects)
-            for cell in cells:
+            targets = {4} if whole else cells
+            for cell in targets:
                 index = 0 if sector.single else cell
                 old = self.sdf.buildings[values[index]]
-                states = [old.state(s) for s in range(4)]
-                if all_states:
-                    states = [model] * 4
+                if state == 0:
+                    states, destructible = chain or ((model,) * 4, old.destructible)
                 else:
+                    states = [old.state(s) for s in range(4)]
                     states[state] = model
+                    destructible = old.destructible
+                values[index] = self._building_slot(states, destructible, values)
+            if whole:
+                values = (values[0 if sector.single else 4],)
+            self.sdf.sectors[number] = replace(sector, kind=int(whole or sector.single),
+                                               subsects=tuple(values))
+        self.change("Replace cell models", apply)
+
+    def shift_state(self, number, cells, state):
+        """Make cells start natively from a damage state (0 intact ... 3 destroyed).
+
+        The new row keeps the later states, so a damaged cell can still be
+        destroyed in game: Damaged gives damaged, heavy, destroyed, destroyed.
+        """
+        if type(state) is not int or not 0 <= state <= 3:
+            raise ValueError("Choose a damage state from 0 to 3.")
+
+        def apply():
+            sector = self.sdf.sectors[number]
+            values = list(sector.subsects)
+            for cell in ({4} if sector.single else cells):
+                index = 0 if sector.single else cell
+                old = self.sdf.buildings[values[index]]
+                states = [old.state(min(3, state + s)) for s in range(4)]
                 values[index] = self._building_slot(states, old.destructible, values)
             self.sdf.sectors[number] = replace(sector, subsects=tuple(values))
-        self.change("Replace cell models", apply)
+        self.change("Change cell state", apply)
+
+    @staticmethod
+    def rotated_cells(cells, quarters):
+        """Map each selected cell to its place after clockwise quarter turns.
+
+        The selection turns around the center of its bounding box. Returns
+        None when a turn would leave the 3 x 3 grid or fall between cells.
+        """
+        cells = sorted(set(cells))
+        if not cells or any(type(c) is not int or not 0 <= c < 9 for c in cells):
+            return None
+        rows, cols = [c // 3 for c in cells], [c % 3 for c in cells]
+        center_row, center_col = (min(rows) + max(rows)) / 2, (min(cols) + max(cols)) / 2
+        mapping = {}
+        for cell in cells:
+            dr, dc = cell // 3 - center_row, cell % 3 - center_col
+            for _ in range(quarters % 4):
+                dr, dc = dc, -dr
+            row, col = center_row + dr, center_col + dc
+            if row != int(row) or col != int(col) or not (0 <= row < 3 and 0 <= col < 3):
+                return None
+            mapping[cell] = int(row) * 3 + int(col)
+        return mapping
+
+    def rotate_cells(self, number, cells, quarters):
+        """Turn only the selected cells; cells left behind become building 0."""
+        sector = self.sdf.sectors[number]
+        mapping = self.rotated_cells(cells, quarters)
+        if sector.single or mapping is None:
+            raise ValueError("This selection cannot turn that way inside the 3 × 3 sector.")
+        original = sector.subsects
+
+        def apply():
+            values = list(original)
+            for source in mapping:
+                values[source] = 0
+            for source, destination in mapping.items():
+                values[destination] = original[source]
+            self.sdf.sectors[number] = replace(sector, subsects=tuple(values))
+        self.change("Rotate cells", apply)
+        return set(mapping.values())
 
     def _store_model(self, model, reserved=()):
         """Allocate a positional row without changing existing referenced models."""
@@ -333,14 +521,6 @@ class SetDocument:
         model = (self.sdf.models[source] if source is not None else
                  SdfBuildingModel(0, base, sklt, (0, 1, 0, 0), (), "Custom model"))
         return self.change("Add model", lambda: self._store_model(model))
-
-    def restore_sector(self, number):
-        def apply():
-            if number in self.saved.sectors:
-                self.sdf.sectors[number] = deepcopy(self.saved.sectors[number])
-            else:
-                self.sdf.sectors.pop(number, None)
-        self.change("Restore saved sector layout", apply)
 
     def _subset_tables(self, building_ids):
         bids = sorted(set(building_ids))
@@ -417,15 +597,22 @@ class SetDocument:
             stage.write_bytes(data)
             commit_verified_files([(stage, target)], verify=lambda: self._verify_file(target, data))
 
-    def import_definitions(self, path):
-        """Merge native definitions into free slots, using the current set's assets."""
+    def import_definitions(self, path, targets=()):
+        """Merge native definitions using the current set's assets.
+
+        Definitions go into ``targets`` first (overwriting them), then into
+        free slots.
+        """
         source = parse_set_sdf_text(decode_sdf(Path(path).read_bytes()))
         issues = table_issues(source)
         if issues:
             raise ValueError("\n".join(issues[:20]))
         if not source.sectors:
             raise ValueError("This SDF file contains no sector definitions.")
-        free = [n for n in range(1, 248) if n not in self.sdf.sectors]
+        targets = list(dict.fromkeys(targets))[:len(source.sectors)]
+        if any(type(n) is not int or not 0 <= n < SECTOR_LIMIT for n in targets):
+            raise ValueError("Choose sector slots from 0 to 255.")
+        free = targets + [n for n in range(1, 248) if n not in self.sdf.sectors and n not in targets]
         if len(free) < len(source.sectors):
             raise ValueError("There are not enough free sector slots.")
 

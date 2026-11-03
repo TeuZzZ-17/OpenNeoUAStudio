@@ -158,26 +158,27 @@ def test_group_move_copy_cut_and_paste_share_history(real_window):
     assert window.document.sdf == before
 
 
-def test_ground_sample_and_fill_preserve_multi_selection_and_buildings(real_window):
+def test_connection_family_applies_to_selected_sectors_and_automatic_picks_values(real_window):
     window = real_window
     window.sectors.setCurrentRow(142)
-    window.pick_ground()
-    sample = window.document.sdf.sectors[142].ground
-    assert window._sampled_ground == sample
     window.sectors.item(141).setSelected(True)
     before = deepcopy(window.document.sdf)
-    with patch.object(QInputDialog, "getInt", return_value=((sample + 1) % 6, True)) as dialog:
-        window.fill_ground()
-    assert dialog.call_args.args[3] == sample
-    assert window._selected_sector_numbers() == {141, 142}
+    sample = window.document.sdf.sectors[142].ground
+    window.ground.setValue((sample + 1) % 6)
+    assert window._selected_sector_numbers() == [141, 142]
     assert window.document.sdf.buildings == before.buildings
-    assert window.document.sdf.models == before.models
     for number in (141, 142):
         assert window.document.sdf.sectors[number].subsects == before.sectors[number].subsects
         assert window.document.sdf.sectors[number].ground == (sample + 1) % 6
     assert len(window.document._undo) == 1
     window.undo()
     assert window.document.sdf == before
+    window.sectors.clearSelection()
+    window.sectors.setCurrentRow(142)
+    window.symbol.setValue(window.symbol.minimum())
+    assert window.symbol.specialValueText() == "Automatic"
+    expected = window.document.suggest_fields(142)[1]
+    assert window.document.sdf.sectors[142].symbol == expected == window.symbol.value()
 
 
 def test_context_menu_uses_shared_actions_and_right_drag_still_orbits(real_window):
@@ -192,9 +193,8 @@ def test_context_menu_uses_shared_actions_and_right_drag_still_orbits(real_windo
             menu.close()
     QTimer.singleShot(50, read_and_close_menu)
     QTest.mouseClick(view, Qt.MouseButton.RightButton, pos=cell_point(view, 4).toPoint())
-    assert "Move selected cells" + chr(0x2026) in seen
-    assert "Cut selected cells" in seen and "Ground / filler" in seen
-    assert "Rotate layout clockwise" in seen
+    assert seen == ["Copy cell", "Cut cell", "Paste cell", "Clear cell", "Rotate cell" + chr(0x2026),
+                    "Select all cells", "Change cell state"]
     previous = view.camera.copy()
     point = cell_point(view, 4).toPoint()
     from PySide6.QtGui import QMouseEvent
@@ -212,8 +212,7 @@ def test_context_menu_uses_shared_actions_and_right_drag_still_orbits(real_windo
     assert view.camera.yaw != previous.yaw or view.camera.pitch != previous.pitch
 
 
-def test_cut_shortcut_respects_text_fields_and_multi_drop_can_be_cancelled(real_window):
-    from PySide6.QtWidgets import QMessageBox
+def test_cut_shortcut_respects_text_fields_and_drop_fills_states(real_window):
     window = real_window
     window.sectors.setCurrentRow(142)
     window.activateWindow()
@@ -226,16 +225,29 @@ def test_cut_shortcut_respects_text_fields_and_multi_drop_can_be_cancelled(real_
     assert window.document.sdf.sectors[142].subsects == before
     window.select_cell(0)
     window.select_cell(8, True)
-    window.all_states.setChecked(True)
     window.drop_model(3, 8)
+    chain = window.document.state_chain(3)
     for cell in (0, 8):
         sector = window.document.sdf.sectors[142]
-        assert tuple(window.document.sdf.buildings[sector.subsects[cell]].state(s) for s in range(4)) == (3,) * 4
-    window.state_models[1].setCurrentIndex(window.state_models[1].findData(4))
-    snapshot = deepcopy(window.document.sdf)
-    with patch.object(QMessageBox, "question", return_value=QMessageBox.StandardButton.Cancel):
-        window.drop_model(5, 4)
-    assert window.document.sdf == snapshot and window.selected_cells == {0, 8}
+        states = tuple(window.document.sdf.buildings[sector.subsects[cell]].state(s) for s in range(4))
+        assert states == (chain[0] if chain else (3,) * 4)
+
+
+def test_whole_sector_model_is_centered_and_converts_the_sector(real_window):
+    from sector_editor.viewport import covers_sector
+    window = real_window
+    window.sectors.setCurrentRow(142)
+    big = next(m.id for m in window.document.sdf.models if covers_sector(window.library, m.id))
+    assert not covers_sector(window.library, 3)
+    window.select_cell(0)
+    window.tabs.setCurrentWidget(window.models_page)
+    window.models.setCurrentRow(big)
+    assert window.view.target_cells == set(range(9))
+    assert {(ox, oz) for _face, ox, oz in window.view._ghost_mesh.faces} == {(0, 0)}
+    window.apply_model()
+    sector = window.document.sdf.sectors[142]
+    assert sector.single and window.document.sdf.buildings[sector.subsects[0]].intact == big
+    assert window.selected_cells == {4}
 
 
 def test_ghost_missing_model_is_reported_and_export_excludes_preview(real_window):
@@ -262,14 +274,41 @@ def test_sector_context_menu_preserves_group_when_clicked_member_is_not_current(
     QApplication.processEvents()
     item = window.sectors.item(141)
     window.sectors.scrollToItem(item)
+    seen = []
     def close_menu():
         menu = QApplication.activePopupWidget()
         if isinstance(menu, QMenu):
+            seen.extend(a.text() for a in menu.actions() if a.text())
             menu.close()
     QTimer.singleShot(50, close_menu)
     window._sector_menu(window.sectors.visualItemRect(item).center())
     assert window.current_sector == 141
-    assert window._selected_sector_numbers() == {141, 142}
+    assert window._selected_sector_numbers() == [141, 142]
+    assert seen == ["Import sector definition" + chr(0x2026), "Export sector definition" + chr(0x2026),
+                    "Wipe sector" + chr(0x2026), "Clear sector", "Copy sector", "Cut sector"]
+
+
+def test_copied_sectors_follow_the_mouse_and_land_on_the_released_slot(real_window):
+    window = real_window
+    window.sectors.setCurrentRow(141)
+    window.sectors.item(142).setSelected(True)
+    before = deepcopy(window.document.sdf)
+    window.copy_sectors()
+    assert window.sectors.carrying
+    target = window.document.free_sector()
+    window.sectors.scrollToItem(window.sectors.item(target))
+    QApplication.processEvents()
+    QTest.mouseClick(window.sectors.viewport(), Qt.MouseButton.LeftButton,
+                     pos=window.sectors.visualItemRect(window.sectors.item(target)).center())
+    assert not window.sectors.carrying
+    assert window.document.sdf.sectors[target].subsects == before.sectors[141].subsects
+    assert window.document.sdf.sectors[target + 1].subsects == before.sectors[142].subsects
+    assert window.current_sector == target and 141 in window.document.sdf.sectors
+    window.undo()
+    window.sectors.setCurrentRow(141)
+    window.copy_sectors(cut=True)
+    window.cancel_interaction()
+    assert not window.sectors.carrying and window.document.sdf == before
 
 
 def test_model_inspection_releases_mouse_without_changing_sector(real_window):
@@ -281,3 +320,15 @@ def test_model_inspection_releases_mouse_without_changing_sector(real_window):
     QTest.mouseClick(window.view, Qt.MouseButton.LeftButton, pos=window.view.rect().center())
     assert window.view._drag_button is None
     assert window.document.sdf == before
+
+
+def test_double_click_places_the_previewed_model(real_window):
+    window = real_window
+    window.sectors.setCurrentRow(142)
+    window.tabs.setCurrentWidget(window.models_page)
+    window.models.setCurrentRow(3)
+    view = window.cell_grid
+    QTest.mouseDClick(view, Qt.MouseButton.LeftButton, pos=cell_point(view, 0).toPoint())
+    sector = window.document.sdf.sectors[142]
+    assert window.document.sdf.buildings[sector.subsects[0]].intact == 3
+    assert len(window.document._undo) == 1

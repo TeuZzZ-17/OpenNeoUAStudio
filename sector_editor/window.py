@@ -2,16 +2,20 @@
 
 from __future__ import annotations
 
+from copy import deepcopy
 from dataclasses import replace
+import math
 from pathlib import Path
+import tempfile
+from zipfile import ZipFile, ZIP_DEFLATED
 
-from PySide6.QtCore import QTimer, Qt, QItemSelectionModel, QEvent
+from PySide6.QtCore import QBuffer, QByteArray, QIODevice, QTimer, Qt, QItemSelectionModel, QEvent, Signal
 from PySide6.QtGui import QAction, QIcon, QKeySequence, QKeyEvent
 from PySide6.QtWidgets import (
-    QApplication, QCheckBox, QComboBox, QDialog, QDialogButtonBox, QFileDialog, QFormLayout,
-    QAbstractItemView, QHBoxLayout, QInputDialog, QLabel, QLineEdit,
-    QListWidgetItem, QMainWindow, QMenu, QMessageBox, QPlainTextEdit, QPushButton,
-    QSizePolicy, QSpinBox, QSplitter, QTabWidget, QVBoxLayout, QWidget,
+    QApplication, QButtonGroup, QCheckBox, QComboBox, QDialog, QDialogButtonBox, QFileDialog,
+    QFormLayout, QAbstractItemView, QGridLayout, QHBoxLayout, QInputDialog, QLabel, QLineEdit,
+    QListWidgetItem, QMainWindow, QMenu, QMessageBox, QPlainTextEdit, QPushButton, QRadioButton,
+    QSizePolicy, QSpinBox, QSplitter, QTabWidget, QToolButton, QVBoxLayout, QWidget,
 )
 
 from map_editor import bootstrap
@@ -19,21 +23,29 @@ from map_editor.core.asset_bridge import SetAssets
 from map_editor.core.sector_resolver import SectorResolver
 from map_editor.render.sector_mesh import SectorMeshLibrary
 from map_editor.ui.preview_cards import DETAIL_ROLE, set_card
+from studio.exchange.portable import DirectoryIndex, commit_verified_files
 from studio.rendering.asset_viewport import VIEW_PRESETS, VIEW_PRESET_ANGLES
+from studio.rendering.snapshot_export import (
+    CONTACT_SHEET_BACKGROUND, compose_contact_sheet, write_static_image_atomic,
+)
 from studio.ui.tabs import PaletteTabStrip
 from studio.ui.widgets import (
     configure_operation_status_bar, install_standard_file_menu_tail,
     loading_resources, use_standard_list_style, ViewportWidthScrollArea,
 )
-from .document import SetDocument, SET_FOLDERS, table_issues, MODEL_LIMIT, BUILDING_LIMIT
-from .viewport import SectorViewport
-from .interactions import KeyboardList, ModelList
+from .document import AUTO, SetDocument, SET_FOLDERS, table_issues, MODEL_LIMIT, BUILDING_LIMIT
+from .viewport import SectorViewport, covers_sector
+from .interactions import ModelList, SectorList
 from .visual_aids import GroundPreview, SymbolPreview
 from .previews import CardPreviews, visible_items
+from .textures import LOOSE_SETS, import_textures
 from studio.ui.cursor_themes import studio_cursor
 
 STATES = ("Intact", "Damaged", "Heavily damaged", "Destroyed")
+COLLISION_MODES = ("Own collision skeleton", "Standard small cell", "Standard large cell")
 PREVIEW_ROLE = int(Qt.ItemDataRole.UserRole) + 10
+# The Bottom view looks at the underside of the ground: never useful for sectors.
+SECTOR_VIEWS = tuple(name for name in VIEW_PRESETS if name != "Bottom")
 
 
 def button(text, callback, layout):
@@ -49,6 +61,55 @@ def scroll_page(content):
     scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
     scroll.setWidget(content)
     return scroll
+
+
+def png_bytes(image):
+    data = QByteArray()
+    buffer = QBuffer(data)
+    buffer.open(QIODevice.OpenModeFlag.WriteOnly)
+    if image.isNull() or not image.save(buffer, "PNG"):
+        raise OSError("The sector image could not be encoded.")
+    return bytes(data)
+
+
+class StateSelector(QWidget):
+    """The damage state shown everywhere: previews, sector cards and the cell editor."""
+    currentIndexChanged = Signal(int)
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        title = QLabel("Damage state")
+        font = title.font()
+        font.setBold(True)
+        title.setFont(font)
+        layout.addWidget(title)
+        grid = QGridLayout()
+        grid.setSpacing(3)
+        layout.addLayout(grid)
+        self.group = QButtonGroup(self)
+        self.group.setExclusive(True)
+        for index, name in enumerate(STATES):
+            choice = QPushButton(name)
+            choice.setCheckable(True)
+            choice.setMinimumHeight(30)
+            choice.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+            self.group.addButton(choice, index)
+            grid.addWidget(choice, index // 2, index % 2)
+        self.group.button(0).setChecked(True)
+        self.setStyleSheet("QPushButton:checked { background: palette(highlight); "
+                           "color: palette(highlighted-text); font-weight: bold; }")
+        self.group.idToggled.connect(lambda index, checked: checked and self.currentIndexChanged.emit(index))
+
+    def currentIndex(self):
+        return self.group.checkedId()
+
+    def setCurrentIndex(self, index):
+        self.group.button(index).setChecked(True)
+
+    def count(self):
+        return len(STATES)
 
 
 class NewSetDialog(QDialog):
@@ -97,6 +158,63 @@ class NewSetDialog(QDialog):
                 field.setText(path)
 
 
+class ExportSetDialog(QDialog):
+    """Export the complete set as a plain folder or as one ZIP archive."""
+
+    def __init__(self, document, parent=None):
+        super().__init__(parent)
+        self.document = document
+        self.setWindowTitle("Export Set")
+        self.resize(560, 210)
+        layout = QVBoxLayout(self)
+        self.folder = QRadioButton("Folder (unpacked set, ready to copy into Data/Sets)")
+        self.archive = QRadioButton("ZIP archive")
+        self.folder.setChecked(True)
+        layout.addWidget(self.folder)
+        layout.addWidget(self.archive)
+        form = QFormLayout()
+        row = QHBoxLayout()
+        self.path = QLineEdit()
+        row.addWidget(self.path, 1)
+        browse = QPushButton("Browse…")
+        browse.clicked.connect(self._browse)
+        row.addWidget(browse)
+        form.addRow("Destination", row)
+        self.number = QSpinBox()
+        self.number.setRange(1, 255)
+        self.number.setValue(document.number)
+        form.addRow("Set number", self.number)
+        layout.addLayout(form)
+        buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+        layout.addWidget(buttons)
+        for choice in (self.folder, self.archive):
+            choice.toggled.connect(self._format_changed)
+        self._format_changed()
+
+    def _format_changed(self):
+        self.number.setEnabled(self.folder.isChecked())
+        self.path.setPlaceholderText("Parent folder: a new Set<number> folder is created inside"
+                                     if self.folder.isChecked() else "ZIP file")
+        self.path.clear()
+
+    def _browse(self):
+        if self.folder.isChecked():
+            path = QFileDialog.getExistingDirectory(self, "Choose parent folder for the exported set")
+        else:
+            path, _ = QFileDialog.getSaveFileName(self, "Export complete set",
+                                                  f"Set{self.document.number}.zip", "ZIP archive (*.zip)")
+        if path:
+            self.path.setText(path)
+
+    def target(self):
+        text = self.path.text().strip()
+        if not text:
+            return None
+        return Path(text) / f"Set{self.number.value()}" if self.folder.isChecked() else Path(text)
+
+
 class SectorEditorWindow(QMainWindow):
     def __init__(self, startup_path=None, parent=None):
         super().__init__(parent)
@@ -107,17 +225,15 @@ class SectorEditorWindow(QMainWindow):
         self._syncing = False
         self._copied_positions = ()
         self._copied_cells = None
+        self._copied_sectors = None
         self._placement = None
         self._browse_preview = False
         self._selection_anchor = 4
-        self._sampled_ground = None
         self._placement_hover = None
         self._model_titles = None
-        self._building_titles = None
         self._editing_model_id = None
         self._model_snapshot = None
-        self._state_snapshot = None
-        self._state_target = None
+        self._model_hidden_numbers = (0, 1)
         self._sector_fields_number = None
         self._description_snapshot = None
         self.setWindowTitle("OpenNeoUA Studio - Sector Editor")
@@ -145,86 +261,72 @@ class SectorEditorWindow(QMainWindow):
             self.sets.blockSignals(False)
             self.open_set(bootstrap.set_dir(self.sets.currentData()))
 
+    def _add_actions(self, menu, entries):
+        for key, text, shortcut, callback in entries:
+            action = QAction(text, self)
+            if shortcut is not None:
+                action.setShortcut(shortcut)
+            action.triggered.connect(callback)
+            menu.addAction(action)
+            self.actions[key] = action
+
     def _build_actions(self):
-        file = self.menuBar().addMenu("File")
         self.actions = {}
-        toolbar = self.addToolBar("Set")
-        toolbar.setMovable(False)
-        for key, text, shortcut, callback in (
+        file = self.menuBar().addMenu("File")
+        self._add_actions(file, (
             ("new", "New Set…", QKeySequence.StandardKey.New, self.new_set),
             ("open", "Open Set…", QKeySequence.StandardKey.Open, self.choose_set),
-            ("save", "Save", QKeySequence.StandardKey.Save, self.save),
-            ("save_as", "Save Set As…", QKeySequence.StandardKey.SaveAs, self.save_as),
-            ("zip", "Export Complete Set as ZIP…", None, self.export_zip),
-        ):
-            action = QAction(text, self)
-            if shortcut is not None:
-                action.setShortcut(shortcut)
-            action.triggered.connect(callback)
-            file.addAction(action)
-            toolbar.addAction(action)
-            self.actions[key] = action
+            ("save", "Overwrite Set", QKeySequence.StandardKey.Save, self.save),
+            ("export", "Export Set…", QKeySequence.StandardKey.SaveAs, self.export_set),
+        ))
         file.addSeparator()
-        file.addAction("Import sector definitions…", self.import_definitions)
-        file.addAction("Export selected sector definition…", self.export_definition)
-        file.addAction("Export all sector definitions…", lambda: self.export_definition(all_sectors=True))
-        file.addAction("Export current view as PNG…", self.export_preview)
+        self._add_actions(file, (("textures", "Import custom textures…", None, self.import_custom_textures),))
+        file.addSeparator()
+        self._add_actions(file, (
+            ("image", "Export current sector image…", None, self.export_preview),
+            ("images", "Export all sector images (ZIP)…", None, self.export_all_images),
+            ("sheet", "Export sector sheet…", None, self.export_sheet),
+        ))
         install_standard_file_menu_tail(file, self)
+
         edit = self.menuBar().addMenu("Edit")
-        for key, text, shortcut, callback in (
-            ("undo", "Undo", QKeySequence.StandardKey.Undo, self.undo),
-            ("redo", "Redo", QKeySequence.StandardKey.Redo, self.redo),
-            ("copy", "Copy selected cells", QKeySequence.StandardKey.Copy, self.copy_cells),
-            ("paste", "Paste cells", QKeySequence.StandardKey.Paste, self.paste_cells),
-            ("cut", "Cut selected cells", QKeySequence.StandardKey.Cut, self.cut_cells),
-            ("move", "Move selected cells…", None, self.start_cell_placement),
-        ):
-            action = QAction(text, self)
-            if shortcut is not None:
-                action.setShortcut(shortcut)
-            action.triggered.connect(callback)
-            edit.addAction(action)
-            self.actions[key] = action
+        self._add_actions(edit, (
+            ("undo", "< Undo", QKeySequence.StandardKey.Undo, self.undo),
+            ("redo", "Redo >", QKeySequence.StandardKey.Redo, self.redo),
+            ("reset", "Reset Set…", None, self.reset_set),
+        ))
         edit.addSeparator()
-        for key, text, shortcut, callback in (
+        self._add_actions(edit, (
+            ("copy", "Copy cell", QKeySequence.StandardKey.Copy, self.copy_cells),
+            ("cut", "Cut cell", QKeySequence.StandardKey.Cut, self.cut_cells),
+            ("paste", "Paste cell", QKeySequence.StandardKey.Paste, self.paste_cells),
+            ("clear", "Clear cell", "Delete", self.clear_cells),
+            ("rotate", "Rotate cell…", "R", self.start_rotation),
             ("select_all", "Select all cells", QKeySequence.StandardKey.SelectAll, self._select_all),
-            ("select_matching", "Select matching buildings", None, self.select_matching_cells),
-            ("inspect", "Inspect assigned model", None, self.inspect_cell_model),
-            ("choose_model", "Choose replacement model", None, self.choose_cell_model),
-            ("clear", "Clear selected cells", "Delete", lambda: self._assign_building(0)),
-        ):
-            action = QAction(text, self)
-            if shortcut is not None:
-                action.setShortcut(shortcut)
-            action.triggered.connect(callback)
-            edit.addAction(action)
-            self.actions[key] = action
+        ))
+        self.state_menu = edit.addMenu("Change cell state")
+        for state, name in enumerate(STATES):
+            self.state_menu.addAction(name, lambda state=state: self.change_cell_state(state))
         cancel = QAction("Cancel preview / placement", self)
         cancel.setShortcut("Escape")
         cancel.triggered.connect(self.cancel_interaction)
         self.addAction(cancel)
         self.actions["cancel_preview"] = cancel
-        toolbar.addSeparator()
-        toolbar.addAction(self.actions["undo"])
-        toolbar.addAction(self.actions["redo"])
-        toolbar.addSeparator()
-        toolbar.addWidget(QLabel("View "))
-        self.view_preset = QComboBox()
-        self.view_preset.addItems(VIEW_PRESETS)
-        self.view_preset.activated.connect(self._change_view)
-        toolbar.addWidget(self.view_preset)
-        toolbar.addAction("Reset View", self.view.reset_camera)
+
         sector = self.menuBar().addMenu("Sector")
-        for text, callback in (("New in first free slot", self.add_sector),
-                               ("Duplicate to free slot", self.duplicate_sector),
-                               ("Remove definition / free slot", self.remove_sector),
-                               ("Copy to another slot…", self.copy_sector_to),
-                               ("Rotate cells clockwise", lambda: self.transform_cells("rotate")),
-                               ("Mirror cells horizontally", lambda: self.transform_cells("horizontal")),
-                               ("Mirror cells vertically", lambda: self.transform_cells("vertical")),
-                               ("Restore saved sector layout", self.restore_sector),
-                               ("Replace building in all sectors…", self.replace_building)):
-            sector.addAction(text, callback)
+        self._add_actions(sector, (
+            ("new_sector", "New sector", None, self.add_sector),
+            ("copy_sector", "Copy sector", None, lambda: self.copy_sectors()),
+            ("cut_sector", "Cut sector", None, lambda: self.copy_sectors(cut=True)),
+            ("clear_sector", "Clear sector", None, self.clear_sectors),
+            ("wipe_sector", "Wipe sector…", None, self.wipe_sectors),
+        ))
+        sector.addSeparator()
+        self._add_actions(sector, (
+            ("import_sector", "Import sector definition…", None, self.import_definitions),
+            ("export_sector", "Export sector definition…", None, self.export_definition),
+        ))
+
         view = self.menuBar().addMenu("View")
         view.addAction("Reset View", self.view.reset_camera)
         view.addAction("Top View", lambda: self.view.set_camera_angles(0, 90))
@@ -241,6 +343,22 @@ class SectorEditorWindow(QMainWindow):
         self.validation_status.linkActivated.connect(self.show_validation)
         self.statusBar().addPermanentWidget(self.validation_status)
         self.validation_status.hide()
+
+        toolbar = self.addToolBar("Set")
+        toolbar.setMovable(False)
+        for key in ("undo", "reset", "redo"):
+            control = QToolButton()
+            control.setDefaultAction(self.actions[key])
+            control.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextOnly)
+            toolbar.addWidget(control)
+        self.actions["reset"].setToolTip("Reset the whole set (asks first)")
+        toolbar.addSeparator()
+        toolbar.addWidget(QLabel("View "))
+        self.view_preset = QComboBox()
+        self.view_preset.addItems(SECTOR_VIEWS)
+        self.view_preset.activated.connect(self._change_view)
+        toolbar.addWidget(self.view_preset)
+        toolbar.addAction("Reset View", self.view.reset_camera)
         for menu in self.findChildren(QMenu):
             menu.installEventFilter(self)
 
@@ -258,6 +376,9 @@ class SectorEditorWindow(QMainWindow):
         self.path_label.setWordWrap(True)
         self.path_label.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
         layout.addWidget(self.path_label)
+        self.state = StateSelector()
+        self.state.currentIndexChanged.connect(self._state_view_changed)
+        layout.addWidget(self.state)
         self.filter = QLineEdit()
         self.filter.setPlaceholderText("Search ID, hex or description…")
         self.filter.textChanged.connect(self._filter_sectors)
@@ -266,18 +387,21 @@ class SectorEditorWindow(QMainWindow):
         self.slot_filter.addItems(("All slots", "Defined sectors", "Free slots", "Using selected model"))
         self.slot_filter.currentIndexChanged.connect(self._filter_sectors)
         layout.addWidget(self.slot_filter)
-        self.sectors = KeyboardList(large_text=False)
+        self.sectors = SectorList(large_text=False)
         use_standard_list_style(self.sectors)
         self.sectors.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
         self.sectors.currentItemChanged.connect(self._sector_selected)
         self.sectors.applyRequested.connect(self.confirm_placement)
-        self.sectors.itemSelectionChanged.connect(self._sector_selection_changed)
+        self.sectors.itemSelectionChanged.connect(self._update_sector_actions)
+        self.sectors.itemDoubleClicked.connect(self._sector_activated)
+        self.sectors.carryDropped.connect(self.paste_sectors)
+        self.sectors.carryCancelled.connect(self.cancel_sector_copy)
         self.sectors.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self.sectors.customContextMenuRequested.connect(self._sector_menu)
         layout.addWidget(self.sectors, 1)
+        layout.addWidget(self.sectors.zoom_controls())
         row = QHBoxLayout()
         button("New", self.add_sector, row)
-        button("Duplicate", self.duplicate_sector, row)
         layout.addLayout(row)
         self.counts = QLabel()
         self.counts.setWordWrap(True)
@@ -291,16 +415,20 @@ class SectorEditorWindow(QMainWindow):
         self.preview_mode.addItems(("Sector preview", "Selected model preview"))
         self.preview_mode.currentIndexChanged.connect(lambda: self._preview(reset=True))
         row.addWidget(self.preview_mode, 1)
-        self.state = QComboBox()
-        self.state.addItems(STATES)
-        self.state.currentIndexChanged.connect(self._preview)
-        row.addWidget(self.state)
         button("Frame selection", lambda: self.view.frame_selection(), row)
         layout.addLayout(row)
         self.view = SectorViewport()
         self._connect_cell_view(self.view)
         self.view.backendChanged.connect(lambda name: self.statusBar().showMessage(name, 5000))
         layout.addWidget(self.view, 1)
+        self.free_hint = QLabel("Free sector slot\n\nDouble-click it in the list, or press New, to create a sector here.")
+        self.free_hint.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.free_hint.setWordWrap(True)
+        font = self.free_hint.font()
+        font.setPointSizeF(font.pointSizeF() + 2)
+        self.free_hint.setFont(font)
+        self.free_hint.hide()
+        layout.addWidget(self.free_hint, 1)
         self.preview_status = QLabel("Right drag: orbit · Middle drag: pan · Wheel: zoom · Ctrl+click: select several cells")
         self.preview_status.setWordWrap(True)
         layout.addWidget(self.preview_status)
@@ -320,14 +448,17 @@ class SectorEditorWindow(QMainWindow):
         self.layout_mode.activated.connect(self._layout_changed)
         form.addRow("Layout", self.layout_mode)
         self.ground = QSpinBox()
-        self.ground.setRange(0, 5)
-        self.ground.setToolTip("Selects the filler family between neighboring sectors. The ground surface itself belongs to the BASE models.")
+        self.ground.setRange(AUTO, 5)
+        self.ground.setSpecialValueText("Automatic")
+        self.ground.setToolTip("Filler family between neighboring sectors (0–5). Automatic copies it from the most similar sector.")
         self.ground.valueChanged.connect(self._sector_fields_changed)
-        form.addRow("Connection family (0–5)", self.ground)
+        form.addRow("Connection family", self.ground)
         self.ground_preview = GroundPreview()
         form.addRow(self.ground_preview)
         self.symbol = QSpinBox()
-        self.symbol.setRange(0, 255)
+        self.symbol.setRange(AUTO, 255)
+        self.symbol.setSpecialValueText("Automatic")
+        self.symbol.setToolTip("Glyph of this sector on the strategic map. Automatic copies it from the most similar sector.")
         self.symbol.valueChanged.connect(self._sector_fields_changed)
         form.addRow("Minimap symbol", self.symbol)
         self.symbol_preview = SymbolPreview()
@@ -340,39 +471,29 @@ class SectorEditorWindow(QMainWindow):
         self.cell_grid = SectorViewport(top_down=True)
         self.cell_grid.setMinimumSize(0, 230)
         self.cell_grid.setMaximumHeight(280)
-        self.cell_grid.setToolTip("Top view · Click: select · Ctrl+click: add/remove · Shift+click: rectangle · Drop a BASE to apply · Right click: tools")
+        self.cell_grid.setToolTip("Click: select · Ctrl+click: add/remove · Drag: move · Double-click: place the previewed model · Right click: tools")
         self._connect_cell_view(self.cell_grid)
         layout.addWidget(self.cell_grid)
         self.selection_info = QLabel()
         self.selection_info.setWordWrap(True)
         layout.addWidget(self.selection_info)
-        row = QHBoxLayout()
-        self.select_all_button = button("Select all", lambda: self._select_all(), row)
-        self.select_matching_button = button("Select matching", self.select_matching_cells, row)
-        self.clear_cells_button = button("Clear cells", lambda: self._assign_building(0), row)
-        layout.addLayout(row)
-        self.building = QComboBox()
-        layout.addWidget(QLabel("Existing building (includes all four states)"))
-        layout.addWidget(self.building)
-        self.apply_building_button = button("Apply building to cells", lambda: self._assign_building(self.building.currentData()), layout)
-        row = QHBoxLayout()
-        self.choose_model_button = button("Choose model…", self.choose_cell_model, row)
-        self.inspect_button = button("Inspect model", self.inspect_cell_model, row)
-        layout.addLayout(row)
-        state_hint = QLabel("Damage states for selected cells")
-        layout.addWidget(state_hint)
+        content = QLabel("Cell content")
+        font = content.font()
+        font.setBold(True)
+        content.setFont(font)
+        content.setToolTip("The model shown in each damage state. Choosing the Intact model fills the other states automatically.")
+        layout.addWidget(content)
         form = QFormLayout()
         self.state_models = []
-        for title in STATES:
+        for state, title in enumerate(STATES):
             combo = QComboBox()
-            combo.currentIndexChanged.connect(self._model_form_changed)
+            combo.currentIndexChanged.connect(lambda _index, state=state: self._state_model_changed(state))
             self.state_models.append(combo)
             form.addRow(title, combo)
         self.destructible = QCheckBox("Destructible")
-        self.destructible.toggled.connect(self._model_form_changed)
+        self.destructible.toggled.connect(lambda: self._state_model_changed(None))
         form.addRow(self.destructible)
         layout.addLayout(form)
-        self.apply_states_button = button("Apply independent state row to cells", self.apply_states, layout)
         layout.addStretch()
         self.cells_page = scroll_page(cells)
         self.tabs.addTab(self.cells_page, "Cells")
@@ -388,6 +509,8 @@ class SectorEditorWindow(QMainWindow):
         self.model_search.returnPressed.connect(self.confirm_placement)
         layout.addWidget(self.model_search)
         self.models = ModelList(large_text=False)
+        # The narrower right panel shows two model tiles per row by default.
+        self.models.tile_level = 1
         self.models.setMinimumHeight(120)
         use_standard_list_style(self.models)
         self.models.currentItemChanged.connect(self._model_selected)
@@ -399,14 +522,17 @@ class SectorEditorWindow(QMainWindow):
         self.models.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self.models.customContextMenuRequested.connect(self._model_menu)
         layout.addWidget(self.models, 1)
-        self.all_states = QCheckBox("Use this model in all four damage states")
-        layout.addWidget(self.all_states)
+        layout.addWidget(self.models.zoom_controls())
         self.apply_model_button = button("Apply model to selected cells", self.apply_model, layout)
         self.tabs.addTab(self.models_page, "Models")
         self.tabs.currentChanged.connect(self._browse_tab_changed)
 
         definitions = QWidget()
         layout = QVBoxLayout(definitions)
+        intro = QLabel("A model is one 3D BASE object with its collision. Cells use models for their "
+                       "four damage states, so a change here updates every cell that uses this model.")
+        intro.setWordWrap(True)
+        layout.addWidget(intro)
         self.model_combo = QComboBox()
         self.model_combo.currentIndexChanged.connect(self._load_model_fields)
         layout.addWidget(self.model_combo)
@@ -420,32 +546,31 @@ class SectorEditorWindow(QMainWindow):
         self.sklt = QComboBox()
         self.sklt.setEditable(True)
         form.addRow("Collision skeleton", self.sklt)
-        self.model_numbers = []
-        for title in ("Unused legacy field", "Building symbol", "Shield / damage reduction (%)", "Collision mode (0/1/2)"):
-            spin = QSpinBox()
-            spin.setRange(-32768, 32767)
-            form.addRow(title, spin)
-            self.model_numbers.append(spin)
-        self.model_numbers[1].setRange(0, 255)
-        self.model_numbers[2].setRange(0, 100)
-        self.model_numbers[3].setRange(0, 2)
-        self.model_numbers[3].setToolTip("0: this model's collision skeleton · 1: standard small-cell collision · 2: standard large-cell collision")
+        self.collision_mode = QComboBox()
+        self.collision_mode.addItems(COLLISION_MODES)
+        self.collision_mode.setToolTip("Own: use the skeleton above · Standard: the engine's ready-made shape for a small or large cell")
+        form.addRow("Collision", self.collision_mode)
+        self.shield = QSpinBox()
+        self.shield.setRange(0, 100)
+        self.shield.setSuffix(" %")
+        self.shield.setToolTip("Damage reduction of the building in this model.")
+        form.addRow("Shield", self.shield)
         self.model_comment = QLineEdit()
         form.addRow("Description", self.model_comment)
         layout.addLayout(form)
-        effect_hint = QLabel("Destruction effects: effect ID, X, Z, Y (one group per line)")
+        effect_hint = QLabel("Destruction effects · one per line: effect ID, X, Z, Y")
         effect_hint.setWordWrap(True)
         layout.addWidget(effect_hint)
         self.effects = QPlainTextEdit()
-        self.effects.setMaximumHeight(120)
+        self.effects.setMaximumHeight(110)
         layout.addWidget(self.effects)
-        self.update_model_button = button("Update shared model definition", self.update_model, layout)
+        self.update_model_button = button("Apply changes", self.update_model, layout)
         for control, signal in ((self.base, "currentTextChanged"), (self.sklt, "currentTextChanged"),
                                 (self.model_comment, "textChanged"), (self.effects, "textChanged"),
-                                *((spin, "valueChanged") for spin in self.model_numbers)):
+                                (self.collision_mode, "currentIndexChanged"), (self.shield, "valueChanged")):
             getattr(control, signal).connect(self._model_form_changed)
         row = QHBoxLayout()
-        button("Add model slot", self.add_model, row)
+        button("New model", self.add_model, row)
         button("Duplicate model", lambda: self.add_model(duplicate=True), row)
         layout.addLayout(row)
         layout.addStretch()
@@ -462,7 +587,7 @@ class SectorEditorWindow(QMainWindow):
             combo.setSizeAdjustPolicy(QComboBox.SizeAdjustPolicy.AdjustToMinimumContentsLengthWithIcon)
             combo.setMinimumContentsLength(8)
             combo.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
-        splitter.setSizes([255, 785, 385])
+        splitter.setSizes([280, 760, 385])
 
     def reload_game_resources(self, initial=False):
         self.sets.blockSignals(True)
@@ -490,6 +615,8 @@ class SectorEditorWindow(QMainWindow):
         self._commit_sector_fields()
         try:
             with loading_resources(self, "Reloading set assets…"):
+                # Files added since the last scan (custom textures, BASE) must be seen.
+                DirectoryIndex.clear_cache()
                 assets = SetAssets(self.document.number, set_dir=self.document.folder).load()
                 assets.sdf = self.document.sdf
                 library = SectorMeshLibrary(assets, set_only=True)
@@ -510,9 +637,13 @@ class SectorEditorWindow(QMainWindow):
         if name in VIEW_PRESET_ANGLES:
             self.view.set_camera_angles(*VIEW_PRESET_ANGLES[name])
 
+    def _state_view_changed(self, index):
+        self._preview()
+        self._load_sector_fields()
+
     def _sector_menu(self, point):
         item = self.sectors.itemAt(point)
-        if item is None or self.document is None:
+        if item is None or self.document is None or self.sectors.carrying:
             return
         number = item.data(Qt.ItemDataRole.UserRole)
         if item.isSelected():
@@ -521,17 +652,17 @@ class SectorEditorWindow(QMainWindow):
             self.sectors.setCurrentItem(item)
         if self.current_sector != number:
             return
+        self._update_sector_actions()
         menu = QMenu(self)
-        if self.current_sector in self.document.sdf.sectors:
-            menu.addAction("Duplicate to free slot", self.duplicate_sector)
-            menu.addAction("Copy to another slot…", self.copy_sector_to)
-            menu.addAction("Export definition…", self.export_definition)
+        if number not in self.document.sdf.sectors:
+            menu.addAction("Create sector here", self.add_sector)
             menu.addSeparator()
-            menu.addAction("Restore saved layout", self.restore_sector)
-            menu.addAction("Remove definition / free slot", self.remove_sector)
-        else:
-            menu.addAction("Create in this slot", self.add_sector)
-            menu.addAction("Import definitions into free slots…", self.import_definitions)
+        for key in ("import_sector", "export_sector", None, "wipe_sector", "clear_sector", None,
+                    "copy_sector", "cut_sector"):
+            if key is None:
+                menu.addSeparator()
+            else:
+                menu.addAction(self.actions[key])
         self._prepare_menu(menu)
         menu.exec(self.sectors.viewport().mapToGlobal(point))
 
@@ -548,7 +679,7 @@ class SectorEditorWindow(QMainWindow):
         menu.addAction("Preview model", lambda: self.preview_mode.setCurrentIndex(1))
         menu.addAction("Edit definition", lambda: self.tabs.setCurrentWidget(self.definitions_page))
         menu.addAction("Find sectors using this model", self.find_model_usage)
-        menu.addAction("Duplicate model slot", lambda: self.add_model(duplicate=True))
+        menu.addAction("Duplicate model", lambda: self.add_model(duplicate=True))
         self._prepare_menu(menu)
         menu.exec(self.models.viewport().mapToGlobal(point))
 
@@ -566,64 +697,43 @@ class SectorEditorWindow(QMainWindow):
         view.cellDragStarted.connect(self.start_cell_drag)
         view.navigationRequested.connect(self.navigate_browser)
         view.applyRequested.connect(self.confirm_placement)
+        view.cellActivated.connect(self._cell_activated)
+        view.rotationChosen.connect(self.finish_rotation)
 
     def _cell_menu(self, index, global_point):
         if self.document is None or self.current_sector not in self.document.sdf.sectors:
             return
         if index not in self.selected_cells:
             self.select_cell(index)
-        if index not in self.selected_cells or self.current_sector not in self.document.sdf.sectors:
+        if index not in self.selected_cells:
             return
         self.cancel_preview()
         menu = QMenu(self)
-        for key in ("move", "copy", "cut", "paste", "clear"):
+        for key in ("copy", "cut", "paste", "clear", "rotate", "select_all"):
             menu.addAction(self.actions[key])
-        menu.addSeparator()
-        menu.addAction("Rotate layout clockwise", lambda: self.transform_cells("rotate"))
-        menu.addAction("Mirror layout horizontally", lambda: self.transform_cells("horizontal"))
-        ground = menu.addMenu("Ground / filler")
-        ground.addAction("Fill selected sectors…", self.fill_ground)
-        ground.addAction("Replace matching in selected sectors…", self.replace_ground)
-        ground.addAction("Pick from this sector", self.pick_ground)
-        ground.setToolTipsVisible(True)
-        ground.setToolTip("Native filler family (0–5). Buildings and BASE surfaces stay intact.")
-        menu.addSeparator()
-        for key in ("choose_model", "inspect", "select_matching", "select_all"):
-            menu.addAction(self.actions[key])
+        menu.addMenu(self.state_menu)
         self._prepare_menu(menu)
         menu.exec(global_point)
 
-    def _sector_selection_changed(self):
-        if not self._syncing and self.document is not None:
-            count = len(self.sectors.selectedItems())
-            if count > 1:
-                self.statusBar().showMessage(f"{count} sector slots selected · Ground / filler tools apply to the defined sectors in this selection.", 5000)
-
     def _selected_sector_numbers(self):
-        return {item.data(Qt.ItemDataRole.UserRole) for item in self.sectors.selectedItems()
-                if item.data(Qt.ItemDataRole.UserRole) in self.document.sdf.sectors}
+        """Defined sectors among the selected slots, always including the current one."""
+        numbers = {item.data(Qt.ItemDataRole.UserRole) for item in self.sectors.selectedItems()}
+        numbers.add(self.current_sector)
+        return sorted(n for n in numbers if n in self.document.sdf.sectors)
 
-    def fill_ground(self, checked=False, *, replace_matching=False):
-        if self.document is None or self.current_sector not in self.document.sdf.sectors:
-            return
-        numbers = self._selected_sector_numbers() or {self.current_sector}
-        source = self.document.sdf.sectors[self.current_sector].ground
-        ground, ok = QInputDialog.getInt(self, "Ground / filler",
-            "Filler family (0–5). Keeps buildings and BASE surfaces intact:",
-            self._sampled_ground if self._sampled_ground is not None else source, 0, 5)
-        if ok:
-            self._run_edit(lambda: self.document.set_ground(numbers, ground,
-                           replace_ground=source if replace_matching else None))
+    def _selected_slots(self):
+        numbers = {item.data(Qt.ItemDataRole.UserRole) for item in self.sectors.selectedItems()}
+        return sorted(numbers | {self.current_sector})
 
-    def replace_ground(self):
-        self.fill_ground(replace_matching=True)
-
-    def pick_ground(self):
-        if self.document and self.current_sector in self.document.sdf.sectors:
-            value = self.document.sdf.sectors[self.current_sector].ground
-            self._sampled_ground = value
-            self.ground.setFocus()
-            self.statusBar().showMessage(f"Picked native ground / filler family {value}. BASE terrain is part of each cell model.", 6000)
+    def _update_sector_actions(self):
+        defined = bool(self.document and self._selected_sector_numbers())
+        for key in ("copy_sector", "cut_sector", "clear_sector", "wipe_sector", "export_sector"):
+            self.actions[key].setEnabled(defined)
+        self.actions["import_sector"].setEnabled(self.document is not None)
+        if self.document is not None:
+            count = len(self.sectors.selectedItems())
+            if count > 1 and not self._syncing:
+                self.statusBar().showMessage(f"{count} sector slots selected · Sector tools and the connection family apply to all of them.", 5000)
 
     def _browse_tab_changed(self, index):
         self.cancel_preview()
@@ -633,6 +743,7 @@ class SectorEditorWindow(QMainWindow):
 
     def cancel_interaction(self):
         self.cancel_preview()
+        self.cancel_sector_copy()
         for view in (self.view, self.cell_grid):
             view.cancel_gesture()
 
@@ -642,8 +753,10 @@ class SectorEditorWindow(QMainWindow):
         self._browse_preview = False
         for view in (self.view, self.cell_grid):
             view.placement_active = False
+            view.rotation_choices = None
             view.set_ghost()
             view.setCursor(studio_cursor("point"))
+            view.update()
 
     def _update_ghost(self):
         if self._placement is not None:
@@ -653,23 +766,44 @@ class SectorEditorWindow(QMainWindow):
         for view in (self.view, self.cell_grid):
             view.set_ghost(model, self.selected_cells if model is not None else ())
 
+    def _place_model(self, model):
+        """Put a model into the selected cells; a whole-sector model takes the full sector."""
+        sector = self.document.sdf.sectors[self.current_sector]
+        whole = not sector.single and covers_sector(self.library, model)
+
+        def apply():
+            self.document.assign_model(self.current_sector, self.selected_cells, model,
+                                       self.state.currentIndex(), whole=whole)
+            if whole:
+                self.selected_cells = {4}
+                self.statusBar().showMessage("This model covers the whole sector: the sector is now one large cell.", 6000)
+        self._run_edit(apply)
+
     def drop_model(self, model, cell):
         self.cancel_preview()
         if self.document is None or self.current_sector not in self.document.sdf.sectors:
             return
         if cell not in self.selected_cells:
             self.select_cell(cell)
-        if cell not in self.selected_cells:
+        if cell in self.selected_cells:
+            self._place_model(model)
+
+    def _cell_activated(self, cell):
+        """Double-click in a cell view places the model previewed from the Models tab."""
+        if not self._browse_preview or self.tabs.currentWidget() is not self.models_page:
             return
-        self._run_edit(lambda: self.document.assign_model(self.current_sector, self.selected_cells,
-                       model, self.state.currentIndex(), self.all_states.isChecked()))
+        if cell not in self.selected_cells:
+            self.select_cell(cell)
+        self.apply_model()
+
+    def _sector_activated(self, item):
+        if self.document is not None and item.data(Qt.ItemDataRole.UserRole) not in self.document.sdf.sectors:
+            self.add_sector()
 
     def select_cell_range(self, index):
         anchor = self._selection_anchor
         rows = sorted((anchor // 3, index // 3))
         cols = sorted((anchor % 3, index % 3))
-        if not self._resolve_state_form():
-            return
         self._commit_sector_fields()
         self.selected_cells = {row * 3 + col for row in range(rows[0], rows[1] + 1)
                                for col in range(cols[0], cols[1] + 1)}
@@ -701,8 +835,6 @@ class SectorEditorWindow(QMainWindow):
             self.apply_model()
 
     def select_cell_box(self, cells, additive=False):
-        if not self._resolve_state_form():
-            return
         self._commit_sector_fields()
         self.cancel_preview()
         self.selected_cells = (self.selected_cells | set(cells)) if additive else set(cells)
@@ -725,8 +857,6 @@ class SectorEditorWindow(QMainWindow):
     def start_cell_placement(self, checked=False):
         if not self.selected_cells or self.document is None or self.current_sector not in self.document.sdf.sectors:
             return
-        if not self._resolve_state_form():
-            return
         self._commit_sector_fields()
         self.cancel_preview()
         self._placement = {"kind": "move", "number": self.current_sector,
@@ -738,8 +868,6 @@ class SectorEditorWindow(QMainWindow):
 
     def _arm_clipboard(self):
         if self._copied_cells is None or self.document is None or self.current_sector not in self.document.sdf.sectors:
-            return
-        if not self._resolve_state_form():
             return
         self.cancel_preview()
         self._placement = {"kind": "paste", "clipboard": self._copied_cells,
@@ -813,51 +941,91 @@ class SectorEditorWindow(QMainWindow):
 
     def cut_cells(self):
         if self.copy_cells(preview=False):
-            self._assign_building(0)
+            self.clear_cells()
             self._arm_clipboard()
 
-    def choose_cell_model(self):
-        if self.document and self.current_sector in self.document.sdf.sectors:
-            self.preview_mode.setCurrentIndex(0)
-            self.tabs.setCurrentWidget(self.models_page)
-            self.model_search.setFocus()
+    def clear_cells(self):
+        if self.selected_cells and self.document and self.current_sector in self.document.sdf.sectors:
+            self._run_edit(lambda: self.document.assign_building(self.current_sector, self.selected_cells, 0))
 
-    def inspect_cell_model(self):
-        if not self.selected_cells:
-            return
-        if self.document is None or self.current_sector not in self.document.sdf.sectors:
-            return
-        sector = self.document.sdf.sectors[self.current_sector]
-        bid = sector.subsects[0 if sector.single else min(self.selected_cells, default=4)]
-        if not 0 <= bid < len(self.document.sdf.buildings):
-            return
-        mid = self.document.sdf.buildings[bid].state(self.state.currentIndex())
-        index = self.model_combo.findData(mid)
-        if index < 0:
-            return
-        self.model_combo.setCurrentIndex(index)
-        if self.model_combo.currentData() != mid:
-            return
-        self.model_search.clear()
-        self.tabs.setCurrentWidget(self.definitions_page)
-        self.preview_mode.setCurrentIndex(1)
+    def change_cell_state(self, state):
+        if self.selected_cells and self.document and self.current_sector in self.document.sdf.sectors:
+            self._run_edit(lambda: self.document.shift_state(self.current_sector, self.selected_cells, state))
 
-    def select_matching_cells(self):
-        if not self.selected_cells:
-            return
+    def start_rotation(self):
+        """Show an arrow for every way the selected cells can turn; Esc or a click elsewhere cancels."""
         if self.document is None or self.current_sector not in self.document.sdf.sectors:
-            return
-        if not self._resolve_state_form():
             return
         self._commit_sector_fields()
-        sector = self.document.sdf.sectors[self.current_sector]
-        bid = sector.subsects[0 if sector.single else min(self.selected_cells, default=4)]
-        self.selected_cells = {4} if sector.single else {i for i, value in enumerate(sector.subsects) if value == bid}
-        self._load_sector_fields()
+        self.cancel_preview()
+        if self.document.sdf.sectors[self.current_sector].single:
+            self.statusBar().showMessage("A one large cell sector has nothing to rotate.", 5000)
+            return
+        choices = {0: True}
+        for quarter in (1, 2, 3):
+            mapping = self.document.rotated_cells(self.selected_cells, quarter)
+            choices[quarter] = mapping is not None and any(a != b for a, b in mapping.items())
+        if not any(choices[q] for q in (1, 2, 3)):
+            self.statusBar().showMessage("Select two or more cells to rotate them.", 5000)
+            return
+        for view in (self.view, self.cell_grid):
+            view.rotation_choices = choices
+            view.update()
+        self.statusBar().showMessage("Rotate: click the arrow of the new direction | Esc: cancel")
 
-    def restore_sector(self):
-        if self.document is not None:
-            self._run_edit(lambda: self.document.restore_sector(self.current_sector), reset=True)
+    def finish_rotation(self, quarters):
+        if quarters == 0:
+            self.cancel_preview()
+            return
+        def apply():
+            self.selected_cells = self.document.rotate_cells(self.current_sector, self.selected_cells, quarters)
+        self._run_edit(apply)
+
+    def copy_sectors(self, *, cut=False):
+        """Pick up the selected sectors; releasing the mouse on a slot places them."""
+        if self.document is None or not self._commit_forms():
+            return
+        numbers = self._selected_sector_numbers()
+        if not numbers:
+            return
+        self._copied_sectors = {"sectors": [deepcopy(self.document.sdf.sectors[n]) for n in numbers],
+                                "cut": cut, "sources": numbers}
+        self.sectors.start_carry(self.sectors.item(numbers[0]).icon(), len(numbers))
+        verb = "Move" if cut else "Copy"
+        self.statusBar().showMessage(f"{verb} {len(numbers)} sector(s): release the mouse on a slot to place | Esc: cancel")
+
+    def cancel_sector_copy(self):
+        if self.sectors.carrying:
+            self.sectors.stop_carry()
+            self._copied_sectors = None
+            self.statusBar().clearMessage()
+
+    def paste_sectors(self, target):
+        clip = self._copied_sectors
+        self.cancel_sector_copy()
+        if clip is None or self.document is None:
+            return
+        def apply():
+            placed = self.document.paste_sectors(clip["sectors"], target,
+                                                 remove=clip["sources"] if clip["cut"] else ())
+            self.current_sector = placed[0]
+            self.selected_cells = {4}
+            self.statusBar().showMessage(f"Placed {len(placed)} sector(s) from slot {placed[0]:03d}.", 5000)
+        self._run_edit(apply, reset=True)
+
+    def clear_sectors(self):
+        if self.document is not None and self._selected_sector_numbers():
+            self._run_edit(lambda: self.document.clear_sectors(self._selected_sector_numbers()))
+
+    def wipe_sectors(self):
+        numbers = self._selected_sector_numbers() if self.document is not None else []
+        if not numbers:
+            return
+        choice = QMessageBox.question(self, "Wipe sector",
+            f"Remove {len(numbers)} sector definition(s)? Their slots become free. "
+            "Existing maps may still refer to these sector IDs.")
+        if choice == QMessageBox.StandardButton.Yes:
+            self._run_edit(lambda: self.document.wipe_sectors(numbers))
 
     def import_definitions(self):
         if self.document is None or not self._commit_forms():
@@ -865,21 +1033,29 @@ class SectorEditorWindow(QMainWindow):
         path, _ = QFileDialog.getOpenFileName(self, "Import native SDF definitions using this set's assets", "", "Set definitions (*.sdf *.SDF)")
         if not path:
             return
+        targets = self._selected_slots()
+        defined = [n for n in targets if n in self.document.sdf.sectors]
+        if defined:
+            choice = QMessageBox.question(self, "Import sector definition",
+                f"Replace the {len(defined)} selected defined sector(s) with the imported definitions? "
+                "Extra definitions go into free slots.")
+            if choice != QMessageBox.StandardButton.Yes:
+                return
         def apply():
-            numbers = self.document.import_definitions(path)
+            numbers = self.document.import_definitions(path, targets)
             self.current_sector = numbers[0]
-            self.statusBar().showMessage(f"Imported {len(numbers)} sector(s) into free slots.", 6000)
+            self.statusBar().showMessage(f"Imported {len(numbers)} sector(s) from slot {numbers[0]:03d}.", 6000)
         self._run_edit(apply, reset=True)
 
-    def export_definition(self, checked=False, *, all_sectors=False):
+    def export_definition(self):
         if self.document is None or not self._commit_forms():
             return
-        numbers = list(self.document.sdf.sectors) if all_sectors else [self.current_sector]
-        if not numbers or any(n not in self.document.sdf.sectors for n in numbers):
+        numbers = self._selected_sector_numbers()
+        if not numbers:
             return
+        name = f"Sector{numbers[0]:03d}.sdf" if len(numbers) == 1 else f"Set{self.document.number}-sectors.sdf"
         path, _ = QFileDialog.getSaveFileName(self, "Export native definitions (assets remain in the set)",
-            f"Set{self.document.number}-sectors.sdf" if all_sectors else f"Sector{self.current_sector:03d}.sdf",
-            "Set definitions (*.sdf)")
+                                              name, "Set definitions (*.sdf)")
         if path:
             try:
                 self.document.export_definitions(numbers, path)
@@ -887,18 +1063,99 @@ class SectorEditorWindow(QMainWindow):
             except (OSError, ValueError) as exc:
                 QMessageBox.warning(self, "Cannot export definitions", str(exc))
 
+    def _sector_image(self, number, width):
+        self.view.show_sector(self.library, number, state=self.state.currentIndex(), reset=True)
+        image = self.view.capture_preview(width)
+        if image.isNull():
+            raise OSError(f"Sector {number} could not be rendered.")
+        return image
+
+    def _render_sectors(self, width, label):
+        """Render every defined sector with the same framing, then restore the view."""
+        numbers = sorted(self.document.sdf.sectors)
+        images = []
+        self.cancel_preview()
+        self.view.show()
+        try:
+            with loading_resources(self, label):
+                for number in numbers:
+                    images.append((number, self._sector_image(number, width)))
+                    QApplication.processEvents()
+        finally:
+            self._preview(reset=True)
+        return images
+
     def export_preview(self):
-        if self.library is None or not self.view.isVisible():
+        if self.library is None or self.current_sector not in self.document.sdf.sectors:
             return
-        path, _ = QFileDialog.getSaveFileName(self, "Export current view", f"Sector{self.current_sector:03d}.png", "PNG image (*.png)")
+        path, _ = QFileDialog.getSaveFileName(self, "Export current sector image", f"Sector{self.current_sector:03d}.png", "PNG image (*.png)")
         if path:
             try:
-                image = self.view.capture_preview()
-                if image.isNull() or not image.save(path, "PNG"):
-                    raise OSError("The preview image could not be written.")
-                self.statusBar().showMessage(f"Saved view to {path}", 6000)
+                write_static_image_atomic(self.view.capture_preview(), Path(path), "png")
+                self.statusBar().showMessage(f"Saved sector image to {path}", 6000)
             except (OSError, ValueError, RuntimeError) as exc:
-                QMessageBox.warning(self, "Cannot export preview", str(exc))
+                QMessageBox.warning(self, "Cannot export image", str(exc))
+
+    def export_all_images(self):
+        if self.library is None or not self.document.sdf.sectors:
+            return
+        path, _ = QFileDialog.getSaveFileName(self, "Export all sector images",
+                                              f"Set{self.document.number}-sectors.zip", "ZIP archive (*.zip)")
+        if not path:
+            return
+        try:
+            images = self._render_sectors(768, "Rendering sector images…")
+            with tempfile.TemporaryDirectory(prefix="sector-images-") as directory:
+                stage = Path(directory) / "images.zip"
+                with ZipFile(stage, "w", ZIP_DEFLATED) as archive:
+                    for number, image in images:
+                        archive.writestr(f"Sector{number:03d}.png", png_bytes(image))
+                with ZipFile(stage) as archive:
+                    if archive.testzip() is not None:
+                        raise OSError("ZIP verification failed.")
+                commit_verified_files([(stage, Path(path))])
+            self.statusBar().showMessage(f"Exported {len(images)} sector images to {path}", 8000)
+        except (OSError, ValueError, RuntimeError) as exc:
+            QMessageBox.warning(self, "Cannot export images", str(exc))
+
+    def export_sheet(self):
+        if self.library is None or not self.document.sdf.sectors:
+            return
+        path, _ = QFileDialog.getSaveFileName(self, "Export sector sheet",
+                                              f"Set{self.document.number}-sheet.png", "PNG image (*.png)")
+        if not path:
+            return
+        try:
+            images = self._render_sectors(320, "Rendering sector sheet…")
+            cells = [(f"{number:03d} [{number:02X}]", image) for number, image in images]
+            sheet = compose_contact_sheet(cells, CONTACT_SHEET_BACKGROUND, columns=math.ceil(math.sqrt(len(cells))))
+            write_static_image_atomic(sheet, Path(path), "png")
+            self.statusBar().showMessage(f"Saved sheet with {len(cells)} sectors to {path}", 8000)
+        except (OSError, ValueError, RuntimeError) as exc:
+            QMessageBox.warning(self, "Cannot export sheet", str(exc))
+
+    def import_custom_textures(self):
+        if self.document is None or self.assets is None:
+            return
+        if self.document.number not in LOOSE_SETS:
+            QMessageBox.information(self, "Custom textures",
+                "The game reads custom set textures only for Set1 to Set7. Studio will still show them.")
+        folder = QFileDialog.getExistingDirectory(self, "Choose the folder with the custom textures (ILBM or PNG, vanilla names)")
+        if not folder:
+            return
+        try:
+            written, skipped = import_textures(self.document.folder, self.assets.archive, [folder])
+        except OSError as exc:
+            QMessageBox.warning(self, "Cannot import textures", str(exc))
+            return
+        if written:
+            self.reload_assets()
+        lines = [f"Imported {len(written)} texture(s) into {Path(self.document.folder) / 'Loose' / 'ILBM'}."]
+        if skipped:
+            lines += ["", f"Skipped {len(skipped)}:", *skipped[:15]]
+            if len(skipped) > 15:
+                lines.append(f"… and {len(skipped) - 15} more")
+        QMessageBox.information(self, "Custom textures", "\n".join(lines))
 
     def _choose_installed(self, index):
         if index < 0:
@@ -925,10 +1182,9 @@ class SectorEditorWindow(QMainWindow):
             self.open_set(path)
 
     def _guard_unsaved(self):
-        if self.document is None or not (self.document.dirty or self._pending_model()
-                                        or self._pending_states() or self._pending_sector_fields()):
+        if self.document is None or not (self.document.dirty or self._pending_model() or self._pending_sector_fields()):
             return True
-        choice = QMessageBox.question(self, "Unsaved set", "Save changes to this set?",
+        choice = QMessageBox.question(self, "Unsaved set", "Overwrite this set with your changes?",
                                       QMessageBox.StandardButton.Save | QMessageBox.StandardButton.Discard | QMessageBox.StandardButton.Cancel)
         if choice == QMessageBox.StandardButton.Save:
             return self.save()
@@ -949,13 +1205,11 @@ class SectorEditorWindow(QMainWindow):
             self._sync_set_combo()
             document.assets = assets
             document.embedded_names = [obj.base_object.name for obj in assets.family.root_object.kids[1].kids]
-            self.cancel_preview()
+            self.cancel_interaction()
             self._copied_cells = None
-            self._sampled_ground = None
             self._model_titles = None
-            self._building_titles = None
             self._editing_model_id = self._model_snapshot = None
-            self._state_snapshot = self._state_target = self._sector_fields_number = None
+            self._sector_fields_number = None
             self.previews.reset(library)
             self.current_sector = min(document.sdf.sectors, default=0)
             self.path_label.setText(f"Set {document.number} · Sectors")
@@ -990,7 +1244,6 @@ class SectorEditorWindow(QMainWindow):
     def _refresh(self, *, reset=False):
         if self.document is None:
             return
-        pending_states = self._state_form_values() if self._pending_states() else None
         self._syncing = True
         self._bind_tables()
         sdf = self.document.sdf
@@ -1000,7 +1253,7 @@ class SectorEditorWindow(QMainWindow):
         for number in range(256):
             sector = sdf.sectors.get(number)
             item = QListWidgetItem()
-            detail = (sector.comment or ("Single cell" if sector.single else "3 × 3 cells")) if sector else "Free slot · Create here"
+            detail = (sector.comment or ("One large cell" if sector.single else "3 × 3 cells")) if sector else "Free slot · Double-click to create"
             if number >= 248:
                 detail += "\nMap border"
             color = (75, 195, 220) if sector else (130, 135, 145)
@@ -1037,16 +1290,6 @@ class SectorEditorWindow(QMainWindow):
             self.models.blockSignals(False)
             self.model_combo.blockSignals(False)
             self._model_titles = model_signature
-        if pending_states is not None:
-            for combo, mid in zip(self.state_models, pending_states[0]):
-                combo.setCurrentIndex(combo.findData(mid))
-            self.destructible.setChecked(pending_states[1])
-        building_titles = tuple(f"{row.id:03d}  " + (sdf.models[row.intact].base if 0 <= row.intact < len(sdf.models) else "Missing model") for row in sdf.buildings)
-        if building_titles != self._building_titles:
-            self.building.clear()
-            for row, title in zip(sdf.buildings, building_titles):
-                self.building.addItem(title, row.id)
-            self._building_titles = building_titles
         self.counts.setText(f"{len(sdf.sectors)} defined · {256-len(sdf.sectors)} free\nModels {len(sdf.models)}/{MODEL_LIMIT} · Buildings {len(sdf.buildings)}/{BUILDING_LIMIT}")
         self._syncing = False
         self._filter_models()
@@ -1054,10 +1297,10 @@ class SectorEditorWindow(QMainWindow):
         self._load_model_fields()
         self._update_model_usage()
         self._update_issues()
+        self._update_sector_actions()
         self._preview(reset=reset)
-        self.actions["undo"].setEnabled(bool(self.document._undo))
-        self.actions["redo"].setEnabled(bool(self.document._redo))
         for key, stack in (("undo", self.document._undo), ("redo", self.document._redo)):
+            self.actions[key].setEnabled(bool(stack))
             self.actions[key].setToolTip(f"{key.title()}: {stack[-1][0]}" if stack else key.title())
         self._model_form_changed()
         self.preview_timer.start()
@@ -1089,6 +1332,8 @@ class SectorEditorWindow(QMainWindow):
         sdf = self.document.sdf
         requests = []
         for kind, browser in (("sector", self.sectors), ("model", self.models)):
+            # Render at the tile's real pixel size, so zoomed tiles stay sharp.
+            size = min(256, max(48, round(browser.image_side * browser.devicePixelRatioF())))
             for item in visible_items(browser):
                 number = item.data(Qt.ItemDataRole.UserRole)
                 if kind == "sector":
@@ -1103,11 +1348,12 @@ class SectorEditorWindow(QMainWindow):
                     signature = (sector.kind, tuple(bases))
                 else:
                     signature = sdf.models[number].base
-                key = (self.previews.generation, kind, number, signature)
+                key = (self.previews.generation, kind, number, signature, size)
                 if item.data(PREVIEW_ROLE) != key:
-                    item.setIcon(QIcon())
+                    if item.data(PREVIEW_ROLE) is None or item.data(PREVIEW_ROLE)[:4] != key[:4]:
+                        item.setIcon(QIcon())
                     item.setData(PREVIEW_ROLE, key)
-                requests.append((key, kind, number, self.state.currentIndex()))
+                requests.append((key, kind, number, self.state.currentIndex(), size))
         self.previews.request(requests)
 
     def _card_ready(self, key, icon):
@@ -1120,11 +1366,6 @@ class SectorEditorWindow(QMainWindow):
         if item is None or self._syncing:
             return
         number = item.data(Qt.ItemDataRole.UserRole)
-        if not self._resolve_state_form():
-            self.sectors.blockSignals(True)
-            self.sectors.setCurrentRow(self.current_sector)
-            self.sectors.blockSignals(False)
-            return
         self._commit_sector_fields()
         self.cancel_preview()
         self.current_sector = number
@@ -1134,6 +1375,7 @@ class SectorEditorWindow(QMainWindow):
         self.selected_cells = {4}
         self._selection_anchor = 4
         self._load_sector_fields()
+        self._update_sector_actions()
         self._preview(reset=True)
 
     def _load_sector_fields(self):
@@ -1143,11 +1385,11 @@ class SectorEditorWindow(QMainWindow):
         pending_description = self._pending_sector_fields()
         if sector and sector.single and self.selected_cells:
             self.selected_cells = {4}
-        target = (self.current_sector, tuple(sorted(self.selected_cells)))
-        pending_states = self._pending_states() and target == self._state_target
         self._syncing = True
-        self.sector_title.setText(f"Sector {self.current_sector:03d} [{self.current_sector:02X}]" if sector else f"Slot {self.current_sector:03d} is free — click New")
-        for field in (self.layout_mode, self.ground, self.symbol, self.description, self.building):
+        layout = "One large cell" if sector and sector.single else "3 × 3 cells"
+        self.sector_title.setText(f"Sector {self.current_sector:03d} [{self.current_sector:02X}] · {layout}"
+                                  if sector else f"Slot {self.current_sector:03d} is free")
+        for field in (self.layout_mode, self.ground, self.symbol, self.description):
             field.setEnabled(sector is not None)
         if sector:
             self.layout_mode.setCurrentIndex(int(sector.single))
@@ -1159,21 +1401,15 @@ class SectorEditorWindow(QMainWindow):
         else:
             self.description.clear()
         if sector and self.selected_cells:
-            index = 0 if sector.single else min(self.selected_cells, default=4)
-            bid = sector.subsects[index]
-            self.building.setCurrentIndex(self.building.findData(bid))
+            bid = sector.subsects[0 if sector.single else min(self.selected_cells, default=4)]
             if 0 <= bid < len(self.document.sdf.buildings):
                 row = self.document.sdf.buildings[bid]
-                if not pending_states:
-                    for state, combo in enumerate(self.state_models):
-                        combo.setCurrentIndex(combo.findData(row.state(state)))
-                    self.destructible.setChecked(bool(row.destructible))
-        for field in (*self.state_models, self.destructible, self.apply_states_button):
+                for state, combo in enumerate(self.state_models):
+                    combo.setCurrentIndex(combo.findData(row.state(state)))
+                self.destructible.setChecked(bool(row.destructible))
+        for field in (*self.state_models, self.destructible):
             field.setEnabled(sector is not None and bool(self.selected_cells))
         self._sector_fields_number = self.current_sector
-        if not pending_states:
-            self._state_target = target
-            self._state_snapshot = self._state_form_values() if sector and self.selected_cells else None
         self._syncing = False
         details = {}
         if sector:
@@ -1206,37 +1442,28 @@ class SectorEditorWindow(QMainWindow):
         selected = sorted(self.selected_cells)
         bids = [sector.subsects[0 if sector.single else c] for c in selected] if sector else []
         valid = defined and bool(selected) and all(0 <= bid < len(self.document.sdf.buildings) for bid in bids)
-        for key in ("select_all", "select_matching", "inspect", "choose_model", "copy", "paste", "clear", "cut", "move"):
-            self.actions[key].setEnabled(defined and bool(selected))
-        self.actions["select_all"].setEnabled(defined)
-        for key in ("inspect", "copy", "cut", "move"):
+        for key in ("copy", "cut", "clear", "rotate"):
             self.actions[key].setEnabled(valid)
-        can_paste = defined and self._copied_cells is not None
-        self.actions["paste"].setEnabled(can_paste)
-        self.actions["undo"].setEnabled(bool(self.document and self.document._undo))
-        self.actions["redo"].setEnabled(bool(self.document and self.document._redo))
-        for field in (self.apply_model_button, self.apply_building_button, self.choose_model_button,
-                      self.select_all_button, self.select_matching_button, self.clear_cells_button):
-            field.setEnabled(defined and bool(selected))
-        self.select_all_button.setEnabled(defined)
-        self.inspect_button.setEnabled(valid)
+        self.state_menu.setEnabled(valid)
+        self.actions["select_all"].setEnabled(defined)
+        self.actions["paste"].setEnabled(defined and self._copied_cells is not None)
+        self.apply_model_button.setEnabled(defined and bool(selected))
         if not sector:
-            self.selection_info.setText("Create a sector in this free slot to edit cells.")
+            self.selection_info.setText("Create a sector in this free slot to edit its cells.")
             self.model_target.setText(f"Slot {self.current_sector:03d} is free. Create a sector before applying models.")
             return
         if not selected:
-            self.selection_info.setText("No cells selected | Click a cell or drag a selection box")
-            self.model_target.setText(f"Sector {self.current_sector:03d} | No cells selected")
+            self.selection_info.setText("No cells selected · Click a cell or drag a selection box")
+            self.model_target.setText(f"Sector {self.current_sector:03d} · No cells selected")
             return
-        if len(selected) == 1:
+        if sector.single:
+            summary = "The whole sector is one large cell"
+        elif len(selected) == 1:
             summary = f"Cell {selected[0]+1} selected"
-        elif len(set(bids)) > 1:
-            summary = f"{len(selected)} cells selected · Different buildings"
         else:
-            summary = f"{len(selected)} cells selected · Same building"
+            summary = f"{len(selected)} cells selected" + (" · Different content" if len(set(bids)) > 1 else "")
         self.selection_info.setText(summary)
-        self.selection_info.setToolTip(f"Damage-state fields start from cell {selected[0]+1}. Apply replaces the full state row for all selected cells.")
-        self.model_target.setText(f"Sector {self.current_sector:03d} · {summary}")
+        self.model_target.setText(f"Sector {self.current_sector:03d} · {summary} · Double-click a cell to place the model")
 
     def _pending_sector_fields(self):
         sector = self.document.sdf.sectors.get(self.current_sector) if self.document else None
@@ -1252,50 +1479,10 @@ class SectorEditorWindow(QMainWindow):
         self.document.change("Sector description", lambda: self.document.sdf.sectors.__setitem__(number, updated))
         self._description_snapshot = self.description.text()
 
-    def _state_form_values(self):
-        return tuple(combo.currentData() for combo in self.state_models), self.destructible.isChecked()
-
-    def _pending_states(self):
-        return self._state_snapshot is not None and self._state_snapshot != self._state_form_values()
-
-    def _resolve_state_form(self):
-        if not self._pending_states():
-            return True
-        choice = QMessageBox.question(self, "Building state changes", "Apply pending damage states to the selected cells?",
-            QMessageBox.StandardButton.Save | QMessageBox.StandardButton.Discard | QMessageBox.StandardButton.Cancel)
-        if choice == QMessageBox.StandardButton.Save:
-            if not self._commit_state_form():
-                return False
-            self._refresh()
-            return True
-        if choice == QMessageBox.StandardButton.Discard:
-            self._state_snapshot = None
-            self._load_sector_fields()
-            return True
-        return False
-
-    def _commit_state_form(self, *, force=False):
-        if not force and not self._pending_states():
-            return True
-        try:
-            number, cells = self._state_target
-            states, destructible = self._state_form_values()
-            self.document.assign_states(number, cells, states, int(destructible))
-            self._state_snapshot = self._state_form_values()
-            self._bind_tables()
-            self._preview()
-            self._update_model_usage()
-            self._model_form_changed()
-            return True
-        except (ValueError, IndexError) as exc:
-            self._bind_tables()
-            QMessageBox.warning(self, "Cannot update building states", str(exc))
-            return False
-
     def _commit_forms(self):
-        pending = self._pending_sector_fields() or self._pending_model() or self._pending_states()
+        pending = self._pending_sector_fields() or self._pending_model()
         self._commit_sector_fields()
-        if not (self._commit_model_form() and self._commit_state_form()):
+        if not self._commit_model_form():
             return False
         if pending:
             self._refresh()
@@ -1305,26 +1492,42 @@ class SectorEditorWindow(QMainWindow):
         if self._syncing or self.document is None or self.current_sector not in self.document.sdf.sectors:
             return
         sector = self.document.sdf.sectors[self.current_sector]
-        updated = replace(sector, ground=self.ground.value(), symbol=self.symbol.value(), comment=self.description.text())
-        self.document.change("Sector properties", lambda: self.document.sdf.sectors.__setitem__(self.current_sector, updated))
-        self._description_snapshot = self.description.text()
-        self._refresh()
+        ground, symbol = self.ground.value(), self.symbol.value()
+        if (ground, symbol) == (sector.ground, sector.symbol):
+            self._commit_sector_fields()
+            self._refresh()
+            return
+        self._commit_sector_fields()
+        numbers = self._selected_sector_numbers()
+        self._run_edit(lambda: self.document.set_sector_fields(
+            numbers, ground=None if ground == sector.ground else ground,
+            symbol=None if symbol == sector.symbol else symbol))
 
     def _layout_changed(self, index):
         if self.document and self.current_sector in self.document.sdf.sectors:
-            if not self._resolve_state_form():
-                self._load_sector_fields()
-                return
             self._commit_sector_fields()
             self.document.set_layout(self.current_sector, bool(index))
             self.selected_cells = {4}
             self._refresh(reset=True)
 
+    def _state_model_changed(self, state):
+        """Apply a cell content change at once; Intact also fills the later states."""
+        if self._syncing or self.document is None or self.current_sector not in self.document.sdf.sectors:
+            return
+        if not self.selected_cells:
+            return
+        if state is None:
+            states = tuple(combo.currentData() for combo in self.state_models)
+            self._run_edit(lambda: self.document.assign_states(
+                self.current_sector, self.selected_cells, states, int(self.destructible.isChecked())))
+            return
+        model = self.state_models[state].currentData()
+        if model is None:
+            return
+        self._run_edit(lambda: self.document.assign_model(self.current_sector, self.selected_cells, model, state))
+
     def select_cell(self, index, additive=False):
         selected = self.selected_cells.symmetric_difference({index}) if additive else {index}
-        if selected != self.selected_cells and not self._resolve_state_form():
-            self._load_sector_fields()
-            return
         self._commit_sector_fields()
         if self._placement is not None:
             self.cancel_preview()
@@ -1334,8 +1537,6 @@ class SectorEditorWindow(QMainWindow):
 
     def _select_all(self):
         sector = self.document.sdf.sectors.get(self.current_sector) if self.document else None
-        if not self._resolve_state_form():
-            return
         self._commit_sector_fields()
         self.selected_cells = {4} if sector is None or sector.single else set(range(9))
         self._load_sector_fields()
@@ -1369,8 +1570,10 @@ class SectorEditorWindow(QMainWindow):
         model = self.document.sdf.models[mid]
         self.base.setCurrentText(model.base)
         self.sklt.setCurrentText(model.sklt)
-        for spin, value in zip(self.model_numbers, model.numbers):
-            spin.setValue(value)
+        # Legacy field and building symbol are kept as they are; they are not edited here.
+        self._model_hidden_numbers = model.numbers[:2]
+        self.shield.setValue(max(0, min(100, model.numbers[2])))
+        self.collision_mode.setCurrentIndex(max(0, min(2, model.numbers[3])))
         self.model_comment.setText(model.comment)
         self.effects.setPlainText("\n".join(" ".join(map(str, group)) for group in model.effects))
         self._update_model_usage()
@@ -1383,9 +1586,11 @@ class SectorEditorWindow(QMainWindow):
         if self.preview_mode.currentIndex() == 1:
             self._preview(reset=changed)
 
+    def _model_numbers(self):
+        return (*self._model_hidden_numbers, self.shield.value(), self.collision_mode.currentIndex())
+
     def _model_form_values(self):
-        return (self.base.currentText(), self.sklt.currentText(),
-                tuple(spin.value() for spin in self.model_numbers),
+        return (self.base.currentText(), self.sklt.currentText(), self._model_numbers(),
                 self.effects.toPlainText(), self.model_comment.text())
 
     def _pending_model(self):
@@ -1395,11 +1600,10 @@ class SectorEditorWindow(QMainWindow):
         if self._syncing or self.document is None:
             return
         pending = self._pending_model()
-        self.update_model_button.setText("Apply pending model changes" if pending else "Update shared model definition")
-        states = self._pending_states()
-        self.apply_states_button.setText("Apply pending damage states to cells" if states else "Apply independent state row to cells")
-        dirty = self.document.dirty or pending or states or self._pending_sector_fields()
-        self.setWindowTitle(f"{'* ' if dirty else ''}Set {self.document.number} - OpenNeoUA Studio - Sector Editor")
+        self.update_model_button.setEnabled(pending)
+        dirty = self.document.dirty or pending or self._pending_sector_fields()
+        self.setWindowTitle(f"{'* ' if dirty else ''}Set {self.document.number} · {self.document.folder}"
+                            " - OpenNeoUA Studio - Sector Editor")
         if self.slot_filter.currentIndex() == 3:
             self._filter_sectors()
 
@@ -1414,9 +1618,8 @@ class SectorEditorWindow(QMainWindow):
         mid = self.model_combo.currentData()
         if self.document is None or mid is None:
             return
-        count = sum(mid == b.state(s) for b in self.document.sdf.buildings for s in range(4))
         used = len(self.document.sectors_using_model(mid))
-        self.model_usage.setText(f"Model {mid}: used in {used} sectors and {count} building states. Updating this definition affects all of them.")
+        self.model_usage.setText(f"Model {mid} is used in {used} sector(s).")
 
     def _resolve_model_form(self):
         if not self._pending_model():
@@ -1448,7 +1651,7 @@ class SectorEditorWindow(QMainWindow):
                 effects.append(values)
             mid = self._editing_model_id
             model = replace(self.document.sdf.models[mid], base=self.base.currentText().strip(),
-                            sklt=self.sklt.currentText().strip(), numbers=tuple(s.value() for s in self.model_numbers),
+                            sklt=self.sklt.currentText().strip(), numbers=self._model_numbers(),
                             effects=tuple(effects), comment=self.model_comment.text())
             def apply():
                 self.document.sdf.models[mid] = model
@@ -1475,8 +1678,10 @@ class SectorEditorWindow(QMainWindow):
         if self.current_sector not in self.document.sdf.sectors and mid is None:
             self.view.hide()
             self.cell_grid.hide()
-            self.preview_status.setText("Free sector slot. Click New to define it, or duplicate an existing sector here.")
+            self.free_hint.show()
+            self.preview_status.clear()
             return
+        self.free_hint.hide()
         self.view.show()
         defined = self.current_sector in self.document.sdf.sectors
         self.cell_grid.setVisible(defined)
@@ -1498,10 +1703,8 @@ class SectorEditorWindow(QMainWindow):
         except (ValueError, OSError, RuntimeError, IndexError) as exc:
             self.preview_status.setText(f"Preview unavailable: {exc}")
 
-    def _run_edit(self, callback, *, reset=False, resolve_states=True):
+    def _run_edit(self, callback, *, reset=False):
         if self.document is None:
-            return
-        if resolve_states and not self._resolve_state_form():
             return
         self._commit_sector_fields()
         self.cancel_preview()
@@ -1519,42 +1722,11 @@ class SectorEditorWindow(QMainWindow):
             self.current_sector = self.document.add_sector(number=number)
         self._run_edit(add, reset=True)
 
-    def duplicate_sector(self):
-        if self.document and self.current_sector in self.document.sdf.sectors:
-            self._run_edit(lambda: setattr(self, "current_sector", self.document.add_sector(self.current_sector)), reset=True)
-
-    def copy_sector_to(self):
-        if self.document is None or self.current_sector not in self.document.sdf.sectors:
-            return
-        number, ok = QInputDialog.getInt(self, "Copy sector", "Unused destination ID:", self.document.free_sector() or 1, 0, 255)
-        if ok:
-            self._run_edit(lambda: setattr(self, "current_sector", self.document.add_sector(self.current_sector, number)), reset=True)
-
-    def remove_sector(self):
-        if self.document and self.current_sector in self.document.sdf.sectors:
-            choice = QMessageBox.question(self, "Free sector slot", "Remove this definition? Existing maps may still refer to this sector ID.")
-            if choice == QMessageBox.StandardButton.Yes:
-                self._run_edit(lambda: self.document.change("Remove sector", lambda: self.document.sdf.sectors.pop(self.current_sector)))
-
-    def _assign_building(self, bid):
-        if bid is not None and self.document and self.current_sector in self.document.sdf.sectors:
-            self._run_edit(lambda: self.document.assign_building(self.current_sector, self.selected_cells, bid))
-
     def apply_model(self):
         if not self.selected_cells:
             return
         if self.document and self.current_sector in self.document.sdf.sectors:
-            self._run_edit(lambda: self.document.assign_model(self.current_sector, self.selected_cells,
-                           self.model_combo.currentData(), self.state.currentIndex(), self.all_states.isChecked()))
-
-    def apply_states(self):
-        if not self.selected_cells:
-            return
-        if self.document is None or self.current_sector not in self.document.sdf.sectors:
-            return
-        self._commit_sector_fields()
-        if self._commit_state_form(force=True):
-            self._refresh()
+            self._place_model(self.model_combo.currentData())
 
     def update_model(self):
         if self.document is not None and self._commit_model_form():
@@ -1564,44 +1736,12 @@ class SectorEditorWindow(QMainWindow):
         if self.document is None or not self._commit_model_form():
             return
         result = self._run_edit(lambda: self.document.add_model(self.base.currentText().strip(), self.sklt.currentText().strip(),
-                                source=self.model_combo.currentData() if duplicate else None), resolve_states=False)
+                                source=self.model_combo.currentData() if duplicate else None))
         if result is not None:
             self.model_combo.setCurrentIndex(self.model_combo.findData(result))
 
-    def transform_cells(self, operation):
-        if self.document is None or self.current_sector not in self.document.sdf.sectors:
-            return
-        sector = self.document.sdf.sectors[self.current_sector]
-        if sector.single:
-            return
-        mappings = {"rotate": (6, 3, 0, 7, 4, 1, 8, 5, 2),
-                    "horizontal": (2, 1, 0, 5, 4, 3, 8, 7, 6),
-                    "vertical": (6, 7, 8, 3, 4, 5, 0, 1, 2)}
-        def apply():
-            sector = self.document.sdf.sectors[self.current_sector]
-            updated = replace(sector, subsects=tuple(sector.subsects[i] for i in mappings[operation]))
-            self.document.change("Rearrange cells", lambda: self.document.sdf.sectors.__setitem__(self.current_sector, updated))
-        self._run_edit(apply)
-
-    def replace_building(self):
-        if self.document is None:
-            return
-        old, ok = QInputDialog.getInt(self, "Replace building", "Building ID to replace in all sectors:", 0, 0, len(self.document.sdf.buildings)-1)
-        if not ok:
-            return
-        new, ok = QInputDialog.getInt(self, "Replace building", "Replacement building ID:", 0, 0, len(self.document.sdf.buildings)-1)
-        if ok:
-            def apply():
-                def edit():
-                    for number, sector in self.document.sdf.sectors.items():
-                        self.document.sdf.sectors[number] = replace(sector, subsects=tuple(new if b == old else b for b in sector.subsects))
-                self.document.change("Replace building throughout set", edit)
-            self._run_edit(apply)
-
     def copy_cells(self, checked=False, *, preview=True):
         if self.selected_cells and self.document and self.current_sector in self.document.sdf.sectors:
-            if not self._resolve_state_form():
-                return
             self._commit_sector_fields()
             try:
                 self._copied_cells = self.document.copy_cells(self.current_sector, self.selected_cells)
@@ -1643,6 +1783,24 @@ class SectorEditorWindow(QMainWindow):
             return
         self._run_edit(self.document.redo if self.document else lambda: None)
 
+    def reset_set(self):
+        """Empty the set or go back to the last saved state; both stay undoable."""
+        if self.document is None or not self._resolve_model_form():
+            return
+        box = QMessageBox(QMessageBox.Icon.Warning, "Reset Set",
+                          "Warning: this changes the whole set.\n\n"
+                          "Remove all sectors: every sector slot becomes free (models and buildings stay).\n"
+                          "Restore last saved: discard every change since the set was opened or overwritten.\n\n"
+                          "Undo can still bring the set back.", parent=self)
+        empty = box.addButton("Remove all sectors", QMessageBox.ButtonRole.DestructiveRole)
+        saved = box.addButton("Restore last saved", QMessageBox.ButtonRole.AcceptRole)
+        box.addButton(QMessageBox.StandardButton.Cancel)
+        box.exec()
+        if box.clickedButton() not in (empty, saved):
+            return
+        self._model_snapshot = None
+        self._run_edit(lambda: self.document.reset_sectors(saved=box.clickedButton() is saved), reset=True)
+
     def _update_issues(self):
         problems = table_issues(self.document.sdf)
         problems.extend(self.document.resource_issues())
@@ -1658,7 +1816,7 @@ class SectorEditorWindow(QMainWindow):
         self.validation_status.setVisible(bool(count))
         self.validation_action.setText(f"Validation Report ({count})…" if count else "Validation Report…")
         self.issues.setPlainText("\n".join([*(f"ERROR: {p}" for p in problems), *warnings]) or
-                                "Native table references and model resources are valid.\n\nSector IDs: 0–255. Slots 248–255 are used for map borders.\n\nSave writes SET.SDF and the native LEGO visual overrides when needed. Save Set As and Export ZIP include the complete set resources.\n\nRotating/mirroring rearranges cell positions; it does not rotate the geometry of each model.")
+                                "Native table references and model resources are valid.\n\nSector IDs: 0–255. Slots 248–255 are used for map borders.\n\nOverwrite Set writes SET.SDF and the native LEGO visual overrides when needed. Export Set includes the complete set resources.\n\nRotate moves the selected cells; each model keeps its own orientation.")
 
     def save(self):
         if self.document is None or not self._commit_forms():
@@ -1666,38 +1824,31 @@ class SectorEditorWindow(QMainWindow):
         try:
             self.document.save()
             self._refresh()
-            self.statusBar().showMessage("SET.SDF saved and reloaded successfully.", 5000)
+            self.statusBar().showMessage("SET.SDF overwritten and reloaded successfully.", 5000)
             return True
         except (OSError, ValueError) as exc:
-            QMessageBox.warning(self, "Cannot save set", str(exc))
+            QMessageBox.warning(self, "Cannot overwrite set", str(exc))
             return False
 
-    def save_as(self):
+    def export_set(self):
         if self.document is None or not self._commit_forms():
             return
-        parent = QFileDialog.getExistingDirectory(self, "Choose parent folder for the copied set")
-        if not parent:
+        dialog = ExportSetDialog(self.document, self)
+        if dialog.exec() != QDialog.DialogCode.Accepted or dialog.target() is None:
             return
-        number, ok = QInputDialog.getInt(self, "Set number", "New set number:", self.document.number, 1, 255)
-        if ok:
-            try:
-                copied = self.document.copy_to(Path(parent) / f"Set{number}")
-                self.open_set(copied.folder, check_unsaved=False)
-                self.statusBar().showMessage(f"Complete set copied to {copied.folder}", 8000)
-            except (OSError, ValueError) as exc:
-                QMessageBox.warning(self, "Cannot copy set", str(exc))
-
-    def export_zip(self):
-        if self.document is None or not self._commit_forms():
-            return
-        target, _ = QFileDialog.getSaveFileName(self, "Export complete set", f"Set{self.document.number}.zip", "ZIP archive (*.zip)")
-        if target:
-            try:
+        target = dialog.target()
+        try:
+            if dialog.archive.isChecked():
                 with loading_resources(self, "Packaging and verifying complete set…"):
                     count = self.document.export_zip(target)
                 self.statusBar().showMessage(f"Exported {count} files to {target}", 8000)
-            except (OSError, ValueError) as exc:
-                QMessageBox.warning(self, "Cannot export set", str(exc))
+            else:
+                with loading_resources(self, "Copying complete set…"):
+                    copied = self.document.copy_to(target)
+                self.open_set(copied.folder, check_unsaved=False)
+                self.statusBar().showMessage(f"Complete set exported to {copied.folder}", 8000)
+        except (OSError, ValueError) as exc:
+            QMessageBox.warning(self, "Cannot export set", str(exc))
 
     def new_set(self):
         if not self._guard_unsaved():
