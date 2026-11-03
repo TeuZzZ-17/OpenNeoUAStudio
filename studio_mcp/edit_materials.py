@@ -21,6 +21,7 @@ from studio.assets.mapping import (
     transfer_material_resources,
 )
 from studio.formats.animation import export_anm_bytes
+from studio.formats.images import parse_ilbm_file
 from studio.formats.setbas import decode_texture
 from studio.rendering.geometry import (
     append_fx_element_clipboard,
@@ -173,16 +174,22 @@ def op_delete_material_block(ctx, block: int = -1, move_polygons_to=None):
 
 
 def _ensure_texture(lm, name: str) -> str:
-    """Decoded texture name usable in the model: already loaded, or decoded from the Set.BAS."""
+    """Decoded texture name usable in the model: already loaded, a loose ILBM in the model's folder (made with
+    studio_make_texture), or decoded from the Set.BAS."""
     if not name:
         raise core.McpToolError("give `texture`, e.g. 'FAERROBO.ILBM' (studio_list_textures shows the choices)")
     for key in lm.family.textures:
         if key.casefold() == name.casefold():
             return key
+    loose = next((p for p in sorted(lm.base_path.parent.rglob("*"))
+                  if p.is_file() and p.name.casefold() == name.casefold()), None)
+    if loose is not None:
+        lm.family.textures[loose.name] = parse_ilbm_file(loose)
+        return loose.name
     archive = getattr(lm.family, "setbas_archive", None) or core._setbas(lm.set_hint or "set1")[0]
     resource = next((r for r in archive.find(name, "ilbm.class") if r.decodable), None)
     if resource is None:
-        raise core.McpToolError(f"Texture {name!r} is not in the model or the set (see studio_list_textures)")
+        raise core.McpToolError(f"Texture {name!r} is not in the model, its folder or the set (see studio_list_textures)")
     lm.family.textures[resource.resource_name] = decode_texture(archive, resource)
     return resource.resource_name
 

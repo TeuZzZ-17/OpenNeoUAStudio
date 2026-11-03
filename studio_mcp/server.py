@@ -28,7 +28,7 @@ except ImportError:  # mcp 1.x
 from PIL import Image as PilImage, ImageDraw
 from pydantic import Field
 
-from studio_mcp import analysis, core, edit, guide, history, wire
+from studio_mcp import analysis, core, edit, guide, history, sets, textures, wire
 from studio_mcp.loose import resolve_base
 from studio_mcp.select import select_points, select_polygons, view_of_object
 
@@ -227,28 +227,17 @@ def studio_render_model(source: str, views: list[str] | None = None, width: int 
         except core.McpToolError as exc:
             return ["ERROR: " + str(exc)]
         scene_dir, source = Path(scene).parent, scene
-    out_dir = Path(tempfile.gettempdir()) / "onua_studio_mcp" / f"render_{uuid.uuid4().hex[:8]}"
+    out_dir = _render_dir()
     request = {"spec": source, "views": views, "size": [width, height], "zoom": zoom_percent,
                "background": background, "out_dir": str(out_dir), "set_hint": set_hint,
                "highlight_polygons": highlight_polygons, "label_points": label_points,
                "label_polygons": label_polygons, "show_wire": show_wire}
-    request_file = out_dir.with_suffix(".json")
-    request_file.parent.mkdir(parents=True, exist_ok=True)
-    request_file.write_text(json.dumps(request), encoding="utf-8")
     try:
-        process = subprocess.run(
-            [sys.executable, "-m", "studio_mcp.render_worker", str(request_file)],
-            cwd=str(core.STUDIO_ROOT), capture_output=True, text=True, timeout=180)
-    except subprocess.TimeoutExpired:
-        return ["ERROR: render timed out after 180 s"]
+        result = _run_worker(request, out_dir, 180)
     finally:
         if scene_dir is not None:
             shutil.rmtree(scene_dir, ignore_errors=True)
-    line = next((ln for ln in process.stdout.splitlines() if ln.startswith("RESULT_JSON ")), None)
-    if line is None:
-        return ["ERROR: render worker failed:\n" + (process.stderr or process.stdout)[-1500:]]
-    result = json.loads(line[len("RESULT_JSON "):])
-    if not result["ok"]:
+    if not result.get("ok"):
         return ["ERROR: " + result.get("error", "unknown render error")]
     sheet = _contact_sheet(result["images"], width, height)
     sheet_file = out_dir / "sheet.png"
@@ -263,6 +252,26 @@ def studio_render_model(source: str, views: list[str] | None = None, width: int 
     return [note, Image(data=sheet, format="png")]
 
 
+def _render_dir() -> Path:
+    return Path(tempfile.gettempdir()) / "onua_studio_mcp" / f"render_{uuid.uuid4().hex[:8]}"
+
+
+def _run_worker(request: dict, out_dir: Path, timeout: int) -> dict:
+    """Run render_worker.py in its own process (Qt owns its main thread there) and return its result."""
+    request_file = out_dir.with_suffix(".json")
+    request_file.parent.mkdir(parents=True, exist_ok=True)
+    request_file.write_text(json.dumps(request), encoding="utf-8")
+    try:
+        process = subprocess.run([sys.executable, "-m", "studio_mcp.render_worker", str(request_file)],
+                                 cwd=str(core.STUDIO_ROOT), capture_output=True, text=True, timeout=timeout)
+    except subprocess.TimeoutExpired:
+        return {"ok": False, "error": f"timed out after {timeout} s"}
+    line = next((ln for ln in process.stdout.splitlines() if ln.startswith("RESULT_JSON ")), None)
+    if line is None:
+        return {"ok": False, "error": "render worker failed:\n" + (process.stderr or process.stdout)[-1500:]}
+    return json.loads(line[len("RESULT_JSON "):])
+
+
 def _prune_renders(folder: Path, keep: int = 20) -> None:
     """Keep only the newest render folders/requests in the work folder."""
     runs = sorted((p for p in folder.glob("render_*") if p.is_dir()), key=lambda p: p.stat().st_mtime)
@@ -271,9 +280,9 @@ def _prune_renders(folder: Path, keep: int = 20) -> None:
         old.with_suffix(".json").unlink(missing_ok=True)
 
 
-def _contact_sheet(images: list[dict], width: int, height: int) -> bytes:
+def _contact_sheet(images: list[dict], width: int, height: int, columns: int = 0) -> bytes:
     tiles = [PilImage.open(item["path"]).convert("RGBA") for item in images]
-    columns = 1 if len(tiles) == 1 else 2
+    columns = columns or (1 if len(tiles) == 1 else 2)
     rows = (len(tiles) + columns - 1) // columns
     sheet = PilImage.new("RGBA", (columns * width, rows * height), (31, 34, 40, 255))
     for index, (tile, item) in enumerate(zip(tiles, images)):
@@ -290,11 +299,13 @@ def _contact_sheet(images: list[dict], width: int, height: int) -> bytes:
 
 
 @mcp.tool()
-def studio_new_model(out_dir: str, base_name: str, skeleton_stem: str) -> str:
+def studio_new_model(out_dir: str, base_name: str, skeleton_stem: str, donor: str = "") -> str:
     """Start a NEW design: an empty loose model (no polygons) in out_dir, ready for loft / create_primitive /
     add_polygons / import_geometry. skeleton_stem: a new unique name of 6, 7 or 8 characters (e.g. 'VPNBOMB1').
+    donor: the Set.BAS object whose material blocks the shell keeps, e.g. 'set3:ST_CITY1' for a sector building
+    with that set's facade textures (the stem must then be as long as the donor's skeleton name).
     Writable folders: Data/Models/... for the game, or the server temp folder for drafts."""
-    return _guard(lambda: core.new_model(out_dir, base_name, skeleton_stem))
+    return _guard(lambda: core.new_model(out_dir, base_name, skeleton_stem, donor))
 
 
 @mcp.tool()
@@ -319,9 +330,9 @@ def studio_export_model(source: str, out_dir: str, base_name: str, skeleton_stem
 
 
 def _history_key(model: str) -> Path:
-    """Undo stacks belong to a .BASE model, or to a bare wireframe .SKL file."""
+    """Undo stacks belong to a .BASE model, a bare wireframe .SKL file or a texture made by studio_make_texture."""
     path = core.resolve_existing(model)
-    return path if path.is_file() and path.suffix.lower() == ".skl" else resolve_base(model)
+    return path if path.is_file() and path.suffix.lower() in (".skl", ".ilbm", ".ilb") else resolve_base(model)
 
 
 @mcp.tool()
@@ -386,23 +397,15 @@ def studio_wire_from_model(source: str, skeleton: str, view: str = "unit", detai
             return ["ERROR: detail must be between 0 and 4"]
     except core.McpToolError as exc:
         return ["ERROR: " + str(exc)]
-    out_dir = Path(tempfile.gettempdir()) / "onua_studio_mcp" / f"render_{uuid.uuid4().hex[:8]}"
+    out_dir = _render_dir()
     staged = out_dir / target.name
     request = {"task": "wireframe", "spec": source, "set_hint": set_hint, "out_dir": str(out_dir),
                "preset": preset, "detail": float(detail), "include_effects": include_effects,
                "wire_out": str(staged), "size": [480, 360], "views": []}
-    request_file = out_dir.with_suffix(".json")
-    request_file.parent.mkdir(parents=True, exist_ok=True)
-    request_file.write_text(json.dumps(request), encoding="utf-8")
-    try:
-        process = subprocess.run([sys.executable, "-m", "studio_mcp.render_worker", str(request_file)],
-                                 cwd=str(core.STUDIO_ROOT), capture_output=True, text=True, timeout=240)
-    except subprocess.TimeoutExpired:
-        return ["ERROR: wireframe generation timed out after 240 s"]
-    line = next((ln for ln in process.stdout.splitlines() if ln.startswith("RESULT_JSON ")), None)
-    result = json.loads(line[len("RESULT_JSON "):]) if line else {"ok": False, "error": (process.stderr or "")[-1500:]}
+    result = _run_worker(request, out_dir, 240)
     if not result.get("ok"):
         return ["ERROR: " + result.get("error", "unknown generator error")]
+    request_file = out_dir.with_suffix(".json")
     if target.exists():
         history.snapshot(target, [target], "wire_from_model")
     else:
@@ -433,6 +436,187 @@ def studio_wire_edit(skeleton: str, operations: Annotated[list[dict], Field(desc
     mirror_copy, weld, normalize (fit to +-1000), split_outlines, outline_move. +z is UP. Steps run on one copy and
     are written once; undo with studio_undo. See studio_help('wireframe')."""
     return _guard(wire.run, skeleton, operations, label, dry_run)
+
+
+# --- textures ---------------------------------------------------------------------------------
+
+
+LAYERS_HELP = "Picture layers in order, each {'op': name, ...}; see studio_help('textures')"
+
+
+@mcp.tool()
+def studio_texture_preview(source: str = "", layers: Annotated[Any, Field(description=LAYERS_HELP)] = None,
+                           size: list[int] | None = None, set_name: str = "set1", uv_grid: bool = False) -> list:
+    """Show a texture in a set's palette without writing anything: a set texture ('set3:CITY1.ILBM'), an ILBM or
+    PNG file, and/or picture layers on top. uv_grid=true marks UV 0..255 every 32 (to pick set_uvs rects)."""
+    try:
+        info, png = textures.preview(layers, size, set_name, source, uv_grid)
+    except core.McpToolError as exc:
+        return ["ERROR: " + str(exc)]
+    return [_json(info), Image(data=png, format="png")]
+
+
+@mcp.tool()
+def studio_make_texture(target: str, layers: Annotated[Any, Field(description=LAYERS_HELP)] = None,
+                        source: str = "", size: list[int] | None = None, set_name: str = "set1",
+                        overwrite: bool = False) -> list:
+    """Write a NEW texture file for a model being built, e.g. 'Models/Base/New/Tower_Intact/NXWALL.ILBM' (beside
+    its BASE), mapped to the palette of set_name (the set the model is for). Then studio_set_texture
+    texture='NXWALL.ILBM' on the model; studio_set_install_model copies it into the set. Keep the name at most as
+    long as the texture it replaces on the model. Undo: studio_undo with the file path."""
+    try:
+        info, png = textures.make(target, layers, size, set_name, source, overwrite)
+    except core.McpToolError as exc:
+        return ["ERROR: " + str(exc)]
+    return [_json(info), Image(data=png, format="png")]
+
+
+# --- sets and sectors (Sector Editor document) -------------------------------------------------------
+
+SET_HELP = "Set: 'set3', 'Set3' or 3"
+
+
+@mcp.tool()
+def studio_set_list() -> str:
+    """The sets under Data/Sets with their sector, model and building counts. Start set work with
+    studio_help('sets')."""
+    return _guard(sets.list_sets)
+
+
+@mcp.tool()
+def studio_set_info(set_name: Annotated[str, Field(description=SET_HELP)]) -> str:
+    """Overview of one set: free sector slots, model/building table use, connection families (ground 0-5) with
+    example sectors, override.lst use and every problem the Sector Editor would report."""
+    return _guard(sets.info, set_name)
+
+
+@mcp.tool()
+def studio_set_sectors(set_name: Annotated[str, Field(description=SET_HELP)], sectors: list[int] | None = None,
+                       text_filter: str = "", detail: bool = False, model: Any = None) -> str:
+    """Sector definitions: layout, ground (connection family), map symbol, comment and the 9 cells
+    ('b<building>:<intact BASE>', cell 0 far-left ... 8 near-right). detail=true gives building ids and the four
+    damage-state models. model = only sectors using that model (id or BASE name)."""
+    return _guard(sets.sectors, set_name, sectors, text_filter, detail, model)
+
+
+@mcp.tool()
+def studio_set_models(set_name: Annotated[str, Field(description=SET_HELP)], text_filter: str = "",
+                      ids: list[int] | None = None, unused: bool = False) -> str:
+    """Model rows of SET.SDF: BASE, collision SKLT, symbol, shield, collision mode, effects, how many building
+    rows use it and where the game takes the picture from (SET.BAS position or override.lst)."""
+    return _guard(sets.models, set_name, text_filter, ids, unused)
+
+
+@mcp.tool()
+def studio_set_buildings(set_name: Annotated[str, Field(description=SET_HELP)], ids: list[int] | None = None,
+                         model: Any = None, unused: bool = False) -> str:
+    """Building rows (four damage states: intact, damaged, heavy, destroyed) with their use in sectors."""
+    return _guard(sets.buildings, set_name, ids, model, unused)
+
+
+@mcp.tool()
+def studio_set_list_textures(set_name: Annotated[str, Field(description=SET_HELP)], text_filter: str = "") -> str:
+    """Textures of a set: SET.BAS ones, repainted ones (Loose/ILBM) and new ones. Look at one with
+    studio_texture_preview(source='set3:CITY1.ILBM')."""
+    return _guard(sets.set_texture_list, set_name, text_filter)
+
+
+@mcp.tool()
+def studio_set_render(set_name: Annotated[str, Field(description=SET_HELP)], sectors: list[int] | None = None,
+                      models: list[Any] | None = None, buildings: list[int] | None = None,
+                      grid: list[list[int | None]] | None = None, state: int = 0, views: list[str] | None = None,
+                      label_cells: bool = False, width: int = 360, height: int = 270,
+                      background: str = "#1f2228") -> list:
+    """Picture of sectors (same scale for all, to compare variants), set models or building rows, with the
+    Sector Editor's renderer. grid = rows of sector numbers placed as on a map (row 0 far) with the set's
+    transition strips, to check how sectors join. state 0 intact .. 3 destroyed. views: iso, iso_left, iso_back,
+    iso_back_left, top. label_cells marks the cell numbers 0-8 (or sector numbers on a grid)."""
+    if not 64 <= width <= 1600 or not 64 <= height <= 1600:
+        return ["ERROR: width and height must be between 64 and 1600"]
+    out_dir = _render_dir()
+    request = {"task": "set_render", "set": set_name, "sectors": sectors, "models": models,
+               "buildings": buildings, "grid": grid, "state": state, "views": views or ["iso"],
+               "label_cells": label_cells, "size": [width, height], "background": background,
+               "out_dir": str(out_dir)}
+    result = _run_worker(request, out_dir, 180)
+    if not result.get("ok"):
+        return ["ERROR: " + result.get("error", "unknown render error")]
+    count = len(result["images"])
+    sheet = _contact_sheet(result["images"], width, height, columns=min(4, max(1, round(count ** 0.5 + 0.49))))
+    sheet_file = out_dir / "sheet.png"
+    sheet_file.write_bytes(sheet)
+    _prune_renders(out_dir.parent)
+    note = f"Rendered {count} picture(s) of {set_name}, state {state}.\nImage file: {sheet_file}"
+    if result["warnings"]:
+        note += "\nWarnings: " + "; ".join(result["warnings"][:6])
+    return [note, Image(data=sheet, format="png")]
+
+
+@mcp.tool()
+def studio_set_edit(set_name: Annotated[str, Field(description=SET_HELP)],
+                    operations: Annotated[list[dict], Field(description="Steps {'op': name, ...}; see "
+                                                            "studio_help('set_ops'). 'save_as' names a result.")],
+                    label: str = "", dry_run: bool = False) -> str:
+    """Edit a set like the Sector Editor: sectors, cells, model and building rows, new models (install_model)
+    and textures (add_texture). Steps run on one in-memory copy; SET.SDF, override.lst and the new files are
+    written ONCE after the Sector Editor's checks, with an undo snapshot. If a step fails nothing is written."""
+    return _guard(sets.run, set_name, operations, label, dry_run)
+
+
+@mcp.tool()
+def studio_set_create(number: int, from_set: str = "set1", keep_sectors: bool = False,
+                      folders: dict | None = None) -> str:
+    """Create a new set SetN under Data/Sets. Default: a full copy of from_set (its SET.BAS with vehicles,
+    textures and installed models) with no sectors, ready for new sectors. keep_sectors=true keeps them (a set
+    variant). folders = take single folders from other sets, e.g. {'Palette': 'set3', 'HI': 'set3'} (Sector
+    Editor New Set). Sets 1-7 also read Loose/ overrides in game; higher numbers do not."""
+    return _guard(sets.create, number, from_set, keep_sectors, folders)
+
+
+@mcp.tool()
+def studio_set_undo(set_name: Annotated[str, Field(description=SET_HELP)], steps: int = 1) -> str:
+    """Undo the last set edit(s): SET.SDF, override.lst and the files written by the edit come back (new files
+    are removed)."""
+    return _guard(sets.undo, set_name, steps)
+
+
+@mcp.tool()
+def studio_set_redo(set_name: Annotated[str, Field(description=SET_HELP)], steps: int = 1) -> str:
+    """Redo set edits that were undone."""
+    return _guard(sets.redo, set_name, steps)
+
+
+@mcp.tool()
+def studio_set_history(set_name: Annotated[str, Field(description=SET_HELP)]) -> str:
+    """The undo/redo entries kept for a set."""
+    return _guard(sets.history_listing, set_name)
+
+
+def _make_set_op_tool(op_name: str, function):
+    """One MCP tool per set operation, with docstring and defaults taken from sets.SET_OPS."""
+    parameters = [inspect.Parameter("set_name", inspect.Parameter.POSITIONAL_OR_KEYWORD,
+                                    annotation=Annotated[str, Field(description=SET_HELP)])]
+    defaults = {}
+    for name, parameter in inspect.signature(function).parameters.items():
+        if name in ("ctx", "save_as"):
+            continue
+        default = None if parameter.default is inspect.Parameter.empty else parameter.default
+        defaults[name] = default
+        parameters.append(inspect.Parameter(name, inspect.Parameter.POSITIONAL_OR_KEYWORD, default=default,
+                                            annotation=_annotation(default)))
+    for name, default in (("label", ""), ("dry_run", False)):
+        parameters.append(inspect.Parameter(name, inspect.Parameter.POSITIONAL_OR_KEYWORD, default=default,
+                                            annotation=_annotation(default)))
+
+    def tool(**kwargs):
+        target = kwargs.pop("set_name")
+        label, dry_run = kwargs.pop("label"), kwargs.pop("dry_run")
+        arguments = {name: value for name, value in kwargs.items() if value != defaults.get(name)}
+        return _guard(sets.run, target, [{"op": op_name, **arguments}], label or op_name, dry_run)
+
+    tool.__signature__ = inspect.Signature(parameters, return_annotation=str)
+    tool.__name__ = sets.tool_name(op_name)
+    mcp.add_tool(tool, name=sets.tool_name(op_name), description=" ".join((function.__doc__ or op_name).split()))
 
 
 # --- editing ----------------------------------------------------------------------------------
@@ -497,6 +681,9 @@ def _make_op_tool(op_name: str, function):
 
 for _name, _function in sorted(edit.OPS.items()):
     _make_op_tool(_name, _function)
+
+for _name, _function in sorted(sets.SET_OPS.items()):
+    _make_set_op_tool(_name, _function)
 
 
 def main() -> None:
