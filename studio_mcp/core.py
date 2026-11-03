@@ -48,8 +48,9 @@ def work_dir() -> Path:
 
 
 def writable_roots() -> list[Path]:
-    """Folders the MCP may write to: game models and wireframes, plus any extra roots from ONUA_MCP_WRITE_ROOTS."""
-    roots = [under_data("Models"), under_data("Wireless"), work_dir()]
+    """Folders the MCP may write to: game models, wireframes and sets, plus any extra roots from
+    ONUA_MCP_WRITE_ROOTS. Sets are written only by the set tools (sets.py), always with an undo snapshot."""
+    roots = [under_data("Models"), under_data("Wireless"), under_data("Sets"), work_dir()]
     for extra in os.environ.get("ONUA_MCP_WRITE_ROOTS", "").split(os.pathsep):
         if extra.strip():
             roots.append(Path(extra.strip()).resolve())
@@ -374,14 +375,18 @@ def export_model(source: Source, out_dir: str, base_name: str, skeleton_stem: st
 NEW_MODEL_DONORS = {6: "set1:VP_MIG", 7: "set1:VP_JET1", 8: "set1:VP_FLSML"}
 
 
-def new_model(out_dir: str, base_name: str, skeleton_stem: str) -> dict:
-    """An empty loose model (no polygons, plain material blocks kept) to build a new design from scratch."""
-    donor = NEW_MODEL_DONORS.get(len(skeleton_stem))
-    if donor is None:
-        raise McpToolError(f"skeleton_stem must have 6, 7 or 8 characters (e.g. 'VPNBOMB1'), got '{skeleton_stem}'")
+def new_model(out_dir: str, base_name: str, skeleton_stem: str, donor: str = "") -> dict:
+    """An empty loose model (no polygons, plain material blocks kept) to build a new design from scratch.
+
+    ``donor`` picks the Set.BAS object whose material blocks the empty shell keeps (e.g. 'set3:ST_CITY1' for a
+    building with that set's facade textures); the skeleton stem must then be as long as the donor's."""
+    if not donor:
+        donor = NEW_MODEL_DONORS.get(len(skeleton_stem))
+        if donor is None:
+            raise McpToolError(f"skeleton_stem must have 6, 7 or 8 characters (e.g. 'VPNBOMB1'), got '{skeleton_stem}'")
     result = export_model(resolve_source(donor), out_dir, base_name, skeleton_stem)
     from studio_mcp import edit, history
-    edit.run(result["base_file"], [{"op": "clear"}], label="new empty model")
+    edit.run(result["base_file"], [{"op": "clear"}], label="new empty model", set_hint=donor.split(":")[0])
     history.clear(Path(result["base_file"]))   # the empty shell is the first state: undo never goes back to the donor
     result["note"] = ("Empty model ready. Build with loft / create_primitive / add_polygons / import_geometry "
                       "(swatch='faction.part' paints, see studio_swatches), then auto_shade.")

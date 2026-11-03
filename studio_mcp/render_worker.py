@@ -12,6 +12,11 @@ import sys
 from pathlib import Path
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+# The offscreen platform loads no fonts by itself: without this the labels on the pictures come out as boxes.
+for _fonts in (Path(os.environ.get("WINDIR", "C:/Windows")) / "Fonts", Path("/usr/share/fonts"),
+               Path("/System/Library/Fonts")):
+    if "QT_QPA_FONTDIR" not in os.environ and _fonts.is_dir():
+        os.environ["QT_QPA_FONTDIR"] = str(_fonts)
 
 STUDIO_ROOT = Path(__file__).resolve().parents[1]
 if str(STUDIO_ROOT) not in sys.path:
@@ -95,6 +100,12 @@ def main() -> int:
     background = QColor(request.get("background", "#1f2228"))
     result = {"ok": False, "images": [], "warnings": []}
     try:
+        if request.get("task") == "set_render":
+            app = QApplication.instance() or QApplication([])  # noqa: F841 - must stay alive
+            from studio_mcp import set_render
+            result.update(set_render.render(request), ok=True)
+            print("RESULT_JSON " + json.dumps(result))
+            return 0
         source = core.resolve_source(request["spec"], request.get("set_hint", ""))
         family = core.load_family(source)
         if family.root_object is None:
