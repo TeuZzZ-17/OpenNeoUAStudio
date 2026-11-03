@@ -2,7 +2,7 @@
 
 from collections import OrderedDict
 
-from PySide6.QtCore import QObject, QPoint, QRunnable, QThreadPool, QTimer, Signal
+from PySide6.QtCore import QObject, QRunnable, QThreadPool, QTimer, Signal
 from PySide6.QtGui import QIcon, QPixmap
 
 from map_editor.render.sector_sprite import rasterize_sprite, sprite_input
@@ -55,13 +55,13 @@ class CardPreviews(QObject):
     def request(self, requests):
         # Scrolling replaces queued work; it never renders the whole model table.
         self.pending.clear()
-        for key, kind, number, state in requests:
+        for key, kind, number, state, size in requests:
             if key in self.cache:
                 icon = self.cache.pop(key)
                 self.cache[key] = icon
                 self.ready.emit(key, icon)
             elif key != self.active:
-                self.pending[key] = (kind, number, state)
+                self.pending[key] = (kind, number, state, size)
         if self.pending:
             self.timer.start()
 
@@ -71,14 +71,14 @@ class CardPreviews(QObject):
         if not self.pending or self.library is None:
             self.timer.stop()
             return
-        key, (kind, number, state) = self.pending.popitem(last=False)
+        key, (kind, number, state, size) = self.pending.popitem(last=False)
         library = PreviewLibrary(self.library, state, number if kind == "model" else None)
         self.busy = True
         self.active = key
         self.rendered += 1
         try:
             sprite = self.viewport.render_icon(library, 0 if kind == "model" else number,
-                                               1, max_dimension=112)
+                                               1, max_dimension=size)
             if sprite is not None:
                 self._complete(key, sprite.image)
                 return
@@ -87,7 +87,7 @@ class CardPreviews(QObject):
                 self._complete(key, None)
                 return
             extent = max(1, *(mesh.bounds[i + 3] - mesh.bounds[i] for i in range(3)))
-            scale = min(.13, 90 / extent)
+            scale = min(.13 * size / 112, .8 * size / extent)
             data = sprite_input(library, mesh, -45, 35.264, scale, fit=True)
             self.pool.start(_RasterTask(key, data, library.tables, scale, self.result))
         except (OSError, ValueError, IndexError, RuntimeError):
@@ -111,17 +111,12 @@ class CardPreviews(QObject):
 
 
 def visible_items(view):
-    """Find only rows intersecting the visible list viewport."""
+    """Find only items intersecting the visible list viewport (list or tile grid)."""
     if not view.isVisible():
         return []
     rect = view.viewport().rect()
-    first = view.indexAt(QPoint(rect.center().x(), 6)).row()
-    if first < 0:
-        first = view.indexAt(QPoint(rect.center().x(), rect.center().y())).row()
-    if first < 0:
-        return []
     items = []
-    for row in range(first, view.count()):
+    for row in range(view.count()):
         item = view.item(row)
         if item.isHidden():
             continue

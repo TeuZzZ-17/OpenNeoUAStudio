@@ -93,7 +93,6 @@ def test_double_click_background_deselects_including_single_cell_layout(real_win
     assert not window.apply_model_button.isEnabled()
     assert window.ground.isEnabled() and window.symbol.isEnabled()
     window.confirm_placement()
-    window.apply_states()
     assert window.document.sdf == before
     window._layout_changed(1)
     before = deepcopy(window.document.sdf)
@@ -175,7 +174,11 @@ def test_validation_is_a_report_not_a_persistent_tab_and_zip_label_is_clear(real
     assert [window.tabs.tabText(i) for i in range(window.tabs.count())] == ["Cells", "Models", "Definitions"]
     assert window.issues.isHidden() and window.issues.toPlainText()
     assert window.validation_action.text().startswith("Validation Report")
-    assert window.actions["zip"].text() == "Export Complete Set as ZIP" + chr(0x2026)
+    assert window.actions["save"].text() == "Overwrite Set"
+    assert window.actions["export"].text() == "Export Set" + chr(0x2026)
+    assert window.actions["undo"].text() == "< Undo" and window.actions["redo"].text() == "Redo >"
+    assert "Bottom" not in [window.view_preset.itemText(i) for i in range(window.view_preset.count())]
+    assert str(window.document.folder) in window.windowTitle()
 
 
 def test_dragging_an_unselected_building_selects_and_moves_it_directly(real_window):

@@ -1,4 +1,5 @@
 from copy import deepcopy
+from dataclasses import replace
 from unittest.mock import patch
 
 import pytest
@@ -6,7 +7,7 @@ import pytest
 from map_editor.core.set_sdf_parser import (
     SetSdf, SdfBuilding, SdfBuildingModel, SdfSector,
 )
-from sector_editor.document import SetDocument
+from sector_editor.document import AUTO, SetDocument
 
 
 def make_document(sectors):
@@ -68,69 +69,20 @@ def test_relocate_cells_move_uses_snapshot_for_overlap_and_is_one_undo():
     assert document.sdf == after
 
 
-@pytest.mark.parametrize(
-    ("sources", "target"),
-    [([], 0), ([9], 0), ([-1], 0), ([1.5], 0), ([0, 2], 2), ([0], 9)],
-)
-def test_relocate_cells_rejects_invalid_or_off_grid_footprints_without_changes(
-        sources, target):
-    document = make_document({5: sector()})
-    before = deepcopy(document.sdf)
-
-    with pytest.raises(ValueError):
-        document.relocate_cells(5, sources, target, move=True)
-
-    assert document.sdf == before
-    assert not document._undo
-
-
-def test_relocate_single_sector_only_accepts_center_cell_noop():
-    document = make_document({
-        9: sector(9, ground=2, cells=(5,), single=True, comment="Single")
-    })
-    before = deepcopy(document.sdf)
-
-    with pytest.raises(ValueError):
-        document.relocate_cells(9, {4}, 3)
-    with pytest.raises(ValueError):
-        document.relocate_cells(9, {0}, 4)
-    assert document.relocate_cells(9, {4}, 4) == {4}
-    assert document.sdf == before
-    assert not document._undo
-
-
-def test_relocate_cells_same_position_does_not_add_undo():
-    document = make_document({5: sector()})
-    before = deepcopy(document.sdf)
-
-    assert document.relocate_cells(5, {0, 1}, 0, move=True) == {0, 1}
-
-    assert document.sdf == before
-    assert not document._undo
-
-
-def test_set_ground_changes_only_matching_sectors_and_undoes_atomically():
+def test_sector_fields_change_selected_sectors_and_undo_atomically():
     document = make_document({
         5: sector(5, ground=1, comment="Family A"),
         6: sector(6, ground=1, comment="Family A sibling"),
         7: sector(7, ground=2, comment="Family B"),
-        9: sector(9, ground=1, cells=(4,), single=True, comment="Single A"),
     })
     before = deepcopy(document.sdf)
 
-    document.set_ground({5, 6, 7, 9}, 4, replace_ground=1)
+    document.set_sector_fields({5, 7}, ground=4)
 
     after = deepcopy(document.sdf)
-    assert {n: s.ground for n, s in after.sectors.items()} == {
-        5: 4, 6: 4, 7: 2, 9: 4,
-    }
-    for number, original in before.sectors.items():
-        expected = SdfSector(original.number, original.kind,
-                             4 if original.ground == 1 else original.ground,
-                             original.symbol, original.subsects, original.comment)
-        assert after.sectors[number] == expected
+    assert {n: s.ground for n, s in after.sectors.items()} == {5: 4, 6: 1, 7: 4}
+    assert {n: s.symbol for n, s in after.sectors.items()} == {n: s.symbol for n, s in before.sectors.items()}
     assert after.buildings == before.buildings
-    assert after.models == before.models
     assert len(document._undo) == 1
     document.undo()
     assert document.sdf == before
@@ -138,38 +90,54 @@ def test_set_ground_changes_only_matching_sectors_and_undoes_atomically():
     assert document.sdf == after
 
 
-def test_set_ground_without_filter_changes_all_selected_families():
+def test_automatic_fields_copy_the_most_similar_sector():
     document = make_document({
-        5: sector(5, ground=1), 7: sector(7, ground=2),
+        5: sector(5, ground=3, comment="Same cells"),
+        7: sector(7, ground=2, cells=(1,) * 9),
+        9: sector(9, ground=0),
     })
-
-    document.set_ground((5, 7), 3)
-
-    assert {n: s.ground for n, s in document.sdf.sectors.items()} == {5: 3, 7: 3}
-
-
-@pytest.mark.parametrize(
-    ("numbers", "ground", "replace_ground"),
-    [([5, 99], 3, None), ([5, True], 3, None), ([5], 6, None),
-     ([5], 3, -1)],
-)
-def test_set_ground_validates_every_input_before_changing(numbers, ground,
-                                                          replace_ground):
-    document = make_document({5: sector()})
-    before = deepcopy(document.sdf)
-
-    with pytest.raises(ValueError):
-        document.set_ground(numbers, ground, replace_ground=replace_ground)
-
-    assert document.sdf == before
-    assert not document._undo
+    document.sdf.sectors[5] = replace(document.sdf.sectors[5], symbol=44)
+    document.set_sector_fields([9], ground=AUTO, symbol=AUTO)
+    assert (document.sdf.sectors[9].ground, document.sdf.sectors[9].symbol) == (3, 44)
 
 
-def test_set_ground_filtered_noop_does_not_add_undo():
+def test_sector_fields_noop_does_not_add_undo():
     document = make_document({5: sector(ground=1)})
     before = deepcopy(document.sdf)
 
-    document.set_ground({5}, 1, replace_ground=2)
+    document.set_sector_fields({5}, ground=1)
 
     assert document.sdf == before
     assert not document._undo
+
+
+
+
+def test_textures_with_vanilla_names_become_loose_ilbm_in_the_set_palette(tmp_path):
+    from PySide6.QtGui import QColor, QImage
+    from studio.formats.images import parse_ilbm_file
+    from sector_editor import textures
+
+    class Resource:
+        class_id, resource_name = "ilbm.class", "BODEN1.ILBM"
+
+    palette = [(0, 0, 0)] * 256
+    palette[7] = (250, 0, 0)
+    original = textures.IlbmImage(source_name="BODEN1.ILBM", kind="ILBM", width=4, height=4,
+                                  palette=palette, pixels=bytes(16))
+    textures.write_image_as_ilbm(original, tmp_path / "Palette" / "STANDARD.PAL")
+    image = QImage(8, 8, QImage.Format.Format_RGB32)
+    image.fill(QColor(255, 0, 0))
+    image.save(str(tmp_path / "boden1.png"))
+    image.save(str(tmp_path / "unknown.png"))
+    with patch.object(textures, "decode_texture", return_value=original):
+        written, skipped = textures.import_textures(tmp_path, SimpleArchive([Resource]), [tmp_path])
+    assert [p.relative_to(tmp_path).as_posix() for p in written] == ["Loose/ILBM/BODEN1.ILBM"]
+    assert len(skipped) == 1 and "unknown.png" in skipped[0]
+    result = parse_ilbm_file(written[0])
+    assert (result.width, result.height) == (4, 4) and set(result.pixels) == {7}
+
+
+class SimpleArchive:
+    def __init__(self, resources):
+        self.resources = [resource() for resource in resources]

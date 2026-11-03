@@ -3,8 +3,10 @@
 import os
 from dataclasses import replace
 
+import math
+
 from PySide6.QtCore import QEvent, QRectF, QPointF, Qt, Signal
-from PySide6.QtGui import QColor, QPen, QPolygonF
+from PySide6.QtGui import QColor, QPainter, QPen, QPolygonF
 from PySide6.QtWidgets import QApplication, QToolTip
 
 from map_editor.render.gpu_viewport import GpuMapViewport, available
@@ -13,6 +15,32 @@ from map_editor.core.ldf_model import DEFAULT_HGT, LdfDocument
 from studio.rendering.asset_viewport import PickShape, resolve_pick_shape
 from studio.ui.cursor_themes import studio_cursor
 from studio.rendering.indexed import retail_source_face_front_facing
+
+
+# A BASE wider than this (in either direction) spans more than one and a half
+# cells: it was made for the whole sector, like ST_MACHT or GS_BIG (900 x 900).
+WHOLE_SECTOR_EXTENT = 450
+# Rotation arrows: clockwise quarter turns -> world direction (x, z) on the grid.
+ROTATION_DIRECTIONS = {0: (0, 1), 1: (1, 0), 2: (0, -1), 3: (-1, 0)}
+
+
+def covers_sector(library, model):
+    """True when a model (ID or BASE name) is built for the full sector."""
+    if library is None:
+        return False
+    if not isinstance(model, str):
+        models = library.assets.sdf.models
+        if model is None or not 0 <= model < len(models):
+            return False
+        model = models[model].base
+    cache = library.__dict__.setdefault("_whole_sector_cache", {})
+    key = model.casefold()
+    if key not in cache:
+        faces = library._base_faces(model) or ()
+        xs = [v[0] for face in faces for v in face.vertices]
+        zs = [v[2] for face in faces for v in face.vertices]
+        cache[key] = bool(xs) and max(max(xs) - min(xs), max(zs) - min(zs)) > WHOLE_SECTOR_EXTENT
+    return cache[key]
 
 
 class PreviewLibrary:
@@ -52,6 +80,8 @@ class SectorViewport(GpuMapViewport):
     cellDragStarted = Signal(int)
     navigationRequested = Signal(int, object)
     applyRequested = Signal()
+    cellActivated = Signal(int)
+    rotationChosen = Signal(int)
 
     def __init__(self, parent=None, *, top_down=False):
         enabled = os.environ.get("NME_RENDERER", "").casefold() != "software" and available()
@@ -71,6 +101,9 @@ class SectorViewport(GpuMapViewport):
         self._gesture = None
         self._selection_box = None
         self.hover_cell = None
+        # Clockwise quarter turns offered as arrows ({turns: allowed}); None when not rotating.
+        self.rotation_choices = None
+        self._rotation_hover = None
         self.setAcceptDrops(True)
         self.setMouseTracking(True)
         self.contextRequested.connect(self._request_context)
@@ -238,6 +271,13 @@ class SectorViewport(GpuMapViewport):
         self._ghost_mesh = None
         if placements:
             original = preview.mesh(self._number)
+            # A whole-sector model is shown centered over the full sector,
+            # the way it is placed (the sector becomes one large cell).
+            whole = any(covers_sector(library, model) for model, _cell in placements)
+            if whole:
+                targets = frozenset({4} if self.single else range(9))
+                placements = placements[:1]
+                self.target_cells = set(targets)
             removed = targets | frozenset(hidden)
             faces = [(face, ox, oz) for face, ox, oz in original.faces
                      if self.cell_index(ox, oz) not in removed]
@@ -253,7 +293,7 @@ class SectorViewport(GpuMapViewport):
                 if source is None:
                     self.previewFailed.emit(f"Preview unavailable: {name}")
                     continue
-                ox, oz = (0, 0) if self.single else ((cell % 3 - 1) * 300, (1 - cell // 3) * 300)
+                ox, oz = (0, 0) if self.single or whole else ((cell % 3 - 1) * 300, (1 - cell // 3) * 300)
                 # Faces need separate identities when a BASE is also used in unchanged cells.
                 for face in source:
                     ghost = replace(face)
@@ -273,6 +313,46 @@ class SectorViewport(GpuMapViewport):
         return QPolygonF([QPointF(*self.camera.world_to_screen((px, -2, pz))[0])
                           for px, pz in ((x-half, z-half), (x+half, z-half),
                                          (x+half, z+half), (x-half, z+half))])
+
+    def _rotation_arrows(self):
+        """Screen center and tip of each rotation arrow around the selected cells."""
+        cells = self.selected_cells or {4}
+        xs = [600 + (c % 3 - 1) * 300 for c in cells]
+        zs = [-600 + (1 - c // 3) * 300 for c in cells]
+        cx, cz = (min(xs) + max(xs)) / 2, (min(zs) + max(zs)) / 2
+        reach = {0: max(zs) - cz, 1: max(xs) - cx, 2: cz - min(zs), 3: cx - min(xs)}
+        center = QPointF(*self.camera.world_to_screen((cx, -2, cz))[0])
+        arrows = {}
+        for quarter, (dx, dz) in ROTATION_DIRECTIONS.items():
+            distance = reach[quarter] + 230
+            tip = QPointF(*self.camera.world_to_screen((cx + dx * distance, -2, cz + dz * distance))[0])
+            arrows[quarter] = (center, tip)
+        return arrows
+
+    def _rotation_at(self, point):
+        for quarter, (_center, tip) in self._rotation_arrows().items():
+            if self.rotation_choices.get(quarter) and (tip - point).manhattanLength() < 26:
+                return quarter
+        return None
+
+    def _draw_rotation_arrows(self, painter):
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        for quarter, (center, tip) in self._rotation_arrows().items():
+            if not self.rotation_choices.get(quarter):
+                continue
+            dx, dy = tip.x() - center.x(), tip.y() - center.y()
+            length = math.hypot(dx, dy) or 1
+            ux, uy = dx / length, dy / length
+            base = QPointF(tip.x() - ux * 22, tip.y() - uy * 22)
+            head = QPolygonF([tip, QPointF(base.x() - uy * 13, base.y() + ux * 13),
+                              QPointF(base.x() + uy * 13, base.y() - ux * 13)])
+            hovered = quarter == self._rotation_hover
+            color = QColor(230, 215, 135, 240) if hovered else QColor(165, 170, 178, 175)
+            painter.setPen(QPen(color, 6, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap))
+            painter.drawLine(QPointF(tip.x() - ux * 48, tip.y() - uy * 48), base)
+            painter.setPen(QPen(QColor(20, 24, 30, 200), 1))
+            painter.setBrush(color)
+            painter.drawPolygon(head)
 
     def _request_context(self, point, global_point):
         cell = self.pick_subcell(point)
@@ -345,6 +425,14 @@ class SectorViewport(GpuMapViewport):
         self.update()
 
     def mousePressEvent(self, event):
+        if self.rotation_choices is not None:
+            quarter = self._rotation_at(event.position()) if event.button() == Qt.MouseButton.LeftButton else None
+            if quarter is None:
+                self.operationCancelled.emit()
+            else:
+                self.rotationChosen.emit(quarter)
+            event.accept()
+            return
         if event.button() == Qt.MouseButton.LeftButton and not self.model_preview:
             self.setFocus(Qt.FocusReason.MouseFocusReason)
             self._cell_press = event.position()
@@ -356,6 +444,13 @@ class SectorViewport(GpuMapViewport):
         super().mousePressEvent(event)
 
     def mouseMoveEvent(self, event):
+        if self.rotation_choices is not None:
+            hover = self._rotation_at(event.position())
+            if hover != self._rotation_hover:
+                self._rotation_hover = hover
+                self.update()
+            self.setCursor(studio_cursor("point" if hover is None else "open"))
+            return
         self.hover_cell = cell = self.pick_subcell(event.position())
         if self._cell_press is not None:
             distance = (event.position() - self._cell_press).manhattanLength()
@@ -411,10 +506,16 @@ class SectorViewport(GpuMapViewport):
         self.setCursor(studio_cursor("point"))
 
     def mouseDoubleClickEvent(self, event):
+        if self.rotation_choices is not None:
+            event.accept()
+            return
         if event.button() == Qt.MouseButton.LeftButton and not self.model_preview:
-            if self.pick_subcell(event.position()) is None:
-                self._cell_press = self._gesture = self._selection_box = None
+            cell = self.pick_subcell(event.position())
+            self._cell_press = self._gesture = self._selection_box = None
+            if cell is None:
                 self.selectionCleared.emit()
+            else:
+                self.cellActivated.emit(cell)
             event.accept()
             return
         super().mouseDoubleClickEvent(event)
@@ -452,7 +553,7 @@ class SectorViewport(GpuMapViewport):
         if self.model_preview or self.doc is None:
             return
         painter.save()
-        if not self.top_down and hasattr(window, "grid_action") and not window.grid_action.isChecked() and not self.target_cells:
+        if not self.top_down and hasattr(window, "grid_action") and not window.grid_action.isChecked() and not self.target_cells and self.rotation_choices is None:
             painter.restore()
             return
         for index in range(9):
@@ -473,4 +574,6 @@ class SectorViewport(GpuMapViewport):
             painter.setPen(QPen(QColor(75, 195, 220), 1, Qt.PenStyle.DashLine))
             painter.setBrush(QColor(75, 195, 220, 35))
             painter.drawRect(self._selection_box)
+        if self.rotation_choices is not None:
+            self._draw_rotation_arrows(painter)
         painter.restore()
