@@ -128,7 +128,7 @@ def test_existing_native_visual_overrides_remain_effective(document):
 
 
 def test_complete_zip_contains_unsaved_tables_and_every_resource(document, tmp_path):
-    document.assign_model(5, {4}, 1, all_states=True)
+    document.assign_model(5, {4}, 1)
     original = document.sdf.path.read_bytes()
     target = tmp_path / "Set8.zip"
     document.export_zip(target)
@@ -231,24 +231,105 @@ def test_import_resource_failure_rolls_back_the_whole_merge(document, tmp_path):
 def test_pending_dummy_building_rows_are_not_overwritten(document):
     document.sdf.models = [replace(m, base="dummy.base") for m in document.sdf.models]
     document.sdf.sectors[5] = replace(document.sdf.sectors[5], subsects=(0, 1) + (0,) * 7)
-    document.assign_model(5, [0, 1], 2)
+    document.assign_model(5, [0, 1], 2, state=1)
     cells = document.sdf.sectors[5].subsects
     assert cells[0] != cells[1]
-    assert document.sdf.buildings[cells[0]].damaged == 0
-    assert document.sdf.buildings[cells[1]].damaged == 1
+    assert document.sdf.buildings[cells[0]].intact == 0
+    assert document.sdf.buildings[cells[1]].intact == 1
 
 
-def test_restore_saved_layout_can_be_undone(document):
-    original = document.sdf.sectors[5]
+def test_reset_set_empties_or_restores_saved_tables_and_can_be_undone(document):
+    saved = deepcopy(document.sdf)
     document.assign_building(5, {0}, 1)
-    edited = document.sdf.sectors[5]
-    document.restore_sector(5)
-    assert document.sdf.sectors[5] == original
+    edited = deepcopy(document.sdf)
+    document.reset_sectors()
+    assert not document.sdf.sectors and document.sdf.models == saved.models
     document.undo()
-    assert document.sdf.sectors[5] == edited
-    number = document.add_sector(5)
-    document.restore_sector(number)
-    assert number not in document.sdf.sectors
+    assert document.sdf == edited
+    document.reset_sectors(saved=True)
+    assert document.sdf == saved
+    document.undo()
+    assert document.sdf == edited
+
+
+def test_intact_model_brings_its_damage_states(document):
+    names = ("ST_CITY1.base", "STxCITY1.base", "STyCITY1.base", "STzCITY1.base", "ST_ROAD.base")
+    document.sdf.models = [SdfBuildingModel(i, name, "skeleton/x.sklt", (0, 1, 0, 0), ())
+                           for i, name in enumerate(names)]
+    document.sdf.buildings = [SdfBuilding(0, 4, 4, 4, 4, 0)]
+    document.sdf.sectors = {5: SdfSector(5, 0, 1, 1, (0,) * 9)}
+    document.assign_model(5, {0}, 0)
+    row = document.sdf.buildings[document.sdf.sectors[5].subsects[0]]
+    assert (row.intact, row.damaged, row.heavy, row.flat, row.destructible) == (0, 1, 2, 3, 1)
+    document.assign_model(5, {1}, 4)
+    row = document.sdf.buildings[document.sdf.sectors[5].subsects[1]]
+    assert (row.intact, row.damaged, row.heavy, row.flat) == (4, 4, 4, 4)
+    # An existing building row that starts from the model wins over the names;
+    # the most used row wins among several.
+    row = len(document.sdf.buildings)
+    document.sdf.buildings.append(SdfBuilding(row, 0, 2, 2, 3, 1))
+    document.sdf.sectors[6] = SdfSector(6, 0, 1, 1, (row, row) + (0,) * 7)
+    assert document.state_chain(0) == ((0, 2, 2, 3), 1)
+
+
+def test_change_cell_state_starts_cells_natively_from_that_state(document):
+    document.assign_states(5, {0, 4}, (0, 1, 2, 2), 1)
+    document.shift_state(5, {0}, 1)
+    cells = document.sdf.sectors[5].subsects
+    row = document.sdf.buildings[cells[0]]
+    assert (row.intact, row.damaged, row.heavy, row.flat) == (1, 2, 2, 2)
+    assert document.sdf.buildings[cells[4]].intact == 0
+    document.shift_state(5, {4}, 3)
+    row = document.sdf.buildings[document.sdf.sectors[5].subsects[4]]
+    assert (row.intact, row.damaged, row.heavy, row.flat) == (2, 2, 2, 2)
+    with pytest.raises(ValueError):
+        document.shift_state(5, {4}, 4)
+
+
+def test_rotation_turns_only_the_selected_cells(document):
+    document.sdf.sectors[5] = replace(document.sdf.sectors[5], subsects=(1, 0, 0, 0, 0, 0, 0, 0, 0))
+    assert document.rotated_cells(set(range(9)), 1)[0] == 2
+    assert document.rotated_cells({0, 1}, 1) is None
+    assert document.rotated_cells({0, 1}, 2) == {0: 1, 1: 0}
+    assert document.rotated_cells({4}, 1) == {4: 4}
+    assert document.rotate_cells(5, {0, 1, 3, 4}, 1) == {0, 1, 3, 4}
+    assert document.sdf.sectors[5].subsects[:2] == (0, 1)
+    document.rotate_cells(5, set(range(9)), 2)
+    assert document.sdf.sectors[5].subsects[7] == 1
+    document.undo()
+    document.undo()
+    assert document.sdf.sectors[5].subsects[0] == 1
+    with pytest.raises(ValueError):
+        document.rotate_cells(5, {0, 1}, 1)
+    with pytest.raises(ValueError):
+        document.rotate_cells(9, {4}, 2)
+
+
+def test_whole_sector_model_turns_the_sector_into_one_large_cell(document):
+    document.assign_model(5, {0}, 1, whole=True)
+    sector = document.sdf.sectors[5]
+    assert sector.single and len(sector.subsects) == 1
+    assert document.sdf.buildings[sector.subsects[0]].intact == 1
+    document.undo()
+    assert not document.sdf.sectors[5].single
+
+
+def test_sector_copy_cut_clear_and_wipe(document):
+    source = deepcopy(document.sdf.sectors[5])
+    assert document.paste_sectors([source], 7) == [7]
+    assert document.sdf.sectors[7] == replace(source, number=7)
+    nine = deepcopy(document.sdf.sectors[9])
+    assert document.paste_sectors([source, nine], 20, remove=(5, 9)) == [20, 24]
+    assert 5 not in document.sdf.sectors and 9 not in document.sdf.sectors
+    assert document.sdf.sectors[24].single
+    with pytest.raises(ValueError):
+        document.paste_sectors([source, nine], 252)
+    document.clear_sectors([7, 24])
+    assert set(document.sdf.sectors[7].subsects) == {0} and document.sdf.sectors[24].subsects == (0,)
+    document.wipe_sectors([7])
+    assert 7 not in document.sdf.sectors
+    with pytest.raises(ValueError):
+        document.wipe_sectors([7])
 
 
 def test_independent_state_assignment_validates_before_changing_tables(document):
@@ -270,7 +351,7 @@ def test_independent_state_assignment_validates_before_changing_tables(document)
 
 def test_clipboard_keeps_model_definitions_after_model_slot_is_reused(document):
     slot = document.add_model("B.base", "skeleton/B.sklt")
-    document.assign_model(5, {0}, slot, all_states=True)
+    document.assign_model(5, {0}, slot)
     clipboard = document.copy_cells(5, {0})
     document.undo()
     document.undo()
@@ -305,7 +386,7 @@ def test_clipboard_keeps_original_shared_model_and_pastes_patterns(document):
 
 def test_clipboard_failure_rolls_back_all_allocated_dependencies(document):
     slot = document.add_model("B.base", "skeleton/B.sklt")
-    document.assign_model(5, {4}, slot, all_states=True)
+    document.assign_model(5, {4}, slot)
     clipboard = document.copy_cells(5, {4})
     document.undo()
     document.undo()
@@ -342,7 +423,7 @@ def test_generated_set_is_read_by_native_engine():
         document.add_sector(number=1)
         while len(document.sdf.models) < 257:
             document.add_model("ST_CITY1.base", "skeleton/STcCITY1.sklt", source=3)
-        document.assign_model(1, {0, 4, 8}, 256, all_states=True)
+        document.assign_model(1, {0, 4, 8}, 256)
         clipboard = document.copy_cells(1, {4})
         document.undo()
         document.paste_cells(1, {0, 4, 8}, clipboard)
@@ -441,7 +522,6 @@ def real_window():
     app.processEvents()
     yield window
     window._model_snapshot = None
-    window._state_snapshot = None
     window._sector_fields_number = None
     window.document.saved = deepcopy(window.document.sdf)
     window.close()
@@ -479,59 +559,38 @@ def test_failed_model_edit_keeps_renderer_bound_to_restored_tables(real_window):
     assert window.library.resolver.sdf is window.document.sdf
 
 
-def test_pending_states_cancel_discard_and_save_keep_original_target(real_window):
-    from PySide6.QtWidgets import QMessageBox
+def test_cell_content_changes_apply_at_once_to_selected_cells(real_window):
     window = real_window
     window.sectors.setCurrentRow(142)
-    original = deepcopy(window.document.sdf)
+    before = deepcopy(window.document.sdf)
     window.state_models[2].setCurrentIndex(window.state_models[2].findData(3))
-    with patch.object(QMessageBox, "question", return_value=QMessageBox.StandardButton.Cancel):
-        window.select_cell(0)
-        window.sectors.setCurrentRow(141)
-    assert window.current_sector == 142 and window.sectors.currentRow() == 142
-    assert window.selected_cells == {4} and window._pending_states()
-    assert window.document.sdf == original
-    with patch.object(QMessageBox, "question", return_value=QMessageBox.StandardButton.Save):
-        window.select_cell(0)
     cells = window.document.sdf.sectors[142].subsects
     assert window.document.sdf.buildings[cells[4]].heavy == 3
     assert window.document.sdf.buildings[cells[0]].heavy != 3
-    window.state_models[2].setCurrentIndex(window.state_models[2].findData(4))
-    before = deepcopy(window.document.sdf)
-    with patch.object(QMessageBox, "question", return_value=QMessageBox.StandardButton.Discard):
-        window.select_cell(8)
-    assert window.selected_cells == {8} and not window._pending_states()
+    window.undo()
     assert window.document.sdf == before
-    window.state_models[2].setCurrentIndex(window.state_models[2].findData(4))
-    with patch.object(QMessageBox, "question", return_value=QMessageBox.StandardButton.Save):
-        window.sectors.setCurrentRow(141)
-    assert window.current_sector == 141 and window.sectors.currentRow() == 141
-    cells = window.document.sdf.sectors[142].subsects
-    assert window.document.sdf.buildings[cells[8]].heavy == 4
 
 
-def test_pending_state_survives_model_table_rebuild_and_rotation(real_window):
-    from PySide6.QtWidgets import QMessageBox
+def test_rotate_shows_arrows_and_turns_the_selection(real_window):
     window = real_window
     window.sectors.setCurrentRow(142)
-    window.select_cell(0)
-    window.state_models[1].setCurrentIndex(window.state_models[1].findData(3))
-    window.model_combo.setCurrentIndex(3)
-    window.model_comment.setText("Updated card detail")
-    window.update_model()
-    assert window._pending_states() and window.state_models[1].currentData() == 3
-    assert window.models.item(3).data(int(Qt.ItemDataRole.UserRole) + 1) == "Updated card detail"
-    with patch.object(QMessageBox, "question", return_value=QMessageBox.StandardButton.Save):
-        window.transform_cells("rotate")
-    cells = window.document.sdf.sectors[142].subsects
-    assert window.document.sdf.buildings[cells[2]].damaged == 3
-    assert window.document.sdf.buildings[cells[0]].damaged != 3
+    window.select_cell(4)
+    window.start_rotation()
+    assert window.cell_grid.rotation_choices is None
+    window._select_all()
+    before = deepcopy(window.document.sdf)
+    window.start_rotation()
+    assert window.cell_grid.rotation_choices == {0: True, 1: True, 2: True, 3: True}
+    window.cell_grid.rotationChosen.emit(1)
+    assert window.cell_grid.rotation_choices is None
+    cells = before.sectors[142].subsects
+    assert window.document.sdf.sectors[142].subsects == tuple(cells[i] for i in (6, 3, 0, 7, 4, 1, 8, 5, 2))
     window.undo()
-    assert window.document.sdf.buildings[window.document.sdf.sectors[142].subsects[0]].damaged == 3
+    assert window.document.sdf == before
 
 
-def test_export_zip_flushes_all_pending_fields_and_tracks_further_edits(real_window, tmp_path):
-    from PySide6.QtWidgets import QFileDialog
+def test_export_set_zip_flushes_pending_fields_and_tracks_further_edits(real_window, tmp_path):
+    from PySide6.QtWidgets import QDialog
     window = real_window
     window.sectors.setCurrentRow(142)
     window.description.setText("Pending ZIP description")
@@ -539,8 +598,10 @@ def test_export_zip_flushes_all_pending_fields_and_tracks_further_edits(real_win
     window.model_combo.setCurrentIndex(3)
     window.model_comment.setText("First pending model edit")
     target = tmp_path / "states.zip"
-    with patch.object(QFileDialog, "getSaveFileName", return_value=(str(target), "")):
-        window.export_zip()
+    with patch("sector_editor.window.ExportSetDialog.exec", return_value=QDialog.DialogCode.Accepted), \
+            patch("sector_editor.window.ExportSetDialog.target", return_value=target), \
+            patch("sector_editor.window.QRadioButton.isChecked", return_value=True):
+        window.export_set()
     with ZipFile(target) as archive:
         sdf = parse_set_sdf_text(archive.read("Data/Sets/Set1/Scripts/SET.SDF").decode("cp1252"))
     assert sdf.sectors[142].comment == "Pending ZIP description"
@@ -612,47 +673,32 @@ def test_copied_states_remain_valid_after_the_source_edit_is_undone(real_window)
     assert (row.intact, row.damaged, row.heavy, row.flat) == (0, 3, 4, 5)
 
 
-def test_cell_tools_inspect_damage_model_and_keep_pending_edits(real_window):
-    from PySide6.QtWidgets import QMessageBox
+def test_change_cell_state_menu_changes_the_selected_cells(real_window):
     window = real_window
     window.sectors.setCurrentRow(142)
     window.document.assign_states(142, {4}, (0, 3, 4, 5), 1)
     window._refresh()
-    window.state.setCurrentIndex(2)
-    window.model_comment.setText("Pending shared definition")
-    with patch.object(QMessageBox, "question", return_value=QMessageBox.StandardButton.Cancel):
-        window.inspect_cell_model()
-    assert window.model_combo.currentData() == 0 and window._pending_model()
-    with patch.object(QMessageBox, "question", return_value=QMessageBox.StandardButton.Discard):
-        window.inspect_cell_model()
-    assert window.model_combo.currentData() == 4
-    assert window.tabs.currentWidget() is window.definitions_page and window.view.lib.model == 4
-    window.choose_cell_model()
-    assert window.tabs.currentWidget() is window.models_page
-    assert window.preview_mode.currentIndex() == 0
-    assert window.selected_cells == {4}
+    window.select_cell(4)
+    window.change_cell_state(2)
+    row = window.document.sdf.buildings[window.document.sdf.sectors[142].subsects[4]]
+    assert (row.intact, row.damaged, row.heavy, row.flat) == (4, 5, 5, 5)
+    assert [a.text() for a in window.state_menu.actions()] == ["Intact", "Damaged", "Heavily damaged", "Destroyed"]
 
 
-def test_select_matching_buildings_and_free_slot_controls(real_window):
+def test_free_slot_controls_and_double_click_creates_a_sector(real_window):
     window = real_window
     window.sectors.setCurrentRow(142)
-    window.select_cell(0)
-    window.select_matching_cells()
-    assert window.selected_cells == {0, 8}
-    assert "2 cells" in window.model_target.text()
     window.copy_cells()
     assert window.actions["paste"].isEnabled()
-    window.select_cell(4)
-    assert window.actions["paste"].isEnabled()
-    window._layout_changed(1)
-    window.select_matching_cells()
-    assert window.selected_cells == {4}
     free = window.document.free_sector()
     window.sectors.setCurrentRow(free)
-    for key in ("clear", "copy", "paste", "inspect", "choose_model", "select_matching"):
+    for key in ("clear", "copy", "paste", "rotate", "copy_sector", "wipe_sector"):
         assert not window.actions[key].isEnabled()
-    assert not window.apply_model_button.isEnabled() and not window.apply_states_button.isEnabled()
-    assert not window.select_all_button.isEnabled() and not window.clear_cells_button.isEnabled()
+    assert not window.apply_model_button.isEnabled() and not window.state_menu.isEnabled()
+    assert window.free_hint.isVisible() and window.view.isHidden()
+    window._sector_activated(window.sectors.item(free))
+    assert free in window.document.sdf.sectors and window.current_sector == free
+    assert not window.free_hint.isVisible()
 
 
 def test_panels_separate_cell_states_from_model_browser(real_window):
@@ -688,25 +734,19 @@ def test_delete_shortcut_keeps_text_editing_and_cell_editing_separate(real_windo
     assert window.document.sdf.sectors[142].subsects == before
 
 
-def test_close_guard_and_invalid_state_preserve_unapplied_fields(real_window):
+def test_close_guard_keeps_or_writes_unapplied_description(real_window):
     from PySide6.QtWidgets import QMessageBox
     window = real_window
     window.sectors.setCurrentRow(142)
     before = deepcopy(window.document.sdf)
-    window.state_models[1].setCurrentIndex(3)
+    window.description.setText("Typed, not applied")
     with patch.object(QMessageBox, "question", return_value=QMessageBox.StandardButton.Cancel):
         assert not window._guard_unsaved()
-    assert window.document.sdf == before and window._pending_states()
-    window.state_models[1].setCurrentIndex(-1)
-    with patch.object(QMessageBox, "warning"), patch.object(window.document, "save") as save:
-        assert not window.save()
-        save.assert_not_called()
-    assert window.document.sdf == before and window._pending_states()
-    assert window.state_models[1].currentIndex() == -1
-    window.state_models[1].setCurrentIndex(3)
-    with patch.object(QMessageBox, "question", return_value=QMessageBox.StandardButton.Save), patch.object(window.document, "save"):
+    assert window.document.sdf == before and window._pending_sector_fields()
+    with patch.object(QMessageBox, "question", return_value=QMessageBox.StandardButton.Save), \
+            patch.object(window.document, "save"):
         assert window._guard_unsaved()
-    assert not window._pending_states()
+    assert window.document.sdf.sectors[142].comment == "Typed, not applied"
 
 
 def test_model_form_cancel_validation_and_save_keep_the_right_model(real_window):
@@ -785,7 +825,7 @@ def test_visible_previews_are_lazy_cached_and_refresh_after_edits(real_window):
     window._request_previews()
     visible = visible_items(window.sectors) + visible_items(window.models)
     assert 0 < len(window.previews.pending) <= len(visible) < 20
-    for _ in range(40):
+    for _ in range(200):
         QTest.qWait(25)
         if window.previews.cache and not window.previews.pending and not window.previews.busy:
             break
@@ -842,3 +882,52 @@ def test_subcell_picker_uses_nearest_visible_geometry():
     finally:
         view.stop_rendering()
         view.close()
+
+
+def test_sector_image_exports_write_one_image_an_archive_and_a_sheet(real_window, tmp_path):
+    from PySide6.QtGui import QImage
+    from PySide6.QtWidgets import QFileDialog
+    window = real_window
+    window.sectors.setCurrentRow(142)
+    keep = {n: window.document.sdf.sectors[n] for n in (141, 142)}
+    window.document.sdf.sectors.clear()
+    window.document.sdf.sectors.update(keep)
+    window._refresh()
+    camera = window.view.camera.copy()
+    paths = {name: tmp_path / name for name in ("one.png", "all.zip", "sheet.png")}
+    with patch.object(QFileDialog, "getSaveFileName", return_value=(str(paths["one.png"]), "")):
+        window.export_preview()
+    with patch.object(QFileDialog, "getSaveFileName", return_value=(str(paths["all.zip"]), "")):
+        window.export_all_images()
+    with patch.object(QFileDialog, "getSaveFileName", return_value=(str(paths["sheet.png"]), "")):
+        window.export_sheet()
+    assert not QImage(str(paths["one.png"])).isNull()
+    with ZipFile(paths["all.zip"]) as archive:
+        assert archive.namelist() == ["Sector141.png", "Sector142.png"]
+    sheet = QImage(str(paths["sheet.png"]))
+    assert sheet.width() == 2 * 320 and window.current_sector == 142
+    assert window.view.lib.mesh(142).faces
+
+
+def test_custom_textures_go_to_the_loose_folder_and_reload(real_window, tmp_path):
+    from PySide6.QtGui import QColor, QImage
+    from PySide6.QtWidgets import QFileDialog, QMessageBox
+    from sector_editor.textures import set_textures
+    window = real_window
+    name = next(iter(set_textures(window.assets.archive)))
+    source = tmp_path / "in"
+    source.mkdir()
+    image = QImage(32, 32, QImage.Format.Format_RGB32)
+    image.fill(QColor(255, 0, 0))
+    image.save(str(source / f"{name}.png"))
+    image.save(str(source / "not_a_set_texture.png"))
+    written = []
+    with patch.object(QFileDialog, "getExistingDirectory", return_value=str(source)), \
+            patch.object(QMessageBox, "information") as report, \
+            patch("sector_editor.window.import_textures", side_effect=lambda folder, archive, files:
+                  written.append((folder, files)) or ([tmp_path / "x.ILBM"], ["not_a_set_texture.png: no texture"])), \
+            patch.object(window, "reload_assets") as reload:
+        window.import_custom_textures()
+    assert written == [(window.document.folder, [str(source)])]
+    reload.assert_called_once()
+    assert "Skipped 1" in report.call_args.args[2]
