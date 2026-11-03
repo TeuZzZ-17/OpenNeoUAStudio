@@ -10,7 +10,7 @@ from functools import lru_cache
 from PySide6.QtCore import QRectF, QSize, Qt, QSignalBlocker, QTimer
 from PySide6.QtGui import QColor, QFontMetrics, QImage
 from PySide6.QtWidgets import (
-    QCheckBox, QComboBox, QFileDialog, QGroupBox, QLabel, QPushButton,
+    QCheckBox, QComboBox, QFileDialog, QGridLayout, QGroupBox, QLabel, QPushButton,
     QSizePolicy, QSlider, QSpinBox, QDoubleSpinBox, QHBoxLayout, QVBoxLayout, QWidget,
 )
 
@@ -257,17 +257,15 @@ class BriefingControls(QWidget):
         layout = QVBoxLayout(self)
         layout.setContentsMargins(2, 3, 2, 3)
         layout.setSpacing(3)
-        group = QGroupBox("Briefing Model Settings")
-        group.setSizePolicy(
-            QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
-        group_layout = QVBoxLayout(group)
-        group_layout.setContentsMargins(6, 4, 6, 4)
-        group_layout.setSpacing(3)
-        layout.addWidget(group)
-        layout.addStretch(1)
+        # Three sections: Size, Position, Preview. Size and Position each show the value they write.
+        size_group = QGroupBox("Size")
+        size_layout = QVBoxLayout(size_group)
+        size_layout.setContentsMargins(6, 4, 6, 4)
+        size_layout.setSpacing(4)
+        layout.addWidget(size_group)
         label = QLabel("A larger size makes the vehicle larger in briefing and debriefing.")
         label.setWordWrap(True)
-        group_layout.addWidget(label)
+        size_layout.addWidget(label)
         self.enabled = QCheckBox("Include briefing_size")
         self.value = QSpinBox()
         self.value.setRange(BRIEFING_SIZE_MIN, BRIEFING_SIZE_MAX)
@@ -277,67 +275,92 @@ class BriefingControls(QWidget):
         self.enabled.toggled.connect(self._enabled)
         self.value.valueChanged.connect(self._value)
         self.slider.valueChanged.connect(lambda value: self.value.setValue(slider_to_briefing_size(value)))
-        group_layout.addWidget(self.enabled)
-        group_layout.addWidget(self.value)
-        group_layout.addWidget(self.slider)
-        xyz_label = QLabel("Position offset (camera axes; x+ right, y+ down, z+ away)")
+        size_row = QHBoxLayout()
+        size_row.addWidget(self.enabled, 1)
+        size_row.addWidget(self.value)
+        size_layout.addLayout(size_row)
+        size_layout.addWidget(self.slider)
+        self.output = QLabel()
+        self.output.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+        size_layout.addWidget(self.output)
+
+        position_group = QGroupBox("Position")
+        position_layout = QVBoxLayout(position_group)
+        position_layout.setContentsMargins(6, 4, 6, 4)
+        position_layout.setSpacing(4)
+        layout.addWidget(position_group)
+        xyz_label = QLabel("Offset in camera axes: x+ right, y+ down, z+ away. Use the arrows to move the model.")
         xyz_label.setWordWrap(True)
-        group_layout.addWidget(xyz_label)
+        position_layout.addWidget(xyz_label)
         self.xyz_enabled = QCheckBox("Include briefing_xyz")
         self.xyz_enabled.toggled.connect(self._xyz_enabled)
-        group_layout.addWidget(self.xyz_enabled)
+        position_layout.addWidget(self.xyz_enabled)
+        # The axes are display only; the arrow buttons below are the way to change them.
         self.xyz_values = {}
         row = QHBoxLayout()
         for axis, title in (("x", "X"), ("y", "Y"), ("z", "Z")):
             spin = QDoubleSpinBox()
             spin.setRange(-100000.0, 100000.0)
             spin.setDecimals(2)
-            spin.setSingleStep(1.0)
             spin.setPrefix(f"{title}: ")
+            spin.setReadOnly(True)
+            spin.setButtonSymbols(QDoubleSpinBox.ButtonSymbols.NoButtons)
+            spin.setFocusPolicy(Qt.FocusPolicy.NoFocus)
             self.xyz_values[axis] = spin
             row.addWidget(spin)
             spin.valueChanged.connect(lambda value, key=axis: self._xyz_value(key, value))
-        group_layout.addLayout(row)
+        position_layout.addLayout(row)
+        # Arrow pad: Reset in the middle, the four arrows around it.
         self.xyz_buttons = {}
-        arrows = QHBoxLayout()
-        for axis, title, sign in (("y", "↑", -1), ("y", "↓", 1), ("x", "←", -1), ("x", "→", 1)):
+        pad = QGridLayout()
+        pad.setSpacing(3)
+        for axis, title, sign, grid_row, grid_col in (
+                ("y", "↑", -1, 0, 1), ("x", "←", -1, 1, 0), ("y", "↓", 1, 2, 1), ("x", "→", 1, 1, 2)):
             button = QPushButton(title)
             button.setToolTip(f"Move {axis} by the current arrow speed")
             button.setAutoRepeat(True)
             self.xyz_buttons[(axis, sign)] = button
             button.clicked.connect(lambda _checked=False, key=axis, amount=sign: self._nudge(key, amount))
-            arrows.addWidget(button)
+            pad.addWidget(button, grid_row, grid_col)
         reset = QPushButton("Reset position")
         reset.clicked.connect(self._reset_xyz)
-        arrows.addWidget(reset)
-        group_layout.addLayout(arrows)
-        # Arrow speed sits under the arrow buttons it controls.
-        group_layout.addWidget(QLabel("Arrow speed"))
+        pad.addWidget(reset, 1, 1)
+        position_layout.addLayout(pad)
         self.xyz_step_slider = QSlider(Qt.Orientation.Horizontal)
         self.xyz_step_slider.setRange(0, _STEP_SLIDER_MAX)
         self.xyz_step_slider.setValue(_STEP_SLIDER_DEFAULT)
         self.xyz_step_slider.setToolTip(
             "How fast the model moves in the image: distance covered by one press "
             "of the arrow buttons, 0.01 to 10000 model units.")
-        group_layout.addWidget(self.xyz_step_slider)
+        position_layout.addWidget(self.xyz_step_slider)
+        self.output_xyz = QLabel()
+        self.output_xyz.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+        position_layout.addWidget(self.output_xyz)
+
+        preview_group = QGroupBox("Preview")
+        preview_layout = QVBoxLayout(preview_group)
+        preview_layout.setContentsMargins(6, 4, 6, 4)
+        preview_layout.setSpacing(4)
+        layout.addWidget(preview_group)
         self.mode = QComboBox()
         self.mode.addItem("Brief", "brief")
         self.mode.addItem("Debrief", "debrief")
         self.mode.currentIndexChanged.connect(self._mode)
-        group_layout.addWidget(self.mode)
         self.aspect = QComboBox()
         for text, ratio in (("16:10", 16/10), ("16:9", 16/9), ("4:3", 4/3)):
             self.aspect.addItem(text, ratio)
         self.aspect.currentIndexChanged.connect(lambda: editor.briefing_preview.update())
-        group_layout.addWidget(self.aspect)
+        preview_row = QHBoxLayout()
+        preview_row.addWidget(self.mode, 1)
+        preview_row.addWidget(self.aspect, 1)
+        preview_layout.addLayout(preview_row)
         self.background_label = _OneLineLabel()
-        group_layout.addWidget(self.background_label)
+        preview_layout.addWidget(self.background_label)
         choose = QPushButton("Choose Background")
         choose.clicked.connect(self.choose_background)
-        group_layout.addWidget(choose)
-        self.output = QLabel()
-        self.output.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
-        group_layout.addWidget(self.output)
+        preview_layout.addWidget(choose)
+
+        layout.addStretch(1)
 
     def sync(self):
         project = self.editor.project
@@ -356,9 +379,14 @@ class BriefingControls(QWidget):
                 self.xyz_values[axis].setValue(value)
         self.setEnabled(project.target_category == "vehicle")
         size_text = f"briefing_size = {round(project.briefing_size)}" if project.briefing_size_enabled else "Uses the vehicle's radius."
-        position_text = (f"briefing_xyz = {project.briefing_x:g}|{project.briefing_y:g}|{project.briefing_z:g}"
-                         if project.briefing_xyz_enabled else "Classic model position.")
-        self.output.setText(size_text + "\n" + position_text)
+        self.output.setText(size_text)
+        self._update_position_text()
+
+    def _update_position_text(self):
+        project = self.editor.project
+        self.output_xyz.setText(
+            f"briefing_xyz = {project.briefing_x:g}|{project.briefing_y:g}|{project.briefing_z:g}"
+            if project.briefing_xyz_enabled else "Classic model position.")
 
     def _xyz_value(self, axis, value):
         if self.editor._syncing:
@@ -369,6 +397,7 @@ class BriefingControls(QWidget):
         with QSignalBlocker(self.xyz_enabled):
             self.xyz_enabled.setChecked(True)
         self.editor._set_modified()
+        self._update_position_text()
         self.editor.briefing_preview.refresh()
 
     def _xyz_enabled(self, enabled):
@@ -377,6 +406,7 @@ class BriefingControls(QWidget):
         self.editor._push_undo()
         self.editor.project.briefing_xyz_enabled = enabled
         self.editor._set_modified()
+        self._update_position_text()
         self.editor.briefing_preview.refresh()
 
     def _nudge(self, axis, amount):
@@ -393,6 +423,7 @@ class BriefingControls(QWidget):
                 spin.setValue(0.0)
                 setattr(self.editor.project, f"briefing_{axis}", 0.0)
         self.editor._set_modified()
+        self._update_position_text()
         self.editor.briefing_preview.refresh()
 
     def arrow_step(self):
