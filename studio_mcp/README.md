@@ -26,7 +26,7 @@ An assistant should start with `studio_help()`: it explains the workflow, conven
 
 | Tool | What it does |
 |---|---|
-| `studio_new_model` | Start a new design: an empty loose model (no polygons, plain material blocks kept) |
+| `studio_new_model` | Start a new design: an empty loose model (no polygons, plain material blocks kept); `donor` picks the Set.BAS object whose blocks it keeps (e.g. a set building) |
 | `studio_export_model` | Copy a Set.BAS model into a loose BASE + skeleton under `Data/Models` |
 | `studio_undo` / `studio_redo` / `studio_history` | Every write keeps a snapshot of the BASE and skeleton |
 
@@ -42,6 +42,28 @@ An assistant should start with `studio_help()`: it explains the workflow, conven
 | Effects | `add_fx`, `delete_fx`, `add_emitter`, `move_emitter`, `delete_emitter`, `generate_genesis` |
 | Wireframes (`.SKL`) | `studio_wire_get`, `studio_wire_render` (drawn like the game: +z up, first segment of each entry), `studio_wire_new`, `studio_wire_edit` (`add_lines`, `add_shape` circle/arc/rect/cross/brackets/dashes, `trace_image`, `normalize`, `split_outlines`, ...), `studio_wire_from_model` (Studio's wireframe generator, effects left out by default) |
 
+**Sets and sectors** (the Sector Editor's document, `sets.py`; help: `studio_help('sets')`, `'set_ops'`)
+
+| Tool | What it does |
+|---|---|
+| `studio_set_list` / `studio_set_info` | Sets with their counts; one set's free slots, connection families, problems |
+| `studio_set_sectors` / `studio_set_models` / `studio_set_buildings` / `studio_set_list_textures` | The SET.SDF tables (cells, damage states, usage) and the set textures |
+| `studio_set_render` | Sectors (same scale), set models, building rows or a grid of sectors with transition strips; `label_cells` |
+| `studio_set_edit` | Batch of set operations, written once after the Sector Editor's checks; one tool per operation too (`studio_set_new_sector`, `studio_set_place_model`, `studio_set_install_model`, `studio_set_add_texture`, ...) |
+| `studio_set_create` | New SetN: a copy of a set without sectors 0-247 (or single folders from other sets) |
+| `studio_set_undo` / `studio_set_redo` / `studio_set_history` | Undo snapshots of SET.SDF, override.lst and every file an edit wrote (new files are removed) |
+
+`install_model` brings a loose model from `Data/Models` into a set: BASE to `Objects/<name>.bas` (loaded through
+`Scripts/override.lst`), skeleton to `Skeleton/`, missing textures re-mapped to the set palette into `Loose/ILBM`
+(Set1-Set7) or the set root. New skeleton, texture and model names must not exist in the set's SET.BAS.
+
+**Textures** (`textures.py`; help: `studio_help('textures')`)
+
+| Tool | What it does |
+|---|---|
+| `studio_texture_preview` | A set texture, a file or picture layers shown in a set's palette (optional UV grid) |
+| `studio_make_texture` | A new ILBM in a set's palette beside a model under `Data/Models` (then `set_texture`) |
+
 Selectors describe *which* points or polygons to edit (`{"x":[0,null]}`, `{"facing":"up"}`, `{"connected_to":12}`,
 `{"mirror_of":{...}}` ...) so assistants do not have to list hundreds of numbers. See `studio_help('selectors')`.
 
@@ -51,8 +73,11 @@ Selectors describe *which* points or polygons to edit (`{"x":[0,null]}`, `{"faci
   staged result was re-read and checked. If any step of a batch fails, nothing is written.
 * The commit reuses the Studio window's writers (`build_topology_states`, `save_model_base_copy`,
   `save_sklt_with_poo2_pol2_structure`) and its clipboard / material / FX routines: no format is re-implemented.
-* Writes are limited to `Data/Models`, `Data/Wireless` and a temp work folder (more roots via
-  `ONUA_MCP_WRITE_ROOTS`). Set.BAS files are only read.
+* Writes are limited to `Data/Models`, `Data/Wireless`, `Data/Sets` (set tools only) and a temp work folder (more
+  roots via `ONUA_MCP_WRITE_ROOTS`). Set.BAS files are only read.
+* Set edits use `SetDocument` (`sector_editor/document.py`) for every table change and save. The Sector Editor is
+  in beta: when its document changes, update `sets.py`, `set_render.py`, `studio_help('sets')` and
+  `tests/test_studio_mcp_sets.py` in the same change.
 * Particle emitters are tied to point numbers; when an edit renumbers points the emitters follow their point.
 * New polygons copy the shading and texel density of the model's original polygons of that material.
 
@@ -80,6 +105,7 @@ server code, restart the client session so it launches the new version.
 ```bash
 python -m studio_mcp.server                       # stdio server (set PYTHONPATH to the Studio folder)
 python -m pytest tests/test_studio_mcp.py         # helpers, editing on real models, wireframes, a real MCP round trip
+python -m pytest tests/test_studio_mcp_sets.py    # set tools on a temporary copy of Set1/Set3
 ```
 
 Renders run in a separate process (`render_worker.py`) so a Qt problem never stops the server.
@@ -96,6 +122,8 @@ Requires `mcp` (2.x or 1.x), `PySide6`, `numpy`, `Pillow`, `PyOpenGL`.
 | `select.py`, `uvs.py`, `shapes.py`, `meshmath.py` | Selectors, UV generation, primitives, vector helpers |
 | `analysis.py` | Materials, effects, textures, quality report, comparison |
 | `wire.py` | Wireframe (`.SKL`) editing |
+| `sets.py`, `set_render.py` | Set and sector tools on the Sector Editor's document; sector pictures (in the render worker) |
+| `textures.py` | Texture pictures from layers, palette mapping, ILBM writing |
 | `history.py` | Undo / redo snapshots |
 | `guide.py` | Text of `studio_help` |
 | `core.py`, `render_worker.py` | Locations, sources, export; headless render with overlays |

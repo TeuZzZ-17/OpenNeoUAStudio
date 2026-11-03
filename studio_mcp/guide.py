@@ -4,7 +4,8 @@ from __future__ import annotations
 
 import inspect
 
-TOPICS = ("start", "design", "conventions", "selectors", "uv", "recipes", "wireframe", "ops")
+TOPICS = ("start", "design", "conventions", "selectors", "uv", "recipes", "wireframe", "ops", "sets", "set_ops",
+          "textures")
 
 START = """WORKFLOW (read-only steps are always safe)
 1. Find a model: studio_list_vp (Set.BAS models) or studio_list_models (loose models under Data/Models).
@@ -18,7 +19,9 @@ START = """WORKFLOW (read-only steps are always safe)
    same engine with one step.
 5. Check: studio_render_model again, studio_analyze_model, studio_validate_model. Wrong? studio_undo / studio_redo.
 `model` is the .BASE path, or a folder holding exactly one .BASE; relative paths start at the game Data folder.
-Writes are only allowed under Data/Models. Every write keeps an undo snapshot (studio_history lists them).
+Model writes go under Data/Models (set tools write Data/Sets). Every write keeps an undo snapshot
+(studio_history / studio_set_history list them).
+SETS AND SECTORS (whole sets, sector variants, new buildings and textures): studio_help('sets').
 """
 
 DESIGN = """NEW DESIGNS IN THE URBAN ASSAULT LOOK (measured on the original Set1 units)
@@ -142,6 +145,97 @@ Undo works the same way: studio_undo / studio_redo / studio_history with the .SK
 """
 
 
+SETS = """SETS AND SECTORS (the Sector Editor's tables; the Sector Editor is in BETA: its rules may still change)
+A set is Data/Sets/SetN: Objects/SET.BAS (every model of the set - vehicles too -, textures, skeletons),
+Scripts/SET.SDF (the tables below), Scripts/override.lst, Palette/STANDARD.PAL (256 colours), HI (sky), Remap.
+SET.SDF tables (studio_set_models / studio_set_buildings / studio_set_sectors):
+- MODELS 0..4095: BASE (a label), collision SKLT, legacy symbol, shield 0-100, collision 0 own SKLT / 1 the set's
+  sub-sector collision / 2 its compact collision, effects = destruction explosions [[VP, x, z, height], ...].
+  The picture is the SET.BAS model at the same position, or the file named in override.lst.
+- BUILDINGS 0..4095: four models = intact, damaged, heavy damage, destroyed, plus destructible 0/1.
+- SECTORS 0..255 (248-255 = map border): '3x3' = 9 cells, one building each, or 'single' = one large cell.
+  ground = connection family 0-5: picks the transition strip to the neighbour (studio_set_info shows what each
+  family is used for). symbol = map symbol 0-255. Free slots: 1-247.
+Geometry: sector 1200 x 1200, cells 300 x 300 centred at x,z = -300/0/+300; y DOWN (negative = up), ground y=0.
+  cells   0 1 2   far row (+z)        A cell model is 300 x 300 and INCLUDES its own ground tile
+          3 4 5                       (ST_EMPTY: one 300 x 300 polygon). Originals: houses 80 high, city blocks
+          6 7 8   near row (-z)       200, towers 420, TV tower 1010; 13-40 polygons; a 'single' model is 900 x 900.
+Damage states: placing a model as intact brings its chain: an existing building row that starts with it, else
+the vanilla names XX_NAME -> XXxNAME (damaged) -> XXyNAME (heavy) -> XXzNAME (destroyed, rubble, may sink to +40).
+
+WORKFLOW
+1. Look: studio_set_list, studio_set_info(set), studio_set_sectors(set, text_filter='...'),
+   studio_set_render(set, sectors=[...], label_cells=true), studio_set_models / studio_set_buildings,
+   studio_set_list_textures + studio_texture_preview(source='set3:CITY1.ILBM', uv_grid=true).
+2. Edit: studio_set_edit(set, operations=[...]) - every step on one copy, ONE verified write, undo snapshot - or a
+   single-step tool (studio_set_new_sector, studio_set_place_model, ...). studio_help('set_ops') lists them all.
+3. Check: studio_set_render again (state=1..3 for the damage states, grid=[[a,b],[c,d]] for the joins),
+   studio_set_info -> problems must be [].
+4. Wrong? studio_set_undo / studio_set_redo / studio_set_history.
+
+RECIPES (studio_set_edit operations)
+Variant of a sector:   {"op":"new_sector","copy_of":5,"comment":"Nobel city, tower","save_as":"v"},
+                       {"op":"place_model","sector":{"named":"v"},"cells":[0,2],"model":"ST_HO.base"}
+Sector from models:    {"op":"new_sector","models":["ST_HAUS1",null,"ST_HAUS1",null,"ST_CITY1",null,"ST_HAUS2",
+                        null,"ST_HAUS2"],"comment":"suburb"}   (null = empty building 0; ground/symbol 'auto')
+One big model:         {"op":"new_sector","layout":"single","models":"ST_MACHT.base","whole":true}
+Start in ruins:        {"op":"shift_state","sector":40,"cells":[4],"state":3}
+Explicit four states:  {"op":"place_states","sector":40,"cells":[1],"states":["ST_HO","STxHO","STyHO","STzHO"]}
+Take sectors from another set: {"op":"import_sectors","from_set":"set1","sectors":[5,6]}  (models must exist here)
+
+NEW BUILDING (model + states + sector), e.g. for Set3:
+a. studio_new_model('Models/Base/New/Signal_Tower_Intact', 'NX_SIGT1', 'NX_SIGT1', donor='set3:ST_CITY1')
+   (keeps ST_CITY1's material blocks = Set3 facade, roof and ground textures; stem as long as the donor's).
+b. Build: ground tile first ({"op":"import_geometry","source":"set3:ST_EMPTY"}), then create_primitive /
+   extrude with material {"block":N} (studio_materials), set_uvs rect on the facade atlas, auto_shade last.
+   Footprint up to ~260 x 260 inside the 300 cell. studio_render_model(..., compare_with='set3:ST_CITY1').
+c. Damaged / heavy / destroyed: new models NXxSIGT1, NXySIGT1, NXzSIGT1 (import_geometry from the intact one,
+   then break it: delete the top, transform with jitter, damaged F-atlases such as FCITY1 via set_texture).
+d. studio_set_edit('set3', [
+     {"op":"install_model","model":"Models/Base/New/Signal_Tower_Intact/NX_SIGT1.BASE","like":"ST_CITY1"},
+     ... the same for NXxSIGT1, NXySIGT1, NXzSIGT1 ...,
+     {"op":"new_sector","copy_of":5,"save_as":"s"},
+     {"op":"place_model","sector":{"named":"s"},"cells":[4],"model":"NX_SIGT1"}])   (the chain is automatic)
+   install_model copies the BASE to Objects/, its skeleton to Skeleton/ and the textures the set lacks (in the
+   set palette); like= copies shield, collision mode and explosions from a similar original.
+e. Change it later: edit the model in Data/Models, then install_model again with replace=<model id>.
+Changing an ORIGINAL set model: studio_export_model('set3:ST_CITY1', 'Models/Base/Original_Refined/
+   City1_Intact', 'SX_CITY1', 'SX_CITY1'), edit it, then install_model with replace=<its row id> and
+   collision='keep' (every sector using it changes).
+
+NEW TEXTURES: studio_help('textures'). NEW SET: studio_set_create(8, from_set='set3') = full copy without sectors;
+then textures, models and sectors as above; a map must use set 8 to show it.
+
+ENGINE FACTS (OpenNeoUA source, Nov 2026) - the tools follow them:
+- override.lst 'lego <id> <file>' loads Objects/<file>; the BASE name in SET.SDF alone changes nothing visible.
+- A new model's skeleton lives in SetN/Skeleton/, new textures in SetN/Loose/ILBM (Set1-Set7) or the set root.
+- SET.BAS names win: new skeleton, texture and model names must be new in that set (the tools refuse clashes).
+- Repainting an existing texture (add_texture replace=true) works only in Set1-Set7 (Loose overrides).
+- Not checked by any tool: the look in game, collisions, explosions, AI behaviour. Tell the user.
+"""
+
+TEXTURES = """TEXTURES (8-bit, 256 colours of the set palette; UVs are 0..255 on a 256 x 256 texture)
+Look:   studio_set_list_textures(set); studio_texture_preview(source='set3:CITY1.ILBM', set_name='set3',
+        uv_grid=true) shows it in game colours with UV lines (pick set_uvs rects from it).
+Make:   layers on a base picture: source = a set texture ('set3:CITY1.ILBM'), an ILBM, or a PNG/JPG (for
+        example a picture made with an image generator), then layers in order. Always preview first.
+- for a model being built: studio_make_texture('Models/Base/New/<Folder>/NXWALL.ILBM', layers, set_name='set3')
+  writes it beside the BASE; then {"op":"set_texture","select":...,"texture":"NXWALL.ILBM"} and set_uvs.
+  install_model copies it into the set later.
+- directly in a set: {"op":"add_texture","name":"NXWALL.ILBM","layers":[...]} in studio_set_edit; replace=true
+  repaints an original (Set1-Set7 only; size kept). New names: up to 12 characters + .ILBM, unique in the set,
+  and not longer than the texture name they replace on a model.
+Style: originals are painted, slightly noisy, mid-dark, few saturated colours; facades are window grids on
+  concrete/brick, damaged versions (F-prefixed atlases like FCITY1) are darker with soot. Reuse crops of the
+  set's own atlases ('image' layer with crop) before inventing new patterns.
+LAYERS:
+{layers}
+Example facade: [{"op":"fill","color":"#5a554c"}, {"op":"noise","amount":10,"grain":2},
+  {"op":"windows","cols":6,"rows":10,"glass":"#263038","frame":"#3a3630","lit":0.08},
+  {"op":"dirt","amount":0.3,"blotches":30}]
+"""
+
+
 def _ops_text() -> str:
     from studio_mcp import edit
     lines = ["OPERATIONS (name: arguments).  In studio_edit_batch pass {\"op\": name, ...arguments}."]
@@ -163,11 +257,17 @@ def help_text(topic: str = "start") -> str:
         return "\n\n".join(help_text(t) for t in TOPICS)
     if topic == "start":
         return START + ("\nMore: studio_help('design' | 'conventions' | 'selectors' | 'uv' | 'recipes' | 'wireframe' | "
-                        "'ops' | 'all')")
+                        "'ops' | 'sets' | 'set_ops' | 'textures' | 'all')")
     texts = {"design": DESIGN, "conventions": CONVENTIONS, "selectors": SELECTORS, "uv": UV, "recipes": RECIPES,
-             "wireframe": WIREFRAME}
+             "wireframe": WIREFRAME, "sets": SETS}
     if topic == "ops":
         return _ops_text()
+    if topic == "set_ops":
+        from studio_mcp import sets
+        return sets.ops_help()
+    if topic == "textures":
+        from studio_mcp import textures
+        return TEXTURES.replace("{layers}", textures.layers_help())
     if topic in texts:
         return texts[topic]
     return f"Unknown topic {topic!r}. Topics: {', '.join(TOPICS)}, all"
