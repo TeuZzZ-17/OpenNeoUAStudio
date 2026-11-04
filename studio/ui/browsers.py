@@ -524,7 +524,9 @@ class GameObjectBrowser(QWidget):
     def set_number(self):
         return self.set_combo.currentData()
 
-    def reload(self):
+    def reload(self, selected=None):
+        """Read the game scripts again; ``selected`` is the object to keep selected."""
+
         install = bootstrap.installation()
         from studio.ui.shell import selected_set
         selected_number = self.set_number or selected_set()
@@ -536,7 +538,7 @@ class GameObjectBrowser(QWidget):
             self.set_combo.setCurrentIndex(index if index >= 0 else 0)
         self.objects = [obj for obj in (load_game_objects(install) if install else [])
                         if self.kinds is None or obj.kind in self.kinds]
-        self.fill()
+        self.fill(selected)
 
     def _sort_key(self, obj):
         order = self.sort_combo.currentData()

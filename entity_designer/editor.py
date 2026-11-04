@@ -2929,6 +2929,7 @@ class CollisionEditorWindow(
         dialog = ApplyScriptDialog(
             self, self.project, initial_path=path)
         if dialog.exec() == QDialog.DialogCode.Accepted:
+            self._refresh_game_objects()
             # Apply to Script can target a different definition: updating it
             # must not silently mark the currently loaded source as saved.
             same_target = (

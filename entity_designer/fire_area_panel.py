@@ -126,12 +126,13 @@ class FireAreaPanel(QGroupBox):
             lambda: self.editFinished.emit("dead_zone"))
         self.dead_zone_slider = self._add_slider(grid, 5, self.dead_zone_spin, "dead_zone")
 
-        grid.addWidget(QLabel("Max tilt (forward)"), 6, 0)
+        grid.addWidget(QLabel("Max tilt down"), 6, 0)
         self.inclination_spin = _spin(0.0, fa.MAX_INCLINATION_LIMIT - 0.1, 1.0, 1)
         self.inclination_spin.setToolTip(
             "ai_fire_trigger_forward_max_inclination: furthest a forward volume "
-            "tilts toward a ground target, in degrees. 0 = no tilt. Not used by "
-            "Below volumes.")
+            "tilts down toward a ground target, in degrees (the translucent volume "
+            "in the 3D view). 0 = no tilt. Used by flying units only: ground units, "
+            "guns and Below volumes ignore it.")
         self.inclination_spin.valueChanged.connect(
             lambda value: self.valueEdited.emit("max_inclination", value))
         self.inclination_spin.editingFinished.connect(
@@ -163,7 +164,7 @@ class FireAreaPanel(QGroupBox):
         self.aim_combo.addItem("High zone (straight ahead)", fa.AIM_HIGH)
         self.aim_combo.setToolTip(
             "Preview only, never written to the script: where a forward weapon "
-            "flies when you press play. Low follows the tilted (dashed) volume "
+            "flies when you press play. Low follows the tilted (translucent) volume "
             "down to the ground, High follows the untilted volume. Below "
             "weapons always fall straight down.")
         self.aim_combo.currentIndexChanged.connect(
@@ -280,8 +281,10 @@ class FireAreaPanel(QGroupBox):
     def set_state(self, area: fa.FireArea, shape: str | None, *, available: bool,
                   height: float, lines: list[str], note: str, warning: str,
                   units: list[tuple[int, str]] = (), unit_id: int | None = None,
-                  aim: str = fa.AIM_LOW) -> None:
-        """Show the project's area without sending edit signals back."""
+                  aim: str = fa.AIM_LOW, tilt_available: bool = True) -> None:
+        """Show the project's area without sending edit signals back.
+
+        ``tilt_available`` is False for a ground firing unit, which ignores the max tilt."""
 
         blocked = [QSignalBlocker(widget) for widget in (
             self.shape_combo, self.unit_combo, self.aim_combo, self.dead_zone_spin,
@@ -324,11 +327,12 @@ class FireAreaPanel(QGroupBox):
         self.dead_zone_slider.setMaximum(max(5000, math.ceil(self.dead_zone_spin.value())))
         self.dead_zone_slider.setValue(round(self.dead_zone_spin.value()))
         self.inclination_spin.setValue(area.max_inclination)
-        self.inclination_spin.setEnabled(shape is not None and not fa.is_below(shape))
+        tilt_enabled = shape is not None and not fa.is_below(shape) and tilt_available
+        self.inclination_spin.setEnabled(tilt_enabled)
         self.inclination_slider.setProperty("factor", 10)
         self.inclination_slider.setRange(0, int((fa.MAX_INCLINATION_LIMIT - 0.1) * 10))
         self.inclination_slider.setValue(round(self.inclination_spin.value() * 10))
-        self.inclination_slider.setEnabled(shape is not None and not fa.is_below(shape))
+        self.inclination_slider.setEnabled(tilt_enabled)
         self.height_slider.setValue(round(height))
         self.height_value.setValue(self.height_slider.value())
         self.aim_combo.setEnabled(shape is not None and not fa.is_below(shape))

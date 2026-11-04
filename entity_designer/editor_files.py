@@ -329,6 +329,17 @@ class _ScriptFilesMixin:
         clear_visual_cache()
         self.game_object_browser.reload()
 
+    def _refresh_game_objects(self):
+        """Read the game scripts again after Studio rewrote one.
+
+        The list keeps the script text it read at start-up: without this, loading the
+        unit again would show its values from before the overwrite."""
+
+        from studio.ui.browsers import GAME_OBJECT_ROLE
+        current = self.game_object_browser.tree.currentItem()
+        self.game_object_browser.reload(
+            current.data(0, GAME_OBJECT_ROLE) if current is not None else None)
+
     def _game_set_changed(self, number):
         from studio.ui.widgets import loading_resources
         self._fx_set_cache = None
@@ -765,6 +776,7 @@ class _ScriptFilesMixin:
         dialog.kind_combo.setEnabled(False)
         dialog.id_spin.setEnabled(False)
         if dialog.exec() == QDialog.DialogCode.Accepted:
+            self._refresh_game_objects()
             baseline_refreshed = self._refresh_linked_script_baseline(
                 dialog.applied_groups)
             if not baseline_refreshed:
