@@ -131,7 +131,7 @@ from studio.assets.visproto import (
 from studio.rendering.asset_viewport import (
     VIEW_PRESETS,
 )
-from studio.ui.shell import compat_color, MIXED, OPENNEOUA as COMPAT_OPENNEOUA, VANILLA
+from studio.ui.shell import compat_color, MIXED, OPENNEOUA as COMPAT_OPENNEOUA, RISKY, VANILLA
 from studio.ui.tabs import PaletteTabStrip
 from studio.ui.widgets import (
     configure_operation_status_bar,
@@ -835,7 +835,7 @@ class CollisionEditorWindow(
                 "OpenNeoUA."),
             self.collision_shape_tab: (
                 COMPAT_OPENNEOUA, "collision_shape is read only by OpenNeoUA; "
-                "vanilla keeps using the radius and collision spheres."),
+                "the vanilla engine does not support it."),
             self.ground_tab: (
                 VANILLA, "overeof (height of the vehicle above the ground) "
                 "works in vanilla Urban Assault and in OpenNeoUA."),
@@ -843,9 +843,10 @@ class CollisionEditorWindow(
                 MIXED, "fire_x/y/z and a fixed num_weapons work in vanilla; a "
                 "Min/Max weapons range is OpenNeoUA only."),
             self.gun_points_tab: (
-                MIXED, "robo_* gun points (Host Stations) and turret angles "
+                RISKY, "robo_* gun points (Host Stations) and turret angles "
                 "are vanilla; unit_* gun points on other vehicles are "
-                "OpenNeoUA only."),
+                "OpenNeoUA only, and the vanilla engine stops loading a script "
+                "with keys it does not know."),
             self.cockpit_tab: (
                 COMPAT_OPENNEOUA, "Cockpit camera offsets exist only in "
                 "OpenNeoUA. The preview keeps the vehicle's real orientation; "
@@ -853,11 +854,12 @@ class CollisionEditorWindow(
             self.briefing_tab: (
                 COMPAT_OPENNEOUA, "briefing_size exists only in OpenNeoUA."),
             self.fx_panel: (
-                MIXED, "Code edits update the preview; Save writes the source script. Vanilla "
+                RISKY, "Code edits update the preview; Save writes the source script. Vanilla "
                 "dest_fx/scale_fx effects work everywhere; begin_fx effects "
                 "and the OpenNeoUA weapon/vehicle FX (tracers, decorations, "
-                "clusters, lasers, debuffs, palette flashes) need OpenNeoUA, "
-                "as labelled in the list. Camera shake (shk_*) is not shown."),
+                "clusters, lasers, debuffs, palette flashes) need OpenNeoUA. "
+                "The dot of every row shows its own compatibility. Camera shake "
+                "(shk_*) is not shown."),
             self.wireframe_panel: (
                 VANILLA, "The wireframe is the vanilla SKLT file named by the "
                 "wireframe key. An exported file inside Data becomes the new "

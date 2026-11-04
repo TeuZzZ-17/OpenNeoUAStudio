@@ -49,7 +49,7 @@ def test_candidates_import_and_paths(tmp_path):
 def test_level_info_ambient_sound_row(app, win):
     panel = win.level_panel
     assert 'OpenNeoUA only' in panel.ambient_marker.toolTip()
-    assert '#e8873a' in panel.ambient_marker.styleSheet()
+    assert '#e0524a' in panel.ambient_marker.styleSheet()
     assert win.doc.lvl_info['ambient_sound'] == ''
     panel._set_ambient('Sounds/New/Ambient')
     assert win.doc.lvl_info['ambient_sound'] == 'Sounds/New/Ambient'
