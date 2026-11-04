@@ -602,19 +602,21 @@ class WireframeEditorWindow(QMainWindow):
         self.renderer_badge = add_renderer_badge(self, self.outline_editor.canvas)
 
         # Same vehicle/weapon list as the Entity Designer.
-        from studio.ui.browsers import GameObjectBrowser
+        from studio.ui.browsers import GameObjectBrowser, entity_list_panel
         self.game_object_browser = GameObjectBrowser(self, kinds=("vehicle", "weapon"))
-        self.game_object_browser.setMinimumWidth(200)
         self.game_object_browser.selected.connect(self._open_game_object)
+        self.entity_list_panel, self.entity_list_tabs = entity_list_panel(self.game_object_browser)
+        self.entity_list_panel.setMinimumWidth(230)
+        self.entity_list_panel.setMaximumWidth(400)
 
         splitter = QSplitter(Qt.Orientation.Horizontal)
-        splitter.addWidget(self.game_object_browser)
+        splitter.addWidget(self.entity_list_panel)
         splitter.addWidget(self.outline_editor)
         splitter.addWidget(side_panel)
-        splitter.setStretchFactor(0, 1)
+        splitter.setStretchFactor(0, 0)
         splitter.setStretchFactor(1, 4)
         splitter.setStretchFactor(2, 1)
-        splitter.setSizes([260, 820, 280])
+        splitter.setSizes([230, 820, 280])
         self.setCentralWidget(splitter)
 
     def _build_menu(self) -> None:

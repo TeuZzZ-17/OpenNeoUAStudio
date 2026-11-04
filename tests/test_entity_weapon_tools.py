@@ -52,7 +52,7 @@ def test_weapon_wireframe_stays_selected_and_loads_its_current_file(window, tmp_
 def test_weapon_shape_import_export_use_the_shared_controls(window, tmp_path, monkeypatch):
     import entity_designer.editor as editor
     data = tmp_path / 'Data'
-    folder = data / 'Models' / 'Collision'
+    folder = data / 'Collision'
     folder.mkdir(parents=True)
     source, target = folder / 'Rocket.collision', folder / 'RocketCopy.collision'
     hull = CollisionHull(((0, 0, 0), (1, 0, 0), (0, 1, 0), (0, 0, 1)),
@@ -70,7 +70,7 @@ def test_weapon_shape_import_export_use_the_shared_controls(window, tmp_path, mo
     monkeypatch.setattr(QMessageBox, 'warning', lambda *a: pytest.fail(str(a[1:])))
     window.import_collision_shape()
     assert window.project.collision_shape == shape
-    assert window.project.collision_shape_path == 'Data/Models/Collision/Rocket.collision'
+    assert window.project.collision_shape_path == 'Data/Collision/Rocket.collision'
     assert window.export_collision_shape_button.isEnabled()
     assert window.export_collision_shape_action.isEnabled()
     window.export_collision_shape()

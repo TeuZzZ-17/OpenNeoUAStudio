@@ -286,6 +286,7 @@ class CollisionEditorWindow(
         self._fx_watcher = QFileSystemWatcher(self)
         self._fx_watcher.fileChanged.connect(self._fx_watched_file_changed)
         self._fx_watcher.directoryChanged.connect(self._fx_watched_directory_changed)
+        self._fx_reloading = False
         self._fx_reload_timer = QTimer(self)
         self._fx_reload_timer.setSingleShot(True)
         self._fx_reload_timer.setInterval(300)
@@ -677,8 +678,7 @@ class CollisionEditorWindow(
         source_panel.setSizePolicy(
             QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Expanding)
         source_layout = QVBoxLayout(source_panel)
-        source_layout.addWidget(QLabel("Game resources"))
-        from studio.ui.browsers import GameObjectBrowser, configure_resource_tree
+        from studio.ui.browsers import GameObjectBrowser, configure_resource_tree, entity_list_panel
         self.game_object_browser = GameObjectBrowser(self, kinds=("vehicle", "weapon"))
         self.game_object_browser.selected.connect(self._open_game_object)
         self.game_object_browser.setChanged.connect(self._game_set_changed)
@@ -693,10 +693,9 @@ class CollisionEditorWindow(
         self.model_tree.setParent(self)
         self.model_tree.hide()
         configure_resource_tree(self.model_tree)
-        source_layout.addWidget(self.game_object_browser, 1)
-        self.source_label = QLabel("No source loaded.")
-        self.source_label.setWordWrap(True)
-        source_layout.addWidget(self.source_label)
+        self.entity_list_panel, self.entity_list_tabs = entity_list_panel(self.game_object_browser)
+        source_layout.addWidget(self.entity_list_panel, 1)
+        self.source_label = self.game_object_browser.source_label
         model_header = self.model_tree.header()
         model_header.setMinimumSectionSize(36)
         # QHeaderView stretches the last section by default.  With VP as the
@@ -2182,8 +2181,10 @@ class CollisionEditorWindow(
                    self._active_script_id, self._current_owner)
             if key != getattr(self, "_fx_autoplay_key", None):
                 self._fx_autoplay_key = key
-                with QSignalBlocker(self.play_button):
-                    self.play_button.setChecked(True)
+                # A file reload keeps the play state the user left.
+                if not getattr(self, "_fx_reloading", False):
+                    with QSignalBlocker(self.play_button):
+                        self.play_button.setChecked(True)
         self.play_button.setEnabled(has_anim)
         self.step_button.setEnabled(has_anim)
         self.speed_spin.setEnabled(has_anim)

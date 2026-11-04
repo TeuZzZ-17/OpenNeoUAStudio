@@ -2212,9 +2212,9 @@ class CollisionEditorTests(unittest.TestCase):
         window.project = _mixed_project()
         window.project.collision_shape = _sample_shape()
         window.project.collision_shape_path = (
-            "Data/Models/Collision/Wasp.collision")
+            "Data/Collision/Wasp.collision")
         window.project.collision_shape_file_path = (
-            "C:/UA/Data/Models/Collision/Wasp.collision")
+            "C:/UA/Data/Collision/Wasp.collision")
         window.project.fire_points_enabled = True
         window.project.fire_x = 4.0
         window.project.fire_y = 5.0
@@ -2252,7 +2252,7 @@ class CollisionEditorTests(unittest.TestCase):
         self.assertIsNone(window._vp_table)
         self.assertIsNone(window._active_script_path)
         self.assertEqual(window.model_tree.topLevelItemCount(), 0)
-        self.assertEqual(window.source_label.text(), "No source loaded.")
+        self.assertEqual(window.source_label.text(), "Source: —")
         self.assertEqual(window.model_search.text(), "")
         self.assertEqual(window.project.name, "")
         self.assertEqual(window.project.source_model, "")
@@ -3962,18 +3962,18 @@ class CollisionEditorTests(unittest.TestCase):
         window = self._window()
         window.project = CollisionProject(
             target_category=VEHICLE,
-            collision_shape_path="Data/Models/Collision/Weasel.collision",
+            collision_shape_path="Data/Collision/Weasel.collision",
         )
         window._capture_tab_reset_baseline()
 
         window.project.collision_shape_path = (
-            "Data/Models/Collision/WeaselFF.collision")
+            "Data/Collision/WeaselFF.collision")
 
         self.assertEqual(window._changed_script_tabs(), {"collision"})
         preview = build_editable_overwrite_preview(
             "new_vehicle", 1, window.project, window._changed_script_tabs())
         self.assertIn(
-            "collision_shape = Data/Models/Collision/WeaselFF.collision",
+            "collision_shape = Data/Collision/WeaselFF.collision",
             preview)
 
     def test_139b_overwrite_blocks_generated_shape_until_it_is_exported(self):
@@ -3999,22 +3999,22 @@ class CollisionEditorTests(unittest.TestCase):
         window = self._window()
         window.project = CollisionProject(
             target_category=WEAPON,
-            collision_shape_path="Data/Models/Collision/Rocket.collision",
+            collision_shape_path="Data/Collision/Rocket.collision",
         )
         window._capture_tab_reset_baseline()
         self.assertTrue(window.properties_tabs.isTabEnabled(window.collision_shape_tab_index))
-        window.project.collision_shape_path = "Data/Models/Collision/RocketFF.collision"
+        window.project.collision_shape_path = "Data/Collision/RocketFF.collision"
 
         self.assertEqual(window._changed_script_tabs(), {"collision"})
         preview = build_editable_overwrite_preview(
             "new_weapon", 5, window.project, window._changed_script_tabs())
         self.assertIn(
-            "collision_shape = Data/Models/Collision/RocketFF.collision", preview)
+            "collision_shape = Data/Collision/RocketFF.collision", preview)
         source = "new_weapon 5\n name = Rocket\n radius = 3\nend\n"
         updated, groups = apply_editable_overwrite_preview(
             source, preview, "new_weapon", 5)
         self.assertEqual(groups, {"collision"})
-        self.assertIn("collision_shape = Data/Models/Collision/RocketFF.collision", updated)
+        self.assertIn("collision_shape = Data/Collision/RocketFF.collision", updated)
 
     def test_139d_overwrite_blocks_unexported_weapon_shape(self):
         window = self._window()
@@ -4366,8 +4366,8 @@ class CollisionEditorTests(unittest.TestCase):
             replace(hull, source_component="part:1", enabled=False),
             *(replace(hull, source_component="part:2") for _ in range(13)),
             replace(hull, source_component="part:3", enabled=False)))
-        window.project.collision_shape_path = "Data/Models/Collision/Loaded.collision"
-        window.project.collision_shape_file_path = "C:/Game/Data/Models/Collision/Loaded.collision"
+        window.project.collision_shape_path = "Data/Collision/Loaded.collision"
+        window.project.collision_shape_file_path = "C:/Game/Data/Collision/Loaded.collision"
         window._sync_all()
         window._set_modified(False)
         root = window.collision_geometry_widget._shape_root

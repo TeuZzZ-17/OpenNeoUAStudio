@@ -159,8 +159,8 @@ def test_click_opens_attached_editor_and_live_drafts_keep_last_valid_preview(app
         QTest.mouseClick(panel.effects_list.viewport(), Qt.MouseButton.LeftButton, pos=point)
         drawer = _open_drawer(panel, app)
         assert drawer.expanded and drawer.isVisible()
-        # Nothing edited yet: both Save buttons are grayed out.
-        assert not drawer.save_button.isEnabled()
+        # Nothing edited yet: the Save button is grayed out.
+        assert not drawer.code.save_button.isEnabled()
         assert not drawer.code.save_button.isEnabled()
         # Attached: same height as the Effects box, ending where the box begins.
         box = panel.effects_box
@@ -178,10 +178,10 @@ def test_click_opens_attached_editor_and_live_drafts_keep_last_valid_preview(app
         drawer.code.setPlainText(EFFECT.removesuffix("end"))
         QTest.qWait(300)
         assert panel.document.items[0].value("duration") == "850"
-        assert not drawer.save_button.isEnabled()
+        assert not drawer.code.save_button.isEnabled()
         drawer.code.setPlainText(EFFECT.replace("400", "650"))
         QTest.qWait(300)
-        assert drawer.save_button.isEnabled() and drawer.code.save_button.isEnabled()
+        assert drawer.code.save_button.isEnabled()
         window.activateWindow()
         drawer.code.editor.setFocus()
         app.processEvents()
@@ -407,7 +407,7 @@ def test_delete_without_a_script_source_changes_nothing(app):
         panel.close()
 
 
-def test_editor_play_and_speed_controls_follow_the_transport_bar(app):
+def test_effect_code_editor_has_no_transport_or_save_rows(app):
     document, _ = _document("new_vehicle 1\n" + THREE + "\nend\n")
     panel = DestructionFxPanel()
     window = _in_wide_window(panel, app)
@@ -415,21 +415,16 @@ def test_editor_play_and_speed_controls_follow_the_transport_bar(app):
         panel.set_context(fx.CONTEXT_VEHICLE, document)
         panel.edit_effect_code(0)
         drawer = _open_drawer(panel, app)
-        play, speed = drawer.play_button, drawer.speed_combo
-        # Same look as the transport bar: icon button, no text, and no Close button.
-        assert play.text() == "" and not play.icon().isNull()
-        assert play.styleSheet() == panel.play_button.styleSheet()
-        assert not any(b.text() == "Close" for b in drawer.findChildren(type(play)))
-        play.click()
-        assert panel.play_button.isChecked() and play.isChecked()
-        panel.play_button.setChecked(False)
-        assert not play.isChecked()
-        speed.setCurrentIndex(speed.findData(0.25))
-        assert panel.speed == 0.25 and panel.speed_combo.currentData() == 0.25
-        panel.speed_combo.setCurrentIndex(panel.speed_combo.findData(2.0))
-        assert speed.currentData() == 2.0
+        # Under the code only the line / column info is left; saving uses the toolbar.
+        for name in ("play_button", "speed_combo", "revert_button", "save_button"):
+            assert not hasattr(drawer, name)
+        assert drawer.code.status_label.text().startswith("Line ")
+        # Reset lives in the toolbar with Undo, Redo, Find, Replace and Save.
+        assert drawer.reset_button.text() == "Reset" and not hasattr(drawer, "save_all_button")
+        assert drawer.code.undo_button.text() == "< Undo" and drawer.code.redo_button.text() == "Redo >"
+        assert not drawer.reset_button.isEnabled()
     finally:
-        window.close()
+        panel.close()
 
 
 def test_add_button_writes_a_new_effect_whose_type_comes_from_its_text(app, tmp_path):
@@ -453,26 +448,26 @@ def test_add_button_writes_a_new_effect_whose_type_comes_from_its_text(app, tmp_
         assert len(panel.document.items) == 2 and drawer.expanded
         row = _item(panel, 1)
         assert row.text().startswith("New effect") and "Empty" in row.text()
-        assert not drawer.save_button.isEnabled()             # nothing written yet
+        assert not drawer.code.save_button.isEnabled()             # nothing written yet
         assert path.read_text(encoding="utf-8") == text
 
         # A sound-event shake: the row becomes a Shake row.
         drawer.code.setPlainText("    shk_explode_slot = 1\n    shk_explode_time = 300")
         QTest.qWait(300)
         assert _item(panel, 1).text().startswith("Shake · explode")
-        assert drawer.save_button.isEnabled()
+        assert drawer.code.save_button.isEnabled()
         # A begin_fx block: the same row becomes a Visual row.
         drawer.code.setPlainText(EFFECT.replace("destroyed", "air_destroyed"))
         QTest.qWait(300)
         assert _item(panel, 1).text().startswith("Visual · air_destroyed")
-        drawer.save_button.click()
+        drawer.code.save_button.click()
         saved = path.read_text(encoding="utf-8")
         # Written inside the first definition, right before its own end.
         assert saved == text.replace(
             "    duration = 400\nend\nend\n",
             "    duration = 400\nend\n" + EFFECT.replace("destroyed", "air_destroyed")
             + "\nend\n", 1)
-        assert not drawer.save_button.isEnabled() and not panel.has_unsaved_text
+        assert not drawer.code.save_button.isEnabled() and not panel.has_unsaved_text
 
         # A second new effect goes after the first one; an unsaved one is deleted silently.
         view.add_button.click()

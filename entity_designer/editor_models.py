@@ -72,9 +72,7 @@ class _ModelBrowserMixin:
             self._last_directory = path.parent
             self.project.source_base = path.name
             self._fill_models(family)
-            self.source_label.setText(
-                f"{path.name}\n{len(family.all_objects()) - 1} mesh parts; "
-                "geometry-only preview through AssetViewport")
+            self.game_object_browser.set_source(path)
             self._set_model_browser_enabled(True)
             self._sync_close_archive_action()
             self._sync_animation_controls()
@@ -118,9 +116,7 @@ class _ModelBrowserMixin:
             from studio.ui.tabs import sync_archive_set_selector
             sync_archive_set_selector(self.game_object_browser.set_combo, path)
             self.game_object_browser.select_object(None)
-        self.source_label.setText(
-            f"{path.name}\n"
-            f"{len([o for o in family.all_objects() if o.skeleton])} models")
+        self.game_object_browser.set_source(path)
         self._set_model_browser_enabled(True)
         if vp_warnings:
             self.statusBar().showMessage(" ".join(vp_warnings), 9000)
@@ -152,9 +148,7 @@ class _ModelBrowserMixin:
         self._last_directory = Path(path).parent
         self.project.source_base = ""
         self._fill_models(family)
-        self.source_label.setText(
-            f"{Path(path).name}\nExternal SKLT; geometry-only unless its "
-            "material mapping is supplied by a BASE.")
+        self.game_object_browser.set_source(path)
         self._set_model_browser_enabled(True)
         self._set_modified()
         self._sync_close_archive_action()

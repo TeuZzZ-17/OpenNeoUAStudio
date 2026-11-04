@@ -247,10 +247,10 @@ class ResourcesDialog(QDialog):
 # ----------------------------------------------------------------------------
 
 # Compatibility scheme shared by every Studio marker (tab dots, effect rows, checker):
-#   green  VANILLA     fully compatible with the vanilla engine;
-#   yellow MIXED       compatible, but conflicts or problems are possible;
-#   orange RISKY       barely compatible: errors or conflicts with vanilla are likely;
-#   red    OPENNEOUA   not compatible: the vanilla engine does not support it.
+#   green  VANILLA     vanilla compatible: works with the vanilla engine;
+#   yellow MIXED       vanilla compatible, but conflicts or problems are possible;
+#   orange RISKY       barely vanilla compatible: errors or conflicts with vanilla are likely;
+#   red    OPENNEOUA   not vanilla compatible: the vanilla engine does not support it.
 VANILLA = "vanilla"
 
 
@@ -277,17 +277,22 @@ class CompatStyle:
 
 
 COMPAT_STYLES = {
-    VANILLA: CompatStyle("Fully compatible", "#5cbf72", "Uses vanilla data formats."),
-    MIXED: CompatStyle("Compatible, may conflict", "#e3c447", "Works with vanilla, but OpenNeoUA extensions or the data can cause conflicts or problems."),
-    RISKY: CompatStyle("Barely compatible", "#e8873a", "Mostly relies on OpenNeoUA extensions: errors or conflicts with the vanilla engine are likely."),
-    OPENNEOUA: CompatStyle("Not compatible", "#e0524a", "Not supported by the vanilla engine."),
+    VANILLA: CompatStyle("Vanilla compatible", "#5cbf72", "Uses vanilla data formats."),
+    MIXED: CompatStyle("Vanilla compatible, may conflict", "#e3c447", "Works with vanilla, but OpenNeoUA extensions or the data can cause conflicts or problems."),
+    RISKY: CompatStyle("Barely vanilla compatible", "#e8873a", "Mostly relies on OpenNeoUA extensions: errors or conflicts with the vanilla engine are likely."),
+    OPENNEOUA: CompatStyle("Not vanilla compatible", "#e0524a", "Not supported by the vanilla engine: it only works in OpenNeoUA."),
     PREVIEW: CompatStyle("Preview / Studio only", "#5cbf72", "Does not change game data."),
-    UNKNOWN: CompatStyle("Depends on the data", "#e3c447", "Check the target game's supported assets and parameters."),
+    UNKNOWN: CompatStyle("Vanilla compatibility depends on the data", "#e3c447", "Check the target game's supported assets and parameters."),
 }
 
 
 def compat_color(level: str) -> QColor:
     return QColor(COMPAT_STYLES[level].color)
+
+
+ENTITY_LIST_COMPAT = (
+    "Entity List", PREVIEW,
+    "Selects game entities for the editor. Listing an entity does not change game data.")
 
 
 def compatibility_entries(window, key):
@@ -299,8 +304,9 @@ def compatibility_entries(window, key):
                  "Writes native SET.SDF tables and LEGO visual overrides, and packages all set resources. Sector IDs stay 0–255. Tables above 256 model/building rows require the updated OpenNeoUA engine. Compatibility also depends on the selected models, materials and scripts.")]
     if key == "entity_designer":
         tabs = window.properties_tabs
-        return [(tabs.tabText(i), *window._tab_compatibility[tabs.widget(i)])
-                for i in range(tabs.count())]
+        return [ENTITY_LIST_COMPAT] + [
+            (tabs.tabText(i), *window._tab_compatibility[tabs.widget(i)])
+            for i in range(tabs.count())]
     if key == "map_editor":
         tabs = window.palette_tabs
         rows = []
@@ -317,7 +323,7 @@ def compatibility_entries(window, key):
         return rows
     resources = [
         ("BAS Manager", PREVIEW, "Browsing and extracting SET.BAS resources does not change the archive. Extracted assets retain their source format and compatibility."),
-        ("Entity List", PREVIEW, "Selects entities and visual states for the editor. Availability in vanilla depends on the source scripts and assets; listing an entity does not make it vanilla-compatible."),
+        ENTITY_LIST_COMPAT,
     ]
     if key == "model_editor":
         return resources + [
@@ -329,7 +335,7 @@ def compatibility_entries(window, key):
     if key == "snapshot_studio":
         return [("Snapshot", PREVIEW, "Camera, background, lights, guides and image export affect the presentation only. A screenshot does not alter the entity's runtime compatibility.")] + resources
     if key == "wireframe_editor":
-        return [("Wireframe geometry / Save / Export", VANILLA, "Edits the existing 2D SKLT wireframe format. The game must still reference the exported resource correctly."),
+        return [ENTITY_LIST_COMPAT, ("Wireframe geometry / Save / Export", VANILLA, "Edits the existing 2D SKLT wireframe format. The game must still reference the exported resource correctly."),
                 ("View and editing guides", PREVIEW, "Zoom, selection, grid and symmetry guides belong to Studio and add no game parameters.")]
     return []
 
@@ -380,7 +386,7 @@ class CompatibilityDialog(QDialog):
         intro = QLabel("Compatibility of the editor's features and output formats. This reference does not scan the current file or certify custom assets.")
         intro.setWordWrap(True)
         layout.addWidget(intro)
-        legend = QLabel("Dots: green = fully compatible with vanilla (or preview without data changes); yellow = compatible, but conflicts or problems are possible; orange = barely compatible, errors with vanilla are likely; red = not compatible, the vanilla engine does not support it.")
+        legend = QLabel("Dots (vanilla compatibility): green = vanilla compatible (or preview without data changes); yellow = vanilla compatible, but conflicts or problems are possible; orange = barely vanilla compatible, errors with vanilla are likely; red = not vanilla compatible, the vanilla engine does not support it (it only works in OpenNeoUA).")
         legend.setWordWrap(True)
         layout.addWidget(legend)
         scroll = QScrollArea(self)

@@ -19,7 +19,7 @@ PROFILE = (
     "    edge_fade = 5~10\n"
     "    duration = permanent\n"
     "    fade_inout = 100|1000\n"
-    "    smoke_count = 30~10\n"
+    "    effect_count = 30~10\n"
     "end\n"
 )
 

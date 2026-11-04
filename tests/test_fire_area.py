@@ -677,3 +677,23 @@ def test_labels_of_close_grips_do_not_overlap():
         assert not any(a.intersects(b) for i, a in enumerate(boxes) for b in boxes[i + 1:])
     finally:
         _close(app, window)
+
+
+def test_a_file_reload_never_starts_the_animation():
+    from PySide6.QtCore import QSignalBlocker
+    app, window, _pytest = _weapon_window(fa.FireArea(box_forward=(100, 80, 1200)))
+    try:
+        window.properties_tabs.setCurrentIndex(window.fire_area_tab_index)
+        with QSignalBlocker(window.play_button):
+            window.play_button.setChecked(False)
+        # A reload changes the autoplay key; the play state the user left must stay.
+        window._fx_reloading = True
+        window._fx_autoplay_key = None
+        window._sync_animation_controls()
+        assert not window.play_button.isChecked()
+        window._fx_reloading = False
+        # The reload entry point always clears its flag, even when it stops early.
+        window.reload_fx_from_file()
+        assert not window._fx_reloading
+    finally:
+        _close(app, window)
