@@ -18,6 +18,8 @@ from studio.exchange.portable import backup_existing_file
 
 MAX_HULLS = 64
 MAX_VERTICES_PER_HULL = 128
+# Total thickness given to a flat (zero-volume) hull, relative to its longest side.
+FLAT_HULL_THICKNESS_RATIO = 0.01
 _SOURCE_RE = re.compile(r"^[A-Za-z0-9_.-]+$")
 _HASH_RE = re.compile(r"^[0-9a-f]{64}$")
 
@@ -94,6 +96,65 @@ def _hull_volume(hull: CollisionHull) -> float:
             + pa[2] * (pb[0] * pc[1] - pb[1] * pc[0])
         ) / 6.0
     return volume
+
+
+def _thicken_flat_hull(hull: CollisionHull) -> CollisionHull:
+    """Turn a flat hull into a thin closed slab; any other hull is returned as is.
+
+    CoACD returns a flat sheet (for example a solar panel) as a hull with no
+    volume, which the runtime cannot use. The slab keeps the same outline and
+    is centred on the sheet, so the silhouette does not grow sideways.
+    """
+
+    import numpy as np
+
+    points = np.asarray(hull.vertices, dtype=np.float64)
+    if len(points) < 3:
+        return hull
+    centre = points.mean(axis=0)
+    _, singular, axes = np.linalg.svd(points - centre)
+    longest = float((points.max(axis=0) - points.min(axis=0)).max())
+    if (longest <= 0.0 or len(singular) < 3
+            or singular[2] > longest * 1e-6 or singular[1] <= longest * 1e-6):
+        return hull
+    u, v = axes[0], axes[1]
+    normal = np.cross(u, v)
+    flat = [(float(np.dot(point - centre, u)), float(np.dot(point - centre, v)))
+            for point in points]
+    # Outline of the sheet in its own plane (monotone chain, counter-clockwise).
+    order = sorted(set(flat))
+
+    def turn(o, a, b):
+        return (a[0] - o[0]) * (b[1] - o[1]) - (a[1] - o[1]) * (b[0] - o[0])
+
+    lower: list = []
+    for point in order:
+        while len(lower) >= 2 and turn(lower[-2], lower[-1], point) <= 0:
+            lower.pop()
+        lower.append(point)
+    upper: list = []
+    for point in reversed(order):
+        while len(upper) >= 2 and turn(upper[-2], upper[-1], point) <= 0:
+            upper.pop()
+        upper.append(point)
+    outline = lower[:-1] + upper[:-1]
+    count = len(outline)
+    if count < 3 or count * 2 > MAX_VERTICES_PER_HULL:
+        return hull
+    half = longest * FLAT_HULL_THICKNESS_RATIO / 2.0
+    ring = [centre + a * u + b * v for a, b in outline]
+    vertices = tuple(
+        tuple(float(c) for c in point + sign * half * normal)
+        for sign in (-1.0, 1.0) for point in ring)
+    faces = []
+    for i in range(1, count - 1):
+        faces.append((count, count + i, count + i + 1))
+        faces.append((0, i + 1, i))
+    for i in range(count):
+        j = (i + 1) % count
+        faces.append((i, j, count + j))
+        faces.append((i, count + j, count + i))
+    return replace(hull, vertices=vertices, faces=tuple(faces))
 
 
 def validate_hull(hull: CollisionHull) -> None:
@@ -891,6 +952,7 @@ def generate_collision_shape(
                 tuple(tuple(int(index) for index in face)
                       for face in baked_faces),
             )
+            candidate = _thicken_flat_hull(candidate)
             validate_hull(candidate)
             candidate = replace(candidate, source_component=_hull_member(
                 candidate, members.get(owner, [(owner, triangles)])))
