@@ -1,7 +1,8 @@
-"""Model states and ground decal size of a vehicle or weapon definition as script keys.
+"""Model states and ground decal (id and size) of a vehicle or weapon definition as script keys.
 
 The Visuals & FX list shows and edits ``vp_<state>``, ``base_<state>`` and
-``3ds_<state>`` (Model row) and ``ground_decal_size`` (Ground decal row) of the
+``3ds_<state>`` (Model row) and ``ground_decal_id`` / ``ground_decal_size``
+(Ground decal row) of the
 previewed definition. Pure Python:
 reading and patching text, and one verified write that keeps encoding and every
 untouched byte.
@@ -29,7 +30,9 @@ KINDS = (("vp", "VP"), ("base", "BASE"), ("3ds", "3DS"))
 
 _FORBIDDEN_IN_PATH = re.compile(r"[;#\r\n=]")
 
+DECAL_ID_KEY = "ground_decal_id"
 DECAL_KEY = "ground_decal_size"
+DECAL_KEYS = (DECAL_ID_KEY, DECAL_KEY)
 # Largest decal diameter the engine accepts.
 DECAL_SIZE_MAX = 12000.0
 
@@ -45,7 +48,7 @@ def all_keys() -> set[str]:
 def managed_keys() -> set[str]:
     """Every key the list rows read and write."""
 
-    return all_keys() | {DECAL_KEY}
+    return all_keys() | set(DECAL_KEYS)
 
 
 def block_for_origin(text: str, origin):
@@ -95,6 +98,14 @@ def normalize_value(key: str, raw: str) -> str:
     value = raw.strip().strip('"')
     if not value:
         return ""
+    if key == DECAL_ID_KEY:
+        try:
+            number = int(value, 0)
+        except ValueError as exc:
+            raise ValueError(f"{key} must be a whole number (-1 = no decal).") from exc
+        if number < -1:
+            raise ValueError(f"{key} must be -1 (no decal) or a profile number.")
+        return str(number)
     if key == DECAL_KEY:
         from entity_designer.destruction_fx import parse_float_range
 
@@ -264,25 +275,29 @@ def parse_model_text(text: str) -> dict[str, str]:
 
 
 def decal_text(values: dict[str, str]) -> str:
-    return f"{DECAL_KEY} = {values[DECAL_KEY]}" if values.get(DECAL_KEY) else ""
+    return "\n".join(f"{key} = {values[key]}" for key in DECAL_KEYS if values.get(key))
 
 
 def decal_summary(values: dict[str, str]) -> str:
-    return f"Size {values[DECAL_KEY]}" if values.get(DECAL_KEY) else "Not set"
+    parts = [f"{label} {values[key]}" for key, label in
+             ((DECAL_ID_KEY, "ID"), (DECAL_KEY, "Size")) if values.get(key)]
+    return " · ".join(parts) or "Not set"
 
 
 def parse_decal_text(text: str) -> dict[str, str]:
-    """Check an edited Ground decal text; returns ``ground_decal_size`` ("" = not set)."""
+    """Check an edited Ground decal text; returns its keys ("" = not set)."""
 
-    updates = {DECAL_KEY: ""}
+    updates = {key: "" for key in DECAL_KEYS}
     for number, line in enumerate(text.splitlines(), 1):
         code = re.split(r";|//|#", line, maxsplit=1)[0].strip()
         if not code:
             continue
         key, separator, value = code.partition("=")
-        if not separator or key.strip().lower() != DECAL_KEY:
-            raise ValueError(f"Line {number}: only {DECAL_KEY} can be written here.")
-        updates[DECAL_KEY] = normalize_value(DECAL_KEY, value)
+        key = key.strip().lower()
+        if not separator or key not in DECAL_KEYS:
+            raise ValueError(
+                f"Line {number}: only {DECAL_ID_KEY} and {DECAL_KEY} can be written here.")
+        updates[key] = normalize_value(key, value)
     return updates
 
 

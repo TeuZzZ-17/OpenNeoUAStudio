@@ -63,6 +63,6 @@ def model_level(values: dict[str, str]) -> str:
 
 
 def decal_level(values: dict[str, str]) -> str:
-    """ground_decal_size is an OpenNeoUA key; unset it writes nothing and stays vanilla."""
+    """ground_decal_id / _size are OpenNeoUA keys; unset they write nothing and stay vanilla."""
 
-    return OPENNEOUA if values.get("ground_decal_size") else VANILLA
+    return OPENNEOUA if values.get("ground_decal_id") or values.get("ground_decal_size") else VANILLA

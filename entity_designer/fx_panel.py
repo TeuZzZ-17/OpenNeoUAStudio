@@ -494,8 +494,10 @@ class FxEffectsView(QWidget):
                 values = fx_visuals.parse_decal_text(session.originals[index])
                 level = fx_compat.decal_level(values)
                 text = "Ground decal\n" + fx_visuals.decal_summary(values)
-                tip = ("ground_decal_size: manual decal diameter (number or min~max). "
-                       "The decal itself comes from ground_decal_id.")
+                profiles = ", ".join(str(number) for number in sorted(panel.decals))
+                tip = ("ground_decal_id: decal profile (-1 = none). "
+                       "ground_decal_size: manual diameter, a number or min~max."
+                       + (f"\nProfiles found: {profiles}." if profiles else ""))
             row = QListWidgetItem(text)
             row.setFlags(row.flags() | Qt.ItemFlag.ItemIsUserCheckable)
             row.setCheckState(Qt.CheckState.Unchecked if index in panel.hidden_items
