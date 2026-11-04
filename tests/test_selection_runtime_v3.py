@@ -245,7 +245,15 @@ class SelectionRuntimeV3Tests(unittest.TestCase):
 
             window.edit_toggle_action.setChecked(False)
             self.assertFalse(window.viewport.is_edit_mode)
+            # Nella tab Editor la modalità modifica segue la tab dopo il reload.
             window._set_family(family)
+            self.assertTrue(window.edit_toggle_action.isChecked())
+            self.assertTrue(window.viewport.is_edit_mode)
+
+            # Fuori dalla tab Editor il reload non la riattiva.
+            window._right_tabs.setCurrentWidget(window._resources_tabs)
+            window._set_family(family)
+            self.assertIs(window._right_tabs.currentWidget(), window._resources_tabs)
             self.assertFalse(window.edit_toggle_action.isChecked())
             self.assertFalse(window.viewport.is_edit_mode)
         finally:
