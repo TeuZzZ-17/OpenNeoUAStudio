@@ -98,24 +98,25 @@ def test_ground_decal_row_writes_the_size_after_the_decal_id(app, tmp_path):
                       fx.extract_fx_document(script, block.start_line, block.end_line))
     panel.set_script_sources([(path, block.start_line, block.end_line)])
     row = _rows(panel)[visuals.DECAL_INDEX]
-    assert row.text().splitlines() == ["Ground decal", "Not set"]
+    assert row.text().splitlines() == ["Ground decal", "ID 1"]
     panel.edit_effect_code(visuals.DECAL_INDEX)
     drawer = panel.code_drawer
     assert drawer.title_label.text() == "Ground decal"
-    drawer.code.setPlainText("ground_decal_size = 30~50")
+    assert drawer.code.toPlainText() == "ground_decal_id = 1"
+    drawer.code.setPlainText("ground_decal_id = 2\nground_decal_size = 30~50")
     assert drawer._save()
     assert path.read_text(encoding="utf-8") == (
-        "new_weapon 6\n    vp_normal = 20\n    ground_decal_id = 1\n"
+        "new_weapon 6\n    vp_normal = 20\n    ground_decal_id = 2\n"
         "    ground_decal_size = 30~50\n    energy = 5\nend\n")
     # The editor reloads the definition after a visual save; do the same here.
     saved_block = find_script_blocks(path.read_text(encoding="utf-8"))[0]
     panel.set_script_sources([(path, saved_block.start_line, saved_block.end_line)])
-    assert _rows(panel)[visuals.DECAL_INDEX].text().splitlines() == ["Ground decal", "Size 30~50"]
+    assert _rows(panel)[visuals.DECAL_INDEX].text().splitlines() == ["Ground decal", "ID 2 · Size 30~50"]
     panel.edit_effect_code(visuals.DECAL_INDEX)
     drawer = panel.code_drawer
     drawer.code.setPlainText("")
     assert drawer._save()
-    assert "ground_decal_size" not in path.read_text(encoding="utf-8")
+    assert "ground_decal" not in path.read_text(encoding="utf-8")
 
 
 def test_a_wrong_decal_size_is_refused_and_the_file_stays(app, tmp_path):
@@ -123,7 +124,8 @@ def test_a_wrong_decal_size_is_refused_and_the_file_stays(app, tmp_path):
     panel.edit_effect_code(visuals.DECAL_INDEX)
     drawer = panel.code_drawer
     for bad in ("ground_decal_size = abc", "ground_decal_size = 13000", "ground_decal_size = -1~5",
-                "ground_decal_size = 1~2~3", "vp_normal = 5", "ground_decal_size"):
+                "ground_decal_size = 1~2~3", "vp_normal = 5", "ground_decal_size",
+                "ground_decal_id = abc", "ground_decal_id = -2"):
         drawer.code.setPlainText(bad)
         assert drawer._apply() is False
     assert path.read_text(encoding="utf-8") == SCRIPT
@@ -164,6 +166,7 @@ def test_row_dots_follow_the_vanilla_compatibility_level(app, tmp_path):
     assert fx_compat.model_level({"base_normal": "N.BASE"}) == OPENNEOUA
     assert fx_compat.decal_level({}) == VANILLA
     assert fx_compat.decal_level({"ground_decal_size": "30~50"}) == OPENNEOUA
+    assert fx_compat.decal_level({"ground_decal_id": "1"}) == OPENNEOUA
     assert fx_compat.dest_line_level(fx.DestFxLine("dest_fx = death_46_0_0_0")) == VANILLA
     assert fx_compat.dest_line_level(fx.DestFxLine("ext_dest_fx = death_46_0_0_0")) == OPENNEOUA
 
