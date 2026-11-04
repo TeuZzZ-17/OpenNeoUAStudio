@@ -231,11 +231,13 @@ class SelectionRuntimeV3Tests(unittest.TestCase):
             self.assertTrue(window.edit_toggle_action.isChecked())
             self.assertTrue(window.viewport.is_edit_mode)
 
+            # Ricaricare la famiglia non cambia mai la tab attiva.
+            active_tab = window._right_tabs.currentWidget()
             window._set_family(family)
-            self.assertIs(
-                window._right_tabs.currentWidget(), window._resources_tabs)
-            self.assertFalse(window.edit_toggle_action.isChecked())
-            self.assertFalse(window.viewport.is_edit_mode)
+            self.assertIs(window._right_tabs.currentWidget(), active_tab)
+            in_editor = active_tab is window._editor_tabs
+            self.assertEqual(window.edit_toggle_action.isChecked(), in_editor)
+            self.assertEqual(window.viewport.is_edit_mode, in_editor)
 
             window._show_model_editor()
             self.assertTrue(window.edit_toggle_action.isChecked())

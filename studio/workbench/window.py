@@ -2644,6 +2644,9 @@ class AssemblyWindow(
     def _raise_setbas_tab(self) -> None:
         """Bring the primary BAS panel to the front after loading it."""
 
+        # La selezione dall'Entity List carica il SET.BAS senza cambiare tab.
+        if getattr(self, "_entity_loading", False):
+            return
         right_tabs = getattr(self, "_right_tabs", None)
         panel = getattr(self, "_setbas_panel", None)
         if right_tabs is not None and panel is not None:

@@ -25,8 +25,8 @@ def test_entity_state_control_precedes_tree_and_state_column_tracks_selection(ap
     try:
         browser = window.entity_browser
         window._resources_tabs.setCurrentWidget(window._entity_panel)
-        assert browser.layout().indexOf(browser.search) == 0
-        assert browser.layout().itemAt(1).layout() is window._entity_controls
+        assert browser.layout().itemAt(0).layout() is window._entity_controls
+        assert browser.layout().indexOf(browser.search) == browser.layout().indexOf(browser.sort_combo) + 1
         assert window._entity_controls.indexOf(browser.set_combo) == -1
         assert window._entity_controls.indexOf(window.entity_state) == 1
         assert window._entity_controls.indexOf(browser.category) == 3

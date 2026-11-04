@@ -1157,55 +1157,6 @@ class DestructionFxPanel(QWidget):
         self.documentEdited.emit()
         return True
 
-    def create_mirror_button(self, parent, source: QPushButton) -> QPushButton:
-        """A copy of a transport bar button that looks and works like the original.
-
-        The icon, tooltip and checked state always follow the original, so the
-        code editor can offer the same controls.
-        """
-
-        mirror = QPushButton(parent)
-        mirror.setCheckable(source.isCheckable())
-        mirror.setIconSize(QSize(20, 20))
-        mirror.setMinimumWidth(28)
-        mirror.setFocusPolicy(Qt.FocusPolicy.NoFocus)
-
-        def follow(*_args) -> None:
-            mirror.setIcon(source.icon())
-            mirror.setToolTip(source.toolTip())
-            mirror.setAccessibleName(source.accessibleName())
-            if source.isCheckable():
-                with QSignalBlocker(mirror):
-                    mirror.setChecked(source.isChecked())
-
-        if source.isCheckable():
-            mirror.toggled.connect(source.setChecked)
-            source.toggled.connect(follow)
-        else:
-            mirror.clicked.connect(source.click)
-        follow()
-        return mirror
-
-    def create_play_button(self, parent) -> QPushButton:
-        """A Play / Pause button that looks and works like the transport bar's."""
-
-        return self.create_mirror_button(parent, self.play_button)
-
-    def create_speed_combo(self, parent) -> QComboBox:
-        """A playback speed list that always shows the transport bar's speed."""
-
-        combo = QComboBox(parent)
-        combo.setToolTip("Playback speed")
-        for speed in SPEEDS:
-            combo.addItem(f"{speed:g}×", speed)
-        combo.setCurrentIndex(self.speed_combo.currentIndex())
-        combo.setSizeAdjustPolicy(
-            QComboBox.SizeAdjustPolicy.AdjustToMinimumContentsLengthWithIcon)
-        combo.setMinimumContentsLength(3)
-        combo.currentIndexChanged.connect(self.speed_combo.setCurrentIndex)
-        self.speed_combo.currentIndexChanged.connect(combo.setCurrentIndex)
-        return combo
-
     def apply_text_item(self, index, item) -> None:
         if self.is_state_index(index):
             # A model state shows its new draft in the preview once it is saved.

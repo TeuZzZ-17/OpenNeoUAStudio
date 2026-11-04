@@ -329,6 +329,15 @@ class _FxPreviewMixin:
     def reload_fx_from_file(self) -> None:
         """Read the definition again from disk and refresh the preview."""
 
+        # A reload refills the model list and can change the autoplay key; it must
+        # never start the animation. Only entering the tab or switching unit does.
+        self._fx_reloading = True
+        try:
+            self._reload_fx_from_file()
+        finally:
+            self._fx_reloading = False
+
+    def _reload_fx_from_file(self) -> None:
         if self.fx_panel.has_unsaved_text:
             self._fx_failed_signatures = self._fx_signatures(self._fx_tracked)
             self.statusBar().showMessage(

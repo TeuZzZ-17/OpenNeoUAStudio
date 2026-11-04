@@ -293,7 +293,8 @@ class _FamilyPanelsMixin:
         self._sync_geometry_save_controls()
         self._rebuild_workbench(family, self._selected_owner)
         self._refresh_fx_elements()
-        self._focus_assets_for_owner(self._selected_owner)
+        # Caricare un modello (anche dall'Entity List) non deve cambiare tab.
+        self._focus_assets_for_owner(self._selected_owner, switch_tabs=False)
         self.viewport.set_mapping_diagnostics(
             self.mapping_diag_check.isChecked())
         self._apply_diagnostics_filter()

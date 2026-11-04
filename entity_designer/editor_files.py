@@ -213,7 +213,7 @@ class _ScriptFilesMixin:
         self._set_script_unit_mode(False)
         if hasattr(self, "model_search"):
             self.model_search.clear()
-        self.source_label.setText("No source loaded.")
+        self.game_object_browser.set_source(None)
         self._set_model_browser_enabled(False)
         self._set_modified(False)
         self._sync_animation_controls()
@@ -632,11 +632,7 @@ class _ScriptFilesMixin:
         self._load_fx_context(text, block, reference)
         self._fire_area_load_defaults(text, block)
         self._set_modified(False)
-        self.source_label.setText(
-            (f"Visual override: {visual_override}" if visual_override
-             else f"VP {reference.vp_normal}: {source_model or '<model>'}")
-            + "\n"
-            f"{script_path.name} — {block.kind} {block.object_id}")
+        self.game_object_browser.set_source(script_path)
         self._sync_all()
         message = (
             f"Loaded {block.kind} {block.object_id} using "

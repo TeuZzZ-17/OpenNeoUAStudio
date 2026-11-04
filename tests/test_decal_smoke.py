@@ -1,4 +1,4 @@
-"""Ground decal smoke: smoke_* keys, engine-exact puff math and the preview timeline."""
+"""Ground decal smoke: effect_* keys, engine-exact puff math and the preview timeline."""
 
 import math
 
@@ -15,11 +15,13 @@ def _spec(profile_body: str) -> fx.FxSpec:
 
 
 DECAL = "    duration = permanent\n"
+RISE = DECAL + "    effect_mode = rise\n    effect_3ds = Data/Models/3ds/Smoke.3ds\n"
 
 PROFILE = (
     "new_decal 1\n" + DECAL +
-    "    smoke_duration = 60000~90000\n    smoke_count = 30\n"
-    "    smoke_size = 16~30\n    smoke_intensity = 120\n"
+    "    effect_3ds = Data/Models/3ds/Smoke.3ds\n    effect_mode = rise\n"
+    "    effect_active_time = 60000~90000\n    effect_count = 30\n"
+    "    effect_size = 16~30\n    effect_intensity = 120\n"
     "end\n")
 
 
@@ -69,7 +71,7 @@ def test_puffs_match_the_engine_reference_values():
 
 
 def test_puff_count_roll_matches_the_engine():
-    # smoke_count = 10~30 rolled per decal with the same hash as the engine.
+    # effect_count = 10~30 rolled per decal with the same hash as the engine.
     spec = ds.SmokeSpec(enabled=True)
     for seed, expected in ((0x1234567, 13), (1, 19), (99, 22), (0xABCDEF, 29)):
         assert ds.emitter_count(spec, seed) == expected
@@ -107,47 +109,47 @@ def test_profile_without_smoke_keys_stays_vanilla():
 
 
 def test_smoke_keys_are_read_and_known_to_studio():
-    spec = _spec(DECAL + "    smoke_chance = 80\n    smoke_duration = 5000~3000\n"
-                 "    smoke_fade_inout = 100|200\n    smoke_count = 30\n"
-                 "    smoke_size = 16~30\n    smoke_growth = 4\n    smoke_rise_speed = 10\n"
-                 "    smoke_puff_time = 4000~7500\n    smoke_drift = 5\n    smoke_spread = 60\n"
-                 "    smoke_intensity = 120\n    smoke_tint = 10|20|30|40\n")
+    spec = _spec(RISE + "    effect_chance = 80\n    effect_active_time = 5000~3000\n"
+                 "    effect_fade_inout = 100|200\n    effect_count = 30\n"
+                 "    effect_size = 16~30\n    effect_growth = 4\n    effect_rise_speed = 10\n"
+                 "    effect_puff_time = 4000~7500\n    effect_drift = 5\n    effect_spread = 60\n"
+                 "    effect_intensity = 120\n    effect_tint = 10|20|30|40\n")
     smoke = spec.smoke
     assert smoke is not None and smoke.enabled
     assert (smoke.chance, smoke.fade_in, smoke.fade_out) == (80, 100, 200)
     assert smoke.count == (30, 30)                             # a single value is a fixed count
-    assert smoke.duration == (3000, 5000)                     # reversed range is normalized
+    assert smoke.active_time == (3000, 5000)                     # reversed range is normalized
     assert smoke.size == (16.0, 30.0) and smoke.puff_time == (4000, 7500)
     assert (smoke.growth, smoke.rise_speed, smoke.drift, smoke.spread, smoke.intensity) == (4, 10, 5, 60, 120)
     assert smoke.tint == (10, 20, 30, 40)
     assert not spec.issues
 
 
-def test_smoke_count_accepts_a_min_max_range():
-    assert _spec(DECAL + "    smoke_count = 30~10\n").smoke.count == (10, 30)
-    assert _spec(DECAL + "    smoke_count = 5~9\n").smoke.count == (5, 9)
-    assert _spec(DECAL + "    smoke_count = 500~900\n").smoke.count == (ds.MAX_PUFFS, ds.MAX_PUFFS)
-    spec = _spec(DECAL + "    smoke_count = 3~x\n")
+def test_effect_count_accepts_a_min_max_range():
+    assert _spec(RISE + "    effect_count = 30~10\n").smoke.count == (10, 30)
+    assert _spec(RISE + "    effect_count = 5~9\n").smoke.count == (5, 9)
+    assert _spec(RISE + "    effect_count = 500~900\n").smoke.count == (ds.MAX_PUFFS, ds.MAX_PUFFS)
+    spec = _spec(RISE + "    effect_count = 3~x\n")
     assert spec.smoke.count == ds.SmokeSpec().count             # bad range keeps the default
-    assert any("smoke_count" in i.message for i in spec.issues)
+    assert any("effect_count" in i.message for i in spec.issues)
 
 
 def test_any_smoke_key_switches_the_smoke_on():
-    # No separate "smoke = 1" switch: one smoke_* key is enough.
-    assert _spec(DECAL + "    smoke_count = 40\n").smoke.enabled
-    assert _spec(DECAL + "    smoke_tint = 1|2|3\n").smoke.enabled
-    # smoke_count = 0 keeps the smoke block but it never produces a puff.
-    assert _spec(DECAL + "    smoke_count = 0\n").smoke.count == (0, 0)
+    # No separate "smoke = 1" switch: one effect_* key is enough.
+    assert _spec(RISE + "    effect_count = 40\n").smoke.enabled
+    assert _spec(RISE + "    effect_tint = 1|2|3\n").smoke.enabled
+    # effect_count = 0 keeps the smoke block but it never produces a puff.
+    assert _spec(RISE + "    effect_count = 0\n").smoke.count == (0, 0)
 
 
 def test_bad_values_keep_the_defaults_and_warn():
-    spec = _spec(DECAL + "    smoke_count = banana\n    smoke_size = 0\n"
-                 "    smoke_duration = x_y\n    smoke_tint = 1|2\n    smoke_growth = 99\n"
-                 "    smoke_chance = 500\n    smoke_puff_time = 1\n    smoke_spread = -5\n")
+    spec = _spec(RISE + "    effect_count = banana\n    effect_size = 0\n"
+                 "    effect_active_time = x_y\n    effect_tint = 1|2\n    effect_growth = 99\n"
+                 "    effect_chance = 500\n    effect_puff_time = 1\n    effect_spread = -5\n")
     smoke = spec.smoke
     defaults = ds.SmokeSpec()
     assert smoke.count == defaults.count and smoke.size == defaults.size
-    assert smoke.duration == defaults.duration
+    assert smoke.active_time == defaults.active_time
     assert smoke.tint == (255, 255, 255, 255)                 # like every invalid tint
     assert smoke.growth == 10.0 and smoke.chance == 100        # clamped
     assert smoke.puff_time == (200, 200) and smoke.spread == 0.0
@@ -156,12 +158,12 @@ def test_bad_values_keep_the_defaults_and_warn():
 
 
 def test_smoke_keys_inside_a_begin_fx_are_unknown_keys():
-    # The old begin_fx ground_decal block is gone: smoke_* only belongs to new_decal.
+    # The old begin_fx ground_decal block is gone: effect_* only belongs to new_decal.
     text = ("new_weapon 9\nbegin_fx\n    trigger = impact_world\n    mode = visual\n"
-            "    duration = 300\n    vp_model = 5\n    smoke_count = 3\nend\nend\n")
+            "    duration = 300\n    vp_model = 5\n    effect_count = 3\nend\nend\n")
     document = fx.extract_fx_document(text, 0, text.count("\n") - 1)
     spec = fx.interpret_block(document.items[0], fx.CONTEXT_WEAPON)
-    assert any(i.severity == fx.SEVERITY_UNKNOWN and "smoke_count" in i.message
+    assert any(i.severity == fx.SEVERITY_UNKNOWN and "effect_count" in i.message
                for i in spec.issues)
 
 
@@ -198,8 +200,8 @@ def test_preview_plays_only_the_first_part_of_a_long_smoke():
 
 
 def test_short_smoke_is_previewed_to_its_end():
-    short = PROFILE.replace("60000~90000", "6000~6000").replace("smoke_count = 30\n",
-                                                                "smoke_count = 30\n    smoke_fade_inout = 3000|2000\n")
+    short = PROFILE.replace("60000~90000", "6000~6000").replace("effect_count = 30\n",
+                                                                "effect_count = 30\n    effect_fade_inout = 3000|2000\n")
     simulation = _simulation(short)
     track = next(t for t in simulation.tracks if t.label.endswith("Decal smoke"))
     assert track.end - track.start == pytest.approx(6000)
@@ -214,8 +216,8 @@ def test_no_smoke_items_without_smoke_keys():
     assert not any(t.label.endswith("Decal smoke") for t in simulation.tracks)
 
 
-def test_smoke_chance_zero_never_smokes():
-    off = PROFILE.replace("smoke_intensity = 120\n", "smoke_intensity = 120\n    smoke_chance = 0\n")
+def test_effect_chance_zero_never_smokes():
+    off = PROFILE.replace("effect_intensity = 120\n", "effect_intensity = 120\n    effect_chance = 0\n")
     simulation = _simulation(off)
     assert not [i for i in simulation.items_at(fx.WEAPON_FLIGHT_MS + 5000) if i.kind == "decal_smoke"]
 

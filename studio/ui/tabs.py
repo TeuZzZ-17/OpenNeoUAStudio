@@ -41,6 +41,8 @@ TAB_COLORS = (
     (190, 165, 120),   # sand
 )
 
+ENTITY_LIST_TAB_COLOR = TAB_COLORS[3]
+
 
 _BUTTON_HEIGHT = 34
 
@@ -232,9 +234,15 @@ class PaletteTabStrip(QWidget):
         self._buttons = []
         for position, leaf in enumerate(leaves):
             page = self._leaf_page(leaf)
+            title = self._leaf_text(leaf)
+            marker = self._markers.get(page)
+            if marker is None and title.casefold() == "entity list":
+                from studio.ui.shell import PREVIEW, compat_color
+                marker = compat_color(PREVIEW)
             button = _PaletteButton(
-                self._leaf_text(leaf), TAB_COLORS[position % len(TAB_COLORS)],
-                self._markers.get(page), self)
+                title, ENTITY_LIST_TAB_COLOR if title.casefold() == "entity list"
+                else TAB_COLORS[position % len(TAB_COLORS)],
+                marker, self)
             button.setEnabled(self._leaf_enabled(leaf))
             button.clicked.connect(
                 lambda _checked=False, slot=position: self.activate(slot))

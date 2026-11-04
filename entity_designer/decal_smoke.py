@@ -19,13 +19,21 @@ MIN_PARTICLE_SIZE = 1.0
 
 _MASK = 0xFFFFFFFF
 
-# Every smoke key of a profile; any of them switches the smoke on.
+# effect_mode is mandatory: without one of these values nothing is emitted.
+MODE_GROUND_PULSE = "ground_pulse"   # short intermittent flashes around the decal
+MODE_RISE = "rise"                   # camera-facing 3DS puffs that climb away
+MODES = (MODE_GROUND_PULSE, MODE_RISE)
+
+# Keys that only one mode reads; the engine warns when a profile uses the other mode.
+GROUND_PULSE_KEYS = ("effect_base", "effect_vp", "effect_pulse_interval", "effect_pulse_time")
+RISE_KEYS = ("effect_fade_inout", "effect_count", "effect_size", "effect_growth",
+             "effect_rise_speed", "effect_puff_time", "effect_drift", "effect_intensity")
+
+# Every effect key of a profile; any of them marks the profile as having an effect.
 SMOKE_KEYS = (
-    "smoke_chance", "smoke_duration", "smoke_fade_inout",
-    "smoke_count", "smoke_size", "smoke_growth", "smoke_rise_speed",
-    "smoke_puff_time", "smoke_drift", "smoke_spread", "smoke_intensity",
-    "smoke_tint",
-)
+    "effect_mode", "effect_3ds", "effect_scale", "effect_active_time", "effect_chance",
+    "effect_spread", "effect_tint",
+) + GROUND_PULSE_KEYS + RISE_KEYS
 
 
 @dataclass(frozen=True)
@@ -36,8 +44,15 @@ class SmokeSpec:
     """
 
     enabled: bool = False
+    mesh3ds: str = ""
+    base_model: str = ""
+    mode: str = ""                        # MODE_GROUND_PULSE or MODE_RISE; "" = disabled
+    pulse_vp: int = 0
+    pulse_interval: tuple[int, int] = (900, 900)   # ms between pulses; min~max rolls it per pulse
+    pulse_time: int = 120
+    mesh_scale: float = 0.1
     chance: int = 100
-    duration: tuple[int, int] = (20000, 25000)
+    active_time: tuple[int, int] = (20000, 25000)
     fade_in: int = 3000
     fade_out: int = 20000
     count: tuple[int, int] = (10, 30)     # puffs at once on a decal of radius 50, rolled per decal
@@ -80,6 +95,37 @@ def _range_from(value: int, low: float, high: float) -> float:
     return low + (high - low) * hash_unit(value)
 
 
+def emits(spec: SmokeSpec) -> bool:
+    """True when the engine would emit: a valid mode and a model that mode can draw."""
+
+    if spec.mode == MODE_RISE:
+        return bool(spec.mesh3ds)
+    if spec.mode == MODE_GROUND_PULSE:
+        return bool(spec.mesh3ds or spec.base_model or spec.pulse_vp > 0)
+    return False
+
+
+def pulse_interval(spec: SmokeSpec, seed: int, cycle: int) -> int:
+    """Length in ms of the interval that starts pulse ``cycle`` (engine ``PulseInterval``)."""
+
+    low, high = spec.pulse_interval
+    if high <= low:
+        return max(200, low)
+    return max(200, int(_range_from(hash32(seed, cycle, 0x494E5456), float(low), float(high))))
+
+
+def pulse_cycle(spec: SmokeSpec, seed: int, age: float) -> tuple[int, int, int]:
+    """Pulse number, start and interval length containing ``age`` (each pulse starts when the previous interval ends)."""
+
+    cycle, start = 0, 0
+    length = pulse_interval(spec, seed, 0)
+    while age >= start + length:
+        start += length
+        cycle += 1
+        length = pulse_interval(spec, seed, cycle)
+    return cycle, start, length
+
+
 def intensity(age: float, duration: float, fade_in: float, fade_out: float) -> float:
     """Linear fade-in, full strength, linear fade-out ending at ``duration``."""
 
@@ -100,13 +146,13 @@ def scaled_count(base: int, radius: float) -> int:
 
 
 def rolls_smoke(spec: SmokeSpec, seed: int) -> bool:
-    """The engine's stable per-decal roll against ``smoke_chance``."""
+    """The engine's stable per-decal roll against ``effect_chance``."""
 
     return hash_unit(hash32(seed, 0x43484E43, 0)) * 100.0 < spec.chance
 
 
 def emitter_count(spec: SmokeSpec, seed: int) -> int:
-    """The puff count this decal rolled inside ``smoke_count = min~max``."""
+    """The puff count this decal rolled inside ``effect_count = min~max``."""
 
     low, high = spec.count
     rolled = low + int(hash_unit(hash32(seed, 0x434E5452, 0)) * (high - low + 1))
@@ -115,7 +161,7 @@ def emitter_count(spec: SmokeSpec, seed: int) -> int:
 
 def emitter_duration(spec: SmokeSpec, seed: int) -> int:
     return int(_range_from(hash32(seed, 0x53445552, 0),
-                           float(spec.duration[0]), float(spec.duration[1])))
+                           float(spec.active_time[0]), float(spec.active_time[1])))
 
 
 def evaluate(spec: SmokeSpec, radius: float, seed: int, count: int,
