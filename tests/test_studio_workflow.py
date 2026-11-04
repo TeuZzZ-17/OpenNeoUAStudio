@@ -71,6 +71,83 @@ def test_entity_context_menu_only_copies_and_never_opens_on_right_click(app):
     browser.close()
 
 
+def test_game_resources_sort_numerically_and_preserve_selection_and_filter(app):
+    from studio.ui.browsers import GameObjectBrowser, GAME_OBJECT_ROLE
+    from studio.assets.catalog import GameObject
+    browser = GameObjectBrowser()
+    a = GameObject('weapon', 12, Path('Weapons.cfg'), {'name': 'Alpha'})
+    b = GameObject('vehicle', 2, Path('Vehicles.cfg'), {'name': 'Zulu'})
+    c = GameObject('weapon', 1, Path('Weapons.cfg'), {'name': 'Beta'})
+    browser.objects = [a, b, c]
+    browser.fill(selected=a)
+    selected_row = browser.tree.currentItem()
+    selected_row.setData(0, 0x0100 + 99, 'unsaved')
+    events = []
+    browser.selected.connect(events.append)
+    def objects():
+        return [browser.tree.topLevelItem(i).data(0, GAME_OBJECT_ROLE)
+                for i in range(browser.tree.topLevelItemCount())]
+    assert objects() == [a, c, b]
+    browser.sort_combo.setCurrentIndex(browser.sort_combo.findData('id'))
+    assert objects() == [c, b, a]
+    browser.search.setText('Alpha')
+    browser.sort_combo.setCurrentIndex(browser.sort_combo.findData('type'))
+    assert objects() == [b, a, c]
+    assert browser.tree.currentItem().data(0, GAME_OBJECT_ROLE) is a
+    assert browser.tree.currentItem() is selected_row
+    assert selected_row.data(0, 0x0100 + 99) == 'unsaved'
+    assert [item.name for i, item in enumerate(objects())
+            if not browser.tree.topLevelItem(i).isHidden()] == ['Alpha']
+    assert not events
+    browser.close()
+
+
+@pytest.mark.parametrize('editor_name', ['entity', 'wireframe', 'model', 'snapshot'])
+def test_editors_share_resource_sorting(app, editor_name):
+    from studio.ui.browsers import GameObjectBrowser
+    from studio.assets.catalog import GameObject
+    from studio.ui.tabs import ENTITY_LIST_TAB_COLOR
+    if editor_name == 'entity':
+        from entity_designer.editor import CollisionEditorWindow
+        window = CollisionEditorWindow()
+        browser = window.game_object_browser
+    elif editor_name == 'wireframe':
+        from wireframe_editor.window import WireframeEditorWindow
+        window = WireframeEditorWindow()
+        browser = window.game_object_browser
+    elif editor_name == 'model':
+        from model_editor.window import ModelEditorWindow
+        window = ModelEditorWindow()
+        browser = window.entity_browser
+    else:
+        from snapshot_studio.window import SnapshotStudioWindow
+        window = SnapshotStudioWindow()
+        browser = window.entity_browser
+    try:
+        assert type(browser) is GameObjectBrowser
+        assert [browser.sort_combo.itemData(i) for i in range(browser.sort_combo.count())] == [
+            'name', 'id', 'type']
+        assert browser.layout().indexOf(browser.sort_combo) >= 0
+        assert browser.layout().indexOf(browser.search) == browser.layout().indexOf(browser.sort_combo) + 1
+        obj = GameObject('weapon', 34, Path('Weapons.cfg'), {'name': 'Test'})
+        browser.objects = [obj]
+        browser.fill()
+        browser.select_object(obj)
+        assert browser.source_label.text() == 'Source: Weapons.cfg'
+        browser.select_object(None)
+        assert browser.source_label.text() == 'Source: —'
+        tabs = window.entity_list_tabs if editor_name in ('entity', 'wireframe') else window._right_tabs
+        strip = tabs._palette_strip
+        strip.refresh()
+        button = next(button for button in strip.buttons() if button.text() == 'Entity List')
+        assert button._tab_color == ENTITY_LIST_TAB_COLOR
+        assert button.marker is not None
+        button.click()
+        assert button.isChecked()
+    finally:
+        window.close()
+
+
 def test_entity_designer_dirty_script_row_clears_after_save_or_reset(app, tmp_path):
     from entity_designer.editor import CollisionEditorWindow
     from studio.assets.catalog import GameObject

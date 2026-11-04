@@ -5,6 +5,10 @@ through Studio's own parsers, writers and Retail indexed renderer. Headless: no 
 
 An assistant should start with `studio_help()`: it explains the workflow, conventions, selectors, UV modes and recipes.
 
+Ground-decal effects need an explicit `effect_mode` (`ground_pulse` or `rise`) and an authored model, and are previewed by Entity Designer.
+`effect_mode = ground_pulse` uses `effect_3ds`, `effect_base` or `effect_vp`, `effect_pulse_interval` (fixed ms or min~max, rolled per flash), `effect_pulse_time` and `effect_scale`.
+`effect_mode = rise` previews camera-facing puffs; the engine renders the assigned `effect_3ds` only.
+
 ## Tools
 
 **Read and look**

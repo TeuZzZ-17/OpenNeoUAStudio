@@ -18,6 +18,7 @@ from PySide6.QtWidgets import (
     QMessageBox,
     QPushButton,
     QSizePolicy,
+    QTabWidget,
     QTreeWidget,
     QTreeWidgetItem,
     QVBoxLayout,
@@ -57,7 +58,7 @@ class EntityListMixin:
             combo.setMinimumContentsLength(5 if stretch == 0 else 10)
             combo.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
             controls.addWidget(combo, stretch)
-        browser_layout.insertLayout(browser_layout.indexOf(self.entity_browser.tree), controls)
+        browser_layout.insertLayout(browser_layout.indexOf(self.entity_browser.sort_combo), controls)
         layout.addWidget(self.entity_browser, 1)
         self._entity_controls = controls
         self._entity_panel = panel
@@ -182,6 +183,21 @@ class EntityListMixin:
 # ----------------------------------------------------------------------------
 
 GAME_OBJECT_ROLE = int(Qt.ItemDataRole.UserRole) + 64
+
+
+def entity_list_panel(browser):
+    """Wrap the shared browser in the standard single-page workspace tab."""
+    from studio.ui.shell import PREVIEW, compat_color
+    from studio.ui.tabs import PaletteTabStrip
+    panel = QWidget()
+    layout = QVBoxLayout(panel)
+    layout.setContentsMargins(0, 0, 0, 0)
+    tabs = QTabWidget()
+    tabs.setDocumentMode(True)
+    tabs.addTab(browser, "Entity List")
+    layout.addWidget(tabs)
+    PaletteTabStrip.install(tabs, markers={browser: compat_color(PREVIEW)})
+    return panel, tabs
 
 
 def configure_resource_tree(tree):
@@ -404,13 +420,21 @@ class GameObjectBrowser(QWidget):
         self.search = QLineEdit()
         self.search.setPlaceholderText("Search name or ID")
         self.search.setClearButtonEnabled(True)
+        self.sort_combo = QComboBox()
+        self.sort_combo.addItem("Sort by name", "name")
+        self.sort_combo.addItem("Sort by ID", "id")
+        self.sort_combo.addItem("Sort by type", "type")
+        layout.addWidget(self.sort_combo)
         layout.addWidget(self.search)
         self.tree = tree if tree is not None else QTreeWidget()
         self.tree.setHeaderLabels(["Game object", "Type", "ID"])
         configure_resource_tree(self.tree)
         layout.addWidget(self.tree, 1)
+        self.source_label = QLabel("Source: —")
+        layout.addWidget(self.source_label)
         self.search.textChanged.connect(self.filter)
         self.category.currentIndexChanged.connect(self.filter)
+        self.sort_combo.currentIndexChanged.connect(self._sort_changed)
         self.set_combo.currentIndexChanged.connect(self._set_changed)
         self.tree.currentItemChanged.connect(self._selected)
         self.tree.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
@@ -514,10 +538,20 @@ class GameObjectBrowser(QWidget):
                         if self.kinds is None or obj.kind in self.kinds]
         self.fill()
 
+    def _sort_key(self, obj):
+        order = self.sort_combo.currentData()
+        name = obj.name.casefold()
+        kind = obj.kind.casefold()
+        if order == "id":
+            return obj.object_id, kind, name
+        if order == "type":
+            return kind, name, obj.object_id
+        return name, kind, obj.object_id
+
     def fill(self, selected=None):
         with QSignalBlocker(self.tree):
             self.tree.clear()
-            for obj in self.objects:
+            for obj in sorted(self.objects, key=self._sort_key):
                 texts = [obj.name, obj.kind.title(), str(obj.object_id)]
                 if self._state_column:
                     key = (self.set_number, obj.kind, obj.object_id)
@@ -528,6 +562,18 @@ class GameObjectBrowser(QWidget):
                 self.tree.addTopLevelItem(item)
                 if selected is not None and (obj.kind, obj.object_id) == (selected.kind, selected.object_id):
                     self.tree.setCurrentItem(item)
+            current = self.tree.currentItem()
+            self.set_source(current.data(0, GAME_OBJECT_ROLE).source if current else None)
+        self.filter()
+
+    def _sort_changed(self):
+        with QSignalBlocker(self.tree):
+            selected = self.tree.currentItem()
+            items = [self.tree.takeTopLevelItem(0)
+                     for _ in range(self.tree.topLevelItemCount())]
+            items.sort(key=lambda item: self._sort_key(item.data(0, GAME_OBJECT_ROLE)))
+            self.tree.addTopLevelItems(items)
+            self.tree.setCurrentItem(selected)
         self.filter()
 
     def filter(self, *_args):
@@ -542,7 +588,11 @@ class GameObjectBrowser(QWidget):
         if current is not None:
             obj = current.data(0, GAME_OBJECT_ROLE)
             if obj is not None:
+                self.set_source(obj.source)
                 self.selected.emit(obj)
+
+    def set_source(self, path):
+        self.source_label.setText(f"Source: {Path(path).name}" if path else "Source: —")
 
     def _set_changed(self):
         if self.set_number is not None:
@@ -558,6 +608,7 @@ class GameObjectBrowser(QWidget):
                     selected = item
                     break
             self.tree.setCurrentItem(selected)
+            self.set_source(selected.data(0, GAME_OBJECT_ROLE).source if selected else None)
 
     def enable_state_column(self):
         self._state_column = True

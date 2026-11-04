@@ -11,7 +11,7 @@ from PySide6.QtCore import (
 )
 from PySide6.QtGui import QKeySequence, QPainter, QPainterPath, QPalette, QPen
 from PySide6.QtWidgets import (
-    QAbstractButton, QFrame, QHBoxLayout, QLabel, QMessageBox, QPushButton, QVBoxLayout,
+    QAbstractButton, QFrame, QLabel, QMessageBox, QVBoxLayout,
 )
 
 from studio.ui.code_editor import ScriptCodeEditor
@@ -122,42 +122,12 @@ class FxCodeDrawer(QFrame):
             "Visual begin_fx: tint applies to every model in the block, "
             "regardless of position. If repeated, the last value wins.")
         layout.addWidget(self.code, 1)
-        # The same controls as the transport bar under the preview.
-        transport = QHBoxLayout()
-        transport.setSpacing(4)
-        self.restart_button = panel.create_mirror_button(self, panel.restart_button)
-        self.play_button = panel.create_play_button(self)
-        self.stop_button = panel.create_mirror_button(self, panel.stop_button)
-        self.loop_button = panel.create_mirror_button(self, panel.loop_button)
-        self.mute_button = panel.create_mirror_button(self, panel.mute_button)
-        self.shake_button = panel.create_mirror_button(self, panel.shake_button)
-        self.pal_button = panel.create_mirror_button(self, panel.pal_button)
-        for control in (self.restart_button, self.play_button, self.stop_button,
-                        self.loop_button, self.mute_button, self.shake_button,
-                        self.pal_button):
-            transport.addWidget(control)
-        transport.addSpacing(10)
-        transport.addWidget(QLabel("Speed"))
-        self.speed_combo = panel.create_speed_combo(self)
-        transport.addWidget(self.speed_combo)
-        transport.addStretch(1)
-        layout.addLayout(transport)
-        buttons = QHBoxLayout()
-        self.revert_button = QPushButton("Revert Effect")
-        self.revert_button.clicked.connect(self._revert)
-        buttons.addWidget(self.revert_button)
-        self.save_button = QPushButton("Save Effect")
-        self.save_button.clicked.connect(self._save)
-        buttons.addWidget(self.save_button)
-        self.save_all_button = QPushButton("Save All Effects")
-        self.save_all_button.clicked.connect(lambda: self._save(all_effects=True))
-        buttons.addWidget(self.save_all_button)
+        # Extra actions sit in the editor toolbar, next to Save.
+        self.reset_button = self.code.add_tool_button("Reset", "Discard the unsaved changes of this effect")
+        self.reset_button.clicked.connect(self._reset)
         # Nothing to save until the effect is edited.
         self._set_save_enabled(False)
-        self.save_all_button.setEnabled(False)
-        self.revert_button.setEnabled(False)
-        buttons.addStretch(1)
-        layout.addLayout(buttons)
+        self.reset_button.setEnabled(False)
 
         self.tab = FxDrawerTab(host)
         self.tab.clicked.connect(self.toggle)
@@ -321,14 +291,10 @@ class FxCodeDrawer(QFrame):
         message = "; ".join(issue.message for issue in issues)
         self.code.set_error(message)
         self._set_save_enabled(not session.source_error and session.is_dirty(self.index))
-        self.save_all_button.setEnabled(not session.source_error and self.panel.has_unsaved_text)
         self._sync_title()
         return True
 
     def _set_save_enabled(self, enabled: bool) -> None:
-        """Both Save buttons (the drawer's and the editor toolbar's) share one state."""
-
-        self.save_button.setEnabled(enabled)
         self.code.save_button.setEnabled(enabled)
 
     def _sync_title(self):
@@ -337,14 +303,14 @@ class FxCodeDrawer(QFrame):
         self.title_label.setText(f"{self.panel.edit_title(self.index)}{dirty}")
         source = self.panel.edit_source(self.index)
         self.source_label.setText(source + ("\n" + session.source_error if session.source_error else ""))
-        self.revert_button.setEnabled(session.is_dirty(self.index))
+        self.reset_button.setEnabled(session.is_dirty(self.index))
 
-    def _save(self, _checked=False, *, all_effects=False):
+    def _save(self, _checked=False):
         self.timer.stop()
         if not self._apply():
             return False
         try:
-            if not self.panel.save_rows(None if all_effects else [self.index]):
+            if not self.panel.save_rows([self.index]):
                 return False
         except (OSError, ValueError, RuntimeError, UnicodeError) as exc:
             QMessageBox.warning(self, "Effect was not saved", str(exc))
@@ -353,7 +319,8 @@ class FxCodeDrawer(QFrame):
         self._apply()
         return True
 
-    def _revert(self):
+
+    def _reset(self):
         self.timer.stop()
         session = self.panel.session_for(self.index)
         item = session.revert(self.index)

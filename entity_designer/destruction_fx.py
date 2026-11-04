@@ -865,7 +865,7 @@ def _nonnegative_ms(text: str) -> int:
 
 
 def _interpret_smoke(rows: dict[str, str], issue) -> decal_smoke.SmokeSpec:
-    """The smoke_* keys of a new_decal profile, with the engine's fallbacks.
+    """The effect_* keys of a new_decal profile, with the engine's fallbacks.
 
     Mirrors ``ParseGroundDecalSmokeParam``: a bad value keeps the default of
     that key (with a warning), so a typo never removes the whole smoke.
@@ -906,51 +906,80 @@ def _interpret_smoke(rows: dict[str, str], issue) -> decal_smoke.SmokeSpec:
         return max(low, min(parsed, high))
 
     size = defaults.size
-    if "smoke_size" in rows:
-        parsed = parse_float_range(rows["smoke_size"])
+    if "effect_size" in rows:
+        parsed = parse_float_range(rows["effect_size"])
         if parsed and parsed[0] > 0 and parsed[1] > 0:
             size = (max(0.5, min(parsed[0], 200.0)), max(0.5, min(parsed[1], 200.0)))
         else:
-            issue(SEVERITY_WARNING, f"Invalid smoke_size '{rows['smoke_size']}': "
+            issue(SEVERITY_WARNING, f"Invalid effect_size '{rows['effect_size']}': "
                   f"using {format_range(*defaults.size)}.")
 
     tint = defaults.tint
-    if "smoke_tint" in rows:
-        parsed_tint = parse_tint(rows["smoke_tint"])
+    if "effect_tint" in rows:
+        parsed_tint = parse_tint(rows["effect_tint"])
         if parsed_tint is None:
-            issue(SEVERITY_WARNING, f"Invalid smoke_tint '{rows['smoke_tint']}': "
+            issue(SEVERITY_WARNING, f"Invalid effect_tint '{rows['effect_tint']}': "
                   "using 255_255_255_255.")
             tint = (255, 255, 255, 255)
         else:
             tint = parsed_tint
 
     fade = (defaults.fade_in, defaults.fade_out)
-    if "smoke_fade_inout" in rows:
-        parts = split_tuple(rows["smoke_fade_inout"], 2)
+    if "effect_fade_inout" in rows:
+        parts = split_tuple(rows["effect_fade_inout"], 2)
         if parts is None:
             issue(SEVERITY_WARNING,
-                  f"Invalid smoke_fade_inout '{rows['smoke_fade_inout']}': "
+                  f"Invalid effect_fade_inout '{rows['effect_fade_inout']}': "
                   f"using {fade[0]}|{fade[1]}.")
         else:
             fade = tuple(
-                bounded_int("smoke_fade_inout", 0, 3600000, default, part)
+                bounded_int("effect_fade_inout", 0, 3600000, default, part)
                 for part, default in zip(parts, fade))
 
-    return decal_smoke.SmokeSpec(
+    # effect_mode is mandatory; the engine logs the same problems when it loads the profile.
+    mode = rows.get("effect_mode", "").lower()
+    if mode not in decal_smoke.MODES:
+        if "effect_mode" in rows:
+            issue(SEVERITY_WARNING, f"Invalid effect_mode '{rows['effect_mode']}' "
+                  "(use ground_pulse or rise): effect disabled.")
+        else:
+            issue(SEVERITY_WARNING, "effect_* keys without effect_mode "
+                  "(ground_pulse or rise): effect disabled.")
+        mode = ""
+    else:
+        ignored = (decal_smoke.RISE_KEYS if mode == decal_smoke.MODE_GROUND_PULSE
+                   else decal_smoke.GROUND_PULSE_KEYS)
+        for key in ignored:
+            if key in rows:
+                issue(SEVERITY_WARNING, f"{key} is ignored with effect_mode = {mode}.")
+
+    spec = decal_smoke.SmokeSpec(
         enabled=True,
-        chance=bounded_int("smoke_chance", 0, 100, defaults.chance),
-        duration=int_range("smoke_duration", 0, 3600000, defaults.duration),
+        mode=mode,
+        pulse_vp=bounded_int("effect_vp", 0, 65535, 0),
+        mesh3ds="" if rows.get("effect_3ds", "") == "0" else rows.get("effect_3ds", ""),
+        base_model="" if rows.get("effect_base", "") == "0" else rows.get("effect_base", ""),
+        pulse_interval=int_range("effect_pulse_interval", 200, 60000, defaults.pulse_interval),
+        pulse_time=bounded_int("effect_pulse_time", 20, 1000, 120),
+        mesh_scale=number("effect_scale", 0.001, 10.0, 0.1),
+        chance=bounded_int("effect_chance", 0, 100, defaults.chance),
+        active_time=int_range("effect_active_time", 0, 3600000, defaults.active_time),
         fade_in=fade[0],
         fade_out=fade[1],
-        count=int_range("smoke_count", 0, decal_smoke.MAX_PUFFS, defaults.count),
+        count=int_range("effect_count", 0, decal_smoke.MAX_PUFFS, defaults.count),
         size=size,
-        growth=number("smoke_growth", 1.0, 10.0, defaults.growth),
-        rise_speed=number("smoke_rise_speed", 0.0, 200.0, defaults.rise_speed),
-        puff_time=int_range("smoke_puff_time", 200, 60000, defaults.puff_time),
-        drift=number("smoke_drift", 0.0, 300.0, defaults.drift),
-        spread=number("smoke_spread", 0.0, 100.0, defaults.spread),
-        intensity=number("smoke_intensity", 0.0, 300.0, defaults.intensity),
+        growth=number("effect_growth", 1.0, 10.0, defaults.growth),
+        rise_speed=number("effect_rise_speed", 0.0, 200.0, defaults.rise_speed),
+        puff_time=int_range("effect_puff_time", 200, 60000, defaults.puff_time),
+        drift=number("effect_drift", 0.0, 300.0, defaults.drift),
+        spread=number("effect_spread", 0.0, 100.0, defaults.spread),
+        intensity=number("effect_intensity", 0.0, 300.0, defaults.intensity),
         tint=tint)
+    if mode and not decal_smoke.emits(spec):
+        need = ("effect_3ds" if mode == decal_smoke.MODE_RISE
+                else "effect_3ds, effect_base or effect_vp")
+        issue(SEVERITY_WARNING, f"effect_mode = {mode} needs {need}: effect disabled.")
+    return spec
 
 
 def interpret_block(block: FxBlock, context: str) -> FxSpec:
@@ -1333,7 +1362,7 @@ def parse_decal_profile(profile_id: int, values: dict[str, str]) -> DecalProfile
         fade_out = min(fade_out, duration)
         fade_in = min(fade_in, duration - fade_out)
 
-    # Any smoke_* key switches the smoke on (smoke_count = 0 keeps it silent).
+    # Any effect_* key switches the smoke on (effect_count = 0 keeps it silent).
     smoke_rows = {key: value for key, value in values.items()
                   if key in decal_smoke.SMOKE_KEYS}
     smoke = _interpret_smoke(smoke_rows, issue) if smoke_rows else None
@@ -3574,7 +3603,9 @@ class PreviewSimulation:
             return
         count = decal_smoke.scaled_count(decal_smoke.emitter_count(smoke, seed), radius)
         real = decal_smoke.emitter_duration(smoke, seed)
-        if count <= 0 or real <= 0:
+        # effect_count only matters for rise; ground_pulse flashes ignore it.
+        if not decal_smoke.emits(smoke) or real <= 0 or (
+                smoke.mode == decal_smoke.MODE_RISE and count <= 0):
             return
         shown = min(float(real), SMOKE_PREVIEW_MS)
         self._events.append((source, "decal_smoke", start, start + shown,
@@ -3792,6 +3823,28 @@ class PreviewSimulation:
                     decal_edge_fade=edge))
             elif kind == "decal_smoke":
                 smoke, position, radius, seed, count, real = payload
+                # Like the engine: no valid mode or no model, nothing is drawn.
+                if not decal_smoke.emits(smoke):
+                    continue
+                if smoke.mode == decal_smoke.MODE_GROUND_PULSE:
+                    cycle, cycle_start, interval = decal_smoke.pulse_cycle(smoke, seed, age)
+                    elapsed = age - cycle_start
+                    life = min(smoke.pulse_time, interval)
+                    if elapsed < life:
+                        angle = 2.0 * math.pi * decal_smoke.hash_unit(
+                            decal_smoke.hash32(seed, cycle, 0x454c4543))
+                        spread = smoke.spread * 0.01 * radius
+                        pos = (position[0] + math.cos(angle) * spread,
+                               position[1] - decal_smoke.GROUND_LIFT,
+                               position[2] + math.sin(angle) * spread)
+                        scale = smoke.mesh_scale * radius / 50.0
+                        items.append(PreviewItem(
+                            source, "visual", smoke.pulse_vp,
+                            pos, _rot_z(angle), (scale,) * 3,
+                            temporal_envelope(elapsed, life, 10, life / 2),
+                            smoke.tint, "decal mesh pulse",
+                            tuple(path for path in (smoke.mesh3ds, smoke.base_model) if path)))
+                    continue
                 gain = smoke.intensity * 0.01 * smoke.tint[3] / 255.0
                 for slot in range(count):
                     puff = decal_smoke.evaluate(

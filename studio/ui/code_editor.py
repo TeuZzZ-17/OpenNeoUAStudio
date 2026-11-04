@@ -252,10 +252,10 @@ class ScriptCodeEditor(QWidget):
         toolbar = QHBoxLayout()
         toolbar.setContentsMargins(0, 0, 0, 0)
         toolbar.setSpacing(3)
-        self.undo_button = self._tool_button("Undo", "Undo the last edit")
+        self.undo_button = self._tool_button("< Undo", "Undo the last edit")
         self.undo_button.clicked.connect(self._undo)
         toolbar.addWidget(self.undo_button)
-        self.redo_button = self._tool_button("Redo", "Redo the last edit")
+        self.redo_button = self._tool_button("Redo >", "Redo the last edit")
         self.redo_button.clicked.connect(self._redo)
         toolbar.addWidget(self.redo_button)
         self.find_button = self._tool_button("Find", "Find text (Ctrl+F)")
@@ -269,6 +269,7 @@ class ScriptCodeEditor(QWidget):
         self.save_button.clicked.connect(self.saveRequested.emit)
         toolbar.addWidget(self.save_button)
         toolbar.addStretch(1)
+        self._toolbar = toolbar
         root.addLayout(toolbar)
 
         self.search_row = QWidget(self)
@@ -337,6 +338,13 @@ class ScriptCodeEditor(QWidget):
         self._bind_shortcut("Ctrl+H", lambda: self._show_search(True))
         self._bind_shortcut("F3", self.find_next)
         self._bind_shortcut("Shift+F3", self.find_previous)
+
+    def add_tool_button(self, text: str, tooltip: str) -> QToolButton:
+        """Add a button after Save, for actions that belong to the owner of the editor."""
+
+        button = self._tool_button(text, tooltip)
+        self._toolbar.insertWidget(self._toolbar.count() - 1, button)
+        return button
 
     @staticmethod
     def _tool_button(text: str, tooltip: str) -> QToolButton:
