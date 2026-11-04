@@ -254,6 +254,32 @@ def test_briefing_size_is_an_integer_and_larger_means_larger():
         assert slider_to_briefing_size(briefing_size_to_slider(size)) == size
 
 
+def test_list_reads_the_script_again_after_an_overwrite_and_keeps_the_selection(tmp_path):
+    from entity_designer.editor_files import _ScriptFilesMixin
+    from studio.assets.catalog import GameObject
+    from studio.ui.browsers import GAME_OBJECT_ROLE
+
+    def objects(size):
+        return [GameObject("vehicle", number, tmp_path / "s.cfg",
+                           {"name": f"V{number}", "briefing_size": str(size)},
+                           [f"name = V{number}\nbriefing_size = {size}"])
+                for number in (1, 2)]
+
+    app = QApplication.instance() or QApplication([])
+    with patch("studio.ui.browsers.load_game_objects", return_value=objects(40)), \
+            patch.object(bootstrap, "installation",
+                         return_value=SimpleNamespace(available_sets=lambda: [1])):
+        browser = GameObjectBrowser(kinds=("vehicle", "weapon"))
+        browser.tree.setCurrentItem(browser.tree.topLevelItem(1))
+        assert "briefing_size = 40" in browser.tree.currentItem().data(0, GAME_OBJECT_ROLE).effective_text
+        # The script is rewritten on disk: the list must not keep the old text.
+        with patch("studio.ui.browsers.load_game_objects", return_value=objects(62)):
+            _ScriptFilesMixin._refresh_game_objects(SimpleNamespace(game_object_browser=browser))
+        current = browser.tree.currentItem().data(0, GAME_OBJECT_ROLE)
+        assert current.object_id == 2 and "briefing_size = 62" in current.effective_text
+        assert browser.tree.topLevelItemCount() == 2
+
+
 def test_entity_designer_list_has_no_buildings(tmp_path):
     from studio.assets.catalog import GameObject
     app = QApplication.instance() or QApplication([])
