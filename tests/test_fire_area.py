@@ -131,9 +131,9 @@ def test_cone_rims_and_longitudinal_lines():
 
 
 def test_tilt_turns_a_forward_volume_toward_the_ground():
-    flat = fa.volume_segments(fa.BOX_FORWARD, (10, 10, 100), 0)
-    tilted = fa.volume_segments(fa.BOX_FORWARD, (10, 10, 100), 0, tilt_deg=30)
-    assert max(p[1] for s in flat for p in s) < max(p[1] for s in tilted for p in s)
+    flat = fa.volume_faces(fa.BOX_FORWARD, (10, 10, 100), 0)
+    tilted = fa.volume_faces(fa.BOX_FORWARD, (10, 10, 100), 0, tilt_deg=30)
+    assert max(p[1] for f in flat for p in f) < max(p[1] for f in tilted for p in f)
 
 
 def test_handles_drag_values():
@@ -299,6 +299,47 @@ def test_x_span_widens_box_and_cone():
     # The lengthwise lines plus the line over the muzzle range at the near end.
     assert len(cone) == 32 + 4 + 1
     assert fa.volume_handles(fa.BOX_FORWARD, (100, 80, 1200), 0, x_span=span)[0].point[0] == 80.0
+
+
+def test_volume_faces_close_box_and_cone_on_the_same_points_as_the_lines():
+    box = fa.volume_faces(fa.BOX_FORWARD, (100, 80, 1200), 150)
+    assert len(box) == 6 and all(len(face) == 4 for face in box)
+    lines = {p for s in fa.volume_segments(fa.BOX_FORWARD, (100, 80, 1200), 150) for p in s}
+    assert {p for face in box for p in face} == lines
+    cone = fa.volume_faces(fa.CONE_FORWARD, (90, 90, 1000), 200, tilt_deg=25.0)
+    # One side face per segment, the far cap and the near cap (dead zone > 0).
+    assert len(cone) == 32 + 2
+    assert len(fa.volume_faces(fa.CONE_FORWARD, (90, 90, 1000), 0)) == 32 + 1
+    assert fa.volume_faces(fa.BOX_FORWARD, (0, 80, 1200), 0) == []
+
+
+def test_max_tilt_is_only_for_flying_units():
+    from entity_designer.fire_area_units import FiringUnit
+
+    app, window, _pytest = _weapon_window(
+        fa.FireArea(box_forward=(100, 80, 1000), max_inclination=25.0))
+    try:
+        window.properties_tabs.setCurrentIndex(window.fire_area_tab_index)
+        panel, viewport = window.fire_area_panel, window.viewport
+        # A bare weapon may be flown: the tilt is shown.
+        assert panel.inclination_spin.isEnabled() and viewport._fire_area_tilt_faces()
+        tank = FiringUnit(5, "Tank", 30, (0.0, -5.0, 18.0), "tank", 10.0, (1, 1, 1), (0, 0, 0))
+        plane = FiringUnit(6, "Plane", 31, (0.0, -5.0, 18.0), "plane", 10.0, (1, 1, 1), (0, 0, 0))
+        window._fire_area_units = [tank, plane]
+        window._fire_area_unit_chosen(5)
+        assert not panel.inclination_spin.isEnabled()
+        assert not panel.inclination_slider.isEnabled()
+        assert viewport._fire_area_tilt_faces() == []
+        # Without the tilt the low shot flies the plain volume depth, not down to the ground.
+        assert window._fire_area_shots()[0][1][2] == window._fire_area_muzzle()[2] + 1000.0
+        window._fire_area_unit_chosen(6)
+        assert panel.inclination_spin.isEnabled() and viewport._fire_area_tilt_faces()
+        # The tilt is only the translucent fill: the outline is the untilted volume alone.
+        assert len(viewport._fire_area_lines()) == len(
+            fa.volume_segments(fa.BOX_FORWARD, (100, 80, 1000), 0.0, viewport._fire_area_origin(),
+                               viewport._fire_area_x_span))
+    finally:
+        _close(app, window)
 
 
 def test_shot_path_drops_bombs_and_fires_ahead_within_the_tilt_limit():

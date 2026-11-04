@@ -229,6 +229,57 @@ def _point(origin: Vec3, axes, along: Vec3) -> Vec3:
                  for i in range(3))
 
 
+def _box_corners(origin: Vec3, axes, half_w: float, half_s: float, depth: float,
+                 near: float, x_span: tuple[float, float]) -> list[Vec3]:
+    """The 8 corners of a box volume; bit 1 = +x side, bit 2 = +second axis, bit 4 = far end."""
+
+    min_x, max_x = x_span
+    return [_point(origin, axes, (max_x + half_w if i & 1 else min_x - half_w,
+                                  half_s if i & 2 else -half_s,
+                                  depth if i & 4 else near))
+            for i in range(8)]
+
+
+def _cone_rim(origin: Vec3, axes, half_w: float, cone_y: float, x_span: tuple[float, float]):
+    """Function (angle, distance) -> point of the cone surface at that distance."""
+
+    min_x, max_x = x_span
+
+    def rim(angle: float, distance: float) -> Vec3:
+        cosine = math.cos(angle)
+        return _point(origin, axes, ((min_x if cosine < 0.0 else max_x) + cosine * half_w * distance,
+                                     math.sin(angle) * cone_y * distance, distance))
+
+    return rim
+
+
+def volume_faces(shape: str, size, dead_zone: float, origin: Vec3 = (0.0, 0.0, 0.0),
+                 tilt_deg: float = 0.0,
+                 x_span: tuple[float, float] = (0.0, 0.0)) -> list[list[Vec3]]:
+    """Polygons that close one volume, for a translucent fill.
+
+    Same geometry as ``volume_segments``: the two share the corner and rim helpers.
+    """
+
+    if not valid_size(shape, size):
+        return []
+    axes = _axes(shape, tilt_deg)
+    half_w, half_s, depth, cone_y = _layout(shape, size)
+    near = dead_zone if 0.0 <= dead_zone < depth else 0.0
+    if not is_cone(shape):
+        corners = _box_corners(origin, axes, half_w, half_s, depth, near, x_span)
+        return [[corners[i] for i in quad] for quad in (
+            (0, 1, 3, 2), (4, 5, 7, 6), (0, 1, 5, 4), (2, 3, 7, 6), (0, 2, 6, 4), (1, 3, 7, 5))]
+    rim = _cone_rim(origin, axes, half_w, cone_y, x_span)
+    angles = [2.0 * math.pi * i / CONE_SEGMENTS for i in range(CONE_SEGMENTS + 1)]
+    faces = [[rim(a, near), rim(a, depth), rim(b, depth), rim(b, near)]
+             for a, b in zip(angles, angles[1:])]
+    faces.append([rim(a, depth) for a in angles[:-1]])
+    if near > 0.0:
+        faces.append([rim(a, near) for a in angles[:-1]])
+    return faces
+
+
 def x_span_of(fire_x: float) -> tuple[float, float]:
     """Sideways extent of the muzzles of a unit: the engine uses +-|fire_x|."""
 
@@ -237,7 +288,6 @@ def x_span_of(fire_x: float) -> tuple[float, float]:
 
 
 def volume_segments(shape: str, size, dead_zone: float, origin: Vec3 = (0.0, 0.0, 0.0),
-                    tilt_deg: float = 0.0,
                     x_span: tuple[float, float] = (0.0, 0.0)) -> list[Segment]:
     """Lines of one volume, the same set the engine's New Debug draws.
 
@@ -247,29 +297,20 @@ def volume_segments(shape: str, size, dead_zone: float, origin: Vec3 = (0.0, 0.0
 
     if not valid_size(shape, size):
         return []
-    axes = _axes(shape, tilt_deg)
+    axes = _axes(shape)
     half_w, half_s, depth, cone_y = _layout(shape, size)
     near = dead_zone if 0.0 <= dead_zone < depth else 0.0
     min_x, max_x = x_span
     segments: list[Segment] = []
     if not is_cone(shape):
-        corners = [
-            _point(origin, axes, (max_x + half_w if i & 1 else min_x - half_w,
-                                  half_s if i & 2 else -half_s,
-                                  depth if i & 4 else near))
-            for i in range(8)
-        ]
+        corners = _box_corners(origin, axes, half_w, half_s, depth, near, x_span)
         for i in range(8):
             for bit in (1, 2, 4):
                 if not i & bit:
                     segments.append((corners[i], corners[i | bit]))
         return segments
 
-    def rim(angle: float, distance: float) -> Vec3:
-        cosine = math.cos(angle)
-        return _point(origin, axes, ((min_x if cosine < 0.0 else max_x) + cosine * half_w * distance,
-                                     math.sin(angle) * cone_y * distance, distance))
-
+    rim = _cone_rim(origin, axes, half_w, cone_y, x_span)
     for i in range(CONE_SEGMENTS):
         angle = 2.0 * math.pi * i / CONE_SEGMENTS
         following = 2.0 * math.pi * (i + 1) / CONE_SEGMENTS

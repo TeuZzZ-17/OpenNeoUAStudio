@@ -224,7 +224,10 @@ class CollisionViewport(FxPreviewViewportMixin, AssetViewport):
     RING_SEGMENTS = 12
     # Same orange as the engine's New Debug fire volume (yw_debug.cpp).
     FIRE_AREA_COLOR = QColor(255, 150, 30)
-    FIRE_AREA_TILT_COLOR = QColor(255, 220, 130)
+    # The engine picks any tilt from 0 up to the limit. Each of these layers is one tilt
+    # in that range, drawn faint: together they fill the whole range the volume can sweep.
+    FIRE_AREA_TILT_FILL = QColor(255, 220, 130, 22)
+    FIRE_AREA_TILT_STEPS = 6
     FIRE_AREA_HANDLE_RADIUS = 7.0
     SELECTED_HALO_WIDTH = 6.0
     SELECTED_COLOR_WIDTH = 3.4
@@ -283,6 +286,7 @@ class CollisionViewport(FxPreviewViewportMixin, AssetViewport):
         self._fire_area_handle = ""
         self._fire_area_muzzle = (0.0, 0.0, 0.0)
         self._fire_area_x_span = (0.0, 0.0)
+        self._fire_area_tilt = True
         self._fire_area_focus: list[tuple[float, float, float]] = []
         # (key, press position, screen pixels per world unit) while dragging a grip.
         self._fire_area_drag: tuple[str, QPointF, QPointF] | None = None
@@ -1233,10 +1237,12 @@ class CollisionViewport(FxPreviewViewportMixin, AssetViewport):
 
     def set_fire_area(self, area: fa.FireArea, shape: str | None,
                       handle: str = "", *, origin=(0.0, 0.0, 0.0),
-                      x_span=(0.0, 0.0), focus=()) -> None:
+                      x_span=(0.0, 0.0), focus=(), tilt=True) -> None:
         """Volume to draw; ``origin`` is the muzzle, ``x_span`` the muzzle range
-        sideways and ``focus`` extra points (unit, target) kept in frame."""
+        sideways, ``focus`` extra points (unit, target) kept in frame and ``tilt``
+        whether the firing unit uses the max tilt (flying units only)."""
 
+        self._fire_area_tilt = bool(tilt)
         self._fire_area = area
         self._fire_area_shape = shape
         self._fire_area_handle = handle
@@ -1263,32 +1269,61 @@ class CollisionViewport(FxPreviewViewportMixin, AssetViewport):
             shape, size, self._fire_area.dead_zone, self._fire_area_origin(),
             self._fire_area_x_span)
 
-    def _fire_area_lines(self) -> list[tuple[fa.Segment, QColor, bool]]:
-        """(segment, colour, dashed) of every authored volume and its tilt limit."""
+    def _fire_area_lines(self) -> list[fa.Segment]:
+        """Lines of every authored volume. The tilt is not a second volume: it is only
+        drawn as the translucent fill (``_draw_fire_area_tilt_fill``)."""
 
         area, origin = self._fire_area, self._fire_area_origin()
         lines = []
         for shape in area.authored_shapes():
-            size = area.size(shape)
-            for segment in fa.volume_segments(
-                    shape, size, area.dead_zone, origin, 0.0, self._fire_area_x_span):
-                lines.append((segment, self.FIRE_AREA_COLOR, False))
-            if not fa.is_below(shape) and area.max_inclination > 0.0:
-                # Furthest the engine tilts the volume toward a ground target.
-                for segment in fa.volume_segments(
-                        shape, size, area.dead_zone, origin, area.max_inclination,
-                        self._fire_area_x_span):
-                    lines.append((segment, self.FIRE_AREA_TILT_COLOR, True))
+            lines += fa.volume_segments(
+                shape, area.size(shape), area.dead_zone, origin, self._fire_area_x_span)
         return lines
+
+    def _fire_area_tilt_shown(self, shape: str) -> bool:
+        return (self._fire_area_tilt and not fa.is_below(shape)
+                and self._fire_area.max_inclination > 0.0)
+
+    def _fire_area_tilt_faces(self) -> list[list[fa.Vec3]]:
+        """Polygons of the volume at every downward tilt up to the limit, for the translucent fill."""
+
+        area, origin = self._fire_area, self._fire_area_origin()
+        faces = []
+        for shape in area.authored_shapes():
+            if not self._fire_area_tilt_shown(shape):
+                continue
+            for step in range(1, self.FIRE_AREA_TILT_STEPS + 1):
+                faces += fa.volume_faces(
+                    shape, area.size(shape), area.dead_zone, origin,
+                    area.max_inclination * step / self.FIRE_AREA_TILT_STEPS,
+                    self._fire_area_x_span)
+        return faces
+
+    def _draw_fire_area_tilt_fill(self, painter: QPainter) -> None:
+        """Translucent fill of the tilted volume, far faces first so overlaps stay readable."""
+
+        drawn = []
+        for face in self._fire_area_tilt_faces():
+            camera = [self._camera_vertex(point) for point in face]
+            if not all(self._camera_point_is_projectable(point) for point in camera):
+                continue
+            depth = sum(4.0 - point[2] for point in camera) / len(camera)
+            drawn.append((depth, QPolygonF([self._project(point) for point in camera])))
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.setBrush(self.FIRE_AREA_TILT_FILL)
+        for _depth, polygon in sorted(drawn, key=lambda item: -item[0]):
+            painter.drawPolygon(polygon)
 
     def frame_fire_area(self, unit_only: bool = False) -> None:
         """Move the camera so the whole volume, the unit and the ground are visible;
         ``unit_only`` closes in on the unit and its fire point instead."""
 
-        segments = [line[0] for line in self._fire_area_lines()]
+        segments = self._fire_area_lines()
         if not segments:
             return
         points = [(point, point) for point in self._fire_area_focus]
+        # The tilted fill is part of what the volume covers.
+        points += [(point, point) for face in self._fire_area_tilt_faces() for point in face]
         if unit_only:
             center, radius = fa.bounds_of(
                 [(point, point) for point in (*self._fire_area_focus[:1], self._fire_area_muzzle)])
@@ -1312,17 +1347,15 @@ class CollisionViewport(FxPreviewViewportMixin, AssetViewport):
         if not (self._fire_area_visible and self._ground_alignment_source_loaded):
             return
         painter.save()
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+        self._draw_fire_area_tilt_fill(painter)
         # Crisp one-pixel style lines, like the engine's debug overlay.
         painter.setRenderHint(QPainter.RenderHint.Antialiasing, False)
-        for (start, end), color, dashed in self._fire_area_lines():
+        painter.setPen(QPen(self.FIRE_AREA_COLOR, 1.5))
+        for start, end in self._fire_area_lines():
             screen = self._fire_area_segment_screen(start, end)
-            if screen is None:
-                continue
-            pen = QPen(color, 1.5)
-            if dashed:
-                pen.setStyle(Qt.PenStyle.DashLine)
-            painter.setPen(pen)
-            painter.drawLine(*screen)
+            if screen is not None:
+                painter.drawLine(*screen)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
         radius = self.FIRE_AREA_HANDLE_RADIUS
         visible = []

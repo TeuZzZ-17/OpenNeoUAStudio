@@ -117,6 +117,12 @@ class FireAreaEditingMixin:
         return next((unit for unit in self._fire_area_units
                      if unit.vehicle_id == self._fire_area_unit_id), None)
 
+    def _fire_area_tilt_applies(self) -> bool:
+        """The engine tilts the volume only for flying units; a bare weapon may be flown."""
+
+        unit = self._fire_area_unit()
+        return unit is None or unit.flies
+
     def _fire_area_reset_height(self) -> None:
         """Preview height of the muzzle: a ground unit stands on the floor, a flying
         unit or a bare weapon starts at the default (editable) height."""
@@ -156,11 +162,12 @@ class FireAreaEditingMixin:
             return []
         unit = self._fire_area_unit()
         muzzle = self._fire_area_muzzle()
+        tilt = self.project.fire_area.max_inclination if self._fire_area_tilt_applies() else 0.0
         shots = []
         for x in (unit.muzzle_xs() if unit is not None else [0.0]):
             shots.append(fa.shot_path(
                 shape, size, (muzzle[0] + x, muzzle[1], muzzle[2]), 0.0,
-                self.project.fire_area.max_inclination, self._fire_area_aim))
+                tilt, self._fire_area_aim))
         return shots
 
     def _fire_area_extra_vps(self) -> set[int]:
@@ -229,7 +236,8 @@ class FireAreaEditingMixin:
             "Select a weapon: ai_fire_trigger_* belong to weapon definitions.",
             warning=" ".join(warnings),
             units=[(unit.vehicle_id, unit.label) for unit in self._fire_area_units],
-            unit_id=self._fire_area_unit_id, aim=self._fire_area_aim)
+            unit_id=self._fire_area_unit_id, aim=self._fire_area_aim,
+            tilt_available=self._fire_area_tilt_applies())
         active = self._is_fire_area_tab_active()
         shots = self._fire_area_shots() if active else []
         shot = shots[0] if shots else None
@@ -237,7 +245,8 @@ class FireAreaEditingMixin:
             area if weapon else fa.FireArea(), shape if weapon else None,
             self._fire_area_handle, origin=self._fire_area_muzzle(),
             x_span=self._fire_area_x_span(),
-            focus=[self._fire_area_unit_position(), *( [shot[1]] if shot else [])])
+            focus=[self._fire_area_unit_position(), *( [shot[1]] if shot else [])],
+            tilt=self._fire_area_tilt_applies())
         # The weapon flies the shot only while this tab is open.
         self.fx_panel.set_shot(shot, shots[1:])
         if active:
