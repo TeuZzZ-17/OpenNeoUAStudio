@@ -22,19 +22,12 @@ from PySide6.QtWidgets import (
 
 from entity_designer import destruction_fx as fx
 from entity_designer.fx_audio import FxSoundPlayer
-from entity_designer import fx_visuals
+from entity_designer import fx_compat, fx_visuals
 from entity_designer.fx_authoring import FxTextSession, effect_text
+from studio.ui.shell import COMPAT_STYLES, OPENNEOUA
 from studio.ui.widgets import use_standard_list_style
 
 SPEEDS = (0.1, 0.25, 0.5, 1.0, 2.0, 4.0)
-MODE_COLORS = {
-    fx.MODE_VISUAL: "#5fb7e8",
-    fx.MODE_PHYSICAL: "#d98c4a",
-    "sound": "#e6b94d",
-    "palette": "#d96cc4",
-    "shake": "#5fd1c3",
-    "dest": "#5cbf72",
-}
 STATUS_GLYPHS = {
     fx.SEVERITY_FATAL: ("✖", "Breaks the script: the whole file stops loading."),
     fx.SEVERITY_UNKNOWN: ("?", "Contains keys Studio does not know."),
@@ -418,24 +411,26 @@ class FxEffectsView(QWidget):
             self.list.clear()
             self._add_state_rows(selected if keep_selection else set())
             for index, item in enumerate(panel.document.items):
+                level = None
                 if isinstance(item, fx.FxBlank):
                     color = "#6f7682"
                     issues = ()
                     title = "New effect"
                     detail = "Empty · write a begin_fx, a dest_fx or snd_ / pal_ / shk_ keys"
                 elif isinstance(item, fx.FxKeyGroup):
-                    color = MODE_COLORS[item.kind]
+                    level = fx_compat.key_group_level(item, panel.context)
                     issues = fx.key_group_issues(item, panel.context)
                     title = f"{KEY_GROUP_LABELS[item.kind]} · {item.event}"
                     detail = fx.key_group_summary(item)
                 else:
                     if isinstance(item, fx.FxBlock):
-                        color = MODE_COLORS.get(item.mode, "#a0a0a0")
+                        # begin_fx is an OpenNeoUA block: vanilla skips it.
+                        level = OPENNEOUA
                         text = (f"{item.trigger or 'no trigger'}  ·  "
                                 f"{fx.block_summary(item, panel.context)}")
                         issues = fx.interpret_block(item, panel.context).issues
                     else:
-                        color = MODE_COLORS["dest"]
+                        level = fx_compat.dest_line_level(item)
                         parsed = item.parsed
                         text = (f"{parsed.kind if parsed else '?'}  ·  "
                                 f"{fx.dest_summary(item, panel.catalog)}")
@@ -445,6 +440,8 @@ class FxEffectsView(QWidget):
                     summary = parts[1] if len(parts) > 1 else ""
                     mode, _, detail = summary.partition(" · ")
                     title = f"{mode} · {trigger}"
+                if level is not None:
+                    color = COMPAT_STYLES[level].color
                 glyph, meaning = STATUS_GLYPHS.get(_issues_status(issues), ("", ""))
                 row = QListWidgetItem(title + (" · Warning" if glyph else "") + "\n" + detail)
                 row.setFlags(row.flags() | Qt.ItemFlag.ItemIsUserCheckable)
@@ -452,8 +449,9 @@ class FxEffectsView(QWidget):
                                   else Qt.CheckState.Checked)
                 row.setIcon(self._dot_icon(color))
                 row.setForeground(QColor("#edf1f7"))
+                compat = [COMPAT_STYLES[level].title] if level is not None else []
                 row.setToolTip("\n".join(
-                    [meaning] + [issue.message for issue in issues]).strip())
+                    compat + [meaning] + [issue.message for issue in issues]).strip())
                 row.setData(Qt.ItemDataRole.UserRole, index)
                 self.list.addItem(row)
                 if keep_selection and index in selected:
@@ -480,25 +478,35 @@ class FxEffectsView(QWidget):
         return QIcon(dot)
 
     def _add_state_rows(self, selected) -> None:
-        """One Model row leads the list: the VP / BASE / 3DS of every state."""
+        """The Model row and the Ground decal row lead the list."""
 
         panel = self.panel
         session = panel.state_session
-        index = fx_visuals.MODEL_INDEX
-        if index not in session.originals:
-            return
-        row = QListWidgetItem("Model\n" + fx_visuals.model_summary(
-            fx_visuals.parse_model_text(session.originals[index])))
-        row.setFlags(row.flags() | Qt.ItemFlag.ItemIsUserCheckable)
-        row.setCheckState(Qt.CheckState.Unchecked if index in panel.hidden_items
-                          else Qt.CheckState.Checked)
-        row.setIcon(self._dot_icon(fx_visuals.MODEL_COLOR))
-        row.setForeground(QColor("#edf1f7"))
-        row.setToolTip("vp_ / base_ / 3ds_ of every model state")
-        row.setData(Qt.ItemDataRole.UserRole, index)
-        self.list.addItem(row)
-        if index in selected:
-            row.setSelected(True)
+        for index in fx_visuals.STATE_INDEXES:
+            if index not in session.originals:
+                continue
+            if index == fx_visuals.MODEL_INDEX:
+                values = fx_visuals.parse_model_text(session.originals[index])
+                level = fx_compat.model_level(values)
+                text = "Model\n" + fx_visuals.model_summary(values)
+                tip = "vp_ / base_ / 3ds_ of every model state"
+            else:
+                values = fx_visuals.parse_decal_text(session.originals[index])
+                level = fx_compat.decal_level(values)
+                text = "Ground decal\n" + fx_visuals.decal_summary(values)
+                tip = ("ground_decal_size: manual decal diameter (number or min~max). "
+                       "The decal itself comes from ground_decal_id.")
+            row = QListWidgetItem(text)
+            row.setFlags(row.flags() | Qt.ItemFlag.ItemIsUserCheckable)
+            row.setCheckState(Qt.CheckState.Unchecked if index in panel.hidden_items
+                              else Qt.CheckState.Checked)
+            row.setIcon(self._dot_icon(COMPAT_STYLES[level].color))
+            row.setForeground(QColor("#edf1f7"))
+            row.setToolTip(f"{COMPAT_STYLES[level].title}\n{tip}")
+            row.setData(Qt.ItemDataRole.UserRole, index)
+            self.list.addItem(row)
+            if index in selected:
+                row.setSelected(True)
 
     def mark_dirty(self) -> None:
         """Append a star to the effects with unsaved code."""
@@ -987,9 +995,9 @@ class DestructionFxPanel(QWidget):
         return self.text_session.dirty or self.state_session.dirty
 
     def is_state_index(self, index) -> bool:
-        """The Model row of the list has a negative index (-1 means none)."""
+        """The Model and Ground decal rows of the list have negative indexes (-1 means none)."""
 
-        return index == fx_visuals.MODEL_INDEX
+        return index in fx_visuals.STATE_INDEXES
 
     def session_for(self, index):
         """The draft session that owns a list row: effects or model states."""
@@ -997,8 +1005,10 @@ class DestructionFxPanel(QWidget):
         return self.state_session if self.is_state_index(index) else self.text_session
 
     def edit_title(self, index) -> str:
-        if self.is_state_index(index):
+        if index == fx_visuals.MODEL_INDEX:
             return "Model"
+        if index == fx_visuals.DECAL_INDEX:
+            return "Ground decal"
         return f"Effect {index + 1}"
 
     def edit_source(self, index) -> str:
@@ -1018,7 +1028,7 @@ class DestructionFxPanel(QWidget):
 
     def all_row_indexes(self) -> set[int]:
         return (set(range(len(self.document.items)))
-                | ({fx_visuals.MODEL_INDEX} if self.state_session.originals else set()))
+                | set(self.state_session.originals))
 
     def has_rows(self) -> bool:
         return bool(self.document.items) or bool(self.state_session.originals)
@@ -1129,7 +1139,8 @@ class DestructionFxPanel(QWidget):
         # open editor follow them.
         position = {old: new for new, old in enumerate(
             i for i in range(total) if i not in gone)}
-        self.hidden_items = {position[i] for i in self.hidden_items if i in position}
+        self.hidden_items = {position[i] if i >= 0 else i
+                             for i in self.hidden_items if i < 0 or i in position}
         self.highlight = position.get(self.highlight)
         self.timeline.highlight = self.highlight
         if drawer is not None:
@@ -1293,7 +1304,9 @@ class DestructionFxPanel(QWidget):
             origin=self.origin, ground_y=self.ground_y,
             unit_radius=self.unit_radius, legacy_catalog=self.catalog,
             enabled=enabled, unit=self.unit, weapons=self.weapons,
-            debuffs=self.debuffs, decals=self.decals, settings=self.settings,
+            debuffs=self.debuffs,
+            decals={} if fx_visuals.DECAL_INDEX in self.hidden_items else self.decals,
+            settings=self.settings,
             shot=shot, volley=self.volley if shot else ())
         self.timeline.set_tracks(self.simulation.tracks, self._length())
         self.sound.stop_all()

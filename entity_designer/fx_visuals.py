@@ -1,7 +1,8 @@
-"""Model states (VP / BASE / 3DS) of a vehicle or weapon definition as script keys.
+"""Model states and ground decal size of a vehicle or weapon definition as script keys.
 
-The "Base data" list of the Visuals & FX tab shows and edits ``vp_<state>``,
-``base_<state>`` and ``3ds_<state>`` of the previewed definition. Pure Python:
+The Visuals & FX list shows and edits ``vp_<state>``, ``base_<state>`` and
+``3ds_<state>`` (Model row) and ``ground_decal_size`` (Ground decal row) of the
+previewed definition. Pure Python:
 reading and patching text, and one verified write that keeps encoding and every
 untouched byte.
 """
@@ -28,6 +29,10 @@ KINDS = (("vp", "VP"), ("base", "BASE"), ("3ds", "3DS"))
 
 _FORBIDDEN_IN_PATH = re.compile(r"[;#\r\n=]")
 
+DECAL_KEY = "ground_decal_size"
+# Largest decal diameter the engine accepts.
+DECAL_SIZE_MAX = 12000.0
+
 
 def state_keys(state: str) -> tuple[str, str, str]:
     return tuple(f"{kind}_{state}" for kind, _label in KINDS)
@@ -35,6 +40,12 @@ def state_keys(state: str) -> tuple[str, str, str]:
 
 def all_keys() -> set[str]:
     return {key for state, _label in STATES for key in state_keys(state)}
+
+
+def managed_keys() -> set[str]:
+    """Every key the list rows read and write."""
+
+    return all_keys() | {DECAL_KEY}
 
 
 def block_for_origin(text: str, origin):
@@ -55,7 +66,7 @@ def block_for_origin(text: str, origin):
 def read_values(text: str, block) -> dict[str, str]:
     """Active top-level visual keys of one block; the last assignment wins."""
 
-    keys = all_keys()
+    keys = managed_keys()
     values: dict[str, str] = {}
     for _line, key, value, _indent in _top_level_assignment_rows(text, block):
         if key in keys:
@@ -84,6 +95,14 @@ def normalize_value(key: str, raw: str) -> str:
     value = raw.strip().strip('"')
     if not value:
         return ""
+    if key == DECAL_KEY:
+        from entity_designer.destruction_fx import parse_float_range
+
+        size = parse_float_range(value)
+        if size is None or not all(0.0 <= number <= DECAL_SIZE_MAX for number in size):
+            raise ValueError(
+                f"{key} must be a number or min~max between 0 and {DECAL_SIZE_MAX:g}.")
+        return value
     if key.startswith("vp_"):
         try:
             number = int(value, 0)
@@ -142,6 +161,11 @@ def _insert_position(lines, block, end_line: int, key: str):
 
     text = "\n".join(lines) + "\n"
     rows = list(_top_level_assignment_rows(text, _Span(block.start_line, end_line)))
+    if key == DECAL_KEY:
+        # The size goes right after the decal profile it belongs to.
+        profile = [row for row in rows if row[1] == "ground_decal_id"]
+        if profile:
+            return profile[-1][0] + 1, profile[-1][3]
     visual = [row for row in rows if row[1].split("_", 1)[0] in {"vp", "base", "3ds"}
               and row[1].split("_", 1)[-1] in {state for state, _l in STATES}]
     if visual:
@@ -189,9 +213,10 @@ def save_values(origins, updates: dict[str, str], snapshots=None) -> Path:
 
 # -- the "Model" row of the effects list ------------------------------------------------------
 
-MODEL_COLOR = "#a58cf0"
-# Virtual list index of the single Model row (-1 means "no effect").
+# Virtual list indexes of the Model and Ground decal rows (-1 means "no effect").
 MODEL_INDEX = -2
+DECAL_INDEX = -3
+STATE_INDEXES = (MODEL_INDEX, DECAL_INDEX)
 
 
 def model_text(values: dict[str, str]) -> str:
@@ -238,8 +263,34 @@ def parse_model_text(text: str) -> dict[str, str]:
     return updates
 
 
+def decal_text(values: dict[str, str]) -> str:
+    return f"{DECAL_KEY} = {values[DECAL_KEY]}" if values.get(DECAL_KEY) else ""
+
+
+def decal_summary(values: dict[str, str]) -> str:
+    return f"Size {values[DECAL_KEY]}" if values.get(DECAL_KEY) else "Not set"
+
+
+def parse_decal_text(text: str) -> dict[str, str]:
+    """Check an edited Ground decal text; returns ``ground_decal_size`` ("" = not set)."""
+
+    updates = {DECAL_KEY: ""}
+    for number, line in enumerate(text.splitlines(), 1):
+        code = re.split(r";|//|#", line, maxsplit=1)[0].strip()
+        if not code:
+            continue
+        key, separator, value = code.partition("=")
+        if not separator or key.strip().lower() != DECAL_KEY:
+            raise ValueError(f"Line {number}: only {DECAL_KEY} can be written here.")
+        updates[DECAL_KEY] = normalize_value(DECAL_KEY, value)
+    return updates
+
+
+_PARSERS = {MODEL_INDEX: parse_model_text, DECAL_INDEX: parse_decal_text}
+
+
 class StateSession:
-    """Draft and saving of the Model row, like ``FxTextSession`` does for effects."""
+    """Draft and saving of the Model and Ground decal rows, like ``FxTextSession`` does for effects."""
 
     def __init__(self, origins) -> None:
         self.origins = [(Path(path), first, last) for path, first, last in origins]
@@ -251,9 +302,11 @@ class StateSession:
             except OSError as exc:
                 self.source_error = str(exc)
         self.values = read_effective_values(self.origins) if self.origins else {}
-        self.originals = ({MODEL_INDEX: model_text(self.values)}
-                          if self.origins else {})
+        self.originals = self._texts() if self.origins else {}
         self.drafts = dict(self.originals)
+
+    def _texts(self) -> dict[int, str]:
+        return {MODEL_INDEX: model_text(self.values), DECAL_INDEX: decal_text(self.values)}
 
     def indexes(self) -> list[int]:
         return list(self.originals)
@@ -269,7 +322,7 @@ class StateSession:
         """Validate a draft; the preview of the models changes when it is saved."""
 
         self.drafts[index] = text
-        parse_model_text(text)
+        _PARSERS[index](text)
         return None, []
 
     def revert(self, index: int) -> None:
@@ -281,12 +334,16 @@ class StateSession:
             return set()
         if self.source_error or not self.origins:
             raise ValueError(self.source_error or "No script source is attached to this definition.")
-        updates = parse_model_text(self.drafts[MODEL_INDEX])
+        updates: dict[str, str] = {}
+        for index in indexes:
+            updates.update(_PARSERS[index](self.drafts[index]))
         path = save_values(self.origins, updates, self.snapshots)
         self.snapshots[path] = path.read_bytes()
         self.values = read_effective_values(self.origins)
-        self.originals[MODEL_INDEX] = model_text(self.values)
-        self.drafts[MODEL_INDEX] = self.originals[MODEL_INDEX]
+        texts = self._texts()
+        for index in indexes:
+            self.originals[index] = texts[index]
+            self.drafts[index] = texts[index]
         return {path}
 
     def refresh_snapshots(self, paths) -> None:

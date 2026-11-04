@@ -84,7 +84,7 @@ def test_map_count_keeps_game_density():
 def test_level_info_cloud_selector(app, win):
     panel = win.level_panel
     assert 'OpenNeoUA only' in panel.cloud_marker.toolTip()
-    assert '#e8873a' in panel.cloud_marker.styleSheet()
+    assert '#e0524a' in panel.cloud_marker.styleSheet()
     assert panel.cloud_box.itemData(0) == -1
     assert win.doc.lvl_info['cloud_id'] == -1
     if panel.cloud_box.count() > 1:
