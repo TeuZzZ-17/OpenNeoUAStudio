@@ -287,6 +287,55 @@ class CollisionShapeTests(unittest.TestCase):
         for hull in result.shape.hulls:
             validate_hull(hull)
 
+    def test_flat_hull_from_coacd_becomes_a_valid_thin_slab(self):
+        from entity_designer.shape import _hull_volume, _thicken_flat_hull
+
+        sheet = CollisionHull(
+            ((0.0, 0.0, 0.0), (40.0, 0.0, 0.0), (40.0, 0.0, 16.0), (0.0, 0.0, 16.0)),
+            ((0, 1, 2), (0, 2, 3), (1, 0, 3), (1, 3, 2)))
+        slab = _thicken_flat_hull(sheet)
+
+        validate_hull(slab)
+        self.assertGreater(_hull_volume(slab), 0.0)
+        self.assertAlmostEqual(
+            max(point[1] for point in slab.vertices)
+            - min(point[1] for point in slab.vertices), 0.4, places=6)
+        solid = CollisionHull(
+            ((0, 0, 0), (1, 0, 0), (0, 1, 0), (0, 0, 1)),
+            ((0, 2, 1), (0, 1, 3), (0, 3, 2), (1, 2, 3)))
+        self.assertIs(_thicken_flat_hull(solid), solid)
+
+    def test_real_coacd_handles_two_separate_flat_panels_with_a_body(self):
+        try:
+            import coacd  # noqa: F401
+        except ImportError:
+            self.skipTest("CoACD is supplied by the packaged worker runtime")
+
+        def sheet(points, name):
+            a, b, c, d = points
+            return (f"root#component:{name}", (
+                (a, b, c), (a, c, d), (b, a, d), (b, d, c)))
+
+        body_points = [(x, y, z) for x in (-10.0, 10.0)
+                       for y in (-22.0, 0.0) for z in (-10.0, 10.0)]
+        faces = ((0, 1, 3), (0, 3, 2), (4, 6, 7), (4, 7, 5),
+                 (0, 4, 5), (0, 5, 1), (2, 3, 7), (2, 7, 6),
+                 (0, 2, 6), (0, 6, 4), (1, 5, 7), (1, 7, 3))
+        body = ("root#component:body", tuple(
+            tuple(body_points[index] for index in face) for face in faces))
+        parts = [
+            body,
+            sheet(((-34.0, -12.0, 8.0), (-14.0, -12.0, 8.0),
+                   (-14.0, -6.0, -8.0), (-34.0, -6.0, -8.0)), "left"),
+            sheet(((14.0, -10.0, 8.0), (34.0, -10.0, 8.0),
+                   (34.0, -8.0, -8.0), (14.0, -8.0, -8.0)), "right"),
+        ]
+        result = generate_collision_shape(parts, source="Satellite", quality="low")
+
+        self.assertGreaterEqual(len(result.shape.hulls), 3)
+        for hull in result.shape.hulls:
+            validate_hull(hull)
+
     def test_parts_of_one_piece_are_baked_together_and_labelled(self):
         from tests.test_collision_mesh_parts import box_with_tower
 
