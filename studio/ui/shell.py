@@ -246,10 +246,18 @@ class ResourcesDialog(QDialog):
 # (formerly studio_compat.py)
 # ----------------------------------------------------------------------------
 
+# Compatibility scheme shared by every Studio marker (tab dots, effect rows, checker):
+#   green  VANILLA     fully compatible with the vanilla engine;
+#   yellow MIXED       compatible, but conflicts or problems are possible;
+#   orange RISKY       barely compatible: errors or conflicts with vanilla are likely;
+#   red    OPENNEOUA   not compatible: the vanilla engine does not support it.
 VANILLA = "vanilla"
 
 
 MIXED = "mixed"
+
+
+RISKY = "risky"
 
 
 OPENNEOUA = "openneoua"
@@ -269,9 +277,10 @@ class CompatStyle:
 
 
 COMPAT_STYLES = {
-    VANILLA: CompatStyle("Vanilla + OpenNeoUA", "#5cbf72", "Uses vanilla data formats."),
-    MIXED: CompatStyle("Partly vanilla", "#e3c447", "Includes OpenNeoUA extensions."),
-    OPENNEOUA: CompatStyle("OpenNeoUA only", "#e8873a", "Not supported by vanilla Urban Assault."),
+    VANILLA: CompatStyle("Fully compatible", "#5cbf72", "Uses vanilla data formats."),
+    MIXED: CompatStyle("Compatible, may conflict", "#e3c447", "Works with vanilla, but OpenNeoUA extensions or the data can cause conflicts or problems."),
+    RISKY: CompatStyle("Barely compatible", "#e8873a", "Mostly relies on OpenNeoUA extensions: errors or conflicts with the vanilla engine are likely."),
+    OPENNEOUA: CompatStyle("Not compatible", "#e0524a", "Not supported by the vanilla engine."),
     PREVIEW: CompatStyle("Preview / Studio only", "#5cbf72", "Does not change game data."),
     UNKNOWN: CompatStyle("Depends on the data", "#e3c447", "Check the target game's supported assets and parameters."),
 }
@@ -371,7 +380,7 @@ class CompatibilityDialog(QDialog):
         intro = QLabel("Compatibility of the editor's features and output formats. This reference does not scan the current file or certify custom assets.")
         intro.setWordWrap(True)
         layout.addWidget(intro)
-        legend = QLabel("Tab dots: green = vanilla formats or preview without data changes; yellow = mixed or dependent on the data; orange = OpenNeoUA only.")
+        legend = QLabel("Dots: green = fully compatible with vanilla (or preview without data changes); yellow = compatible, but conflicts or problems are possible; orange = barely compatible, errors with vanilla are likely; red = not compatible, the vanilla engine does not support it.")
         legend.setWordWrap(True)
         layout.addWidget(legend)
         scroll = QScrollArea(self)

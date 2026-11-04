@@ -469,7 +469,7 @@ def test_all_workspace_tabs_use_checker_marker_colors(app, key):
             assert button.marker is not None, button.text()
             if button.text().casefold() in expected:
                 assert button.marker == compat_color(expected[button.text().casefold()])
-        assert all(button.marker.name() in ('#5cbf72', '#e3c447', '#e8873a') for button in buttons)
+        assert all(button.marker.name() in ('#5cbf72', '#e3c447', '#e8873a', '#e0524a') for button in buttons)
     finally:
         window.close()
         bootstrap.set_installation(previous_installation)
