@@ -359,9 +359,40 @@ def op_auto_shade(ctx, select=None, base: float = SHADE_BASE, vertical: float = 
     return result
 
 
+def swatch_board(rows: dict) -> Path | None:
+    """Picture of the given swatches, cut from the user's own Set1 textures into the MCP temp folder.
+    The picture is never shipped with Studio: it contains original game art. None if Set1 cannot be read."""
+    from PIL import Image, ImageDraw
+    from studio_mcp import textures
+
+    columns, cell_w, cell_h, shot_h = 5, 200, 150, 112
+    sheet = Image.new("RGB", (columns * cell_w, ((len(rows) + columns - 1) // columns) * cell_h), (16, 16, 24))
+    draw = ImageDraw.Draw(sheet)
+    atlases: dict = {}
+    try:
+        for index, (name, entry) in enumerate(rows.items()):
+            texture = entry["texture"]
+            if texture not in atlases:
+                atlases[texture] = textures.load_picture(f"set1:{texture}", "set1")
+            u0, v0, u1, v1 = entry["rect"]
+            patch = atlases[texture].crop((u0, v0, u1 + 1, v1 + 1))
+            scale = max(1, min((cell_w - 10) // patch.width, shot_h // patch.height))
+            patch = patch.resize((patch.width * scale, patch.height * scale), Image.NEAREST)
+            x, y = (index % columns) * cell_w + 5, (index // columns) * cell_h + 4
+            sheet.paste(patch, (x, y))
+            draw.text((x, y + shot_h + 4), name, fill=(255, 210, 60))
+            draw.text((x, y + shot_h + 18), f"{texture.split('.')[0]} {entry['rect']}", fill=(170, 170, 180))
+    except (core.McpToolError, OSError, KeyError):
+        return None
+    target = core.work_dir() / "swatches.png"
+    sheet.save(target)
+    return target
+
+
 def describe_swatches(faction: str = "") -> dict:
     rows = {k: v for k, v in swatches().items() if not faction or k.startswith(faction.lower())}
+    board = swatch_board(rows)
     return {"swatches": rows, "factions": sorted({k.split(".")[0] for k in swatches()}),
             "use": "studio_paint(select, swatch=name) or loft/create_primitive with swatch=name; finish with auto_shade",
-            "board": str(SWATCH_FILE.with_suffix(".png"))}
+            "board": str(board) if board else ""}
 
