@@ -111,6 +111,34 @@ def test_flat_tracy_matches_cpu_with_seeded_destination_and_transparent_border(a
         assert tuple(gpu[3, 3]) == (0, 0, 0, 0)
         assert tuple(gpu[3, 4]) == (*palette[40], 255)
         assert tuple(gpu[0, 0]) == (0, 0, 0, 0)
+
+        gl.glBindFramebuffer(gl.GL_FRAMEBUFFER, target)
+        gl.glClearColor(20 / 255, 40 / 255, 60 / 255, 1)
+        gl.glClear(gl.GL_COLOR_BUFFER_BIT)
+        renderer.render_pieces(
+            [piece], tables, width, height, target,
+            background_indices=background_indices, tint=(255, 0, 0), opacity=0.5,
+        )
+        gl.glBindFramebuffer(gl.GL_READ_FRAMEBUFFER, target)
+        gpu = np.empty((height, width, 4), dtype=np.uint8)
+        gl.glReadPixels(0, 0, width, height, gl.GL_RGBA, gl.GL_UNSIGNED_BYTE, gpu)
+        gpu = gpu[::-1]
+        assert np.allclose(gpu[3, 4, :3], (118, 20, 30), atol=1)
+        assert tuple(gpu[0, 0, :3]) == (20, 40, 60)
+
+        gl.glBindFramebuffer(gl.GL_FRAMEBUFFER, target)
+        gl.glClearColor(20 / 255, 40 / 255, 60 / 255, 1)
+        gl.glClear(gl.GL_COLOR_BUFFER_BIT)
+        renderer.render_pieces(
+            [piece], tables, width, height, target,
+            background_indices=background_indices, tint=(255, 0, 0),
+            opacity=0.5, additive=True,
+        )
+        gl.glBindFramebuffer(gl.GL_READ_FRAMEBUFFER, target)
+        gpu = np.empty((height, width, 4), dtype=np.uint8)
+        gl.glReadPixels(0, 0, width, height, gl.GL_RGBA, gl.GL_UNSIGNED_BYTE, gpu)
+        gpu = gpu[::-1]
+        assert np.allclose(gpu[3, 4, :3], (128, 40, 60), atol=1)
     finally:
         if renderer is not None:
             renderer.delete()

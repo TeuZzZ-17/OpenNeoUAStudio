@@ -18,6 +18,8 @@ from PySide6.QtCore import (
 from PySide6.QtGui import (
     QColor,
     QCursor,
+    QFont,
+    QFontMetricsF,
     QMouseEvent,
     QPainter,
     QPen,
@@ -261,6 +263,7 @@ class CollisionViewport(FxPreviewViewportMixin, AssetViewport):
         self._geometry_component_preview: tuple | None = None
         self._geometry_component_highlight: tuple | None = None
         self._geometry_component_excluded: tuple | None = None
+        self._geometry_component_picks = {}
         self._ground_alignment_available = True
         self._ground_alignment_authored = False
         self._ground_alignment_source_loaded = False
@@ -710,10 +713,33 @@ class CollisionViewport(FxPreviewViewportMixin, AssetViewport):
         self.update()
 
     def _hit_shape_component(self, position):
+        if self._collision_shape is None:
+            return self._hit_geometry_component(position)
         index = self._hit_shape_hull(position)
         if index is None:
             return None
         return self._collision_shape.hulls[index].source_component or f"@hull:{index}"
+
+    def _hit_collision_component(self, position):
+        """Pick a generated hull, or a source component before generation."""
+        return (self._hit_shape_hull(position) if self._collision_shape is not None
+                else self._hit_geometry_component(position))
+
+    def _hit_geometry_component(self, position):
+        """Pick the nearest visible source triangle in the current preview."""
+        hits = []
+        for key, triangles in self._geometry_component_picks.items():
+            for triangle in triangles:
+                worlds = tuple(self._preview_point(point) for point in triangle)
+                projected = [self._project_visible_world(point) for point in worlds]
+                if any(point is None for point in projected):
+                    continue
+                depth = _pick_shape_depth(PickShape(
+                    QPolygonF(projected), None,
+                    tuple(self._camera_vertex(point) for point in worlds), 0), position)
+                if depth is not None:
+                    hits.append((depth, key))
+        return min(hits)[1] if hits else None
 
     def _hit_shape_hull(self, position):
         if self._collision_shape is None:
@@ -737,11 +763,12 @@ class CollisionViewport(FxPreviewViewportMixin, AssetViewport):
         return min(hits)[1]
 
     def set_geometry_component_preview(
-            self, triangles, highlighted=None, excluded=None) -> None:
+            self, triangles, highlighted=None, excluded=None, components=None) -> None:
         """Show the geometry the next generation uses.
 
         ``triangles`` are the ticked components, ``highlighted`` the ticked
         rows picked in the list and ``excluded`` the picked unticked rows.
+        ``components`` maps visible component keys to their source triangles.
         """
 
         def frozen(values):
@@ -751,6 +778,7 @@ class CollisionViewport(FxPreviewViewportMixin, AssetViewport):
         self._geometry_component_preview = frozen(triangles)
         self._geometry_component_highlight = frozen(highlighted)
         self._geometry_component_excluded = frozen(excluded)
+        self._geometry_component_picks = dict(components or {})
         self.update()
 
     def set_ground_alignment(
@@ -784,17 +812,95 @@ class CollisionViewport(FxPreviewViewportMixin, AssetViewport):
 
     def set_fire_points(
             self, points: list[tuple[float, float, float]],
-            selected: int = -1) -> None:
+            selected: int = -1, *, mirrored: bool = False) -> None:
         self._fire_points = [
             tuple(float(value) for value in point) for point in points
         ]
         self._fire_point_selected = (
             selected if 0 <= selected < len(self._fire_points) else -1)
+        self._fire_point_mirrored = bool(
+            mirrored and len(self._fire_points) == 1 and self._fire_points[0][0])
         self.update()
 
     def set_fire_points_visible(self, visible: bool) -> None:
         self._fire_points_visible = bool(visible)
         self.update()
+
+    def set_forward_arrow(self, origin, length: float, visible: bool) -> None:
+        self._forward_arrow_origin = tuple(float(value) for value in origin)
+        self._forward_arrow_length = max(1.0, float(length))
+        self._forward_arrow_visible = bool(visible)
+        self.update()
+
+    def _forward_arrow_points(self):
+        if not getattr(self, "_forward_arrow_visible", False):
+            return None
+        x, y, z = self._forward_arrow_origin
+        return ((x, y, z), (x, y, z + self._forward_arrow_length))
+
+    def _draw_forward_arrow(self, painter: QPainter) -> None:
+        if self._forward_arrow_points() is None:
+            return
+        origin = self._camera_vertex((0.0, 0.0, 0.0))
+        forward = self._camera_vertex((0.0, 0.0, 1.0))
+        dx = forward[0] - origin[0]
+        dy = -(forward[1] - origin[1])
+        dz = forward[2] - origin[2]
+        side = math.hypot(dx, dy)
+        axis_length = math.hypot(side, dz)
+        depth_view = axis_length > 0 and side / axis_length < 0.12
+        caption = ("TOWARD VIEW" if dz > 0 else "AWAY FROM VIEW") if depth_view else ""
+        title_font = QFont(painter.font())
+        title_font.setBold(True)
+        title_font.setPointSizeF(9.0)
+        detail_font = QFont(title_font)
+        detail_font.setBold(False)
+        detail_font.setPointSizeF(8.0)
+        title_metrics = QFontMetricsF(title_font)
+        detail_metrics = QFontMetricsF(detail_font)
+        text_width = max(title_metrics.horizontalAdvance("FRONT +Z"),
+                         detail_metrics.horizontalAdvance(caption))
+        text_height = title_metrics.height() + (detail_metrics.height() if caption else 0)
+        box_height = max(32.0, text_height) + 8.0
+        box = QRectF(10.0, self.height() - 10.0 - box_height,
+                     8.0 + 32.0 + 7.0 + text_width + 8.0, box_height)
+        painter.save()
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+        painter.setPen(QPen(QColor(83, 105, 120), 1.0))
+        painter.setBrush(QColor(20, 26, 34, 235))
+        painter.drawRoundedRect(box, 6, 6)
+        center = QPointF(box.left() + 24.0, box.center().y())
+        color = QColor(FIRE_POINT_COLOR)
+        painter.setPen(QPen(color, 2.5))
+        painter.setBrush(color)
+        if depth_view:
+            painter.setBrush(Qt.BrushStyle.NoBrush)
+            painter.drawEllipse(center, 12, 12)
+            if dz > 0:
+                painter.setBrush(color)
+                painter.drawEllipse(center, 3.5, 3.5)
+            else:
+                painter.drawLine(center + QPointF(-5, -5), center + QPointF(5, 5))
+                painter.drawLine(center + QPointF(-5, 5), center + QPointF(5, -5))
+        elif side > 0:
+            ux, uy = dx / side, dy / side
+            def point(along, across):
+                return QPointF(center.x() + (ux * along - uy * across) * 0.85,
+                               center.y() + (uy * along + ux * across) * 0.85)
+            painter.setPen(QPen(QColor(55, 15, 20), 1.0))
+            painter.drawPolygon(QPolygonF([
+                point(-17, -3), point(4, -3), point(4, -8),
+                point(18, 0), point(4, 8), point(4, 3), point(-17, 3),
+            ]))
+        text_x = box.left() + 8.0 + 32.0 + 7.0
+        title_y = box.center().y() - text_height / 2.0 + title_metrics.ascent()
+        painter.setFont(title_font)
+        painter.setPen(QColor(255, 215, 215))
+        painter.drawText(QPointF(text_x, title_y), "FRONT +Z")
+        if caption:
+            painter.setFont(detail_font)
+            painter.drawText(QPointF(text_x, title_y + title_metrics.height()), caption)
+        painter.restore()
 
     def set_gun_points(
             self, points: list[tuple[float, float, float]],
@@ -1185,6 +1291,13 @@ class CollisionViewport(FxPreviewViewportMixin, AssetViewport):
             distance = math.hypot(point.x() - screen.x(), point.y() - screen.y())
             if distance <= 16.0:
                 candidates.append((distance, index))
+        if getattr(self, "_fire_point_mirrored", False):
+            x, y, z = self._fire_points[0]
+            screen = self._project_visible_world((-x, y, z))
+            if screen is not None:
+                distance = math.hypot(point.x() - screen.x(), point.y() - screen.y())
+                if distance <= 16.0:
+                    candidates.append((distance, 0))
         return min(candidates)[1] if candidates else -1
 
 
@@ -1212,6 +1325,7 @@ class CollisionViewport(FxPreviewViewportMixin, AssetViewport):
             FIRE_POINT_COLOR.blue(), 225)
         rack_selected = (
             self._fire_point_selected >= 0 and len(self._fire_points) > 1)
+        labels = []
         for index, screen in enumerate(self._fire_point_screen_positions()):
             if screen is None:
                 continue
@@ -1225,12 +1339,53 @@ class CollisionViewport(FxPreviewViewportMixin, AssetViewport):
                     11.0 if is_primary else 10.5)
             self._draw_fire_marker(
                 painter, screen, QPen(FIRE_POINT_COLOR, 2.4), fill, 10.0)
-            painter.setPen(QPen(
-                QColor(255, 255, 255)
-                if (is_primary or rack_selected) else FIRE_POINT_COLOR,
-                1.5))
-            painter.drawText(
-                screen + QPointF(9.0, -9.0), f"F{index + 1}")
+            labels.append((screen, index + 1, is_primary or rack_selected, False))
+        if getattr(self, "_fire_point_mirrored", False):
+            x, y, z = self._fire_points[0]
+            screen = self._project_visible_world((-x, y, z))
+            if screen is not None:
+                ghost = QColor(FIRE_POINT_COLOR)
+                ghost.setAlpha(140)
+                pen = QPen(ghost, 2.4, Qt.PenStyle.DashLine)
+                self._draw_fire_marker(painter, screen, pen, ghost, 10.0)
+                labels.append((screen, 1, False, True))
+
+        groups = []
+        for screen, number, selected, ghost in labels:
+            group = next((group for group in groups if any(
+                math.hypot(screen.x() - point.x(), screen.y() - point.y()) < 24
+                for point, _number, _selected, _ghost in group)), None)
+            if group is None:
+                group = []
+                groups.append(group)
+            group.append((screen, number, selected, ghost))
+
+        occupied = []
+        metrics = self.fontMetrics()
+        for group in groups:
+            numbers = sorted({item[1] for item in group})
+            ranges = []
+            first = last = numbers[0]
+            for number in numbers[1:]:
+                if number == last + 1:
+                    last = number
+                else:
+                    ranges.append(f"F{first}–F{last}" if first != last else f"F{first}")
+                    first = last = number
+            ranges.append(f"F{first}–F{last}" if first != last else f"F{first}")
+            label = ", ".join(ranges)
+            position = group[0][0] + QPointF(9.0, -9.0)
+            bounds = QRectF(metrics.boundingRect(label)).translated(position)
+            while any(bounds.intersects(other) for other in occupied):
+                position += QPointF(0, metrics.height() + 2)
+                bounds = QRectF(metrics.boundingRect(label)).translated(position)
+            occupied.append(bounds)
+            color = (QColor(255, 255, 255) if any(item[2] for item in group)
+                     else QColor(FIRE_POINT_COLOR))
+            if all(item[3] for item in group):
+                color.setAlpha(140)
+            painter.setPen(QPen(color, 1.5))
+            painter.drawText(position, label)
 
 
     # -- Fire Area (ai_fire_trigger_*) ----------------------------------------------------
@@ -1679,8 +1834,8 @@ class CollisionViewport(FxPreviewViewportMixin, AssetViewport):
                        key=lambda pair: pair[0] in self._shape_selected_indices)
         for index, hull in hulls:
             selected = index in self._shape_selected_indices
-            # A switched-off part is drawn only while picked in the list.
-            if not hull.enabled and not selected:
+            # A switched-off part is not drawn at all, even while picked.
+            if not hull.enabled:
                 continue
             edges = set()
             for a, b, c in hull.faces:
@@ -1705,20 +1860,15 @@ class CollisionViewport(FxPreviewViewportMixin, AssetViewport):
                     lines.append((first, second))
             pen = QPen(QColor(245, 55, 65) if selected
                        else QColor(70, 230, 225), 1.8)
-            if not hull.enabled:
-                pen = QPen(QColor(150, 150, 160), 1.8)
-                pen.setStyle(Qt.PenStyle.DashLine)
             painter.setPen(pen)
             for first, second in lines:
                 painter.drawLine(first, second)
         painter.restore()
 
     def _draw_geometry_component_preview(self, painter: QPainter) -> None:
-        excluded_pen = QPen(QColor(150, 150, 160), 2.2)
-        excluded_pen.setStyle(Qt.PenStyle.DashLine)
+        # Switched-off components (_geometry_component_excluded) are not drawn.
         layers = (
             (self._geometry_component_preview, QPen(QColor(255, 255, 255), 1.6)),
-            (self._geometry_component_excluded, excluded_pen),
             (self._geometry_component_highlight, QPen(QColor(245, 55, 65), 3.0)),
         )
         if not any(triangles for triangles, _pen in layers):
@@ -1765,6 +1915,7 @@ class CollisionViewport(FxPreviewViewportMixin, AssetViewport):
             self._empty_hint_suppressed = True
             try:
                 self._paint_fx_viewport(painter)
+                self._draw_forward_arrow(painter)
             finally:
                 self._empty_hint_suppressed = suppressed
                 painter.restore()
@@ -1786,6 +1937,7 @@ class CollisionViewport(FxPreviewViewportMixin, AssetViewport):
             )
 
         self._draw_ground_alignment_overlay(painter)
+        self._draw_forward_arrow(painter)
         if self._collision_shape_overlay_visible:
             self._draw_collision_shape_overlay(painter)
             self._draw_geometry_component_preview(painter)
@@ -1842,7 +1994,7 @@ class CollisionViewport(FxPreviewViewportMixin, AssetViewport):
         if (self._fire_area_visible and not event.buttons()):
             over = self._hit_fire_area_handle(event.position())
             self.setCursor(studio_cursor("move" if over else "point"))
-        if self._collision_shape_overlay_visible and self._collision_shape is not None:
+        if self._collision_shape_overlay_visible:
             if not event.buttons():
                 self._update_shape_component_cursor(event.position())
             elif (self._shape_press_pos is not None
@@ -1883,7 +2035,7 @@ class CollisionViewport(FxPreviewViewportMixin, AssetViewport):
             self._shape_press_pos = None
             super().mouseReleaseEvent(event)
             if abs(delta.x()) <= 4.0 and abs(delta.y()) <= 4.0:
-                key = self._hit_shape_hull(event.position())
+                key = self._hit_collision_component(event.position())
                 if key is not None:
                     self.shapeComponentPicked.emit(
                         key, bool(event.modifiers() & Qt.KeyboardModifier.ControlModifier))
@@ -1940,7 +2092,8 @@ class CollisionViewport(FxPreviewViewportMixin, AssetViewport):
             event.accept()
             return
         if event.button() == Qt.MouseButton.LeftButton:
-            if self._collision_shape_overlay_visible and self._collision_shape is not None:
+            if self._collision_shape_overlay_visible and (
+                    self._collision_shape is not None or self._geometry_component_picks):
                 self._shape_press_pos = QPointF(event.position())
                 super().mousePressEvent(event)
                 return
@@ -2033,7 +2186,7 @@ class CollisionViewport(FxPreviewViewportMixin, AssetViewport):
                 return
             if self._collision_shape_overlay_visible:
                 self._shape_press_pos = None
-                key = self._hit_shape_hull(event.position())
+                key = self._hit_collision_component(event.position())
                 if key is None:
                     self.shapeDeselectRequested.emit()
                 else:

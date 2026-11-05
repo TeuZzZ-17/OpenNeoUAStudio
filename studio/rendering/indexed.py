@@ -1397,13 +1397,19 @@ class StudioGpuRenderer(GpuRenderer):
                     _program(STUDIO_VERTEX,STUDIO_FRAGMENT.replace(
                         '#version 330 core','#version 330 core\n#define FLAT_PASS')),
                     _program(SCREEN_VERTEX,SCREEN_FRAGMENT.replace(
-                        'if(code==0 && index==0u)', 'if(code==0)')))
+                        'if(code==0 && index==0u)', 'if(code==0)').replace(
+                        'uniform float pixelScale;',
+                        'uniform float pixelScale;\nuniform vec4 layerTint;\nuniform bool colorizeLayer;').replace(
+                        'color=texelFetch(palette,ivec2(int(index),0),0);',
+                        'color=texelFetch(palette,ivec2(int(index),0),0);\n'
+                        'if(colorizeLayer) color.rgb=max(max(color.r,color.g),color.b)*layerTint.rgb;\n'
+                        'color.a*=layerTint.a;')))
         super().__init__(programs)
         self.owns_programs = True
         self._tables = None
 
     def render_pieces(self, pieces, tables, width, height, target, *, blend=True,
-                      background_indices=None):
+                      background_indices=None, tint=None, opacity=1.0, additive=False):
         if background_indices is not None and len(background_indices) != width * height:
             raise ValueError('Background indices must match render dimensions')
         if any(piece.distance_fade for piece in pieces):
@@ -1445,7 +1451,14 @@ class StudioGpuRenderer(GpuRenderer):
             gl.glBindVertexArray(self.buffers[0,0].vao)
             gl.glDrawArrays(gl.GL_TRIANGLES,start,count)
             self.draw_calls += 1
+        gl.glUseProgram(self.screen_program)
+        gl.glUniform1i(self.uniform(self.screen_program, 'colorizeLayer'), tint is not None)
+        color = (1.0, 1.0, 1.0) if tint is None else tuple(v / 255.0 for v in tint)
+        gl.glUniform4f(self.uniform(self.screen_program, 'layerTint'), *color, opacity)
+        if blend:
+            gl.glEnable(gl.GL_BLEND)
+            gl.glBlendFunc(gl.GL_SRC_ALPHA, gl.GL_ONE if additive else gl.GL_ONE_MINUS_SRC_ALPHA)
         self._present(target,width,height,owner_colors={},overlays=False,sky=False,
-                      transparent_background=True,blend=blend)
+                      transparent_background=True,blend=False)
         return {'backend':'OpenGL 3.3 indexed','draw_calls':self.draw_calls,
                 'triangles':len(data)//3,'renderer':self.name}

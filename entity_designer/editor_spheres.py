@@ -502,6 +502,9 @@ class _SpheresMixin:
                 widget._add_component_toggle_action(menu, item)
                 menu.addSeparator()
         self.collision_geometry_widget._add_component_deselect_action(menu)
+        self._context_action(
+            menu, "Delete", self.delete_collision_shape,
+            self.delete_collision_shape_button.isEnabled())
         menu.addSeparator()
         menu.addAction(self.undo_action)
         menu.addAction(self.redo_action)
@@ -660,7 +663,7 @@ class _SpheresMixin:
             return
         if (self.properties_tabs.currentIndex()
                 == self.collision_shape_tab_index):
-            key = self.viewport._hit_shape_hull(
+            key = self.viewport._hit_collision_component(
                 QPointF(self.viewport.mapFromGlobal(global_pos)))
             self._create_collision_shape_context_menu(key).exec(global_pos)
             return
@@ -1094,6 +1097,23 @@ class _SpheresMixin:
 
         self.viewport.set_fire_points_visible(
             fire_tab and wanted("Show Fire Points"))
+
+        arrow_origin = (0.0, self.viewport.overeof_preview_offset, 0.0)
+        arrow_bounds = self._model_bounds() if fire_tab else None
+        firing_unit = self._fire_area_unit() if fire_area_tab else None
+        if firing_unit is not None:
+            arrow_origin = self._fire_area_unit_position()
+            owner = self._owner_for_vp(firing_unit.vp)
+            arrow_bounds = self.viewport._owner_bounds.get(owner)
+        if arrow_bounds is not None:
+            extent = max(arrow_bounds[i + 3] - arrow_bounds[i] for i in range(3))
+            arrow_length = max(1.0, arrow_bounds[5], extent * 0.75)
+        else:
+            arrow_length = 100.0
+        self.viewport.set_forward_arrow(
+            arrow_origin, arrow_length,
+            (fire_tab and self.project.target_category == VEHICLE)
+            or (fire_area_tab and firing_unit is not None))
 
         self.viewport.set_gun_points_visible(
             gun_tab and wanted("Show Gun Points"))

@@ -188,7 +188,74 @@ def test_click_opens_attached_editor_and_live_drafts_keep_last_valid_preview(app
         QTest.keyClick(drawer.code.editor, Qt.Key.Key_S, Qt.KeyboardModifier.ControlModifier)
         assert "duration = 650" in path.read_text()
         assert not panel.has_unsaved_text
+        QTest.qWait(200)
+        assert not drawer.expanded and not drawer.isVisible()
     finally:
+        window.close()
+
+
+def test_save_and_reload_effect_closes_editor_and_refreshes_preview(app, tmp_path):
+    text = "new_vehicle 1\n" + EFFECT + "\nend\n"
+    path = tmp_path / "vehicle.cfg"
+    path.write_text(text, encoding="utf-8")
+    document, block = _document(text)
+    panel = DestructionFxPanel()
+    window = _in_wide_window(panel, app)
+    try:
+        panel.set_context(fx.CONTEXT_VEHICLE, document)
+        panel.set_script_sources([(path, 0, block.end_line)])
+        reloaded = []
+
+        def reload_from_disk():
+            saved = path.read_text(encoding="utf-8")
+            refreshed, source = _document(saved)
+            panel.set_context(fx.CONTEXT_VEHICLE, refreshed, keep_view=True)
+            panel.set_script_sources([(path, 0, source.end_line)])
+            reloaded.append(saved)
+
+        panel.visualsSaved.connect(reload_from_disk)
+        panel.edit_effect_code(0)
+        drawer = _open_drawer(panel, app)
+        assert drawer.code.save_button.text() == "Save and Reload"
+        drawer.code.setPlainText(EFFECT.replace("400", "650"))
+        assert drawer._save()
+        assert reloaded and "duration = 650" in reloaded[0]
+        assert panel.document.items[0].value("duration") == "650"
+        assert not drawer.expanded
+    finally:
+        window.close()
+
+
+def test_save_keeps_other_effect_drafts_when_reload_is_deferred(app, tmp_path):
+    from entity_designer.editor import CollisionEditorWindow
+    from entity_designer.script_model import VehicleModelReference
+
+    text = "new_vehicle 1\n" + EFFECT + "\n" + EFFECT.replace("129", "130") + "\nend\n"
+    path = tmp_path / "vehicle.cfg"
+    path.write_text(text, encoding="utf-8")
+    document, block = _document(text)
+    window = CollisionEditorWindow()
+    try:
+        reference = VehicleModelReference(block=block, vp_normal=10)
+        window._active_script_path, window._active_script_id = path, 1
+        window._active_script_kind, window._active_model_reference = "new_vehicle", reference
+        window._load_fx_context(text, block, reference)
+        panel = window.fx_panel
+        panel.edit_effect_code(1)
+        drawer = panel.code_drawer
+        second_draft = drawer.code.toPlainText().replace("400", "900")
+        drawer.code.setPlainText(second_draft)
+        panel.edit_effect_code(0)
+        drawer.code.setPlainText(drawer.code.toPlainText().replace("400", "650"))
+        assert drawer._save()
+        assert "duration = 650" in path.read_text(encoding="utf-8")
+        assert "duration = 900" not in path.read_text(encoding="utf-8")
+        assert panel.text_session.drafts[1] == second_draft
+        assert panel.has_unsaved_text and not drawer.expanded
+    finally:
+        if window.fx_panel.text_session.dirty:
+            window.fx_panel.text_session.revert(1)
+        window._set_modified(False)
         window.close()
 
 

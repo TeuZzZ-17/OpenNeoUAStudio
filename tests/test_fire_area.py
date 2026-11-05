@@ -406,6 +406,14 @@ def test_firing_unit_preview_prefers_external_models_and_keeps_vp_fallback():
         _close(app, window)
 
 
+def test_firing_unit_can_use_explicit_vp_zero():
+    from entity_designer.fire_area_units import unit_from_values
+    unit = unit_from_values(64, {"name": "Quadda", "weapon": "64",
+                                 "vp_normal": "0"}, 64)
+    assert unit is not None and unit.vp == 0 and unit.vp_zero_valid
+    assert unit_from_values(64, {"weapon": "64"}, 64) is None
+
+
 def test_simulation_fires_the_weapon_from_the_muzzle():
     from entity_designer import destruction_fx as fx
 
@@ -446,8 +454,14 @@ def test_the_shot_only_runs_while_the_tab_is_open():
         floor = window.viewport._ground_grid_spec()
         window.viewport._scale *= 2.0
         assert window.viewport._ground_grid_spec() == floor
+        # The open project is the weapon: its scale must not stretch the vehicle.
         window.project.model_scale_x = 2.0
-        assert window._fire_area_unit_items()[0].scale == (2.0, 1.0, 1.0)
+        window.project.model_scale_z = 2.4
+        assert window._fire_area_unit_items()[0].scale == (1.0, 1.0, 1.0)
+        # The vehicle's own scale_xyz is the only one applied, through the matrix.
+        window._fire_area_units[0] = FiringUnit(
+            5, "Plane", 30, (0.0, -5.0, 18.0), "plane", 10.0, (1, 1, 3), (0, 0, 0))
+        assert window._fire_area_unit_items()[0].rotation[2][2] == 3.0
         # Choosing "None" in the preview drops the unit and starts the shot at the weapon.
         window._fire_area_unit_chosen(None)
         assert window.fx_panel.shot[0] == (0.0, -1000.0, 0.0)
@@ -737,4 +751,72 @@ def test_a_file_reload_never_starts_the_animation():
         window.reload_fx_from_file()
         assert not window._fx_reloading
     finally:
+        _close(app, window)
+
+
+def test_script_reload_outside_fx_merges_unedited_fire_area_values(tmp_path):
+    from PySide6.QtTest import QTest
+    from entity_designer.script_model import VehicleModelReference
+
+    original = ("new_weapon 7\n    vp_normal = 20\n"
+                "    ai_fire_trigger_box_forward_xyz = 100|80|1200\n"
+                "    ai_fire_trigger_dead_zone = 100\nend\n")
+    path = tmp_path / "Weapons.cfg"
+    path.write_text(original, encoding="utf-8")
+    area = _read(original)
+    app, window, _pytest = _weapon_window(area)
+    try:
+        block = find_script_blocks(original)[0]
+        reference = VehicleModelReference(block=block, vp_normal=20)
+        window._active_script_path = path
+        window._active_script_id = 7
+        window._active_script_kind = "new_weapon"
+        window._active_model_reference = reference
+        window._load_fx_context(original, block, reference)
+        window.properties_tabs.setCurrentIndex(window.fire_area_tab_index)
+        window._fire_area_value_edited("dead_zone", 150)
+        path.write_text(original.replace("100|80|1200", "110|90|1400")
+                        .replace("dead_zone = 100", "dead_zone = 200"), encoding="utf-8")
+        QTest.qWait(1200)
+        assert window.project.fire_area.box_forward == (110, 90, 1400)
+        assert window.project.fire_area.dead_zone == 150
+        window._fire_area_reset_all()
+        assert window.project.fire_area.dead_zone == 200
+        assert window.project.fire_area.box_forward == (110, 90, 1400)
+    finally:
+        _close(app, window)
+
+
+def test_external_fire_area_update_keeps_unsaved_effect_code(tmp_path):
+    from PySide6.QtTest import QTest
+    from entity_designer.script_model import VehicleModelReference
+
+    original = ("new_weapon 7\n    vp_normal = 20\n"
+                "    ai_fire_trigger_box_forward_xyz = 100|80|1200\n"
+                "begin_fx\n    trigger = detonate\n    mode = visual\n"
+                "    vp_model = 5\n    duration = 400\nend\nend\n")
+    path = tmp_path / "Weapons.cfg"
+    path.write_text(original, encoding="utf-8")
+    app, window, _pytest = _weapon_window(_read(original))
+    try:
+        block = find_script_blocks(original)[0]
+        reference = VehicleModelReference(block=block, vp_normal=20)
+        window._active_script_path = path
+        window._active_script_id = 7
+        window._active_script_kind = "new_weapon"
+        window._active_model_reference = reference
+        window._load_fx_context(original, block, reference)
+        window.fx_panel.edit_effect_code(0)
+        drawer = window.fx_panel.code_drawer
+        draft = drawer.code.toPlainText().replace("400", "600")
+        drawer.code.setPlainText(draft)
+        assert window.fx_panel.has_unsaved_text
+        path.write_text(original.replace("100|80|1200", "110|90|1400"), encoding="utf-8")
+        QTest.qWait(1200)
+        assert window.project.fire_area.box_forward == (110, 90, 1400)
+        assert drawer.code.toPlainText() == draft
+        assert window.fx_panel.has_unsaved_text
+    finally:
+        if window.fx_panel.text_session.dirty:
+            window.fx_panel.text_session.revert(0)
         _close(app, window)
