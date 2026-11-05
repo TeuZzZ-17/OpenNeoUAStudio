@@ -504,6 +504,14 @@ class GeometryPartSelectionWidget(QWidget):
         return tuple(sorted(
             selected, key=lambda value: _geometry_component_key(value)))
 
+    def pickable_components(self):
+        """Geometry visible in the preview, including selected disabled rows."""
+        keys = {_geometry_component_key(component) for component in self.selected_components()}
+        keys.update(row.data(0, _GEOMETRY_COMPONENT_ROLE)
+                    for item in self.tree.selectedItems() for row in self._subtree(item))
+        return tuple(component for key, component in self._components_by_key.items()
+                     if key in keys)
+
     def selected_component_keys(self) -> tuple[str, ...]:
         return tuple(
             _geometry_component_key(component)

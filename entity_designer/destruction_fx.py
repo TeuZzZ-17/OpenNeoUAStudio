@@ -1692,7 +1692,7 @@ class PreviewItem:
 
     source: int                 # item index in the FxDocument, -1 = the unit
     kind: str                   # visual | physical | impact | legacy | ground_decal | decal_smoke | unit | decoration | tracer
-    vp: int                     # VP id to draw (0 = marker only)
+    vp: int                     # VP id to draw (0 is usually a marker)
     position: tuple[float, float, float]
     rotation: Matrix3
     scale: tuple[float, float, float]
@@ -1707,6 +1707,7 @@ class PreviewItem:
     texture: str = ""
     decal_size: tuple[float, float] = (0.0, 0.0)
     decal_edge_fade: float = 0.0
+    vp_zero_valid: bool = False
 
 
 @dataclass(frozen=True)

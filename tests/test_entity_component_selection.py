@@ -212,3 +212,78 @@ def test_a_loaded_shape_starts_with_no_part_highlighted(window):
     assert window.collision_geometry_widget.tree.selectedItems() == []
     _select_rows_with_qtest(window.collision_geometry_widget, [1])
     assert window.viewport._shape_selected_indices == {1}
+
+
+def test_click_selects_source_geometry_before_shape_generation(window, app):
+    from types import SimpleNamespace
+    from studio.assets.family import AssetFamily, FamilyObject
+    from studio.formats.base_format import BaseObject
+
+    window.project.collision_shape = None
+    window._sync_all()
+    viewport = window.viewport
+    widget = window.collision_geometry_widget
+    owner = FamilyObject(BaseObject(name="Body", skeleton_name="body"),
+                         skeleton=SimpleNamespace(polygons=[[0, 1, 2]]), owner_path="root")
+    triangles = (
+        ((-0.9, -0.3, 0.), (-0.3, -0.3, 0.), (-0.6, 0.3, 0.)),
+        ((0.3, -0.3, 0.), (0.9, -0.3, 0.), (0.6, 0.3, 0.)),
+    )
+    components = tuple(SimpleNamespace(
+        owner="root", component_id=f"part-{index}", group_id="",
+        triangles=(triangle,), boundary_edges=3, non_manifold_edges=0,
+        planar=True, has_volume=False) for index, triangle in enumerate(triangles))
+    widget.set_geometry(AssetFamily(root_object=owner), "root", components,
+                        {"root": triangles}, source_key=("test", "source"))
+    viewport.set_model_preview_scale(1.2, 0.8, 1.0)
+    viewport.set_model_preview_rotation(0, 0, 15)
+    app.processEvents()
+
+    points = []
+    for triangle in triangles:
+        projected = [viewport._project_visible_world(viewport._preview_point(p)) for p in triangle]
+        assert all(point is not None for point in projected)
+        points.append(QPointF(sum(p.x() for p in projected) / 3,
+                              sum(p.y() for p in projected) / 3).toPoint())
+    QTest.mouseMove(viewport, points[0])
+    assert cursor_kind(viewport.cursor()) == "open"
+    QTest.mouseClick(viewport, Qt.MouseButton.LeftButton, pos=points[0])
+    assert _selected_keys(widget) == {"root#component:part-0"}
+    assert viewport._geometry_component_highlight == (triangles[0],)
+    QTest.mouseClick(viewport, Qt.MouseButton.LeftButton,
+                     Qt.KeyboardModifier.ControlModifier, pos=points[1])
+    assert _selected_keys(widget) == {"root#component:part-0", "root#component:part-1"}
+    assert set(viewport._geometry_component_highlight) == set(triangles)
+    assert len(widget.selected_components()) == 2
+
+    def disable_selected():
+        menu = QApplication.activePopupWidget()
+        assert menu is not None
+        next(action for action in menu.actions() if action.text() == "Disable").trigger()
+        menu.close()
+
+    QTimer.singleShot(0, disable_selected)
+    QTest.mouseClick(viewport, Qt.MouseButton.RightButton, pos=points[0])
+    app.processEvents()
+    assert len(widget.selected_components()) == 0
+    assert _selected_keys(widget) == {"root#component:part-0", "root#component:part-1"}
+    QTest.mouseDClick(viewport, Qt.MouseButton.LeftButton, pos=QPoint(2, 2))
+    assert not widget.tree.selectedItems()
+    assert viewport._geometry_component_highlight is None
+    assert viewport._hit_geometry_component(QPointF(points[0])) is None
+
+
+def test_source_geometry_picking_prefers_the_nearest_overlapping_triangle(window):
+    viewport = window.viewport
+    viewport.set_collision_shape(None)
+    viewport._yaw = 0.0
+    viewport._pitch = 0.0
+    viewport._center = (0.0, 0.0, 0.0)
+    viewport._scale = 1.0
+    viewport.set_model_preview_scale(1, 1, 1)
+    viewport.set_model_preview_rotation(0, 0, 0)
+    far = ((-0.5, -0.5, -1.0), (0.5, -0.5, -1.0), (0.0, 0.5, -1.0))
+    near = ((-0.5, -0.5, 1.0), (0.5, -0.5, 1.0), (0.0, 0.5, 1.0))
+    viewport.set_geometry_component_preview((far, near), components={"far": (far,), "near": (near,)})
+    point = viewport._project_visible_world(viewport._preview_point((0, 0, 0)))
+    assert viewport._hit_geometry_component(point) == "near"

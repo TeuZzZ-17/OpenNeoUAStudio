@@ -197,8 +197,11 @@ class BriefingPreview(AcceleratedWidget):
 
     def _tick(self):
         now = time.monotonic()
-        self.angle = (self.angle + (now - self._last_frame) * 200.0) % 360.0
+        elapsed = now - self._last_frame
+        self.angle = (self.angle + elapsed * 200.0) % 360.0
         self._last_frame = now
+        if self.renderer.has_animation:
+            self.renderer.seek_animation(self.renderer._anim_clock_ms + elapsed * 1000.0)
         self.update()
 
     def refresh(self):

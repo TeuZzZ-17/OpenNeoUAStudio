@@ -39,6 +39,90 @@ from entity_designer.widgets import (
 class _CollisionShapeMixin:
     """Part of CollisionEditorWindow; `self` is always the CollisionEditorWindow."""
 
+    def _prepare_collision_tracer(self, values) -> None:
+        """Use a configured tracer only when the normal model has no geometry."""
+        from entity_designer import destruction_fx as fx
+        from entity_designer.script_model import _load_3ds_family, _resolve_data_asset_path
+
+        root = self._collision_shape_root_owner()
+        objects = self.family.all_objects() if self.family is not None else ()
+        has_geometry = any(
+            obj.skeleton is not None and obj.skeleton.polygons
+            and (root is None or obj.owner_path == root
+                 or obj.owner_path.startswith(root.rstrip("/") + "/"))
+            for obj in objects)
+        if self._active_visual_reference is not None and root is None:
+            has_geometry = False
+        tracer = fx.parse_tracer(values) if not has_geometry else None
+        path = (_resolve_data_asset_path(tracer.mesh, self._active_script_path,
+                                         self._active_base_path)
+                if tracer is not None else None)
+        key = None
+        if path is not None and path.suffix.casefold() == ".3ds":
+            try:
+                stat = path.stat()
+                key = (str(path), stat.st_mtime_ns, stat.st_size, tracer)
+            except OSError:
+                pass
+        if key == getattr(self, "_collision_tracer_key", None):
+            return
+        self._collision_tracer_key = key
+        self._collision_tracer_family = None
+        if key is not None:
+            try:
+                family = _load_3ds_family(path)
+                for obj in family.all_objects():
+                    if obj.skeleton is not None:
+                        obj.skeleton.points = [
+                            (x * tracer.size_x + tracer.pos[0],
+                             y * tracer.size_y + tracer.pos[1],
+                             (z - 0.5) * tracer.size_z + tracer.pos[2])
+                            for x, y, z in obj.skeleton.points]
+                self._collision_tracer_family = family
+            except (OSError, ValueError):
+                self._collision_tracer_key = None
+        self._collision_geometry_cache_key = None
+        self._refresh_collision_geometry_widget()
+
+    def _sync_collision_model_preview(self) -> None:
+        """Switch only the collision viewport to the geometry-only 3DS."""
+        family = getattr(self, "_collision_tracer_family", None)
+        collision_tab = self.properties_tabs.currentIndex() in (
+            self.collision_tab_index, self.collision_shape_tab_index)
+        direct_3ds = (collision_tab and family is None
+                      and self._active_base_path is not None
+                      and self._active_base_path.suffix.casefold() == ".3ds")
+        if direct_3ds and not getattr(self, "_collision_direct_3ds_mode", False):
+            self._collision_direct_previous_mode = self.viewport._mode
+            self.viewport.set_mode("solid")
+            self._collision_direct_3ds_mode = True
+        elif not direct_3ds and getattr(self, "_collision_direct_3ds_mode", False):
+            self.viewport.set_mode(self._collision_direct_previous_mode)
+            self._collision_direct_3ds_mode = False
+        active = family is not None and collision_tab
+        current = getattr(self, "_collision_tracer_preview", False)
+        if active and (not current or self.viewport._family_ref is not family):
+            if not current:
+                self._collision_tracer_camera = self.viewport._camera_state()
+                self._collision_tracer_home = self.viewport._home_camera_state
+                self._collision_tracer_mode = self.viewport._mode
+            self.viewport.load_family(family, None, primary_owner="root")
+            self.viewport.set_mode("solid")
+            self._shape_preview_settings()
+            self.viewport.frame_all()
+            self.viewport.capture_reset_view()
+            self._collision_tracer_preview = True
+        elif not active and current:
+            self._collision_tracer_preview = False
+            if self.family is not None:
+                self.viewport.load_family(
+                    self.family, {self._current_owner} if self._current_owner else None,
+                    keep_camera=True, primary_owner=self._current_owner)
+                self._shape_preview_settings()
+                self.viewport.set_mode(self._collision_tracer_mode)
+                self.viewport._set_camera_state(self._collision_tracer_camera)
+                self.viewport._home_camera_state = self._collision_tracer_home
+
     def _active_asset_set_id(self) -> int:
         path = self._active_base_path
         if path is None:
@@ -190,14 +274,20 @@ class _CollisionShapeMixin:
         return (
             source_path, id(self.family), reference_key,
             self._collision_shape_root_owner(), self._current_owner,
-            self.project.source_model)
+            self.project.source_model, getattr(self, "_collision_tracer_key", None))
 
     def _set_collision_geometry_preview(
             self, triangles, highlighted=None, excluded=None) -> None:
         self._collision_geometry_preview = (
             tuple(triangles) if triangles else None)
+        widget = getattr(self, "collision_geometry_widget", None)
+        components = (widget.pickable_components()
+                      if widget is not None and (triangles or highlighted or excluded)
+                      else ())
         self.viewport.set_geometry_component_preview(
-            self._collision_geometry_preview, highlighted, excluded)
+            self._collision_geometry_preview, highlighted, excluded,
+            {_geometry_component_key(component): component.triangles
+             for component in components})
 
     def _refresh_collision_geometry_widget(self) -> None:
         widget = getattr(self, "collision_geometry_widget", None)
@@ -217,9 +307,11 @@ class _CollisionShapeMixin:
             self._sync_collision_generation_controls()
             return
 
-        root_owner = self._collision_shape_root_owner()
+        geometry_family = getattr(self, "_collision_tracer_family", None) or self.family
+        root_owner = ("root" if geometry_family is not self.family
+                      else self._collision_shape_root_owner())
         eligible = [
-            obj for obj in self.family.all_objects()
+            obj for obj in geometry_family.all_objects()
             if obj.skeleton is not None and (
                 root_owner is None
                 or obj.owner_path == root_owner
@@ -244,7 +336,7 @@ class _CollisionShapeMixin:
         error = None
         try:
             self.viewport.load_family(
-                self.family, {obj.owner_path for obj in eligible},
+                geometry_family, {obj.owner_path for obj in eligible},
                 keep_camera=True, primary_owner=root_owner)
             self._shape_preview_settings()
             owner_triangles = {
@@ -260,8 +352,10 @@ class _CollisionShapeMixin:
             error = str(exc)
         finally:
             self.viewport.load_family(
-                self.family, previous_scope, keep_camera=True,
-                primary_owner=self._current_owner)
+                (geometry_family if getattr(self, "_collision_tracer_preview", False)
+                 else self.family), previous_scope, keep_camera=True,
+                primary_owner=("root" if getattr(self, "_collision_tracer_preview", False)
+                               else self._current_owner))
             self._shape_preview_settings()
             self.viewport._set_camera_state(previous_camera)
             self.viewport._home_camera_state = previous_home_camera
@@ -271,7 +365,7 @@ class _CollisionShapeMixin:
         self._collision_geometry_triangles_by_owner = owner_triangles
         self._collision_geometry_owners = tuple(sorted(owner_triangles))
         widget.set_geometry(
-            self.family, root_owner, self._collision_geometry_components,
+            geometry_family, root_owner, self._collision_geometry_components,
             owner_triangles, source_key)
         if error:
             widget.summary_label.setText(f"Geometry unavailable: {error}")
@@ -312,7 +406,8 @@ class _CollisionShapeMixin:
                 and not (self._active_visual_reference.three_ds_normal
                          or self._active_visual_reference.base_normal)
                 and self._active_visual_reference.vp_normal is not None
-                and self._collision_shape_root_owner() is None):
+                and self._collision_shape_root_owner() is None
+                and not getattr(self, "_collision_tracer_family", None)):
             self.collision_shape_status.setText(
                 "Generation unavailable: active VP has no model geometry.")
             return
@@ -362,8 +457,10 @@ class _CollisionShapeMixin:
         if spheres:
             answer = QMessageBox.question(
                 self, "Generate Collision Shape",
-                "All Legacy and OpenNeoUA collision spheres will be removed "
-                "after generation succeeds. Continue?",
+                "OpenNeoUA collision spheres will be removed from the Studio "
+                "project after generation succeeds. The legacy radius is kept "
+                "because other game functions use it. Export the shape and "
+                "update the script to apply these changes. Continue?",
                 QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
                 QMessageBox.StandardButton.No)
             if answer != QMessageBox.StandardButton.Yes:
@@ -523,7 +620,6 @@ class _CollisionShapeMixin:
         self.project.collision_shape_components = tuple(
             part["owner"] for part in selected_parts)
         self.project.collision_shape_warnings = bake_warnings
-        self.project.legacy = None
         self.project.compound.clear()
         self.project.sphere_isolation_active = False
         self._selected = -1

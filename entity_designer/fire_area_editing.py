@@ -176,7 +176,7 @@ class FireAreaEditingMixin:
         unit = self._fire_area_unit()
         if unit is None or not self._is_fire_area_tab_active():
             return set()
-        return {unit.vp} if unit.vp > 0 else set()
+        return {unit.vp} if unit.vp > 0 or unit.vp_zero_valid else set()
 
     def _fire_area_unit_items(self) -> list:
         """The firing unit as a preview item, at rest on the ground or at height."""
@@ -189,11 +189,13 @@ class FireAreaEditingMixin:
                    for axis in ((1.0, 0.0, 0.0), (0.0, 1.0, 0.0), (0.0, 0.0, 1.0))]
         rotation = tuple(tuple(columns[column][row] for column in range(3))
                          for row in range(3))
+        # The matrix already holds the unit's own scale. The open project is the
+        # weapon, so its scale_xyz must not be applied to the vehicle model.
         return [fx.PreviewItem(
             -1, "unit", unit.vp, self._fire_area_unit_position(), rotation,
-            (self.project.model_scale_x, self.project.model_scale_y,
-             self.project.model_scale_z), 1.0, None,
-            f"firing unit · {unit.label}", external=unit.external)]
+            (1.0, 1.0, 1.0), 1.0, None,
+            f"firing unit · {unit.label}", external=unit.external,
+            vp_zero_valid=unit.vp_zero_valid)]
 
     def _fire_area_note(self) -> str:
         family = self._fire_area_weapon_family

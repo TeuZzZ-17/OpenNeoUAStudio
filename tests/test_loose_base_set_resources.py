@@ -23,6 +23,7 @@ def window():
     from entity_designer.editor import CollisionEditorWindow
     window = CollisionEditorWindow()
     yield window
+    window._set_modified(False)
     window.close()
     bootstrap.set_installation(None)
 
@@ -34,6 +35,114 @@ def _mnojet(window):
     obj = next(o for o in load_game_objects(bootstrap.installation())
                if o.kind == "weapon" and o.object_id == 38)
     assert window._open_game_object(obj)
+
+
+def test_gatling_tracer_is_available_for_collision_generation(window):
+    from unittest.mock import patch
+    from PySide6.QtTest import QTest
+    from PySide6.QtWidgets import QMessageBox
+    from map_editor import bootstrap
+    from studio.assets.catalog import load_game_objects
+
+    obj = next(o for o in load_game_objects(bootstrap.installation())
+               if o.kind == "weapon" and o.object_id == 33)
+    assert window._open_game_object(obj)
+    window.properties_tabs.setCurrentIndex(window.collision_shape_tab_index)
+    components = window.collision_geometry_widget.selected_components()
+    assert components
+    points = [p for component in components for triangle in component.triangles
+              for p in triangle]
+    extent = [max(p[i] for p in points) - min(p[i] for p in points)
+              for i in range(3)]
+    assert extent == pytest.approx((1, 1, 80))
+    assert min(p[2] for p in points) == pytest.approx(-80)
+    assert max(p[2] for p in points) == pytest.approx(0)
+    assert window.generate_collision_shape_button.isEnabled()
+    assert window.viewport._family_ref is window._collision_tracer_family
+    assert window.viewport._mode == "solid"
+    assert window.viewport._faces
+    window.properties_tabs.setCurrentIndex(window.collision_tab_index)
+    assert window.viewport._family_ref is window._collision_tracer_family
+    window.properties_tabs.setCurrentIndex(window.fx_tab_index)
+    assert window.viewport._family_ref is window.family
+    window.properties_tabs.setCurrentIndex(window.fire_area_tab_index)
+    assert window.viewport._family_ref is window.family
+    window.properties_tabs.setCurrentIndex(window.collision_shape_tab_index)
+    with patch.object(QMessageBox, "question", return_value=QMessageBox.StandardButton.Yes), \
+            patch.object(QMessageBox, "warning"):
+        window.generate_collision_shape()
+        for _ in range(300):
+            if window._collision_bake_process is None:
+                break
+            QTest.qWait(100)
+    assert window._collision_bake_process is None
+    assert window.project.collision_shape is not None
+    assert window.project.collision_shape.hulls
+    window._set_modified(False)
+    _mnojet(window)
+    assert window._collision_tracer_family is None
+    assert window.viewport._family_ref is window.family
+    assert window.collision_geometry_widget.selected_components()
+
+
+def test_ghargoil_one_fire_point_has_mirrored_preview(window):
+    from map_editor import bootstrap
+    from studio.assets.catalog import load_game_objects
+
+    obj = next(o for o in load_game_objects(bootstrap.installation())
+               if o.kind == "vehicle" and o.object_id == 24)
+    assert window._open_game_object(obj)
+    window.properties_tabs.setCurrentIndex(window.fire_points_tab_index)
+    assert len(window.viewport._fire_points) == 1
+    assert window.viewport._fire_point_mirrored
+    assert window.fire_point_tree.topLevelItemCount() == 1
+    start, end = window.viewport._forward_arrow_points()
+    assert end[0:2] == start[0:2] and end[2] > start[2]
+
+
+def test_quadda_vp_zero_is_drawn_in_zapper_fire_area(window):
+    from map_editor import bootstrap
+    from studio.assets.catalog import load_game_objects
+    obj = next(o for o in load_game_objects(bootstrap.installation())
+               if o.kind == "weapon" and o.object_id == 64)
+    assert window._open_game_object(obj)
+    window.properties_tabs.setCurrentIndex(window.fire_area_tab_index)
+    assert window._fire_area_unit().vehicle_id == 64
+    item = window._fire_area_unit_items()[0]
+    assert item.vp == 0 and item.vp_zero_valid
+    assert 0 in window._fire_area_extra_vps()
+    viewport = window.viewport
+    start, end = viewport._forward_arrow_points()
+    assert end[0:2] == start[0:2] and end[2] > start[2]
+    owner = viewport._fx_owner_by_vp.get(0)
+    assert owner is not None
+    assert viewport._fx_item_faces(item, viewport._fx_templates())
+
+
+def test_external_3ds_normal_can_be_used_as_collision_geometry(window, tmp_path):
+    from unittest.mock import patch
+    from PySide6.QtTest import QTest
+    from PySide6.QtWidgets import QMessageBox
+    script = tmp_path / "weapon.cfg"
+    script.write_text(
+        "new_weapon 987\n name = Test\n vp_normal = 22\n"
+        " 3ds_normal = Data/Models/3ds/Tracer.3ds\nend\n", encoding="utf-8")
+    assert window.open_vehicle_script(
+        script, object_id=987, object_kind="new_weapon",
+        set_bas_path=DATA / "Sets/Set1/Objects/Set.BAS")
+    window.properties_tabs.setCurrentIndex(window.collision_shape_tab_index)
+    assert window._active_base_path.suffix.casefold() == ".3ds"
+    assert window.collision_geometry_widget.selected_components()
+    assert window.generate_collision_shape_button.isEnabled()
+    assert window.viewport._mode == "solid" and window.viewport._faces
+    with patch.object(QMessageBox, "warning"):
+        window.generate_collision_shape()
+        for _ in range(300):
+            if window._collision_bake_process is None:
+                break
+            QTest.qWait(100)
+    assert window.project.collision_shape and window.project.collision_shape.hulls
+    window._set_modified(False)
 
 
 def test_loose_base_finds_its_textures_in_the_set(window):
@@ -102,6 +211,99 @@ def test_firing_unit_in_fire_area_follows_the_toolbar_play(window):
         assert materials
         seen.add(tuple(sorted(helper._anim_states[m] for m in materials)))
     assert len(seen) > 1
+
+
+def test_fire_area_renders_firing_unit_with_gpu_when_available(window):
+    from PySide6.QtTest import QTest
+
+    _mnojet(window)
+    window.properties_tabs.setCurrentIndex(window.fire_area_tab_index)
+    window.show()
+    window._push_fx_frame()
+    QTest.qWait(500)
+    viewport = window.viewport
+    if viewport.renderer_mode != "gpu" or not viewport._gpu_canvas.isValid():
+        pytest.skip("A working OpenGL canvas is required")
+    viewport._gpu_canvas.grabFramebuffer()
+    helper = next(h for key, h in viewport._fx_external_cache.items()
+                  if key.startswith("set:") and h is not None)
+    assert helper._last_effective_renderer == "retail_indexed_gpu"
+    assert viewport.renderer_name.startswith("OpenGL")
+    viewport._gpu_indexed_unavailable = True
+    viewport._gpu_canvas.grabFramebuffer()
+    assert helper._last_effective_renderer == "retail_indexed_reconstructed"
+    assert viewport.renderer_name.startswith("Software")
+    assert viewport.set_renderer_mode("software")
+    viewport.grab()
+    assert helper._last_effective_renderer == "retail_indexed_reconstructed"
+
+
+def test_briefing_dragonfly_animation_plays_when_main_view_is_paused(window):
+    from PySide6.QtCore import QSize
+    from PySide6.QtTest import QTest
+    from map_editor import bootstrap
+    from studio.assets.catalog import load_game_objects
+
+    unit = next(o for o in load_game_objects(bootstrap.installation())
+                if o.kind == "vehicle" and o.object_id == 14)
+    assert window._open_game_object(unit)
+    window.play_button.setChecked(False)
+    window.show()
+    window.properties_tabs.setCurrentIndex(window.briefing_tab_index)
+    view = window.briefing_preview
+    assert view.renderer.has_animation
+    states = set()
+    for _ in range(8):
+        QTest.qWait(130)
+        states.add(tuple(sorted(view.renderer._anim_states.items())))
+    assert len(states) > 1
+    assert not window.play_button.isChecked()
+    view.timer.stop()
+    view.angle = 0
+    renderer = view.renderer
+    renderer.seek_animation(0)
+    first = renderer.render_snapshot(QSize(320, 200), None)
+    frame = next(material.anim_frames[0][0] for material in renderer._materials
+                 if len(material.anim_frames) > 1 and material.anim_frames[0][0] > 0)
+    renderer.seek_animation(frame * 1000 / 1024 + 1)
+    second = renderer.render_snapshot(QSize(320, 200), None)
+    assert first != second
+
+
+def test_dragonfly_source_component_can_be_picked_without_a_collision_shape(window):
+    from PySide6.QtCore import QPointF, Qt
+    from PySide6.QtTest import QTest
+    from map_editor import bootstrap
+    from studio.assets.catalog import load_game_objects
+    from entity_designer.widgets import _GEOMETRY_COMPONENT_ROLE
+
+    unit = next(o for o in load_game_objects(bootstrap.installation())
+                if o.kind == "vehicle" and o.object_id == 14)
+    assert window._open_game_object(unit)
+    window.project.collision_shape = None
+    window.show()
+    window.properties_tabs.setCurrentIndex(window.collision_shape_tab_index)
+    window._sync_all()
+    view = window.viewport
+    QApplication.processEvents()
+    point = key = None
+    for candidate, triangles in view._geometry_component_picks.items():
+        for triangle in triangles:
+            projected = [view._project_visible_world(view._preview_point(p)) for p in triangle]
+            if any(p is None for p in projected):
+                continue
+            center = QPointF(sum(p.x() for p in projected) / 3,
+                             sum(p.y() for p in projected) / 3).toPoint()
+            if view.rect().contains(center) and view._hit_geometry_component(QPointF(center)) == candidate:
+                point, key = center, candidate
+                break
+        if key is not None:
+            break
+    assert key is not None
+    QTest.mouseClick(view, Qt.MouseButton.LeftButton, pos=point)
+    assert [row.data(0, _GEOMETRY_COMPONENT_ROLE)
+            for row in window.collision_geometry_widget.tree.selectedItems()] == [key]
+    assert view._geometry_component_highlight
 
 
 def test_fire_area_loads_air_cube_external_normal_model(window):

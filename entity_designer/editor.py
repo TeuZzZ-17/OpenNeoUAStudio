@@ -291,7 +291,7 @@ class CollisionEditorWindow(
         self._fx_reload_timer.setSingleShot(True)
         self._fx_reload_timer.setInterval(300)
         self._fx_reload_timer.timeout.connect(self.reload_fx_from_file)
-        # Safety net for the file watcher: while the FX tab is open the files
+        # Safety net for the file watcher: the active definition's files
         # are also compared with what was loaded, so no edit is ever missed
         # (editors that save by renaming, locked files, a tab left and reopened).
         self._fx_tracked: set[str] = set()
@@ -2642,7 +2642,10 @@ class CollisionEditorWindow(
                 for x, y, z in authored_points
             ]
         self._refresh_fire_point_tree(authored_points)
-        self.viewport.set_fire_points(points, self._selected_fire_point)
+        self.viewport.set_fire_points(
+            points, self._selected_fire_point,
+            mirrored=(self._active_script_path is not None
+                      and getattr(self, "_fire_point_mirrored", False)))
         gun_points = []
         gun_directions = []
         if vehicle_mode and self.project.gun_points_enabled:

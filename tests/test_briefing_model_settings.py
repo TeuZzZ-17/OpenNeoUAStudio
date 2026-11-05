@@ -1,4 +1,5 @@
 import os
+import pytest
 os.environ.setdefault('QT_QPA_PLATFORM','offscreen')
 from types import SimpleNamespace
 from PySide6.QtWidgets import QApplication,QWidget
@@ -80,6 +81,30 @@ def test_preview_camera_axes_and_depth_match_engine():
     e.project.briefing_xyz_enabled=False
     assert view.renderer._camera_vertex((1,2,3))==classic
     view.close();e.close()
+
+
+def test_briefing_preview_advances_its_own_animation(monkeypatch):
+    from entity_designer import briefing
+    from studio.rendering.asset_viewport_common import ViewMaterial
+
+    app = QApplication.instance() or QApplication([])
+    editor = Editor()
+    view = BriefingPreview(editor)
+    try:
+        view.renderer._materials = [ViewMaterial(
+            "rotor", anim_frames=[(102, 0, 0), (102, 1, 0)])]
+        view.renderer.seek_animation(0)
+        view._last_frame = 10.0
+        monkeypatch.setattr(briefing.time, "monotonic", lambda: 10.12)
+        view._tick()
+        assert view.renderer._anim_clock_ms == pytest.approx(120)
+        assert view.renderer._anim_states[0][0] == 1
+        monkeypatch.setattr(briefing.time, "monotonic", lambda: 10.24)
+        view._tick()
+        assert view.renderer._anim_states[0][0] == 0
+    finally:
+        view.close()
+        editor.close()
 
 
 def test_briefing_xyz_written_with_six_digits_is_not_reported_as_unsaved():

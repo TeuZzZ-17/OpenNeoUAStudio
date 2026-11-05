@@ -63,6 +63,7 @@ class FiringUnit:
     rack: tuple[float, float, int] | None = None
     projectiles: int = 1
     external: tuple[str, ...] = ()
+    vp_zero_valid: bool = False
 
     @property
     def x_span(self) -> tuple[float, float]:
@@ -125,6 +126,19 @@ def _rack(values: dict[str, str], mode: str) -> tuple[float, float, int] | None:
     return (start, step, slots) if math.isfinite(start + (slots - 1) * step) else None
 
 
+def mirrored_single_fire_point(values: dict[str, str]) -> bool:
+    """Whether successive single projectiles can use opposite muzzle sides."""
+
+    mode = values.get("fire_x_mode", "").strip().casefold()
+    if mode == "salve_mirror":
+        return False
+    if mode in ("sequence", "random") and _rack(values, mode) is not None:
+        return False
+    if mode in ("sequence", "random", "salve_sequence"):
+        return True
+    return values.get("model", "").strip().casefold() not in ("gun", "")
+
+
 def _projectiles(raw: str | None) -> int:
     """First number of ``N`` or ``min~max`` (the engine rolls inside the range)."""
 
@@ -143,11 +157,14 @@ def unit_from_values(vehicle_id: int, values: dict[str, str],
                 if script_int(values.get(key), -1) == weapon_id), None)
     if key is None:
         return None
-    vp = script_int(values.get("vp_normal"), 0)
+    vp = script_int(values.get("vp_normal"), -1)
     external = tuple(value for key in ("3ds_normal", "base_normal")
                      if (value := values.get(key, "").strip()))
-    if vp <= 0 and not external:
+    if vp < 0 and not external:
         return None
+    vp_zero_valid = vp == 0
+    if vp < 0:
+        vp = 0
     mode = values.get("fire_x_mode", "").strip().casefold()
     mode = mode if mode in FIRE_X_MODES else "vanilla"
     return FiringUnit(
@@ -164,6 +181,7 @@ def unit_from_values(vehicle_id: int, values: dict[str, str],
         rack=_rack(values, mode),
         projectiles=_projectiles(values.get(_COUNT_KEYS[key])),
         external=external,
+        vp_zero_valid=vp_zero_valid,
     )
 
 

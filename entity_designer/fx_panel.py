@@ -637,7 +637,7 @@ class DestructionFxPanel(QWidget):
     documentEdited = Signal()
     draftStateChanged = Signal()
     sourceSaved = Signal(object)
-    # A model-state key was written to the script: the editor reloads the definition.
+    # Script changes were saved: the editor reloads the definition.
     visualsSaved = Signal()
 
     def __init__(self, parent=None) -> None:
@@ -1043,8 +1043,8 @@ class DestructionFxPanel(QWidget):
     def save_rows(self, indexes) -> bool:
         """Save the given list rows (None = all) to the script; False if it was refused.
 
-        Effect code goes through ``FxTextSession``. Model states rewrite their keys
-        and then the whole definition is reloaded, so effect drafts must be saved first.
+        Effect code goes through ``FxTextSession``. Model states rewrite their keys,
+        so effect drafts must be saved before a model-state change.
         """
 
         effects = (range(len(self.document.items)) if indexes is None
@@ -1055,12 +1055,16 @@ class DestructionFxPanel(QWidget):
         if paths:
             self.sourceSaved.emit(paths)
             self.state_session.refresh_snapshots(paths)
+        visuals_saved = False
         if states:
             if self.text_session.dirty:
                 raise ValueError("Save or revert the effect-code drafts first: "
                                  "the script is reloaded after a model change.")
-            if self.state_session.save(states):
-                self.visualsSaved.emit()
+            visuals_saved = self.state_session.save(states)
+        if self.code_drawer is not None:
+            self.code_drawer.set_expanded(False, animate=False)
+        if visuals_saved or paths:
+            self.visualsSaved.emit()
         return True
 
     def edit_effect_code(self, index) -> None:

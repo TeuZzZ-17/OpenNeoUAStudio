@@ -861,9 +861,17 @@ def generate_collision_shape(
         tolerance = max(1e-10, extent * 1e-7)
         point_array = np.asarray(points, dtype=np.float64)
         if np.linalg.matrix_rank(point_array - point_array[0], tol=tolerance) < 3:
-            raise ValueError(
-                f"{model_owner}: selected planar components do not define "
-                "a three-dimensional collision volume.")
+            if not prepared_for_bake:
+                raise ValueError(
+                    f"{model_owner}: selected planar components do not define "
+                    "a three-dimensional collision volume.")
+            # Flat pieces on one plane (wings, fins) next to a 3D body: bake each
+            # one alone, like a single flat component. CoACD thickens its hull.
+            for owner, triangles, repair_warnings in component_group:
+                prepared_for_bake.append((owner, triangles))
+                warnings.extend(
+                    f"{owner}: {warning}" for warning in repair_warnings)
+            continue
         # Disconnected flat render pieces can together describe a 3D object.
         # Keep that union intact so CoACD sees its volume instead of three sheets.
         group_ids = "\0".join(sorted(

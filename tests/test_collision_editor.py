@@ -2231,7 +2231,7 @@ class CollisionEditorTests(unittest.TestCase):
         window._selected_gun_point = 0
         window._undo.append((window.project.snapshot(), (0, (0,))))
         window._redo.append((window.project.snapshot(), (0, (0,))))
-        window.family = object()
+        window.family = AssetFamily()
         window._active_base_path = Path("C:/UA/Data/Set1/Objects/SET.BAS")
         window._vp_embedded = SimpleNamespace(source_path="C:/UA/Data/Set1/Objects/SET.BAS")
         window._vp_table = object()
@@ -2327,6 +2327,116 @@ class CollisionEditorTests(unittest.TestCase):
             if call.args[2].color() == QColor(255, 255, 255)
         ]
         self.assertEqual(len(white_calls), 2)
+        self.assertEqual([call.args[1] for call in painter.drawText.call_args_list],
+                         ["F1", "F2"])
+        painter.drawPath.assert_not_called()
+
+    def test_90g_mirrored_single_fire_point_is_same_selectable_point(self):
+        viewport = CollisionViewport()
+        viewport._ground_alignment_source_loaded = True
+        viewport.set_fire_points([(28, 0, 11)], selected=0, mirrored=True)
+        viewport._fire_points_visible = True
+        with patch.object(viewport, "_project_visible_world",
+                          side_effect=lambda p: QPointF(p[0] + 50, p[2] + 50)):
+            self.assertEqual(viewport._hit_fire_point(QPointF(22, 61)), 0)
+            self.assertEqual(viewport._hit_fire_point(QPointF(78, 61)), 0)
+        self.assertEqual(len(viewport._fire_points), 1)
+
+    def test_90h_mirror_only_for_modes_with_two_sides(self):
+        from entity_designer.fire_area_units import mirrored_single_fire_point
+        self.assertTrue(mirrored_single_fire_point({"model": "heli", "fire_x_mode": "sequence"}))
+        self.assertTrue(mirrored_single_fire_point({"model": "heli"}))
+        self.assertFalse(mirrored_single_fire_point({"model": "gun"}))
+        self.assertFalse(mirrored_single_fire_point({"model": "heli", "fire_x_mode": "sequence", "fire_x_start": "0", "fire_x_step": "3", "fire_x_slots": "3"}))
+        self.assertFalse(mirrored_single_fire_point({"model": "heli", "fire_x_mode": "salve_mirror"}))
+
+    def test_90i_forward_arrow_follows_game_forward_axis(self):
+        viewport = CollisionViewport()
+        viewport.set_forward_arrow((3, -5, 7), 40, True)
+        assert viewport._forward_arrow_points() == ((3, -5, 7), (3, -5, 47))
+        viewport.set_forward_arrow((3, -5, 7), 40, False)
+        assert viewport._forward_arrow_points() is None
+
+    def test_90j_forward_indicator_survives_zoom_and_head_on_views(self):
+        viewport = CollisionViewport()
+        viewport.resize(640, 480)
+        viewport.set_forward_arrow((1_000_000, 0, 0), 100, True)
+
+        def render(yaw):
+            viewport._yaw, viewport._pitch = yaw, 0
+            image = QImage(640, 480, QImage.Format.Format_ARGB32)
+            image.fill(Qt.GlobalColor.transparent)
+            painter = QPainter(image)
+            viewport._draw_forward_arrow(painter)
+            painter.end()
+            return image
+
+        toward = render(0)
+        away = render(180)
+        side = render(90)
+        for image in (toward, away, side):
+            self.assertTrue(any(image.pixelColor(x, y).alpha() > 0
+                                for x in range(8, 180) for y in range(392, 472)))
+        self.assertNotEqual(toward, away)
+        self.assertNotEqual(toward, side)
+
+    def test_90m_forward_indicator_is_compact_at_bottom_left(self):
+        viewport = CollisionViewport()
+        viewport.resize(640, 480)
+        viewport.set_forward_arrow((0, 0, 0), 100, True)
+
+        def bounds(yaw):
+            viewport._yaw, viewport._pitch = yaw, 0
+            image = QImage(640, 480, QImage.Format.Format_ARGB32)
+            image.fill(Qt.GlobalColor.transparent)
+            painter = QPainter(image)
+            viewport._draw_forward_arrow(painter)
+            painter.end()
+            pixels = [(x, y) for y in range(480) for x in range(200)
+                      if image.pixelColor(x, y).alpha()]
+            return (min(x for x, _ in pixels), min(y for _, y in pixels),
+                    max(x for x, _ in pixels), max(y for _, y in pixels))
+
+        side = bounds(90)
+        depth = bounds(0)
+        self.assertGreater(side[1], 420)
+        self.assertLess(side[2] - side[0], 155)
+        self.assertLess(side[3] - side[1], 45)
+        self.assertGreaterEqual(depth[3] - depth[1], side[3] - side[1])
+        self.assertLessEqual(abs(depth[3] - side[3]), 1)
+
+    def test_90k_overlapping_fire_point_labels_are_combined(self):
+        viewport = CollisionViewport()
+        viewport._ground_alignment_source_loaded = True
+        viewport._fire_points_visible = True
+        viewport.set_fire_points([(0, -5, 59)] * 11, selected=0)
+        painter = MagicMock()
+        with patch.object(viewport, "_fire_point_screen_positions",
+                          return_value=[QPointF(80, 80)] * 11), \
+             patch.object(viewport, "_draw_fire_marker"):
+            viewport._draw_fire_points_overlay(painter)
+        self.assertEqual([call.args[1] for call in painter.drawText.call_args_list],
+                         ["F1–F11"])
+        self.assertEqual(len(viewport._fire_points), 11)
+
+    def test_90l_nearby_fire_point_labels_do_not_overlap(self):
+        viewport = CollisionViewport()
+        viewport._ground_alignment_source_loaded = True
+        viewport._fire_points_visible = True
+        viewport.set_fire_points([(0, 0, 0)] * 4, selected=0)
+        painter = MagicMock()
+        screens = [QPointF(80, 80), QPointF(82, 80),
+                   QPointF(84, 80), QPointF(108, 80)]
+        with patch.object(viewport, "_fire_point_screen_positions",
+                          return_value=screens), \
+             patch.object(viewport, "_draw_fire_marker"):
+            viewport._draw_fire_points_overlay(painter)
+        labels = painter.drawText.call_args_list
+        self.assertEqual([call.args[1] for call in labels], ["F1–F3", "F4"])
+        metrics = viewport.fontMetrics()
+        rectangles = [QRectF(metrics.boundingRect(call.args[1])).translated(call.args[0])
+                      for call in labels]
+        self.assertFalse(rectangles[0].intersects(rectangles[1]))
 
     def test_91_canonical_save_replaces_all_active_managed_parameters(self):
         text = (

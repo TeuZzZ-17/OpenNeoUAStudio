@@ -2,7 +2,8 @@
 
 from __future__ import annotations
 
-from dataclasses import replace
+from copy import deepcopy
+from dataclasses import fields, replace
 from pathlib import Path
 
 from PySide6.QtCore import (
@@ -21,6 +22,14 @@ from entity_designer.script_model import (
     effective_runtime_radius,
     find_script_blocks,
     import_collision_block,
+    import_fire_area_block,
+    import_fire_points_block,
+    import_gun_points_block,
+    import_cockpit_camera_block,
+    import_briefing_size_block,
+    import_briefing_xyz_block,
+    import_type_icon_block,
+    import_wireframe_block,
     import_overeof_block,
     OPENNEOUA,
     read_script_file,
@@ -231,6 +240,11 @@ class _FxPreviewMixin:
                          keep_view: bool = False, objects=None) -> None:
         """Show one loaded definition in the Destruction FX preview."""
 
+        from entity_designer.fire_area_units import mirrored_single_fire_point
+        self._fire_point_mirrored = mirrored_single_fire_point(
+            fx.top_level_values(text, block.start_line, block.end_line))
+        self._prepare_collision_tracer(
+            fx.top_level_values(text, block.start_line, block.end_line))
         self._fx_catalog = self._build_fx_catalog(text, objects)
         self._sync_wireframe_current(text, block)
         if not keep_view:
@@ -278,51 +292,85 @@ class _FxPreviewMixin:
 
     def _fx_script_values(self, text: str, block: ScriptBlock,
                           reference: VehicleModelReference) -> dict:
-        """The script values the unit preview depends on (see _fx_apply_script_changes)."""
+        """Read the script values shown by the Entity Designer."""
 
-        values = {
-            "scale": (reference.scale_x, reference.scale_y, reference.scale_z),
-            "rotation": (reference.rotation_x, reference.rotation_y, reference.rotation_z),
-            "overeof": None, "legacy": None, "legacy_radius": None}
+        values = dict(zip(
+            ("model_scale_x", "model_scale_y", "model_scale_z",
+             "model_rotation_x", "model_rotation_y", "model_rotation_z"),
+            (reference.scale_x, reference.scale_y, reference.scale_z,
+             reference.rotation_x, reference.rotation_y, reference.rotation_z)))
         try:
-            legacy, _compounds, _warnings = import_collision_block(text, block, OPENNEOUA)
-            values["legacy"] = legacy
-            values["legacy_radius"] = legacy.radius if legacy is not None else None
+            values["legacy"], values["compound"], _warnings = import_collision_block(text, block, OPENNEOUA)
+            values["wireframe"] = import_wireframe_block(text, block)
             if not block.kind.endswith("weapon"):
-                values["overeof"] = import_overeof_block(text, block)
+                for names, result in (
+                    (("overeof_enabled", "overeof"), import_overeof_block(text, block)),
+                    (("fire_points_enabled", "fire_x", "fire_y", "fire_z",
+                      "num_weapons", "num_weapons_max"), import_fire_points_block(text, block)),
+                    (("gun_points_enabled", "gun_points", "unit_gun_default_icon"),
+                     import_gun_points_block(text, block)),
+                    (("cockpit_camera_enabled", "cockpit_camera_offset_x",
+                      "cockpit_camera_offset_y", "cockpit_camera_offset_z"),
+                     import_cockpit_camera_block(text, block)),
+                    (("briefing_size_enabled", "briefing_size"),
+                     import_briefing_size_block(text, block)),
+                    (("briefing_xyz_enabled", "briefing_x", "briefing_y", "briefing_z"),
+                     import_briefing_xyz_block(text, block)),
+                ):
+                    values.update(zip(names, result))
+                values["type_icon"] = import_type_icon_block(text, block)
+            else:
+                values["fire_area"] = import_fire_area_block(text, block)
         except CollisionScriptError:
             pass
         return values
 
     def _fx_apply_script_changes(self, text: str, block: ScriptBlock,
                                  reference: VehicleModelReference) -> None:
-        """Bring the project in line with script edits that change the preview.
-
-        scale/rotation, overeof and radius are copied only when the script
-        value itself changed since the last load, so values the user is
-        trying out in the Designer are not overwritten by a reload.
-        """
+        """Merge script edits without replacing unsaved Designer values."""
 
         current = self._fx_script_values(text, block, reference)
         previous = self._fx_script_snapshot
-        self._fx_script_snapshot = current
+        self._fx_script_snapshot = {**(previous or {}), **current}
         if previous is None:
             return
         project = self.project
+        baseline = self._baseline_project()
         changed = False
-        if current["scale"] != previous["scale"]:
-            project.model_scale_x, project.model_scale_y, project.model_scale_z = current["scale"]
-            changed = True
-        if current["rotation"] != previous["rotation"]:
-            (project.model_rotation_x, project.model_rotation_y,
-             project.model_rotation_z) = current["rotation"]
-            changed = True
-        if current["overeof"] != previous["overeof"] and current["overeof"] is not None:
-            project.overeof_enabled, project.overeof = current["overeof"]
-            changed = True
-        if current["legacy_radius"] != previous["legacy_radius"]:
-            project.legacy = current["legacy"]
-            changed = True
+        changed_names = set()
+        for name, value in current.items():
+            if name not in previous or value == previous[name]:
+                continue
+            changed_names.add(name)
+            old = previous[name]
+            local = getattr(project, name)
+            if name == "fire_area":
+                updates = {field.name: getattr(value, field.name) for field in fields(value)
+                           if getattr(local, field.name) == getattr(old, field.name)}
+                merged = replace(local, **updates)
+            else:
+                merged = deepcopy(value) if local == old else local
+            if merged != local:
+                setattr(project, name, merged)
+                if name == "type_icon":
+                    project.type_icon_cell = None
+                changed = True
+            setattr(baseline, name, deepcopy(value))
+            if name == "type_icon":
+                baseline.type_icon_cell = None
+        self._tab_reset_baseline = baseline.snapshot()
+        if "fire_area" in changed_names:
+            self._fire_area_loaded = current["fire_area"]
+        if changed_names.intersection({"cockpit_camera_enabled", "cockpit_camera_offset_x",
+                                       "cockpit_camera_offset_y", "cockpit_camera_offset_z"}):
+            self._loaded_cockpit_camera_enabled = baseline.cockpit_camera_enabled
+            self._loaded_cockpit_camera_offset = (
+                baseline.cockpit_camera_offset_x, baseline.cockpit_camera_offset_y,
+                baseline.cockpit_camera_offset_z)
+        if changed_names.intersection({"gun_points_enabled", "gun_points", "unit_gun_default_icon"}):
+            self._loaded_gun_points_enabled = baseline.gun_points_enabled
+            self._loaded_gun_points = [point.clone() for point in baseline.gun_points]
+            self._loaded_unit_gun_default_icon = baseline.unit_gun_default_icon
         if changed:
             self._sync_all()
 
@@ -338,12 +386,6 @@ class _FxPreviewMixin:
             self._fx_reloading = False
 
     def _reload_fx_from_file(self) -> None:
-        if self.fx_panel.has_unsaved_text:
-            self._fx_failed_signatures = self._fx_signatures(self._fx_tracked)
-            self.statusBar().showMessage(
-                "Source files changed. Save or revert the effect-code drafts before reloading.", 6000)
-            return
-
         if (self._active_script_path is None or self._active_script_id is None
                 or self._active_model_reference is None):
             self.statusBar().showMessage(
@@ -388,6 +430,11 @@ class _FxPreviewMixin:
                          self._active_model_reference)
         self._active_model_reference = reference
         self._fx_apply_script_changes(text, block, reference)
+        if self.fx_panel.has_unsaved_text:
+            self._fx_failed_signatures = snapshot
+            self.statusBar().showMessage(
+                "Source files changed. Save or revert the effect-code drafts before reloading effects.", 6000)
+            return
         self._load_fx_context(text, block, reference,
                               keep_view=True, objects=objects)
         self._fx_failed_signatures = None
@@ -495,12 +542,12 @@ class _FxPreviewMixin:
             return None
 
     def _fx_update_watcher(self) -> None:
-        """Always watch the active FX definition and its loaded dependencies."""
+        """Watch the active definition and its loaded preview dependencies."""
         watched = self._fx_watcher.files() + self._fx_watcher.directories()
         if watched:
             self._fx_watcher.removePaths(watched)
         self._fx_watch_signatures = {}
-        if not self._is_fx_tab_active() or self._active_script_path is None:
+        if self._active_script_path is None:
             self._fx_reload_timer.stop()
             self._fx_poll_timer.stop()
             return
@@ -528,9 +575,9 @@ class _FxPreviewMixin:
         return {path: self._fx_file_signature(path) for path in paths}
 
     def _fx_poll(self) -> None:
-        """Reload when a tracked file differs from what the tab loaded."""
+        """Reload when a tracked file differs from the loaded version."""
 
-        if (not self._is_fx_tab_active() or self._active_script_path is None
+        if (self._active_script_path is None
                 or self._fx_reload_timer.isActive()):
             return
         current = self._fx_signatures(self._fx_tracked)
@@ -549,7 +596,7 @@ class _FxPreviewMixin:
                 self._fx_watched_file_changed(path)
 
     def _fx_watched_file_changed(self, path: str) -> None:
-        if not self._is_fx_tab_active():
+        if self._active_script_path is None:
             return
         if path in self._fx_asset_paths:
             self._fx_changed_assets.add(path)
@@ -601,8 +648,7 @@ class _FxPreviewMixin:
             self._fx_failed_signatures = None
 
     def _fx_sources_saved(self, paths) -> None:
-        # Our own save is already in the preview. Reloading it would erase
-        # the text editor's undo history and move its cursor unnecessarily.
+        # Record our save before reloading, so the watcher does not repeat it.
         for path in paths:
             key = str(Path(path).resolve())
             signature = self._fx_file_signature(path)
@@ -615,6 +661,7 @@ class _FxPreviewMixin:
 
         if not hasattr(self, "fx_panel"):
             return
+        self._sync_collision_model_preview()
         fx_tab = self._is_fx_tab_active()
         # Visuals & FX and Fire Area share the scene preview (unit, ground, shot).
         active = fx_tab or self._is_fire_area_tab_active()

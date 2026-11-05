@@ -6,6 +6,7 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 import pytest
 from PySide6.QtCore import Qt
+from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication
 
 from entity_designer import destruction_fx as fx
@@ -36,6 +37,60 @@ def _panel(app, tmp_path):
 def _rows(panel):
     return {panel.effects_list.item(i).data(Qt.ItemDataRole.UserRole): panel.effects_list.item(i)
             for i in range(panel.effects_list.count())}
+
+
+@pytest.mark.parametrize(("index", "old", "new"), [
+    (visuals.MODEL_INDEX, "vp_normal = 20", "vp_normal = 21"),
+    (visuals.DECAL_INDEX, "", "ground_decal_id = 2"),
+])
+def test_saving_closes_the_editor_even_when_the_visuals_reload(app, tmp_path, index, old, new):
+    panel, path = _panel(app, tmp_path)
+    panel.show()
+
+    def reload_visuals():
+        text = path.read_text(encoding="utf-8")
+        block = find_script_blocks(text)[0]
+        panel.set_context(fx.CONTEXT_WEAPON,
+                          fx.extract_fx_document(text, block.start_line, block.end_line),
+                          keep_view=True)
+        panel.set_script_sources([(path, block.start_line, block.end_line)])
+
+    panel.visualsSaved.connect(reload_visuals)
+    try:
+        panel.edit_effect_code(index)
+        drawer = panel.code_drawer
+        QTest.qWait(200)
+        text = drawer.code.toPlainText()
+        drawer.code.setPlainText(text.replace(old, new) if old else new)
+        drawer._apply()
+        drawer.code.save_button.click()
+        QTest.qWait(350)
+        assert new in path.read_text(encoding="utf-8")
+        assert not drawer.expanded
+        assert not drawer.isVisible()
+        assert not panel.has_unsaved_text
+    finally:
+        panel.close()
+
+
+def test_failed_save_keeps_the_editor_open_and_the_draft(app, tmp_path, monkeypatch):
+    from PySide6.QtWidgets import QMessageBox
+
+    panel, path = _panel(app, tmp_path)
+    panel.show()
+    try:
+        panel.edit_effect_code(visuals.DECAL_INDEX)
+        drawer = panel.code_drawer
+        drawer.code.setPlainText("ground_decal_id = 2")
+        path.write_text(SCRIPT + "; external change\n", encoding="utf-8")
+        monkeypatch.setattr(QMessageBox, "warning", lambda *args: None)
+        assert not drawer._save()
+        assert drawer.expanded
+        assert drawer.code.toPlainText() == "ground_decal_id = 2"
+        assert panel.has_unsaved_text
+        assert "ground_decal_id" not in path.read_text(encoding="utf-8")
+    finally:
+        panel.close()
 
 
 def test_one_model_row_leads_the_effects_list(app, tmp_path):
