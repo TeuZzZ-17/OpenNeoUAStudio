@@ -288,7 +288,8 @@ class FxPreviewViewportMixin:
         return templates
 
     def _fx_item_faces(self, item, templates) -> list[ViewFace]:
-        owner = self._fx_owner_by_vp.get(int(item.vp)) if item.vp else None
+        owner = (self._fx_owner_by_vp.get(int(item.vp))
+                 if item.vp or item.vp_zero_valid else None)
         template = templates.get(owner) if owner else None
         if not template:
             return []
@@ -511,7 +512,7 @@ class FxPreviewViewportMixin:
             helper = self._fx_external_cache[path]
             if helper is not None:
                 return helper
-        if item.vp and int(item.vp) not in self._fx_owner_by_vp:
+        if (item.vp or item.vp_zero_valid) and int(item.vp) not in self._fx_owner_by_vp:
             return self._fx_set_vp_helper(int(item.vp))
         return None
 
@@ -555,7 +556,8 @@ class FxPreviewViewportMixin:
         by_owner = getattr(helper, "_fx_owner_faces", None)
         if by_owner is None:
             return helper._fx_base_faces
-        source = self._fx_vp_source(int(item.vp)) if item.vp else None
+        source = (self._fx_vp_source(int(item.vp))
+                  if item.vp or item.vp_zero_valid else None)
         return by_owner.get(source[1], ()) if source is not None else ()
 
     def _draw_fx_external(self, painter, target, camera, helper, items, *,
@@ -601,6 +603,19 @@ class FxPreviewViewportMixin:
             else:
                 helper._anim_states[material_id] = anim_state_at(
                     material.anim_frames, material.anim_type, self._fx_time_ms)
+        if (getattr(helper, "_fx_flat", False) and self._gpu_canvas is not None
+                and painter.device() is self._gpu_canvas):
+            painter.save()
+            painter.setOpacity(max(0.0, min(1.0, opacity)))
+            if additive:
+                painter.setCompositionMode(QPainter.CompositionMode.CompositionMode_Plus)
+            self._paint_flat_faces(painter, target, camera, helper._faces,
+                                   shaded=items[0].kind != "tracer", rgb=rgb)
+            painter.restore()
+            return
+        if not getattr(helper, "_fx_flat", False) and self._draw_fx_gpu_layer(
+                painter, target, camera, helper, opacity, rgb, additive):
+            return
         width = max(1, int(round(target.width())))
         height = max(1, int(round(target.height())))
         layer = QImage(width, height, QImage.Format.Format_RGBA8888)
@@ -620,6 +635,8 @@ class FxPreviewViewportMixin:
                     allow_transparent_background=True)
         finally:
             layer_painter.end()
+        if not getattr(helper, "_fx_flat", False):
+            self._last_effective_renderer = helper._last_effective_renderer
         if rgb is not None:
             layer = colorize_image(layer, (*rgb, 255))
         painter.save()
@@ -630,7 +647,7 @@ class FxPreviewViewportMixin:
         painter.restore()
 
     def _paint_flat_faces(self, painter, target, camera, faces, *,
-                          shaded: bool) -> None:
+                          shaded: bool, rgb=None) -> None:
         """Fill untextured faces far to near; ``shaded`` darkens grazing faces.
 
         Both sides are drawn, like the engine does for its beam meshes.
@@ -656,7 +673,9 @@ class FxPreviewViewportMixin:
                 level = int(255 * (0.55 + 0.45 * abs(normal[2]) / length))
             drawn.append((depth, level, points))
         for _depth, level, points in sorted(drawn, key=lambda entry: entry[0]):
-            painter.setBrush(QColor(level, level, level))
+            color = (level, level, level) if rgb is None else tuple(
+                int(level * component / 255) for component in rgb)
+            painter.setBrush(QColor(*color))
             painter.drawPolygon(QPolygonF(
                 [self._project(point, target, camera) for point in points]))
 
@@ -845,7 +864,8 @@ class FxPreviewViewportMixin:
                 # A VP found in the SET but without faces is either drawn by
                 # its particle emitters or is an intentionally empty model
                 # (DUMMY). Only VPs missing from the SET get a marker.
-                if not item.vp or self._fx_vp_source(int(item.vp)) is None:
+                if ((not item.vp and not item.vp_zero_valid)
+                        or self._fx_vp_source(int(item.vp)) is None):
                     markers.append(item)
                 continue
             tinted, rgb, opacity, step = self._fx_item_look(item)
@@ -861,7 +881,8 @@ class FxPreviewViewportMixin:
         animated_unit_owners = set(unit_owners)
         animated_unit_owners.update(
             self._fx_owner_by_vp.get(int(item.vp))
-            for item in self._fx_items if item.kind == "unit" and item.vp)
+            for item in self._fx_items
+            if item.kind == "unit" and (item.vp or item.vp_zero_valid))
         unit_materials = {face.material for face in saved_faces
                           if face.owner in animated_unit_owners}
         for material_id in self._fx_material_ids(templates) - unit_materials:
@@ -879,6 +900,7 @@ class FxPreviewViewportMixin:
             # Empty FX phases still need the ground; the shared renderer
             # returns before drawing guides when no faces remain.
             if not self._faces:
+                self._last_effective_renderer = "not_rendered"
                 painter.fillRect(target, QColor(24, 26, 32))
                 if self._show_grid:
                     self._draw_grid(painter, target, camera)
@@ -908,6 +930,8 @@ class FxPreviewViewportMixin:
         self._draw_fire_area_overlay(painter)
 
     def _draw_fx_layer(self, painter, target, camera, opacity, rgb) -> None:
+        if self._draw_fx_gpu_layer(painter, target, camera, self, opacity, rgb, False):
+            return
         width = max(1, int(round(target.width())))
         height = max(1, int(round(target.height())))
         layer = QImage(width, height, QImage.Format.Format_RGBA8888)
@@ -925,6 +949,21 @@ class FxPreviewViewportMixin:
         painter.setOpacity(max(0.0, min(1.0, opacity)))
         painter.drawImage(target, layer)
         painter.restore()
+
+    def _draw_fx_gpu_layer(self, painter, target, camera, renderer, opacity, rgb, additive):
+        """Draw an FX layer on the active GPU canvas, or use the software path."""
+        canvas = getattr(self, "_gpu_canvas", None)
+        if canvas is None or painter.device() is not canvas:
+            return False
+        pieces = []
+        renderer._render_scene(painter, target, None, clean=True, camera=camera,
+                               allow_transparent_background=True, geometry_capture=pieces)
+        if not renderer._draw_gpu_indexed(
+                painter, target, pieces, camera, canvas=canvas, renderer_owner=self,
+                tint=rgb, opacity=opacity, additive=additive):
+            return False
+        renderer._last_effective_renderer = "retail_indexed_gpu"
+        return True
 
     def _fx_project(self, point, target, camera) -> QPointF | None:
         camera_point = self._camera_vertex(point, camera)

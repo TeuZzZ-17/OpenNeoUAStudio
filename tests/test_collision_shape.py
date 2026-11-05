@@ -395,6 +395,38 @@ class CollisionShapeTests(unittest.TestCase):
 
         self.assertEqual(calls, [])
 
+    def test_coplanar_flat_components_are_baked_alone_next_to_a_3d_body(self):
+        from tests.test_collision_mesh_parts import box_with_tower
+
+        flat = (
+            ((5.0, 0.0, 0.0), (6.0, 0.0, 0.0), (6.0, 1.0, 0.0)),
+            ((5.0, 0.0, 0.0), (6.0, 1.0, 0.0), (5.0, 1.0, 0.0)),
+        )
+        other_flat = tuple(
+            tuple((x + 3.0, y, z) for x, y, z in triangle) for triangle in flat)
+        box, _tower = box_with_tower()
+        meshes = []
+        slab = ((0, 0, 0), (1, 0, 0), (1, 1, 0), (0, 1, 0),
+                (0, 0, 1), (1, 0, 1), (1, 1, 1), (0, 1, 1))
+        faces = ((0, 1, 2), (0, 2, 3), (4, 6, 5), (4, 7, 6), (0, 4, 5),
+                 (0, 5, 1), (2, 6, 7), (2, 7, 3), (0, 3, 7), (0, 7, 4),
+                 (1, 5, 6), (1, 6, 2))
+        fake_coacd = types.SimpleNamespace(
+            Mesh=lambda vertices, _faces: meshes.append(vertices) or object(),
+            run_coacd=lambda _mesh, **_settings: [(slab, faces)],
+            set_log_level=lambda _level: None,
+        )
+
+        with patch.dict(sys.modules, {"coacd": fake_coacd}):
+            result = generate_collision_shape(
+                [("root#component:body", box),
+                 ("root#component:wing", flat),
+                 ("root#component:fin", other_flat)],
+                source="Plane", quality="low")
+
+        self.assertEqual(len(meshes), 3)
+        self.assertEqual(len(result.shape.hulls), 3)
+
     def test_component_with_several_convex_parts_lists_each_part(self):
         window = CollisionEditorWindow()
         self.addCleanup(lambda: (window._set_modified(False), window.close()))
@@ -971,7 +1003,7 @@ class CollisionShapeTests(unittest.TestCase):
                 patch.object(editor_shape_module, "QProcess") as process_type:
             window.generate_collision_shape()
 
-        self.assertIn("Legacy and OpenNeoUA", confirm.call_args.args[2])
+        self.assertIn("legacy radius is kept", confirm.call_args.args[2])
         self.assertIn("after generation succeeds", confirm.call_args.args[2])
         process_type.assert_not_called()
         self.assertEqual(window.project.snapshot(), before)
@@ -1163,7 +1195,7 @@ class CollisionShapeTests(unittest.TestCase):
         self.assertIn("project data changed", window.collision_shape_status.text())
         warning.assert_not_called()
 
-    def test_success_removes_both_sphere_types_as_one_undo_and_redo(self):
+    def test_success_preserves_radius_and_removes_compound_with_undo_and_redo(self):
         window = CollisionEditorWindow()
         self.addCleanup(lambda: (window._set_modified(False), window.close()))
         old_shape = CollisionShape(
@@ -1186,7 +1218,7 @@ class CollisionShapeTests(unittest.TestCase):
         warning.assert_not_called()
 
         self.assertEqual(window.project.collision_shape, new_shape)
-        self.assertIsNone(window.project.legacy)
+        self.assertEqual(window.project.legacy.radius, 12)
         self.assertEqual(window.project.compound, [])
         self.assertFalse(window.project.sphere_isolation_active)
         self.assertEqual(window._selected, -1)
@@ -1205,7 +1237,8 @@ class CollisionShapeTests(unittest.TestCase):
         self.assertEqual(window._selected_sphere_indices(), {0, 1, 2})
         window.redo()
         self.assertEqual(window.project.collision_shape, new_shape)
-        self.assertEqual(window.project.spheres(), [])
+        self.assertEqual(window.project.legacy.radius, 12)
+        self.assertEqual(window.project.compound, [])
         self.assertFalse(window.project.sphere_isolation_active)
 
     def test_export_suggests_sanitized_unit_filename_and_model_fallback(self):
@@ -1732,7 +1765,7 @@ class CollisionShapeTests(unittest.TestCase):
         window.redo()
         self.assertTrue(window.project.collision_shape.hulls[0].enabled)
 
-    def test_shape_render_keeps_cyan_and_draws_disabled_parts_only_when_picked(self):
+    def test_shape_render_keeps_cyan_and_never_draws_disabled_parts(self):
         viewport = viewport_module.CollisionViewport()
         self.addCleanup(viewport.close)
         hull = _tetrahedron()
@@ -1762,9 +1795,8 @@ class CollisionShapeTests(unittest.TestCase):
         painter.lines.clear()
         viewport.set_shape_selected_indices({1})
         viewport._draw_collision_shape_overlay(painter)
-        # A picked switched-off part is dashed grey, so the pick stays visible.
-        self.assertEqual(painter.lines, [((70, 230, 225), 1.8)] * 6
-                         + [((150, 150, 160), 1.8)] * 6)
+        # A switched-off part is invisible, even while picked.
+        self.assertEqual(painter.lines, [((70, 230, 225), 1.8)] * 6)
         painter.lines.clear()
         viewport.set_shape_selected_indices(set())
         viewport._draw_collision_shape_overlay(painter)

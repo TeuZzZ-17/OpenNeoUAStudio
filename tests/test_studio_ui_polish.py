@@ -753,7 +753,41 @@ def test_fx_auto_reload_handles_atomic_script_save_and_texture_update(app, tmp_p
         assert 'Data/Textures/impact.png' not in window.viewport._fx_decal_cache
         assert str(texture.resolve()) in window._fx_watcher.files()
         window.properties_tabs.setCurrentIndex(window.ground_tab_index)
-        assert not window._fx_watcher.files()
+        assert str(script.resolve()) in window._fx_watcher.files()
+    finally:
+        window._modified = False
+        window.close()
+
+
+def test_script_reload_merges_vehicle_fields_without_replacing_local_edits(app, tmp_path):
+    from PySide6.QtTest import QTest
+    from entity_designer.script_model import CollisionProject, VehicleModelReference, find_script_blocks
+
+    text = ("new_vehicle 5\n    name = Test\n    vp_normal = 10\n"
+            "    fire_x = 10\n    fire_y = 20\n"
+            "    cockpit_camera_offset_xyz = 1|2|3\nend\n")
+    path = tmp_path / "Vehicles.cfg"
+    path.write_text(text, encoding="utf-8")
+    window = CollisionEditorWindow()
+    try:
+        window.project = CollisionProject(
+            source_model="m", fire_points_enabled=True, fire_x=10, fire_y=20,
+            cockpit_camera_enabled=True, cockpit_camera_offset_x=1,
+            cockpit_camera_offset_y=2, cockpit_camera_offset_z=3)
+        window._capture_tab_reset_baseline()
+        block = find_script_blocks(text)[0]
+        reference = VehicleModelReference(block=block, vp_normal=10)
+        window._active_script_path, window._active_script_id = path, 5
+        window._active_script_kind, window._active_model_reference = "new_vehicle", reference
+        window._load_fx_context(text, block, reference)
+        window.project.fire_x = 15
+        updated = text.replace("fire_x = 10", "fire_x = 30").replace("fire_y = 20", "fire_y = 40")
+        updated = updated.replace("offset_xyz = 1|2|3", "offset_xyz = 1|5|3")
+        path.write_text(updated, encoding="utf-8")
+        QTest.qWait(1200)
+        assert (window.project.fire_x, window.project.fire_y) == (15, 40)
+        assert window.project.cockpit_camera_offset_y == 5
+        assert window._loaded_cockpit_camera_offset == (1, 5, 3)
     finally:
         window._modified = False
         window.close()

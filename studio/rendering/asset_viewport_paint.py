@@ -92,7 +92,8 @@ class _PaintingMixin:
         if effective == 'retail_indexed_reconstructed':
             return f'Software indexed rasterizer; presentation: {super().renderer_name}'
         if effective == 'retail_indexed_with_particle_overrides':
-            return 'Indexed renderer with native particle textures'
+            prefix = 'OpenGL' if self._last_indexed_stats.get('backend', '').startswith('OpenGL') else 'Software'
+            return f'{prefix} indexed renderer with native particle textures'
         if effective == 'retail_indexed_error':
             return f'Software renderer error: {self._indexed_runtime_error}'
         return super().renderer_name
@@ -682,14 +683,17 @@ class _PaintingMixin:
             ))
         return indexed_pieces
 
-    def _draw_gpu_indexed(self, painter, target, ordered, camera, *, backdrop=None):
-        canvas = getattr(self, '_gpu_canvas', None)
+    def _draw_gpu_indexed(self, painter, target, ordered, camera, *, backdrop=None,
+                          canvas=None, renderer_owner=None, tint=None, opacity=1.0,
+                          additive=False):
+        owner = renderer_owner or self
+        canvas = canvas or getattr(owner, '_gpu_canvas', None)
         if (canvas is None or painter.device() is not canvas
                 or self._retail_distance_fade_enabled
-                or getattr(self, '_gpu_indexed_unavailable', False)):
+                or getattr(owner, '_gpu_indexed_unavailable', False)):
             return False
         # Cockpit subrect rendering keeps its existing clip and exact raster path.
-        if target != QRectF(self.rect()):
+        if target != QRectF(canvas.rect()):
             return False
         pieces = self._indexed_pieces(target, ordered, camera)
         from studio.rendering.indexed import StudioGpuRenderer
@@ -698,8 +702,8 @@ class _PaintingMixin:
         unpack_alignment = int(gl.glGetIntegerv(gl.GL_UNPACK_ALIGNMENT))
         gl.glPixelStorei(gl.GL_UNPACK_ALIGNMENT, 1)
         try:
-            if getattr(self, '_gpu_indexed', None) is None:
-                self._gpu_indexed = StudioGpuRenderer()
+            if getattr(owner, '_gpu_indexed', None) is None:
+                owner._gpu_indexed = StudioGpuRenderer()
             ratio = canvas.devicePixelRatioF()
             if ratio != 1:
                 from dataclasses import replace
@@ -708,15 +712,16 @@ class _PaintingMixin:
                 if backdrop is not None:
                     backdrop = backdrop.scaled(round(target.width()*ratio),
                                                round(target.height()*ratio))
-            self._last_indexed_stats = self._gpu_indexed.render_pieces(
+            self._last_indexed_stats = owner._gpu_indexed.render_pieces(
                 pieces, self._indexed_adapter.tables,
                 round(target.width()*ratio), round(target.height()*ratio),
                 canvas.defaultFramebufferObject(),
-                background_indices=self._indexed_background_bytes(backdrop))
+                background_indices=self._indexed_background_bytes(backdrop),
+                tint=tint, opacity=opacity, additive=additive)
         except Exception as exc:
-            self._cleanup_gpu()
-            self._gpu_indexed_unavailable = True
-            self.statusMessage.emit(f"GPU textured rendering unavailable: {exc}. Using software rendering.")
+            owner._cleanup_gpu()
+            owner._gpu_indexed_unavailable = True
+            owner.statusMessage.emit(f"GPU textured rendering unavailable: {exc}. Using software rendering.")
             return False
         finally:
             gl.glPixelStorei(gl.GL_UNPACK_ALIGNMENT, unpack_alignment)
