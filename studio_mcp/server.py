@@ -311,12 +311,13 @@ def studio_new_model(out_dir: str, base_name: str, skeleton_stem: str, donor: st
 @mcp.tool()
 def studio_swatches(faction: str = "") -> list:
     """Named faction texture patches for paint / loft / create_primitive (swatch='ghorkov.hull'): texture, rect
-    and what the original units use them for, plus a picture of every patch. faction filters
+    and what the original units use them for, plus a picture of every patch (cut from your own Set1 on request,
+    not shipped with Studio). faction filters
     (resistance, ghorkov, taerkasten, mykonian, sulgogar, blacksect)."""
     info = edit.edit_build.describe_swatches(faction)
     result = [_json(info)]
-    board = Path(info["board"])
-    if board.is_file():
+    board = Path(info["board"]) if info["board"] else None
+    if board and board.is_file():
         result.append(Image(data=board.read_bytes(), format="png"))
     return result
 
