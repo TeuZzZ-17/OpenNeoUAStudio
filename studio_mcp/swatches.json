@@ -1,5 +1,5 @@
 {
- "_about": "Named texture patches of the Set1 vehicle atlases, read from where the original units map their faces (2026-10-28). rect = [u0, v0, u1, v1] in texture pixels (0..255). swatches.png shows every patch. Yellow/black key areas of the atlases are left out on purpose.",
+ "_about": "Named texture patches of the Set1 vehicle atlases, read from where the original units map their faces (2026-10-28). rect = [u0, v0, u1, v1] in texture pixels (0..255). studio_swatches draws every patch from the user's own Set1 (no picture is shipped). Yellow/black key areas of the atlases are left out on purpose.",
 
  "_donors": {"BAGGER.ILBM": ["set1:71", 13], "MTL.ILBM": ["set1:201", 9], "HUBI.ILBM": ["set1:12", 3],
              "FAERROBO.ILBM": ["set1:163", 4], "AIR1TXT.ILBM": ["set1:116", 7], "FBAGGER.ILBM": ["set1:212", 0],

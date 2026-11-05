@@ -16,7 +16,7 @@ Ground-decal effects need an explicit `effect_mode` (`ground_pulse` or `rise`) a
 | Tool | What it does |
 |---|---|
 | `studio_help` | Built-in manual: start, design, conventions, selectors, uv, recipes, wireframe, ops |
-| `studio_swatches` | Named faction texture patches (`ghorkov.hull`, `taerkasten.plate`, ...) with a picture of each (`swatches.json`, `swatches.png`) |
+| `studio_swatches` | Named faction texture patches (`ghorkov.hull`, `taerkasten.plate`, ...) with a picture of each (`swatches.json`; the picture is cut from your own Set1 into the temp folder) |
 | `studio_status` / `studio_list_vp` / `studio_list_models` | Data folder and sets, VP numbers of a set, loose models under `Data/Models` |
 | `studio_describe_model` / `studio_materials` | Objects, counts, size; material blocks with texture, shading, UV box and a sample polygon to copy |
 | `studio_get_geometry` | Points and polygons, optionally filtered by selectors and with UVs |
@@ -121,7 +121,7 @@ Requires `mcp` (2.x or 1.x), `PySide6`, `numpy`, `Pillow`, `PyOpenGL`.
 |---|---|
 | `server.py` | Tool registration; one tool per entry of `edit.OPS`, generated from the operation's signature and docstring |
 | `edit.py`, `edit_materials.py` | The modeling operations and the batch runner |
-| `edit_build.py`, `swatches.json`, `swatches.png` | New-design operations (loft, paint, auto_shade) and the faction swatch catalog |
+| `edit_build.py`, `swatches.json` | New-design operations (loft, paint, auto_shade) and the faction swatch catalog |
 | `loose.py` | A loose model opened for editing and its verified atomic commit |
 | `select.py`, `uvs.py`, `shapes.py`, `meshmath.py` | Selectors, UV generation, primitives, vector helpers |
 | `analysis.py` | Materials, effects, textures, quality report, comparison |
