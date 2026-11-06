@@ -3,7 +3,7 @@ from entity_designer.destruction_fx import decal_profiles_from_text
 def test_decal_profile_uses_authored_world_unit_size_and_no_explosion_reduction():
     profile = decal_profiles_from_text(
         "new_decal 1\n"
-        "    texture = Interface/GroundDecals/impact.png\n"
+        "    texture = Graphics/GroundDecals/impact.png\n"
         "    duration = permanent\n"
         "end\n"
     )[1]

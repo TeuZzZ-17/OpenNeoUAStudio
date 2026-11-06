@@ -1541,6 +1541,8 @@ class AssemblyWindow(
             self._sync_uv_add_vertex_button)
         self.uv_editor.handleContextMenuRequested.connect(
             self._show_uv_handle_context_menu)
+        self.uv_editor.backgroundContextMenuRequested.connect(
+            self._show_uv_background_context_menu)
         uv_layout.addWidget(self.uv_editor, 1)
         self.uv_phase_combo = QComboBox()
         self.uv_phase_combo.setToolTip(
@@ -2223,6 +2225,14 @@ class AssemblyWindow(
             return
         self._set_family(family)
 
+    def _game_folder(self) -> Path:
+        """Where file pickers start: the game installation, once Studio knows it."""
+
+        from map_editor import bootstrap
+
+        install = bootstrap.installation()
+        return install.root if install is not None else self._last_directory
+
     def open_family_dialog(self) -> None:
         """Import a complete model: BASE plus its skeleton, textures and animations."""
 
@@ -2238,7 +2248,7 @@ class AssemblyWindow(
             self,
             initial_base=initial_base,
             initial_archive=self._setbas,
-            initial_directory=self._last_directory,
+            initial_directory=self._game_folder(),
             extra_roots=self._extra_roots,
         )
         if dialog.exec() != QDialog.DialogCode.Accepted:

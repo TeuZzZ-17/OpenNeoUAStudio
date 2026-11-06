@@ -316,7 +316,7 @@ class IconSelectorControls(QWidget):
         self.open_button = QPushButton("Open")
         self.open_button.setToolTip("Open the font page with its default program.")
         self.open_button.clicked.connect(self._open_page)
-        self.open_with_button = QPushButton("Open With...")
+        self.open_with_button = QPushButton("Open With")
         self.open_with_button.setToolTip("Choose the program that opens the font page.")
         self.open_with_button.clicked.connect(self._open_page_with)
         self.folder_button = QPushButton("Show in Folder")

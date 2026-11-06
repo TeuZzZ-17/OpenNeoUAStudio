@@ -328,6 +328,19 @@ class CoreTests(unittest.TestCase):
         with self.assertRaises(core.McpToolError):
             self.run_ops(base, {"op": "add_polygons", "polygons": [[0, 1, 2]]})   # which material?
 
+    def test_animate_polygons_makes_a_blinking_face(self):
+        base = self.export()
+        before = len(LooseModel.open(base, writable=False).polygons)
+        self.run_ops(base, {"op": "animate_polygons", "select": [0], "shifts": [[0, 4]],
+                            "frames": [[1, 500], [0, 250]], "name": "BLNK"})
+        loaded = LooseModel.open(base, writable=False)
+        self.assertEqual(len(loaded.polygons), before)
+        self.assertTrue(core.validate(core.resolve_source(base))["ok"])
+        self.assertTrue(os.path.exists(os.path.join(os.path.dirname(base), "BLNKA.ANM")))
+        with self.assertRaises(core.McpToolError):   # a shift that leaves the 256 x 256 texture
+            self.run_ops(base, {"op": "animate_polygons", "select": [1], "shifts": [[300, 0]],
+                                "frames": [[1, 500]]})
+
     def test_clear_then_build_new_model_and_genesis(self):
         base = self.export()
         self.run_ops(base, {"op": "clear"},
@@ -560,3 +573,12 @@ class ServerRoundTripTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+def test_a_quarter_turn_keeps_the_uvs_inside_a_long_patch():
+    from studio_mcp import uvs
+
+    group = [(90, 2), (174, 2), (174, 34), (90, 34)]
+    turned = uvs.adjust(group, rotate_90=1, keep_box=True)
+    assert uvs.uv_box(turned) == (90, 2, 174, 34)
+    assert turned != group

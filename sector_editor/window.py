@@ -133,7 +133,7 @@ class NewSetDialog(QDialog):
                     edit.setText(str(found))
             edit.setPlaceholderText("New folder named Set<number>" if name == "Destination" else f"Select {name} folder")
             row.addWidget(edit, 1)
-            browse = QPushButton("Browse…")
+            browse = QPushButton("Browse")
             browse.clicked.connect(lambda checked=False, field=edit, dest=name == "Destination": self._browse(field, dest))
             row.addWidget(browse)
             form.addRow(name, row)
@@ -176,7 +176,7 @@ class ExportSetDialog(QDialog):
         row = QHBoxLayout()
         self.path = QLineEdit()
         row.addWidget(self.path, 1)
-        browse = QPushButton("Browse…")
+        browse = QPushButton("Browse")
         browse.clicked.connect(self._browse)
         row.addWidget(browse)
         form.addRow("Destination", row)
@@ -274,18 +274,18 @@ class SectorEditorWindow(QMainWindow):
         self.actions = {}
         file = self.menuBar().addMenu("File")
         self._add_actions(file, (
-            ("new", "New Set…", QKeySequence.StandardKey.New, self.new_set),
-            ("open", "Open Set…", QKeySequence.StandardKey.Open, self.choose_set),
+            ("new", "New Set", QKeySequence.StandardKey.New, self.new_set),
+            ("open", "Open Set", QKeySequence.StandardKey.Open, self.choose_set),
             ("save", "Overwrite Set", QKeySequence.StandardKey.Save, self.save),
-            ("export", "Export Set…", QKeySequence.StandardKey.SaveAs, self.export_set),
+            ("export", "Export Set", QKeySequence.StandardKey.SaveAs, self.export_set),
         ))
         file.addSeparator()
-        self._add_actions(file, (("textures", "Import custom textures…", None, self.import_custom_textures),))
+        self._add_actions(file, (("textures", "Import custom textures", None, self.import_custom_textures),))
         file.addSeparator()
         self._add_actions(file, (
-            ("image", "Export current sector image…", None, self.export_preview),
-            ("images", "Export all sector images (ZIP)…", None, self.export_all_images),
-            ("sheet", "Export sector sheet…", None, self.export_sheet),
+            ("image", "Export current sector image", None, self.export_preview),
+            ("images", "Export all sector images (ZIP)", None, self.export_all_images),
+            ("sheet", "Export sector sheet", None, self.export_sheet),
         ))
         install_standard_file_menu_tail(file, self)
 
@@ -293,7 +293,7 @@ class SectorEditorWindow(QMainWindow):
         self._add_actions(edit, (
             ("undo", "< Undo", QKeySequence.StandardKey.Undo, self.undo),
             ("redo", "Redo >", QKeySequence.StandardKey.Redo, self.redo),
-            ("reset", "Reset Set…", None, self.reset_set),
+            ("reset", "Reset Set", None, self.reset_set),
         ))
         edit.addSeparator()
         self._add_actions(edit, (
@@ -301,7 +301,7 @@ class SectorEditorWindow(QMainWindow):
             ("cut", "Cut cell", QKeySequence.StandardKey.Cut, self.cut_cells),
             ("paste", "Paste cell", QKeySequence.StandardKey.Paste, self.paste_cells),
             ("clear", "Clear cell", "Delete", self.clear_cells),
-            ("rotate", "Rotate cell…", "R", self.start_rotation),
+            ("rotate", "Rotate cell", "R", self.start_rotation),
             ("select_all", "Select all cells", QKeySequence.StandardKey.SelectAll, self._select_all),
         ))
         self.state_menu = edit.addMenu("Change cell state")
@@ -319,12 +319,12 @@ class SectorEditorWindow(QMainWindow):
             ("copy_sector", "Copy sector", None, lambda: self.copy_sectors()),
             ("cut_sector", "Cut sector", None, lambda: self.copy_sectors(cut=True)),
             ("clear_sector", "Clear sector", None, self.clear_sectors),
-            ("wipe_sector", "Wipe sector…", None, self.wipe_sectors),
+            ("wipe_sector", "Wipe sector", None, self.wipe_sectors),
         ))
         sector.addSeparator()
         self._add_actions(sector, (
-            ("import_sector", "Import sector definition…", None, self.import_definitions),
-            ("export_sector", "Export sector definition…", None, self.export_definition),
+            ("import_sector", "Import sector definition", None, self.import_definitions),
+            ("export_sector", "Export sector definition", None, self.export_definition),
         ))
 
         view = self.menuBar().addMenu("View")
@@ -338,7 +338,7 @@ class SectorEditorWindow(QMainWindow):
         self.grid_action.setCheckable(True)
         self.grid_action.setChecked(True)
         self.grid_action.toggled.connect(lambda checked: self.view.update())
-        self.validation_action = view.addAction("Validation Report…", self.show_validation)
+        self.validation_action = view.addAction("Validation Report", self.show_validation)
         self.validation_status = QLabel()
         self.validation_status.linkActivated.connect(self.show_validation)
         self.statusBar().addPermanentWidget(self.validation_status)
@@ -1814,7 +1814,7 @@ class SectorEditorWindow(QMainWindow):
         count = len(problems) + len(warnings)
         self.validation_status.setText(f'<a href="report">Set issues: {count}</a>')
         self.validation_status.setVisible(bool(count))
-        self.validation_action.setText(f"Validation Report ({count})…" if count else "Validation Report…")
+        self.validation_action.setText(f"Validation Report ({count})" if count else "Validation Report")
         self.issues.setPlainText("\n".join([*(f"ERROR: {p}" for p in problems), *warnings]) or
                                 "Native table references and model resources are valid.\n\nSector IDs: 0–255. Slots 248–255 are used for map borders.\n\nOverwrite Set writes SET.SDF and the native LEGO visual overrides when needed. Export Set includes the complete set resources.\n\nRotate moves the selected cells; each model keeps its own orientation.")
 

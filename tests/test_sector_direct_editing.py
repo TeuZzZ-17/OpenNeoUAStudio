@@ -175,7 +175,7 @@ def test_validation_is_a_report_not_a_persistent_tab_and_zip_label_is_clear(real
     assert window.issues.isHidden() and window.issues.toPlainText()
     assert window.validation_action.text().startswith("Validation Report")
     assert window.actions["save"].text() == "Overwrite Set"
-    assert window.actions["export"].text() == "Export Set" + chr(0x2026)
+    assert window.actions["export"].text() == "Export Set"
     assert window.actions["undo"].text() == "< Undo" and window.actions["redo"].text() == "Redo >"
     assert "Bottom" not in [window.view_preset.itemText(i) for i in range(window.view_preset.count())]
     assert str(window.document.folder) in window.windowTitle()

@@ -54,12 +54,39 @@ def test_never_overwrites_a_choice_the_user_made(fake_windows):
     assert fake_windows[r"C:\Studio\OpenNeoUAStudio.exe"] == "GpuPreference=1;"
 
 
-def test_does_not_decide_for_python_when_run_from_sources(monkeypatch):
-    monkeypatch.setattr(sys, "platform", "win32", raising=False)
+def test_python_from_the_sources_gets_the_card_too(fake_windows, monkeypatch):
     monkeypatch.setattr(pref, "running_as_program", lambda: False)
-    monkeypatch.setattr(pref, "write_preference",
-                        lambda path, value=pref.HIGH_PERFORMANCE: pytest.fail("must not write"))
-    assert pref.prefer_graphics_card(on_integrated=True) == pref.NOT_FROZEN
+    monkeypatch.setattr(pref, "program_path", lambda: r"C:\Python\python.exe")
+    assert pref.prefer_graphics_card(on_integrated=True) == pref.APPLIED
+    assert fake_windows[r"C:\Python\python.exe"] == pref.HIGH_PERFORMANCE
+
+
+def test_nothing_is_asked_without_a_card(fake_windows):
+    assert pref.prefer_graphics_card(on_integrated=True, has_card=False) == pref.NO_CARD
+    assert fake_windows == {}
+
+
+def test_windows_decides_is_not_a_choice_and_other_options_survive():
+    assert pref.chosen_preference("GpuPreference=0;") == 0
+    assert pref.chosen_preference(None) == 0
+    assert pref.chosen_preference("SwapEffectUpgradeEnable=1;GpuPreference=2;") == 2
+    assert pref.with_high_performance("VRROptimizeEnable=0;GpuPreference=0;") == (
+        "VRROptimizeEnable=0;GpuPreference=2;")
+    assert pref.with_high_performance("VRROptimizeEnable=0;") == (
+        "VRROptimizeEnable=0;GpuPreference=2;")
+
+
+def test_restart_happens_only_once(monkeypatch):
+    started = []
+    monkeypatch.setattr(pref.subprocess, "Popen", lambda command, **kw: started.append((command, kw["env"])))
+    monkeypatch.delenv(pref.RESTART_GUARD, raising=False)
+    assert pref.restart_on_card()
+    command, env = started[0]
+    assert env[pref.RESTART_GUARD] == "1"
+    assert env["PYINSTALLER_RESET_ENVIRONMENT"] == "1"
+    monkeypatch.setenv(pref.RESTART_GUARD, "1")
+    assert not pref.restart_on_card()
+    assert len(started) == 1
 
 
 def test_other_systems_are_left_alone(monkeypatch):
@@ -70,6 +97,7 @@ def test_other_systems_are_left_alone(monkeypatch):
 
 
 def test_every_outcome_explains_itself():
-    for result in (pref.APPLIED, pref.NOT_FROZEN, pref.UNSUPPORTED):
+    for result in (pref.APPLIED, pref.UNSUPPORTED):
         assert pref.message(result, "Intel(R) Graphics")
     assert pref.message(pref.ALREADY_SET) == ""
+    assert pref.message(pref.NO_CARD) == ""

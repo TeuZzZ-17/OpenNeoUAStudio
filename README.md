@@ -67,27 +67,42 @@ Music and sounds use Qt Multimedia, which needs GStreamer or FFmpeg on the syste
 
 ### Choosing the game installation
 
-On first start, select either the game folder or its `Data` folder. The Studio then fills in every
-resource folder (sets, scripts, levels, briefing maps, music, ...) and shows how many items it found.
-Every folder can still be changed by hand.
+On first start Studio only asks where the game is installed. Any folder works: the game
+folder, its `Data` folder, or the folder around it. Studio then finds the data folder by itself,
+recognises the game and catalogues every resource, whatever the letter case and the old or new
+file formats. Each resource shows what was really found. A folder that is missing can be chosen
+by hand; a resource the game does not have at all is locked.
 
-The following layouts are recognized:
-
-- **Vanilla Urban Assault**: `Levels` (with `Mbpix`) and `Music` sit next to the `Data` folder,
-  and the sets are loose `SetN` folders inside `Data`.
+- **Urban Assault (original)**: `Levels` (with `Mbpix`) and `Music` sit next to the `Data` folder,
+  and the sets are loose `SetN` folders inside `Data`. `Models`, `Graphics` and `Collisions` exist
+  only in OpenNeoUA, so they are locked, not reported as missing.
 - **OpenNeoUA**: everything sits inside `Data`, as the engine reads `Data` first and the game folder second.
-- **Metropolis Dawn**: select `dataxp` to use the expansion's scripts and sets together with the
-  sibling `levelsxp` folder. If both `Data` and `dataxp` are installed, selecting the game folder
-  defaults to `Data`; select `dataxp` explicitly for the expansion.
+- **Metropolis Dawn**: the game sits in `dataxp` and `levelsxp`, also when you select the folder
+  around `Game`. Installed beside the base game it borrows skies and music from `Data`. If both
+  `Data` and `dataxp` are there, selecting the game folder defaults to `Data`; select `dataxp` for
+  the expansion.
 
 ## Graphics card
 
-On a computer with two graphics chips, a program is given the slow built-in one unless it asks for the other. The engine asks through its own executable; Studio runs under Python and cannot, so on Windows it asks the system instead: the first time Studio sees it is drawing with a built-in chip, it stores the same "High performance" choice the Settings page writes, for its own program only. Close Studio and open it again and the graphics card is used.
+On a computer with two graphics chips, a program is given the slow built-in one unless it asks for the other. The engine asks through its own executable; Studio runs under Python and cannot, so on Windows it asks the system instead, with the same "High performance" choice the Settings page writes.
 
-- It is written in the current user's own settings, needs no administrator, and is never written over a choice already made there. Change it back any time in Settings, System, Display, Graphics.
-- Running from the sources, nothing is decided for you, because that would choose for every Python program on the computer. Add python.exe there yourself if you want it.
+- It is written in the current user's own settings, needs no administrator, and can be changed back any time in Settings, System, Display, Graphics.
 - On Linux Studio asks the NVIDIA library for the card by itself, before Qt starts, in the same way the `prime-run` command does, and drops the request if no drawing context can be made with it. With an AMD or Intel card, start Studio with `DRI_PRIME=1`.
 - The chip in use is written on the console at startup and shown in the renderer badge in the status bar.
+
+Every way of starting Studio gets the card by itself: the Windows preference
+belongs to one exact program path, so the built program, a copy in `dist` and
+`python.exe` from the sources each get their own. When Studio finds itself on the
+built-in chip of a computer with a card, it asks Windows for the card and restarts
+once. A "Power saving" choice in Windows is respected.
+
+Click the renderer badge to choose GPU or software rendering without closing the
+current document. The badge shows the name reported by the active OpenGL
+context; a software OpenGL implementation is identified as such. When multiple
+devices are detected, the menu also offers Linux PCI devices, or the Windows
+power-saving/high-performance preference for the packaged application. A device
+preference takes effect after restarting Studio; availability and the resulting
+device depend on the OS and driver. Check the badge after restarting.
 
 ## License
 

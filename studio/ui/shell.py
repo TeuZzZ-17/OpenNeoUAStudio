@@ -29,11 +29,18 @@ from PySide6.QtWidgets import (
 
 from map_editor import bootstrap
 from studio.ui.cursor_themes import studio_cursor
+from studio.ui.widgets import STATUS_COLORS
 from map_editor.core.game_installation import (
+    EDITION_TITLES,
+    FOLDER_TITLES,
     FOLDERS,
     forget_remembered,
     GameInstallation,
     load_remembered,
+    MISSING,
+    NOT_IN_EDITION,
+    READY,
+    REQUIRED_MISSING,
     save_remembered,
 )
 
@@ -94,6 +101,9 @@ QDialog#resourcesDialog QDialogButtonBox QPushButton:default {
 """
 
 
+RESOURCE_STATE_COLORS = {READY: "found", MISSING: "ambiguous", REQUIRED_MISSING: "missing"}
+
+
 class ResourcesPanel(QWidget):
     changed = Signal()
     reset_done = Signal()
@@ -112,17 +122,23 @@ class ResourcesPanel(QWidget):
         grid.setVerticalSpacing(5)
         grid.setColumnStretch(1, 1)
         layout.addLayout(grid)
-        self.root = QLineEdit(str(current.data) if current else "")
-        self.root.setPlaceholderText("Game Data folder")
+        self.root = QLineEdit(str(current.root) if current else "")
+        self.root.setPlaceholderText("Folder where the game is installed")
         self._add_row(grid, 0, "Game installation", self.root, self._suggest)
         self.edits = {}
+        self.states = {}
+        self.browse_buttons = {}
         for row, name in enumerate(FOLDERS, start=1):
-            edit = QLineEdit(str(current.folder(name)) if current else "")
+            edit = QLineEdit(self._folder_text(current, name))
             self.edits[name] = edit
             if name == "sets":
                 edit.setToolTip("Folder containing Set1, Set2... or, as in vanilla, the folder "
                                 "where the loose set1, set2... folders sit. A single SetN folder also works.")
-            self._add_row(grid, row, name.capitalize(), edit)
+            self.browse_buttons[name] = self._add_row(grid, row, FOLDER_TITLES[name], edit)
+            self.states[name] = state = QLabel()
+            state.setObjectName("resourceState")
+            state.setMinimumWidth(116)
+            grid.addWidget(state, row, 3)
             edit.editingFinished.connect(self._refresh_inventory)
         self.root.editingFinished.connect(self._suggest)
 
@@ -139,6 +155,14 @@ class ResourcesPanel(QWidget):
         layout.addLayout(footer)
         self._refresh_inventory()
 
+    @staticmethod
+    def _folder_text(install, name):
+        """A found folder, or nothing: an invented path looks like a real one."""
+        if install is None:
+            return ""
+        path = install.folder(name)
+        return str(path) if path.is_dir() else ""
+
     def _add_row(self, grid, row, label, edit, after=None):
         grid.addWidget(QLabel(label), row, 0)
         grid.addWidget(edit, row, 1)
@@ -146,9 +170,11 @@ class ResourcesPanel(QWidget):
         button.setAutoDefault(False)
         button.clicked.connect(lambda: self._browse(edit, after))
         grid.addWidget(button, row, 2)
+        return button
 
     def _browse(self, edit, after):
-        chosen = QFileDialog.getExistingDirectory(self, "Select resource folder", edit.text())
+        chosen = QFileDialog.getExistingDirectory(
+            self, "Select resource folder", edit.text() or self.root.text())
         if chosen:
             edit.setText(chosen)
             (after or self._refresh_inventory)()
@@ -156,12 +182,12 @@ class ResourcesPanel(QWidget):
     def _suggest(self):
         if self.root.text().strip():
             install = GameInstallation.suggest(self.root.text().strip())
-            self.root.setText(str(install.data))
+            self.root.setText(str(install.root))
             if install.data != self._suggested_data:
                 self._suggested_data = install.data
                 self.preview_backgrounds.clear()
                 for name, edit in self.edits.items():
-                    edit.setText(str(install.folder(name)))
+                    edit.setText(self._folder_text(install, name))
             self._refresh_inventory()
 
     def installation(self):
@@ -175,15 +201,25 @@ class ResourcesPanel(QWidget):
         }, dict(self.preview_backgrounds))
 
     def _refresh_inventory(self):
+        """Show what was really found, and offer a manual folder only where it can help."""
         install = self.installation()
+        statuses = {} if install is None else {item.key: item for item in install.report()}
+        for name, edit in self.edits.items():
+            status = statuses.get(name)
+            state = self.states[name]
+            usable = status is None or status.state != NOT_IN_EDITION
+            edit.setEnabled(usable)
+            self.browse_buttons[name].setEnabled(usable)
+            edit.setPlaceholderText("" if status is None or status.state == READY or not usable
+                                    else "Choose the folder by hand")
+            state.setText(status.detail if status is not None else "")
+            color = RESOURCE_STATE_COLORS.get(status.state) if status is not None else None
+            state.setStyleSheet(f"color: {STATUS_COLORS[color].name()};" if color else "")
         if install is None or not install.valid():
             self.inventory_label.setText("Select the game installation.")
         else:
-            counts = install.inventory()
             self.inventory_label.setText(
-                f"Found: {counts['sets']} sets · {counts['scripts']} scripts · "
-                f"{counts['levels']} levels · {counts['models']} models · "
-                f"{counts['mb']} briefings · {counts['db']} debriefings")
+                f"Detected: {EDITION_TITLES[install.edition]} · Data: {install.data}")
         self.changed.emit()
 
     def reset_configuration(self):
@@ -208,7 +244,7 @@ class ResourcesPanel(QWidget):
     def apply(self):
         install = self.installation()
         if install is None or not install.valid():
-            QMessageBox.warning(self, "Resources", "Choose an existing game Data folder containing Sets.")
+            QMessageBox.warning(self, "Resources", "Choose the folder where the game is installed.")
             return None
         save_remembered(install)
         bootstrap.set_installation(install)
@@ -470,7 +506,7 @@ def _fill_menu(window, menu):
     if not numbers:
         menu.addAction("No sets found").setEnabled(False)
     menu.addSeparator()
-    menu.addAction("Browse…", lambda: browse_for_set(window))
+    menu.addAction("Browse", lambda: browse_for_set(window))
 
 
 def change_game_set(window, number, *, force=False):

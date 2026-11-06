@@ -68,8 +68,14 @@ def _editable_uv_group(model, block, poly_id: int, atts_index: int):
 
 def plan_uv_vertex_insertion(
         model, block, poly_id: int, atts_index: int,
-        edge_start: int) -> UVVertexInsertion:
-    """Plan a midpoint inserted after one selected UV/winding vertex."""
+        edge_start: int,
+        target_uv: tuple[int, int] | None = None) -> UVVertexInsertion:
+    """Plan a vertex inserted after one selected UV/winding vertex.
+
+    Without ``target_uv`` it is the edge midpoint. With ``target_uv`` the new
+    UV sits exactly there and the 3D point lies on the edge at the closest
+    position, so the face shape does not change.
+    """
 
     polygon, uvs = _editable_uv_group(
         model, block, poly_id, atts_index)
@@ -96,12 +102,28 @@ def plan_uv_vertex_insertion(
             for uv in edge_uvs):
         raise UVTopologyError("the selected OLPL edge is outside byte range")
 
-    point = tuple(
-        (points[0][axis] + points[1][axis]) / 2.0
-        for axis in range(3))
+    t = 0.5
     uv = tuple(
         round((edge_uvs[0][axis] + edge_uvs[1][axis]) / 2.0)
         for axis in range(2))
+    if target_uv is not None:
+        uv = (max(0, min(255, int(target_uv[0]))),
+              max(0, min(255, int(target_uv[1]))))
+        du = edge_uvs[1][0] - edge_uvs[0][0]
+        dv = edge_uvs[1][1] - edge_uvs[0][1]
+        length_sq = du * du + dv * dv
+        if length_sq:
+            t = ((uv[0] - edge_uvs[0][0]) * du
+                 + (uv[1] - edge_uvs[0][1]) * dv) / length_sq
+            t = max(0.0, min(1.0, t))
+    if target_uv is None:
+        point = tuple(
+            (points[0][axis] + points[1][axis]) / 2.0
+            for axis in range(3))
+    else:
+        point = tuple(
+            points[0][axis] + (points[1][axis] - points[0][axis]) * t
+            for axis in range(3))
     return UVVertexInsertion(
         poly_id=poly_id,
         atts_index=atts_index,
@@ -212,6 +234,8 @@ class UVEditorWidget(AcceleratedWidget):
     pointSelected = Signal(int)
     selectionChanged = Signal()
     handleContextMenuRequested = Signal(object, int, object)
+    # Right click on the bare texture (no handle): global position + (u, v).
+    backgroundContextMenuRequested = Signal(object, object)
 
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
@@ -245,6 +269,8 @@ class UVEditorWidget(AcceleratedWidget):
         self._zoom = 1.0
         self._pan = QPointF(0.0, 0.0)
         self._pan_last: QPoint | None = None
+        # Right press on the bare texture: pans if dragged, opens the menu if not.
+        self._rclick_pos: QPointF | None = None
         self._auto_align_enabled = True
         self._snap_guides: tuple[tuple[str, int, str], ...] = ()
 
@@ -449,6 +475,17 @@ class UVEditorWidget(AcceleratedWidget):
         self.loopsChanged.emit(self.loop_uvs())
         if self._loops:
             self.uvChanged.emit(self.uvs())
+
+    def replace_loop_uvs(self, updates: dict) -> None:
+        """Give whole loops new coordinates, as one undoable edit."""
+
+        before = self.loop_uvs()
+        for key, uvs in updates.items():
+            loop = self._loop(key)
+            if loop is not None and loop.editable and len(uvs) == len(loop.uvs):
+                loop.uvs[:] = [tuple(uv) for uv in uvs]
+        self.update()
+        self._finish_programmatic_edit(before)
 
     def _finish_programmatic_edit(self, before: dict) -> None:
         if before == self.loop_uvs():
@@ -896,6 +933,8 @@ class UVEditorWidget(AcceleratedWidget):
         elif event.button() in (Qt.MouseButton.MiddleButton,
                                 Qt.MouseButton.RightButton):
             self._pan_last = pos.toPoint()
+            if event.button() == Qt.MouseButton.RightButton:
+                self._rclick_pos = QPointF(pos)
         event.accept()
 
     def mouseMoveEvent(self, event) -> None:  # noqa: N802
@@ -952,6 +991,9 @@ class UVEditorWidget(AcceleratedWidget):
                 self._box_rect = QRectF(self._box_start, pos).normalized()
                 self.update()
         elif self._pan_last is not None:
+            if self._rclick_pos is not None \
+                    and (pos - self._rclick_pos).manhattanLength() >= 5.0:
+                self._rclick_pos = None  # it is a pan, not a click
             delta = pos.toPoint() - self._pan_last
             self._pan_last = pos.toPoint()
             self._pan += QPointF(delta.x(), delta.y())
@@ -994,6 +1036,13 @@ class UVEditorWidget(AcceleratedWidget):
         self._press_pos = None
         self._press_selection.clear()
         self._pan_last = None
+        if event.button() == Qt.MouseButton.RightButton \
+                and self._rclick_pos is not None:
+            click = self._rclick_pos
+            self._rclick_pos = None
+            self.backgroundContextMenuRequested.emit(
+                self.mapToGlobal(click.toPoint()),
+                self._screen_to_uv(click))
         event.accept()
 
     def keyPressEvent(self, event) -> None:  # noqa: N802
