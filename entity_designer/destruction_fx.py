@@ -168,6 +168,15 @@ def script_int(text: str | None, default: int = 0) -> int:
     return value if used else default
 
 
+def debuff_link(text: str | None, default: int) -> tuple[int, str]:
+    """(ID, name) of a debuff_id value: the engine takes either one."""
+
+    value = (text or "").strip()
+    if value and not value[0].isdigit() and value[0] not in "+-":
+        return default, value
+    return script_int(value, default), ""
+
+
 def _full_float(text: str) -> float | None:
     value, used = _strtod_prefix(text)
     if used != len(text) or not text:
@@ -2030,9 +2039,14 @@ def unit_look(values: dict[str, str], *, weapon: bool) -> dict:
         "laser": parse_laser(values) if weapon else None,
         "delay_time": (_non_negative_int(values.get("delay_time"))
                        if weapon else 0),
-        "debuff_id": script_int(values.get("debuff_id"), -1) if weapon else -1,
+        "debuff_id": debuff_link(values.get("debuff_id"), -1)[0] if weapon else -1,
+        "debuff_name": debuff_link(values.get("debuff_id"), -1)[1] if weapon else "",
         "delay_debuff_id": (script_int(values.get("delay_time_debuff_id"), -1)
                             if weapon else -1),
+        "blast_debuff_id": (max(0, debuff_link(values.get("blast_debuff_id"), 0)[0])
+                            if weapon else 0),
+        "blast_debuff_name": (debuff_link(values.get("blast_debuff_id"), 0)[1]
+                              if weapon else ""),
         # artillery_shell vertical_barrage: rounds fall from arc_height.
         "fixed_speed": (_stof(values.get("artillery_shell_speed", "0"))
                         if weapon and values.get("model", "").casefold() == "artillery_shell"
@@ -2227,6 +2241,7 @@ class DebuffSpec:
     """The visual side of a ``new_debuff`` profile hit units show."""
 
     debuff_id: int
+    name: str = ""
     vps: tuple[int, ...] = ()
     mesh3ds: str = ""
     tint: Tint = WHITE
@@ -2254,7 +2269,8 @@ def parse_debuff(debuff_id: int, values: dict[str, str]) -> DebuffSpec:
     offset = _stof(offset_text.rstrip("%")) if offset_text else 0.0
     scale = _stof(values.get("debuff_scale", "1"))
     return DebuffSpec(
-        debuff_id=debuff_id, vps=tuple(vps), mesh3ds=values.get("debuff_3ds", ""),
+        debuff_id=debuff_id, name=values.get("name", ""), vps=tuple(vps),
+        mesh3ds=values.get("debuff_3ds", ""),
         tint=_tint_value(values, "debuff_tint", WHITE),
         trail_tint=(_tint_value(values, "debuff_vp_trail_tint", WHITE)
                     if "debuff_vp_trail_tint" in values else None),
@@ -2264,6 +2280,17 @@ def parse_debuff(debuff_id: int, values: dict[str, str]) -> DebuffSpec:
         tick_time=_non_negative_int(values.get("debuff_tick_time")),
         duration=_non_negative_int(values.get("debuff_duration")),
         sound=sound_specs(values, ("debuff",)).get("debuff"))
+
+
+def resolved_debuff_id(number: int, name: str, debuffs: dict[int, DebuffSpec]) -> int:
+    """Profile ID of a debuff link. Names ignore case and the lowest ID wins."""
+
+    if not name:
+        return number
+    for debuff_id in sorted(debuffs):
+        if debuffs[debuff_id].name.casefold() == name.casefold():
+            return debuff_id
+    return -1
 
 
 def debuff_profiles_from_text(text: str) -> dict[int, DebuffSpec]:
@@ -2398,7 +2425,9 @@ def weapon_vps(unit: "UnitPhases", document: "FxDocument", weapons: dict,
             vps.update(visual.vp for visual in spec.visuals if visual.vp > 0)
             vps.update(vp for vp in spec.vp_models if vp > 0)
             vps.update(vp for vp in spec.vp_impacts if vp > 0)
-    for debuff_id in (unit.debuff_id, unit.delay_debuff_id):
+    for debuff_id in (resolved_debuff_id(unit.debuff_id, unit.debuff_name, debuffs),
+                      unit.delay_debuff_id,
+                      resolved_debuff_id(unit.blast_debuff_id, unit.blast_debuff_name, debuffs)):
         if debuff_id in debuffs:
             vps.update(vp for vp in debuffs[debuff_id].vps if vp > 0)
     cluster = unit.cluster
@@ -2458,6 +2487,9 @@ class UnitPhases:
     delay_time: int = 0
     debuff_id: int = -1
     delay_debuff_id: int = -1
+    blast_debuff_id: int = 0
+    debuff_name: str = ""
+    blast_debuff_name: str = ""
     fixed_speed: float = 0.0
     start_speed: float = 0.0
     # snd_* packages of the definition, by event name.
@@ -3303,9 +3335,20 @@ class PreviewSimulation:
                                  (unit.normal, positions, look, unit)))
 
     def _hit_unit_effects(self, unit: "UnitPhases", position, at: float) -> None:
-        """Debuffs a hit unit shows (debuff_id, delay_time_debuff_id)."""
+        """Debuffs a hit unit shows (debuff_id, delay_time_debuff_id).
 
-        for debuff_id in dict.fromkeys((unit.debuff_id, unit.delay_debuff_id)):
+        Like the engine, blast_debuff_id reaches the struck unit only without debuff_id.
+        """
+
+        direct = resolved_debuff_id(unit.debuff_id, unit.debuff_name, self.debuffs)
+        blast = resolved_debuff_id(unit.blast_debuff_id, unit.blast_debuff_name, self.debuffs)
+        for name, found in ((unit.debuff_name, direct), (unit.blast_debuff_name, blast)):
+            note = f"debuff {name} is not in the loaded game scripts."
+            if name and found < 0 and note not in self.notes:
+                self.notes.append(note)
+        if direct < 0 and blast > 0 and unit.blast_radius > 0:
+            direct = blast
+        for debuff_id in dict.fromkeys((direct, unit.delay_debuff_id)):
             if debuff_id < 0:
                 continue
             spec = self.debuffs.get(debuff_id)

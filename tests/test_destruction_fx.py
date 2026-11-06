@@ -1105,6 +1105,46 @@ def test_delay_time_sticks_the_weapon_and_detonates_later_with_a_debuff():
                                 None, fx.debuff_profiles_from_text(DEBUFF_TEXT))
 
 
+def test_blast_debuff_shows_on_the_hit_unit_only_without_a_direct_debuff():
+    def debuffs_on_hit(body):
+        definition = fx.weapon_def_from_text(4, (
+            "new_weapon 4\n    vp_normal = 60\n    vp_dead = 61\n" + body + "end\n"))
+        simulation = fx.PreviewSimulation(
+            definition.document, fx.CONTEXT_WEAPON, fx.WEAPON_HIT_UNIT,
+            unit=definition.unit, debuffs=fx.debuff_profiles_from_text(DEBUFF_TEXT))
+        return [i for i in simulation.items_at(fx.WEAPON_FLIGHT_MS + 100) if i.kind == "debuff"]
+
+    area = "    blast_radius = 400\n    blast_debuff_id = 2\n"
+    assert debuffs_on_hit(area)
+    assert not debuffs_on_hit("    blast_debuff_id = 2\n")
+    assert not debuffs_on_hit("    blast_radius = 400\n    blast_debuff_id = 0\n")
+    definition = fx.weapon_def_from_text(4, "new_weapon 4\n    vp_normal = 60\n" + area + "end\n")
+    assert definition.unit.blast_debuff_id == 2
+    assert 191 in fx.weapon_vps(definition.unit, definition.document, {},
+                                None, fx.debuff_profiles_from_text(DEBUFF_TEXT))
+
+
+def test_debuff_links_accept_a_profile_name():
+    profiles = fx.debuff_profiles_from_text(
+        "new_debuff 7\n    name = Shock\n    debuff_vp = 191\nend\n"
+        "new_debuff 9\n    name = shock\nend\n")
+    assert fx.debuff_link("shock", -1) == (-1, "shock")
+    assert fx.debuff_link("7", -1) == (7, "")
+    assert fx.debuff_link("-3", 0) == (-3, "")
+    assert fx.resolved_debuff_id(-1, "SHOCK", profiles) == 7
+    assert fx.resolved_debuff_id(-1, "missing", profiles) == -1
+    assert fx.resolved_debuff_id(9, "", profiles) == 9
+
+    for key in ("debuff_id", "blast_debuff_id"):
+        definition = fx.weapon_def_from_text(4, (
+            f"new_weapon 4\n    vp_normal = 60\n    blast_radius = 400\n    {key} = shock\nend\n"))
+        simulation = fx.PreviewSimulation(
+            definition.document, fx.CONTEXT_WEAPON, fx.WEAPON_HIT_UNIT,
+            unit=definition.unit, debuffs=profiles)
+        assert [i for i in simulation.items_at(fx.WEAPON_FLIGHT_MS + 100) if i.kind == "debuff"]
+        assert 191 in fx.weapon_vps(definition.unit, definition.document, {}, None, profiles)
+
+
 def test_laser_draws_a_beam_of_models_from_the_muzzle_to_the_contact():
     laser = fx.weapon_def_from_text(125, (
         "new_weapon 125\n    model = laser\n    vp_normal = 60\n"

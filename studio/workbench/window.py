@@ -23,7 +23,9 @@ from PySide6.QtWidgets import (
     QComboBox,
     QDialog,
     QDoubleSpinBox,
-    QFileDialog,
+    # Tests patch this module attribute to drive the file dialogs used by the
+    # mixins (the Qt class is shared, so the patch reaches them too).
+    QFileDialog,  # noqa: F401
     QFrame,
     QGridLayout,
     QGroupBox,
@@ -889,9 +891,10 @@ class AssemblyWindow(
         # Retain the public action attribute used by existing integrations;
         # its UI meaning remains the read-only archive import.
         self.open_base_action = self.open_bas_archive_action
-        # "Import BASE" is the guided asset-family import: BASE, skeleton,
-        # textures and animations chosen in one go (each step is optional).
-        self.open_family_action = QAction("Import BASE", self)
+        # "Import Model" is the guided family import: the BASE entry point plus
+        # its skeleton, textures and animations, resolved together against
+        # loose files or an optional SET.BAS archive.
+        self.open_family_action = QAction("Import Model", self)
         self.open_family_action.triggered.connect(self.open_family_dialog)
         self.import_onua3d_action = QAction("Import OpenNeoUA 3D", self)
         self.import_onua3d_action.triggered.connect(self._import_onua3d)
@@ -910,11 +913,12 @@ class AssemblyWindow(
         self.export_runtime_loose_action.setEnabled(False)
         self.export_runtime_loose_action.triggered.connect(
             self._export_runtime_loose_set)
-        # "Export BASE" is the guided asset-family export (BASE, skeleton,
+        # "Export Model" is the guided asset-family export (BASE, skeleton,
         # textures and animations as one portable package).
-        self.save_asset_family_action = QAction("Export BASE", self)
-        self.save_asset_family_action.setEnabled(False)
-        self.save_asset_family_action.triggered.connect(self._save_model_as)
+        self.export_model_action = QAction("Export Model", self)
+        self.export_model_action.setEnabled(False)
+        self.export_model_action.triggered.connect(self._save_model_as)
+        self.save_asset_family_action = self.export_model_action
         self.export_blender_action = QAction("Export OpenNeoUA 3D", self)
         self.export_blender_action.setEnabled(False)
         self.export_blender_action.triggered.connect(self._export_to_blender)
@@ -925,7 +929,7 @@ class AssemblyWindow(
         self.file_export_menu = file_menu.addMenu("Export")
         for action in (
                 self.export_runtime_loose_action,
-                self.save_asset_family_action,
+                self.export_model_action,
                 self.export_blender_action,
                 self.overwrite_action):
             self.file_export_menu.addAction(action)
@@ -2219,79 +2223,55 @@ class AssemblyWindow(
             return
         self._set_family(family)
 
-    def _open_manual_asset_family(
-            self, sklt: str | Path | None = None,
-            base: str | Path | None = None,
-            textures: list[str | Path] | None = None,
-            anms: list[str | Path] | None = None) -> None:
-        textures = list(textures or [])
-        anms = list(anms or [])
-        if not sklt and not base and not textures and not anms:
+    def open_family_dialog(self) -> None:
+        """Import a complete model: BASE plus its skeleton, textures and animations."""
+
+        from studio.workbench.model_import import ModelImportDialog
+
+        initial_base = None
+        if self._family is not None and self._family.base_path is not None:
+            candidate = Path(self._family.base_path)
+            # A SET.BAS entry point is an archive, not a standalone model BASE.
+            if candidate.name.casefold() != "set.bas":
+                initial_base = candidate
+        dialog = ModelImportDialog(
+            self,
+            initial_base=initial_base,
+            initial_archive=self._setbas,
+            initial_directory=self._last_directory,
+            extra_roots=self._extra_roots,
+        )
+        if dialog.exec() != QDialog.DialogCode.Accepted:
             return
+        self._import_model_family(dialog.selection())
+
+    def _import_model_family(self, selection) -> None:
+        """Load the model assembled by the guided import dialog."""
+
+        base_path = Path(selection.base_path)
         if not self._confirm_discard_geometry():
             return
-        primary_path = base or sklt or (textures[0] if textures else None) \
-            or (anms[0] if anms else None)
-        if primary_path:
-            self._last_directory = Path(primary_path).parent
-        try:
-            family = load_manual_family(
-                str(sklt) if sklt else None,
-                [str(path) for path in textures],
-                [str(path) for path in anms],
-                str(base) if base else None,
-                self._extra_roots,
-                self._overrides,
-                self._setbas,
-            )
-        except Exception as exc:
-            QMessageBox.critical(
-                self, "Load failed",
-                f"No file was modified.\n\nUnexpected error:\n{exc}",
-            )
-            return
+        if self._setbas is not selection.archive:
+            self._setbas_preview_cache = None
+        self._setbas = selection.archive
+        self._overrides = dict(selection.overrides)
+        self._last_directory = base_path.parent
+        for root in selection.search_roots:
+            if root not in self._extra_roots:
+                self._extra_roots.append(root)
+        from studio.ui.widgets import loading_resources
+        with loading_resources(self, 'Loading model family. Please wait…'):
+            try:
+                family = load_asset_family(
+                    base_path, self._extra_roots, self._overrides,
+                    self._setbas)
+            except Exception as exc:
+                QMessageBox.critical(
+                    self, "Load failed",
+                    f"No file was modified.\n\nUnexpected error:\n{exc}",
+                )
+                return
         self._set_family(family)
-        if primary_path:
-            self._set_document_title(primary_path)
-
-    def open_family_dialog(self) -> None:
-        # Keep the chooser anchored to the most recently selected file during
-        # this one Asset Family import.  Optional steps may be skipped, but a
-        # successful selection becomes the starting directory for the next
-        # requested asset type instead of resetting to the session directory.
-        dialog_directory = Path(self._last_directory)
-
-        base, _ = QFileDialog.getOpenFileName(
-            self, "Import BASE entry point - optional, Cancel to skip",
-            str(dialog_directory),
-            "Urban Assault BASE (*.base *.bas *.BASE *.BAS);;All files (*)",
-        )
-        if base:
-            dialog_directory = Path(base).parent
-
-        sklt, _ = QFileDialog.getOpenFileName(
-            self, "Import skeleton (.sklt/.skl) - optional, Cancel to skip",
-            str(dialog_directory),
-            "Skeletons (*.sklt *.skl *.SKLT *.SKL);;All files (*)",
-        )
-        if sklt:
-            dialog_directory = Path(sklt).parent
-
-        textures, _ = QFileDialog.getOpenFileNames(
-            self, "Import texture files (.ilbm/.ilb/.vbmp) - optional",
-            str(dialog_directory),
-            "ILBM/VBMP textures (*.ilbm *.ilb *.lbm *.iff *.vbmp "
-            "*.ILBM *.ILB *.LBM *.IFF *.VBMP);;All files (*)",
-        )
-        if textures:
-            dialog_directory = Path(textures[0]).parent
-
-        anms, _ = QFileDialog.getOpenFileNames(
-            self, "Import animation files (.anm/.vanm) - optional",
-            str(dialog_directory),
-            "Animations (*.anm *.vanm *.ANM *.VANM);;All files (*)",
-        )
-        self._open_manual_asset_family(sklt, base, textures, anms)
 
     def _sync_close_archive_action(self) -> None:
         """Enable Close Current Resource while any Studio resource is open."""

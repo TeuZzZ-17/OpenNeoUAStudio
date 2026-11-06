@@ -27,6 +27,137 @@ def request_desktop_opengl() -> None:
     QSurfaceFormat.setDefaultFormat(surface)
 
 
+
+# ----------------------------------------------------------------------------
+# Which graphics chip the OpenGL context really got.
+#
+# On a computer with two of them, a program is given the built-in chip unless it
+# asks for the other one. The game asks for it through its executable; Studio
+# runs under Python, which cannot ask, so the only thing it can do is say what
+# it got and how to change it. Same rule as GFXEngine::ReportGraphicsChip in the
+# engine, so both tell the same story.
+# ----------------------------------------------------------------------------
+
+_INTEGRATED_NAMES = (
+    'intel', 'uhd graphics', 'hd graphics', 'iris', 'radeon(tm) graphics',
+    'vega', 'llvmpipe', 'softpipe', 'microsoft basic',
+)
+
+_graphics_chip = None
+
+
+def integrated_graphics(name: str) -> bool:
+    """True when the name looks like a chip built into the processor.
+
+    Intel Arc is a real graphics card and must not be mistaken for one.
+    """
+
+    lowered = (name or '').casefold()
+    if 'arc' in lowered:
+        return False
+    return any(marker in lowered for marker in _INTEGRATED_NAMES)
+
+
+def graphics_chip() -> str:
+    """Name of the chip Studio draws with, or an empty string if unknown.
+
+    The probe runs once, on an offscreen surface of its own, and leaves any
+    context the caller had current untouched.
+    """
+
+    global _graphics_chip
+    if _graphics_chip is not None:
+        return _graphics_chip
+
+    _graphics_chip = ''
+    if QApplication.instance() is None:
+        return _graphics_chip
+
+    previous = QOpenGLContext.currentContext()
+    previous_surface = previous.surface() if previous is not None else None
+    surface = None
+    context = None
+    try:
+        from OpenGL import GL as gl
+
+        surface = QOffscreenSurface()
+        surface.setFormat(_surface_format())
+        surface.create()
+        if not surface.isValid():
+            return _graphics_chip
+
+        context = QOpenGLContext()
+        context.setFormat(_surface_format())
+        if not context.create() or not context.makeCurrent(surface):
+            return _graphics_chip
+
+        raw = gl.glGetString(gl.GL_RENDERER)
+        _graphics_chip = raw.decode(errors='replace') if raw else ''
+        context.doneCurrent()
+    except Exception:
+        _graphics_chip = ''
+    finally:
+        if previous is not None and previous_surface is not None:
+            previous.makeCurrent(previous_surface)
+
+    if not _graphics_chip:
+        # On Linux the card was asked for before Qt started. Asking must never
+        # cost Studio its drawing: drop the request and look again.
+        from studio.rendering import gpu_preference
+
+        if gpu_preference.stop_asking_nvidia_offload():
+            _graphics_chip = None
+            return graphics_chip()
+
+    return _graphics_chip
+
+
+def prefer_graphics_card() -> str:
+    """Make Studio run on the graphics card, and say what happened.
+
+    The engine asks for the card through its own executable; Studio asks
+    Windows for its program. Returns a line to show, or an empty string when
+    Studio is already on a graphics card and there is nothing to say.
+    """
+
+    from PySide6.QtCore import QSettings
+    from studio.rendering import gpu_preference
+
+    chip = graphics_chip()
+    result = (gpu_preference.prefer_graphics_card(on_integrated=integrated_graphics(chip))
+              if chip else 'no_context')
+
+    # The built program has no console, so keep the outcome where it can be read
+    # again: the badge tooltip shows it, and so does this settings entry.
+    try:
+        settings = QSettings('OpenNeoUA', 'Studio')
+        settings.setValue('gpu/chip', chip)
+        settings.setValue('gpu/result', result)
+        settings.setValue('gpu/program', gpu_preference.program_path())
+        settings.sync()
+    except Exception:
+        pass
+
+    if not chip:
+        return ''
+    return gpu_preference.message(result, chip)
+
+
+def graphics_chip_warning() -> str:
+    """Advice to show when Studio ended up on the built-in chip."""
+
+    name = graphics_chip()
+    if not name or not integrated_graphics(name):
+        return ''
+    return (
+        f'Studio is drawing with {name}, the chip built into the processor.\n'
+        'If this computer has a graphics card, choose it for Studio: on Windows in\n'
+        'Settings, System, Display, Graphics, add OpenNeoUAStudio.exe (or python.exe\n'
+        'when you start Studio from the sources) and pick High performance.\n'
+        'On Linux start Studio with DRI_PRIME=1 (AMD/Intel) or prime-run (NVIDIA).'
+    )
+
+
 # ----------------------------------------------------------------------------
 # QWidget paint surface backed by a native Qt OpenGL canvas when available.
 # (formerly gpu_widget.py)
@@ -271,10 +402,22 @@ class RendererBadge(QPushButton):
         self.set_backend(viewport.renderer_name)
 
     def set_backend(self, name):
-        self.setText('GPU' if name.startswith('OpenGL') else 'Software')
+        warning = graphics_chip_warning()
+        on_gpu = name.startswith('OpenGL')
+        label = 'GPU' if on_gpu else 'Software'
+        # The badge stays two words; the chip and the advice live in the tooltip.
+        self.setText(f'{label} !' if (on_gpu and warning) else label)
         target = 'Software' if self.viewport.renderer_mode == 'gpu' else 'GPU'
-        self.setToolTip(f'{name}\nClick to switch to {target}.')
-        self.setAccessibleName(f'Renderer: {self.text()}. Switch to {target}')
+        chip = graphics_chip()
+        lines = [name]
+        if on_gpu and chip:
+            lines.append(chip)
+        if on_gpu and warning:
+            lines.append('')
+            lines.append(warning)
+        lines.append(f'Click to switch to {target}.')
+        self.setToolTip('\n'.join(lines))
+        self.setAccessibleName(f'Renderer: {label}. Switch to {target}')
 
     def toggle_backend(self):
         target = 'software' if self.viewport.renderer_mode == 'gpu' else 'gpu'

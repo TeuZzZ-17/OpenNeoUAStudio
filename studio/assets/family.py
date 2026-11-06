@@ -1068,6 +1068,137 @@ def load_manual_family(sklt_path: str | Path | None,
 
 
 # ----------------------------------------------------------------------------
+# Requirement inspection used by the guided model import dialog.
+# ----------------------------------------------------------------------------
+
+@dataclass(frozen=True)
+class FamilyRequirement:
+    """One external resource a BASE family needs to assemble its model."""
+
+    kind: str                  # "skeleton" | "texture" | "animation"
+    logical_name: str
+    class_id: str
+
+
+def collect_family_requirements(base_asset: BaseAsset) -> list[FamilyRequirement]:
+    """List every skeleton/texture/animation referenced by a parsed BASE.
+
+    Children (FORM KIDS) and particle life stages are included, matching the
+    references that :func:`load_asset_family` resolves when it assembles the
+    family.  Duplicate references are reported once, in load order.
+    """
+
+    requirements: list[FamilyRequirement] = []
+    seen: set[tuple[str, str]] = set()
+
+    def add(kind: str, name: str, class_id: str) -> None:
+        key = (kind, normalize_logical_name(name).casefold())
+        if key in seen:
+            return
+        seen.add(key)
+        requirements.append(FamilyRequirement(kind, name, class_id))
+
+    def walk(base_obj: BaseObject) -> None:
+        if base_obj.skeleton_name:
+            add("skeleton", base_obj.skeleton_name, "sklt.class")
+        for root_block in base_obj.ades:
+            for block in root_block.iter_visual_blocks():
+                for texture in (block.texture, block.tracy_texture):
+                    if texture is None or not texture.name:
+                        continue
+                    if texture.kind == "bmpanim":
+                        add("animation", texture.name, "bmpanim.class")
+                    else:
+                        add("texture", texture.name, "ilbm.class")
+        for kid in base_obj.kids:
+            walk(kid)
+
+    if base_asset.root is not None:
+        walk(base_asset.root)
+    return requirements
+
+
+@dataclass(frozen=True)
+class FamilyRequirementProbe:
+    """Resolution state of one requirement, before any resource is decoded."""
+
+    requirement: FamilyRequirement
+    # "loose" | "manual" | "setbas" | "ambiguous" | "missing"
+    status: str
+    path: Path | None = None
+    embedded_names: tuple[str, ...] = ()
+    detail: str = ""
+
+    @property
+    def resolved(self) -> bool:
+        return self.status in ("loose", "manual", "setbas")
+
+
+def probe_family_requirements(
+        base_path: str | Path,
+        extra_roots: list[str | Path] | None = None,
+        overrides: dict[str, Path | str] | None = None,
+        setbas: SetBasArchive | str | Path | None = None,
+) -> tuple[BaseAsset, list[FamilyRequirementProbe]]:
+    """Resolve a BASE's references without decoding textures or skeletons.
+
+    The guided import dialog uses this to show, per resource, whether the
+    model will take it from a loose file (or a manual choice) or from the
+    attached SET.BAS archive.
+    """
+
+    path = Path(base_path)
+    family = AssetFamily()
+    family.base_path = path
+    roots: list[Path | str] = [path.parent, path.parent.parent]
+    for extra in extra_roots or []:
+        roots.append(extra)
+    _attach_setbas(family, setbas, roots)
+
+    base_asset = parse_base_file(path)
+    # Mirror load_asset_family: a BASE with embedded EMRS records is its own
+    # resource provider, so its rows must not look missing.
+    if family.setbas_archive is None and base_asset.root is not None \
+            and base_asset.root.embedded:
+        try:
+            family.setbas_archive = read_setbas(path)
+            family.setbas_path = path
+        except SetBasError:
+            pass
+
+    file_overrides = _split_overrides(family, overrides)
+    resolver = AssetResolver(roots, file_overrides, prefer_earliest_root=True)
+
+    probes: list[FamilyRequirementProbe] = []
+    for requirement in collect_family_requirements(base_asset):
+        ref = _resolve_with_setbas(
+            family, resolver, requirement.logical_name,
+            requirement.kind, requirement.class_id)
+        embedded_matches = _setbas_matches(
+            family, requirement.logical_name, requirement.class_id)
+        embedded_names = tuple(
+            (f"{family.setbas_path.name}:{resource.resource_name}"
+             if family.setbas_path is not None else resource.resource_name)
+            for resource in embedded_matches)
+        if ref.status in ("setbas", "manual (SET.BAS)"):
+            status = "setbas"
+        elif ref.path is not None:
+            status = "manual" if ref.status == "manual" else "loose"
+        elif ref.status == "ambiguous":
+            status = "ambiguous"
+        else:
+            status = "missing"
+        probes.append(FamilyRequirementProbe(
+            requirement=requirement,
+            status=status,
+            path=ref.path,
+            embedded_names=embedded_names,
+            detail=ref.resolution_rule or ref.status,
+        ))
+    return base_asset, probes
+
+
+# ----------------------------------------------------------------------------
 # Canonical portable package workflow for a complete :mod:`asset_family`.
 # (formerly asset_family_package.py)
 # ----------------------------------------------------------------------------
