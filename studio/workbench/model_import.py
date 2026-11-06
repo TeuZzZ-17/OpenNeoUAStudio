@@ -17,6 +17,8 @@ from PySide6.QtWidgets import (
     QDialog,
     QDialogButtonBox,
     QFileDialog,
+    QFrame,
+    QGridLayout,
     QHBoxLayout,
     QHeaderView,
     QLabel,
@@ -24,6 +26,7 @@ from PySide6.QtWidgets import (
     QMenu,
     QMessageBox,
     QPushButton,
+    QStackedWidget,
     QTreeWidget,
     QTreeWidgetItem,
     QVBoxLayout,
@@ -54,6 +57,20 @@ _RESOURCE_FILTER = (
     "*.anm *.vanm *.SKLT *.SKL *.ILBM *.ILB *.LBM *.IFF *.VBMP *.PNG "
     "*.ANM *.VANM);;All files (*)"
 )
+
+# Theme colors only: every Studio theme restyles this dialog by itself.
+_DIALOG_STYLE = """
+QFrame#importSources { background: palette(base); border: 1px solid palette(mid); border-radius: 6px; }
+QFrame#importSources QLabel { background: transparent; }
+QLabel#importNote, QLabel#importEmpty { color: palette(placeholder-text); }
+QLabel#importState { font-weight: 600; }
+QFrame#importLine { background: palette(mid); border: none; max-height: 1px; min-height: 1px; }
+QTreeWidget::item { padding: 3px 0; }
+QDialogButtonBox QPushButton:default:enabled {
+    background: palette(highlight); border-color: palette(highlight);
+    color: palette(highlighted-text); font-weight: 600;
+}
+"""
 
 _STATUS_LABELS = {
     "loose": "Ready (loose)",
@@ -96,6 +113,8 @@ class ModelImportDialog(QDialog):
         self.resize(980, 640)
         self.setMinimumSize(760, 480)
         self._directory = Path(initial_directory or Path.home())
+        # The BASE picker always starts here, even with a model already chosen.
+        self._base_start = self._directory
         self._base_path: Path | None = None
         self._base_error = ""
         self._archive = initial_archive
@@ -162,55 +181,52 @@ class ModelImportDialog(QDialog):
     # -- UI -------------------------------------------------------------------
 
     def _build_ui(self) -> None:
+        self.setStyleSheet(_DIALOG_STYLE)
         layout = QVBoxLayout(self)
-        layout.setContentsMargins(14, 12, 14, 12)
-        layout.setSpacing(8)
+        layout.setContentsMargins(16, 16, 16, 14)
+        layout.setSpacing(10)
 
-        intro = QLabel(
-            "Choose the model BASE, then check the resources below. Loose "
-            "files beside the BASE win; anything missing can come from the "
-            "selected SET.BAS archive.")
-        intro.setWordWrap(True)
-        layout.addWidget(intro)
+        sources = QFrame()
+        sources.setObjectName("importSources")
+        grid = QGridLayout(sources)
+        grid.setContentsMargins(12, 10, 12, 10)
+        grid.setHorizontalSpacing(8)
+        grid.setVerticalSpacing(6)
+        grid.setColumnStretch(1, 1)
 
-        base_row = QHBoxLayout()
-        base_label = QLabel("Model BASE")
-        base_label.setMinimumWidth(112)
         self.base_edit = QLineEdit()
         self.base_edit.setReadOnly(True)
         self.base_edit.setPlaceholderText("Select a .BASE / .BAS entry point")
-        self.base_button = QPushButton("Browse…")
+        self.base_button = QPushButton("Browse")
         self.base_button.clicked.connect(self._browse_base)
         self.base_state = QLabel("—")
-        self.base_state.setMinimumWidth(70)
-        base_row.addWidget(base_label)
-        base_row.addWidget(self.base_edit, 1)
-        base_row.addWidget(self.base_button)
-        base_row.addWidget(self.base_state)
-        layout.addLayout(base_row)
+        self.base_state.setObjectName("importState")
+        self.base_state.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        grid.addWidget(QLabel("Model BASE"), 0, 0)
+        grid.addWidget(self.base_edit, 0, 1)
+        grid.addWidget(self.base_button, 0, 2)
+        grid.addWidget(self.base_state, 0, 3)
 
-        archive_row = QHBoxLayout()
-        archive_label = QLabel("SET.BAS resources")
-        archive_label.setMinimumWidth(112)
         self.archive_edit = QLineEdit()
         self.archive_edit.setReadOnly(True)
         self.archive_edit.setPlaceholderText(
-            "Optional: select a SET.BAS archive to load missing resources (skeletons, textures, animations)")
-        self.archive_button = QPushButton("Browse…")
+            "Optional: a SET.BAS archive supplies missing resources")
+        self.archive_button = QPushButton("Browse")
         self.archive_button.clicked.connect(self._browse_archive)
         self.archive_clear_button = QPushButton("Clear")
         self.archive_clear_button.clicked.connect(self._clear_archive)
-        archive_row.addWidget(archive_label)
-        archive_row.addWidget(self.archive_edit, 1)
-        archive_row.addWidget(self.archive_button)
-        archive_row.addWidget(self.archive_clear_button)
-        layout.addLayout(archive_row)
+        grid.addWidget(QLabel("SET.BAS resources"), 1, 0)
+        grid.addWidget(self.archive_edit, 1, 1)
+        grid.addWidget(self.archive_button, 1, 2)
+        grid.addWidget(self.archive_clear_button, 1, 3)
 
         self.archive_summary = QLabel(
             "No SET.BAS archive selected. If external resources are missing, "
             "select a SET.BAS archive above to load them automatically.")
+        self.archive_summary.setObjectName("importNote")
         self.archive_summary.setWordWrap(True)
-        layout.addWidget(self.archive_summary)
+        grid.addWidget(self.archive_summary, 2, 1, 1, 3)
+        layout.addWidget(sources)
 
         self.tree = QTreeWidget()
         self.tree.setColumnCount(5)
@@ -239,14 +255,20 @@ class ModelImportDialog(QDialog):
         self.tree.itemSelectionChanged.connect(self._sync_buttons)
         self.tree.itemDoubleClicked.connect(
             lambda _item, _column: self._choose_source())
-        layout.addWidget(self.tree, 1)
+        self.empty_label = QLabel("Select a model BASE to inspect its resources.")
+        self.empty_label.setObjectName("importEmpty")
+        self.empty_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.resources = QStackedWidget()
+        self.resources.addWidget(self.empty_label)
+        self.resources.addWidget(self.tree)
+        layout.addWidget(self.resources, 1)
 
         actions = QHBoxLayout()
-        self.source_button = QPushButton("Choose source…")
+        self.source_button = QPushButton("Choose source")
         self.source_button.clicked.connect(self._choose_source)
-        self.files_button = QPushButton("Add loose files…")
+        self.files_button = QPushButton("Add loose files")
         self.files_button.clicked.connect(self._add_loose_files)
-        self.folder_button = QPushButton("Add search folder…")
+        self.folder_button = QPushButton("Add search folder")
         self.folder_button.clicked.connect(self._add_search_folder)
         self.reset_button = QPushButton("Reset choices")
         self.reset_button.clicked.connect(self._reset_choices)
@@ -257,10 +279,15 @@ class ModelImportDialog(QDialog):
         actions.addStretch(1)
         layout.addLayout(actions)
 
-        self.summary = QLabel("Select a model BASE to inspect its resources.")
-        self.summary.setWordWrap(True)
-        layout.addWidget(self.summary)
+        line = QFrame()
+        line.setObjectName("importLine")
+        layout.addWidget(line)
 
+        footer = QHBoxLayout()
+        self.summary = QLabel("")
+        self.summary.setObjectName("importNote")
+        self.summary.setWordWrap(True)
+        footer.addWidget(self.summary, 1)
         self.buttons = QDialogButtonBox(
             QDialogButtonBox.StandardButton.Ok
             | QDialogButtonBox.StandardButton.Cancel)
@@ -268,14 +295,16 @@ class ModelImportDialog(QDialog):
             QDialogButtonBox.StandardButton.Ok)
         self.import_button.setText("Import Model")
         self.import_button.setEnabled(False)
+        self.import_button.setDefault(True)
         self.buttons.accepted.connect(self.accept)
         self.buttons.rejected.connect(self.reject)
-        layout.addWidget(self.buttons)
+        footer.addWidget(self.buttons)
+        layout.addLayout(footer)
         self._sync_buttons()
 
     def _browse_base(self) -> None:
         path, _ = QFileDialog.getOpenFileName(
-            self, "Select the model BASE", str(self._directory),
+            self, "Select the model BASE", str(self._base_start),
             "Urban Assault BASE (*.base *.bas *.BASE *.BAS);;All files (*)")
         if not path:
             return
@@ -490,6 +519,9 @@ class ModelImportDialog(QDialog):
         ]
 
     def _sync_buttons(self) -> None:
+        # The table only appears once there is something to show in it.
+        self.resources.setCurrentWidget(
+            self.tree if self.tree.topLevelItemCount() else self.empty_label)
         has_selection = bool(self.tree.selectedItems())
         self.source_button.setEnabled(has_selection)
 
@@ -501,7 +533,7 @@ class ModelImportDialog(QDialog):
         automatic = menu.addAction("Automatic (loose file, then SET.BAS)")
         use_setbas = menu.addAction("Use SET.BAS")
         choose_file = menu.addAction(
-            "Choose file…" if len(probes) == 1 else "Choose files…")
+            "Choose file" if len(probes) == 1 else "Choose files")
         use_setbas.setEnabled(
             self._archive is not None
             and any(probe.embedded_names for probe in probes))

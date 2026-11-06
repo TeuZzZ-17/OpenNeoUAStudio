@@ -72,6 +72,15 @@ class UVEditorToolsTests(unittest.TestCase):
         after = self.widget._screen_to_uv(cursor)
         self.assertEqual(before, after)
 
+    def test_replace_loop_uvs_is_one_finished_edit(self):
+        finished = []
+        self.widget.editFinished.connect(lambda: finished.append(True))
+        target = [(1, 2), (3, 4), (5, 6), (7, 8)]
+        self.widget.replace_loop_uvs({"a": target, "b": target[:3]})
+        self.assertEqual(self.widget.loop_uvs()["a"], target)
+        self.assertEqual(self.widget.loop_uvs()["b"][0], (160, 160))
+        self.assertEqual(finished, [True])
+
 
 if __name__ == "__main__":
     unittest.main()

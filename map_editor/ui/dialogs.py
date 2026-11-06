@@ -290,7 +290,7 @@ class LevelInfoPanel(QWidget):
         # scroll bar appears or the panel is laid out after loading a map.
         self.sky_list.installEventFilter(self)
         layout.addWidget(self.sky_list)
-        self.custom_sky_button = QPushButton("Custom sky…")
+        self.custom_sky_button = QPushButton("Custom sky")
         self.custom_sky_button.setToolTip("Pick a sky archive (.bas) or complete sky file (.base) inside the game's Data folder")
         self.custom_sky_button.clicked.connect(self._choose_custom_sky)
         layout.addWidget(self.custom_sky_button)
@@ -383,7 +383,7 @@ class LevelInfoPanel(QWidget):
         self.ambient_edit.editingFinished.connect(self._ambient_edited)
         buttons = QHBoxLayout()
         buttons.setSpacing(4)
-        for text, handler in (("File...", self._choose_ambient_file), ("Folder...", self._choose_ambient_folder),
+        for text, handler in (("File", self._choose_ambient_file), ("Folder", self._choose_ambient_folder),
                               ("Listen", self._toggle_ambient_listen)):
             button = QPushButton(text)
             button.clicked.connect(lambda _checked=False, h=handler: h())

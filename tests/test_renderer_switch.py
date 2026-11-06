@@ -47,6 +47,12 @@ def _window_with_badge(viewport):
     return window, badge
 
 
+def _choose_backend(badge, mode):
+    badge.click()
+    label = "Software" if mode == "software" else "GPU (current device)"
+    next(action for action in badge._menu.actions() if action.text() == label).trigger()
+
+
 def _set_asset_state(view):
     family = object()
     view._family_ref = family
@@ -106,9 +112,9 @@ def test_renderer_badge_clicks_toggle_generic_backend_with_state_intact(app):
         first_canvas = view._gpu_canvas
         try:
             assert badge.text() == "GPU"
-            assert "Click to switch to Software" in badge.toolTip()
+            assert "Click to choose" in badge.toolTip()
 
-            badge.click()
+            _choose_backend(badge, "software")
             assert view.renderer_mode == "software"
             assert badge.text() == "Software"
             assert window.statusBar().currentMessage() == "Renderer switched to Software."
@@ -116,7 +122,7 @@ def test_renderer_badge_clicks_toggle_generic_backend_with_state_intact(app):
             assert first_canvas.delete_later_calls == 1
             _assert_asset_state(view, family, camera)
 
-            badge.click()
+            _choose_backend(badge, "gpu")
             second_canvas = view._gpu_canvas
             assert view.renderer_mode == "gpu"
             assert badge.text() == "GPU"
@@ -136,7 +142,7 @@ def test_unavailable_gpu_keeps_generic_state_and_reports_status(app):
         family, camera = _set_asset_state(view)
         try:
             assert view.renderer_mode == "software"
-            badge.click()
+            _choose_backend(badge, "gpu")
             assert view.renderer_mode == "software"
             assert "OpenGL 3.3 is unavailable" in window.statusBar().currentMessage()
             assert badge.text() == "Software"
@@ -184,7 +190,7 @@ def test_unavailable_map_gpu_keeps_document_camera_selection_and_status(app):
         doc, camera_ref, camera, selection, selected = _set_map_state(view)
         try:
             assert view.renderer_mode == "software"
-            badge.click()
+            _choose_backend(badge, "gpu")
             assert view.renderer_mode == "software"
             assert "OpenGL 3.3 is unavailable" in window.statusBar().currentMessage()
             assert badge.text() == "Software"
@@ -213,10 +219,10 @@ def test_badge_switches_active_preview_and_main_view_together(app):
         badge.add_viewport(preview)
         try:
             badge.set_viewport(preview)
-            badge.click()
+            _choose_backend(badge, "software")
             assert main.renderer_mode == preview.renderer_mode == "software"
             assert badge.text() == "Software"
-            badge.click()
+            _choose_backend(badge, "gpu")
             assert main.renderer_mode == preview.renderer_mode == "gpu"
             badge.set_viewport(main)
             assert badge.text() == "GPU"
@@ -224,4 +230,21 @@ def test_badge_switches_active_preview_and_main_view_together(app):
             main.set_renderer_mode("software")
             preview.set_renderer_mode("software")
             preview.close()
+            window.close()
+
+
+def test_badge_shows_actual_context_name_and_menu(app):
+    with patch("studio.rendering.gpu._use_opengl_canvas", return_value=True), patch("studio.rendering.gpu.Canvas", FakeCanvas):
+        view = AssetViewport()
+        window, badge = _window_with_badge(view)
+        try:
+            view.graphics_renderer = 'Example GPU 123'
+            badge.set_backend('OpenGL indexed renderer')
+            assert badge.text() == 'GPU — Example GPU 123'
+            badge.click()
+            assert [a.text() for a in badge._menu.actions()][:2] == [
+                'GPU (current device)', 'Software']
+            assert view.renderer_mode == 'gpu'
+        finally:
+            view.set_renderer_mode('software')
             window.close()

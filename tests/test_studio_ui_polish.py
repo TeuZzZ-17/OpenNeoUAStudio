@@ -264,7 +264,7 @@ def test_change_set_menu_lists_the_sets_and_drives_the_hidden_combo(app, tmp_pat
         menu = install_set_menu(window, window.menuBar())
         menu.aboutToShow.emit()
         labels = [a.text() for a in menu.actions() if not a.isSeparator()]
-        assert labels == ['Set 1', 'Set 2', 'Browse…']
+        assert labels == ['Set 1', 'Set 2', 'Browse']
         assert [a.isChecked() for a in menu.actions() if a.isCheckable()] == [True, False]
         changes = []
         window._set_combo.currentIndexChanged.connect(lambda _i: changes.append(window._set_combo.currentData()))

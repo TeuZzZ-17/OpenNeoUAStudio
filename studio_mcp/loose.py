@@ -59,31 +59,51 @@ class LooseModel:
     """In-memory working copy of one object of a loose BASE (the root object unless owner_path says otherwise)."""
 
     def __init__(self, base_path: Path, owner_path: str = "", set_hint: str = "", writable: bool = True):
-        self.base_path = base_path
-        self.writable = writable
-        self.set_hint = set_hint
         setbas = Path(core._set_info(set_hint or "set1")["set_bas"])
         DirectoryIndex.clear_cache()   # see files written since the last call (see core.load_family)
-        self.family = load_asset_family(base_path, setbas=setbas)
-        if self.family.root_object is None:
-            raise core.McpToolError(f"Could not load {base_path.name}: {'; '.join(self.family.warnings[:3])}")
-        candidates = [o for o in self.family.all_objects() if o.skeleton is not None]
+        family = load_asset_family(base_path, setbas=setbas)
+        if family.root_object is None:
+            raise core.McpToolError(f"Could not load {base_path.name}: {'; '.join(family.warnings[:3])}")
+        candidates = [o for o in family.all_objects() if o.skeleton is not None]
         if owner_path:
             candidates = [o for o in candidates if o.owner_path == owner_path]
         if not candidates:
             raise core.McpToolError("No object with a skeleton found" + (f" at {owner_path!r}" if owner_path else ""))
-        self.fam_obj = candidates[0]
+        self.set_hint = set_hint
+        self._guard = core.ensure_writable
+        self._attach(base_path, family, candidates[0], writable)
+
+    @classmethod
+    def from_family(cls, family, fam_obj, *, writable: bool = True) -> "LooseModel":
+        """Work on a model Studio already holds in memory, wherever the person keeps it.
+
+        The folder limits of the MCP protect the game from agents; here a person chose
+        the file. A model inside SET.BAS can be edited for a preview, never written.
+        """
+        self = cls.__new__(cls)
+        self.set_hint = ""
+        self._guard = Path
+        self._attach(Path(family.base_path), family, fam_obj, writable, needs_loose=writable)
+        return self
+
+    def _attach(self, base_path: Path, family, fam_obj, writable: bool, needs_loose: bool = True) -> None:
+        self.base_path = base_path
+        self.writable = writable
+        self.family = family
+        self.fam_obj = fam_obj
         self.owner_path = self.fam_obj.owner_path
         self.model = self.fam_obj.skeleton
         self.blocks = self.fam_obj.base_object.ades
         ref = self.fam_obj.skeleton_ref
-        if ref is None or ref.path is None or ref.source != "loose":
-            raise core.McpToolError("The skeleton does not come from a loose file: use studio_export_model first")
-        self.sklt_path = Path(str(ref.path)).resolve()
+        self.sklt_path = None
+        if needs_loose:
+            if ref is None or ref.path is None or ref.source != "loose":
+                raise core.McpToolError("The skeleton does not come from a loose file: use studio_export_model first")
+            self.sklt_path = Path(str(ref.path)).resolve()
         if writable:
-            core.ensure_writable(self.base_path)
-            core.ensure_writable(self.sklt_path)
-        self.base_bytes = base_path.read_bytes()
+            self._guard(self.base_path)
+            self._guard(self.sklt_path)
+        self.base_bytes = base_path.read_bytes() if needs_loose else b""
         self._orig_points = [tuple(p) for p in self.model.points]
         self._orig_polygons = [list(p) for p in self.model.polygons]
         self._orig_blocks = copy.deepcopy([(b.atts, b.olpl) for b in self.blocks])
@@ -445,7 +465,7 @@ class LooseModel:
                 if source.exists():
                     os.replace(source, target)
             for name in self.extra_files:
-                target = core.ensure_writable(self.base_path.parent / name)
+                target = self._guard(self.base_path.parent / name)
                 os.replace(stage / name, target)
                 touched.append(target)
         finally:
