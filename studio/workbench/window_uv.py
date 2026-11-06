@@ -649,8 +649,8 @@ class _UvTexturesMixin:
         elif not loops:
             if skipped and skipped[0][1] == "unmapped":
                 message = (
-                    "This polygon has no UV mapping. Open Tools > "
-                    "Mapping Repair first.")
+                    "This polygon has no UV mapping (a material "
+                    "block must be assigned first).")
             else:
                 reason = skipped[0][1] if skipped else "UV data unavailable"
                 message = f"This polygon is not editable: {reason}."

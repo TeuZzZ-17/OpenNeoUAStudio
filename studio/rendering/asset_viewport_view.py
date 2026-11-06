@@ -98,10 +98,6 @@ class _ViewControlsMixin:
         self._invalidate_indexed_view_cache()
         self.update()
 
-    def set_show_sen(self, enabled: bool) -> None:
-        self._show_sen = enabled
-        self.update()
-
     def set_show_axes(self, enabled: bool) -> None:
         self._show_axes = enabled
         self.update()
@@ -148,7 +144,6 @@ class _ViewControlsMixin:
             self._snapshot_saved_state = {
                 "camera": camera,
                 "mode": self._mode,
-                "show_sen": self._show_sen,
                 "show_axes": self._show_axes,
                 "show_grid": self._show_grid,
                 "show_wire_overlay": self._show_wire_overlay,
@@ -163,7 +158,6 @@ class _ViewControlsMixin:
         self._snapshot_background = (QColor(background)
                                      if background is not None else None)
         self._mode = "textured"
-        self._show_sen = False
         self._show_axes = False
         self._show_grid = False
         self._show_wire_overlay = False
@@ -178,7 +172,6 @@ class _ViewControlsMixin:
         if state is not None:
             self._set_camera_state(state["camera"])
             self._mode = state["mode"]
-            self._show_sen = state["show_sen"]
             self._show_axes = state["show_axes"]
             self._show_grid = state["show_grid"]
             self._show_wire_overlay = state["show_wire_overlay"]
@@ -205,7 +198,6 @@ class _ViewControlsMixin:
         self._snapshot_show_guides = bool(visible)
         state = self._snapshot_saved_state
         if self._snapshot_active and state is not None:
-            self._show_sen = state["show_sen"] if visible else False
             self._show_axes = state["show_axes"] if visible else False
             self._show_grid = state["show_grid"] if visible else False
             self._show_wire_overlay = (

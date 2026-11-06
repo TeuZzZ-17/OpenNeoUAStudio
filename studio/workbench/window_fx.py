@@ -707,6 +707,27 @@ class _FxElementsMixin:
             "Scale and orientation are unchanged.",
             12000)
 
+    def _deselect_all_fx_elements(self) -> None:
+        """Remove every FX element from the selection; other geometry stays selected."""
+
+        elements = tuple(self._fx_elements)
+        if not elements or self.viewport.paste_preview_active:
+            return
+        fx_polys = {poly_id for element in elements for poly_id in element.poly_ids}
+        self._selected_polys -= fx_polys
+        self._mirror_select_source_polys -= fx_polys
+        self._selected_poly = min(self._selected_polys, default=None)
+        self.viewport.set_selected_polygon(self._selected_poly)
+        self.viewport.set_highlight_polys(self._selected_polys)
+        session = self.viewport.edit_session
+        if session is not None:
+            fx_vertices = {index for element in elements for index in element.vertex_indices}
+            self.viewport.select_edit_vertices(sorted(session.selection - fx_vertices))
+        self._sync_poly_id_control()
+        self._fill_polygon_inspector(self._selected_poly)
+        self._sync_edit_action_states()
+        self.statusBar().showMessage("FX elements deselected.", 4000)
+
     def _select_all_fx_elements(self) -> None:
         """Select every FX element of the current model and nothing else."""
 
@@ -746,7 +767,7 @@ class _FxElementsMixin:
                  for index in element.vertex_indices}))
         self._sync_poly_id_control()
         self._fill_polygon_inspector(self._selected_poly)
-        self._update_repair_buttons()
+        self._update_material_buttons()
         if len(elements) > 1:
             # The list cannot name a single element for this selection.
             self.fx_combo.blockSignals(True)
@@ -786,7 +807,7 @@ class _FxElementsMixin:
         self.viewport.set_highlight_polys(self._selected_polys)
         self._sync_poly_id_control()
         self._fill_polygon_inspector(primary_poly)
-        self._update_repair_buttons()
+        self._update_material_buttons()
         self.statusBar().showMessage(
             f"Selected {element.fx_name} polyIDs "
             f"{','.join(str(poly_id) for poly_id in element.poly_ids)} "

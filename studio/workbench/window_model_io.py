@@ -1,5 +1,5 @@
 """AssemblyWindow mixin: model files: bundle paths, save / save as / overwrite, SKLT writing and
-Blender (ONUA3D) import/export."""
+the .ONUA archive import/export."""
 
 from __future__ import annotations
 
@@ -324,7 +324,7 @@ class _ModelFilesMixin:
             labels, 0, False)
         return label_to_owner.get(chosen) if accepted else None
 
-    def _blender_export_object(self):
+    def _onua_export_object(self):
         family = self._family
         if family is None or family.base_asset is None or family.root_object is None:
             return None
@@ -336,73 +336,68 @@ class _ModelFilesMixin:
             return self._owner_to_obj.get(next(iter(self._base_entry_names)))
         return family.root_object
 
-    def _import_onua3d(self) -> None:
-        """Open a validated position-only import as a new Complete Asset Family."""
-        from studio.exchange.onua3d import prepare_onua3d
+    def _import_onua_archive(self) -> None:
+        """Unpack a .ONUA archive into a folder and open its model."""
+        from studio.assets.family import load_asset_family
+        from studio.exchange.onua_archive import FILE_FILTER, import_onua
 
         source, _ = QFileDialog.getOpenFileName(
-            self, "Import OpenNeoUA 3D", str(self._last_directory),
-            "OpenNeoUA 3D package (*.onua3d)")
+            self, "Import Whole Model from Archive (.ONUA)", str(self._last_directory), FILE_FILTER)
         if not source:
             return
+        if not self._confirm_discard_geometry():
+            return
+        target = QFileDialog.getExistingDirectory(
+            self, "Choose an empty folder to unpack the archive into",
+            str(self._last_directory))
+        if not target:
+            return
         try:
-            with prepare_onua3d(source) as prepared:
-                if not self._confirm_discard_geometry():
-                    return
-                target = QFileDialog.getExistingDirectory(
-                    self,
-                    "Choose empty Asset Family destination folder",
-                    str(self._last_directory),
-                )
-                if not target:
-                    return
-                result = prepared.materialize(target)
+            base_path = import_onua(source, target)
+            family = load_asset_family(base_path, isolated_root=Path(target))
         except (AssetFamilyPackageError, OSError, ValueError) as exc:
-            QMessageBox.critical(self, "OpenNeoUA 3D import failed", str(exc))
+            QMessageBox.critical(self, "Archive import failed", str(exc))
             return
         self._overrides = {}
         self._trial_names = set()
         self._kept_names = set()
         self._skipped_names = set()
-        self._last_directory = result.output_root
-        self._set_family(result.family)
-        self._notify(
-            f"Imported {Path(source).name}: {result.changed_points} SKLT point(s) updated. "
-            f"Complete Asset Family saved to {target}.", 15000)
+        self._last_directory = Path(target)
+        self._set_family(family)
+        self._notify(f"Imported {Path(source).name}. Files unpacked to {target}.", 12000)
 
-    def _export_to_blender(self) -> None:
-        """Export the loaded BASE root, including KIDS, through bundle staging."""
-        from studio.exchange.onua3d import write_onua3d
+    def _export_onua_archive(self) -> None:
+        """Pack the loaded model and every resource it needs into one .ONUA file."""
+        from studio.exchange.onua_archive import FILE_FILTER, ONUA_SUFFIX, write_onua
 
         family = self._family
-        obj = self._blender_export_object()
+        obj = self._onua_export_object()
         if obj is None or self.viewport.paste_preview_active:
-            self._notify("Load a BASE family before exporting OpenNeoUA 3D.", 5000)
+            self._notify("Load a BASE family before exporting an archive.", 5000)
             return
         stem = re.sub(r'[^A-Za-z0-9_.-]', "_", obj.base_object.name or "MODEL")
         stem = Path(stem).stem or "MODEL"
         output, _ = QFileDialog.getSaveFileName(
-            self, "Export OpenNeoUA 3D", str(self._last_directory / (stem + ".onua3d")),
-            "OpenNeoUA 3D package (*.onua3d)")
+            self, "Export Whole Model as Archive (.ONUA)",
+            str(self._last_directory / (stem + ONUA_SUFFIX)), FILE_FILTER)
         if not output:
             return
-        target = Path(output).with_suffix(".onua3d")
+        target = Path(output).with_suffix(ONUA_SUFFIX)
         try:
             relative = self._bundle_skeleton_relative_path(obj)
-            with tempfile.TemporaryDirectory(prefix="OpenNeoUAStudio_onua3d_") as temp:
+            with tempfile.TemporaryDirectory(prefix="OpenNeoUAStudio_onua_") as temp:
                 root = Path(temp)
                 exported = self._write_model_files(
                     obj.owner_path, family, obj, root / relative,
                     root / (stem + ".BASE"), ask_replace=False,
-                    staged_consumer=lambda staged, validation: write_onua3d(
-                        staged, target, validation=validation,
-                        source_owner_path=obj.owner_path))
+                    staged_consumer=lambda staged, validation: write_onua(
+                        staged, target, validation=validation))
         except (AssetFamilyPackageError, OSError, ValueError) as exc:
-            QMessageBox.critical(self, "OpenNeoUA 3D export failed", str(exc))
+            QMessageBox.critical(self, "Archive export failed", str(exc))
             return
         if exported:
             self._last_directory = target.parent
-            self._notify(f"Exported {target.name} as an OpenNeoUA 3D package.", 12000)
+            self._notify(f"Exported {target.name}: the model and all its resources.", 12000)
 
     def _save_model_as(self) -> None:
         owner = self._export_owner_for_selection()
@@ -1081,8 +1076,6 @@ class _ModelFilesMixin:
             del self._texture_original[key]
         for key in self._owner_vanm_uv_keys(owner):
             del self._vanm_uv_original[key]
-        self._pending_repairs = []
-        self._repair_plan = None
         self._sync_geometry_save_controls()
         self._update_editor_status()
         self._sync_uv_add_vertex_button()

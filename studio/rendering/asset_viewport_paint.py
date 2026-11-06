@@ -523,9 +523,6 @@ class _PaintingMixin:
                 or self._model_nudge_before is not None):
             self._draw_precision_guides(painter, target, camera)
 
-        if not clean and self._show_sen:
-            self._draw_sen(painter, target, camera)
-
         if not clean and self._mode == "textured" and self._diagnostics \
                 and self._show_diag_overlay:
             self._draw_diagnostics_overlay(painter)
@@ -1086,27 +1083,6 @@ class _PaintingMixin:
                    for j in range(len(face.vertices))]
             return uvs
         return face.uvs
-
-    def _draw_sen(self, painter: QPainter, target: QRectF,
-                  camera: dict) -> None:
-        painter.setPen(QPen(QColor(255, 170, 60, 200), 1.4,
-                            Qt.PenStyle.DashLine))
-        painter.setBrush(Qt.BrushStyle.NoBrush)
-        for box in self._sen_boxes:
-            pts = [self._project(self._camera_vertex(p, camera),
-                                 target, camera) for p in box]
-            if len(pts) == 8:
-                edges = [(0, 1), (1, 3), (3, 2), (2, 0),
-                         (4, 5), (5, 7), (7, 6), (6, 4),
-                         (0, 4), (1, 5), (2, 6), (3, 7)]
-                for a, b in edges:
-                    painter.drawLine(pts[a], pts[b])
-            else:
-                for point in pts:
-                    painter.drawEllipse(point, 3.0, 3.0)
-        # The orange volume is self-explanatory.  The old bottom-left label
-        # covered textured FX and fought with the status bar, so keep the
-        # viewport clean and expose the feature through View > SEN2 volume.
 
     def _draw_axes(self, painter: QPainter, target: QRectF,
                    camera: dict) -> None:

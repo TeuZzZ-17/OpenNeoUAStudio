@@ -17,6 +17,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 import re
 
+from studio.assets.visproto import normalize_base_name
+
 STATE_WORDS = ("normal", "fire", "wait", "dead", "megadeth", "genesis", "create")
 _STATE_TOKEN = re.compile(r"(?<![a-z0-9])(" + "|".join(STATE_WORDS) + r")(?![a-z0-9])", re.I)
 # A folder search must stay near the model: one game holds thousands of BASE files.
@@ -44,7 +46,9 @@ class StateCandidate:
 
     @property
     def key(self) -> str:
-        return (self.base_name or str(self.path.resolve())).casefold()
+        # Scripts write 'VP_X.base', the archive objects are called 'VP_X': one key for both.
+        return (normalize_base_name(self.base_name) if self.base_name
+                else str(self.path.resolve()).casefold())
 
 
 def state_word(name: str) -> str:
@@ -122,7 +126,7 @@ def states_in_entities(install, set_number, base_path, base_name) -> list[StateC
 
     def is_current(choice):
         if base_name and choice.base_name:
-            return choice.base_name.casefold() == base_name.casefold()
+            return normalize_base_name(choice.base_name) == normalize_base_name(base_name)
         return (not choice.base_name and base_path is not None
                 and same_path(choice.path, base_path))
 

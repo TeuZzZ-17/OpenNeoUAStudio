@@ -108,7 +108,7 @@ class SnapshotStudioWindow(EntityListMixin, SetBasMixin, AssemblyWindow):
 
         self.edit_menu.menuAction().setVisible(False)
         self.file_export_menu.menuAction().setVisible(False)
-        self.mapping_repair_action.setVisible(False)
+        self.materials_action.setVisible(False)
         self.integrated_editors_separator.setVisible(False)
         for action in (
                 self.wireframe_editor_action,

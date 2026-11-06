@@ -7,7 +7,7 @@ from contextlib import contextmanager
 from functools import wraps
 
 from PySide6.QtCore import (
-    QEasingCurve, QEventLoop, QLocale, QPointF, QPropertyAnimation, QSize, Qt, QTimer, Signal,
+    QEasingCurve, QEvent, QEventLoop, QLocale, QPointF, QPropertyAnimation, QSize, Qt, QTimer, Signal,
 )
 from PySide6.QtGui import (
     QAction,
@@ -355,11 +355,27 @@ class ResponsiveButtonGrid(QWidget):
         for column in range(columns):
             self._layout.setColumnStretch(column, 1)
         self._columns = columns
+        self._fit_height()
+
+    def _fit_height(self) -> None:
+        """Rows are as tall as the buttons really are (not as the default style guessed)."""
+        self._layout.invalidate()
         self._layout.activate()
         height = self._layout.sizeHint().height()
         self.setMinimumHeight(height)
         self.setMaximumHeight(height)
         self.updateGeometry()
+
+    def showEvent(self, event) -> None:  # noqa: N802
+        # The theme style is applied after the grid is built: measure again once it is shown,
+        # otherwise the buttons are taller than the row and get cut in half.
+        self._fit_height()
+        super().showEvent(event)
+
+    def event(self, event) -> bool:  # noqa: N802
+        if event.type() in (QEvent.Type.StyleChange, QEvent.Type.FontChange, QEvent.Type.Polish):
+            self._fit_height()
+        return super().event(event)
 
     def resizeEvent(self, event) -> None:  # noqa: N802
         self._relayout(self._best_columns(event.size().width()))

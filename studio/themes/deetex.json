@@ -1,0 +1,47 @@
+{
+  "id": "deetex",
+  "name": "Deetex Mercury Empire",
+  "description": "Dedicated to Deetex: quicksilver steel with Redshirt red. Pairs with the Deetex cursors.",
+  "mode": "dark",
+  "order": 26,
+  "palette": {
+    "Window": "#1c2128",
+    "Base": "#282d34",
+    "AlternateBase": "#373c43",
+    "Button": "#282d34",
+    "Mid": "#555a60",
+    "Midlight": "#40454c",
+    "Light": "#6d7278",
+    "Dark": "#111418",
+    "WindowText": "#e6ebf0",
+    "Text": "#e6ebf0",
+    "ButtonText": "#e6ebf0",
+    "ToolTipBase": "#30353c",
+    "ToolTipText": "#e6ebf0",
+    "Highlight": "#c8283c",
+    "HighlightedText": "#ffffff",
+    "Disabled.Text": "#81868c",
+    "Disabled.WindowText": "#81868c",
+    "Disabled.ButtonText": "#81868c"
+  },
+  "tone": {
+    "Accent": "#ff5c70"
+  },
+  "lists": {
+    "Hover": "#58232f",
+    "Selected": "#c8283c",
+    "DependencySelected": "#285445",
+    "Problem": "#6a3236",
+    "ModifiedSelected": "#225274",
+    "ModifiedHover": "#204057"
+  },
+  "syntax": {
+    "key": "#ff7d8c",
+    "function": "#cfd8e0",
+    "number": "#9fd3ff",
+    "string": "#e7c2a0",
+    "comment": "#919ca9",
+    "line_number": "#7a8590",
+    "error": "#5a2a30"
+  }
+}

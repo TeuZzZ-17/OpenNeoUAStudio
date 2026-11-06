@@ -199,7 +199,7 @@ def ui_check(app, output):
     win.resize(1600,1000); win.show(); app.processEvents(); win._icons.stop()
     view = win.view
     assert view.renderer is not None and not view._software_fallback
-    assert win.renderer_badge.text() == 'GPU'
+    assert win.renderer_badge.state_label == 'GPU'
     def frame():
         view._canvas.repaint()
         view._canvas.makeCurrent(); GL.glFinish(); view._canvas.doneCurrent()
