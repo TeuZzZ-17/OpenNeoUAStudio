@@ -34,9 +34,8 @@ class SelectedModelBoundsTests(unittest.TestCase):
             labels = [
                 action.text() for action in window.view_menu.actions()
                 if not action.isSeparator()
-            ][:8]
+            ][:7]
             self.assertEqual(labels, [
-                "SEN2 volume",
                 "Wire overlay",
                 "Backface cull",
                 "Axes",
@@ -45,34 +44,27 @@ class SelectedModelBoundsTests(unittest.TestCase):
                 "Mapping diagnostics",
                 "Vanilla distance fade",
             ])
-            self.assertFalse(window.sen_check.isChecked())
             self.assertTrue(window.wire_check.isChecked())
-            self.assertFalse(window.viewport._show_sen)
             self.assertTrue(window.viewport._show_wire_overlay)
         finally:
             window.close()
 
-    def test_snapshot_hides_and_restores_sen2_and_wire_overlay(self):
+    def test_snapshot_hides_and_restores_wire_overlay(self):
         viewport = AssetViewport()
-        viewport.set_show_sen(True)
         viewport.set_wire_overlay(True)
 
         viewport.begin_snapshot_mode()
         state = viewport._snapshot_saved_state
         self.assertIsNotNone(state)
         self.assertNotIn("show_owner_bbox", state)
-        self.assertFalse(viewport._show_sen)
         self.assertFalse(viewport._show_wire_overlay)
 
         viewport.set_snapshot_guides_visible(True)
-        self.assertTrue(viewport._show_sen)
         self.assertTrue(viewport._show_wire_overlay)
         viewport.set_snapshot_guides_visible(False)
-        self.assertFalse(viewport._show_sen)
         self.assertFalse(viewport._show_wire_overlay)
 
         viewport.end_snapshot_mode()
-        self.assertTrue(viewport._show_sen)
         self.assertTrue(viewport._show_wire_overlay)
         viewport.close()
 
@@ -83,7 +75,7 @@ class SelectedModelBoundsTests(unittest.TestCase):
             state = viewport._snapshot_saved_state
             self.assertIsNotNone(state)
             self.assertEqual(set(state), {
-                "camera", "mode", "show_sen", "show_axes", "show_grid",
+                "camera", "mode", "show_axes", "show_grid",
                 "show_wire_overlay", "mapping_diagnostics",
                 "show_diag_overlay",
             })
@@ -91,21 +83,17 @@ class SelectedModelBoundsTests(unittest.TestCase):
             viewport.end_snapshot_mode()
             viewport.close()
 
-    def test_snapshot_guides_restore_sen_and_wire_preferences(self):
+    def test_snapshot_guides_restore_wire_preference(self):
         viewport = AssetViewport()
-        viewport.set_show_sen(False)
         viewport.set_wire_overlay(True)
         viewport.begin_snapshot_mode()
         try:
             viewport.set_snapshot_guides_visible(True)
-            self.assertFalse(viewport._show_sen)
             self.assertTrue(viewport._show_wire_overlay)
             viewport.set_snapshot_guides_visible(False)
-            self.assertFalse(viewport._show_sen)
             self.assertFalse(viewport._show_wire_overlay)
         finally:
             viewport.end_snapshot_mode()
-            self.assertFalse(viewport._show_sen)
             self.assertTrue(viewport._show_wire_overlay)
             viewport.close()
 

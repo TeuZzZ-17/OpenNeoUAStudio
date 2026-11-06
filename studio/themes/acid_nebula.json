@@ -1,0 +1,47 @@
+{
+  "id": "acid_nebula",
+  "name": "Acid Nebula",
+  "description": "Deep violet space with toxic lime and magenta.",
+  "mode": "dark",
+  "order": 27,
+  "palette": {
+    "Window": "#1a0f2e",
+    "Base": "#271c3b",
+    "AlternateBase": "#372c4b",
+    "Button": "#271c3b",
+    "Mid": "#564b69",
+    "Midlight": "#403654",
+    "Light": "#6f6582",
+    "Dark": "#10091c",
+    "WindowText": "#efe6ff",
+    "Text": "#efe6ff",
+    "ButtonText": "#efe6ff",
+    "ToolTipBase": "#2f2443",
+    "ToolTipText": "#efe6ff",
+    "Highlight": "#a4e61f",
+    "HighlightedText": "#14101c",
+    "Disabled.Text": "#847a96",
+    "Disabled.WindowText": "#847a96",
+    "Disabled.ButtonText": "#847a96"
+  },
+  "tone": {
+    "Accent": "#ff3fd0"
+  },
+  "lists": {
+    "Hover": "#4a5a29",
+    "Selected": "#a4e61f",
+    "DependencySelected": "#274849",
+    "Problem": "#69273a",
+    "ModifiedSelected": "#214977",
+    "ModifiedHover": "#1e335b"
+  },
+  "syntax": {
+    "key": "#ff6fe0",
+    "function": "#a4e61f",
+    "number": "#7df9ff",
+    "string": "#ffd36b",
+    "comment": "#9888b9",
+    "line_number": "#7a68a0",
+    "error": "#5e1a40"
+  }
+}

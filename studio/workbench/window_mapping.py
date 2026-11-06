@@ -24,13 +24,9 @@ from studio.assets.family import (
 from studio.assets.mapping import (
     build_material_block_clipboard,
     delete_material_block,
-    eligible_blocks,
     MappingEditError,
     MappingIndex,
     paste_material_block,
-)
-from studio.ui.uv_editor import (
-    UVLoop,
 )
 from studio.ui.widgets import (
     draw_uv_polygon as _draw_uv_polygon,
@@ -59,7 +55,7 @@ class _PolygonMappingMixin:
             )
 
     def _update_mapping_diagnostics_summary(self) -> None:
-        """Refresh the Mapping Repair summary from the shared index only."""
+        """Refresh the Materials mapping summary from the shared index only."""
 
         label = getattr(self, "mapping_diagnostics_label", None)
         if label is None:
@@ -128,16 +124,7 @@ class _PolygonMappingMixin:
         self._mapping_index = (MappingIndex(self._workbench_obj)
                                if self._workbench_obj else None)
         self._update_mapping_diagnostics_summary()
-        self._repair_plan = None
-        self.repair_preview.clear()
         self._fill_blocks_list(family)
-        self.repair_target_combo.clear()
-        if self._workbench_obj is not None:
-            for index, block in eligible_blocks(self._workbench_obj):
-                tex = block.texture.name if block.texture else f"block {index}"
-                self.repair_target_combo.addItem(
-                    f"#{index} {tex} ({len(block.atts)} entries)", index
-                )
         if self._selected_poly is not None and self._mapping_index is not None \
                 and self._selected_poly < self._mapping_index.poly_count:
             self.viewport.set_selected_polygon(self._selected_poly)
@@ -146,7 +133,7 @@ class _PolygonMappingMixin:
             self._selected_poly = None
             self._fill_polygon_inspector(None)
         self._sync_poly_id_control()
-        self._update_repair_buttons()
+        self._update_material_buttons()
 
     def _fill_blocks_list(self, family: AssetFamily) -> None:
         self.blocks_list.clear()
@@ -170,7 +157,7 @@ class _PolygonMappingMixin:
     def _on_block_selected(self, row: int) -> None:
         if row < 0 or self._workbench_obj is None:
             self.viewport.set_highlight_polys(set())
-            self._update_repair_buttons()
+            self._update_material_buttons()
             return
         item = self.blocks_list.item(row)
         index = item.data(Qt.ItemDataRole.UserRole)
@@ -182,7 +169,7 @@ class _PolygonMappingMixin:
             f"Block #{index} {tex}: {len(ids)} polygon(s) highlighted"
         )
         self._draw_block_uv_islands(index)
-        self._update_repair_buttons()
+        self._update_material_buttons()
 
     def _current_material_block_index(self) -> int | None:
         item = self.blocks_list.currentItem()
@@ -218,8 +205,6 @@ class _PolygonMappingMixin:
         if self._workbench_obj is None or self._family is None \
                 or owner != self._workbench_obj.owner_path:
             return "select an editable model owner first"
-        if self._pending_repairs:
-            return "export or revert pending Mapping Repairs first"
         if any(key[0] == owner for key in self._texture_original):
             return "save or reset pending material previews first"
         return ""
@@ -250,6 +235,8 @@ class _PolygonMappingMixin:
             self.viewport.refresh_family_materials()
             self._rebuild_workbench(family, owner)
             self._refresh_fx_elements()
+            # New or removed animated materials (Genesis): Play must follow.
+            self._sync_animation_controls()
             self.viewport.set_selected_owner(owner)
             self.viewport.set_selected_polygon(self._selected_poly)
             self.viewport.set_highlight_polys(self._selected_polys)
@@ -317,7 +304,7 @@ class _PolygonMappingMixin:
             f"Copied material #{block_index} {texture} with "
             f"{len(self._material_clipboard.resources)} dependency snapshot(s).",
             7000)
-        self._update_repair_buttons()
+        self._update_material_buttons()
 
     def _paste_material_block(self) -> None:
         if not self._require_editing("Paste Material"):
@@ -383,7 +370,7 @@ class _PolygonMappingMixin:
             return
         self._notify(
             f"Added empty compatible AMESH slot #{result.block_index}. "
-            "Use Mapping Repair to assign polygons; Undo is available.", 9000)
+            "Undo is available.", 9000)
 
     def _delete_material_block(self) -> None:
         if not self._require_editing("Delete Material"):
@@ -461,11 +448,9 @@ class _PolygonMappingMixin:
         self.viewport.set_selected_polygon(self._selected_poly)
         self.viewport.set_highlight_polys(self._selected_polys)
         self._sync_poly_id_control()
-        self._repair_plan = None
-        self.repair_preview.clear()
         if self._mapping_index is not None:
             self._fill_polygon_inspector(self._selected_poly)
-        self._update_repair_buttons()
+        self._update_material_buttons()
         if self._mapping_index is not None:
             status = (self._mapping_index.status(self._selected_poly)
                       if self._selected_poly is not None else "none")
@@ -557,111 +542,14 @@ class _PolygonMappingMixin:
         self._uv_ctx = None
         self._uv_contexts = {}
         self._uv_phase_links = {}
-        obj = self._owner_to_obj.get(element.owner_path)
-        model = getattr(obj, "skeleton", None)
-        loops, keys = [], set()
-        phase_shapes = {}
-        image = None
-        for poly_id, block_index, atts_index, block, material in self._fx_face_records(element):
-            if model is None or not 0 <= poly_id < len(model.polygons):
-                continue
-            vertex_count = len(model.polygons[poly_id])
-            animation_entry = self._animation_for_name(material) if block.texture and block.texture.kind == "bmpanim" else None
-            if animation_entry is not None:
-                name, animation = animation_entry
-                # UV groups are authored phases, not the current playback frame.
-                # Repeated frames share one group and must edit it only once.
-                for frame in animation.frames:
-                    group = frame.texcoords_id
-                    if not 0 <= group < len(animation.texcoord_groups):
-                        continue
-                    key = ("@VANM", name, group)
-                    if key in keys:
-                        continue
-                    keys.add(key)
-                    uvs = list(animation.texcoord_groups[group])
-                    editable = self._editing_allowed() and len(uvs) == vertex_count and self._animation_uv_writable(name, group)
-                    bitmap = animation.bitmap_names[frame.frame_id] if 0 <= frame.frame_id < len(animation.bitmap_names) else ""
-                    shape = (name, bitmap.casefold(), tuple(sorted(uvs)))
-                    if editable:
-                        self._uv_contexts[key] = (obj, None, name, group, poly_id)
-                    # Rotated windings of the same footprint are animation
-                    # samples of one phase. Keep their corner correspondence.
-                    if shape in phase_shapes and len(set(uvs)) == len(uvs):
-                        primary, primary_uvs = phase_shapes[shape]
-                        self._uv_phase_links.setdefault(primary, []).append(
-                            (key, tuple(primary_uvs.index(uv) for uv in uvs)))
-                        continue
-                    phase_shapes[shape] = (key, uvs)
-                    if image is None and 0 <= frame.frame_id < len(animation.bitmap_names):
-                        image = self._texture_qimage(animation.bitmap_names[frame.frame_id])
-                    loops.append(UVLoop(key, poly_id, uvs, editable))
-                    if editable:
-                        self._uv_contexts[key] = (obj, None, name, group, poly_id)
-                continue
-            key = (element.owner_path, block_index, atts_index)
-            if key in keys or not 0 <= atts_index < len(block.olpl):
-                continue
-            keys.add(key)
-            uvs = list(block.olpl[atts_index])
-            editable = bool(self._editing_allowed() and element.editable
-                            and len(uvs) == vertex_count
-                            and (block.class_id or "").casefold() in ("amesh.class", "area.class"))
-            if image is None:
-                image = self._texture_qimage(material)
-            loops.append(UVLoop(key, poly_id, uvs, editable))
-            if editable:
-                context = (obj, block, block_index, atts_index, poly_id)
-                self._uv_contexts[key] = context
-                if self._uv_ctx is None:
-                    self._uv_ctx = context
-        self.uv_editor.set_loops(
-            image, loops,
-            f"{len(loops)} UV phases shown together by default. Use the phase "
-            "selector to isolate one phase; drag to move, wheel to zoom, "
-            "middle drag to pan. Yellow and cyan identify the phases.")
-        self._sync_uv_add_vertex_button()
-
-    def _fill_fx_inspector(self, element: FxElement, poly_id: int) -> None:
-        obj = self._owner_to_obj.get(element.owner_path)
-        model = getattr(obj, "skeleton", None)
-        polygon = model.polygons[poly_id] if model is not None else ()
-        lines = [
-            f"polyID {poly_id} | {len(polygon)} vertices | POO2 {list(polygon)}",
-            f"FX element: {element.fx_name} | source: {element.source_kind}",
-            f"FX polyIDs: {list(element.poly_ids)}",
-            f"UV source: {element.uv_source} | "
-            + (
-                "editable VANM group"
-                if element.source_kind == "VANM"
-                else
-                "editable direct OLPL"
-                if element.editable and element.source_kind == "direct"
-                and element.uv_source == "OLPL"
-                else "UV coordinates unavailable"),
-        ]
-        labels = []
-        for face_poly, block_index, atts_index, block, material in \
-                self._fx_face_records(element):
-            labels.append(material)
-            lines.append(
-                f"poly #{face_poly} | block #{block_index} "
-                f"({block.class_id}) | texture: {material} | "
-                f"ATTS #{atts_index}")
-            if element.source_kind == "VANM" \
-                    or (block.texture is not None
-                        and block.texture.kind == "bmpanim"):
-                frame = self.viewport.current_animation_frame_data(
-                    element.owner_path, block_index)
-                if frame is not None:
-                    lines.append(f"current VANM: {frame[2]}")
+        labels = [material for _poly, _block_index, _atts_index, _block, material
+                  in self._fx_face_records(element)]
         label = ", ".join(dict.fromkeys(value for value in labels if value))
         self.model_texture_label.setText(
             "Current FX Texture: " + (label or "-"))
         self.load_texture_button.setToolTip(
             "Replace the selected FX segment texture or VANM binding without "
             "changing its geometry, winding or animation data.")
-        self._set_polygon_object_info(lines)
 
     def _fill_polygon_inspector(self, poly_id: int | None) -> None:
         self._update_uv_editor(poly_id)
@@ -671,13 +559,10 @@ class _PolygonMappingMixin:
         self.load_texture_button.setEnabled(False)
         if poly_id is None or self._workbench_obj is None \
                 or self._workbench_obj.skeleton is None:
-            self._set_polygon_object_info([])
             return
         obj = self._workbench_obj
         skeleton = obj.skeleton
         if not (0 <= poly_id < len(skeleton.polygons)):
-            self._set_polygon_object_info(
-                [f"polygon #{poly_id}: out of range"])
             return
 
         element = self._fx_element_for_polygon(poly_id)
@@ -685,10 +570,6 @@ class _PolygonMappingMixin:
             self._fill_fx_inspector(element, poly_id)
             return
 
-        polygon = skeleton.polygons[poly_id]
-        lines = [
-            f"polyID {poly_id} | {len(polygon)} vertices | "
-            f"POO2 {list(polygon)}"]
         requested = self._resolved_geometry_polys() or {poly_id}
         texture_selection = classify_texture_assignment(
             self._mapping_index, requested)
@@ -700,11 +581,7 @@ class _PolygonMappingMixin:
             "segment(s). Clicking the button explains any selected segment "
             "that has no replaceable texture binding.")
 
-        status = self._mapping_index.status(poly_id)
-        lines.append(f"mapping: {status.upper()}")
-        if status == "unmapped":
-            lines.append("No ATTS material: polygon is invisible in-game.")
-            self._set_polygon_object_info(lines)
+        if self._mapping_index.status(poly_id) == "unmapped":
             return
 
         texture_names = []
@@ -712,15 +589,11 @@ class _PolygonMappingMixin:
             block = ref.block
             tex = block.texture.name if block.texture else "-"
             texture_names.append(tex)
-            lines.append(
-                f"block #{ref.block_index} | texture: {tex} | "
-                f"ATTS #{ref.atts_index}")
             uvs = (block.olpl[ref.atts_index]
                    if ref.atts_index < len(block.olpl) else [])
             self._draw_uv_overlay(tex, uvs, poly_id)
         self.model_texture_label.setText(
             "Current FX Texture: " + ", ".join(dict.fromkeys(texture_names)))
-        self._set_polygon_object_info(lines)
 
     def _texture_qimage(self, tex_name: str) -> QImage | None:
         family = self._family

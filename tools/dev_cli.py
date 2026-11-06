@@ -11,7 +11,6 @@ import argparse
 import json
 from pathlib import Path
 import sys
-from typing import List, Optional
 
 # Run from the repository root no matter where the script is started.
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
@@ -21,9 +20,6 @@ from studio.assets.family import load_asset_family
 from studio.assets.mapping import (
     eligible_blocks,
     MappingIndex,
-    plan_copy_style,
-    plan_planar,
-    save_repaired_base,
 )
 from studio.assets.reports import (
     _run_single,
@@ -42,11 +38,7 @@ from studio.formats.animation import (
     parse_anm_file,
 )
 from studio.formats.base_format import (
-    build_parser,
-    ExportError,
     parse_base_file,
-    print_summary,
-    write_outputs,
 )
 from studio.formats.images import (
     _iter_inputs,
@@ -390,17 +382,9 @@ def run_base_mapping_editor():
     from studio.assets.family import load_asset_family
 
     cli = argparse.ArgumentParser(
-        description="Inspect/repair BASE ATTS coverage holes (writes only "
-                    "to a new file via --repair/--out)."
+        description="Inspect BASE ATTS coverage holes (read-only)."
     )
     cli.add_argument("base_file")
-    cli.add_argument("--repair", type=int, metavar="POLYID",
-                     help="polygon to repair")
-    cli.add_argument("--block", type=int, default=0,
-                     help="target material block index (planar method)")
-    cli.add_argument("--copy-from", type=int, metavar="POLYID",
-                     help="copy mapping style from this polygon instead")
-    cli.add_argument("--out", help="output .base path (never the original)")
     cli.add_argument("--deps", action="store_true",
                      help="print the dependency report and exit")
     args = cli.parse_args()
@@ -421,21 +405,6 @@ def run_base_mapping_editor():
     for index, block in eligible_blocks(fam_obj):
         tex = block.texture.name if block.texture else "-"
         print(f"  block #{index}: {tex} ({len(block.atts)} entries)")
-
-    if args.repair is not None:
-        if mapping.status(args.repair) != "unmapped":
-            raise SystemExit(f"polygon #{args.repair} is not unmapped "
-                             f"({mapping.status(args.repair)})")
-        if args.copy_from is not None:
-            plan = plan_copy_style(fam_obj, args.repair, args.copy_from,
-                                   mapping)
-        else:
-            plan = plan_planar(fam_obj, args.repair, args.block, mapping)
-        for line in plan.describe():
-            print(line)
-        if args.out:
-            for note in save_repaired_base(family, fam_obj, [plan], args.out):
-                print(note)
 
 
 def run_ilbm_parser():
@@ -522,28 +491,6 @@ def run_base_parser():
         print(f"WARNING: {warning}")
 
 
-def main_base_kids(argv: Optional[List[str]] = None) -> int:
-    parser = build_parser()
-    args = parser.parse_args(argv)
-    setbas = Path(args.setbas).resolve()
-    out_dir = Path(args.out).resolve()
-
-    if not setbas.is_file():
-        print(f"error: SET.BAS not found: {setbas}", file=sys.stderr)
-        return 2
-
-    try:
-        summary = write_outputs(setbas, out_dir)
-    except (ExportError, OSError) as exc:
-        print(f"error: {exc}", file=sys.stderr)
-        return 1
-
-    print_summary(summary)
-    return 0
-
-
-def run_base_kids_export():
-    raise SystemExit(main_base_kids())
 
 
 def run_anm_parser():
@@ -606,8 +553,6 @@ def main_setbas_export(argv: list[str] | None = None) -> int:
                         help="also convert extracted VBMP textures to ILBM")
     parser.add_argument("--export-base-kids-raw", action="store_true",
                         help="developer dump of raw BASE/KIDS chunks (slow)")
-    parser.add_argument("--metadata", action="store_true",
-                        help="export BASE/KIDS scene metadata JSON")
     parser.add_argument("--manifest-csv", default="",
                         help="optional CSV manifest filename")
     parser.add_argument("--dry-run", action="store_true")
@@ -648,7 +593,6 @@ def main_setbas_export(argv: list[str] | None = None) -> int:
         convert_ilbm=args.ilbm,
         convert_png=args.png,
         export_base_kids=args.export_base_kids_raw,
-        export_metadata=args.metadata,
         manifest_csv=args.manifest_csv,
         dry_run=args.dry_run,
     )
@@ -685,7 +629,6 @@ TOOLS = {
     'ilbm': run_ilbm_parser,
     'family': run_asset_family,
     'base': run_base_parser,
-    'base-kids': run_base_kids_export,
     'anm': run_anm_parser,
     'resolver': run_asset_resolver,
     'setbas-export': run_setbas_export,

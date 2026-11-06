@@ -256,9 +256,8 @@ class _ExtractionMixin:
         png_check.setChecked(True)
         kids_check = QCheckBox(
             "Export raw BASE/KIDS chunks (slow, developer mode)")
-        meta_check = QCheckBox("Export BASE/KIDS Scene Metadata JSON")
         csv_check = QCheckBox("Write manifest.csv next to manifest.json")
-        for check in (all_check, ilbm_check, png_check, kids_check, meta_check,
+        for check in (all_check, ilbm_check, png_check, kids_check,
                       csv_check):
             layout.addWidget(check)
         buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok
@@ -283,7 +282,6 @@ class _ExtractionMixin:
                 convert_ilbm=ilbm_check.isChecked(),
                 convert_png=png_check.isChecked(),
                 export_base_kids=kids_check.isChecked(),
-                export_metadata=meta_check.isChecked(),
                 manifest_csv="manifest.csv" if csv_check.isChecked() else "",
                 log=self._log,
             )
@@ -390,39 +388,6 @@ class _ExtractionMixin:
             QMessageBox.warning(
                 self, "Runtime Loose export needs attention",
                 f"{message}\n\nTarget: {loose_root}{issue_text}")
-
-    def _export_setbas_metadata(self) -> None:
-        if self._setbas is None:
-            QMessageBox.information(
-                self, "No SET.BAS loaded",
-                "Open a SET.BAS provider before exporting scene metadata.")
-            return
-        out_dir = QFileDialog.getExistingDirectory(
-            self, "Output folder for SET.BAS scene metadata",
-            str(self._last_directory))
-        if not out_dir:
-            return
-        metadata_dir = Path(out_dir) / "metadata"
-        try:
-            import studio.formats.base_format as base_kids_export
-            summary = base_kids_export.write_outputs(
-                Path(self._setbas.path), metadata_dir)
-        except Exception as exc:
-            QMessageBox.critical(
-                self, "Metadata export failed",
-                f"The source archive was not modified.\n\n{exc}")
-            return
-        self._last_directory = Path(out_dir)
-        self._remember_output_folder(out_dir)
-        message = (
-            f"Metadata exported: {summary['node_count']} object node(s), "
-            f"{summary['texture_ref_count']} texture reference(s), "
-            f"{summary['skeleton_ref_count']} skeleton reference(s), "
-            f"{summary['animation_ref_count']} animation reference(s), "
-            f"{summary['unresolved_count']} unresolved reference(s)."
-        )
-        self._log(message)
-        self._notify(f"{message} | Output: {metadata_dir}", 15000)
 
     def _preview_family_texture(self, name: str) -> None:
         if self._family is None:
@@ -1029,7 +994,7 @@ class _ExtractionMixin:
         """Return the one shared View-option set used by every workspace."""
 
         return (
-            self.sen_check, self.wire_check, self.cull_check, self.axes_check,
+            self.wire_check, self.cull_check, self.axes_check,
             self.grid_check, self.overlay_check, self.mapping_diag_check,
             self.retail_distance_fade_check,
         )
@@ -1042,7 +1007,6 @@ class _ExtractionMixin:
             self._snapshot_view_action_state = {
                 action: action.isChecked() for action in actions}
         defaults = {
-            self.sen_check: False,
             self.wire_check: False,
             self.cull_check: True,
             self.axes_check: False,
@@ -1068,7 +1032,7 @@ class _ExtractionMixin:
 
     def _snapshot_include_guides(self) -> bool:
         return any(action.isChecked() for action in (
-            self.sen_check, self.wire_check, self.axes_check, self.grid_check,
+            self.wire_check, self.axes_check, self.grid_check,
             self.overlay_check, self.mapping_diag_check))
 
     def _sync_snapshot_view_render_mode(self, _checked: bool = False) -> None:
@@ -1949,7 +1913,6 @@ class _ExtractionMixin:
                 self.asset_tree.blockSignals(True)
                 self.asset_tree.setCurrentItem(item)
                 self.asset_tree.blockSignals(False)
-                self._on_tree_node_selected(item)
         obj = self._owner_to_obj.get(owner) if owner else None
         label = obj.display_name if obj else "-"
         self.statusBar().showMessage(
@@ -2492,7 +2455,7 @@ class _ExtractionMixin:
                 "was not modified.")
             return False
         if (self._geom_dirty or self._uv_original or self._vanm_uv_original
-                or self._texture_original or self._pending_repairs):
+                or self._texture_original):
             QMessageBox.information(
                 self, "Save other edits first",
                 "Finish or export the current model edits before changing "

@@ -138,7 +138,7 @@ class SnapshotStudioTests(unittest.TestCase):
             self.assertFalse(window.wireframe_editor_action.isVisible())
             self.assertFalse(window.entity_designer_action.isVisible())
             self.assertFalse(window.map_editor_action.isVisible())
-            self.assertFalse(window.mapping_repair_action.isVisible())
+            self.assertFalse(window.materials_action.isVisible())
             self.assertFalse(window.integrated_editors_separator.isVisible())
         finally:
             window.close()
@@ -147,7 +147,7 @@ class SnapshotStudioTests(unittest.TestCase):
         window = SnapshotStudioWindow()
         try:
             shared_actions = (
-                window.sen_check, window.wire_check, window.cull_check,
+                window.wire_check, window.cull_check,
                 window.axes_check, window.grid_check, window.overlay_check,
                 window.mapping_diag_check, window.retail_distance_fade_check,
             )

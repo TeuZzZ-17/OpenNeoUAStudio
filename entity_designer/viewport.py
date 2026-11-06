@@ -301,8 +301,6 @@ class CollisionViewport(FxPreviewViewportMixin, AssetViewport):
         self._cockpit_runtime_aspect: float = 4.0 / 3.0
         self._model_preview_base_faces: list[
             tuple[tuple[float, float, float], ...]] = []
-        self._model_preview_base_sen_boxes: list[
-            tuple[tuple[float, float, float], ...]] = []
         self._model_preview_base_owner_bounds: dict[str, tuple] = {}
         self._fx_init()
 
@@ -519,7 +517,6 @@ class CollisionViewport(FxPreviewViewportMixin, AssetViewport):
         self._sphere_box_rect = None
         self._context_press_pos = None
         self._model_preview_base_faces = []
-        self._model_preview_base_sen_boxes = []
         self._model_preview_base_owner_bounds = {}
         self._collision_shape = None
 
@@ -568,10 +565,6 @@ class CollisionViewport(FxPreviewViewportMixin, AssetViewport):
         self._model_preview_base_faces = [
             tuple(tuple(vertex) for vertex in face.vertices)
             for face in self._faces
-        ]
-        self._model_preview_base_sen_boxes = [
-            tuple(tuple(point) for point in box)
-            for box in self._sen_boxes
         ]
         self._model_preview_base_owner_bounds = dict(self._owner_bounds)
 
@@ -640,11 +633,6 @@ class CollisionViewport(FxPreviewViewportMixin, AssetViewport):
                 face.vertices = [
                     self._preview_point(vertex) for vertex in vertices
                 ]
-        if len(self._model_preview_base_sen_boxes) == len(self._sen_boxes):
-            self._sen_boxes = [
-                [self._preview_point(point) for point in box]
-                for box in self._model_preview_base_sen_boxes
-            ]
         preview_bounds = {}
         offset_y = self.overeof_preview_offset
         for owner in self._model_preview_base_owner_bounds:

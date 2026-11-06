@@ -372,11 +372,6 @@ class _AxisHandlesMixin:
         if not build_faces:
             return
 
-        if skeleton.sensors:
-            self._sen_boxes.append(
-                [_apply(matrix, p, pos) for p in skeleton.sensors]
-            )
-
         groups = fam_obj.materials
         if not groups:
             # No BASE mapping (manual mode): one synthetic material, all polys.

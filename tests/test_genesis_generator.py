@@ -239,7 +239,10 @@ def test_real_family_genesis_undo_redo_and_export_roundtrip(app):
         obj.base_object.ades[4].olpl[0][0] = (11, 17)
         before = copy.deepcopy(obj.base_object.ades)
         points = copy.deepcopy(obj.skeleton.points)
+        assert window.generate_genesis_action in window.edit_menu.actions()
+        assert window.generate_genesis_action not in window.file_menu.actions()
         window.generate_genesis_action.trigger()
+        assert window.play_button.isEnabled()   # the Genesis animation can be played at once
         assert len(window._edit_undo_stack) == 1
         assert len(obj.base_object.ades) == len(obj.skeleton.polygons) + 1
         assert obj.base_object.ades[-1] == emitter

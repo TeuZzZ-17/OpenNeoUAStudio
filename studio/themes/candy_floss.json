@@ -1,0 +1,47 @@
+{
+  "id": "candy_floss",
+  "name": "Candy Floss",
+  "description": "The only sweet light theme: pink cotton candy with grape ink.",
+  "mode": "light",
+  "order": 43,
+  "palette": {
+    "Window": "#fbe3f1",
+    "Base": "#fdf2f9",
+    "AlternateBase": "#fceaf4",
+    "Button": "#fdf2f9",
+    "Mid": "#cbb2c8",
+    "Midlight": "#ecd3e4",
+    "Light": "#ffffff",
+    "Dark": "#a48ba7",
+    "WindowText": "#3a1f4d",
+    "Text": "#3a1f4d",
+    "ButtonText": "#3a1f4d",
+    "ToolTipBase": "#ffffff",
+    "ToolTipText": "#3a1f4d",
+    "Highlight": "#b83fd0",
+    "HighlightedText": "#ffffff",
+    "Disabled.Text": "#9a819f",
+    "Disabled.WindowText": "#9a819f",
+    "Disabled.ButtonText": "#9a819f"
+  },
+  "tone": {
+    "Accent": "#ad278c"
+  },
+  "lists": {
+    "Hover": "#e4aae5",
+    "Selected": "#b83fd0",
+    "DependencySelected": "#b9d2c7",
+    "Problem": "#f0a6af",
+    "ModifiedSelected": "#9dbde2",
+    "ModifiedHover": "#c0cbe8"
+  },
+  "syntax": {
+    "key": "#b0238a",
+    "function": "#6a2fc0",
+    "number": "#1a7791",
+    "string": "#a05a00",
+    "comment": "#7a5e88",
+    "line_number": "#9a7aa8",
+    "error": "#f5b5c0"
+  }
+}

@@ -13,7 +13,6 @@ from studio.exchange.portable import commit_verified_files as _commit_verified_f
 from studio.assets.family import AssetFamily, FamilyObject, MaterialGroup, load_asset_family
 from studio.assets.mapping import (
     MappingIndex,
-    RepairPlan,
     StructuralBlockState,
     save_model_base_copy,
 )
@@ -78,46 +77,20 @@ class StructuralSaveTests(unittest.TestCase):
         self.assertEqual(parsed.points, points)
         self.assertEqual(parsed.polygons, polygons)
 
-    def test_base_mapping_append_round_trip_preserves_old_entry(self):
-        original = _minimal_base()
-        parsed = parse_base_bytes(original)
-        self.assertEqual(len(parsed.root.ades[0].atts), 1)
-        plan = RepairPlan(
-            poly_id=1,
-            block_index=0,
-            color_val=11,
-            shade_val=22,
-            tracy_val=33,
-            pad=44,
-            uvs=[(1, 2), (3, 4), (5, 6)],
-            method="geometry-paste",
-        )
-        with tempfile.TemporaryDirectory() as tmp:
-            path = Path(tmp) / "COPY.BASE"
-            save_model_base_copy(original, [], [], path, [plan])
-            reparsed = parse_base_bytes(path.read_bytes())
-        block = reparsed.root.ades[0]
-        self.assertEqual(
-            (block.atts[0].poly_id, block.atts[0].pad), (0, 40))
-        self.assertEqual(
-            (block.atts[1].poly_id, block.atts[1].color_val,
-             block.atts[1].shade_val, block.atts[1].tracy_val,
-             block.atts[1].pad),
-            (1, 11, 22, 33, 44))
-        self.assertEqual(block.olpl[1], [(1, 2), (3, 4), (5, 6)])
-
     def test_complete_base_writer_supports_shrink_and_renumber(self):
         original = _minimal_base()
-        plan = RepairPlan(
-            poly_id=1, block_index=0,
-            color_val=11, shade_val=22, tracy_val=33, pad=44,
-            uvs=[(1, 2), (3, 4), (5, 6)],
-            method="geometry-paste",
+        old = parse_base_bytes(original).root.ades[0]
+        grown_state = StructuralBlockState(
+            block_index=0,
+            atts=(old.atts[0], AttsEntry(1, 11, 22, 33, 44)),
+            olpl=(tuple(old.olpl[0]), ((1, 2), (3, 4), (5, 6))),
         )
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             grown_path = root / "GROWN.BASE"
-            save_model_base_copy(original, [], [], grown_path, [plan])
+            save_model_base_copy(
+                original, [], [], grown_path,
+                structural_blocks=[grown_state])
             grown = grown_path.read_bytes()
             shrunk_path = root / "SHRUNK.BASE"
             state = StructuralBlockState(

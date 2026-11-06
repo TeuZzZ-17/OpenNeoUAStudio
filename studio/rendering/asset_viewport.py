@@ -106,7 +106,6 @@ class AssetViewport(
         self._faces: list[ViewFace] = []
         self._materials: list[ViewMaterial] = []
         self._block_material_ids: dict[tuple[str, int], int] = {}
-        self._sen_boxes: list[list[tuple[float, float, float]]] = []
         self._diagnostics: list[str] = []
         self._center = (0.0, 0.0, 0.0)
         self._scale = 1.0
@@ -201,7 +200,6 @@ class AssetViewport(
         self._mode_label_rect: QRect | None = None
 
         self._mode = "textured"
-        self._show_sen = False
         self._show_axes = True
         self._show_grid = True
         self._show_wire_overlay = False
@@ -270,7 +268,6 @@ class AssetViewport(
         self._ground_y = None
         self._materials = []
         self._block_material_ids = {}
-        self._sen_boxes = []
         self._diagnostics = []
         self._selected_poly = None
         self._highlight_polys = set()
@@ -370,7 +367,6 @@ class AssetViewport(
         self._refresh_particle_faces()
         self._build_particle_bounds()
         points = self._framing_points()
-        points.extend(p for box in self._sen_boxes for p in box)
         if preserved_camera is None:
             if points:
                 xs = [p[0] for p in points]

@@ -654,7 +654,7 @@ class CollisionEditorTests(unittest.TestCase):
         self.assertGreater(white_pixels(selected), white_pixels(plain) + 20)
         viewport.close()
 
-    def test_38_tools_menu_places_mapping_repair_after_map_editor(self):
+    def test_38_tools_menu_places_materials_after_map_editor(self):
         from studio.workbench.window import AssemblyWindow
         window = AssemblyWindow()
         self.addCleanup(window.close)
@@ -665,7 +665,7 @@ class CollisionEditorTests(unittest.TestCase):
                     action.text() for action in menu_action.menu().actions()]
                 break
         self.assertLess(
-            labels.index("Map Editor"), labels.index("Mapping Repair"))
+            labels.index("Map Editor"), labels.index("Materials"))
 
     def test_39_file_commands_are_not_repeated_in_a_collision_toolbar(self):
         window = self._window()

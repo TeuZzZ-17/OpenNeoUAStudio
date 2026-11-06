@@ -114,13 +114,13 @@ class ModelEditorWorkspaceTests(unittest.TestCase):
         finally:
             window.close()
 
-    def test_tools_menu_keeps_mapping_repair_only_for_integrated_editors(self):
+    def test_tools_menu_keeps_materials_only_for_integrated_editors(self):
         window = ModelEditorWindow()
         try:
             self.assertFalse(window.wireframe_editor_action.isVisible())
             self.assertFalse(window.entity_designer_action.isVisible())
             self.assertFalse(window.map_editor_action.isVisible())
-            self.assertTrue(window.mapping_repair_action.isVisible())
+            self.assertTrue(window.materials_action.isVisible())
             self.assertTrue(window.integrated_editors_separator.isVisible())
         finally:
             window.close()
@@ -128,18 +128,18 @@ class ModelEditorWorkspaceTests(unittest.TestCase):
     def test_poly_id_uses_group_box_like_transform_and_keeps_controls_compact(self):
         window = ModelEditorWindow()
         try:
-            self.assertEqual(window.poly_id_box.title(), "Poly ID")
-            self.assertIs(window.poly_id_box.layout(), window.poly_id_row_layout)
-            layout = window.poly_id_row_layout
-            # Centered row: stretch, "<", value, ">", stretch.
-            self.assertIs(layout.itemAt(1).widget(),
-                          window.poly_id_previous_button)
-            self.assertIs(layout.itemAt(2).widget(), window.poly_id_spin)
-            self.assertIs(layout.itemAt(3).widget(),
-                          window.poly_id_next_button)
-            self.assertIsNone(layout.itemAt(0).widget())
-            self.assertIsNone(layout.itemAt(4).widget())
-            self.assertEqual(layout.stretch(1), 0)
+            self.assertEqual(window.poly_id_box.title(), "Quick Actions")
+            # The polygon selector lives on the animation toolbar, after Speed.
+            toolbar_widgets = [
+                window.animation_toolbar.widgetForAction(action)
+                for action in window.animation_toolbar.actions()]
+            self.assertIn(window.poly_id_spin, toolbar_widgets)
+            self.assertGreater(toolbar_widgets.index(window.poly_id_spin),
+                               toolbar_widgets.index(window.speed_spin))
+            self.assertIs(window.apply_states_button.parentWidget(),
+                          window.poly_id_box)
+            self.assertIs(window.generate_genesis_button.parentWidget(),
+                          window.poly_id_box)
             self.assertEqual(window.poly_id_previous_button.width(), 36)
             self.assertEqual(window.poly_id_next_button.width(), 36)
             self.assertGreaterEqual(window.poly_id_spin.minimumWidth(), 72)

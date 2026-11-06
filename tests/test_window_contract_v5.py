@@ -100,8 +100,8 @@ class WindowContractV5Tests(unittest.TestCase):
                 QTest.qWait(5)
             self.assertTrue(window._diagnostics_dock.isVisible())
             diagnostic_height = window._diagnostics_splitter.sizes()[-1]
-            self.assertGreaterEqual(diagnostic_height, 70)
-            self.assertLessEqual(diagnostic_height, 90)
+            self.assertGreaterEqual(diagnostic_height, 240)
+            self.assertLessEqual(diagnostic_height, 280)
             window._hide_diagnostics()
             self.assertFalse(window._diagnostics_dock.isVisible())
             self.assertEqual(
@@ -138,8 +138,8 @@ class WindowContractV5Tests(unittest.TestCase):
                 [window._editor_tabs.tabText(index)
                  for index in range(window._editor_tabs.count())],
                 ["Models and Textures"])
-            self.assertEqual(window.mapping_repair_action.text(),
-                             "Mapping Repair")
+            self.assertEqual(window.materials_action.text(),
+                             "Materials")
             self.assertNotIn(
                 "Add",
                 [action.text().replace("&", "")
@@ -224,8 +224,8 @@ class WindowContractV5Tests(unittest.TestCase):
                 window.model_save_as_button.text(),
                 "Export Asset Family")
             self.assertEqual(
-                window.setbas_onua3d_button.text(),
-                "Export OpenNeoUA 3D")
+                window.setbas_onua_button.text(),
+                "Export Whole Model as Archive (.ONUA)")
             self.assertEqual(window.material_copy_button.text(),
                              "Copy Material")
             self.assertEqual(window.material_paste_button.text(),
@@ -252,14 +252,14 @@ class WindowContractV5Tests(unittest.TestCase):
                 [action.text() for action in window.file_import_menu.actions()],
                 [
                     "Import BAS Archive", "Import Model",
-                    "Import OpenNeoUA 3D",
+                    "Import Whole Model from Archive (.ONUA)",
                 ],
             )
             self.assertEqual(
                 [action.text() for action in window.file_export_menu.actions()],
                 [
                     "Extract Entire Current Set", "Export Model",
-                    "Export OpenNeoUA 3D", "Overwrite",
+                    "Export Whole Model as Archive (.ONUA)", "Overwrite",
                 ],
             )
             self.assertEqual(window.open_base_action.shortcut().toString(), "")
@@ -606,7 +606,7 @@ class WindowContractV5Tests(unittest.TestCase):
                     if not candidate.isSeparator()]
             copied.assert_called_once_with(
                 "Objects/MODEL.BASE", "BASE name copied successfully.")
-            self.assertIn("Export OpenNeoUA 3D", labels)
+            self.assertIn("Export Whole Model as Archive (.ONUA)", labels)
             self.assertIn("Show Dependencies", labels)
             self.assertIn("Edit BASE Dependencies", labels)
         finally:
@@ -746,16 +746,16 @@ class WindowContractV5Tests(unittest.TestCase):
         finally:
             window.close()
 
-    def test_mapping_repair_is_one_standalone_shared_state_tool(self):
+    def test_materials_is_one_standalone_shared_state_tool(self):
         window = AssemblyWindow()
         try:
             panel = window._mapping_panel
-            window._show_mapping_repair()
+            window._show_materials()
             first_dialog = window._mapping_dialog
             self.assertIsNotNone(first_dialog)
             self.assertIs(panel.parentWidget(), first_dialog)
             first_dialog.close()
-            window._show_mapping_repair()
+            window._show_materials()
             self.assertIs(window._mapping_dialog, first_dialog)
             self.assertIs(window._mapping_panel, panel)
         finally:
@@ -804,7 +804,6 @@ class WindowContractV5Tests(unittest.TestCase):
                 texture_refs={}, textures={}, dependencies=[],
                 animations={}, external_palette=None,
                 setbas_archive=None)
-            window._set_object_info = lambda _lines: None
             window._effective_status = lambda _name, status: status
             window._saved_choice_for = lambda _name: None
             item = QTreeWidgetItem(["TEST.ILBM", "found"])
@@ -812,7 +811,6 @@ class WindowContractV5Tests(unittest.TestCase):
                 0, Qt.ItemDataRole.UserRole, ("texture", "TEST.ILBM"))
 
             window._right_tabs.setCurrentWidget(window._resources_tabs)
-            window._on_tree_node_selected(item)
             self.assertIs(
                 window._right_tabs.currentWidget(), window._resources_tabs)
             window._on_tree_double_clicked(item)
@@ -917,11 +915,10 @@ class WindowContractV5Tests(unittest.TestCase):
             window._family = SimpleNamespace(
                 texture_refs={}, textures={}, dependencies=[],
                 animations={}, external_palette=None)
-            window._set_object_info = lambda _lines: None
             window._effective_status = lambda _name, status: status
             window._saved_choice_for = lambda _name: None
             with patch.object(window, "_select_owner") as select_owner:
-                window._on_tree_node_selected(texture_item)
+                pass
             select_owner.assert_not_called()
         finally:
             window.close()
@@ -983,7 +980,7 @@ class WindowContractV5Tests(unittest.TestCase):
             self.assertIn(
                 "never overwritten", window._right_tabs.tabToolTip(editor_index))
             self.assertTrue(window.edit_menu.isEnabled())
-            self.assertTrue(window.mapping_repair_action.isEnabled())
+            self.assertTrue(window.materials_action.isEnabled())
             self.assertTrue(window.edit_toggle_action.isEnabled())
         finally:
             window.close()

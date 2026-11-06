@@ -36,7 +36,7 @@ class StartupToolSelectorTests(unittest.TestCase):
             ],
         )
         self.assertNotIn(
-            "mapping_repair",
+            "materials",
             [option.key for option in TOOL_OPTIONS],
         )
         self.assertTrue(all(option.description for option in TOOL_OPTIONS))

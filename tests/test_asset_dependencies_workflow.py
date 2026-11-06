@@ -268,7 +268,7 @@ class AssetDependenciesWorkflowTests(unittest.TestCase):
             self.assertTrue(window._right_tabs.isTabEnabled(editor_index))
             self.assertTrue(window.edit_toggle_action.isEnabled())
             self.assertTrue(window.edit_menu.isEnabled())
-            self.assertTrue(window.mapping_repair_action.isEnabled())
+            self.assertTrue(window.materials_action.isEnabled())
             self.assertIn(
                 "never overwritten",
                 window._right_tabs.tabToolTip(editor_index))
@@ -456,7 +456,7 @@ class AssetDependenciesWorkflowTests(unittest.TestCase):
         self.assertIn(
             '"Export Asset Family"', source[asset_start:asset_end])
         self.assertIn(
-            '"Export OpenNeoUA 3D"', source[asset_start:asset_end])
+            '"Export Whole Model as Archive (.ONUA)"', source[asset_start:asset_end])
         texture_start = source.index("    def _show_texture_context_menu")
         texture_end = source.index("    def _build_toolbar", texture_start)
         self.assertIn(

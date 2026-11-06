@@ -60,7 +60,6 @@ from studio.assets.family import (
 from studio.assets.mapping import (
     MappingIndex,
     MaterialBlockClipboard,
-    RepairPlan,
 )
 from studio.assets.visproto import (
     normalize_base_name,
@@ -121,6 +120,11 @@ from studio.workbench.window_geometry import _GeometryEditMixin
 from studio.workbench.window_model_io import _ModelFilesMixin
 from studio.workbench.window_uv import _UvTexturesMixin
 from studio.workbench.window_panels import _FamilyPanelsMixin
+
+
+# Show Diagnostic Panel opens at this height (the user can drag it up to the maximum).
+DIAGNOSTICS_OPEN_HEIGHT = 260
+DIAGNOSTICS_MAX_HEIGHT = 600
 
 
 class AssemblyWindow(
@@ -188,9 +192,6 @@ class AssemblyWindow(
         self._selected_poly: int | None = None
         self._selected_polys: set[int] = set()
         self._mirror_select_source_polys: set[int] = set()
-        self._repair_plan: RepairPlan | None = None
-        self._pending_repairs: list[RepairPlan] = []
-        self._saved_repair_path: str | None = None
         # geometry Edit Mode: owners with unsaved vertex edits
         self._geom_dirty: dict[str, object] = {}
         self._geom_original: dict[str, list[tuple[float, float, float]]] = {}
@@ -219,8 +220,6 @@ class AssemblyWindow(
         self._history_replaying = False
         self._uv_history_before: dict[
             tuple[str, int, int], list[tuple[int, int]]] | None = None
-        self._object_info_asset_lines = ["No asset selected."]
-        self._object_info_polygon_lines: list[str] = []
         self._fx_elements: list[FxElement] = []
         self._snapshot_mode_active = False
         self._snapshot_custom_color: QColor | None = None
@@ -315,7 +314,6 @@ class AssemblyWindow(
         self.asset_tree.setTextElideMode(Qt.TextElideMode.ElideMiddle)
         self.asset_tree.setHorizontalScrollBarPolicy(
             Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
-        self.asset_tree.currentItemChanged.connect(self._on_tree_node_selected)
         self.asset_tree.itemSelectionChanged.connect(
             self._restore_asset_dependency_focus)
         self.asset_tree.itemClicked.connect(
@@ -416,21 +414,6 @@ class AssemblyWindow(
         self.material_delete_button = QPushButton("Delete Material")
         self.material_delete_button.clicked.connect(
             self._delete_material_block)
-        self.repair_target_combo = QComboBox()
-        self.repair_source_spin = QSpinBox()
-        self.repair_source_spin.setRange(0, 65535)
-        self.repair_copy_button = QPushButton("Copy Mapping")
-        self.repair_copy_button.clicked.connect(self._plan_copy_style)
-        self.repair_planar_button = QPushButton("Create Planar Mapping")
-        self.repair_planar_button.clicked.connect(self._plan_planar)
-        self.repair_preview = QListWidget()
-        use_standard_list_style(self.repair_preview)
-        self.repair_apply_button = QPushButton("Apply")
-        self.repair_apply_button.clicked.connect(self._apply_repair_in_memory)
-        self.repair_revert_button = QPushButton("Revert")
-        self.repair_revert_button.clicked.connect(self._revert_repairs)
-        self.repair_save_button = QPushButton("Export Repaired BASE")
-        self.repair_save_button.clicked.connect(self._save_repaired_as)
         self.chunk_tree = QTreeWidget()
         use_standard_list_style(self.chunk_tree)
         self.chunk_tree.setHeaderLabels(["Chunk", "Size", "Offset"])
@@ -440,7 +423,7 @@ class AssemblyWindow(
         for view in (self.warning_list, self.checks_list, self.log_list):
             use_standard_list_style(view)
         for widget in (
-                self.blocks_list, self.repair_preview,
+                self.blocks_list,
                 self.warning_list, self.checks_list, self.log_list):
             widget.setContextMenuPolicy(
                 Qt.ContextMenuPolicy.CustomContextMenu)
@@ -592,10 +575,10 @@ class AssemblyWindow(
             lambda: self._export_setbas_resource_family(item))
         export_family.setEnabled(kind in (
             "base", "sklt.class", "ilbm.class", "bmpanim.class"))
-        export_onua3d = menu.addAction(
-            "Export OpenNeoUA 3D",
-            lambda: self._export_setbas_base_onua3d(item))
-        export_onua3d.setEnabled(kind == "base" and item is not None)
+        export_onua = menu.addAction(
+            "Export Whole Model as Archive (.ONUA)",
+            lambda: self._export_setbas_base_onua(item))
+        export_onua.setEnabled(kind == "base" and item is not None)
         self._add_model_generator_context_actions(menu, item)
         if kind == "base" and item is not None:
             base_name = (
@@ -776,18 +759,18 @@ class AssemblyWindow(
             self._save_model_as()
 
         export_family.triggered.connect(export_current_family)
-        export_onua3d = menu.addAction("Export OpenNeoUA 3D")
-        export_onua3d.setEnabled(bool(data and data[0] == "base"))
+        export_onua = menu.addAction("Export Whole Model as Archive (.ONUA)")
+        export_onua.setEnabled(bool(data and data[0] == "base"))
 
-        def export_current_onua3d() -> None:
+        def export_current_onua() -> None:
             if not data or data[0] != "base":
                 return
             fam_obj = data[1]
             if fam_obj is not None:
                 self._selected_owner = fam_obj.owner_path
-            self._export_to_blender()
+            self._export_onua_archive()
 
-        export_onua3d.triggered.connect(export_current_onua3d)
+        export_onua.triggered.connect(export_current_onua)
         path = self._asset_item_path(item)
         if path is not None:
             menu.addAction("Reveal Source File",
@@ -896,13 +879,13 @@ class AssemblyWindow(
         # loose files or an optional SET.BAS archive.
         self.open_family_action = QAction("Import Model", self)
         self.open_family_action.triggered.connect(self.open_family_dialog)
-        self.import_onua3d_action = QAction("Import OpenNeoUA 3D", self)
-        self.import_onua3d_action.triggered.connect(self._import_onua3d)
+        self.import_onua_action = QAction("Import Whole Model from Archive (.ONUA)", self)
+        self.import_onua_action.triggered.connect(self._import_onua_archive)
 
         self.file_import_menu = file_menu.addMenu("Import")
         for action in (
                 self.open_bas_archive_action, self.open_family_action,
-                self.import_onua3d_action):
+                self.import_onua_action):
             self.file_import_menu.addAction(action)
 
         # One shared Runtime Loose action is exposed from both File > Export
@@ -919,9 +902,9 @@ class AssemblyWindow(
         self.export_model_action.setEnabled(False)
         self.export_model_action.triggered.connect(self._save_model_as)
         self.save_asset_family_action = self.export_model_action
-        self.export_blender_action = QAction("Export OpenNeoUA 3D", self)
-        self.export_blender_action.setEnabled(False)
-        self.export_blender_action.triggered.connect(self._export_to_blender)
+        self.export_onua_action = QAction("Export Whole Model as Archive (.ONUA)", self)
+        self.export_onua_action.setEnabled(False)
+        self.export_onua_action.triggered.connect(self._export_onua_archive)
         self.overwrite_action = QAction("Overwrite", self)
         self.overwrite_action.setEnabled(False)
         self.overwrite_action.triggered.connect(self._overwrite_model)
@@ -930,7 +913,7 @@ class AssemblyWindow(
         for action in (
                 self.export_runtime_loose_action,
                 self.export_model_action,
-                self.export_blender_action,
+                self.export_onua_action,
                 self.overwrite_action):
             self.file_export_menu.addAction(action)
 
@@ -974,6 +957,12 @@ class AssemblyWindow(
         self.edit_select_all_action.triggered.connect(
             self.viewport.select_all_edit_vertices)
         edit_menu.addAction(self.edit_select_all_action)
+        self.edit_select_none_action = QAction("Deselect All Geometry", self)
+        self.edit_select_none_action.setStatusTip(
+            "Clear the model geometry selection.")
+        self.edit_select_none_action.triggered.connect(
+            self.viewport.select_no_edit_vertices)
+        edit_menu.addAction(self.edit_select_none_action)
         self.select_all_fx_action = QAction("Select All FX", self)
         self.select_all_fx_action.setStatusTip(
             "Select every FX element of the current model and no other "
@@ -981,12 +970,13 @@ class AssemblyWindow(
         self.select_all_fx_action.triggered.connect(
             self._select_all_fx_elements)
         edit_menu.addAction(self.select_all_fx_action)
-        self.edit_select_none_action = QAction("Deselect All Geometry", self)
-        self.edit_select_none_action.setStatusTip(
-            "Clear the model geometry selection.")
-        self.edit_select_none_action.triggered.connect(
-            self.viewport.select_no_edit_vertices)
-        edit_menu.addAction(self.edit_select_none_action)
+        self.deselect_all_fx_action = QAction("Deselect All FX", self)
+        self.deselect_all_fx_action.setStatusTip(
+            "Remove every FX element of the current model from the selection; "
+            "other selected geometry stays selected.")
+        self.deselect_all_fx_action.triggered.connect(
+            self._deselect_all_fx_elements)
+        edit_menu.addAction(self.deselect_all_fx_action)
         edit_menu.addSeparator()
         self.copy_geometry_action = QAction("Copy", self.viewport)
         self.copy_geometry_action.setShortcut(QKeySequence.StandardKey.Copy)
@@ -1060,8 +1050,6 @@ class AssemblyWindow(
 
         view_menu = self.menuBar().addMenu("&View")
         self.view_menu = view_menu
-        self.sen_check = self._checkable("SEN2 volume",
-                                         self.viewport.set_show_sen, False)
         self.wire_check = self._checkable("Wire overlay",
                                           self.viewport.set_wire_overlay, True)
         self.cull_check = self._checkable("Backface cull",
@@ -1075,7 +1063,7 @@ class AssemblyWindow(
             "Preview issues overlay", self.viewport.set_overlay_visible, True)
         self.mapping_diag_check = self._checkable(
             "Mapping diagnostics", self._set_mapping_diagnostics, True)
-        for action in (self.sen_check, self.wire_check, self.cull_check,
+        for action in (self.wire_check, self.cull_check,
                        self.axes_check, self.grid_check,
                        self.overlay_check, self.mapping_diag_check):
             view_menu.addAction(action)
@@ -1091,7 +1079,7 @@ class AssemblyWindow(
         # viewport setters already own the feature state; this extra signal
         # only switches the Snapshot renderer out of clean-model-only mode
         # when one of the shared overlays is actually requested.
-        for action in (self.sen_check, self.wire_check, self.axes_check,
+        for action in (self.wire_check, self.axes_check,
                        self.grid_check, self.overlay_check,
                        self.mapping_diag_check):
             action.toggled.connect(self._sync_snapshot_view_render_mode)
@@ -1109,9 +1097,6 @@ class AssemblyWindow(
         extract_setbas_action.triggered.connect(self._extract_setbas_archive)
         setbas_tools_menu.addAction(extract_setbas_action)
         setbas_tools_menu.addAction(self.export_runtime_loose_action)
-        metadata_action = QAction("Export Scene Metadata", self)
-        metadata_action.triggered.connect(self._export_setbas_metadata)
-        setbas_tools_menu.addAction(metadata_action)
         open_output = QAction("Open Last Output Folder", self)
         open_output.triggered.connect(self._open_last_output_folder)
         setbas_tools_menu.addAction(open_output)
@@ -1140,10 +1125,9 @@ class AssemblyWindow(
         self.map_editor_action = QAction("Map Editor", self)
         self.map_editor_action.triggered.connect(self._open_map_editor)
         tools_menu.addAction(self.map_editor_action)
-        self.mapping_repair_action = QAction("Mapping Repair", self)
-        self.mapping_repair_action.triggered.connect(
-            self._show_mapping_repair)
-        tools_menu.addAction(self.mapping_repair_action)
+        self.materials_action = QAction("Materials", self)
+        self.materials_action.triggered.connect(self._show_materials)
+        tools_menu.addAction(self.materials_action)
 
         diagnostics_menu = self.menuBar().addMenu("&Diagnostics")
         self.diagnostics_toggle_action = QAction(
@@ -1155,9 +1139,6 @@ class AssemblyWindow(
         self.clear_log_action = QAction("Clear Log", self)
         self.clear_log_action.triggered.connect(self._clear_diagnostics)
         diagnostics_menu.addAction(self.clear_log_action)
-
-        self.object_info_menu = self.menuBar().addMenu("Object Info")
-        self._set_object_info(["No asset selected."])
 
         # --- toolbar: essentials only ---
         toolbar = QToolBar("Workbench", self)
@@ -1171,6 +1152,13 @@ class AssemblyWindow(
             "Undo the latest geometry, texture or UV edit.")
         self.global_undo_button.clicked.connect(self._undo_edit)
         toolbar.addWidget(self.global_undo_button)
+
+        self.toolbar_reset_model_button = QPushButton("Reset Model")
+        self.toolbar_reset_model_button.setEnabled(False)
+        self.toolbar_reset_model_button.setToolTip(
+            "Discard unsaved geometry, texture and UV edits for the current model.")
+        self.toolbar_reset_model_button.clicked.connect(self._reset_model)
+        toolbar.addWidget(self.toolbar_reset_model_button)
 
         self.global_redo_button = QPushButton("Redo >")
         self.global_redo_button.setEnabled(False)
@@ -1214,13 +1202,6 @@ class AssemblyWindow(
         self.toolbar_reset_view_button.clicked.connect(
             self._reset_view_and_gizmo)
         toolbar.addWidget(self.toolbar_reset_view_button)
-
-        self.toolbar_reset_model_button = QPushButton("Reset Model")
-        self.toolbar_reset_model_button.setEnabled(False)
-        self.toolbar_reset_model_button.setToolTip(
-            "Discard unsaved geometry, texture and UV edits for the current model.")
-        self.toolbar_reset_model_button.clicked.connect(self._reset_model)
-        toolbar.addWidget(self.toolbar_reset_model_button)
 
         # Animation controls (enabled only when a VANM is loaded)
         anim_bar = QToolBar("Animation", self)
@@ -1307,15 +1288,15 @@ class AssemblyWindow(
             self._open_last_output_folder)
         self.setbas_open_output_button.setEnabled(False)
         setbas_buttons.addWidget(self.setbas_open_output_button, 1, 1)
-        self.setbas_onua3d_button = QPushButton(
-            "Export OpenNeoUA 3D")
-        self.setbas_onua3d_button.setToolTip(
-            "Export the selected BASE family as an OpenNeoUA 3D (.onua3d) "
-            "package for compatible 3D tools.")
-        self.setbas_onua3d_button.setEnabled(False)
-        self.setbas_onua3d_button.clicked.connect(
-            self._export_selected_setbas_base_onua3d)
-        setbas_buttons.addWidget(self.setbas_onua3d_button, 2, 0, 1, 2)
+        self.setbas_onua_button = QPushButton(
+            "Export Whole Model as Archive (.ONUA)")
+        self.setbas_onua_button.setToolTip(
+            "Pack the selected BASE and all its resources (skeletons, textures, "
+            "animations) into one .ONUA archive.")
+        self.setbas_onua_button.setEnabled(False)
+        self.setbas_onua_button.clicked.connect(
+            self._export_selected_setbas_base_onua)
+        setbas_buttons.addWidget(self.setbas_onua_button, 2, 0, 1, 2)
         self.setbas_edit_dependencies_button = QPushButton(
             "Edit BASE Dependencies")
         self.setbas_edit_dependencies_button.setEnabled(False)
@@ -1593,8 +1574,7 @@ class AssemblyWindow(
         save_buttons.addWidget(self.model_save_as_button, 1)
         model_layout.addLayout(save_buttons)
 
-        # Mapping repair reuses the existing MappingIndex, material blocks,
-        # preview and repair controls; only their UI container changes.
+        # Materials panel: the MappingIndex summary and the material block tools.
         mapping_panel = QWidget()
         mapping_layout = QVBoxLayout(mapping_panel)
         mapping_layout.setContentsMargins(5, 5, 5, 5)
@@ -1609,8 +1589,10 @@ class AssemblyWindow(
         self._update_mapping_diagnostics_summary()
         self.poly_uv_label.setMinimumHeight(90)
         self.poly_uv_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        # Ignored: the picture takes the space that is left and never pushes the
+        # list and the material buttons below it out of the window.
         self.poly_uv_label.setSizePolicy(
-            QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
+            QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Ignored)
         overview_layout.addWidget(self.poly_uv_label, 1)
         self.blocks_list.setMaximumHeight(145)
         overview_layout.addWidget(self.blocks_list)
@@ -1620,32 +1602,9 @@ class AssemblyWindow(
             self.material_add_button,
             self.material_delete_button,
         ])
-        overview_layout.addWidget(material_tools)
+        overview_layout.addWidget(material_tools, 0)
         mapping_layout.addWidget(mapping_overview, 1)
 
-        repair_box = QGroupBox("Repair Selected Unmapped Polygon")
-        repair_layout = QVBoxLayout(repair_box)
-        repair_layout.setContentsMargins(6, 6, 6, 6)
-        repair_layout.setSpacing(5)
-        repair_grid = QGridLayout()
-        repair_grid.setHorizontalSpacing(5)
-        repair_grid.setVerticalSpacing(4)
-        repair_grid.addWidget(QLabel("Target material:"), 0, 0)
-        repair_grid.addWidget(self.repair_target_combo, 0, 1)
-        repair_grid.addWidget(QLabel("Source polyID:"), 1, 0)
-        repair_grid.addWidget(self.repair_source_spin, 1, 1)
-        repair_grid.addWidget(self.repair_copy_button, 2, 0)
-        repair_grid.addWidget(self.repair_planar_button, 2, 1)
-        repair_layout.addLayout(repair_grid)
-        self.repair_preview.setMaximumHeight(90)
-        repair_layout.addWidget(self.repair_preview)
-        repair_buttons = QGridLayout()
-        repair_buttons.setHorizontalSpacing(5)
-        repair_buttons.addWidget(self.repair_apply_button, 0, 0)
-        repair_buttons.addWidget(self.repair_revert_button, 0, 1)
-        repair_buttons.addWidget(self.repair_save_button, 0, 2)
-        repair_layout.addLayout(repair_buttons)
-        mapping_layout.addWidget(repair_box)
 
         snapshot_panel = QWidget()
         snapshot_layout = QVBoxLayout(snapshot_panel)
@@ -1982,7 +1941,7 @@ class AssemblyWindow(
         diagnostics_layout.setContentsMargins(0, 0, 0, 0)
         diagnostics_layout.addWidget(diagnostics_tabs)
         diagnostics_panel.setMinimumHeight(0)
-        diagnostics_panel.setMaximumHeight(200)
+        diagnostics_panel.setMaximumHeight(DIAGNOSTICS_MAX_HEIGHT)
         diagnostics_panel.setSizePolicy(QSizePolicy.Policy.Expanding,
                                         QSizePolicy.Policy.Ignored)
 
@@ -2001,7 +1960,7 @@ class AssemblyWindow(
         self._diagnostics_dock = diagnostics_panel
         self._diagnostics_splitter = vertical_split
         # Diagnostics are opt-in at startup.  Show Diagnostic Panel reopens
-        # the same compact 80 px panel with Log as the default tab.
+        # the panel (DIAGNOSTICS_OPEN_HEIGHT px, readable) with Log as the default tab.
         diagnostics_panel.hide()
 
     # -- actions ---------------------------------------------------------------
@@ -2032,7 +1991,7 @@ class AssemblyWindow(
             return
 
         def fit_inside_window() -> None:
-            target = min(80, max(1, splitter.height() - 1))
+            target = min(DIAGNOSTICS_OPEN_HEIGHT, max(1, splitter.height() - 1))
             splitter.setSizes([max(1, splitter.height() - target), target])
 
         QTimer.singleShot(0, fit_inside_window)
@@ -2063,43 +2022,6 @@ class AssemblyWindow(
 
         self.log_list.clear()
         self.statusBar().showMessage("Log cleared.", 2000)
-
-    def _set_object_info(self, lines: list[str]) -> None:
-        """Store selected-asset details and rebuild the compact info menu."""
-
-        self._object_info_asset_lines = lines or ["No asset selected."]
-        self._refresh_object_info_menu()
-
-    def _set_polygon_object_info(self, lines: list[str]) -> None:
-        """Keep polygon diagnostics beside the asset data, without repeats."""
-
-        self._object_info_polygon_lines = lines
-        self._refresh_object_info_menu()
-
-    def _refresh_object_info_menu(self) -> None:
-        menu = getattr(self, "object_info_menu", None)
-        if menu is None:
-            return
-        menu.clear()
-        seen = set()
-        sections = (self._object_info_asset_lines,
-                    self._object_info_polygon_lines)
-        wrote_section = False
-        for lines in sections:
-            unique = []
-            for line in lines:
-                if line and line not in seen:
-                    unique.append(line)
-                    seen.add(line)
-            if not unique:
-                continue
-            if wrote_section:
-                menu.addSeparator()
-            for line in unique:
-                action = menu.addAction(line)
-                action.setEnabled(False)
-            wrote_section = True
-
 
     def _remember_output_folder(self, folder: str | Path) -> None:
         path = Path(folder)
@@ -2357,9 +2279,6 @@ class AssemblyWindow(
         self._selected_poly = None
         self._selected_polys.clear()
         self._mirror_select_source_polys.clear()
-        self._repair_plan = None
-        self._pending_repairs.clear()
-        self._saved_repair_path = None
         self._geom_dirty.clear()
         self._geom_original.clear()
         self._topology_original.clear()
@@ -2384,7 +2303,6 @@ class AssemblyWindow(
         self._bundle_base_snapshots.clear()
         self._texture_preview_cache.clear()
         self._texture_qimage_cache.clear()
-        self._object_info_polygon_lines = []
 
         # Resource browsers and diagnostics belonging to the closed document.
         self.setbas_tree.clear()
@@ -2394,10 +2312,8 @@ class AssemblyWindow(
         self.texture_list.clear()
         self.chunk_tree.clear()
         self.blocks_list.clear()
-        self.repair_preview.clear()
         self.warning_list.clear()
         self.checks_list.clear()
-        self._set_object_info(["No asset selected."])
 
         self._set_vp_table(None, "unavailable")
         self.vp_selected_base_label.setText("-")
@@ -2405,7 +2321,7 @@ class AssemblyWindow(
         self.setbas_extract_button.setEnabled(False)
         self.setbas_extract_all_button.setEnabled(False)
         self.setbas_runtime_loose_button.setEnabled(False)
-        self.setbas_onua3d_button.setEnabled(False)
+        self.setbas_onua_button.setEnabled(False)
         self.setbas_edit_dependencies_button.setEnabled(False)
         self.export_runtime_loose_action.setEnabled(False)
 
@@ -2623,9 +2539,9 @@ class AssemblyWindow(
             if item is not None else None)
         self.setbas_extract_button.setEnabled(resource_index is not None)
         base_selected = self._setbas is not None and kind == "base"
-        onua3d_button = getattr(self, "setbas_onua3d_button", None)
-        if onua3d_button is not None:
-            onua3d_button.setEnabled(base_selected)
+        onua_button = getattr(self, "setbas_onua_button", None)
+        if onua_button is not None:
+            onua_button.setEnabled(base_selected)
         edit_dependencies = getattr(
             self, "setbas_edit_dependencies_button", None)
         if edit_dependencies is not None:
@@ -3115,8 +3031,8 @@ class AssemblyWindow(
         if target is not None:
             self._edit_base_dependencies(target.owner_path)
 
-    def _export_setbas_base_onua3d(self, item) -> None:
-        """Export exactly the BASE selected in the BAS Manager as ONUA3D."""
+    def _export_setbas_base_onua(self, item) -> None:
+        """Export exactly the BASE selected in the BAS Manager as a .ONUA archive."""
 
         if self._setbas is None or item is None \
                 or item.data(0, _BAS_KIND_ROLE) != "base":
@@ -3130,17 +3046,17 @@ class AssemblyWindow(
         if target is None:
             return
         self._selected_owner = target.owner_path
-        self._export_to_blender()
+        self._export_onua_archive()
 
-    def _export_selected_setbas_base_onua3d(self) -> None:
+    def _export_selected_setbas_base_onua(self) -> None:
         """Button entry point for exporting the selected BAS BASE."""
 
         item = self.setbas_tree.currentItem()
         if item is None or item.data(0, _BAS_KIND_ROLE) != "base":
             self._notify(
-                "Select a BASE entry before exporting OpenNeoUA 3D.", 6000)
+                "Select a BASE entry before exporting an archive.", 6000)
             return
-        self._export_setbas_base_onua3d(item)
+        self._export_setbas_base_onua(item)
 
     def _edit_selected_setbas_base_dependencies(self) -> None:
         """Open the same BASE dependency editor used by the context menu."""

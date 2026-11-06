@@ -369,7 +369,6 @@ def extract_archive(archive: SetBasArchive, out_dir: str | Path, *,
                     convert_ilbm: bool = False,
                     convert_png: bool = False,
                     export_base_kids: bool = False,
-                    export_metadata: bool = False,
                     manifest_csv: str = "",
                     dry_run: bool = False,
                     log=print) -> dict:
@@ -562,13 +561,6 @@ def extract_archive(archive: SetBasArchive, out_dir: str | Path, *,
         summary["base_kids"] = base_summary
         log(f"BASE/KIDS raw export: {base_summary['kids_forms_exported']} "
             f"KIDS forms, {base_summary['objt_forms_exported']} OBJT forms")
-
-    if export_metadata:
-        import studio.formats.base_format as base_kids_export
-        meta_summary = base_kids_export.write_outputs(
-            Path(archive.path), out_dir / "metadata")
-        summary["metadata"] = meta_summary
-        log(f"scene metadata exported to {out_dir / 'metadata'}")
 
     return summary
 

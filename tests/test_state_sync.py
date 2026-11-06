@@ -77,6 +77,15 @@ def test_a_state_found_twice_is_one_row_with_both_sources(tmp_path):
     assert merged[0].found_by == ["Folder", "Entity List"]
 
 
+def test_archive_objects_match_the_script_names_with_or_without_the_base_suffix(tmp_path):
+    """Scripts say 'VP_BRGR2.base', the objects inside SET.BAS are called 'VP_BRGR2'."""
+    archive = tmp_path / "SET.BAS"
+    merged = merge_states([StateCandidate("Fire", archive, "VPfBRGR2", ["Bas Manager"])],
+                          [StateCandidate("Fire — VP 7", archive, "VPfBRGR2.base", ["Entity List"])])
+    assert len(merged) == 1
+    assert merged[0].found_by == ["Bas Manager", "Entity List"]
+
+
 def test_a_model_without_state_names_still_finds_its_neighbours(flak):
     found = nearby_models(flak / "Kyt_Flak_Fire" / "Kyt_Flak_Fire.BASE", set())
     assert [path.name for path in found] == ["Kyt_Flak_Normal.BASE"]

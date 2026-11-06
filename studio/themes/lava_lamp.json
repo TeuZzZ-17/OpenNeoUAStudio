@@ -1,0 +1,47 @@
+{
+  "id": "lava_lamp",
+  "name": "Lava Lamp",
+  "description": "Burnt purple wax with orange blobs rising.",
+  "mode": "dark",
+  "order": 28,
+  "palette": {
+    "Window": "#2a1030",
+    "Base": "#371d3a",
+    "AlternateBase": "#472d46",
+    "Button": "#371d3a",
+    "Mid": "#664d5e",
+    "Midlight": "#50374e",
+    "Light": "#7f6772",
+    "Dark": "#190a1d",
+    "WindowText": "#ffe9d6",
+    "Text": "#ffe9d6",
+    "ButtonText": "#ffe9d6",
+    "ToolTipBase": "#3f2641",
+    "ToolTipText": "#ffe9d6",
+    "Highlight": "#ff7a1a",
+    "HighlightedText": "#14101c",
+    "Disabled.Text": "#947c83",
+    "Disabled.WindowText": "#947c83",
+    "Disabled.ButtonText": "#947c83"
+  },
+  "tone": {
+    "Accent": "#ffb347"
+  },
+  "lists": {
+    "Hover": "#753528",
+    "Selected": "#ff7a1a",
+    "DependencySelected": "#31494a",
+    "Problem": "#73283b",
+    "ModifiedSelected": "#2a4978",
+    "ModifiedHover": "#2a345d"
+  },
+  "syntax": {
+    "key": "#ff9a4d",
+    "function": "#ffd166",
+    "number": "#9be564",
+    "string": "#ff8fa3",
+    "comment": "#a58aa8",
+    "line_number": "#92789a",
+    "error": "#6a1a2a"
+  }
+}
