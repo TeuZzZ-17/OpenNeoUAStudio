@@ -25,13 +25,14 @@ MODE_RISE = "rise"                   # camera-facing 3DS puffs that climb away
 MODES = (MODE_GROUND_PULSE, MODE_RISE)
 
 # Keys that only one mode reads; the engine warns when a profile uses the other mode.
-GROUND_PULSE_KEYS = ("effect_base", "effect_vp", "effect_pulse_interval", "effect_pulse_time")
+GROUND_PULSE_KEYS = ("effect_base", "effect_vp", "effect_pulse_interval", "effect_pulse_time",
+                     "effect_scale")
 RISE_KEYS = ("effect_fade_inout", "effect_count", "effect_size", "effect_growth",
              "effect_rise_speed", "effect_puff_time", "effect_drift", "effect_intensity")
 
 # Every effect key of a profile; any of them marks the profile as having an effect.
 SMOKE_KEYS = (
-    "effect_mode", "effect_3ds", "effect_scale", "effect_active_time", "effect_chance",
+    "effect_mode", "effect_3ds", "effect_active_time", "effect_chance",
     "effect_spread", "effect_tint",
 ) + GROUND_PULSE_KEYS + RISE_KEYS
 

@@ -9,7 +9,7 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 from PySide6.QtCore import QPoint, Qt
 from PySide6.QtTest import QTest
 from PySide6.QtWidgets import (
-    QApplication, QHeaderView, QProgressDialog, QTreeWidgetItem,
+    QApplication, QDialog, QHeaderView, QProgressDialog, QTreeWidgetItem,
 )
 
 import studio.workbench.window as assembly_window_module
@@ -208,7 +208,9 @@ class WindowContractV5Tests(unittest.TestCase):
                 window.findChildren(QProgressDialog), [])
             self.assertFalse(hasattr(window, "import_vp_package_action"))
             self.assertEqual(
-                window.save_asset_family_action.text(), "Export BASE")
+                window.export_model_action.text(), "Export Model")
+            self.assertEqual(
+                window.save_asset_family_action.text(), "Export Model")
             for removed_vp_control in (
                     "vp_import_button", "vp_new_spin", "vp_assign_button",
                     "vp_undo_button", "vp_redo_button", "vp_clear_button",
@@ -249,14 +251,14 @@ class WindowContractV5Tests(unittest.TestCase):
             self.assertEqual(
                 [action.text() for action in window.file_import_menu.actions()],
                 [
-                    "Import BAS Archive", "Import BASE",
+                    "Import BAS Archive", "Import Model",
                     "Import OpenNeoUA 3D",
                 ],
             )
             self.assertEqual(
                 [action.text() for action in window.file_export_menu.actions()],
                 [
-                    "Extract Entire Current Set", "Export BASE",
+                    "Extract Entire Current Set", "Export Model",
                     "Export OpenNeoUA 3D", "Overwrite",
                 ],
             )
@@ -266,7 +268,7 @@ class WindowContractV5Tests(unittest.TestCase):
                     assembly_window_module.QToolBar)
                 for action in toolbar.actions() if action.text()]
             self.assertNotIn("Import BAS Archive", toolbar_texts)
-            self.assertNotIn("Import BASE", toolbar_texts)
+            self.assertNotIn("Import Model", toolbar_texts)
             self.assertFalse(any(
                 "extra asset root" in label.casefold()
                 or "report" in label.casefold()
@@ -300,40 +302,52 @@ class WindowContractV5Tests(unittest.TestCase):
         finally:
             window.close()
 
-    def test_import_asset_family_reuses_selected_directory_between_steps(self):
+    def test_import_model_uses_the_guided_dialog_selection(self):
         window = AssemblyWindow()
         try:
-            window._last_directory = Path("C:/start")
-            selected_dir = Path("C:/UA/Assets/Family")
-            single_results = [
-                (str(selected_dir / "MODEL.BASE"), "BASE"),
-                (str(selected_dir / "MODEL.SKLT"), "Skeletons"),
-            ]
-            multi_results = [
-                ([str(selected_dir / "MODEL.ILBM")], "Textures"),
-                ([str(selected_dir / "MODEL.ANM")], "Animations"),
-            ]
-            with patch.object(
-                    assembly_window_module.QFileDialog, "getOpenFileName",
-                    side_effect=single_results) as single_dialog, patch.object(
-                    assembly_window_module.QFileDialog, "getOpenFileNames",
-                    side_effect=multi_results) as multi_dialog, patch.object(
-                    window, "_open_manual_asset_family") as open_family:
+            selection = SimpleNamespace(
+                base_path=Path("C:/UA/Assets/Family/MODEL.BASE"),
+                archive=None,
+                overrides={"MODEL.ILBM": "C:/UA/Assets/Family/MODEL.ILBM"},
+                search_roots=[Path("C:/UA/Assets")],
+            )
+            with patch(
+                    "studio.workbench.model_import.ModelImportDialog") as dialog, \
+                 patch.object(window, "_import_model_family") as import_family:
+                dialog.return_value.exec.return_value = \
+                    QDialog.DialogCode.Accepted
+                dialog.return_value.selection.return_value = selection
                 window.open_family_dialog()
 
-            self.assertEqual(single_dialog.call_args_list[0].args[2],
-                             str(Path("C:/start")))
-            self.assertEqual(single_dialog.call_args_list[1].args[2],
-                             str(selected_dir))
-            self.assertEqual(multi_dialog.call_args_list[0].args[2],
-                             str(selected_dir))
-            self.assertEqual(multi_dialog.call_args_list[1].args[2],
-                             str(selected_dir))
-            open_family.assert_called_once_with(
-                str(selected_dir / "MODEL.SKLT"),
-                str(selected_dir / "MODEL.BASE"),
-                [str(selected_dir / "MODEL.ILBM")],
-                [str(selected_dir / "MODEL.ANM")])
+            dialog.assert_called_once()
+            import_family.assert_called_once_with(selection)
+        finally:
+            window.close()
+
+    def test_import_model_family_applies_overrides_archive_and_roots(self):
+        window = AssemblyWindow()
+        try:
+            archive = object()
+            selection = SimpleNamespace(
+                base_path=Path("C:/UA/MODEL.BASE"),
+                archive=archive,
+                overrides={"MODEL.ILBM": "C:/UA/MODEL.ILBM"},
+                search_roots=[Path("C:/UA/Model Resources")],
+            )
+            with patch.object(
+                    window, "_confirm_discard_geometry",
+                    return_value=True), patch(
+                    "studio.workbench.window.load_asset_family") as load, \
+                    patch.object(window, "_set_family") as set_family:
+                load.return_value = object()
+                window._import_model_family(selection)
+
+            self.assertIs(window._setbas, archive)
+            self.assertEqual(
+                window._overrides, {"MODEL.ILBM": "C:/UA/MODEL.ILBM"})
+            self.assertIn(Path("C:/UA/Model Resources"),
+                          window._extra_roots)
+            set_family.assert_called_once()
         finally:
             window.close()
 

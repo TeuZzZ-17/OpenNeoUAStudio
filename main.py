@@ -144,7 +144,12 @@ def main() -> int:
         return _run_map_editor(args)
 
     from PySide6.QtWidgets import QApplication
-    from studio.rendering.gpu import request_desktop_opengl
+    from studio.rendering.gpu import prefer_graphics_card, request_desktop_opengl
+    from studio.rendering.gpu_preference import ask_nvidia_offload
+
+    # On Linux the graphics card is chosen inside the process, and only before
+    # the first context exists: ask for it here, before Qt starts.
+    ask_nvidia_offload()
     from studio.ui.shell import StartupToolSelector
 
     request_desktop_opengl()
@@ -155,6 +160,12 @@ def main() -> int:
     # Each window composes its own full title. Keep the platform from
     # appending a second "OpenNeoUA Studio" label to document titles.
     app.setApplicationDisplayName("")
+
+    # A built-in graphics chip costs most of the frame rate. Ask Windows for the
+    # graphics card the same way the engine does, and say what happened.
+    notice = prefer_graphics_card()
+    if notice:
+        print(notice, file=sys.stderr)
 
     if SECTOR_EDITOR_FLAG in args:
         from map_editor import bootstrap

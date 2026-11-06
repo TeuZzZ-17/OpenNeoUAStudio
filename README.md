@@ -80,6 +80,15 @@ The following layouts are recognized:
   sibling `levelsxp` folder. If both `Data` and `dataxp` are installed, selecting the game folder
   defaults to `Data`; select `dataxp` explicitly for the expansion.
 
+## Graphics card
+
+On a computer with two graphics chips, a program is given the slow built-in one unless it asks for the other. The engine asks through its own executable; Studio runs under Python and cannot, so on Windows it asks the system instead: the first time Studio sees it is drawing with a built-in chip, it stores the same "High performance" choice the Settings page writes, for its own program only. Close Studio and open it again and the graphics card is used.
+
+- It is written in the current user's own settings, needs no administrator, and is never written over a choice already made there. Change it back any time in Settings, System, Display, Graphics.
+- Running from the sources, nothing is decided for you, because that would choose for every Python program on the computer. Add python.exe there yourself if you want it.
+- On Linux Studio asks the NVIDIA library for the card by itself, before Qt starts, in the same way the `prime-run` command does, and drops the request if no drawing context can be made with it. With an AMD or Intel card, start Studio with `DRI_PRIME=1`.
+- The chip in use is written on the console at startup and shown in the renderer badge in the status bar.
+
 ## License
 
 Copyright (C) 2025-2026 TeuZzZ-17
