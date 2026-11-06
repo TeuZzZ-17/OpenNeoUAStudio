@@ -265,3 +265,38 @@ def test_editors_do_not_use_system_cursors():
             if path not in allowed and "CursorShape." in path.read_text(encoding="utf-8"):
                 offenders.append(str(path.relative_to(root)))
     assert not offenders, offenders
+
+
+def test_painted_theme_cursor_reaches_every_window_and_widget_not_only_the_3d_views(app):
+    """The theme cursor must show over panels, lists, dialogs and menus too, and go back with a system theme."""
+    from PySide6.QtWidgets import QDialog, QListWidget, QMenu, QVBoxLayout
+    from studio.ui.cursor_themes import set_cursor_theme
+
+    dialog = QDialog()
+    QVBoxLayout(dialog).addWidget(QListWidget())
+    menu = QMenu()
+    menu.addAction("entry")
+    try:
+        set_cursor_theme("deetex_steel")
+        dialog.show()
+        menu.show()
+        app.processEvents()
+        for widget in (dialog, dialog.findChild(QListWidget), menu):
+            assert widget.cursor().shape() == Qt.CursorShape.BitmapCursor
+        set_cursor_theme("cosmic_eye")           # a theme change reaches windows that are already open
+        assert dialog.findChild(QListWidget).cursor().pixmap().toImage() == studio_cursor("arrow").pixmap().toImage()
+        set_cursor_theme("classic")
+        assert dialog.findChild(QListWidget).cursor().shape() == Qt.CursorShape.ArrowCursor
+    finally:
+        set_cursor_theme("classic")
+        dialog.close()
+        menu.close()
+
+
+def test_deetex_has_one_steel_cursor_and_a_colour_theme(app):
+    from studio.ui.cursor_themes import THEMES
+    from studio.ui.style import load_themes
+
+    assert "deetex_steel" in THEMES and "Deetex" in THEMES["deetex_steel"][1]
+    assert not [key for key in THEMES if key.startswith("deetex") and key != "deetex_steel"]
+    assert load_themes()["deetex"]["name"] == "Deetex Mercury Empire"

@@ -421,6 +421,7 @@ class AcceleratedWidget(QWidget):
 class RendererBadge(QPushButton):
     def __init__(self, viewport, parent=None):
         super().__init__(parent)
+        self.state_label = ''
         self.setObjectName('rendererBadge')
         self.setFlat(True)
         self.viewport = viewport
@@ -450,7 +451,10 @@ class RendererBadge(QPushButton):
         label = (('Software OpenGL — ' if software_gl else 'GPU — ') + chip
                  if chip else ('GPU' if on_gpu else 'Software'))
         warning = graphics_chip_warning() if on_gpu else ''
-        self.setText(f'{label} !' if warning else label)
+        # The button never states the mode itself (it could be stale): it opens the menu,
+        # whose first line is read from the viewport at the moment of the click.
+        self.state_label = label
+        self.setText('Graphics Info !' if warning else 'Graphics Info')
         lines = [name]
         if on_gpu and chip:
             lines.append(chip)
@@ -460,15 +464,25 @@ class RendererBadge(QPushButton):
             lines.extend(('', warning))
         lines.append('Click to choose a renderer or an available device.')
         self.setToolTip('\n'.join(lines))
-        self.setAccessibleName(f'Renderer: {label}. Choose rendering mode')
+        self.setAccessibleName('Graphics Info. Shows the current renderer and lets you change it')
 
     def show_menu(self):
         from studio.rendering import gpu_preference as preference
+        # Read the live state now, never the one remembered from the last paint.
+        self.set_backend(self.viewport.renderer_name)
+        actual = 'gpu' if self.viewport.renderer_name.startswith('OpenGL') else 'software'
         menu = QMenu(self)
+        running = menu.addAction(f'Running now: {self.state_label}')
+        running.setEnabled(False)
+        if self.viewport.renderer_mode != actual:
+            note = (self.viewport.renderer_error
+                    or 'GPU requested; waiting for the first GPU frame.')
+            menu.addAction(note).setEnabled(False)
+        menu.addSeparator()
         for title, mode in (("GPU (current device)", "gpu"), ("Software", "software")):
             action = menu.addAction(title)
             action.setCheckable(True)
-            action.setChecked(self.viewport.renderer_mode == mode)
+            action.setChecked(actual == mode)
             action.triggered.connect(lambda _checked=False, value=mode: self.switch_backend(value))
 
         devices = preference.linux_graphics_devices()

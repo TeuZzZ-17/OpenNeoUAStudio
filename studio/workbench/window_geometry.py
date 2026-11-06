@@ -449,7 +449,7 @@ class _GeometryEditMixin:
         self.fx_combo.blockSignals(False)
         self._sync_poly_id_control()
         self._fill_polygon_inspector(self._selected_poly)
-        self._update_repair_buttons()
+        self._update_material_buttons()
         self._sync_edit_action_states()
         self.viewport.setFocus()
 
@@ -654,7 +654,7 @@ class _GeometryEditMixin:
                 self.fx_combo.blockSignals(False)
         if self._mapping_index is not None:
             self._fill_polygon_inspector(self._selected_poly)
-        self._update_repair_buttons()
+        self._update_material_buttons()
         self._sync_fx_combo_label()
         self._sync_edit_action_states()
 
@@ -1790,10 +1790,11 @@ class _GeometryEditMixin:
         select_all = menu.addAction(
             "Select All Geometry", self.viewport.select_all_edit_vertices)
         select_all.setEnabled(active)
-        menu.addAction(self.select_all_fx_action)
         select_none = menu.addAction(
             "Deselect All Geometry", self.viewport.select_no_edit_vertices)
         select_none.setEnabled(active)
+        menu.addAction(self.select_all_fx_action)
+        menu.addAction(self.deselect_all_fx_action)
         deselect = menu.addAction(
             "Deselect",
             lambda: self.viewport.deselect_at(position)
@@ -1868,20 +1869,20 @@ class _GeometryEditMixin:
             self._right_tabs.setCurrentWidget(self._editor_tabs)
             self._editor_tabs.setCurrentWidget(self._model_editor_panel)
 
-    def _show_mapping_repair(self) -> None:
-        """Open the existing repair panel as one shared-state tool window."""
+    def _show_materials(self) -> None:
+        """Open the Materials panel as one shared-state tool window."""
 
         self._show_model_editor()
         if self._mapping_dialog is None:
             dialog = QDialog(self)
-            dialog.setWindowTitle("Mapping Repair")
+            dialog.setWindowTitle("Materials")
             dialog.resize(520, 680)
             layout = QVBoxLayout(dialog)
             layout.setContentsMargins(4, 4, 4, 4)
             layout.addWidget(self._mapping_panel)
             self._mapping_dialog = dialog
         self._update_mapping_diagnostics_summary()
-        self._update_repair_buttons()
+        self._update_material_buttons()
         self._mapping_dialog.show()
         self._mapping_dialog.raise_()
         self._mapping_dialog.activateWindow()
@@ -1970,8 +1971,8 @@ class _GeometryEditMixin:
             self.edit_toggle_action.setEnabled(not paste_preview)
         if hasattr(self, "edit_menu"):
             self.edit_menu.setEnabled(not paste_preview)
-        if hasattr(self, "mapping_repair_action"):
-            self.mapping_repair_action.setEnabled(not paste_preview)
+        if hasattr(self, "materials_action"):
+            self.materials_action.setEnabled(not paste_preview)
         if hasattr(self, "_right_tabs") and hasattr(self, "_editor_tabs"):
             editor_index = self._right_tabs.indexOf(self._editor_tabs)
             if editor_index >= 0:
@@ -2067,6 +2068,8 @@ class _GeometryEditMixin:
         can_select_all_fx = bool(self._fx_elements) and not paste_preview
         if hasattr(self, "select_all_fx_action"):
             self.select_all_fx_action.setEnabled(can_select_all_fx)
+        if hasattr(self, "deselect_all_fx_action"):
+            self.deselect_all_fx_action.setEnabled(can_select_all_fx)
         can_add_fx = editing and self._can_add_fx_element()
         if hasattr(self, "add_fx_action"):
             self.add_fx_action.setEnabled(can_add_fx)
@@ -2143,8 +2146,8 @@ class _GeometryEditMixin:
                 and (classification.groups or classification.skipped)))
         # This synchronizer is also used while the window is being built.
         # Keep it safe before the later editor widgets exist.
-        if hasattr(self, "repair_copy_button"):
-            self._update_repair_buttons()
+        if hasattr(self, "material_copy_button"):
+            self._update_material_buttons()
         if hasattr(self, "uv_add_vertex_button"):
             self._sync_uv_add_vertex_button()
 
@@ -2154,10 +2157,10 @@ class _GeometryEditMixin:
         self.model_save_button.setEnabled(overwrite_enabled)
         self.model_save_as_button.setEnabled(family_export_enabled)
         self.save_asset_family_action.setEnabled(family_export_enabled)
-        onua3d_enabled = bool(
-            self._blender_export_object() is not None
+        onua_enabled = bool(
+            self._onua_export_object() is not None
             and not self.viewport.paste_preview_active)
-        self.export_blender_action.setEnabled(onua3d_enabled)
+        self.export_onua_action.setEnabled(onua_enabled)
         self.overwrite_action.setEnabled(overwrite_enabled)
         owner = self._selected_owner
         can_reset = bool(
@@ -2430,6 +2433,7 @@ class _GeometryEditMixin:
         except Exception:
             self._restore_family_resource_state(family, previous)
             return False
+        self._sync_animation_controls()   # undo/redo may add or remove animated materials
         return True
 
     def _apply_edit_command(self, command: dict, redo: bool) -> bool:
@@ -2519,8 +2523,7 @@ class _GeometryEditMixin:
 
         model_dirty = bool(
             self._geom_dirty or self._texture_original
-            or self._uv_original or self._vanm_uv_original
-            or self._pending_repairs)
+            or self._uv_original or self._vanm_uv_original)
         if not model_dirty:
             return True
         if self._skip_model_switch_warning:

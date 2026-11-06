@@ -1,0 +1,47 @@
+{
+  "id": "neon_abyss",
+  "name": "Neon Abyss",
+  "description": "A drowned arcade: black-blue water, cyan neon and hot pink signs.",
+  "mode": "dark",
+  "order": 29,
+  "palette": {
+    "Window": "#04141f",
+    "Base": "#11222c",
+    "AlternateBase": "#21333d",
+    "Button": "#11222c",
+    "Mid": "#40545e",
+    "Midlight": "#2a3d47",
+    "Light": "#596f79",
+    "Dark": "#020c13",
+    "WindowText": "#d9f7ff",
+    "Text": "#d9f7ff",
+    "ButtonText": "#d9f7ff",
+    "ToolTipBase": "#192b35",
+    "ToolTipText": "#d9f7ff",
+    "Highlight": "#00d9f2",
+    "HighlightedText": "#14101c",
+    "Disabled.Text": "#6e868f",
+    "Disabled.WindowText": "#6e868f",
+    "Disabled.ButtonText": "#6e868f"
+  },
+  "tone": {
+    "Accent": "#ff2bd6"
+  },
+  "lists": {
+    "Hover": "#035969",
+    "Selected": "#00d9f2",
+    "DependencySelected": "#194c3f",
+    "Problem": "#5c2a31",
+    "ModifiedSelected": "#154b6f",
+    "ModifiedHover": "#0f3651"
+  },
+  "syntax": {
+    "key": "#ff5ce0",
+    "function": "#7df9ff",
+    "number": "#ffe066",
+    "string": "#9bf6c4",
+    "comment": "#6996a9",
+    "line_number": "#4f7a8c",
+    "error": "#5a1a3a"
+  }
+}

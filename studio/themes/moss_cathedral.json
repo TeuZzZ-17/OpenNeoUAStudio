@@ -1,0 +1,47 @@
+{
+  "id": "moss_cathedral",
+  "name": "Moss Cathedral",
+  "description": "Old green stone, candle gold and a little incense smoke.",
+  "mode": "dark",
+  "order": 30,
+  "palette": {
+    "Window": "#14211a",
+    "Base": "#212d25",
+    "AlternateBase": "#313d33",
+    "Button": "#212d25",
+    "Mid": "#505b4f",
+    "Midlight": "#3b463c",
+    "Light": "#6a7366",
+    "Dark": "#0c1410",
+    "WindowText": "#ecefd9",
+    "Text": "#ecefd9",
+    "ButtonText": "#ecefd9",
+    "ToolTipBase": "#2a362d",
+    "ToolTipText": "#ecefd9",
+    "Highlight": "#c9a227",
+    "HighlightedText": "#14101c",
+    "Disabled.Text": "#80887a",
+    "Disabled.WindowText": "#80887a",
+    "Disabled.ButtonText": "#80887a"
+  },
+  "tone": {
+    "Accent": "#e6c65a"
+  },
+  "lists": {
+    "Hover": "#534e1f",
+    "Selected": "#c9a227",
+    "DependencySelected": "#23543c",
+    "Problem": "#66322e",
+    "ModifiedSelected": "#1e526c",
+    "ModifiedHover": "#1a404d"
+  },
+  "syntax": {
+    "key": "#e6c65a",
+    "function": "#9fd89a",
+    "number": "#e8b36a",
+    "string": "#c9d98a",
+    "comment": "#8b9d8f",
+    "line_number": "#6a7e6e",
+    "error": "#5a2a22"
+  }
+}

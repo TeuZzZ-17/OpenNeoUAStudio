@@ -1,8 +1,7 @@
-"""AssemblyWindow mixin: repair actions and the family -> panels refresh."""
+"""AssemblyWindow mixin: material buttons and the family -> panels refresh."""
 
 from __future__ import annotations
 
-import os
 from pathlib import Path
 
 from PySide6.QtCore import Qt
@@ -12,9 +11,7 @@ from PySide6.QtGui import (
 )
 from PySide6.QtWidgets import (
     QAbstractItemView,
-    QFileDialog,
     QListWidgetItem,
-    QMessageBox,
     QTreeWidgetItem,
 )
 
@@ -22,14 +19,6 @@ from studio.assets.catalog import build_texture_catalog
 from studio.assets.dependencies import filter_tree as filter_asset_tree
 from studio.assets.family import (
     AssetFamily,
-)
-from studio.assets.mapping import (
-    MappingEditError,
-    MappingIndex,
-    plan_copy_style,
-    plan_planar,
-    RepairPlan,
-    save_repaired_base,
 )
 from studio.ui.style import theme_list_color
 from studio.ui.widgets import (
@@ -40,9 +29,6 @@ from studio.ui.widgets import (
     STATUS_COLORS as _STATUS_COLORS,
     status_icon as _status_icon,
 )
-from studio.rendering.geometry import (
-    detect_fx_elements,
-)
 from studio.workbench.common import (
     WINDOW_TITLE,
     _display_path,
@@ -52,28 +38,12 @@ from studio.workbench.common import (
 class _FamilyPanelsMixin:
     """Part of AssemblyWindow; `self` is always the AssemblyWindow."""
 
-    # -- repair -----------------------------------------------------------------
+    # -- material buttons -------------------------------------------------------
 
-    def _update_repair_buttons(self) -> None:
+    def _update_material_buttons(self) -> None:
         editing = (
             self._editing_allowed()
             and not self.viewport.paste_preview_active)
-        can_plan = (
-            editing
-            and self._selected_poly is not None
-            and self._mapping_index is not None
-            and self._mapping_index.status(self._selected_poly) == "unmapped"
-            and self._family is not None
-            and self._family.base_path is not None
-            and self.repair_target_combo.count() > 0
-        )
-        self.repair_copy_button.setEnabled(can_plan)
-        self.repair_planar_button.setEnabled(can_plan)
-        self.repair_apply_button.setEnabled(
-            editing and self._repair_plan is not None)
-        self.repair_revert_button.setEnabled(
-            editing and bool(self._pending_repairs))
-        self.repair_save_button.setEnabled(bool(self._pending_repairs))
         block_index = self._current_material_block_index()
         block = None
         if self._workbench_obj is not None and block_index is not None \
@@ -91,123 +61,6 @@ class _FamilyPanelsMixin:
             editing and supported
             and (block.class_id or "").lower() == "amesh.class")
         self.material_delete_button.setEnabled(editing and supported)
-
-    def _show_plan(self, plan: RepairPlan) -> None:
-        self._repair_plan = plan
-        self.repair_preview.clear()
-        for line in plan.describe():
-            self.repair_preview.addItem(line)
-        block = self._workbench_obj.base_object.ades[plan.block_index]
-        tex = block.texture.name if block.texture else "-"
-        self._draw_uv_overlay(tex, plan.uvs, plan.poly_id,
-                              extra_groups=block.olpl)
-        self._update_repair_buttons()
-
-    def _plan_copy_style(self) -> None:
-        try:
-            plan = plan_copy_style(self._workbench_obj, self._selected_poly,
-                                   self.repair_source_spin.value(),
-                                   self._mapping_index)
-        except MappingEditError as exc:
-            QMessageBox.warning(self, "Cannot plan repair", str(exc))
-            return
-        self._show_plan(plan)
-
-    def _plan_planar(self) -> None:
-        target = self.repair_target_combo.currentData()
-        if target is None:
-            return
-        try:
-            plan = plan_planar(self._workbench_obj, self._selected_poly,
-                               target, self._mapping_index)
-        except MappingEditError as exc:
-            QMessageBox.warning(self, "Cannot plan repair", str(exc))
-            return
-        self._show_plan(plan)
-
-    def _apply_repair_in_memory(self) -> None:
-        if not self._require_editing("Apply Mapping Repair"):
-            return
-        if self.viewport.paste_preview_active:
-            self._notify(
-                "Finish or cancel Paste Geometry before applying a mapping "
-                "repair.", 6000)
-            return
-        plan = self._repair_plan
-        if plan is None or self._workbench_obj is None:
-            return
-        from studio.formats.base_format import AttsEntry
-
-        block = self._workbench_obj.base_object.ades[plan.block_index]
-        block.atts.append(AttsEntry(plan.poly_id, plan.color_val,
-                                    plan.shade_val, plan.tracy_val, 0))
-        block.olpl.append(list(plan.uvs))
-        if plan.block_index < len(self._workbench_obj.materials):
-            self._workbench_obj.materials[plan.block_index].faces.append(
-                (plan.poly_id, list(plan.uvs), plan.shade_val)
-            )
-        self._pending_repairs.append(plan)
-        self._repair_plan = None
-        self._mapping_index = MappingIndex(self._workbench_obj)
-        self._update_mapping_diagnostics_summary()
-        visible = self._family_descendants(
-            self._family, self._selected_owner)
-        self.viewport.load_family(
-            self._family, visible_owners=visible,
-            primary_owner=self._selected_owner)
-        self._sync_animation_controls()
-        self.viewport.set_mapping_diagnostics(
-            self.mapping_diag_check.isChecked())
-        self.viewport.set_selected_polygon(plan.poly_id)
-        self._fill_polygon_inspector(plan.poly_id)
-        self._fill_blocks_list(self._family)
-        self._update_repair_buttons()
-        self.statusBar().showMessage(
-            f"Mapping repair ready for polygon #{plan.poly_id}. "
-            "Use Export Asset Family to keep it."
-        )
-
-    def _revert_repairs(self) -> None:
-        if not self._require_editing("Revert Mapping Repairs"):
-            return
-        if self._family is None or self._family.base_path is None:
-            return
-        self._pending_repairs = []
-        self._repair_plan = None
-        self.open_base(self._family.base_path)
-        self.statusBar().showMessage("In-memory repairs reverted (reloaded "
-                                     "from disk).")
-
-    def _save_repaired_as(self) -> None:
-        if not self._pending_repairs or self._family is None \
-                or self._family.base_path is None:
-            return
-        source = self._family.base_path
-        suggested = source.with_name(f"{source.stem}.fixed{source.suffix}")
-        path, _ = QFileDialog.getSaveFileName(
-            self, "Export mapping as",
-            str(suggested),
-            "Urban Assault BASE (*.base *.bas);;All files (*)",
-        )
-        if not path:
-            return
-        try:
-            notes = save_repaired_base(self._family, self._workbench_obj,
-                                       self._pending_repairs, path)
-        except MappingEditError as exc:
-            QMessageBox.critical(self, "Export failed - nothing written",
-                                 str(exc))
-            return
-        self._saved_repair_path = path
-        self._pending_repairs = []
-        self._log("; ".join(notes))
-        self._notify(f"Mapping exported: {Path(path).name}.", 8000)
-        # Keep resolving against the original family's directories so the
-        # reloaded copy finds its skeleton/textures even from a new folder.
-        for root in (source.parent, source.parent.parent):
-            if root not in self._extra_roots:
-                self._extra_roots.append(root)
-        self.open_base(path)
 
     # -- family -> panels --------------------------------------------------------
 
@@ -271,7 +124,6 @@ class _FamilyPanelsMixin:
         self._fill_textures(family)
         self._fill_chunks(family)
         self._fill_checks(family)
-        self._pending_repairs = []
         self._geom_dirty = {}
         self._geom_original = {}
         self._topology_original = {}
@@ -289,7 +141,6 @@ class _FamilyPanelsMixin:
         self._uv_history_before = None
         self._selected_poly = None
         self._selected_polys.clear()
-        self._object_info_polygon_lines = []
         self._sync_geometry_save_controls()
         self._rebuild_workbench(family, self._selected_owner)
         self._refresh_fx_elements()
@@ -821,7 +672,7 @@ class _FamilyPanelsMixin:
         self.viewport.set_highlight_polys(self._selected_polys)
         self._sync_poly_id_control()
         self._fill_polygon_inspector(self._selected_poly)
-        self._update_repair_buttons()
+        self._update_material_buttons()
         self._sync_edit_action_states()
         self._notify(
             f"Deselected polygon #{poly_id}."
@@ -848,176 +699,10 @@ class _FamilyPanelsMixin:
             self.fx_combo.setCurrentIndex(0)
             self.fx_combo.blockSignals(False)
         self._fill_polygon_inspector(None)
-        self._update_repair_buttons()
+        self._update_material_buttons()
         self._sync_edit_action_states()
         if notify:
             self._notify("Selection cleared.", 3500)
-
-    def _on_tree_node_selected(self, current, _previous=None) -> None:
-        if current is None or self._family is None:
-            self._set_object_info(["No asset selected."])
-            return
-        data = current.data(0, Qt.ItemDataRole.UserRole)
-        if not data:
-            self._set_object_info(["No asset information available."])
-            return
-        kind, payload = data
-        # Asset Dependencies is intentionally a viewer/resolver.  Moving the
-        # current/hovered row must never switch the active model or replace its
-        # persistent dependency highlight.  Explicit model changes come from
-        # the viewport/Bas Manager (or the dedicated context action).
-        family = self._family
-        lines = []
-
-        if kind == "base":
-            lines.extend(["BASE prefab", f"path: {family.base_path}",
-                          f"search root: {family.search_root}"])
-            objects = family.all_objects()
-            lines.append(f"objects: {len(objects)} "
-                         f"(children: {max(0, len(objects) - 1)})")
-            from studio.assets.dependencies import summarize
-            lines.append("dependencies: " + ", ".join(
-                f"{v} {k}" for k, v in summarize(family.dependencies).items()))
-            if self._mapping_index:
-                lines.append(f"mapping: {self._mapping_index.poly_count} "
-                             f"polygons, unmapped "
-                             f"{self._mapping_index.unmapped or 'none'}")
-            lines.append(f"warnings: {len(family.warnings)}")
-        elif kind in ("skeleton", "child"):
-            fam_obj = payload
-            skeleton = fam_obj.skeleton
-            lines.append("skeleton" if kind == "skeleton"
-                         else "child BASE object (KIDS)")
-            lines.append(f"owner: {fam_obj.owner_path}")
-            if fam_obj.base_object.name:
-                lines.append(f"BASE name: {fam_obj.base_object.name}")
-            lines.append(f"reference: {fam_obj.base_object.skeleton_name}")
-            if fam_obj.base_object.skeleton_class:
-                lines.append(
-                    f"class: {fam_obj.base_object.skeleton_class}")
-            if fam_obj.skeleton_ref:
-                lines.append(f"source: {fam_obj.skeleton_ref.source or '?'} "
-                             f"-> {fam_obj.skeleton_ref.display_path}")
-                source_path = getattr(fam_obj.skeleton_ref, "path", None)
-                if source_path and Path(source_path).is_file():
-                    path = Path(source_path)
-                    lines.append(
-                        f"file: {path.stat().st_size:,} bytes | "
-                        f"{'writable' if os.access(path, os.W_OK) else 'read-only'}")
-            if skeleton:
-                lines.append(f"vertices: {len(skeleton.points)}")
-                lines.append(
-                    f"polygons: {skeleton.parsed_polygon_count} parsed | "
-                    f"{skeleton.rendered_polygon_count} rendered")
-                lines.append(
-                    f"outline: {len(skeleton.outline_points)} points | "
-                    f"{skeleton.parsed_outline_group_count} groups")
-                lines.append(
-                    f"SEN2 points: {len(skeleton.sensors)} | "
-                    f"chunks: {len(skeleton.chunks)}")
-                mapped = {p for g in fam_obj.materials for p, _u, _s in g.faces}
-                lines.append(f"mapped polygons: {len(mapped)}/"
-                             f"{skeleton.parsed_polygon_count}")
-                mapping = (self._mapping_index
-                           if fam_obj is self._workbench_obj
-                           else MappingIndex(fam_obj))
-                lines.append(
-                    f"mapping issues: {len(mapping.unmapped)} unmapped | "
-                    f"{len(mapping.duplicates)} duplicate | "
-                    f"{len(mapping.invalid)} invalid")
-                if skeleton.points:
-                    axes = list(zip(*skeleton.points))
-                    minimum = tuple(min(axis) for axis in axes)
-                    maximum = tuple(max(axis) for axis in axes)
-                    size = tuple(maximum[i] - minimum[i] for i in range(3))
-                    lines.append(
-                        "bounds size: "
-                        f"({size[0]:.2f}, {size[1]:.2f}, {size[2]:.2f})")
-                    lines.append(
-                        "bounds min/max: "
-                        f"{tuple(round(v, 2) for v in minimum)} -> "
-                        f"{tuple(round(v, 2) for v in maximum)}")
-                textures = list(dict.fromkeys(
-                    group.texture_name for group in fam_obj.materials
-                    if group.texture_name))
-                lines.append(
-                    f"materials: {len(fam_obj.materials)} | "
-                    f"textures: {len(textures)}")
-                if textures:
-                    lines.append("texture refs: " + ", ".join(textures))
-                fx_count = len(detect_fx_elements(
-                    fam_obj, family.animations))
-                lines.append(f"editable FX elements: {fx_count}")
-                session = self.viewport.edit_session
-                if session is not None \
-                        and self.viewport.edit_owner == fam_obj.owner_path:
-                    lines.append(
-                        f"selected vertices: {len(session.selection)} | "
-                        f"edit state: {'modified' if session.dirty else 'clean'}")
-                lines.append(
-                    f"unsaved geometry: "
-                    f"{'yes' if fam_obj.owner_path in self._geom_dirty else 'no'}")
-                total_warnings = len(fam_obj.warnings) + len(skeleton.warnings)
-                lines.append(f"model warnings: {total_warnings}")
-            else:
-                lines.append("skeleton not loaded")
-            lines.append(
-                f"ADES blocks: {len(fam_obj.base_object.ades)} | "
-                f"KIDS: {len(fam_obj.kids)} | "
-                f"embedded resources: {len(fam_obj.base_object.embedded)}")
-            if fam_obj.base_object.unknown_chunks:
-                lines.append(
-                    "unknown BASE chunks: "
-                    + ", ".join(fam_obj.base_object.unknown_chunks))
-            transform = fam_obj.base_object.transform
-            if transform:
-                lines.append(f"STRC: pos={transform.position} "
-                             f"scale={transform.scale} "
-                             f"euler(deg)={transform.euler}")
-                lines.append(
-                    f"STRC flags: {transform.flags} | "
-                    f"visibility: {transform.vis_limit} | "
-                    f"ambient: {transform.ambient_light}")
-        elif kind == "texture":
-            name = payload
-            ref = family.texture_refs.get(name)
-            img = family.textures.get(name)
-            lines.extend(["texture", f"reference: {name}"])
-            status = self._effective_status(
-                name, next((d.status for d in family.dependencies
-                            if d.raw_ref == name), "?"))
-            lines.append(f"status: {status}")
-            if ref:
-                lines.append(f"source: {ref.source or '-'} "
-                             f"-> {ref.display_path}")
-                if ref.candidates:
-                    lines.append(f"candidates: {len(ref.candidates)}")
-            saved = self._saved_choice_for(name)
-            if saved:
-                lines.append(f"saved choice: {saved.chosen_path}"
-                             + (" [STALE]" if saved.stale else ""))
-            if img:
-                lines.append(f"format: {img.kind} {img.width}x{img.height}, "
-                             f"{img.n_planes} planes, "
-                             f"{'ByteRun1' if img.compression else 'raw'}")
-                lines.append("palette: "
-                             + ("own CMAP" if img.palette else
-                                ("external PAL" if family.external_palette
-                                 else "grayscale fallback")))
-        elif kind == "animation":
-            name = payload
-            anm = family.animations.get(name)
-            lines.extend(["animation (bmpanim/VANM)", f"reference: {name}"])
-            if anm:
-                lines.append(f"bitmaps: {anm.bitmap_names}")
-                lines.append(f"frames: {len(anm.frames)} "
-                             f"(~{anm.total_duration_ms:.0f} ms/cycle)")
-                lines.append("playback: Play/Step/Speed toolbar")
-            else:
-                lines.append("not loaded / unsupported")
-        else:
-            lines.append("group node")
-        self._set_object_info(lines)
 
     def _active_model_texture_names(self) -> set[str]:
         """Return every ILBM/frame bitmap used by the active model subtree."""

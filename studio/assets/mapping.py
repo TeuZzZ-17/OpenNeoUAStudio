@@ -1,4 +1,4 @@
-"""Polygon mapping workbench core: reference graph, mapping index, repair plans and safe writers.
+"""Polygon mapping workbench core: reference graph, mapping index and safe writers.
 """
 
 from __future__ import annotations
@@ -12,7 +12,6 @@ from typing import Iterable
 
 from studio.exchange.portable import backup_existing_file
 from studio.formats.base_format import AmeshBlock, AttsEntry, parse_base_bytes
-from studio.formats.images import read_iff_bytes
 
 # ----------------------------------------------------------------------------
 # Typed POL2 reference graph and conservative structural remappers.
@@ -377,7 +376,7 @@ def diagnose_polygon_references(fam_obj, fx_elements=()) -> list[str]:
 
 
 # ----------------------------------------------------------------------------
-# Polygon Mapping Workbench core: mapping index, repair plans, safe writer.
+# Polygon Mapping Workbench core: mapping index, safe writer.
 # (formerly base_mapping_editor.py)
 # ----------------------------------------------------------------------------
 
@@ -433,36 +432,6 @@ class MappingIndex:
         if len(refs) > 1:
             return "duplicate"
         return "mapped"
-
-
-# --- repair plans -----------------------------------------------------------------
-
-
-@dataclass
-class RepairPlan:
-    poly_id: int
-    block_index: int
-    color_val: int = 0
-    shade_val: int = 0
-    tracy_val: int = 128
-    pad: int = 0
-    uvs: list[tuple[int, int]] = field(default_factory=list)
-    method: str = ""          # "copy-style" | "planar"
-    source_poly: int | None = None
-    notes: list[str] = field(default_factory=list)
-
-    def describe(self) -> list[str]:
-        lines = [
-            f"repair polygon #{self.poly_id} -> material block "
-            f"#{self.block_index} ({self.method})",
-            f"ATTS entry: polyID={self.poly_id} colorVal={self.color_val} "
-            f"shadeVal={self.shade_val} tracyVal={self.tracy_val} "
-            f"pad={self.pad}",
-            f"OLPL group ({len(self.uvs)} UVs): "
-            + " ".join(f"({u},{v})" for u, v in self.uvs),
-        ]
-        lines.extend(self.notes)
-        return lines
 
 
 @dataclass(frozen=True)
@@ -799,7 +768,7 @@ def paste_material_block(
         if target_poly_id is not None:
             raise MappingEditError(
                 "AMESH paste creates an empty material slot; map polygons "
-                "explicitly with the Mapping Repair tools")
+                "with the Studio MCP map_polygons tool")
         block.atts = []
         block.olpl = []
     else:
@@ -857,126 +826,6 @@ def delete_material_block(fam_obj, block_index: int):
     return blocks.pop(int(block_index))
 
 
-def _polygon_vertices(fam_obj, poly_id: int) -> list[tuple[float, float, float]]:
-    skeleton = fam_obj.skeleton
-    if skeleton is None or not (0 <= poly_id < len(skeleton.polygons)):
-        raise MappingEditError(f"polygon #{poly_id} not available")
-    return [skeleton.points[i] for i in skeleton.polygons[poly_id]]
-
-
-def planar_uvs(points: list[tuple[float, float, float]],
-               lo: int = 16, hi: int = 240) -> list[tuple[int, int]]:
-    """Simple planar projection: drop the dominant normal axis, normalise the
-    remaining two coordinates into texture-space bytes [lo, hi]."""
-
-    if len(points) < 3:
-        raise MappingEditError("planar UVs need at least 3 vertices")
-
-    # Newell normal
-    nx = ny = nz = 0.0
-    for i, (x0, y0, z0) in enumerate(points):
-        x1, y1, z1 = points[(i + 1) % len(points)]
-        nx += (y0 - y1) * (z0 + z1)
-        ny += (z0 - z1) * (x0 + x1)
-        nz += (x0 - x1) * (y0 + y1)
-    dominant = max(range(3), key=lambda i: abs((nx, ny, nz)[i]))
-    axes = [i for i in range(3) if i != dominant]
-
-    us = [p[axes[0]] for p in points]
-    vs = [p[axes[1]] for p in points]
-    du = (max(us) - min(us)) or 1.0
-    dv = (max(vs) - min(vs)) or 1.0
-    span = hi - lo
-    return [
-        (lo + round((u - min(us)) / du * span),
-         lo + round((v - min(vs)) / dv * span))
-        for u, v in zip(us, vs)
-    ]
-
-
-def plan_planar(fam_obj, poly_id: int, block_index: int,
-                mapping: MappingIndex) -> RepairPlan:
-    """Assign the polygon to a block with planar-projected UVs."""
-
-    block = _eligible_block(fam_obj, block_index)
-    points = _polygon_vertices(fam_obj, poly_id)
-    plan = RepairPlan(poly_id=poly_id, block_index=block_index,
-                      method="planar", uvs=planar_uvs(points))
-    _default_atts_values(plan, block)
-    plan.notes.append(
-        "UVs are a planar projection of the polygon bounds (preview and "
-        "adjust in-game if needed)."
-    )
-    return plan
-
-
-def plan_copy_style(fam_obj, poly_id: int, source_poly: int,
-                    mapping: MappingIndex) -> RepairPlan:
-    """Copy material block, ATTS values and UV pattern from a mapped polygon."""
-
-    refs = mapping.refs.get(source_poly)
-    if not refs:
-        raise MappingEditError(
-            f"source polygon #{source_poly} has no mapping to copy"
-        )
-    ref = refs[0]
-    block = _eligible_block(fam_obj, ref.block_index)
-    entry = block.atts[ref.atts_index]
-
-    plan = RepairPlan(poly_id=poly_id, block_index=ref.block_index,
-                      method="copy-style", source_poly=source_poly,
-                      color_val=entry.color_val, shade_val=entry.shade_val,
-                      tracy_val=entry.tracy_val)
-
-    target_points = _polygon_vertices(fam_obj, poly_id)
-    source_uvs = (block.olpl[ref.atts_index]
-                  if ref.atts_index < len(block.olpl) else [])
-    if source_uvs and len(source_uvs) == len(target_points):
-        plan.uvs = list(source_uvs)
-        plan.notes.append(
-            f"UV pattern copied from polygon #{source_poly} "
-            "(same vertex count)."
-        )
-    else:
-        plan.uvs = planar_uvs(target_points)
-        plan.notes.append(
-            f"vertex counts differ from #{source_poly} "
-            f"({len(source_uvs)} vs {len(target_points)}): "
-            "planar UVs generated instead."
-        )
-    return plan
-
-
-def _default_atts_values(plan: RepairPlan, block: AmeshBlock) -> None:
-    """Sensible ATTS defaults: mimic the block's existing entries."""
-
-    if block.atts:
-        entry = block.atts[0]
-        plan.color_val = entry.color_val
-        plan.shade_val = entry.shade_val
-        plan.tracy_val = entry.tracy_val
-        plan.notes.append(
-            "colorVal/shadeVal/tracyVal copied from the block's first entry."
-        )
-
-
-def _eligible_block(fam_obj, block_index: int) -> AmeshBlock:
-    ades = fam_obj.base_object.ades
-    if not (0 <= block_index < len(ades)):
-        raise MappingEditError(f"material block #{block_index} does not exist")
-    block = ades[block_index]
-    if (block.class_id or "").lower() != "amesh.class":
-        raise MappingEditError(
-            f"block #{block_index} is {block.class_id!r}: only amesh.class "
-            "blocks can receive new ATTS/OLPL entries"
-        )
-    if block.atts_chunk_offset < 0 or block.olpl_chunk_offset < 0:
-        raise MappingEditError(
-            f"block #{block_index} has no recorded ATTS/OLPL chunk offsets"
-        )
-    return block
-
-
 def eligible_blocks(fam_obj) -> list[tuple[int, AmeshBlock]]:
     result = []
     for index, block in enumerate(fam_obj.base_object.ades):
@@ -988,127 +837,6 @@ def eligible_blocks(fam_obj) -> list[tuple[int, AmeshBlock]]:
 
 
 # --- safe writer -------------------------------------------------------------------
-
-
-def _pack_atts_entry(plan: RepairPlan) -> bytes:
-    return struct.pack(">hBBBB", plan.poly_id, plan.color_val & 0xFF,
-                       plan.shade_val & 0xFF, plan.tracy_val & 0xFF,
-                       plan.pad & 0xFF)
-
-
-def _pack_olpl_group(plan: RepairPlan) -> bytes:
-    blob = struct.pack(">h", len(plan.uvs))
-    for u, v in plan.uvs:
-        blob += struct.pack(">BB", u & 0xFF, v & 0xFF)
-    return blob
-
-
-def apply_repair_to_bytes(data: bytes, block: AmeshBlock,
-                          plan: RepairPlan) -> bytes:
-    """Splice one ATTS entry + one OLPL group into a .base byte image."""
-
-    if not plan.uvs:
-        raise MappingEditError("the repair plan has no UVs")
-    atts_blob = _pack_atts_entry(plan)
-    olpl_blob = _pack_olpl_group(plan)
-
-    tree = read_iff_bytes(data)
-    atts_chunk = None
-    olpl_chunk = None
-    for chunk in tree.iter_all():
-        if chunk.offset == block.atts_chunk_offset and chunk.tag == "ATTS":
-            atts_chunk = chunk
-        elif chunk.offset == block.olpl_chunk_offset and chunk.tag == "OLPL":
-            olpl_chunk = chunk
-    if atts_chunk is None or olpl_chunk is None:
-        raise MappingEditError(
-            "target ATTS/OLPL chunks not found at the recorded offsets "
-            "(file changed since parsing?)"
-        )
-
-    insertions = [
-        (atts_chunk.payload_offset + atts_chunk.size, atts_blob),
-        (olpl_chunk.payload_offset + olpl_chunk.size, olpl_blob),
-    ]
-
-    new_data = bytearray(data)
-    for pos, blob in sorted(insertions, key=lambda x: x[0], reverse=True):
-        new_data[pos:pos] = blob
-
-    # Bump the size field of every chunk whose payload received an insertion
-    # (the chunk itself and all enclosing FORMs).  Deltas are even, so IFF
-    # padding never changes.
-    for chunk in tree.iter_all():
-        payload_start = chunk.payload_offset
-        payload_end = chunk.payload_offset + chunk.size
-        delta = sum(len(blob) for pos, blob in insertions
-                    if payload_start <= pos <= payload_end)
-        if not delta:
-            continue
-        shift = sum(len(blob) for pos, blob in insertions
-                    if pos <= chunk.offset)
-        struct.pack_into(">I", new_data, chunk.offset + 4 + shift,
-                         chunk.size + delta)
-
-    return bytes(new_data)
-
-
-def verify_repair(original: bytes, repaired: bytes, block_index: int,
-                  plan: RepairPlan) -> list[str]:
-    """Re-parse the output and prove the edit is exactly the intended one.
-    Returns a list of verification notes; raises on any mismatch."""
-
-    notes: list[str] = []
-    before = parse_base_bytes(original, "<original>")
-    after = parse_base_bytes(repaired, "<repaired>")
-
-    blocks_before = before.root.ades if before.root else []
-    blocks_after = after.root.ades if after.root else []
-    if len(blocks_before) != len(blocks_after):
-        raise MappingEditError("material block count changed")
-
-    for index, (a, b) in enumerate(zip(blocks_before, blocks_after)):
-        if index == block_index:
-            if len(b.atts) != len(a.atts) + 1:
-                raise MappingEditError(
-                    f"block #{index}: expected +1 ATTS entry "
-                    f"({len(a.atts)} -> {len(b.atts)})"
-                )
-            if len(b.olpl) != len(a.olpl) + 1:
-                raise MappingEditError(
-                    f"block #{index}: expected +1 OLPL group "
-                    f"({len(a.olpl)} -> {len(b.olpl)})"
-                )
-            new_entry = b.atts[-1]
-            if (new_entry.poly_id, new_entry.color_val, new_entry.shade_val,
-                    new_entry.tracy_val, new_entry.pad) != (
-                        plan.poly_id, plan.color_val, plan.shade_val,
-                        plan.tracy_val, plan.pad):
-                raise MappingEditError("appended ATTS entry does not match plan")
-            if b.olpl[-1] != plan.uvs:
-                raise MappingEditError("appended OLPL group does not match plan")
-            if b.atts[:-1] != a.atts or b.olpl[:-1] != a.olpl:
-                raise MappingEditError(
-                    f"block #{index}: existing entries changed"
-                )
-            notes.append(
-                f"block #{index}: ATTS {len(a.atts)} -> {len(b.atts)}, "
-                f"OLPL {len(a.olpl)} -> {len(b.olpl)} (appended entry verified)"
-            )
-        else:
-            if a.atts != b.atts or a.olpl != b.olpl:
-                raise MappingEditError(f"unrelated block #{index} changed")
-
-    tags_before = [c.tag for c in before.tree.iter_all()]
-    tags_after = [c.tag for c in after.tree.iter_all()]
-    if tags_before != tags_after:
-        raise MappingEditError("chunk tree structure changed")
-    notes.append(f"chunk tree shape unchanged ({len(tags_after)} chunks)")
-    notes.append(
-        f"file size {len(original)} -> {len(repaired)} "
-        f"(+{len(repaired) - len(original)} bytes)"
-    )
-    return notes
 
 
 def _encode_atts_payload(entries) -> bytes:
@@ -1963,7 +1691,6 @@ def rewrite_ade_point_template(block, point_id: int) -> bytes:
 def save_model_base_copy(data: bytes, uv_edits: list[UVEdit],
                          texture_edits: list[TextureNameEdit],
                          out_path: str | Path,
-                         mapping_plans: list[RepairPlan] | None = None,
                          *,
                          structural_blocks: list[StructuralBlockState] | None = None
                          ) -> list[str]:
@@ -1976,26 +1703,11 @@ def save_model_base_copy(data: bytes, uv_edits: list[UVEdit],
     edited = data
     notes: list[str] = []
     if structural_blocks is not None:
-        if mapping_plans:
-            raise MappingEditError(
-                "append repair plans and complete structural states cannot "
-                "be combined")
         structured = rewrite_model_base_structure(
             edited, structural_blocks)
         notes.extend(verify_model_base_structure(
             edited, structured, structural_blocks))
         edited = structured
-    for plan in mapping_plans or []:
-        parsed = parse_base_bytes(edited, "<model-base-append>")
-        blocks = parsed.root.ades if parsed.root else []
-        if not (0 <= plan.block_index < len(blocks)):
-            raise MappingEditError(
-                f"material block #{plan.block_index} no longer exists")
-        repaired = apply_repair_to_bytes(
-            edited, blocks[plan.block_index], plan)
-        notes.extend(verify_repair(
-            edited, repaired, plan.block_index, plan))
-        edited = repaired
     if uv_edits:
         uv_edited = apply_uv_edits_to_bytes(edited, uv_edits)
         notes.extend(verify_uv_edits(edited, uv_edited, uv_edits))
@@ -2014,40 +1726,4 @@ def save_model_base_copy(data: bytes, uv_edits: list[UVEdit],
     backup_existing_file(destination)
     destination.write_bytes(edited)
     notes.append(f"saved to {destination}")
-    return notes
-
-
-def save_repaired_base(family, fam_obj, plans: list[RepairPlan],
-                       out_path: str | Path) -> list[str]:
-    """Apply all plans to the ORIGINAL file bytes and save to a new path."""
-
-    if not plans:
-        raise MappingEditError("no repair plans to save")
-    source = family.base_path
-    if source is None or not Path(source).is_file():
-        raise MappingEditError("the family was not loaded from a loose .base file")
-    out_path = Path(out_path)
-    if out_path.resolve() == Path(source).resolve():
-        raise MappingEditError(
-            "refusing to overwrite the original file; choose a new path"
-        )
-
-    data = Path(source).read_bytes()
-    notes: list[str] = []
-    for plan in plans:
-        # Re-parse each round so chunk offsets are fresh after the previous
-        # insertion.
-        asset = parse_base_bytes(data, Path(source).name)
-        blocks = asset.root.ades if asset.root else []
-        if plan.block_index >= len(blocks):
-            raise MappingEditError(f"block #{plan.block_index} not found")
-        block = blocks[plan.block_index]
-        repaired = apply_repair_to_bytes(data, block, plan)
-        notes.extend(verify_repair(data, repaired, plan.block_index, plan))
-        data = repaired
-
-    out_path.parent.mkdir(parents=True, exist_ok=True)
-    backup_existing_file(out_path)
-    out_path.write_bytes(data)
-    notes.append(f"saved to {out_path}")
     return notes

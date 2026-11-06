@@ -6,7 +6,7 @@ from pathlib import Path
 
 from PySide6.QtGui import QAction
 from PySide6.QtCore import Qt
-from PySide6.QtWidgets import QMessageBox, QPushButton
+from PySide6.QtWidgets import QLabel, QMessageBox, QPushButton, QVBoxLayout
 
 
 from studio.workbench.window import AssemblyWindow, _BAS_KIND_ROLE, _BAS_NAME_ROLE
@@ -82,16 +82,41 @@ class ModelEditorWindow(EntityListMixin, SetBasMixin, AssemblyWindow):
 
         self.generate_genesis_action = QAction("Generate Genesis", self)
         self.generate_genesis_action.triggered.connect(self._generate_genesis_action)
-        self.file_menu.insertAction(self.exit_action, self.generate_genesis_action)
+        # Generating a Genesis edits the model, so it lives in the Edit menu.
+        self.edit_menu.addSeparator()
+        self.edit_menu.addAction(self.generate_genesis_action)
         self.apply_states_action = QAction("Apply Changes to Other States", self)
         self.apply_states_action.triggered.connect(self._apply_to_other_states)
-        self.file_menu.insertAction(self.generate_genesis_action, self.apply_states_action)
-        self.apply_states_button = QPushButton("Apply to States")
+        self.file_menu.insertAction(self.exit_action, self.apply_states_action)
+        self.apply_states_button = QPushButton(
+            "Apply the changes made to this model to its other states")
         self.apply_states_button.setToolTip(
-            "Apply the changes of this model to its other states (Normal, Fire, Genesis...).")
+            "Copy the changes made to this model onto its other states "
+            "(Normal, Fire, Dead, Genesis...). You choose which states to write.")
         self.apply_states_button.clicked.connect(self._apply_to_other_states)
-        self.toolbar_reset_model_button.parentWidget().addWidget(self.apply_states_button)
+        self.generate_genesis_button = QPushButton("Generate Genesis from this model")
+        self.generate_genesis_button.setToolTip(
+            "Turn the current model into its animated Genesis (spawn-in) version. "
+            "Undo restores it.")
+        self.generate_genesis_button.clicked.connect(self.generate_genesis_action.trigger)
+        # Quick actions box: the two buttons stacked. The polygon selector moves to the
+        # animation toolbar, next to Play / Speed.
+        row = self.poly_id_row_layout
+        while row.count():
+            row.takeAt(0)
+        self.poly_id_box.setTitle("Quick Actions")
+        stack = QVBoxLayout()
+        stack.addWidget(self.apply_states_button)
+        stack.addWidget(self.generate_genesis_button)
+        row.addLayout(stack, 1)
+        toolbar = self.animation_toolbar
+        toolbar.addSeparator()
+        toolbar.addWidget(QLabel(" Polygon ID: "))
+        toolbar.addWidget(self.poly_id_previous_button)
+        toolbar.addWidget(self.poly_id_spin)
+        toolbar.addWidget(self.poly_id_next_button)
         self.file_menu.aboutToShow.connect(self._sync_generator_actions)
+        self.edit_menu.aboutToShow.connect(self._sync_generator_actions)
         self._sync_generator_actions()
 
         # Keep the detached container alive because the shared AssemblyWindow
@@ -206,7 +231,7 @@ class ModelEditorWindow(EntityListMixin, SetBasMixin, AssemblyWindow):
         """The model selected in the Bas Manager while that tab is shown, else None.
 
         The Bas Manager works on a model that is not yet in Edit Mode; its context
-        menu loads it first. File > Generate Genesis does the same for the selection.
+        menu loads it first. Edit > Generate Genesis does the same for the selection.
         """
 
         if (self._setbas is None
@@ -224,6 +249,7 @@ class ModelEditorWindow(EntityListMixin, SetBasMixin, AssemblyWindow):
         self.apply_states_button.setEnabled(can_apply)
         if self._bas_manager_model_item() is not None:
             self.generate_genesis_action.setEnabled(True)
+            self.generate_genesis_button.setEnabled(True)
             self.generate_genesis_action.setToolTip(
                 "Transform the model selected in the Bas Manager into a Genesis. "
                 "Undo restores it.")
@@ -235,6 +261,7 @@ class ModelEditorWindow(EntityListMixin, SetBasMixin, AssemblyWindow):
             reason = "load a complete BASE asset family first"
         enabled = not reason and obj is not None and bool(obj.skeleton.polygons)
         self.generate_genesis_action.setEnabled(enabled)
+        self.generate_genesis_button.setEnabled(enabled)
         tip = ("Transform the current model into a Genesis. Undo restores it."
                if enabled else "Generate Genesis: " + (reason or "load a model first"))
         self.generate_genesis_action.setToolTip(tip)

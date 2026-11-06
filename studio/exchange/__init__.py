@@ -1,1 +1,1 @@
-"""ONUA3D exchange: the Qt-free portable core, glTF export/import and the Blender add-on front end."""
+"""Exchange: the Qt-free portable core and the .ONUA archive (one model plus all its resources)."""
