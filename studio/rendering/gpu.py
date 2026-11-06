@@ -6,7 +6,7 @@ from __future__ import annotations
 import os
 import weakref
 
-from PySide6.QtCore import Qt, Signal
+from PySide6.QtCore import Qt, Signal, QPoint, QSettings
 from PySide6.QtGui import (
     QGuiApplication,
     QOffscreenSurface,
@@ -15,13 +15,15 @@ from PySide6.QtGui import (
     QSurfaceFormat,
 )
 from PySide6.QtOpenGLWidgets import QOpenGLWidget
-from PySide6.QtWidgets import QApplication, QPushButton, QWidget
+from PySide6.QtWidgets import QApplication, QPushButton, QWidget, QMenu
 from studio.ui.cursor_themes import studio_cursor
 
 
 def request_desktop_opengl() -> None:
     """Keep Qt's default surface settings and request desktop OpenGL."""
-
+    if QApplication.instance() is None:
+        from studio.rendering.gpu_preference import configure_before_qt
+        configure_before_qt()
     surface = QSurfaceFormat.defaultFormat()
     surface.setRenderableType(QSurfaceFormat.RenderableType.OpenGL)
     QSurfaceFormat.setDefaultFormat(surface)
@@ -44,6 +46,17 @@ _INTEGRATED_NAMES = (
 )
 
 _graphics_chip = None
+_preference_result = ''
+
+
+def current_gl_renderer() -> str:
+    """Read the renderer of the actual current OpenGL context."""
+    try:
+        from OpenGL import GL
+        raw = GL.glGetString(GL.GL_RENDERER)
+        return raw.decode(errors='replace') if raw else ''
+    except Exception:
+        return ''
 
 
 def integrated_graphics(name: str) -> bool:
@@ -123,9 +136,12 @@ def prefer_graphics_card() -> str:
     from PySide6.QtCore import QSettings
     from studio.rendering import gpu_preference
 
+    global _preference_result
     chip = graphics_chip()
-    result = (gpu_preference.prefer_graphics_card(on_integrated=integrated_graphics(chip))
+    result = (gpu_preference.prefer_graphics_card(on_integrated=integrated_graphics(chip),
+                                                  has_card=graphics_card_present())
               if chip else 'no_context')
+    _preference_result = result
 
     # The built program has no console, so keep the outcome where it can be read
     # again: the badge tooltip shows it, and so does this settings entry.
@@ -143,6 +159,27 @@ def prefer_graphics_card() -> str:
     return gpu_preference.message(result, chip)
 
 
+def restart_on_graphics_card() -> bool:
+    """Reopen Studio when Windows has just been told to use the card.
+
+    Returns True when a new copy started and this one should close.
+    """
+
+    from studio.rendering import gpu_preference
+
+    return (_preference_result == gpu_preference.APPLIED
+            and gpu_preference.restart_on_card())
+
+
+def graphics_card_present() -> bool:
+    """True when the computer has a real graphics card, in use or not."""
+
+    from studio.rendering import gpu_preference
+
+    return any(not integrated_graphics(name)
+               for name in gpu_preference.windows_graphics_devices())
+
+
 def graphics_chip_warning() -> str:
     """Advice to show when Studio ended up on the built-in chip."""
 
@@ -151,9 +188,8 @@ def graphics_chip_warning() -> str:
         return ''
     return (
         f'Studio is drawing with {name}, the chip built into the processor.\n'
-        'If this computer has a graphics card, choose it for Studio: on Windows in\n'
-        'Settings, System, Display, Graphics, add OpenNeoUAStudio.exe (or python.exe\n'
-        'when you start Studio from the sources) and pick High performance.\n'
+        'If this computer has a graphics card, choose High performance in this\n'
+        'menu, or in Windows Settings, System, Display, Graphics.\n'
         'On Linux start Studio with DRI_PRIME=1 (AMD/Intel) or prime-run (NVIDIA).'
     )
 
@@ -247,6 +283,9 @@ class Canvas(QOpenGLWidget):
 
     def initializeGL(self) -> None:  # noqa: N802 - Qt override
         context = self.context()
+        owner = self.owner
+        if owner is not None:
+            owner.graphics_renderer = current_gl_renderer()
         if context is not None and context is not self._cleanup_context:
             self._cleanup_context = context
             context.aboutToBeDestroyed.connect(self._cleanup_owner_gpu)
@@ -293,6 +332,7 @@ class AcceleratedWidget(QWidget):
         self._gpu_canvas = None
         self._reported_backend = None
         self.renderer_error = ""
+        self.graphics_renderer = ""
         super().__init__(parent)
         # Every 3D/2D view starts with the shared pointing hand, never the system arrow.
         self.setCursor(studio_cursor("point"))
@@ -385,7 +425,7 @@ class RendererBadge(QPushButton):
         self.setFlat(True)
         self.viewport = viewport
         self._viewports = [viewport]
-        self.clicked.connect(self.toggle_backend)
+        self.clicked.connect(self.show_menu)
         viewport.backendChanged.connect(self.set_backend)
         self.set_backend(viewport.renderer_name)
 
@@ -402,25 +442,90 @@ class RendererBadge(QPushButton):
         self.set_backend(viewport.renderer_name)
 
     def set_backend(self, name):
-        warning = graphics_chip_warning()
         on_gpu = name.startswith('OpenGL')
-        label = 'GPU' if on_gpu else 'Software'
-        # The badge stays two words; the chip and the advice live in the tooltip.
-        self.setText(f'{label} !' if (on_gpu and warning) else label)
-        target = 'Software' if self.viewport.renderer_mode == 'gpu' else 'GPU'
-        chip = graphics_chip()
+        chip = getattr(self.viewport, 'graphics_renderer', '') if on_gpu else ''
+        software_gl = any(marker in chip.casefold() for marker in (
+            'llvmpipe', 'softpipe', 'swrast', 'software rasterizer',
+            'microsoft basic render', 'gdi generic'))
+        label = (('Software OpenGL — ' if software_gl else 'GPU — ') + chip
+                 if chip else ('GPU' if on_gpu else 'Software'))
+        warning = graphics_chip_warning() if on_gpu else ''
+        self.setText(f'{label} !' if warning else label)
         lines = [name]
         if on_gpu and chip:
             lines.append(chip)
-        if on_gpu and warning:
-            lines.append('')
-            lines.append(warning)
-        lines.append(f'Click to switch to {target}.')
+        if on_gpu and not chip:
+            lines.append('GPU name is unavailable until its OpenGL context starts.')
+        if warning:
+            lines.extend(('', warning))
+        lines.append('Click to choose a renderer or an available device.')
         self.setToolTip('\n'.join(lines))
-        self.setAccessibleName(f'Renderer: {label}. Switch to {target}')
+        self.setAccessibleName(f'Renderer: {label}. Choose rendering mode')
+
+    def show_menu(self):
+        from studio.rendering import gpu_preference as preference
+        menu = QMenu(self)
+        for title, mode in (("GPU (current device)", "gpu"), ("Software", "software")):
+            action = menu.addAction(title)
+            action.setCheckable(True)
+            action.setChecked(self.viewport.renderer_mode == mode)
+            action.triggered.connect(lambda _checked=False, value=mode: self.switch_backend(value))
+
+        devices = preference.linux_graphics_devices()
+        if len(devices) > 1:
+            menu.addSeparator()
+            header = menu.addAction('Graphics device (restart required)')
+            header.setEnabled(False)
+            saved = QSettings('OpenNeoUA', 'Studio').value('gpu/linux_device', '')
+            automatic = menu.addAction('Automatic')
+            automatic.setCheckable(True)
+            automatic.setChecked(not saved)
+            automatic.triggered.connect(lambda: self._linux_device(''))
+            nvidia_count = sum(vendor == '0x10de' for _, vendor in devices)
+            for bus, vendor in devices:
+                vendor_name = {'0x10de': 'NVIDIA', '0x8086': 'Intel', '0x1002': 'AMD'}.get(vendor, 'GPU')
+                value = f'{bus}|{vendor}'
+                action = menu.addAction(f'{vendor_name} — {bus}')
+                action.setCheckable(True)
+                action.setChecked(saved == value)
+                if vendor == '0x10de' and nvidia_count > 1:
+                    action.setEnabled(False)  # PRIME provider cannot be identified safely by PCI here.
+                action.triggered.connect(lambda _checked=False, v=value: self._linux_device(v))
+        elif len(preference.windows_graphics_devices()) > 1:
+            menu.addSeparator()
+            header = menu.addAction('Windows graphics preference (restart required)')
+            header.setEnabled(False)
+            current = preference.chosen_preference(
+                preference.read_preference(preference.program_path()))
+            for title, value in (('Windows decides', 'GpuPreference=0;'),
+                                 ('Power saving', preference.POWER_SAVING),
+                                 ('High performance', preference.HIGH_PERFORMANCE)):
+                action = menu.addAction(title)
+                action.setCheckable(True)
+                action.setChecked(preference.chosen_preference(value) == current)
+                action.triggered.connect(lambda _checked=False, v=value: self._windows_device(v))
+        self._menu = menu  # keep the non-blocking popup alive
+        menu.adjustSize()
+        menu.popup(self.mapToGlobal(QPoint(0, -menu.sizeHint().height())))
+
+    def _linux_device(self, value):
+        settings = QSettings('OpenNeoUA', 'Studio')
+        settings.setValue('gpu/linux_device', value)
+        settings.sync()
+        self.window().statusBar().showMessage('GPU choice saved. Restart Studio to apply it.', 15000)
+
+    def _windows_device(self, value):
+        from studio.rendering import gpu_preference as preference
+        ok = preference.write_preference(preference.program_path(), value)
+        message = ('Windows GPU preference saved. Restart Studio to apply it.' if ok
+                   else 'Windows could not save the GPU preference.')
+        self.window().statusBar().showMessage(message, 15000)
 
     def toggle_backend(self):
         target = 'software' if self.viewport.renderer_mode == 'gpu' else 'gpu'
+        self.switch_backend(target)
+
+    def switch_backend(self, target):
         success = True
         for viewport in self._viewports:
             success = viewport.set_renderer_mode(target) and success

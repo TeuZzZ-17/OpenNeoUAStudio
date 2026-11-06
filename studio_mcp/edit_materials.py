@@ -173,6 +173,24 @@ def op_delete_material_block(ctx, block: int = -1, move_polygons_to=None):
     return {"deleted_block": block, "moved_polygons": len(owned), "blocks_left": len(lm.blocks)}
 
 
+@op("copy_from_state")
+@_guard_errors
+def op_copy_from_state(ctx, source=None, textures: bool = True, shape: bool = True, state_faces: bool = False):
+    """Bring this model in line with another state of the same model (Normal from Fire, for example): textures,
+    UVs and moved points of the faces both states share. Animated faces stay as they are. state_faces also copies
+    the static faces only the source has."""
+    from studio_mcp.state_sync import apply_plan, build_plan, SyncOptions, texture_files
+
+    lm = ctx.lm
+    family, obj = _source_object(source, lm.set_hint)
+    plan = build_plan(obj, lm.fam_obj)
+    options = SyncOptions(textures=textures, shape=shape, added_faces=False,
+                          state_faces=state_faces, deleted_faces=False)
+    apply_plan(lm, plan, family, obj, options)
+    lm.extra_files.update(texture_files(lm, plan, family, obj, options))
+    return {"match": round(plan.match_share, 3), **plan.counts(options)}
+
+
 def _ensure_texture(lm, name: str) -> str:
     """Decoded texture name usable in the model: already loaded, a loose ILBM in the model's folder (made with
     studio_make_texture), or decoded from the Set.BAS."""
@@ -257,6 +275,82 @@ def op_generate_genesis(ctx):
     if created:
         ctx.notes.append(f"new animation file(s) written beside the BASE: {created}")
     return {"blocks": len(lm.blocks), "new_animations": created}
+
+
+# Opaque animated-polygon material (area.class + bmpanim.class "SIMPEL.ANM"), taken from the original Weasel.
+_ANIMATED_POLYGON_TEMPLATE = bytes.fromhex(
+    "464f524d000000a84f424a54434c49440000000b617265612e636c6173730000"
+    "464f524d0000008841524541464f524d0000002241444520464f524d00000004"
+    "524f4f54535452430000000a00010006000000000000535452430000000a0001"
+    "0001003a00008000464f524d000000404f424a54434c49440000000e626d7061"
+    "6e696d2e636c61737300464f524d0000001e42414e4953545243000000110001"
+    "0006000053494d50454c2e414e4d0000")
+
+
+@op("animate_polygons")
+@_guard_errors
+def op_animate_polygons(ctx, select=None, shifts=None, frames=None, name: str = "ANIM"):
+    """Make polygons play a UV animation on their own texture (blinking lights, screens). Every polygon keeps its
+    current UVs as state 0; `shifts` = [[du, dv], ...] moves them to states 1, 2, ... `frames` = [[state, ms], ...]
+    in play order, looping: shifts [[0,-36]] + frames [[1,1500],[0,700]] = state 1 for 1.5 s, state 0 for 0.7 s.
+    Polygons with equal UVs share one .ANM written beside the BASE (named NAME, at most 5 letters, + a letter). The polygons leave
+    their amesh block and each gets an opaque animated block."""
+    from model_editor.genesis_generator import _animation_bytes
+    from studio.assets.mapping import _wrap_ades_objt
+    from studio.formats.animation import VanmData, VanmFrame
+    from studio.formats.base_format import parse_base_bytes
+    lm = ctx.lm
+    lm.require_topology_edit()
+    ids = ctx.polygons(_need(select, "polygon"))
+    shifts = [[0, 0]] + [[int(c) for c in shift] for shift in (shifts or [])]
+    if len(shifts) < 2 or not frames:
+        raise core.McpToolError("give `shifts` (the other states, e.g. [[0,-36]]) and `frames` [[state, ms], ...]")
+    clean = name.upper().replace(".ANM", "")[:5]   # block template name space: 10 characters
+    table = lm.slot_table()
+    per_uv: dict[tuple, list[int]] = {}
+    for pid in ids:
+        block_index, atts_index = table[pid]
+        block = lm.blocks[block_index]
+        if (block.class_id or "").lower() != "amesh.class" or block.uses_atts_only_mapping:
+            raise core.McpToolError(f"Polygon #{pid} is not an ordinary textured face")
+        per_uv.setdefault(tuple(map(tuple, block.olpl[atts_index])), []).append(pid)
+    created = {}
+    base_block = parse_base_bytes(_wrap_ades_objt(_ANIMATED_POLYGON_TEMPLATE), "<animated polygon>").root.ades[0]
+    for letter, (uvs, polys) in zip("ABCDEFGHIJKLMNOPQRSTUVWXYZ", per_uv.items()):
+        groups = []
+        for du, dv in shifts:
+            moved = [(u + du, v + dv) for u, v in uvs]
+            if any(not 0 <= c <= 255 for uv in moved for c in uv):
+                raise core.McpToolError(f"shift {[du, dv]} moves the UVs of polygons {polys} outside the texture")
+            groups.append(moved)
+        sequence = []
+        for state, ms in frames:
+            if not 0 <= int(state) < len(shifts) or int(ms) < 1:
+                raise core.McpToolError("frames = [[state, ms], ...] with state 0..%d and ms > 0" % (len(shifts) - 1))
+            sequence.append(VanmFrame(max(1, round(int(ms) * 1024 / 1000)), 0, int(state)))
+        first = lm.blocks[table[polys[0]][0]]
+        source = VanmData(source_name=f"{clean}{letter}.ANM", bitmap_class="ilbm.class",
+                          bitmap_names=[first.texture.name], frames=sequence)
+        anm_name = f"{clean}{letter}.ANM"
+        animation = _animation_bytes(source, groups, anm_name)
+        animation.source_name = anm_name
+        lm.family.animations[anm_name] = animation
+        lm.extra_files[anm_name] = export_anm_bytes(animation)
+        created[anm_name] = polys
+        template = rewrite_block_texture_template(base_block, anm_name)
+        animated = parse_base_bytes(_wrap_ades_objt(template), "<animated polygon>").root.ades[0]
+        for pid in polys:
+            block_index, atts_index = lm.slot_table()[pid]
+            old = lm.blocks[block_index]
+            entry = copy.deepcopy(old.atts[atts_index])
+            old.atts.pop(atts_index)
+            old.olpl.pop(atts_index)
+            block = copy.deepcopy(animated)
+            block.ade_poly_id = pid
+            entry.shade_val, entry.tracy_val = 0, 128   # animated faces are drawn unshaded, like the originals
+            block.atts = [entry]
+            lm.blocks.append(block)
+    return {"animations": created, "polygons": sorted(ids)}
 
 
 # --- effects: FX elements and particle emitters --------------------------------------------------

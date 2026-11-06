@@ -59,6 +59,8 @@ class Canvas(QOpenGLWidget):
         self.setFocusPolicy(Qt.FocusPolicy.NoFocus)
 
     def initializeGL(self):
+        from studio.rendering.gpu import current_gl_renderer
+        self.owner.graphics_renderer = current_gl_renderer()
         from OpenGL import GL
         unpack_alignment = int(GL.glGetIntegerv(GL.GL_UNPACK_ALIGNMENT))
         try:

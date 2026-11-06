@@ -12,7 +12,7 @@ from entity_designer import destruction_fx as fx
 PROFILE = (
     "new_decal 1\n"
     "    name = destroyed\n"
-    "    texture = Interface/GroundDecals/impact_01.png\n"
+    "    texture = Graphics/GroundDecals/impact_01.png\n"
     "    stretch_xz = 0.8~1.2|0.9\n"
     "    tint = 255|255|255|180\n"
     "    random_rotation = 1\n"

@@ -455,6 +455,8 @@ class UVPhase3Tests(unittest.TestCase):
                 "Select This Vertex",
                 "Select All UVs",
                 "Clear Selection",
+                "Copy UV Position",
+                "Paste UV Position",
                 "Revert Selected UV",
             ])
             actions = {action.text(): action for action in menu.actions()}
@@ -464,6 +466,43 @@ class UVPhase3Tests(unittest.TestCase):
             self.assertFalse(actions["Revert Selected UV"].isEnabled())
             self.assertTrue(
                 actions["Revert Selected UV"].toolTip())
+        finally:
+            window.close()
+
+    def test_background_context_menu_works_without_a_handle(self):
+        family, obj = _two_polygon_family()
+        window = _open_memory_window(family, obj)
+
+        class CapturingMenu(QMenu):
+            captured = None
+
+            def exec(self, _position):
+                type(self).captured = self
+
+        try:
+            window._on_polygon_picked(0)
+            with patch("studio.workbench.window_uv.QMenu", CapturingMenu):
+                window._show_uv_background_context_menu(window.pos(), (10, 10))
+            menu = CapturingMenu.captured
+            labels = [a.text() for a in menu.actions() if not a.isSeparator()]
+            self.assertEqual(labels, [
+                "Add New Vertex Here",
+                "Select All UVs",
+                "Clear Selection",
+                "Copy UV Position",
+                "Paste UV Position",
+                "Revert Selected UV",
+            ])
+            actions = {a.text(): a for a in menu.actions()}
+            self.assertTrue(actions["Add New Vertex Here"].isEnabled())
+            self.assertTrue(actions["Copy UV Position"].isEnabled())
+            before = len(window._uv_contexts and
+                         next(iter(window._uv_contexts.values()))[0]
+                         .skeleton.points)
+            window._add_uv_vertex_here((10, 10))
+            after = len(next(iter(window._uv_contexts.values()))[0]
+                        .skeleton.points)
+            self.assertEqual(after, before + 1)
         finally:
             window.close()
 

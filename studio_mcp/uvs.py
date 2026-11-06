@@ -84,17 +84,25 @@ def uv_box(uvs) -> tuple[int, int, int, int]:
     return (min(u for u, _ in uvs), min(v for _, v in uvs), max(u for u, _ in uvs), max(v for _, v in uvs))
 
 
-def adjust(uvs, offset=(0, 0), scale=(1.0, 1.0), flip_u=False, flip_v=False, rotate_90=0):
-    """Offset / scale / flip / quarter-turn existing UVs around their box center."""
+def adjust(uvs, offset=(0, 0), scale=(1.0, 1.0), flip_u=False, flip_v=False, rotate_90=0, keep_box=False):
+    """Offset / scale / flip / quarter-turn existing UVs around their box center.
+
+    keep_box: a quarter turn of a long patch would leave its box and read beyond the
+    texture patch, so the turned UVs are squeezed back into the same box.
+    """
     if isinstance(scale, (int, float)):
         scale = (float(scale), float(scale))
     u0, v0, u1, v1 = uv_box(uvs)
     cu, cv = (u0 + u1) / 2.0, (v0 + v1) / 2.0
+    fit_u = fit_v = 1.0
+    if keep_box and int(rotate_90) % 2 and u1 > u0 and v1 > v0:
+        fit_u, fit_v = (u1 - u0) / (v1 - v0), (v1 - v0) / (u1 - u0)
     result = []
     for u, v in uvs:
         x, y = u - cu, v - cv
         for _ in range(int(rotate_90) % 4):
             x, y = -y, x
+        x, y = x * fit_u, y * fit_v
         if flip_u:
             x = -x
         if flip_v:

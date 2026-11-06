@@ -263,7 +263,7 @@ def _paint_uvs(pts, rect, mapping: str, texels_per_unit: float, rotate_90: int, 
     else:
         raise core.McpToolError("mapping must be 'stretch' (one face = the whole patch), 'aspect' or 'world'")
     if rotate_90 or flip_u or flip_v:
-        group = uvtools.adjust(group, rotate_90=rotate_90, flip_u=flip_u, flip_v=flip_v)
+        group = uvtools.adjust(group, rotate_90=rotate_90, flip_u=flip_u, flip_v=flip_v, keep_box=True)
     return group
 
 

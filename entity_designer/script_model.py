@@ -300,7 +300,7 @@ def _resolve_data_asset_path(
     if install is not None and raw.casefold().startswith("data/"):
         parts = raw.split("/")[1:]
         folder_keys = {"models": "models", "sets": "sets", "scripts": "scripts",
-                       "levels": "levels", "interface": "interface", "objects": "skies"}
+                       "levels": "levels", "graphics": "graphics", "collisions": "collisions", "objects": "skies"}
         if parts and parts[0].casefold() in folder_keys:
             candidates.append(install.folder(folder_keys[parts[0].casefold()]).joinpath(*parts[1:]))
         candidates.append(install.data.joinpath(*parts))

@@ -274,7 +274,7 @@ class MainWindow(QMainWindow):
         self.copy_action = act(edit_menu, 'Copy', self._copy_elements, 'Ctrl+C')
         self.paste_action = act(edit_menu, 'Paste', self._paste_elements, 'Ctrl+V')
         act(map_menu, "Fill", self.map_fill)
-        act(map_menu, "Close Roads (Experimental)…", self.map_close_roads)
+        act(map_menu, "Close Roads (Experimental)", self.map_close_roads)
         act(map_menu, "Level Info", self.map_level_info)
         tools_menu = edit_menu.addMenu("Tool")
         group = QActionGroup(self)

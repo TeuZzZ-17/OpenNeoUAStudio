@@ -645,8 +645,8 @@ class CollisionShapeTests(unittest.TestCase):
         window.project.collision_shape = CollisionShape(
             "Mixed_Test", "e" * 64, (1, 1, 1), (0, 0, 0),
             (_tetrahedron(),), asset_set=1)
-        window.project.collision_shape_path = "Data/Collision/Test.collision"
-        window.project.collision_shape_file_path = "C:/Game/Data/Collision/Test.collision"
+        window.project.collision_shape_path = "Data/Collisions/Test.collision"
+        window.project.collision_shape_file_path = "C:/Game/Data/Collisions/Test.collision"
         window.project.collision_shape_owners = ("root/body",)
         window.project.collision_shape_components = (
             "root/body#component:body-hash",)
@@ -665,7 +665,7 @@ class CollisionShapeTests(unittest.TestCase):
             target_category=VEHICLE,
             compound=[CollisionSphere(OPENNEOUA, x=3, radius=2)],
             collision_shape=shape,
-            collision_shape_path="Data/Collision/Mixed.collision",
+            collision_shape_path="Data/Collisions/Mixed.collision",
         )
         source = (
             "; file header stays\n"
@@ -675,7 +675,7 @@ class CollisionShapeTests(unittest.TestCase):
             "    ; keep this comment\n"
             "    radius = 44\n"
             "    coll_num = 0\n"
-            "    collision_shape = Data/Collision/Old.collision\n"
+            "    collision_shape = Data/Collisions/Old.collision\n"
             "end\n"
         )
         updated, _preview, _name = plan_script_update(
@@ -685,7 +685,7 @@ class CollisionShapeTests(unittest.TestCase):
         self.assertIn("; keep this comment", updated)
         self.assertIn("mass = 100", updated)
         self.assertIn(
-            "collision_shape = Data/Collision/Mixed.collision", updated)
+            "collision_shape = Data/Collisions/Mixed.collision", updated)
         self.assertIn("coll_radius = 2", updated)
         self.assertNotIn("Old.collision", updated)
 
@@ -695,7 +695,7 @@ class CollisionShapeTests(unittest.TestCase):
             (_tetrahedron(),))
         project = CollisionProject(
             name="Fox", target_category=VEHICLE, collision_shape=shape,
-            collision_shape_path="Data/Collision/Fox.collision")
+            collision_shape_path="Data/Collisions/Fox.collision")
         source = (
             "new_vehicle 14\n"
             "    name = Fox\n"
@@ -705,7 +705,7 @@ class CollisionShapeTests(unittest.TestCase):
             "    coll_act = 0\n"
             "    coll_xyz = 1|2|3\n"
             "    coll_radius = 4\n"
-            "    collision_shape = Data/Collision/Old.collision\n"
+            "    collision_shape = Data/Collisions/Old.collision\n"
             "end\n")
         updated, _preview, _name = plan_script_update(
             source, "new_vehicle", 14, project, replace_all_managed=True)
@@ -717,7 +717,7 @@ class CollisionShapeTests(unittest.TestCase):
         self.assertFalse(any(key.startswith("coll_") for key in assignments))
         self.assertIn("mass = 80", updated)
         self.assertIn(
-            "collision_shape = Data/Collision/Fox.collision", updated)
+            "collision_shape = Data/Collisions/Fox.collision", updated)
         self.assertNotIn("Old.collision", updated)
 
     def test_export_validation_blocks_sphere_overcap_without_mutating_import(self):
@@ -741,10 +741,10 @@ class CollisionShapeTests(unittest.TestCase):
         window.project.legacy = CollisionSphere(LEGACY, radius=20)
         window.project.compound = [CollisionSphere(OPENNEOUA, radius=3)]
         window.project.collision_shape = baseline_shape
-        window.project.collision_shape_path = "Data/Collision/Fox.collision"
+        window.project.collision_shape_path = "Data/Collisions/Fox.collision"
         window._capture_tab_reset_baseline()
         window.project.collision_shape = replacement_shape
-        window.project.collision_shape_path = "Data/Collision/Fox_New.collision"
+        window.project.collision_shape_path = "Data/Collisions/Fox_New.collision"
         window.project.legacy.radius = 33
         window.properties_tabs.setCurrentIndex(window.collision_shape_tab_index)
         window._sync_all()
@@ -758,7 +758,7 @@ class CollisionShapeTests(unittest.TestCase):
         self.assertEqual(window.project.collision_shape, baseline_shape)
         self.assertEqual(
             window.project.collision_shape_path,
-            "Data/Collision/Fox.collision")
+            "Data/Collisions/Fox.collision")
         self.assertEqual(window.project.legacy.radius, 33)
         self.assertEqual(len(window.project.compound), 1)
         window.undo()
@@ -981,7 +981,7 @@ class CollisionShapeTests(unittest.TestCase):
             "Fox_Old", "3" * 64, (1, 1, 1), (0, 0, 0),
             (_tetrahedron(),))
         window.project.collision_shape = previous_shape
-        window.project.collision_shape_path = "Data/Collision/Old.collision"
+        window.project.collision_shape_path = "Data/Collisions/Old.collision"
         window.project.legacy = CollisionSphere(LEGACY, radius=14)
         window.project.compound = [CollisionSphere(OPENNEOUA, radius=5)]
         component = types.SimpleNamespace(
@@ -1068,9 +1068,9 @@ class CollisionShapeTests(unittest.TestCase):
             "Delete_Test", "d" * 64, (1, 1, 1), (0, 0, 0),
             (_tetrahedron(),))
         window.project.collision_shape = shape
-        window.project.collision_shape_path = "Data/Collision/Delete_Test.collision"
+        window.project.collision_shape_path = "Data/Collisions/Delete_Test.collision"
         window.project.collision_shape_file_path = (
-            "C:/Game/Data/Collision/Delete_Test.collision")
+            "C:/Game/Data/Collisions/Delete_Test.collision")
         window.project.collision_shape_owners = ("root",)
         window.project.collision_shape_components = ("root#component:test",)
         window.project.collision_shape_warnings = ("test warning",)
@@ -1096,7 +1096,7 @@ class CollisionShapeTests(unittest.TestCase):
         self.assertEqual(window.project.collision_shape, shape)
         self.assertEqual(
             window.project.collision_shape_path,
-            "Data/Collision/Delete_Test.collision")
+            "Data/Collisions/Delete_Test.collision")
 
     def test_collision_shape_buttons_use_two_rows_of_two(self):
         window = CollisionEditorWindow()
@@ -1203,7 +1203,7 @@ class CollisionShapeTests(unittest.TestCase):
         new_shape = CollisionShape(
             "New", "8" * 64, (1, 1, 1), (0, 0, 0), (_tetrahedron(),))
         window.project.collision_shape = old_shape
-        window.project.collision_shape_path = "Data/Collision/Old.collision"
+        window.project.collision_shape_path = "Data/Collisions/Old.collision"
         window.project.legacy = CollisionSphere(LEGACY, radius=12)
         window.project.compound = [
             CollisionSphere(OPENNEOUA, x=2, radius=4),
@@ -1230,7 +1230,7 @@ class CollisionShapeTests(unittest.TestCase):
         window.undo()
         self.assertEqual(window.project.collision_shape, old_shape)
         self.assertEqual(window.project.collision_shape_path,
-                         "Data/Collision/Old.collision")
+                         "Data/Collisions/Old.collision")
         self.assertIsNotNone(window.project.legacy)
         self.assertEqual(len(window.project.compound), 2)
         self.assertTrue(window.project.sphere_isolation_active)
@@ -1374,7 +1374,7 @@ class CollisionShapeTests(unittest.TestCase):
             "new_vehicle 3\n"
             "    3ds_normal = Data/Models/3ds/Test.3ds\n"
             "    rotation_xyz = 90|0|0\n"
-            "    collision_shape = Data/Collision/Test.collision\n"
+            "    collision_shape = Data/Collisions/Test.collision\n"
             "end\n")
         reference = script_model_references(text)[0]
         self.assertIsNone(reference.vp_normal)
@@ -1383,7 +1383,7 @@ class CollisionShapeTests(unittest.TestCase):
         self.assertEqual(reference.rotation_x, 90)
         self.assertEqual(
             reference.collision_shape_path,
-            "Data/Collision/Test.collision")
+            "Data/Collisions/Test.collision")
 
     def test_visual_source_falls_back_from_missing_3ds_to_valid_base(self):
         from tempfile import TemporaryDirectory
@@ -1681,7 +1681,7 @@ class CollisionShapeTests(unittest.TestCase):
         window.project.collision_shape = CollisionShape(
             "Model", "a" * 64, (1, 1, 1), (0, 0, 0),
             (_tetrahedron(), _tetrahedron()), quality="low")
-        window.project.collision_shape_path = "Data/Collision/Model.collision"
+        window.project.collision_shape_path = "Data/Collisions/Model.collision"
         window.project.collision_shape_file_path = "old.collision"
         window._sync_all()
         widget = window.collision_geometry_widget
@@ -1815,8 +1815,8 @@ class CollisionShapeTests(unittest.TestCase):
                  replace(_tetrahedron(), source_component="Speedy#component:3", enabled=False))
         window.project.collision_shape = CollisionShape(
             "Speedy", "a"*64, (1,1,1), (0,0,0), hulls)
-        window.project.collision_shape_path = "Data/Collision/Speedy.collision"
-        window.project.collision_shape_file_path = "C:/Game/Data/Collision/Speedy.collision"
+        window.project.collision_shape_path = "Data/Collisions/Speedy.collision"
+        window.project.collision_shape_file_path = "C:/Game/Data/Collisions/Speedy.collision"
         window._active_model_reference = script_model_references(
             "new_vehicle 1\nname = Speedy\nvp_normal = 236\nend\n")[0]
         window._sync_all()
@@ -1844,7 +1844,7 @@ class CollisionShapeTests(unittest.TestCase):
         first.setCheckState(0, Qt.CheckState.Unchecked)
         self.app.processEvents()
         self.assertTrue(window._modified)
-        self.assertEqual(window.project.collision_shape_path, "Data/Collision/Speedy.collision")
+        self.assertEqual(window.project.collision_shape_path, "Data/Collisions/Speedy.collision")
 
     def test_ctrl_click_viewport_toggles_group_without_changing_checks(self):
         window = CollisionEditorWindow()

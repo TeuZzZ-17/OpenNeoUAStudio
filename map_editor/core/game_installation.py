@@ -1,4 +1,10 @@
-"""Local game resource locations. No game content is copied or stored here."""
+"""Local game resource locations. No game content is copied or stored here.
+
+The person only says where the game is installed. From there Studio finds the
+data folder, recognises which game it is (OpenNeoUA, the original Urban Assault
+or its expansion) and catalogues every resource folder, whatever the letter case
+and the file formats of that edition. ``report`` says what was really found.
+"""
 
 from __future__ import annotations
 
@@ -12,11 +18,28 @@ from studio.exchange.portable import find_existing_path
 
 
 FOLDERS = ("briefings", "skies", "music", "movies", "sets", "scripts",
-           "levels", "models", "interface")
+           "levels", "models", "graphics", "collisions")
 IMAGE_SUFFIXES = {".png", ".jpg", ".jpeg", ".bmp", ".webp", ".iff", ".ilbm", ".ilb", ".lbm", ".vbmp"}
 MUSIC_SUFFIXES = {".ogg"}
 MOVIE_SUFFIXES = {".mpg", ".mpeg", ".avi", ".mp4", ".mkv", ".webm"}
 SCRIPT_SUFFIXES = {".cfg", ".ini", ".lua", ".sdf", ".scr"}
+
+OPENNEOUA, VANILLA, EXPANSION = "openneoua", "vanilla", "expansion"
+EDITION_TITLES = {OPENNEOUA: "OpenNeoUA",
+                  VANILLA: "Urban Assault (original)",
+                  EXPANSION: "Urban Assault: Metropolis Dawn (expansion)"}
+FOLDER_TITLES = {"briefings": "Briefings", "skies": "Skies", "music": "Music",
+                 "movies": "Movies", "sets": "Sets", "scripts": "Scripts",
+                 "levels": "Levels", "models": "Models", "graphics": "Graphics",
+                 "collisions": "Collisions"}
+# The original game has no such folders: they are not missing there.
+OPENNEOUA_ONLY = frozenset({"models", "graphics", "collisions"})
+# Studio cannot work without these; everything else only disables one feature.
+REQUIRED_FOLDERS = frozenset({"sets", "scripts"})
+
+READY, MISSING, REQUIRED_MISSING, NOT_IN_EDITION = "ready", "missing", "required", "not_in_edition"
+# Folders that never hold a game: looking inside them only finds false matches.
+_IGNORED_FOLDERS = {".git", ".codex", "build", "dist", "outputs", "__pycache__", "node_modules"}
 
 
 _SET_NAME = re.compile(r"set(\d+)", re.I)
@@ -45,6 +68,83 @@ def _game_root(data: Path) -> Path:
     return data.parent if data.name.casefold() in ("data", "dataxp") else data
 
 
+def _holds_sets(folder: Path) -> bool:
+    """True for a game data folder: SetN folders inside it or inside its Sets folder."""
+    return _has_loose_sets(folder) or _has_loose_sets(_child(folder, "Sets"))
+
+
+def _data_child(folder: Path) -> Path | None:
+    """The data folder directly inside ``folder``, if it really holds sets."""
+    for name in ("Data", "Dataxp"):
+        found = find_existing_path(folder, name)
+        if found is not None and found.is_dir() and _holds_sets(found):
+            return found
+    return None
+
+
+def locate_data(chosen: str | Path) -> Path:
+    """Find the data folder from any folder the person points at.
+
+    The game folder, the data folder itself, a folder inside it, or a folder
+    around the game (the expansion sits in ``<name>/<name>/Game``) all work.
+    """
+    chosen = Path(chosen).expanduser().resolve()
+    if chosen.name.casefold() == "sets" or _SET_NAME.fullmatch(chosen.name):
+        chosen = chosen.parent.parent if chosen.parent.name.casefold() == "sets" else chosen.parent
+    found = _data_child(chosen)
+    if found is not None:
+        return found
+    if _holds_sets(chosen):
+        return chosen
+    for parent in chosen.parents[:2]:
+        if parent.name.casefold() != "sets" and _holds_sets(parent):
+            return parent
+
+    level = [chosen]
+    for _ in range(3):
+        below = []
+        for folder in level:
+            try:
+                below += [path for path in sorted(folder.iterdir())
+                          if path.is_dir() and path.name.casefold() not in _IGNORED_FOLDERS]
+            except OSError:
+                continue
+        for folder in below:
+            found = _data_child(folder)
+            if found is not None:
+                return found
+        level = below
+
+    # Nothing usable yet: keep the plain answer, so a new or empty game folder still opens.
+    for name in ("Data", "Dataxp"):
+        found = find_existing_path(chosen, name)
+        if found is not None and found.is_dir():
+            return found
+    return chosen
+
+
+def detect_edition(data: Path) -> str:
+    """Which game lives here. The file names decide, never the name of the folder."""
+    root = _game_root(data)
+    if data.name.casefold() == "dataxp" or find_existing_path(root, "Ua_xp.exe") is not None:
+        return EXPANSION
+    if (find_existing_path(root, "OpenNeoUA.exe") is not None
+            or any(_child(data, name).is_dir() for name in ("Sets", "Models", "Graphics"))):
+        return OPENNEOUA
+    return VANILLA
+
+
+@dataclass(frozen=True)
+class ResourceStatus:
+    """What Studio really found for one kind of resource."""
+
+    key: str
+    title: str
+    state: str
+    detail: str
+    path: Path | None
+
+
 @dataclass
 class GameInstallation:
     data: Path
@@ -52,6 +152,15 @@ class GameInstallation:
     preview_backgrounds: dict[str, Path] = field(default_factory=dict)
     # SetN folders picked by hand (Change Set > Browse), kept for the session.
     custom_sets: dict[int, Path] = field(default_factory=dict)
+
+    @property
+    def root(self) -> Path:
+        """The game installation folder: the one holding the program and Data."""
+        return _game_root(self.data)
+
+    @property
+    def edition(self) -> str:
+        return detect_edition(self.data)
 
     @classmethod
     def suggest(cls, chosen: str | Path) -> "GameInstallation":
@@ -61,38 +170,45 @@ class GameInstallation:
         are read from Data first and then from the game root, where the
         vanilla layout keeps them. Folder names are matched without case.
         """
-        chosen = Path(chosen).expanduser().resolve()
-        data_child = find_existing_path(chosen, "Data")
-        if data_child is None:
-            data_child = find_existing_path(chosen, "Dataxp")
-        data = data_child if data_child is not None and data_child.is_dir() else chosen
+        data = locate_data(chosen)
         bases = (data,) if _game_root(data) == data else (data, _game_root(data))
+        edition = detect_edition(data)
+        if edition == EXPANSION:
+            # The expansion is an add-on: an installed one sits beside the base
+            # game and reads from it what it does not replace (skies, music).
+            base_game = find_existing_path(_game_root(data), "Data")
+            if base_game is not None and base_game.is_dir() and base_game != data:
+                bases += (base_game,)
         levels = _first_dir(bases, "Levelsxp" if data.name.casefold() == "dataxp" else "Levels")
         if not levels.is_dir():
             levels = _first_dir(bases, "Levels")
         folders = {
             "briefings": _child(levels, "Mbpix"),
-            "skies": _child(data, "Objects"),
+            "skies": _first_dir(bases, "Objects"),
             "music": _first_dir(bases, "Music"),
             "movies": _child(data, "Mov"),
             "sets": _child(data, "Sets"),
             "scripts": _child(data, "Scripts"),
             "levels": levels,
             "models": _child(data, "Models"),
-            "interface": _child(data, "Interface"),
+            "graphics": _child(data, "Graphics"),
+            "collisions": _child(data, "Collisions"),
         }
         # Vanilla keeps every set as a loose SetN folder, with no parent "Sets" folder.
         if not folders["sets"].is_dir() and _has_loose_sets(data):
             folders["sets"] = data
-        missing = {key for key, path in folders.items() if not path.is_dir()}
+        missing = {key for key, path in folders.items() if not path.is_dir()
+                   and (edition == OPENNEOUA or key not in OPENNEOUA_ONLY)}
         if missing and data.is_dir():
             aliases = {"briefings": "mbpix", "skies": "objects", "music": "music",
                        "movies": "mov", "sets": "sets", "scripts": "scripts",
-                       "levels": "levels", "models": "models", "interface": "interface"}
+                       "levels": "levels", "models": "models", "graphics": "graphics",
+                       "collisions": "collisions"}
             candidates = {key: [] for key in missing}
-            ignored = {".git", ".codex", "build", "dist", "outputs", "__pycache__", "node_modules"}
             for directory, children, files in os.walk(data):
-                children[:] = [name for name in children if name.casefold() not in ignored]
+                # A set's own Objects and Scripts folders are not the game's.
+                children[:] = [name for name in children if name.casefold() not in _IGNORED_FOLDERS
+                               and not _SET_NAME.fullmatch(name)]
                 path = Path(directory)
                 names = {name.casefold() for name in files}
                 for key in missing:
@@ -193,12 +309,6 @@ class GameInstallation:
             model_count = sum(
                 1 for path in models.rglob("*")
                 if path.is_file() and path.suffix.casefold() == ".base")
-        interface = self.folder("interface")
-        icon_count = 0
-        status = find_existing_path(interface, "StatusIcons")
-        if status is not None and status.is_dir():
-            icon_count = sum(1 for path in status.iterdir()
-                             if path.is_file() and path.suffix.casefold() == ".png")
         return {
             "mb": count("briefings", lambda p: p.stem.casefold().startswith("mb")
                         and p.suffix.casefold() in IMAGE_SUFFIXES),
@@ -211,8 +321,33 @@ class GameInstallation:
             "scripts": count_recursive("scripts", lambda p: p.suffix.casefold() in SCRIPT_SUFFIXES),
             "levels": level_count,
             "models": model_count,
-            "icons": icon_count,
+            "graphics": count_recursive("graphics", lambda p: p.suffix.casefold() in {".png", ".svg"}),
+            "collisions": count_recursive("collisions", lambda p: p.suffix.casefold() == ".collision"),
         }
+
+    def report(self) -> list[ResourceStatus]:
+        """Every resource with what was really found, in the order of ``FOLDERS``."""
+        counts = self.inventory()
+        found = {"briefings": (counts["mb"] + counts["db"], "images"),
+                 "skies": (counts["skies"], "skies"), "music": (counts["music"], "tracks"),
+                 "movies": (counts["movies"], "movies"), "sets": (counts["sets"], "sets"),
+                 "scripts": (counts["scripts"], "scripts"), "levels": (counts["levels"], "levels"),
+                 "models": (counts["models"], "models"), "graphics": (counts["graphics"], "images"),
+                 "collisions": (counts["collisions"], "shapes")}
+        edition = self.edition
+        statuses = []
+        for key in FOLDERS:
+            title, path = FOLDER_TITLES[key], self.folder(key)
+            number, unit = found[key]
+            if key in OPENNEOUA_ONLY and edition != OPENNEOUA:
+                statuses.append(ResourceStatus(key, title, NOT_IN_EDITION, "Not in this game", None))
+            elif number:
+                statuses.append(ResourceStatus(key, title, READY, f"{number} {unit}", path))
+            elif key in REQUIRED_FOLDERS:
+                statuses.append(ResourceStatus(key, title, REQUIRED_MISSING, "Required: not found", None))
+            else:
+                statuses.append(ResourceStatus(key, title, MISSING, "Not found", None))
+        return statuses
 
     def to_json(self) -> dict:
         return {"data": str(self.data), "folders": {key: str(self.folder(key)) for key in FOLDERS},

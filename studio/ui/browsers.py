@@ -267,7 +267,7 @@ class GameFileBrowser(QWidget):
         self.folder_button = self.game_button = self.folder_label = None
         if allow_folder:
             row = QHBoxLayout()
-            self.folder_button = QPushButton("Open Folder...")
+            self.folder_button = QPushButton("Open Folder")
             self.folder_button.setToolTip("Load only the files found in a folder you choose.")
             self.game_button = QPushButton("Game Files")
             self.game_button.setToolTip("Go back to the files of the configured game.")

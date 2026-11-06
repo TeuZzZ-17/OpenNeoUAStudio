@@ -211,6 +211,12 @@ class _UvTexturesMixin:
         select_this = menu.addAction("Select This Vertex")
         select_this.triggered.connect(
             lambda _checked=False: self.uv_editor.select_handle(*handle))
+        self._add_uv_common_menu_actions(menu, key)
+        menu.exec(global_position)
+
+    def _add_uv_common_menu_actions(self, menu, copy_key) -> None:
+        """Entries shared by the handle menu and the bare-texture menu."""
+
         select_all = menu.addAction("Select All UVs")
         self._configure_uv_menu_action(
             select_all,
@@ -225,13 +231,114 @@ class _UvTexturesMixin:
             "Clear the current UV handle selection.")
         clear.triggered.connect(self.uv_editor.select_none)
         menu.addSeparator()
+        copy_position = menu.addAction("Copy UV Position")
+        self._configure_uv_menu_action(
+            copy_position,
+            "" if copy_key is not None
+            else "Select a UV handle or show a single UV loop first.",
+            "Remember where this face's vertices sit on the texture.")
+        copy_position.triggered.connect(
+            lambda _checked=False: self._copy_uv_position(copy_key))
+        paste_position = menu.addAction("Paste UV Position")
+        self._configure_uv_menu_action(
+            paste_position, self._uv_paste_reason(),
+            "Move the vertices of the visible faces to the copied position, "
+            "so they show the same part of the texture.")
+        paste_position.triggered.connect(self._paste_uv_position)
+        menu.addSeparator()
         revert = menu.addAction("Revert Selected UV")
         revert_reason = self._uv_revert_reason()
         self._configure_uv_menu_action(
             revert, revert_reason,
             "Restore the selected handles to their original UV coordinates.")
         revert.triggered.connect(self._revert_selected_uv)
+
+    def _show_uv_background_context_menu(self, global_position, uv) -> None:
+        """Right click on the bare texture: same entries, no handle needed."""
+
+        menu = QMenu(self.uv_editor)
+        add = menu.addAction("Add New Vertex Here")
+        add_reason = self._uv_add_here_reason()
+        self._configure_uv_menu_action(
+            add, add_reason,
+            "Insert a vertex at the pointer position on the nearest edge of "
+            "the visible UV loop and connect it.")
+        add.triggered.connect(
+            lambda _checked=False: self._add_uv_vertex_here(uv))
+        menu.addSeparator()
+        # Copy works on the selected handle's loop, else on the only loop shown.
+        selected = sorted(self.uv_editor.selected_handles(), key=repr)
+        keys = self.uv_editor.loop_keys()
+        copy_key = (selected[0][0] if selected
+                    else keys[0] if len(keys) == 1 else None)
+        self._add_uv_common_menu_actions(menu, copy_key)
         menu.exec(global_position)
+
+    def _uv_add_here_reason(self) -> str:
+        """Same checks as Add Vertex, but no handle selection is required."""
+
+        keys = self.uv_editor.loop_keys()
+        if len(keys) != 1 or len(self._uv_contexts) != 1:
+            return "Select exactly one editable UV loop/polygon first."
+        return self._uv_topology_reason("add", (keys[0], 0))
+
+    def _add_uv_vertex_here(self, uv) -> None:
+        """Insert a vertex at ``uv`` on the loop edge closest to it."""
+
+        reason = self._uv_add_here_reason()
+        if reason:
+            self._notify(f"Add Vertex refused: {reason}", 8000)
+            return
+        key = self.uv_editor.loop_keys()[0]
+        points = self.uv_editor.loop_uvs()[key]
+
+        def edge_distance(index: int) -> float:
+            ax, ay = points[index]
+            bx, by = points[(index + 1) % len(points)]
+            dx, dy = bx - ax, by - ay
+            length_sq = dx * dx + dy * dy
+            t = (0.0 if not length_sq else max(0.0, min(
+                1.0, ((uv[0] - ax) * dx + (uv[1] - ay) * dy) / length_sq)))
+            return (uv[0] - (ax + dx * t)) ** 2 + (uv[1] - (ay + dy * t)) ** 2
+
+        edge = min(range(len(points)), key=edge_distance)
+        self.uv_editor.select_handle(key, edge)
+        reason = self._uv_topology_reason("add")
+        if reason:
+            self._notify(f"Add Vertex refused: {reason}", 8000)
+            return
+        self._apply_uv_topology_edit("add", target_uv=tuple(uv))
+
+    def _copy_uv_position(self, key) -> None:
+        self._uv_position_clipboard = list(self.uv_editor.loop_uvs().get(key, ()))
+        self.statusBar().showMessage("UV position copied.", 4000)
+
+    def _uv_paste_targets(self) -> list:
+        """Visible editable faces with as many vertices as the copied one."""
+
+        copied = getattr(self, "_uv_position_clipboard", None)
+        if not copied:
+            return []
+        return [key for key, uvs in self.uv_editor.loop_uvs().items()
+                if len(uvs) == len(copied) and self.uv_editor.loop_editable(key)]
+
+    def _uv_paste_reason(self) -> str:
+        if not getattr(self, "_uv_position_clipboard", None):
+            return "Copy a UV position first."
+        if not self._editing_allowed():
+            return "Edit Mode is required."
+        if not self._uv_paste_targets():
+            return "The copied face has a different number of vertices."
+        return ""
+
+    def _paste_uv_position(self) -> None:
+        reason = self._uv_paste_reason()
+        if reason:
+            self._notify(f"Paste UV Position refused: {reason}", 6000)
+            return
+        self.uv_editor.replace_loop_uvs({
+            key: self._uv_position_clipboard for key in self._uv_paste_targets()})
+        self.statusBar().showMessage("UV position pasted.", 4000)
 
     def _run_uv_topology_from_handle(self, operation: str, handle) -> None:
         self.uv_editor.select_handle(*handle)
@@ -254,7 +361,8 @@ class _UvTexturesMixin:
             return
         self._apply_uv_topology_edit("delete")
 
-    def _apply_uv_topology_edit(self, operation: str) -> None:
+    def _apply_uv_topology_edit(
+            self, operation: str, target_uv=None) -> None:
         key, context = next(iter(self._uv_contexts.items()))
         fam_obj, block, _block_index, atts_index, poly_id = context
         owner = fam_obj.owner_path
@@ -275,7 +383,8 @@ class _UvTexturesMixin:
         try:
             if operation == "add":
                 plan = plan_uv_vertex_insertion(
-                    model, block, poly_id, atts_index, selected)
+                    model, block, poly_id, atts_index, selected,
+                    target_uv=target_uv)
             else:
                 plan = plan_uv_vertex_deletion(
                     model, block, poly_id, atts_index, selected)

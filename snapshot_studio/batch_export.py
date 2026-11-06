@@ -246,7 +246,7 @@ class VPSnapshotBatchPanel(QWidget):
         self.output_edit.setPlaceholderText("Output folder")
         self.output_edit.setAccessibleName("Output folder")
         output_row.addWidget(self.output_edit, 1)
-        self.output_button = QPushButton("...")
+        self.output_button = QPushButton("Browse")
         self.output_button.setFixedWidth(34)
         self.output_button.setToolTip("Choose the output folder")
         self.output_button.clicked.connect(self._choose_output)

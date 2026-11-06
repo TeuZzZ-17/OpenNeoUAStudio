@@ -6,7 +6,7 @@ from pathlib import Path
 
 from PySide6.QtGui import QAction
 from PySide6.QtCore import Qt
-from PySide6.QtWidgets import QMessageBox
+from PySide6.QtWidgets import QMessageBox, QPushButton
 
 
 from studio.workbench.window import AssemblyWindow, _BAS_KIND_ROLE, _BAS_NAME_ROLE
@@ -83,6 +83,14 @@ class ModelEditorWindow(EntityListMixin, SetBasMixin, AssemblyWindow):
         self.generate_genesis_action = QAction("Generate Genesis", self)
         self.generate_genesis_action.triggered.connect(self._generate_genesis_action)
         self.file_menu.insertAction(self.exit_action, self.generate_genesis_action)
+        self.apply_states_action = QAction("Apply Changes to Other States", self)
+        self.apply_states_action.triggered.connect(self._apply_to_other_states)
+        self.file_menu.insertAction(self.generate_genesis_action, self.apply_states_action)
+        self.apply_states_button = QPushButton("Apply to States")
+        self.apply_states_button.setToolTip(
+            "Apply the changes of this model to its other states (Normal, Fire, Genesis...).")
+        self.apply_states_button.clicked.connect(self._apply_to_other_states)
+        self.toolbar_reset_model_button.parentWidget().addWidget(self.apply_states_button)
         self.file_menu.aboutToShow.connect(self._sync_generator_actions)
         self._sync_generator_actions()
 
@@ -98,6 +106,13 @@ class ModelEditorWindow(EntityListMixin, SetBasMixin, AssemblyWindow):
         strip = getattr(self._right_tabs, "_palette_strip", None)
         if strip is not None:
             strip.refresh()
+
+    def _apply_to_other_states(self):
+        from model_editor.state_sync_dialog import StateSyncDialog
+        try:
+            StateSyncDialog(self).exec()
+        except (ValueError, OSError) as exc:
+            QMessageBox.information(self, "Apply Changes to Other States", str(exc))
 
     def _set_family(self, family) -> None:
         super()._set_family(family)
@@ -203,6 +218,10 @@ class ModelEditorWindow(EntityListMixin, SetBasMixin, AssemblyWindow):
         return item if kind in ("base", "sklt.class") else None
 
     def _sync_generator_actions(self) -> None:
+        can_apply = (self._family is not None
+                     and self._owner_to_obj.get(self._selected_owner) is not None)
+        self.apply_states_action.setEnabled(can_apply)
+        self.apply_states_button.setEnabled(can_apply)
         if self._bas_manager_model_item() is not None:
             self.generate_genesis_action.setEnabled(True)
             self.generate_genesis_action.setToolTip(

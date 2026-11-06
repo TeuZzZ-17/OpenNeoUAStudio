@@ -60,7 +60,7 @@ def test_road_plan_caps_an_isolated_straight_instead_of_leaving_it_cut():
 def test_road_command_is_reachable_in_map_menu(win):
     from PySide6.QtWidgets import QMenu
     actions = [action.text() for menu in win.menuBar().findChildren(QMenu) for action in menu.actions()]
-    assert 'Close Roads (Experimental)…' in actions
+    assert 'Close Roads (Experimental)' in actions
 
 
 def test_special_drag_back_to_origin_invalidates_scene(win, monkeypatch):

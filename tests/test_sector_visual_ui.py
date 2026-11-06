@@ -193,7 +193,7 @@ def test_context_menu_uses_shared_actions_and_right_drag_still_orbits(real_windo
             menu.close()
     QTimer.singleShot(50, read_and_close_menu)
     QTest.mouseClick(view, Qt.MouseButton.RightButton, pos=cell_point(view, 4).toPoint())
-    assert seen == ["Copy cell", "Cut cell", "Paste cell", "Clear cell", "Rotate cell" + chr(0x2026),
+    assert seen == ["Copy cell", "Cut cell", "Paste cell", "Clear cell", "Rotate cell",
                     "Select all cells", "Change cell state"]
     previous = view.camera.copy()
     point = cell_point(view, 4).toPoint()
@@ -284,8 +284,8 @@ def test_sector_context_menu_preserves_group_when_clicked_member_is_not_current(
     window._sector_menu(window.sectors.visualItemRect(item).center())
     assert window.current_sector == 141
     assert window._selected_sector_numbers() == [141, 142]
-    assert seen == ["Import sector definition" + chr(0x2026), "Export sector definition" + chr(0x2026),
-                    "Wipe sector" + chr(0x2026), "Clear sector", "Copy sector", "Cut sector"]
+    assert seen == ["Import sector definition", "Export sector definition",
+                    "Wipe sector", "Clear sector", "Copy sector", "Cut sector"]
 
 
 def test_copied_sectors_follow_the_mouse_and_land_on_the_released_slot(real_window):

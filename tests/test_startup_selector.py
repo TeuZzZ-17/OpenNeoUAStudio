@@ -149,7 +149,7 @@ class StartupToolSelectorTests(unittest.TestCase):
         self.assertEqual(
             sorted(dialog.resources_panel.edits),
             sorted(["briefings", "skies", "music", "movies", "sets",
-                    "scripts", "levels", "models", "interface"]))
+                    "scripts", "levels", "models", "graphics", "collisions"]))
 
     @staticmethod
     def _send_wheel(widget, delta):

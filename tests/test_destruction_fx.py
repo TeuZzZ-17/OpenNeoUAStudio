@@ -585,7 +585,7 @@ def test_decal_edge_fade_clears_the_corners_and_keeps_the_center():
 # -- weapon decals in unit mode, launch flash and chaos --------------------------------------
 
 DECAL_PROFILES = fx.decal_profiles_from_text(
-    "new_decal 1\n    texture = Interface/GroundDecals/impact_01.png\n"
+    "new_decal 1\n    texture = Graphics/GroundDecals/impact_01.png\n"
     "    duration = permanent\nend\n")
 
 DECAL_WEAPON = (
