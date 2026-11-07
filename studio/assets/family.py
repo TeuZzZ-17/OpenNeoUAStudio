@@ -1170,7 +1170,12 @@ def probe_family_requirements(
     resolver = AssetResolver(roots, file_overrides, prefer_earliest_root=True)
 
     probes: list[FamilyRequirementProbe] = []
-    for requirement in collect_family_requirements(base_asset):
+    requirements = collect_family_requirements(base_asset)
+    seen = {(item.kind, normalize_logical_name(item.logical_name).casefold())
+            for item in requirements}
+    # VANM frame bitmaps are indirect dependencies, absent from the BASE.
+    # Expand them from the selected animation source, just as the loader does.
+    for requirement in requirements:
         ref = _resolve_with_setbas(
             family, resolver, requirement.logical_name,
             requirement.kind, requirement.class_id)
@@ -1188,12 +1193,27 @@ def probe_family_requirements(
             status = "ambiguous"
         else:
             status = "missing"
+        detail = ref.resolution_rule or ref.status
+        if requirement.kind == "animation" and status in ("setbas", "loose", "manual"):
+            try:
+                if status == "setbas":
+                    animation = decode_animation(family.setbas_archive,
+                                                 embedded_matches[0])
+                else:
+                    animation = parse_anm_file(ref.path)
+                for name in animation.bitmap_names:
+                    key = ("texture", normalize_logical_name(name).casefold())
+                    if name and key not in seen:
+                        seen.add(key)
+                        requirements.append(FamilyRequirement("texture", name, "ilbm.class"))
+            except Exception as exc:
+                detail += f"; animation could not be inspected: {exc}"
         probes.append(FamilyRequirementProbe(
             requirement=requirement,
             status=status,
             path=ref.path,
             embedded_names=embedded_names,
-            detail=ref.resolution_rule or ref.status,
+            detail=detail,
         ))
     return base_asset, probes
 

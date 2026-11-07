@@ -359,11 +359,15 @@ class DirectoryIndex:
         cls._cache.clear()
 
     def find_name(self, filename: str) -> list[Path]:
-        return list(self.by_name.get(filename.lower(), []))
+        # Files can be removed outside Studio after this shared scan. A stale
+        # loose hit must not prevent fallback to the installed SET resources.
+        return [path for path in self.by_name.get(filename.lower(), [])
+                if path.is_file()]
 
     def find_relative(self, logical_path: str) -> list[Path]:
         normalized = normalize_logical_name(logical_path).casefold()
-        return list(self.by_relative.get(normalized, []))
+        return [path for path in self.by_relative.get(normalized, [])
+                if path.is_file()]
 
 
 @dataclass

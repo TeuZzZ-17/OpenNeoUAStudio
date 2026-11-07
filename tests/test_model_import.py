@@ -14,6 +14,7 @@ from PySide6.QtWidgets import QApplication
 
 from studio.assets.family import (
     collect_family_requirements,
+    load_asset_family,
     probe_family_requirements,
 )
 from studio.exchange.portable import DirectoryIndex
@@ -141,6 +142,73 @@ class ModelImportTests(unittest.TestCase):
         setbas_path = root / "SET.BAS"
         setbas_path.write_bytes(_setbas_bytes())
         return base, setbas_path, read_setbas(setbas_path)
+
+    def test_deleted_loose_resources_fall_back_without_restarting(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            model = root / "model"
+            model.mkdir()
+            base, _path, archive = self._fixture(model)
+            installed = root / "set" / "PALETTE"
+            installed.mkdir(parents=True)
+            local = model / "PALETTE"
+            local.mkdir()
+            palette = _form(b"ILBM", _chunk(b"CMAP", bytes(range(256)) * 3))
+            (installed / "STANDARD.PAL").write_bytes(palette)
+            (local / "STANDARD.PAL").write_bytes(palette)
+            texture = model / "MTL.ILBM"
+            texture.write_bytes(_vbmp())
+            first = load_asset_family(base, extra_roots=[installed.parent], setbas=archive)
+            self.assertEqual(first.external_palette_path, local / "STANDARD.PAL")
+            self.assertEqual(first.texture_refs["MTL.ILBM"].path, texture)
+            texture.unlink()
+            (local / "STANDARD.PAL").unlink()
+            second = load_asset_family(base, extra_roots=[installed.parent], setbas=archive)
+            self.assertEqual(second.texture_refs["MTL.ILBM"].status, "setbas")
+            self.assertIn("MTL.ILBM", second.textures)
+            self.assertEqual(second.external_palette_path, installed / "STANDARD.PAL")
+            self.assertFalse(second.load_errors)
+
+    def test_probe_includes_animation_frame_textures(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            base, _path, archive = self._fixture(root)
+            (root / "FLASH.ANM").write_bytes(_vanm().replace(b"MTL.ILBM", b"FX2.ILBM"))
+            _asset, probes = probe_family_requirements(base, setbas=archive)
+            frames = [p for p in probes if p.requirement.logical_name == "FX2.ILBM"]
+            self.assertEqual(len(frames), 1)
+            self.assertEqual(frames[0].status, "missing")
+
+    def test_probe_animation_frame_texture_uses_set_or_manual_source(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            base, _path, archive = self._fixture(root)
+            # Reuse the embedded MTL bitmap solely as an indirect VANM dependency.
+            base.write_bytes(_base_bytes().replace(b"MTL.ILBM", b"DIR.ILBM"))
+            _asset, probes = probe_family_requirements(base, setbas=archive)
+            frames = [p for p in probes if p.requirement.logical_name == "MTL.ILBM"]
+            self.assertEqual(len(frames), 1)
+            self.assertEqual(frames[0].status, "setbas")
+            chosen = root / "CHOSEN.ILBM"
+            chosen.write_bytes(_vbmp())
+            _asset, probes = probe_family_requirements(
+                base, setbas=archive, overrides={"MTL.ILBM": chosen})
+            frame = next(p for p in probes if p.requirement.logical_name == "MTL.ILBM")
+            self.assertEqual(frame.status, "manual")
+            self.assertEqual(frame.path, chosen)
+
+    def test_cached_index_excludes_deleted_relative_paths(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            nested = root / "Skeleton"
+            nested.mkdir()
+            skeleton = nested / "HERO.SKLT"
+            skeleton.write_bytes(_sklt())
+            index = DirectoryIndex.get(root)
+            self.assertEqual(index.find_relative("Skeleton/HERO.SKLT"), [skeleton])
+            skeleton.unlink()
+            self.assertEqual(index.find_relative("Skeleton/HERO.SKLT"), [])
+            self.assertEqual(index.find_name("HERO.SKLT"), [])
 
     def test_requirements_cover_skeleton_textures_and_animations(self):
         with tempfile.TemporaryDirectory() as tmp:
