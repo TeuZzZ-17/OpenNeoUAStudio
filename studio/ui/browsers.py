@@ -393,6 +393,33 @@ class GameFileBrowser(QWidget):
             self.tree.setCurrentItem(selected)
 
 
+def _entity_weapon_links(objects):
+    """Resolve weapon slots for display without changing script names."""
+    weapons = {obj.object_id: obj for obj in objects if obj.kind == "weapon"}
+    links = {}
+    for vehicle in (obj for obj in objects if obj.kind == "vehicle"):
+        used = []
+        for key in ("weapon", "weapon_2", "weapon_3", "weapon_4", "mgun"):
+            value = vehicle.values.get(key, "").strip()
+            try:
+                number = int(value, 0)
+            except ValueError:
+                try:
+                    number = int(value, 10)
+                except ValueError:
+                    continue
+            if number > 0 and number in weapons and number not in used:
+                used.append(number)
+        if used:
+            links[("vehicle", vehicle.object_id)] = [weapons[number].name for number in used]
+        for number in used:
+            links.setdefault(("weapon", number), []).append(vehicle.name)
+    for key, names in links.items():
+        if key[0] == "weapon":
+            names.sort(key=str.casefold)
+    return links
+
+
 class GameObjectBrowser(QWidget):
     selected = Signal(object)
     setChanged = Signal(int)
@@ -402,6 +429,7 @@ class GameObjectBrowser(QWidget):
         # ``kinds`` limits the list to some game-object kinds; None shows all of them.
         self.kinds = tuple(kinds) if kinds else None
         self.objects = []
+        self._related_names = {}
         self._state_column = False
         self._visual_states = {}
         layout = QVBoxLayout(self)
@@ -536,7 +564,9 @@ class GameObjectBrowser(QWidget):
                 self.set_combo.addItem(f"Set {number}", number)
             index = self.set_combo.findData(selected_number)
             self.set_combo.setCurrentIndex(index if index >= 0 else 0)
-        self.objects = [obj for obj in (load_game_objects(install) if install else [])
+        all_objects = load_game_objects(install) if install else []
+        self._related_names = _entity_weapon_links(all_objects)
+        self.objects = [obj for obj in all_objects
                         if self.kinds is None or obj.kind in self.kinds]
         self.fill(selected)
 
@@ -554,13 +584,15 @@ class GameObjectBrowser(QWidget):
         with QSignalBlocker(self.tree):
             self.tree.clear()
             for obj in sorted(self.objects, key=self._sort_key):
-                texts = [obj.name, obj.kind.title(), str(obj.object_id)]
+                names = self._related_names.get((obj.kind, obj.object_id), ())
+                display = f"{obj.name} ({', '.join(names)})" if names else obj.name
+                texts = [display, obj.kind.title(), str(obj.object_id)]
                 if self._state_column:
                     key = (self.set_number, obj.kind, obj.object_id)
                     texts.insert(1, self._visual_states.get(key, self.default_visual_state(obj)))
                 item = QTreeWidgetItem(texts)
                 item.setData(0, GAME_OBJECT_ROLE, obj)
-                item.setToolTip(0, f"{obj.source}\n{obj.kind} {obj.object_id}")
+                item.setToolTip(0, f"{display}\n{obj.source}\n{obj.kind} {obj.object_id}")
                 self.tree.addTopLevelItem(item)
                 if selected is not None and (obj.kind, obj.object_id) == (selected.kind, selected.object_id):
                     self.tree.setCurrentItem(item)
@@ -584,7 +616,7 @@ class GameObjectBrowser(QWidget):
             item = self.tree.topLevelItem(index)
             obj = item.data(0, GAME_OBJECT_ROLE)
             if obj is not None:
-                item.setHidden(bool(kind and obj.kind != kind) or text not in f"{obj.name} {obj.object_id}".casefold())
+                item.setHidden(bool(kind and obj.kind != kind) or text not in f"{item.text(0)} {obj.object_id}".casefold())
 
     def _selected(self, current, previous):
         if current is not None:

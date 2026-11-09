@@ -62,6 +62,13 @@ def model_level(values: dict[str, str]) -> str:
     return RISKY if plain else OPENNEOUA
 
 
+def crater_level(values: dict[str, str]) -> str:
+    """crater_radius / _depth / _rim are OpenNeoUA keys; unset they write nothing and stay vanilla."""
+
+    return OPENNEOUA if any(values.get(key) for key in ("crater_radius", "crater_depth", "crater_rim")) \
+        else VANILLA
+
+
 def decal_level(values: dict[str, str]) -> str:
     """ground_decal_id / _size are OpenNeoUA keys; unset they write nothing and stay vanilla."""
 

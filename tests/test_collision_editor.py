@@ -17,8 +17,8 @@ from PySide6.QtWidgets import (
     QTreeWidgetItem,
 )
 
-from studio.assets.family import AssetFamily, FamilyObject
-from studio.formats.base_format import BaseObject
+from studio.assets.family import AssetFamily, FamilyObject, MaterialGroup
+from studio.formats.base_format import AmeshBlock, BaseObject
 from studio.rendering.asset_viewport import PREVIEW_SCALE
 from studio.rendering.indexed import IndexedSurface
 import entity_designer.editor as editor_module
@@ -1906,6 +1906,53 @@ class CollisionEditorTests(unittest.TestCase):
         window._reset_overeof()
         self.assertFalse(profile.authored)
         self.assertEqual(profile.overeof, 0.0)
+
+    def test_ground_profile_and_auto_ignore_additive_effects_and_unused_points(self):
+        family = _family()
+        model = family.root_object
+        model.skeleton.points = [
+            (-2, -10, 0), (-2, 20, 0), (2, 20, 0),
+            (-1, -10, 0), (-1, 40, 0), (1, 40, 0),
+            (0, 90, 0),  # No polygon uses this point.
+        ]
+        model.skeleton.polygons = [[0, 1, 2], [3, 4, 5]]
+        model.materials = [
+            MaterialGroup("body", block=AmeshBlock(polflags=0),
+                          faces=[(0, [], 0)]),
+            MaterialGroup("effect", block=AmeshBlock(polflags=0x80),
+                          faces=[(1, [], 0)]),
+        ]
+        window = self._window()
+        with patch("entity_designer.load_asset_family", return_value=family):
+            window.open_base("sample.base")
+        window.overeof_check.setChecked(True)
+        window.overeof_spin.setValue(39)
+        self.assertEqual(window.ground_profile.bounds[4], 20)
+        self.assertEqual(window.ground_profile.contact_status()[0],
+                         "Above ground: 19")
+        window._suggest_overeof_from_bounds()
+        self.assertEqual(window.project.overeof, 20)
+        self.assertEqual(window.ground_profile.contact_status()[0],
+                         "Touching ground")
+        window.model_scale_y_spin.setValue(1.5)
+        self.assertEqual(window.ground_profile.bounds[4], 30)
+        window.viewport.set_model_preview_rotation(0, 0, 90)
+        window._sync_all()
+        self.assertAlmostEqual(window.ground_profile.bounds[4], 3.0)
+
+    def test_ground_profile_marks_additive_only_model_as_estimate(self):
+        family = _family()
+        family.root_object.materials = [
+            MaterialGroup("effect", block=AmeshBlock(polflags=0x80),
+                          faces=[(0, [], 0)]),
+        ]
+        window = self._window()
+        with patch("entity_designer.load_asset_family", return_value=family):
+            window.open_base("sample.base")
+        self.assertTrue(window.ground_profile.additive_only)
+        self.assertEqual(window.ground_profile.bounds[4], 2)
+        window._suggest_overeof_from_bounds()
+        self.assertEqual(window.project.overeof, 2)
 
     def test_ground_profile_wheel_updates_overeof_and_undo(self):
         window = self._window()

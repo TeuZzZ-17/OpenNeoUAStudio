@@ -626,6 +626,34 @@ class CollisionViewport(FxPreviewViewportMixin, AssetViewport):
             max(point[2] for point in corners),
         )
 
+    def ground_contact_bounds(self, owner: str | None):
+        """Measure rendered model surfaces without additive effects or particles.
+
+        If the model contains only additive surfaces, use those as an
+        explicitly approximate fallback. Returned bounds are relative to the
+        actor origin, before the temporary Overeof translation.
+        """
+
+        faces = [face for face in self._faces
+                 if (owner is None or face.owner == owner)
+                 and face.billboard_center is None and face.vertices]
+        body = [face for face in faces
+                if not self._materials[face.material].additive]
+        additive_only = bool(faces) and not body
+        points = [point for face in (body or faces) for point in face.vertices
+                  if all(math.isfinite(value) for value in point)]
+        if not points:
+            return None, False
+        offset_y = self.overeof_preview_offset
+        return (
+            min(point[0] for point in points),
+            min(point[1] for point in points) - offset_y,
+            min(point[2] for point in points),
+            max(point[0] for point in points),
+            max(point[1] for point in points) - offset_y,
+            max(point[2] for point in points),
+        ), additive_only
+
     def _apply_model_preview_scale(self) -> None:
         if len(self._model_preview_base_faces) == len(self._faces):
             for face, vertices in zip(
@@ -1529,7 +1557,7 @@ class CollisionViewport(FxPreviewViewportMixin, AssetViewport):
     def _fire_area_handle_text(self, handle: fa.AreaHandle) -> str:
         if handle.key == "dead_zone":
             return f"{handle.key} {round(self._fire_area.dead_zone)}"
-        return f"{handle.key} {handle.label}"
+        return f"{handle.key.removesuffix('_opposite')} {handle.label}"
 
     def _fire_area_label_positions(self, painter: QPainter, visible) -> dict:
         """{handle key: (text, baseline point)} with labels kept apart.

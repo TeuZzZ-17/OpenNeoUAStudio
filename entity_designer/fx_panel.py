@@ -478,7 +478,7 @@ class FxEffectsView(QWidget):
         return QIcon(dot)
 
     def _add_state_rows(self, selected) -> None:
-        """The Model row and the Ground decal row lead the list."""
+        """The Model, Ground decal and (weapons) Crater rows lead the list."""
 
         panel = self.panel
         session = panel.state_session
@@ -490,6 +490,14 @@ class FxEffectsView(QWidget):
                 level = fx_compat.model_level(values)
                 text = "Model\n" + fx_visuals.model_summary(values)
                 tip = "vp_ / base_ / 3ds_ of every model state"
+            elif index == fx_visuals.CRATER_INDEX:
+                values = fx_visuals.parse_crater_text(session.originals[index])
+                level = fx_compat.crater_level(values)
+                text = "Crater\n" + fx_visuals.crater_summary(values)
+                tip = ("crater_radius and crater_depth (a number or min~max) dig the ground "
+                       "where the weapon hits it, and dent roofs and walls; crater_rim is the "
+                       "raised border in % of the depth (default 20). The depth never goes "
+                       "past half the radius. Both radius and depth are needed.")
             else:
                 values = fx_visuals.parse_decal_text(session.originals[index])
                 level = fx_compat.decal_level(values)
@@ -821,6 +829,7 @@ class DestructionFxPanel(QWidget):
         self.shake_button.setIconSize(QSize(20, 20))
         self.shake_button.setMinimumWidth(28)
         self.shake_button.toggled.connect(self._shake_toggled)
+        self.shake_button.setChecked(True)
         self.shake_button.setAccessibleName("Mute view shake")
         self.pal_button.setText("")
         self.pal_button.setIcon(_palette_icon(False))
@@ -833,6 +842,7 @@ class DestructionFxPanel(QWidget):
         self.damage_button.setIconSize(QSize(20, 20))
         self.damage_button.setMinimumWidth(28)
         self.damage_button.toggled.connect(self._damage_toggled)
+        self.damage_button.setChecked(True)
         self.damage_button.setAccessibleName("Hide damage marks")
         # Eight icon buttons must fit the narrow right panel.
         for icon_button in (self.restart_button, self.play_button, self.stop_button,
@@ -900,7 +910,7 @@ class DestructionFxPanel(QWidget):
             self.highlight = None
             self.seed = 1
             self.time_ms = 0.0
-            self.current_trigger = (fx.WEAPON_HIT_UNIT
+            self.current_trigger = (fx.WEAPON_HIT_GROUND
                                     if context == fx.CONTEXT_WEAPON
                                     else fx.SEQUENCE_TRIGGER)
         weapon = context == fx.CONTEXT_WEAPON
@@ -981,7 +991,7 @@ class DestructionFxPanel(QWidget):
 
     def set_script_sources(self, origins) -> None:
         self.text_session = FxTextSession(self.document, self.context, origins)
-        self.state_session = fx_visuals.StateSession(origins)
+        self.state_session = fx_visuals.StateSession(origins, weapon=self.context == fx.CONTEXT_WEAPON)
         self._fill_list(keep_selection=True)
         self.update_text_status()
         self.effects_view.update_actions()
@@ -1011,6 +1021,8 @@ class DestructionFxPanel(QWidget):
             return "Model"
         if index == fx_visuals.DECAL_INDEX:
             return "Ground decal"
+        if index == fx_visuals.CRATER_INDEX:
+            return "Crater"
         return f"Effect {index + 1}"
 
     def edit_source(self, index) -> str:
@@ -1263,6 +1275,7 @@ class DestructionFxPanel(QWidget):
             enabled=enabled, unit=self.unit, weapons=self.weapons,
             debuffs=self.debuffs,
             decals={} if fx_visuals.DECAL_INDEX in self.hidden_items else self.decals,
+            craters=fx_visuals.CRATER_INDEX not in self.hidden_items,
             settings=self.settings,
             shot=shot, volley=self.volley if shot else ())
         self.timeline.set_tracks(self.simulation.tracks, self._length())

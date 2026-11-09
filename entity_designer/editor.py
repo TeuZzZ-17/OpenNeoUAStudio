@@ -674,8 +674,8 @@ class CollisionEditorWindow(
         self.setCentralWidget(splitter)
 
         source_panel = QWidget()
-        source_panel.setMinimumWidth(230)
-        source_panel.setMaximumWidth(400)
+        source_panel.setMinimumWidth(300)
+        source_panel.setMaximumWidth(600)
         source_panel.setSizePolicy(
             QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Expanding)
         source_layout = QVBoxLayout(source_panel)
@@ -911,8 +911,8 @@ class CollisionEditorWindow(
         ground_controls.addWidget(self.overeof_spin, 0, 1)
         self.suggest_overeof_button = QPushButton("Auto")
         self.suggest_overeof_button.setToolTip(
-            "Use the lowest scaled model point as a starting Overeof "
-            "estimate. The result remains manually editable.")
+            "Estimate Overeof from the lowest model surface, excluding "
+            "additive effects when possible. The result remains editable.")
         self.suggest_overeof_button.clicked.connect(
             self._suggest_overeof_from_bounds)
         ground_controls.addWidget(self.suggest_overeof_button, 1, 0)
@@ -1849,7 +1849,7 @@ class CollisionEditorWindow(
         # Start at the user-validated splitter proportions: the archive list is
         # wide enough for full resource names, while the properties column is
         # compact and the viewport remains the flexible central workspace.
-        splitter.setSizes([230, 850, 430])
+        splitter.setSizes([340, 850, 430])
 
     def eventFilter(self, watched, event):
         if (hasattr(self, "gun_point_tree")
@@ -2357,10 +2357,11 @@ class CollisionEditorWindow(
         self.overeof_spin.setValue(self.project.overeof)
         self.overeof_spin.setEnabled(
             vehicle_mode and self.project.overeof_enabled)
-        model_bounds = self._model_bounds()
+        model_bounds, additive_only = self.viewport.ground_contact_bounds(
+            self._current_owner)
         self.ground_profile.set_profile(
             model_bounds, vehicle_mode and self.project.overeof_enabled,
-            self.project.overeof)
+            self.project.overeof, additive_only=additive_only)
         self.suggest_overeof_button.setEnabled(
             vehicle_mode and model_bounds is not None)
         self.reset_overeof_button.setEnabled(

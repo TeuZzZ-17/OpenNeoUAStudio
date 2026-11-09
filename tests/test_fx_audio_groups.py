@@ -259,6 +259,11 @@ def test_list_shows_sound_pal_and_shake_rows(app):
 
 def test_shake_button_sits_between_sound_and_palette_and_switches_the_shake_off(app):
     panel = _panel(app)
+    assert panel.shake_button.isChecked()
+    assert panel.damage_button.isChecked()
+    assert panel.shake_angles() == (0.0, 0.0, 0.0)
+    assert panel.damage_marks() == []
+    panel.shake_button.setChecked(False)
     layout = panel.mute_button.parentWidget().layout().itemAt(0).layout()
     assert layout.indexOf(panel.shake_button) == layout.indexOf(panel.mute_button) + 1
     assert layout.indexOf(panel.pal_button) == layout.indexOf(panel.shake_button) + 1
@@ -274,6 +279,7 @@ def test_shake_button_sits_between_sound_and_palette_and_switches_the_shake_off(
 
 def test_hiding_a_row_from_the_list_silences_it(app):
     panel = _panel(app)
+    panel.shake_button.setChecked(False)
     panel._set_trigger(fx.WEAPON_HIT_GROUND)
     panel.seek(fx.WEAPON_FLIGHT_MS + 100)
     assert any(panel.shake_angles())

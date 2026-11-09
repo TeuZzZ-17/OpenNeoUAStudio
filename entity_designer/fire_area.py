@@ -355,6 +355,12 @@ def volume_handles(shape: str, size, dead_zone: float,
             ("width", f"{size[0]:g}", (max_x + half_w, 0.0, depth), axes[0]),
             ("height", f"{size[height_index]:g}", (0.0, half_s, depth), axes[1]),
         ]
+    for key, label, along, axis in tuple(grips):
+        opposite = ((x_span[0] - half_w * depth if is_cone(shape)
+                     else x_span[0] - half_w), 0.0, depth) if key in ("angle_x", "width") else (
+                         0.0, -along[1], depth)
+        grips.append((key + "_opposite", label, opposite,
+                      tuple(-component for component in axis)))
     depth_index = 1 if shape == BOX_BELOW else 2
     grips.append(("depth", f"{size[depth_index]:g}", (0.0, 0.0, depth), axes[2]))
     grips.append(("dead_zone", f"{near:g}", (0.0, 0.0, near), axes[2]))
@@ -375,6 +381,7 @@ def _size_index(shape: str, key: str) -> int:
 def dragged(shape: str, size, dead_zone: float, key: str, delta: float):
     """(size, dead_zone) after moving handle ``key`` by ``delta`` along its axis."""
 
+    key = key.removesuffix("_opposite")
     values = list(size)
     if key == "dead_zone":
         depth = values[_size_index(shape, "depth")]

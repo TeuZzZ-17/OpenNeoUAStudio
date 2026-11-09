@@ -23,6 +23,7 @@ from PySide6.QtGui import (
 )
 
 from studio.exchange.portable import find_existing_path
+from entity_designer import crater_preview
 from studio.rendering.asset_viewport import AssetViewport, ViewFace, _apply, _rotation_matrix
 from entity_designer.destruction_fx import (
     DAMAGE_AREA, DAMAGE_DIRECT, EmitterSpec, damage_text,
@@ -86,6 +87,49 @@ def _transform(item, vertex):
         item.position[1] + rot[1][0] * local[0] + rot[1][1] * local[1] + rot[1][2] * local[2],
         item.position[2] + rot[2][0] * local[0] + rot[2][1] * local[1] + rot[2][2] * local[2],
     )
+
+
+def _convex(points) -> bool:
+    """A screen quad that does not fold over itself (all turns the same way)."""
+
+    signs = set()
+    for index in range(4):
+        a, b, c = points[index], points[(index + 1) % 4], points[(index + 2) % 4]
+        cross = (b.x() - a.x()) * (c.y() - b.y()) - (b.y() - a.y()) * (c.x() - b.x())
+        if abs(cross) < 1e-6:
+            return False
+        signs.add(cross > 0)
+    return len(signs) == 1
+
+
+def _grown(points, pixels):
+    """A screen quad pushed ``pixels`` outward from its centre."""
+
+    cx = sum(p.x() for p in points) / 4.0
+    cy = sum(p.y() for p in points) / 4.0
+    out = []
+    for p in points:
+        dx, dy = p.x() - cx, p.y() - cy
+        length = math.hypot(dx, dy)
+        grow = (length + pixels) / length if length > 1e-6 else 1.0
+        out.append(QPointF(cx + dx * grow, cy + dy * grow))
+    return out
+
+
+def _affine(source, target):
+    """QTransform mapping three source points onto three target points (None if flat)."""
+
+    (x0, y0), (x1, y1), (x2, y2) = ((p.x(), p.y()) for p in source)
+    (u0, v0), (u1, v1), (u2, v2) = ((p.x(), p.y()) for p in target)
+    det = (x1 - x0) * (y2 - y0) - (x2 - x0) * (y1 - y0)
+    if abs(det) < 1e-9:
+        return None
+    # Columns of the linear part from the two edges, then the translation.
+    a = ((u1 - u0) * (y2 - y0) - (u2 - u0) * (y1 - y0)) / det
+    b = ((u2 - u0) * (x1 - x0) - (u1 - u0) * (x2 - x0)) / det
+    c = ((v1 - v0) * (y2 - y0) - (v2 - v0) * (y1 - y0)) / det
+    d = ((v2 - v0) * (x1 - x0) - (v1 - v0) * (x2 - x0)) / det
+    return QTransform(a, c, b, d, u0 - a * x0 - b * y0, v0 - c * x0 - d * y0)
 
 
 def colorize_image(image: QImage, tint) -> QImage:
@@ -193,6 +237,8 @@ class FxPreviewViewportMixin:
         self._fx_emitter_cache: dict[str, list] = {}
         self._fx_emitter_family = None
         self._fx_tinted_stage_cache: dict[tuple, QImage] = {}
+        # Dug ground of the weapon craters: (key, texture, grid) of the last frame.
+        self._fx_crater_cache: tuple | None = None
         # External 3DS/BASE models: path -> hidden renderer (None = failed).
         self._fx_external_loader = None
         self._fx_external_cache: dict[str, AssetViewport | None] = {}
@@ -833,6 +879,7 @@ class FxPreviewViewportMixin:
         layers: dict[tuple, list[ViewFace]] = {}
         markers = []
         decals = []
+        craters = []
         smokes = []
         # External models are grouped by tint, fade and blending so each group
         # is one layer: (helper id, rgb, opacity step, additive) -> items.
@@ -841,6 +888,9 @@ class FxPreviewViewportMixin:
         for item in self._fx_items:
             if item.kind == "ground_decal":
                 decals.append(item)
+                continue
+            if item.kind == "crater":
+                craters.append(item)
                 continue
             if item.kind == "decal_smoke":
                 smokes.append(item)
@@ -906,7 +956,11 @@ class FxPreviewViewportMixin:
                     self._draw_grid(painter, target, camera)
             else:
                 AssetViewport._paint_viewport(self, painter)
-            self._draw_fx_decals(painter, target, camera, decals)
+            # Decals on a crater are painted on the dug ground itself, like the
+            # engine's decal shader does; the others stay flat on the plane.
+            on_craters = self._draw_fx_craters(painter, target, camera, craters, decals)
+            self._draw_fx_decals(painter, target, camera,
+                                 [item for item in decals if id(item) not in on_craters])
             for (_key, rgb, step, additive), (helper, helper_items) in sorted(
                     externals.items(), key=lambda entry: (entry[0][3], entry[0][2])):
                 self._draw_fx_external(
@@ -999,30 +1053,239 @@ class FxPreviewViewportMixin:
         self._fx_decal_cache[key] = image
         return image
 
+    def _decal_look(self, item):
+        """(image with tint applied or None, opacity) of a decal item."""
+
+        tint = item.tint or (255, 255, 255, 255)
+        opacity = item.alpha * tint[3] / 255.0
+        image = self._decal_image(item.texture, item.decal_edge_fade)
+        if image is not None and tuple(tint[:3]) != (255, 255, 255):
+            key = (id(image), tuple(tint[:3]))
+            tinted = self._fx_tinted_stage_cache.get(key)
+            if tinted is None:
+                tinted = colorize_image(image, (*tint[:3], 255))
+                self._fx_tinted_stage_cache[key] = tinted
+            image = tinted
+        return image, opacity
+
+    @staticmethod
+    def _decal_corners(item):
+        """World corners of a decal on its ground plane."""
+
+        half_x = item.decal_size[0] * 0.5
+        half_z = item.decal_size[1] * 0.5
+        return [_transform(item, corner) for corner in
+                ((-half_x, 0.0, -half_z), (half_x, 0.0, -half_z),
+                 (half_x, 0.0, half_z), (-half_x, 0.0, half_z))]
+
+    # Dug ground: cells per side of the drawn grid and pixels of its texture.
+    CRATER_CELLS = 40
+    CRATER_TEXTURE = 512
+    # Neutral ground colour of the preview (Studio has no level terrain).
+    CRATER_GROUND = (96, 108, 116)
+
+    def _draw_fx_craters(self, painter, target, camera, craters, decals) -> set[int]:
+        """Weapon craters: the ground dug with the engine's shape and shading.
+
+        The dug square is one texture seen from above (engine shading, decals
+        on it) drawn on a grid lowered by the crater: each cell maps its part of
+        the texture, so a decal follows the dug ground exactly like the
+        engine's projected decal. Returns the ids of the decals it painted.
+        """
+
+        if not craters or _np is None:
+            return set()
+        shapes = [crater_preview.Shape(*item.position, *item.scale) for item in craters]
+        low_x = min(shape.x - crater_preview.reach(shape) for shape in shapes)
+        high_x = max(shape.x + crater_preview.reach(shape) for shape in shapes)
+        low_z = min(shape.z - crater_preview.reach(shape) for shape in shapes)
+        high_z = max(shape.z + crater_preview.reach(shape) for shape in shapes)
+        side = max(high_x - low_x, high_z - low_z, 1.0)
+        centre_x, centre_z = (low_x + high_x) * 0.5, (low_z + high_z) * 0.5
+        low_x, low_z = centre_x - side * 0.5, centre_z - side * 0.5
+        ground_y = shapes[0].y
+
+        def inside(item):
+            x, _y, z = item.position
+            return low_x <= x <= low_x + side and low_z <= z <= low_z + side
+
+        covered = [item for item in decals if inside(item)]
+        key = (tuple(shapes), tuple(
+            (item.texture, item.position, item.decal_size, tuple(map(tuple, item.rotation)),
+             round(item.alpha, 2), item.tint, item.decal_edge_fade) for item in covered))
+        if self._fx_crater_cache is None or self._fx_crater_cache[0] != key:
+            self._fx_crater_cache = (key, *self._crater_patch(
+                shapes, low_x, low_z, side, ground_y, covered))
+        _key, texture, heights = self._fx_crater_cache
+
+        cells = self.CRATER_CELLS
+        step = side / cells
+        pixels = self.CRATER_TEXTURE / cells
+        quads = []
+
+        def facing(points):
+            # Camera space: the eye sits at z = 4 (AssetViewport convention).
+            (ax, ay, az), (bx, by, bz), (cx, cy, cz), (dx, dy, dz) = points
+            ux, uy, uz = cx - ax, cy - ay, cz - az
+            vx, vy, vz = dx - bx, dy - by, dz - bz
+            nx, ny, nz = uy * vz - uz * vy, uz * vx - ux * vz, ux * vy - uy * vx
+            mx, my, mz = (ax + cx) * 0.5, (ay + cy) * 0.5, (az + cz) * 0.5
+            return nx * -mx + ny * -my + nz * (4.0 - mz)
+
+        # The side the flat ground shows the camera: cells turned the other way
+        # are the underside of the dug ground, hidden by the ground in front.
+        middle_x, middle_z = low_x + side * 0.5, low_z + side * 0.5
+        front = facing([self._camera_vertex((middle_x + a * step, ground_y, middle_z + b * step), camera)
+                        for a, b in ((0, 0), (1, 0), (1, 1), (0, 1))]) > 0.0
+        hidden = self._crater_hidden_cells(shapes, low_x, low_z, step, ground_y, camera)
+        for i in range(cells):
+            for k in range(cells):
+                world = [(low_x + (i + a) * step, heights[k + b, i + a], low_z + (k + b) * step)
+                         for a, b in ((0, 0), (1, 0), (1, 1), (0, 1))]
+                camera_points = [self._camera_vertex(point, camera) for point in world]
+                if not all(self._camera_point_is_projectable(point) for point in camera_points):
+                    continue
+                if (facing(camera_points) > 0.0) != front or hidden[k, i]:
+                    continue
+                screen = [self._project(point, target, camera) for point in camera_points]
+                # Order of a height field seen from above: by the cell's place on
+                # the flat ground, far to near (its dug depth would mix the walls).
+                flat = self._camera_vertex(
+                    (low_x + (i + 0.5) * step, ground_y, low_z + (k + 0.5) * step), camera)
+                quads.append((flat[2], i, k, screen))
+        quads.sort(key=lambda entry: entry[0])     # Far cells first.
+        # The cells go to a layer of their own where each one replaces what it
+        # covers: overlapping edges then never add up their transparency.
+        width = max(1, int(math.ceil(target.width())))
+        height = max(1, int(math.ceil(target.height())))
+        layer_image = QImage(width, height, QImage.Format.Format_ARGB32_Premultiplied)
+        layer_image.fill(Qt.GlobalColor.transparent)
+        layer = QPainter(layer_image)
+        layer.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform, True)
+        layer.setCompositionMode(QPainter.CompositionMode.CompositionMode_Source)
+        base = QTransform.fromTranslate(-target.left(), -target.top())
+        painter_for_cells = layer
+        for _depth, i, k, screen in quads:
+            source = QRectF(i * pixels, k * pixels, pixels, pixels)
+            corners = [source.topLeft(), source.topRight(), source.bottomRight(), source.bottomLeft()]
+            transform = QTransform()
+            # Half a pixel wider on screen, so neighbours leave no seam; the
+            # texture side stays exact, so the mapping never runs to infinity.
+            wide = _grown(screen, 0.5)
+            if _convex(wide) and QTransform.quadToQuad(QPolygonF(corners), QPolygonF(wide), transform):
+                painter_for_cells.setTransform(transform * base)
+                painter_for_cells.drawImage(source, texture, source)
+                continue
+            # A cell seen edge-on folds over itself on screen: two triangles,
+            # each mapped exactly and cut to its own shape.
+            for a, b, c in ((0, 1, 2), (0, 2, 3)):
+                affine = _affine((corners[a], corners[b], corners[c]), (screen[a], screen[b], screen[c]))
+                if affine is None:
+                    continue
+                painter_for_cells.setTransform(affine * base)
+                path = QPainterPath()
+                path.addPolygon(QPolygonF([corners[a], corners[b], corners[c]]))
+                path.closeSubpath()
+                painter_for_cells.save()
+                painter_for_cells.setClipPath(path)
+                painter_for_cells.drawImage(source, texture, source)
+                painter_for_cells.restore()
+        layer.end()
+        painter.drawImage(QPointF(target.left(), target.top()), layer_image)
+        return {id(item) for item in covered}
+
+    def _crater_hidden_cells(self, shapes, low_x, low_z, step, ground_y, camera):
+        """Cells below the ground that the intact ground in front of them hides.
+
+        The preview ground plane is see-through, the game's ground is not: a dug
+        point stays visible only when the line of sight enters the ground
+        through the crater's opening.
+        """
+
+        cells = self.CRATER_CELLS
+        centres = low_x + (_np.arange(cells) + 0.5) * step, low_z + (_np.arange(cells) + 0.5) * step
+        xs, zs = _np.meshgrid(*centres)
+        ys = ground_y + crater_preview.sample(shapes, xs, zs)[0]
+        # The eye in world space: camera space (0, 0, 4) taken back through _camera_vertex.
+        if not all(key in camera for key in ("center", "scale", "yaw", "pitch")) or not camera["scale"]:
+            return _np.zeros(xs.shape, bool)
+        yaw, pitch = math.radians(camera["yaw"]), math.radians(camera["pitch"])
+        cam_y, cam_z = 0.0, 4.0
+        y = cam_y * math.cos(pitch) + cam_z * math.sin(pitch)
+        xz_z = -cam_y * math.sin(pitch) + cam_z * math.cos(pitch)
+        x = -xz_z * math.sin(yaw)
+        z = xz_z * math.cos(yaw)
+        centre, scale = camera["center"], camera["scale"]
+        eye = (x / scale + centre[0], -y / scale + centre[1], z / scale + centre[2])
+        below = ys > ground_y + 0.5
+        if eye[1] >= ground_y or not _np.any(below):
+            return _np.zeros(xs.shape, bool)
+        t = (ground_y - eye[1]) / _np.maximum(ys - eye[1], 1e-6)
+        enter_x = eye[0] + t * (xs - eye[0])
+        enter_z = eye[2] + t * (zs - eye[2])
+        opening = crater_preview.sample(shapes, enter_x, enter_z)[0] > 0.5
+        return below & ~opening
+
+    def _crater_patch(self, shapes, low_x, low_z, side, ground_y, decals):
+        """(texture seen from above, heights of the grid points) of the dug square."""
+
+        size = self.CRATER_TEXTURE
+        cells = self.CRATER_CELLS
+        centres = (_np.arange(size) + 0.5) / size * side
+        xs, zs = _np.meshgrid(low_x + centres, low_z + centres)   # rows = z
+        drop, slope_x, slope_z, deepest = crater_preview.sample(shapes, xs, zs)
+        light = crater_preview.shade(drop, slope_x, slope_z, deepest)
+        # The dug square fades into the preview plane past the craters' reach.
+        fade = _np.zeros_like(drop)
+        for shape in shapes:
+            distance = _np.hypot(xs - shape.x, zs - shape.z) / crater_preview.reach(shape)
+            fade = _np.maximum(fade, _np.clip((1.0 - distance) / 0.15, 0.0, 1.0))
+        rgba = _np.empty((size, size, 4), _np.uint8)
+        for channel, value in enumerate(self.CRATER_GROUND):
+            rgba[..., channel] = _np.clip(value * light, 0, 255).astype(_np.uint8)
+        rgba[..., 3] = (fade * 255.0).astype(_np.uint8)
+        texture = QImage(rgba.tobytes(), size, size, size * 4,
+                         QImage.Format.Format_RGBA8888).copy()
+        if decals:
+            layer = QPainter(texture)
+            layer.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform, True)
+            # Decals cover the ground but never widen the dug square's outline.
+            layer.setCompositionMode(QPainter.CompositionMode.CompositionMode_SourceAtop)
+            for item in decals:
+                image, opacity = self._decal_look(item)
+                if image is None:
+                    continue
+                corners = [QPointF((x - low_x) / side * size, (z - low_z) / side * size)
+                           for x, _y, z in self._decal_corners(item)]
+                transform = QTransform()
+                if not QTransform.quadToQuad(
+                        QPolygonF([QPointF(0, 0), QPointF(image.width(), 0),
+                                   QPointF(image.width(), image.height()), QPointF(0, image.height())]),
+                        QPolygonF(corners), transform):
+                    continue
+                layer.save()
+                layer.setOpacity(max(0.0, min(1.0, opacity)))
+                layer.setTransform(transform)
+                layer.drawImage(0, 0, image)
+                layer.restore()
+            layer.end()
+        points = _np.arange(cells + 1) / cells * side
+        gx, gz = _np.meshgrid(low_x + points, low_z + points)
+        heights = ground_y + crater_preview.sample(shapes, gx, gz)[0]
+        return texture, heights
+
     def _draw_fx_decals(self, painter, target, camera, decals) -> None:
         for item in decals:
-            half_x = item.decal_size[0] * 0.5
-            half_z = item.decal_size[1] * 0.5
-            corners_local = ((-half_x, 0.0, -half_z), (half_x, 0.0, -half_z),
-                             (half_x, 0.0, half_z), (-half_x, 0.0, half_z))
-            corners = [self._fx_project(_transform(item, corner), target, camera)
-                       for corner in corners_local]
+            corners = [self._fx_project(corner, target, camera)
+                       for corner in self._decal_corners(item)]
             if any(point is None for point in corners):
                 continue
             polygon = QPolygonF(corners)
             tint = item.tint or (255, 255, 255, 255)
-            opacity = item.alpha * tint[3] / 255.0
-            image = self._decal_image(item.texture, item.decal_edge_fade)
+            image, opacity = self._decal_look(item)
             painter.save()
             painter.setOpacity(max(0.0, min(1.0, opacity)))
             if image is not None:
-                if tuple(tint[:3]) != (255, 255, 255):
-                    key = (id(image), tuple(tint[:3]))
-                    tinted = self._fx_tinted_stage_cache.get(key)
-                    if tinted is None:
-                        tinted = colorize_image(image, (*tint[:3], 255))
-                        self._fx_tinted_stage_cache[key] = tinted
-                    image = tinted
                 source = QPolygonF([
                     QPointF(0, 0), QPointF(image.width(), 0),
                     QPointF(image.width(), image.height()),

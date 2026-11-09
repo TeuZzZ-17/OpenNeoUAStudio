@@ -28,7 +28,7 @@ import random
 import re
 from dataclasses import dataclass, field, replace
 
-from entity_designer import decal_smoke
+from entity_designer import crater_preview, decal_smoke
 
 CONTEXT_VEHICLE = "vehicle"
 CONTEXT_WEAPON = "weapon"
@@ -82,6 +82,8 @@ SHAKE_FRAME_MS = 16.0
 SHAKE_SCAN_FRAMES = 12
 # Source id of the profile decal in timeline rows (not an item of the document).
 PROFILE_DECAL_SOURCE = -5
+# Source id of the weapon crater in timeline rows.
+CRATER_SOURCE = -8
 LEGACY_NESTING_LIMIT = 3
 
 _SOUND_PREFIXES = ("snd_", "pal_", "shk_")  # shk_ is read by the game, never previewed
@@ -2069,6 +2071,7 @@ def unit_look(values: dict[str, str], *, weapon: bool) -> dict:
             script_int(values.get("ground_decal_id"), -1)),
         # The unit's own size, written in its script; a bad value is ignored.
         "decal_size": _manual_decal_size(values.get("ground_decal_size", "0_0")),
+        "crater": crater_preview.config_from_values(values) if weapon else None,
     }
 
 
@@ -2508,6 +2511,8 @@ class UnitPhases:
     ground_decal_id: int = -1
     # Manual world-space diameter range.
     decal_size: tuple[float, float] = (0.0, 0.0)
+    # Weapons: terrain crater (crater_radius / crater_depth / crater_rim), None = none.
+    crater: "crater_preview.CraterConfig | None" = None
 
     @property
     def plasma_ms(self) -> float:
@@ -2690,6 +2695,7 @@ class PreviewSimulation:
                  weapons: dict[int, WeaponDef] | None = None,
                  debuffs: dict[int, DebuffSpec] | None = None,
                  decals: dict[int, DecalProfile] | None = None,
+                 craters: bool = True,
                  settings: EffectSettings | None = None,
                  shot: tuple[tuple, tuple] | None = None,
                  volley: tuple = ()) -> None:
@@ -2725,6 +2731,7 @@ class PreviewSimulation:
         self.weapons = weapons or {}
         self.debuffs = debuffs or {}
         self.decals = decals or {}
+        self.craters = craters
         self.settings = settings or EffectSettings()
         self._root = _Def(self.unit, document, self._specs, enabled)
         self._cluster_projectiles = 0
@@ -2792,6 +2799,28 @@ class PreviewSimulation:
                 self._build_legacy(source, dest, origin, rng, start, 0,
                                    prefix=prefix)
         self._build_profile_decal(trigger, start, origin, prefix, definition)
+        if not decals_only:
+            self._build_crater(trigger, start, origin, prefix, definition)
+
+    def _build_crater(self, trigger: str, start: float, origin, prefix: str,
+                      definition: "_Def") -> None:
+        """The crater a weapon digs where it hits the ground (SpawnTerrainCrater).
+
+        The unit-hit preview also calls this on the ground beneath the target.
+        Preview ground is always flat, so it is a crater and never a dent.
+        """
+
+        unit = definition.unit
+        if (not self.craters or unit.crater is None or not unit.weapon
+                or trigger != "impact_world"):
+            return
+        rng = self._rng(CRATER_SOURCE, trigger + definition.salt + repr(tuple(origin)))
+        shape = crater_preview.roll(unit.crater, rng, origin[0], self.ground_y, origin[2])
+        if shape is None:
+            return
+        self._events.append((CRATER_SOURCE, "crater", start, math.inf, shape))
+        self._tracks.append(PreviewTrack(
+            CRATER_SOURCE, f"{prefix}Crater", start, start + 4000.0, 0.0, 0.0))
 
     def _build_profile_decal(self, trigger: str, start: float, origin, prefix: str,
                              definition: "_Def") -> None:
@@ -3267,6 +3296,12 @@ class PreviewSimulation:
                         "Hits a unit: the ground decal is shown for preview "
                         "only. The engine spawns it when the weapon hits the "
                         "terrain.")
+                before = len(self._events)
+                self._build_crater("impact_world", end, target,
+                                   "Preview · ", definition)
+                if len(self._events) > before:
+                    self.notes.append(
+                        "Hits a unit: the ground crater is shown for preview only.")
             final, label = unit.dead, "dead"
         # The projectile's visual motion stays frozen on its last pose.
         self._unit_event(final, end, end + IMPACT_PREVIEW_MS,
@@ -3855,6 +3890,11 @@ class PreviewSimulation:
                     1.0, None, f"cluster · {ref.label}", _external_paths(ref)))
             elif kind == "tracer":
                 items.extend(self._tracer_items(payload, time_ms))
+            elif kind == "crater":
+                shape = payload
+                items.append(PreviewItem(
+                    source, "crater", 0, (shape.x, shape.y, shape.z), IDENTITY,
+                    (shape.radius, shape.depth, shape.rim), 1.0, None, "crater"))
             elif kind == MODE_DECAL:
                 spec, position, angle, width, depth, edge = payload
                 alpha = temporal_envelope(
@@ -3930,6 +3970,8 @@ class PreviewSimulation:
             for item in self.items_at(time_ms):
                 if item.kind == MODE_DECAL:
                     reach = 0.5 * max(item.decal_size)
+                elif item.kind == "crater":
+                    reach = item.scale[0] * crater_preview.REACH
                 elif item.kind == "tracer":
                     reach = 0.5 * item.scale[2]
                 elif item.kind == "decal_smoke":

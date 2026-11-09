@@ -71,6 +71,31 @@ def test_entity_context_menu_only_copies_and_never_opens_on_right_click(app):
     browser.close()
 
 
+def test_entity_list_displays_and_searches_weapon_relationships(app):
+    from studio.ui.browsers import GameObjectBrowser, GAME_OBJECT_ROLE, _entity_weapon_links
+    from studio.assets.catalog import GameObject
+    source = Path('test.cfg')
+    tank = GameObject('vehicle', 1, source, {'name': 'Tank', 'weapon': '7',
+                      'weapon_2': '8', 'weapon_3': '7', 'mgun': '9'})
+    plane = GameObject('vehicle', 2, source, {'name': 'Plane', 'weapon': '7',
+                       'weapon_4': 'invalid'})
+    weapons = [GameObject('weapon', number, source, {'name': name})
+               for number, name in [(7, 'Rocket'), (8, 'Bomb'), (9, 'Gun')]]
+    browser = GameObjectBrowser()
+    browser.objects = [tank, plane, *weapons]
+    browser._related_names = _entity_weapon_links(browser.objects)
+    browser.fill()
+    rows = {browser.tree.topLevelItem(i).data(0, GAME_OBJECT_ROLE).name:
+            browser.tree.topLevelItem(i) for i in range(browser.tree.topLevelItemCount())}
+    assert rows['Tank'].text(0) == 'Tank (Rocket, Bomb, Gun)'
+    assert rows['Rocket'].text(0) == 'Rocket (Plane, Tank)'
+    browser.search.setText('Bomb')
+    assert not rows['Tank'].isHidden()
+    assert not rows['Bomb'].isHidden()
+    assert rows['Plane'].isHidden()
+    browser.close()
+
+
 def test_game_resources_sort_numerically_and_preserve_selection_and_filter(app):
     from studio.ui.browsers import GameObjectBrowser, GAME_OBJECT_ROLE
     from studio.assets.catalog import GameObject

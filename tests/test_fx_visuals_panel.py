@@ -97,7 +97,9 @@ def test_one_model_row_leads_the_effects_list(app, tmp_path):
     panel, _path = _panel(app, tmp_path)
     rows = _rows(panel)
     assert list(rows)[0] == visuals.MODEL_INDEX and 0 in rows
-    assert [i for i in rows if i < 0] == [visuals.MODEL_INDEX, visuals.DECAL_INDEX]
+    # Weapons also get the Crater row.
+    assert [i for i in rows if i < 0] == [visuals.MODEL_INDEX, visuals.DECAL_INDEX,
+                                          visuals.CRATER_INDEX]
     assert rows[visuals.MODEL_INDEX].text().splitlines() == [
         "Model", "Normal: VP 20", "Dead: BASE Data/Models/Base/D.BASE"]
     assert not hasattr(panel, "show_unit")
