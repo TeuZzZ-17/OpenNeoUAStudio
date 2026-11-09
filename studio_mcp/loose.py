@@ -352,10 +352,13 @@ class LooseModel:
         return [b for b in self.blocks
                 if (b.class_id or "").lower() not in ("amesh.class", "area.class") and b.ade_point_id >= 0]
 
-    def _retarget_emitters(self, remap: dict[int, int], old_positions: list) -> None:
+    def _retarget_emitters(self, remap: dict[int, int], old_positions: list,
+                           *, skip_particles: bool = False) -> None:
         """After points were renumbered: emitters keep their place. A block follows its point to the new index;
         if the point disappeared (no polygon uses it) it is re-created at the same position."""
         for block in self._emitter_blocks():
+            if skip_particles and (block.class_id or "").lower() == "particle.class":
+                continue
             old = block.ade_point_id
             if old in remap:
                 new = remap[old]
@@ -381,7 +384,7 @@ class LooseModel:
         except (GeometryClipboardError, MappingEditError) as exc:
             raise core.McpToolError(f"Cannot delete: {exc}") from exc
         point_remap = dict(result.old_to_new_point)
-        self._retarget_emitters(point_remap, old_positions)
+        self._retarget_emitters(point_remap, old_positions, skip_particles=True)
         return {"deleted": len(ids), "polygon_remap": dict(result.old_to_new_polygon), "point_remap": point_remap}
 
     def compact_points(self) -> dict[int, int]:

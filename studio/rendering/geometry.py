@@ -20,6 +20,7 @@ from studio.assets.mapping import (
     paste_material_block,
     plan_polygon_renumber,
     PolygonReferenceError,
+    rewrite_ade_point_template,
     StructuralBlockState,
     transfer_material_resources,
 )
@@ -790,6 +791,12 @@ def plan_delete_geometry(
     for old_id, polygon in survivors:
         for point_index in polygon:
             used_points.add(point_index)
+    for block in blocks:
+        if (block.class_id or "").lower() == "particle.class":
+            if not 0 <= block.ade_point_id < len(model.points):
+                raise GeometryClipboardError(
+                    "a particle emitter has an invalid source point")
+            used_points.add(block.ade_point_id)
 
     kept_point_indices = [
         index for index in range(len(model.points)) if index in used_points
@@ -839,7 +846,13 @@ def plan_delete_geometry(
         graph = build_polygon_reference_graph(fam_obj)
         reference_plan = plan_polygon_renumber(
             graph, old_to_new_polygon, selected_set)
-    except PolygonReferenceError as exc:
+        for block in reference_plan.blocks:
+            if (block.class_id or "").lower() == "particle.class":
+                point_id = old_to_new_point[block.ade_point_id]
+                if point_id != block.ade_point_id:
+                    block.source_objt_bytes = rewrite_ade_point_template(block, point_id)
+                    block.ade_point_id = point_id
+    except (PolygonReferenceError, MappingEditError) as exc:
         raise GeometryClipboardError(str(exc)) from exc
 
     return GeometryDeletePlan(

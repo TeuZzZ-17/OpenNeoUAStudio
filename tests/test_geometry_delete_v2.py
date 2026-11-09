@@ -2,8 +2,9 @@ import copy
 import unittest
 from types import SimpleNamespace
 
-from studio.assets.mapping import MappingIndex
-from studio.formats.base_format import AmeshBlock, AttsEntry
+from studio.assets.mapping import MappingIndex, _wrap_ades_objt, rewrite_ade_point_template
+from studio.formats.base_format import AmeshBlock, AttsEntry, parse_base_bytes
+from tests.test_particle_dependencies import _particle_base_bytes
 from studio.rendering.geometry import (
     GeometryClipboardError,
     apply_delete_geometry,
@@ -50,6 +51,69 @@ def _fixture():
 
 
 class GeometryDeleteV2Tests(unittest.TestCase):
+    def test_delete_preserves_and_renumbers_emitter_anchors(self):
+        obj, model, _block = _fixture()
+        template = parse_base_bytes(_particle_base_bytes(), "particle.base").root.ades[0]
+        for point in (3, 4):
+            emitter = copy.deepcopy(template)
+            emitter.source_objt_bytes = rewrite_ade_point_template(emitter, point)
+            emitter.ade_point_id = point
+            obj.base_object.ades.append(emitter)
+
+        plan = plan_delete_geometry(obj, {0}, MappingIndex(obj))
+        apply_delete_geometry(model, obj.base_object.ades, plan)
+
+        emitters = obj.base_object.ades[1:]
+        self.assertEqual([block.ade_point_id for block in emitters], [2, 3])
+        self.assertEqual([model.points[block.ade_point_id] for block in emitters],
+                         [(0.0, 1.0, 0.0), (99.0, 99.0, 99.0)])
+        for block in emitters:
+            saved = parse_base_bytes(_wrap_ades_objt(block.source_objt_bytes), "saved.base")
+            self.assertEqual(saved.root.ades[0].ade_point_id, block.ade_point_id)
+
+    def test_mcp_delete_keeps_emitter_on_original_point(self):
+        from studio_mcp.loose import LooseModel
+
+        obj, model, _block = _fixture()
+        obj.owner_path = "root"
+        obj.skeleton_ref = None
+        emitter = parse_base_bytes(_particle_base_bytes(), "particle.base").root.ades[0]
+        emitter.source_objt_bytes = rewrite_ade_point_template(emitter, 3)
+        emitter.ade_point_id = 3
+        obj.base_object.ades.append(emitter)
+        family = SimpleNamespace(base_path="unused.base", animations={})
+        editor = LooseModel.from_family(family, obj, writable=False)
+
+        editor.delete_polygons([0])
+
+        emitter = obj.base_object.ades[-1]
+        self.assertEqual(emitter.ade_point_id, 2)
+        self.assertEqual(model.points[emitter.ade_point_id], (0.0, 1.0, 0.0))
+
+    def test_delete_keeps_anchor_used_only_by_deleted_geometry(self):
+        obj, model, _block = _fixture()
+        emitter = parse_base_bytes(_particle_base_bytes(), "particle.base").root.ades[0]
+        emitter.source_objt_bytes = rewrite_ade_point_template(emitter, 1)
+        emitter.ade_point_id = 1
+        obj.base_object.ades.append(emitter)
+
+        plan = plan_delete_geometry(obj, {0}, MappingIndex(obj))
+        apply_delete_geometry(model, obj.base_object.ades, plan)
+
+        self.assertEqual(model.points[obj.base_object.ades[-1].ade_point_id],
+                         (1.0, 0.0, 0.0))
+
+    def test_delete_refuses_existing_invalid_emitter_without_changes(self):
+        obj, model, _block = _fixture()
+        emitter = parse_base_bytes(_particle_base_bytes(), "particle.base").root.ades[0]
+        emitter.ade_point_id = 99
+        obj.base_object.ades.append(emitter)
+        original = copy.deepcopy(model.points), copy.deepcopy(model.polygons)
+
+        with self.assertRaisesRegex(GeometryClipboardError, "invalid source point"):
+            plan_delete_geometry(obj, {0}, MappingIndex(obj))
+        self.assertEqual((model.points, model.polygons), original)
+
     def test_delete_compacts_points_polygons_atts_and_matching_olpl(self):
         obj, model, block = _fixture()
         surviving_uvs = copy.deepcopy(block.olpl[1])
