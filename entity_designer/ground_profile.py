@@ -21,13 +21,16 @@ class GroundProfile(QWidget):
         self.bounds = None
         self.overeof = 0.0
         self.authored = False
+        self.additive_only = False
         self._wheel_delta = 0
         self.setMinimumHeight(240)
         self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
         self.setToolTip(
-            "Schematic side view of the selected model's scaled bounds. "
-            "Contact is estimated against flat ground; animation and terrain "
-            "can change the result in-game. Scroll to adjust Overeof.")
+            "Schematic side view of the selected model's surfaces. Additive "
+            "effects and particles are excluded when possible. If only "
+            "additive surfaces exist, they are shown as an estimate. Contact "
+            "is estimated against flat ground; verify it in-game. Scroll to "
+            "adjust Overeof.")
 
     def wheelEvent(self, event) -> None:
         delta = event.angleDelta().y()
@@ -41,11 +44,13 @@ class GroundProfile(QWidget):
             self.wheelSteps.emit(steps)
         event.accept()
 
-    def set_profile(self, bounds, authored: bool, overeof: float) -> None:
+    def set_profile(self, bounds, authored: bool, overeof: float, *,
+                    additive_only: bool = False) -> None:
         if bounds is not None and not all(math.isfinite(v) for v in bounds):
             bounds = None
         self.bounds = bounds
         self.authored = bool(authored)
+        self.additive_only = bool(additive_only and bounds is not None)
         self.overeof = float(overeof) if authored and math.isfinite(overeof) else 0.0
         self.update()
 
@@ -62,14 +67,17 @@ class GroundProfile(QWidget):
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
         painter.fillRect(self.rect(), QColor(25, 28, 32))
         painter.setPen(QColor(225, 228, 231))
+        title = ("Flat ground profile (additive only: estimate)"
+                 if self.additive_only else
+                 "Flat ground profile (additive FX excluded)")
         painter.drawText(QRectF(10, 6, self.width() - 20, 24),
                          Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter,
-                         "Flat ground profile (model bounds)")
+                         title)
         if self.bounds is None:
             painter.setPen(QColor(170, 175, 180))
             painter.drawText(QRectF(10, 35, self.width() - 20, 160),
                              Qt.AlignmentFlag.AlignCenter | Qt.TextFlag.TextWordWrap,
-                             "Load a model to see its ground profile.")
+                             "Load a model with surfaces to see its ground profile.")
             return
 
         top = self.bounds[1] - self.overeof

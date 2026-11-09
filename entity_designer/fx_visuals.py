@@ -1,9 +1,9 @@
-"""Model states and ground decal (id and size) of a vehicle or weapon definition as script keys.
+"""Model states, ground decal and crater of a vehicle or weapon definition as script keys.
 
 The Visuals & FX list shows and edits ``vp_<state>``, ``base_<state>`` and
-``3ds_<state>`` (Model row) and ``ground_decal_id`` / ``ground_decal_size``
-(Ground decal row) of the
-previewed definition. Pure Python:
+``3ds_<state>`` (Model row), ``ground_decal_id`` / ``ground_decal_size``
+(Ground decal row) and, for weapons, ``crater_radius`` / ``crater_depth`` /
+``crater_rim`` (Crater row) of the previewed definition. Pure Python:
 reading and patching text, and one verified write that keeps encoding and every
 untouched byte.
 """
@@ -19,6 +19,7 @@ from entity_designer.script_model import (
     read_script_file, write_script_file,
 )
 from studio.exchange.portable import commit_verified_files
+from entity_designer import crater_preview
 
 # (state, label) in the order the list shows them.
 STATES = (
@@ -45,10 +46,13 @@ def all_keys() -> set[str]:
     return {key for state, _label in STATES for key in state_keys(state)}
 
 
+CRATER_KEYS = crater_preview.KEYS
+
+
 def managed_keys() -> set[str]:
     """Every key the list rows read and write."""
 
-    return all_keys() | set(DECAL_KEYS)
+    return all_keys() | set(DECAL_KEYS) | set(CRATER_KEYS)
 
 
 def block_for_origin(text: str, origin):
@@ -114,6 +118,9 @@ def normalize_value(key: str, raw: str) -> str:
             raise ValueError(
                 f"{key} must be a number or min~max between 0 and {DECAL_SIZE_MAX:g}.")
         return value
+    if key in CRATER_KEYS:
+        crater_preview.parse_range(key, value)
+        return value
     if key.startswith("vp_"):
         try:
             number = int(value, 0)
@@ -177,6 +184,11 @@ def _insert_position(lines, block, end_line: int, key: str):
         profile = [row for row in rows if row[1] == "ground_decal_id"]
         if profile:
             return profile[-1][0] + 1, profile[-1][3]
+    if key in CRATER_KEYS:
+        # The crater keys stay together, after the decal they go with.
+        near = [row for row in rows if row[1] in CRATER_KEYS or row[1] in DECAL_KEYS]
+        if near:
+            return near[-1][0] + 1, near[-1][3]
     visual = [row for row in rows if row[1].split("_", 1)[0] in {"vp", "base", "3ds"}
               and row[1].split("_", 1)[-1] in {state for state, _l in STATES}]
     if visual:
@@ -224,10 +236,11 @@ def save_values(origins, updates: dict[str, str], snapshots=None) -> Path:
 
 # -- the "Model" row of the effects list ------------------------------------------------------
 
-# Virtual list indexes of the Model and Ground decal rows (-1 means "no effect").
+# Virtual list indexes of the Model, Ground decal and Crater rows (-1 means "no effect").
 MODEL_INDEX = -2
 DECAL_INDEX = -3
-STATE_INDEXES = (MODEL_INDEX, DECAL_INDEX)
+CRATER_INDEX = -4
+STATE_INDEXES = (MODEL_INDEX, DECAL_INDEX, CRATER_INDEX)
 
 
 def model_text(values: dict[str, str]) -> str:
@@ -301,13 +314,50 @@ def parse_decal_text(text: str) -> dict[str, str]:
     return updates
 
 
-_PARSERS = {MODEL_INDEX: parse_model_text, DECAL_INDEX: parse_decal_text}
+def crater_text(values: dict[str, str]) -> str:
+    return "\n".join(f"{key} = {values[key]}" for key in CRATER_KEYS if values.get(key))
+
+
+def crater_summary(values: dict[str, str]) -> str:
+    if not values.get(crater_preview.RADIUS_KEY) and not values.get(crater_preview.DEPTH_KEY):
+        return "Not set"
+    parts = [f"{label} {values[key]}" for key, label in
+             ((crater_preview.RADIUS_KEY, "Radius"), (crater_preview.DEPTH_KEY, "Depth"),
+              (crater_preview.RIM_KEY, "Rim %")) if values.get(key)]
+    if crater_preview.config_from_values(values) is None:
+        parts.append("(no crater: needs radius and depth)")
+    return " · ".join(parts)
+
+
+def parse_crater_text(text: str) -> dict[str, str]:
+    """Check an edited Crater text; returns its keys ("" = not set)."""
+
+    updates = {key: "" for key in CRATER_KEYS}
+    for number, line in enumerate(text.splitlines(), 1):
+        code = re.split(r";|//|#", line, maxsplit=1)[0].strip()
+        if not code:
+            continue
+        key, separator, value = code.partition("=")
+        key = key.strip().lower()
+        if not separator or key not in CRATER_KEYS:
+            raise ValueError(
+                f"Line {number}: only {', '.join(CRATER_KEYS)} can be written here.")
+        updates[key] = normalize_value(key, value)
+    return updates
+
+
+_PARSERS = {MODEL_INDEX: parse_model_text, DECAL_INDEX: parse_decal_text,
+            CRATER_INDEX: parse_crater_text}
 
 
 class StateSession:
-    """Draft and saving of the Model and Ground decal rows, like ``FxTextSession`` does for effects."""
+    """Draft and saving of the Model, Ground decal and Crater rows, like ``FxTextSession`` does for effects.
 
-    def __init__(self, origins) -> None:
+    The Crater row exists for weapons only (``weapon``).
+    """
+
+    def __init__(self, origins, weapon: bool = False) -> None:
+        self.weapon = weapon
         self.origins = [(Path(path), first, last) for path, first, last in origins]
         self.source_error = ""
         self.snapshots: dict[Path, bytes] = {}
@@ -321,7 +371,10 @@ class StateSession:
         self.drafts = dict(self.originals)
 
     def _texts(self) -> dict[int, str]:
-        return {MODEL_INDEX: model_text(self.values), DECAL_INDEX: decal_text(self.values)}
+        texts = {MODEL_INDEX: model_text(self.values), DECAL_INDEX: decal_text(self.values)}
+        if self.weapon:
+            texts[CRATER_INDEX] = crater_text(self.values)
+        return texts
 
     def indexes(self) -> list[int]:
         return list(self.originals)

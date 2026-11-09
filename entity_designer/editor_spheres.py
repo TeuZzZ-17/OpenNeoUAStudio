@@ -1039,13 +1039,15 @@ class _SpheresMixin:
         self._sync_all()
 
     def _suggest_overeof_from_bounds(self):
-        bounds = self._model_bounds()
+        bounds, additive_only = self.viewport.ground_contact_bounds(
+            self._current_owner)
         if bounds is None:
             QMessageBox.warning(
                 self, "No model", "Load and select a model first.")
             return
-        # OpenNeoUA places the actor origin at ground_y - overeof.  In the
-        # model convention used by UA the lowest point is the maximum local Y.
+        # OpenNeoUA places the actor origin at ground_y - overeof. In UA the
+        # lowest point is the maximum local Y; additive FX are excluded when
+        # non-additive model surfaces are available.
         suggested = float(bounds[4])
         if (self.project.overeof_enabled
                 and abs(self.project.overeof - suggested) < 1e-9):
@@ -1056,9 +1058,10 @@ class _SpheresMixin:
         self.project.overeof_enabled = True
         self._set_modified()
         self._sync_all()
+        note = ("Only additive surfaces are available; " if additive_only else "")
         self.statusBar().showMessage(
-            "Suggested Overeof uses the lowest scaled model point; verify "
-            "the final terrain contact in-game.", 7000)
+            note + "Suggested Overeof is an estimate; verify the final "
+            "terrain contact in-game.", 7000)
 
     def _reset_overeof(self):
         if (not self.project.overeof_enabled

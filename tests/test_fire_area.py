@@ -152,6 +152,23 @@ def test_handles_drag_values():
     assert handles["depth"].point == (0.0, 0.0, 1000.0)
 
 
+def test_opposite_fire_area_handles_resize_outwards():
+    for shape, size, first, second in (
+        (fa.CONE_FORWARD, (30, 20, 1000), "angle_x", "angle_y"),
+        (fa.CONE_BELOW, (30, 20, 1000), "angle_x", "angle_y"),
+        (fa.BOX_FORWARD, (100, 80, 1000), "width", "height"),
+        (fa.BOX_BELOW, (100, 1000, 80), "width", "height"),
+    ):
+        handles = {h.key: h for h in fa.volume_handles(shape, size, 0, x_span=(-30, 50))}
+        for key in (first, second):
+            positive = handles[key]
+            negative = handles[key + "_opposite"]
+            assert negative.axis == tuple(-v for v in positive.axis)
+            assert fa.dragged(shape, size, 0, negative.key, 10) == fa.dragged(
+                shape, size, 0, positive.key, 10)
+        assert handles[first + "_opposite"].point[0] < -30
+
+
 # -- window integration (no game data needed) -------------------------------------
 
 
