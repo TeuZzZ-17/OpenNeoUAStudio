@@ -23,7 +23,6 @@ from map_editor.core.game_installation import (
     VANILLA,
 )
 from studio.ui.shell import ResourcesPanel
-from studio.workbench.model_import import ModelImportDialog
 
 ORIGINALS = Path(__file__).resolve().parents[2] / "Urban Assault + Espansione Originale"
 
@@ -150,16 +149,6 @@ def test_a_saved_data_folder_is_still_understood(openneoua):
     remembered = {"data": str(openneoua / "Data"), "folders": {}}
     install = GameInstallation.from_json(remembered)
     assert install.root == openneoua
-
-
-def test_the_model_picker_starts_from_the_game_folder_even_with_a_model_open(openneoua, tmp_path):
-    app = QApplication.instance() or QApplication([])
-    elsewhere = tmp_path / "elsewhere" / "Tank.BASE"
-    elsewhere.parent.mkdir()
-    elsewhere.write_bytes(b"")
-    dialog = ModelImportDialog(initial_directory=openneoua, initial_base=elsewhere)
-    assert dialog._base_start == openneoua
-    dialog.close()
 
 
 @pytest.mark.parametrize("folder, edition, sets", [

@@ -2170,7 +2170,6 @@ class AssemblyWindow(
             self,
             initial_base=initial_base,
             initial_archive=self._setbas,
-            initial_directory=self._game_folder(),
             extra_roots=self._extra_roots,
         )
         if dialog.exec() != QDialog.DialogCode.Accepted:
