@@ -105,16 +105,12 @@ class ModelImportDialog(QDialog):
             *,
             initial_base: str | Path | None = None,
             initial_archive: SetBasArchive | None = None,
-            initial_directory: str | Path | None = None,
             extra_roots: list[str | Path] | None = None,
     ) -> None:
         super().__init__(parent)
         self.setWindowTitle("Import Model")
         self.resize(980, 640)
         self.setMinimumSize(760, 480)
-        self._directory = Path(initial_directory or Path.home())
-        # The BASE picker always starts here, even with a model already chosen.
-        self._base_start = self._directory
         self._base_path: Path | None = None
         self._base_error = ""
         self._archive = initial_archive
@@ -143,7 +139,6 @@ class ModelImportDialog(QDialog):
         self._base_path = base
         self.base_edit.setText(str(base))
         self.base_edit.setToolTip(str(base))
-        self._directory = base.parent
         self._choices.clear()
         self._search_roots.clear()
         return self._reprobe()
@@ -304,7 +299,7 @@ class ModelImportDialog(QDialog):
 
     def _browse_base(self) -> None:
         path, _ = QFileDialog.getOpenFileName(
-            self, "Select the model BASE", str(self._base_start),
+            self, "Select the model BASE", "",
             "Urban Assault BASE (*.base *.bas *.BASE *.BAS);;All files (*)")
         if not path:
             return
@@ -318,10 +313,8 @@ class ModelImportDialog(QDialog):
         self.set_base_path(path)
 
     def _browse_archive(self) -> None:
-        start = (self._archive.path.parent
-                 if self._archive is not None else self._directory)
         path, _ = QFileDialog.getOpenFileName(
-            self, "Select a SET.BAS resource archive", str(start),
+            self, "Select a SET.BAS resource archive", "",
             "SET.BAS archives (SET.BAS *.bas *.BAS);;All files (*)")
         if path:
             self._load_archive(Path(path))
@@ -336,7 +329,6 @@ class ModelImportDialog(QDialog):
                     self, "SET.BAS not loaded",
                     f"The archive was not loaded.\n\n{exc}")
                 return
-        self._directory = path.parent
         self.set_archive(archive)
 
     def _clear_archive(self) -> None:
@@ -553,10 +545,8 @@ class ModelImportDialog(QDialog):
             self._reprobe()
         elif action is choose_file:
             paths, _ = QFileDialog.getOpenFileNames(
-                self, "Choose model resources", str(self._directory),
-                _RESOURCE_FILTER)
+                self, "Choose model resources", "", _RESOURCE_FILTER)
             if paths:
-                self._directory = Path(paths[0]).parent
                 self._assign_paths([Path(path) for path in paths], probes)
                 self._reprobe()
 
@@ -616,8 +606,7 @@ class ModelImportDialog(QDialog):
         if self._base_path is None:
             return
         paths, _ = QFileDialog.getOpenFileNames(
-            self, "Add loose model resources", str(self._directory),
-            _RESOURCE_FILTER)
+            self, "Add loose model resources", "", _RESOURCE_FILTER)
         if not paths:
             return
         unmatched: list[str] = []
@@ -628,7 +617,6 @@ class ModelImportDialog(QDialog):
                 unmatched.append(path.name)
             else:
                 self._set_file_choice(probe, path)
-        self._directory = Path(paths[0]).parent
         self._reprobe()
         if unmatched:
             QMessageBox.information(
@@ -639,13 +627,12 @@ class ModelImportDialog(QDialog):
 
     def _add_search_folder(self) -> None:
         directory = QFileDialog.getExistingDirectory(
-            self, "Add a search folder", str(self._directory))
+            self, "Add a search folder")
         if not directory:
             return
         path = Path(directory)
         if path not in self._search_roots:
             self._search_roots.append(path)
-        self._directory = path
         self._reprobe()
 
     def _reset_choices(self) -> None:
