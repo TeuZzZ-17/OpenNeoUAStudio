@@ -33,7 +33,11 @@ from studio.assets.mapping import (
     build_polygon_reference_graph,
     diagnose_polygon_references,
     plan_polygon_renumber,
+    rewrite_ade_point_template,
+    save_model_base_copy,
 )
+from studio.rendering.geometry import build_topology_states
+from tests.test_particle_dependencies import _particle_base_bytes
 from studio.formats.sklt import (
     create_minimal_sklt_model,
     parse_sklt_file,
@@ -217,6 +221,51 @@ class AreaFxStructuralTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         cls.app = QApplication.instance() or QApplication([])
+
+    def test_particle_anchor_survives_delete_undo_redo_and_save(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            family, obj, original_base = _family(root)
+            original_point = (123.0, 45.0, 67.0)
+            obj.skeleton.points.append(original_point)
+            old_id = len(obj.skeleton.points) - 1
+            emitter = parse_base_bytes(_particle_base_bytes(), "particle.base").root.ades[0]
+            emitter.source_objt_bytes = rewrite_ade_point_template(emitter, old_id)
+            emitter.ade_point_id = old_id
+            obj.base_object.ades.append(emitter)
+            plan = plan_delete_geometry(obj, {0}, MappingIndex(obj))
+
+            window = AssemblyWindow()
+            try:
+                window._family = family
+                window._owner_to_obj = {"root": obj}
+                window._selected_owner = "root"
+                window._workbench_obj = obj
+                window.viewport.load_family(family, primary_owner="root")
+                window.viewport.set_selected_owner("root")
+                window._show_model_editor()
+                window._apply_delete_plan("root", obj, plan, label="Delete geometry")
+                self.assertEqual(obj.base_object.ades[-1].ade_point_id, old_id - 4)
+                self.assertEqual(obj.skeleton.points[old_id - 4], original_point)
+                window._undo_edit()
+                self.assertEqual(obj.base_object.ades[-1].ade_point_id, old_id)
+                self.assertEqual(obj.skeleton.points[old_id], original_point)
+                window._redo_edit()
+                self.assertEqual(obj.base_object.ades[-1].ade_point_id, old_id - 4)
+
+                out_base = root / "saved.BASE"
+                out_sklt = root / "saved.SKLT"
+                states = build_topology_states(original_base, obj, family.animations)
+                save_model_base_copy(original_base, [], [], out_base, structural_blocks=states)
+                save_sklt_with_poo2_pol2_structure(
+                    obj.skeleton, obj.skeleton.points, obj.skeleton.polygons, out_sklt)
+                saved = parse_base_bytes(out_base.read_bytes(), str(out_base))
+                saved_model = parse_sklt_file(out_sklt)
+                point_id = saved.root.ades[-1].ade_point_id
+                self.assertEqual(point_id, old_id - 4)
+                self.assertEqual(saved_model.points[point_id], original_point)
+            finally:
+                dispose_window(window)
 
     def test_reference_graph_area_amesh_particle_and_unknown(self):
         with tempfile.TemporaryDirectory() as temp:
