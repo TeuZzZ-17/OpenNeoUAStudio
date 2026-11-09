@@ -1022,6 +1022,22 @@ class _SpheresMixin:
     def _finish_overeof_edit(self):
         self._overeof_spin_active = False
 
+    def _ground_profile_wheel(self, steps: int):
+        if self._syncing or self.project.target_category != VEHICLE:
+            return
+        current = self.project.overeof if self.project.overeof_enabled else 0.0
+        value = max(self.overeof_spin.minimum(), min(
+            self.overeof_spin.maximum(),
+            current + steps * self.overeof_spin.singleStep()))
+        if self.project.overeof_enabled and abs(value - current) < 1e-9:
+            return
+        self._overeof_spin_active = False
+        self._push_undo()
+        self.project.overeof_enabled = True
+        self.project.overeof = value
+        self._set_modified()
+        self._sync_all()
+
     def _suggest_overeof_from_bounds(self):
         bounds = self._model_bounds()
         if bounds is None:
