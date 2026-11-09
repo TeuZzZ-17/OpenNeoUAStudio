@@ -10,7 +10,7 @@ from unittest.mock import MagicMock, patch
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 from PySide6.QtCore import QEvent, QPoint, QPointF, QRectF, Qt
-from PySide6.QtGui import QColor, QKeyEvent, QImage, QMouseEvent, QPainter
+from PySide6.QtGui import QColor, QKeyEvent, QImage, QMouseEvent, QPainter, QWheelEvent
 from PySide6.QtWidgets import (
     QAbstractItemView, QApplication, QDialog, QGridLayout, QHeaderView, QLabel,
     QMessageBox, QSizePolicy, QPushButton, QToolBar, QToolButton,
@@ -1881,6 +1881,60 @@ class CollisionEditorTests(unittest.TestCase):
         window.undo()
         self.assertFalse(window.project.overeof_enabled)
         self.assertEqual(window.project.overeof, 0.0)
+
+    def test_ground_profile_tracks_bounds_scale_overeof_and_reset(self):
+        window = self._window()
+        profile = window.ground_profile
+        self.assertIsNone(profile.bounds)
+        with patch("entity_designer.load_asset_family", return_value=_family()):
+            window.open_base("sample.base")
+        self.assertEqual(profile.bounds[4], 2.0)
+        self.assertFalse(profile.authored)
+        self.assertEqual(profile.overeof, 0.0)
+        window.model_scale_y_spin.setValue(1.5)
+        self.assertEqual(profile.bounds[4], 3.0)
+        window.overeof_check.setChecked(True)
+        for value, status in ((2.0, "Below ground: 1"),
+                              (3.0, "Touching ground"),
+                              (4.0, "Above ground: 1")):
+            window.overeof_spin.setValue(value)
+            self.assertEqual(profile.overeof - profile.bounds[4], value - 3.0)
+            self.assertEqual(profile.contact_status()[0], status)
+            image = QImage(400, 240, QImage.Format.Format_ARGB32)
+            profile.resize(image.size())
+            profile.render(image)
+        window._reset_overeof()
+        self.assertFalse(profile.authored)
+        self.assertEqual(profile.overeof, 0.0)
+
+    def test_ground_profile_wheel_updates_overeof_and_undo(self):
+        window = self._window()
+        profile = window.ground_profile
+
+        def scroll(delta):
+            event = QWheelEvent(
+                QPointF(20, 80), QPointF(20, 80), QPoint(), QPoint(0, delta),
+                Qt.MouseButton.NoButton, Qt.KeyboardModifier.NoModifier,
+                Qt.ScrollPhase.NoScrollPhase, False)
+            QApplication.sendEvent(profile, event)
+
+        scroll(120)
+        self.assertFalse(window.project.overeof_enabled)
+        with patch("entity_designer.load_asset_family", return_value=_family()):
+            window.open_base("sample.base")
+        self.assertEqual(window.suggest_overeof_button.text(), "Auto")
+        scroll(60)
+        self.assertFalse(window.project.overeof_enabled)
+        scroll(60)
+        self.assertTrue(window.project.overeof_enabled)
+        self.assertEqual(window.project.overeof, 1.0)
+        self.assertEqual(window.viewport.overeof_preview_offset, -1.0)
+        window.undo()
+        self.assertFalse(window.project.overeof_enabled)
+        self.assertEqual(window.project.overeof, 0.0)
+        scroll(-120)
+        self.assertEqual(window.project.overeof, -1.0)
+        self.assertEqual(window.overeof_spin.value(), -1.0)
 
     def test_78_overeof_numeric_edit_is_live_undoable_and_resettable(self):
         window = self._window()

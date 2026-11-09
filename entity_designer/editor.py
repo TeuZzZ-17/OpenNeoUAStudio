@@ -64,6 +64,7 @@ from entity_designer.dialogs import (
 )
 from entity_designer.fire_area import FireArea
 from entity_designer.fire_area_editing import FireAreaEditingMixin
+from entity_designer.ground_profile import GroundProfile
 from entity_designer.fx_panel import DestructionFxPanel
 from entity_designer.script_model import (
     _clamp_gun_angle,
@@ -908,7 +909,7 @@ class CollisionEditorWindow(
         self.overeof_spin.editingFinished.connect(
             self._finish_overeof_edit)
         ground_controls.addWidget(self.overeof_spin, 0, 1)
-        self.suggest_overeof_button = QPushButton("Suggest from Model")
+        self.suggest_overeof_button = QPushButton("Auto")
         self.suggest_overeof_button.setToolTip(
             "Use the lowest scaled model point as a starting Overeof "
             "estimate. The result remains manually editable.")
@@ -925,6 +926,9 @@ class CollisionEditorWindow(
         self.ground_alignment_notice = QLabel("")
         self.ground_alignment_notice.hide()
         self.ground_tab_layout.addWidget(self.ground_alignment_box)
+        self.ground_profile = GroundProfile(self.ground_tab)
+        self.ground_profile.wheelSteps.connect(self._ground_profile_wheel)
+        self.ground_tab_layout.addWidget(self.ground_profile)
         self.ground_tab_layout.addStretch(1)
 
         shape_box = QGroupBox("Convex Collision Shape")
@@ -2353,8 +2357,12 @@ class CollisionEditorWindow(
         self.overeof_spin.setValue(self.project.overeof)
         self.overeof_spin.setEnabled(
             vehicle_mode and self.project.overeof_enabled)
+        model_bounds = self._model_bounds()
+        self.ground_profile.set_profile(
+            model_bounds, vehicle_mode and self.project.overeof_enabled,
+            self.project.overeof)
         self.suggest_overeof_button.setEnabled(
-            vehicle_mode and self._model_bounds() is not None)
+            vehicle_mode and model_bounds is not None)
         self.reset_overeof_button.setEnabled(
             vehicle_mode and (self.project.overeof_enabled
                               or abs(self.project.overeof) > 1e-9))
