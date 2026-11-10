@@ -31,6 +31,7 @@ from studio.assets.mapping import (
 from studio.ui.widgets import (
     draw_uv_polygon as _draw_uv_polygon,
 )
+from studio.ui.uv_editor import UVLoop
 from studio.rendering.geometry import (
     FxElement,
 )
@@ -409,6 +410,7 @@ class _PolygonMappingMixin:
 
     def _on_polygon_picked(self, poly_id: int,
                            additive: bool = False) -> None:
+        self._clear_emitter_selection()
         was_selected = poly_id in self._selected_polys
         mirror_active = self._mirror_select_active()
         if mirror_active:
@@ -449,9 +451,6 @@ class _PolygonMappingMixin:
         self.viewport.set_highlight_polys(self._selected_polys)
         self._sync_poly_id_control()
         if self._mapping_index is not None:
-            self._fill_polygon_inspector(self._selected_poly)
-        self._update_material_buttons()
-        if self._mapping_index is not None:
             status = (self._mapping_index.status(self._selected_poly)
                       if self._selected_poly is not None else "none")
             self.statusBar().showMessage(
@@ -463,7 +462,7 @@ class _PolygonMappingMixin:
         block_index = (
             picked[2] if picked is not None
             and picked[0] == self._selected_owner
-            and picked[1] == poly_id else None)
+            and picked[1] == poly_id and picked[2] >= 0 else None)
         element = self._fx_element_for_polygon(poly_id, block_index)
         if poly_id not in self._selected_polys:
             element = self._fx_element_for_polygon(self._selected_poly)
@@ -471,6 +470,9 @@ class _PolygonMappingMixin:
         self.fx_combo.setCurrentIndex(
             self._fx_combo_index(element.identity) if element else 0)
         self.fx_combo.blockSignals(False)
+        if self._mapping_index is not None:
+            self._fill_polygon_inspector(self._selected_poly)
+        self._update_material_buttons()
         if element is not None and not additive and not mirror_active:
             if self._editing_allowed() \
                     and element.shared_state == "shared":
@@ -542,20 +544,73 @@ class _PolygonMappingMixin:
         self._uv_ctx = None
         self._uv_contexts = {}
         self._uv_phase_links = {}
+        obj = self._owner_to_obj.get(element.owner_path)
+        model = getattr(obj, "skeleton", None)
+        loops, keys = [], set()
+        image = None
+        records = sorted(self._fx_face_records(element),
+                         key=lambda record: record[0] != self._selected_poly)
+        for poly_id, block_index, atts_index, block, material in records:
+            if model is None or not 0 <= poly_id < len(model.polygons):
+                continue
+            vertex_count = len(model.polygons[poly_id])
+            entry = (self._animation_for_name(material)
+                     if block.texture and block.texture.kind == "bmpanim" else None)
+            if entry is not None:
+                self._show_uv_timeline(
+                    *entry, obj, poly_id,
+                    lambda: self.viewport.current_animation_index(
+                        element.owner_path, block_index))
+                return
+            key = (element.owner_path, block_index, atts_index)
+            if key in keys or not 0 <= atts_index < len(block.olpl):
+                continue
+            keys.add(key)
+            uvs = list(block.olpl[atts_index])
+            editable = bool(self._editing_allowed() and element.editable
+                            and len(uvs) == vertex_count
+                            and (block.class_id or "").casefold() in ("amesh.class", "area.class"))
+            if image is None:
+                image = self._texture_qimage(
+                    self._ensure_model_texture_loaded(material, show_error=False)
+                    or material)
+            loops.append(UVLoop(key, poly_id, uvs, editable))
+            if editable:
+                context = (obj, block, block_index, atts_index, poly_id)
+                self._uv_contexts[key] = context
+                if self._uv_ctx is None:
+                    self._uv_ctx = context
+        self.uv_editor.set_loops(
+            image, loops,
+            f"{len(loops)} UV phases shown together by default. Use the phase "
+            "selector to isolate one phase; drag to move, wheel to zoom, "
+            "middle drag to pan. Use the phase selector to inspect the mapped loops.")
+        self._uv_timeline_token = None
+        self._sync_uv_add_vertex_button()
+
+    def _fill_fx_inspector(self, element: FxElement, poly_id: int) -> None:
         labels = [material for _poly, _block_index, _atts_index, _block, material
                   in self._fx_face_records(element)]
         label = ", ".join(dict.fromkeys(value for value in labels if value))
         self.model_texture_label.setText(
             "Current FX Texture: " + (label or "-"))
+        self.poly_uv_label.setText(
+            f"{element.fx_name} · Polygon {poly_id} · {element.uv_source}")
         self.load_texture_button.setToolTip(
             "Replace the selected FX segment texture or VANM binding without "
             "changing its geometry, winding or animation data.")
+        self.load_texture_button.setEnabled(
+            self._editing_allowed() and bool(classify_texture_assignment(
+                self._mapping_index, self._resolved_geometry_polys() or {poly_id}
+            ).groups))
 
     def _fill_polygon_inspector(self, poly_id: int | None) -> None:
+        if poly_id is None and self._selected_emitter() is not None:
+            return
         self._update_uv_editor(poly_id)
         self.poly_uv_label.clear()
         self.poly_uv_label.setText("Select a polygon in the viewport.")
-        self.model_texture_label.setText("Current FX Texture: -")
+        self.model_texture_label.setText("Current Texture: -")
         self.load_texture_button.setEnabled(False)
         if poly_id is None or self._workbench_obj is None \
                 or self._workbench_obj.skeleton is None:
@@ -593,7 +648,7 @@ class _PolygonMappingMixin:
                    if ref.atts_index < len(block.olpl) else [])
             self._draw_uv_overlay(tex, uvs, poly_id)
         self.model_texture_label.setText(
-            "Current FX Texture: " + ", ".join(dict.fromkeys(texture_names)))
+            "Current Texture: " + ", ".join(dict.fromkeys(texture_names)))
 
     def _texture_qimage(self, tex_name: str) -> QImage | None:
         family = self._family

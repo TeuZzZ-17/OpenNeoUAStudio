@@ -7,6 +7,8 @@ have their own modules (see ``entity_designer/__init__.py``).
 
 from __future__ import annotations
 
+from studio.rendering.playback import DEFAULT_ANIMATION_SPEED
+
 import math
 from pathlib import Path
 
@@ -635,7 +637,7 @@ class CollisionEditorWindow(
         self.speed_spin = QDoubleSpinBox()
         self.speed_spin.setRange(0.05, 8.0)
         self.speed_spin.setSingleStep(0.25)
-        self.speed_spin.setValue(1.0)
+        self.speed_spin.setValue(DEFAULT_ANIMATION_SPEED)
         self.speed_spin.setEnabled(False)
         self.speed_spin.valueChanged.connect(
             self._on_animation_speed_changed)

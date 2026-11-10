@@ -7,6 +7,8 @@ that is not present in the VISPROTO table. Source assets remain read-only.
 
 from __future__ import annotations
 
+from studio.rendering.playback import DEFAULT_ANIMATION_SPEED
+
 import csv
 import json
 import os
@@ -217,7 +219,7 @@ class VPSnapshotBatchPanel(QWidget):
         self._format_id = "png"
         self._quality = 95
         self._fps = 25
-        self._speed = 1.0
+        self._speed = DEFAULT_ANIMATION_SPEED
         self._duration_seconds: float | None = None
         self._name_mode = "resource"
         self._background = None

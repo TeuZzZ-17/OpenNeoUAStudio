@@ -3,6 +3,8 @@ import math
 import time
 
 import numpy as np
+from studio.rendering.playback import DEFAULT_ANIMATION_SPEED
+
 from PySide6.QtCore import QPointF, Qt, QTimer
 from PySide6.QtGui import QBrush, QColor, QPolygonF
 
@@ -101,7 +103,7 @@ class CloudOverlay:
         dt_ms = 0.0 if self._last is None else (now - self._last) * 1000.0
         self._last = now
         sim, mesh = self._simulation, self._mesh
-        sim.step(dt_ms)
+        sim.step(dt_ms * DEFAULT_ANIMATION_SPEED)
 
         rotation = spin_matrices(profile.spin, sim.age)
         local = np.einsum('vj,nij->nvi', mesh.vertices * np.asarray(profile.scale), rotation)

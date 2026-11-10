@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import copy
+from functools import partial
 from pathlib import Path
 
 from PySide6.QtCore import Qt
@@ -17,23 +18,11 @@ from PySide6.QtWidgets import (
     QMessageBox,
 )
 
-from studio.assets.family import (
-    load_asset_family,
-)
 from studio.assets.mapping import (
     MappingEditError,
     MappingIndex,
 )
-from studio.assets.visproto import (
-    DUMMY_BASE_NAME,
-    reconstruct_embedded_vps,
-    VPEmbeddedError,
-)
-from studio.formats.setbas import read_setbas
-from studio.ui.widgets import (
-    choose_bas_archive,
-    crop_uv_region,
-)
+from studio.ui.widgets import crop_uv_region
 from studio.rendering.geometry import (
     build_fx_element_clipboard,
     detach_shared_fx_vertices,
@@ -48,9 +37,11 @@ from studio.rendering.geometry import (
 from studio.workbench.common import (
     AddFxElementDialog,
 )
+from studio.workbench.effect_catalog import scan_catalog_file
+from studio.workbench.window_emitters import _EmittersMixin
 
 
-class _FxElementsMixin:
+class _FxElementsMixin(_EmittersMixin):
     """Part of AssemblyWindow; `self` is always the AssemblyWindow."""
 
     # -- FX Elements ---------------------------------------------------------------
@@ -202,6 +193,7 @@ class _FxElementsMixin:
         # The FX list drives the FX commands, so realign labels and enabled
         # states every time the list is rebuilt.
         self._sync_fx_combo_label()
+        self._refresh_emitters()
         self._sync_edit_action_states()
 
     def _sync_fx_combo_label(self) -> None:
@@ -221,6 +213,7 @@ class _FxElementsMixin:
         return 0
 
     def _on_fx_selected(self, _index: int) -> None:
+        self._clear_emitter_selection()
         element = self._selected_fx_element()
         if not isinstance(element, FxElement):
             self._clear_model_selection()
@@ -580,85 +573,21 @@ class _FxElementsMixin:
             and self._workbench_obj is not None
             and self._workbench_obj.skeleton is not None)
 
-    def _load_fx_source(self, kind):
-        family = self._family
-        if family is None:
-            return []
-        if kind == "model":
-            filename, _ = QFileDialog.getOpenFileName(
-                self, "Choose a model containing FX", str(self._last_directory),
-                "BASE models (*.base *.BASE)")
-            if not filename:
-                return []
-            source_family = load_asset_family(
-                filename, self._extra_roots, setbas=self._setbas)
-            sources = self._fx_sources_for_objects(
-                source_family, source_family.all_objects())
-            if not sources:
-                raise GeometryClipboardError(
-                    "This model has no readable FX geometry/material pair.")
-            return Path(filename).name, sources
-        if kind == "bas":
-            archive = self._setbas
-            if archive is None:
-                path = choose_bas_archive(self, self._last_directory)
-                if not path:
-                    return []
-                archive = read_setbas(path)
-            embedded = (
-                self._vp_embedded
-                if archive is self._setbas and self._vp_embedded is not None
-                else reconstruct_embedded_vps(archive.path))
-            entries = [
-                entry for entry in embedded.entries
-                if entry.normalized_base != DUMMY_BASE_NAME
-            ]
-            if not entries:
-                raise VPEmbeddedError(
-                    "This BAS archive has no usable VP-defined models.")
-            labels = [
-                f"VP {entry.index}: {entry.base_name}"
-                + (f" | {entry.skeleton_name}" if entry.skeleton_name else "")
-                for entry in entries
-            ]
-            selected, accepted = QInputDialog.getItem(
-                self, "Choose BAS model", "VP-defined model:",
-                labels, 0, False)
-            if not accepted:
-                return []
-            entry = entries[labels.index(selected)]
-            source_family = load_asset_family(
-                Path(archive.path), self._extra_roots, {}, archive)
-            source_obj = self._resolve_family_base_object(
-                source_family, entry.base_name, entry.source_objt_offset)
-            if source_obj is None:
-                raise VPEmbeddedError(
-                    f"VP {entry.index} ({entry.base_name}) could not be "
-                    "resolved to its embedded BASE object.")
-            sources = self._fx_sources_for_objects(
-                source_family, list(source_obj.iter_tree()))
-            if not sources:
-                raise GeometryClipboardError(
-                    f"VP {entry.index} ({entry.base_name}) has no readable "
-                    "FX geometry/material pair.")
-            return f"VP {entry.index}: {entry.base_name}", sources
-        return []
-
-    @staticmethod
-    def _fx_sources_for_objects(source_family, objects):
-        """Return only FX elements proven copyable from the given objects."""
-
-        sources = []
-        for obj in objects:
-            for element in detect_fx_elements(
-                    obj, source_family.animations):
-                try:
-                    build_fx_element_clipboard(
-                        obj, element, source_family.animations)
-                except GeometryClipboardError:
-                    continue
-                sources.append((source_family, obj, element))
-        return sources
+    def _catalog_source(self, kind, *, external=False):
+        archive = self._setbas or getattr(self._family, "setbas_archive", None)
+        if external:
+            path, _ = QFileDialog.getOpenFileName(
+                self, "Choose an external effects source",
+                str(self._last_directory),
+                "BASE or BAS files (*.base *.BASE *.bas *.BAS)")
+            if not path:
+                return None
+        elif archive is not None:
+            path = archive.path
+        else:
+            return None
+        return str(Path(path)), partial(
+            scan_catalog_file, path, tuple(self._extra_roots), archive, kind)
 
     def _add_fx_element(
             self, *, preferred: FxElement | None = None) -> None:
@@ -668,7 +597,9 @@ class _FxElementsMixin:
         dialog = AddFxElementDialog(
             templates, self, preferred=preferred,
             preview_provider=self._fx_template_preview,
-            source_loader=self._load_fx_source)
+            playback_speed=lambda: self.viewport.animation_speed,
+            active_source=lambda: self._catalog_source("fx"),
+            external_source=lambda: self._catalog_source("fx", external=True))
         if dialog.exec() != QDialog.DialogCode.Accepted:
             self._notify("Add FX Element cancelled.", 3000)
             return

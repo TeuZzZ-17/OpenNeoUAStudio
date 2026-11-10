@@ -22,6 +22,7 @@ from studio.assets.mapping import (
     rewrite_block_texture_template,
 )
 from studio.formats.setbas import decode_texture
+from studio.formats.animation import AnmParseError, edit_anm_phase
 from studio.ui.uv_editor import (
     apply_uv_vertex_deletion,
     apply_uv_vertex_insertion,
@@ -126,12 +127,141 @@ class _UvTexturesMixin:
         key = self.uv_phase_combo.itemData(index)
         self.uv_editor.set_visible_loop_key(key)
         if key is None:
-            self.uv_editor.select_all()
+            if getattr(self, "_uv_timeline", None) is None:
+                self.uv_editor.select_all()
+            else:
+                self.uv_editor.select_none()
         else:
             self.uv_editor.select_handles({
                 (key, i)
                 for i in range(len(self.uv_editor.loop_uvs().get(key, ())))
             })
+        self._sync_uv_add_vertex_button()
+        if getattr(self, "_uv_timeline", None) is not None:
+            self.uv_editor.fit_selection()
+
+    def _show_uv_timeline(self, name, animation, obj, poly_id, frame_provider):
+        self._uv_ctx = None
+        self._uv_contexts = {}
+        self._uv_phase_links = {}
+        frame_keys, labels, bitmaps = [], {}, {}
+        loops, by_group, by_shape = [], {}, {}
+        for index, frame in enumerate(animation.frames):
+            group, bitmap = frame.texcoords_id, frame.frame_id
+            if not (0 <= group < len(animation.texcoord_groups)
+                    and 0 <= bitmap < len(animation.bitmap_names)):
+                frame_keys.append(None)
+                continue
+            uvs = list(animation.texcoord_groups[group])
+            group_key = (group, bitmap)
+            key = by_group.get(group_key)
+            if key is None:
+                key = ("@VANM", name, group)
+                if key in bitmaps:
+                    key += (bitmap,)
+                editable = (self._editing_allowed()
+                            and (poly_id is None
+                                 or len(uvs) == len(obj.skeleton.polygons[poly_id]))
+                            and self._animation_uv_writable(name, group))
+                if editable:
+                    self._uv_contexts[key] = (obj, None, name, group, poly_id)
+                shape = (bitmap, tuple(sorted(uvs)))
+                previous = by_shape.get(shape)
+                if previous and previous[1] != uvs and len(set(uvs)) == len(uvs):
+                    primary, primary_uvs = previous
+                    self._uv_phase_links.setdefault(primary, []).append(
+                        (key, tuple(primary_uvs.index(uv) for uv in uvs)))
+                    key = primary
+                else:
+                    by_shape[shape] = key, uvs
+                    loops.append(UVLoop(key, poly_id or 0, uvs, editable))
+                    bitmaps[key] = bitmap
+                by_group[group_key] = key
+            frame_keys.append(key)
+            labels.setdefault(key, []).append(str(index + 1))
+        token = (id(obj), poly_id, name, self.emitter_stage_combo.currentData()
+                 if self._selected_emitter() is not None else None)
+        focus = token != getattr(self, "_uv_timeline_token", None)
+        self._uv_timeline_token = token
+        self._uv_timeline = (name, frame_provider, frame_keys, labels, bitmaps)
+        image = self.uv_editor._image if not focus else None
+        if focus:
+            self._uv_timeline_bitmap = None
+            self.uv_phase_combo.setCurrentIndex(0)
+            self.uv_editor.set_visible_loop_key(None)
+        self.uv_editor.set_loops(image, loops, "UV phases shown together by default.")
+        self._refresh_uv_timeline(focus=focus)
+        self._sync_uv_add_vertex_button()
+
+    def _refresh_uv_timeline(self, *, focus=False):
+        timeline = getattr(self, "_uv_timeline", None)
+        if timeline is None:
+            return
+        name, frame_provider, keys, labels, bitmaps = timeline
+        entry = self._animation_for_name(name)
+        if entry is None or not keys:
+            return
+        animation = entry[1]
+        if len(animation.frames) != len(keys):
+            # Undo may replace the ANM before the inspector rebuilds its loops.
+            return
+        index = min(max(0, frame_provider()), len(keys) - 1)
+        selected = self.uv_phase_combo.currentData()
+        bitmap = bitmaps.get(selected, animation.frames[index].frame_id)
+        if bitmap != self._uv_timeline_bitmap:
+            self._uv_timeline_bitmap = bitmap
+            if 0 <= bitmap < len(animation.bitmap_names):
+                image = self._texture_qimage(animation.bitmap_names[bitmap])
+                self.uv_editor.set_preview_image(image)
+            focus = True
+        visible = {key for key, value in bitmaps.items() if value == bitmap}
+        self.uv_editor.set_timeline_overlay(visible, keys[index])
+        if focus:
+            self.uv_editor.fit_selection()
+        combo = self.uv_phase_combo
+        combo.setItemText(0, f"All UV phases · Frame {index + 1}/{len(keys)}")
+        for row in range(1, combo.count()):
+            numbers = labels.get(combo.itemData(row), [])
+            if numbers:
+                title = "Frames " + ", ".join(numbers)
+                combo.setItemText(row, title + (" · Playing" if combo.itemData(row) == keys[index] else ""))
+
+    def _change_uv_phase(self, *, duplicate):
+        timeline = getattr(self, "_uv_timeline", None)
+        if timeline is None or self._material_structure_reason():
+            return
+        name, provider, keys, _labels, _bitmaps = timeline
+        selected = self.uv_phase_combo.currentData()
+        if selected is None:
+            selected_loops = {key for key, _ in self.uv_editor.selected_handles()}
+            if len(selected_loops) == 1:
+                selected, = selected_loops
+        index = min(max(0, provider()), len(keys) - 1)
+        if selected in keys and selected is not None and selected != keys[index]:
+            index = keys.index(selected)
+        try:
+            animation = edit_anm_phase(self._animation_for_name(name)[1], index,
+                                       duplicate=duplicate)
+            self._apply_material_structure(
+                "Add UV phase" if duplicate else "Delete UV phase",
+                lambda: self._family.animations.__setitem__(name, animation))
+        except (MappingEditError, AnmParseError, ValueError, IndexError) as exc:
+            self._notify(str(exc), 7000)
+            return
+        if self._selected_emitter() is not None:
+            self._show_emitter_stage()
+        if duplicate:
+            updated = getattr(self, "_uv_timeline", None)
+            if updated is not None and updated[0] == name and index + 1 < len(updated[2]):
+                key = updated[2][index + 1]
+                combo = self.uv_phase_combo
+                # Qt's QVariant search does not compare Python tuple keys reliably.
+                for row in range(1, combo.count()):
+                    if combo.itemData(row) == key:
+                        combo.setCurrentIndex(row)
+                        self._select_uv_phase(row)
+                        break
+        self._sync_uv_add_vertex_button()
 
     def _sync_uv_add_vertex_button(self, *_args) -> None:
         combo = getattr(self, "uv_phase_combo", None)
@@ -141,8 +271,18 @@ class _UvTexturesMixin:
                 combo.clear()
                 combo.addItem("All UV phases", None)
                 for index, key in enumerate(keys):
-                    combo.addItem(f"Phase {index + 1} — {'Yellow' if index % 2 == 0 else 'Cyan'}", key)
+                    combo.addItem(f"Phase {index + 1}", key)
             combo.setEnabled(bool(keys))
+            if getattr(self, "_uv_timeline", None) is not None and keys:
+                self._refresh_uv_timeline()
+            elif combo.count():
+                combo.setItemText(0, "All UV phases")
+        if hasattr(self, "uv_add_phase_button"):
+            timeline = getattr(self, "_uv_timeline", None)
+            count = len(timeline[2]) if timeline else 0
+            enabled = count > 0 and not self._material_structure_reason()
+            self.uv_add_phase_button.setEnabled(enabled)
+            self.uv_delete_phase_button.setEnabled(enabled and count > 1)
         add_button = getattr(self, "uv_add_vertex_button", None)
         if add_button is not None:
             reason = self._uv_add_vertex_reason()
@@ -490,11 +630,13 @@ class _UvTexturesMixin:
             self._sync_uv_add_vertex_button()
 
     def _update_uv_editor(self, poly_id: int | None) -> None:
+        self._uv_timeline = None
         self._uv_phase_links = {}
         self._uv_ctx = None
         self._uv_contexts = {}
         if poly_id is None or self._workbench_obj is None \
                 or self._mapping_index is None:
+            self._uv_timeline_token = None
             self.uv_editor.set_loops(
                 None, [],
                 "Select a mapped polygon to edit its texture coordinates.")
@@ -505,6 +647,7 @@ class _UvTexturesMixin:
         if element is not None:
             self._update_fx_uv_editor(element)
             return
+        self._uv_timeline_token = None
 
         requested = self._resolved_geometry_polys()
         if not requested:
@@ -758,6 +901,12 @@ class _UvTexturesMixin:
                     group.faces[index] = (pid, updated, shade)
                     break
 
+    def _refresh_selected_uvs(self) -> None:
+        if self._selected_emitter() is not None:
+            self._show_emitter_stage()
+        else:
+            self._update_uv_editor(self._selected_poly)
+
     def _revert_selected_uv(self) -> None:
         reason = self._uv_revert_reason()
         if reason:
@@ -798,8 +947,7 @@ class _UvTexturesMixin:
             "after": targets,
             "label": "UV revert",
         })
-        poly_id = self._uv_ctx[4] if self._uv_ctx else None
-        self._update_uv_editor(poly_id)
+        self._refresh_selected_uvs()
         self.uv_editor.select_handles(selected)
         self._sync_geometry_save_controls()
         self._update_editor_status()
@@ -855,7 +1003,7 @@ class _UvTexturesMixin:
             "after": targets,
             "label": "reset all UVs",
         })
-        self._update_uv_editor(self._selected_poly)
+        self._refresh_selected_uvs()
         self._sync_geometry_save_controls()
         self._update_editor_status()
         self._sync_uv_add_vertex_button()
@@ -1113,7 +1261,7 @@ class _UvTexturesMixin:
             return cache[name]
         dialog = TexturePickerDialog(
             names, current, lambda name: frames(name)[0][0] if frames(name) else None,
-            self, frame_loader=frames)
+            self, frame_loader=frames, playback_speed=self.viewport.animation_speed)
         if dialog.exec() != QDialog.DialogCode.Accepted:
             self._notify("Texture selection cancelled.", 3000)
             return None

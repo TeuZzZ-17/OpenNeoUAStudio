@@ -3,6 +3,8 @@
 
 from __future__ import annotations
 
+from studio.rendering.playback import DEFAULT_ANIMATION_SPEED
+
 
 from PySide6.QtCore import QPoint, QPointF, QRect, Qt, QTimer, Signal
 from PySide6.QtGui import (
@@ -81,6 +83,7 @@ class AssetViewport(
     polygonDeselected = Signal(int)
     selectionCleared = Signal()
     objectPicked = Signal(str)      # owner_path of the clicked object
+    emitterPicked = Signal(str, int)
     editModeChanged = Signal(bool)  # geometry Edit Mode entered / left
     editSelectionChanged = Signal(int)
     editSelectionDetailsChanged = Signal(object, str)
@@ -113,6 +116,7 @@ class AssetViewport(
 
         # Polygon Mapping Workbench state
         self._selected_poly: int | None = None
+        self._selected_emitter: tuple[str, int] | None = None
         self._mapping_diagnostics = False
         self._highlight_polys: set[int] = set()
         self._duplicate_polys: set[int] = set()
@@ -224,7 +228,7 @@ class AssetViewport(
         self._anim_timer.setInterval(16)
         self._anim_timer.timeout.connect(self._advance_animation)
         self._anim_playing = False
-        self._anim_speed = 1.0
+        self._anim_speed = DEFAULT_ANIMATION_SPEED
         self._anim_clock_ms = 0.0
         self._particle_emitters: list[ParticleEmitter] = []
         self._particle_bounds_points = []
@@ -270,6 +274,7 @@ class AssetViewport(
         self._block_material_ids = {}
         self._diagnostics = []
         self._selected_poly = None
+        self._selected_emitter = None
         self._highlight_polys = set()
         self._duplicate_polys = set()
         self._pick_shapes = []
@@ -287,6 +292,10 @@ class AssetViewport(
 
     def set_selected_polygon(self, poly_id: int | None) -> None:
         self._selected_poly = poly_id
+        self.update()
+
+    def set_selected_emitter(self, selection: tuple[str, int] | None) -> None:
+        self._selected_emitter = selection
         self.update()
 
     def set_highlight_polys(self, poly_ids: set[int]) -> None:

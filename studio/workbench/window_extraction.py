@@ -1183,7 +1183,7 @@ class _ExtractionMixin:
         self._update_snapshot_frame_text(text)
         element = self._fx_element_for_polygon(self._selected_poly)
         if element is not None and element.source_kind == "VANM":
-            self._fill_fx_inspector(element, self._selected_poly)
+            self._refresh_uv_timeline()
             return
         if self._mapping_index is not None and self._selected_poly is not None:
             refs = self._mapping_index.refs.get(self._selected_poly, [])
@@ -1887,6 +1887,8 @@ class _ExtractionMixin:
         edit_button = getattr(self, "edit_toggle_action", None)
         keep_global_edit = bool(edit_button and edit_button.isChecked())
         previous_owner = self._selected_owner
+        if owner != previous_owner:
+            self._clear_emitter_selection()
         self._selected_owner = owner
         self.viewport.set_selected_owner(owner)
         # The polygon workbench (picking / inspector / UV editor) follows the

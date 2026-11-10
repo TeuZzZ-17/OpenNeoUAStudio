@@ -3,6 +3,8 @@
 
 from __future__ import annotations
 
+from studio.rendering.playback import DEFAULT_ANIMATION_SPEED
+
 from pathlib import Path
 import sys
 
@@ -28,6 +30,7 @@ from PySide6.QtWidgets import (
     QFileDialog,  # noqa: F401
     QFrame,
     QGridLayout,
+    QScrollBar,
     QGroupBox,
     QHBoxLayout,
     QHeaderView,
@@ -257,6 +260,7 @@ class AssemblyWindow(
         self.viewport.polygonDeselected.connect(self._on_polygon_deselected)
         self.viewport.selectionCleared.connect(self._on_selection_cleared)
         self.viewport.objectPicked.connect(self._on_object_picked)
+        self.viewport.emitterPicked.connect(self._on_emitter_picked)
         self.viewport.editModeChanged.connect(self._on_edit_mode_toggled)
         self.viewport.editSelectionChanged.connect(
             lambda _count: self._sync_edit_action_states())
@@ -1028,6 +1032,17 @@ class AssemblyWindow(
         self.rename_fx_action = QAction("Rename FX", self)
         self.rename_fx_action.triggered.connect(self._rename_selected_fx)
         edit_menu.addAction(self.rename_fx_action)
+        for attr, label, handler in (
+                ("add_emitter_action", "Add Emitter", self._add_emitter),
+                ("clone_emitter_action", "Clone Emitter", self._clone_emitter),
+                ("reanchor_emitter_action", "Change Emitter Anchor", self._reanchor_emitter),
+                ("edit_emitter_action", "Edit Emitter Settings", self._edit_emitter_settings),
+                ("delete_emitter_action", "Delete Emitter", self._delete_emitter)):
+            action = QAction(label, self)
+            action.setEnabled(False)
+            action.triggered.connect(handler)
+            setattr(self, attr, action)
+            edit_menu.addAction(action)
         self.edit_move_action = QAction("Move", self)
         self.edit_move_action.setStatusTip(
             "Move selected vertices/polygons continuously in place (G); "
@@ -1225,7 +1240,7 @@ class AssemblyWindow(
         self.speed_spin = QDoubleSpinBox()
         self.speed_spin.setRange(0.05, 8.0)
         self.speed_spin.setSingleStep(0.25)
-        self.speed_spin.setValue(1.0)
+        self.speed_spin.setValue(DEFAULT_ANIMATION_SPEED)
         self.speed_spin.valueChanged.connect(self._on_animation_speed_changed)
         anim_bar.addWidget(self.speed_spin)
 
@@ -1465,11 +1480,11 @@ class AssemblyWindow(
         self._apply_transform_mode_colors()
         model_layout.addWidget(gizmo_box)
 
-        fx_box = QGroupBox("FX")
+        fx_box = QGroupBox("Effects and Emitters")
         fx_layout = QVBoxLayout(fx_box)
         fx_layout.setContentsMargins(5, 4, 5, 5)
         fx_layout.setSpacing(4)
-        self.model_texture_label = QLabel("Current FX Texture: -")
+        self.model_texture_label = QLabel("Current Texture: -")
         self.model_texture_label.setWordWrap(True)
         fx_layout.addWidget(self.model_texture_label)
         self.fx_combo.setMinimumWidth(0)
@@ -1485,8 +1500,7 @@ class AssemblyWindow(
         self.add_fx_button = QPushButton("Add FX")
         self.add_fx_button.setEnabled(False)
         self.add_fx_button.setToolTip(
-            "Add an FX from the current model, another model, or a VP-defined "
-            "model in a BAS archive.")
+            "Browse effects from the active set, current model or an external file.")
         self.add_fx_button.clicked.connect(self.add_fx_action.trigger)
         self.clone_fx_button = QPushButton("Clone FX")
         self.clone_fx_button.setEnabled(False)
@@ -1510,9 +1524,33 @@ class AssemblyWindow(
             self.delete_fx_button,
             self.load_texture_button,
         ]))
+        self.emitter_combo = QComboBox()
+        self.emitter_combo.addItem("No emitter selected")
+        self.emitter_combo.setEnabled(False)
+        self.emitter_combo.setSizePolicy(
+            QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Fixed)
+        self.emitter_combo.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self.emitter_combo.customContextMenuRequested.connect(
+            self._show_emitter_context_menu)
+        self.emitter_combo.currentIndexChanged.connect(self._on_emitter_selected)
+        self._setup_emitter_preview()
+        fx_layout.addWidget(self.emitter_combo)
+        emitter_buttons = []
+        for action, label in (
+                (self.add_emitter_action, "Add Emitter"),
+                (self.clone_emitter_action, "Clone Emitter"),
+                (self.delete_emitter_action, "Delete Emitter"),
+                (self.edit_emitter_action, "Settings")):
+            button = QPushButton(label)
+            button.setEnabled(action.isEnabled())
+            button.clicked.connect(action.trigger)
+            action.changed.connect(
+                lambda button=button, action=action: button.setEnabled(action.isEnabled()))
+            emitter_buttons.append(button)
+        fx_layout.addWidget(_ResponsiveButtonGrid(emitter_buttons))
         model_layout.addWidget(fx_box)
 
-        uv_box = QGroupBox("Texture and FX Editor")
+        uv_box = QGroupBox("Effects, Emitters and Textures · Preview and Editor")
         uv_layout = QVBoxLayout(uv_box)
         uv_layout.setContentsMargins(5, 5, 5, 5)
         self.uv_editor = UVEditorWidget()
@@ -1524,12 +1562,41 @@ class AssemblyWindow(
             self._show_uv_handle_context_menu)
         self.uv_editor.backgroundContextMenuRequested.connect(
             self._show_uv_background_context_menu)
-        uv_layout.addWidget(self.uv_editor, 1)
+        uv_canvas = QGridLayout()
+        uv_canvas.setSpacing(1)
+        uv_horizontal = QScrollBar(Qt.Orientation.Horizontal)
+        uv_vertical = QScrollBar(Qt.Orientation.Vertical)
+        self.uv_editor.set_scrollbars(uv_horizontal, uv_vertical)
+        uv_canvas.addWidget(self.uv_editor, 0, 0)
+        uv_canvas.addWidget(uv_vertical, 0, 1)
+        uv_canvas.addWidget(uv_horizontal, 1, 0)
+        uv_canvas.setRowStretch(0, 1)
+        uv_canvas.setColumnStretch(0, 1)
+        uv_layout.addLayout(uv_canvas, 1)
         self.uv_phase_combo = QComboBox()
         self.uv_phase_combo.setToolTip(
             "Choose which UV phase is visible. All UV phases is the default.")
         self.uv_phase_combo.activated.connect(self._select_uv_phase)
         uv_layout.addWidget(self.uv_phase_combo)
+        self.uv_add_phase_button = QPushButton("Add UV Phase")
+        self.uv_add_phase_button.setToolTip(
+            "Copy the selected or playing frame to a free area on its texture.")
+        self.uv_delete_phase_button = QPushButton("Delete UV Phase")
+        self.uv_delete_phase_button.setToolTip(
+            "Remove the selected or playing frame from the ANM timeline.")
+        for button, duplicate in ((self.uv_add_phase_button, True),
+                                  (self.uv_delete_phase_button, False)):
+            button.setEnabled(False)
+            button.clicked.connect(
+                lambda _checked=False, duplicate=duplicate:
+                self._change_uv_phase(duplicate=duplicate))
+        uv_layout.addWidget(_ResponsiveButtonGrid([
+            self.uv_add_phase_button, self.uv_delete_phase_button,
+        ]))
+        self.emitter_stage_combo = QComboBox()
+        self.emitter_stage_combo.hide()
+        self.emitter_stage_combo.currentIndexChanged.connect(self._show_emitter_stage)
+        uv_layout.addWidget(self.emitter_stage_combo)
         self.uv_auto_align_check = QCheckBox("Auto Align UV")
         self.uv_auto_align_check.setChecked(True)
         self.uv_auto_align_check.setToolTip(
@@ -1547,12 +1614,10 @@ class AssemblyWindow(
         self.uv_revert_button = QPushButton("Revert Selected UV")
         self.uv_revert_button.setEnabled(False)
         self.uv_revert_button.clicked.connect(self._revert_selected_uv)
-        self.uv_reset_all_button = QPushButton("Reset All UVs")
+        self.uv_reset_all_button = QPushButton("Reset UV")
         self.uv_reset_all_button.setEnabled(False)
         self.uv_reset_all_button.clicked.connect(self._reset_all_uvs)
         uv_layout.addWidget(_ResponsiveButtonGrid([
-            self.uv_add_vertex_button,
-            self.uv_delete_vertex_button,
             self.uv_revert_button,
             self.uv_reset_all_button,
         ]))
@@ -1784,7 +1849,7 @@ class AssemblyWindow(
         animation_grid.addWidget(QLabel("Animation Speed:"), 1, 0)
         self.snapshot_export_speed_box = PresetNumberBox(
             (0.25, 0.5, 0.75, 1.0, 1.5, 2.0, 3.0, 4.0), minimum=0.05, maximum=8.0,
-            decimals=2, value=1.0)
+            decimals=2, value=DEFAULT_ANIMATION_SPEED)
         self.snapshot_export_speed_box.setToolTip(
             "Animation playback speed used while capturing frames; "
             "pick a template or type 0,05 to 8.")

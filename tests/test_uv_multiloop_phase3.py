@@ -238,6 +238,28 @@ class UVPhase3Tests(unittest.TestCase):
         finally:
             editor.close()
 
+    def test_timeline_handles_follow_playback_and_isolated_phase(self):
+        editor = UVEditorWidget()
+        try:
+            first, second = (40, 40), (90, 90)
+            editor.set_loops(None, [
+                UVLoop("first", 0, [first, (60, 40), (60, 60)]),
+                UVLoop("second", 0, [second, (110, 90), (110, 110)]),
+            ])
+            editor.set_timeline_overlay({"first", "second"}, "first")
+            self.assertEqual(editor._hit_point(editor._uv_to_screen(first)), ("first", 0))
+            self.assertIsNone(editor._hit_point(editor._uv_to_screen(second)))
+
+            editor.set_timeline_overlay({"first", "second"}, "second")
+            self.assertIsNone(editor._hit_point(editor._uv_to_screen(first)))
+            self.assertEqual(editor._hit_point(editor._uv_to_screen(second)), ("second", 0))
+
+            editor.set_visible_loop_key("first")
+            self.assertEqual(editor._hit_point(editor._uv_to_screen(first)), ("first", 0))
+            self.assertIsNone(editor._hit_point(editor._uv_to_screen(second)))
+        finally:
+            editor.close()
+
     def test_multi_loop_nudge_clamps_to_one_shared_boundary_delta(self):
         editor = UVEditorWidget()
         try:

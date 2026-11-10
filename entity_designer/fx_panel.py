@@ -8,6 +8,8 @@ the viewport (playback, speed and the visual timeline).
 
 from __future__ import annotations
 
+from studio.rendering.playback import DEFAULT_ANIMATION_SPEED
+
 import math
 from dataclasses import replace
 from time import perf_counter
@@ -709,7 +711,7 @@ class DestructionFxPanel(QWidget):
         self.unit_radius = 0.0
         self.seed = 1
         self.time_ms = 0.0
-        self.speed = 0.25
+        self.speed = DEFAULT_ANIMATION_SPEED
         self.hidden_items: set[int] = set()
         self.highlight: int | None = None
         self.simulation: fx.PreviewSimulation | None = None

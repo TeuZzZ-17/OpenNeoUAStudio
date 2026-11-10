@@ -1,5 +1,6 @@
 import struct
 import unittest
+from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -7,6 +8,7 @@ from unittest.mock import patch
 from studio.assets.family import AssetFamily, FamilyObject, _load_family_object
 from studio.exchange.portable import AssetResolver, ResolvedFile
 from studio.assets.dependencies import collect_dependencies
+from studio.assets.mapping import copy_particle_emitter, update_particle_emitter
 from studio.formats.base_format import parse_base_bytes
 
 
@@ -99,6 +101,24 @@ class ParticleDependencyTests(unittest.TestCase):
         self.assertEqual(
             self.asset.referenced_textures(),
             ["SMOKE.ANM", "SPARK.ILBM"])
+
+    def test_edit_and_clone_native_emitter_preserve_nested_stages(self):
+        family = AssetFamily()
+        owner = FamilyObject(base_object=self.asset.root, owner_path="root")
+        clone = copy_particle_emitter(family, owner, family, self.block, 17)
+        changed = replace(clone.particle_attributes, birth_rate=24, end_size=5)
+        edited = update_particle_emitter(clone, changed)
+        wrapped = _form(b"MC2 ", _form(
+            b"OBJT", _chunk(b"CLID", b"base.class\0") + _form(
+                b"BASE", _chunk(b"STRC", bytes(62))
+                + _form(b"ADES", edited.source_objt_bytes))))
+        readback = parse_base_bytes(wrapped, "edited.base").root.ades[0]
+        self.assertEqual(readback.ade_point_id, 17)
+        self.assertEqual(readback.particle_attributes, changed)
+        self.assertEqual(
+            [stage.source_objt_bytes for stage in readback.particle_stages],
+            [stage.source_objt_bytes for stage in self.block.particle_stages])
+        self.assertEqual(self.block.particle_attributes.birth_rate, 10)
 
     def test_nested_resources_are_loaded_and_reported_as_real_dependencies(self):
         family = AssetFamily()

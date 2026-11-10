@@ -2,6 +2,8 @@
 import copy
 from pathlib import Path
 
+from studio.rendering.playback import DEFAULT_ANIMATION_SPEED
+
 from PySide6.QtCore import QObject, QEvent, QPointF, QRectF, QSize, Qt, QTimer, QElapsedTimer, QUrl
 from PySide6.QtGui import QColor, QIcon, QPainter, QPalette, QPen, QPixmap, QPolygonF, QFont, QFontDatabase, QPainterPath
 from PySide6.QtWidgets import (QApplication, QComboBox, QStyledItemDelegate, QStyle,
@@ -95,7 +97,7 @@ class LocationNotice(QWidget):
         self.update()
 
     def _tick(self):
-        if self.clock.elapsed() >= sum(self.value[k] for k in ('fade_in_ms', 'hold_ms', 'fade_out_ms')):
+        if self.clock.elapsed() * DEFAULT_ANIMATION_SPEED >= sum(self.value[k] for k in ('fade_in_ms', 'hold_ms', 'fade_out_ms')):
             self.timer.stop()
         self.update()
 
@@ -103,7 +105,7 @@ class LocationNotice(QWidget):
         painter = QPainter(self)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
         painter.fillRect(self.rect(), QColor('#152630'))
-        alpha = notice_opacity(self.value, self.clock.elapsed()) if self.clock.isValid() else 1
+        alpha = notice_opacity(self.value, self.clock.elapsed() * DEFAULT_ANIMATION_SPEED) if self.clock.isValid() else 1
         painter.setOpacity(alpha)
         width, height = self.width(), self.height()
         top = height * .19

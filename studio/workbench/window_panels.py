@@ -685,6 +685,7 @@ class _FamilyPanelsMixin:
     def _clear_model_selection(self, notify: bool = False) -> None:
         """Clear every polygon/FX selection without changing the owner."""
 
+        self._clear_emitter_selection()
         self._selected_polys.clear()
         self._mirror_select_source_polys.clear()
         self._selected_poly = None
