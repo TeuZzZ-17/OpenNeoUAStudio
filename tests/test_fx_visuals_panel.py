@@ -106,8 +106,10 @@ def test_projectile_altitude_default_and_label(app):
         panel.close()
 
 
-def test_fx_timeline_starts_at_quarter_speed_and_can_be_changed(app):
+def test_fx_timeline_starts_at_half_speed_and_can_be_changed(app):
     panel = DestructionFxPanel()
+    assert panel.speed == panel.speed_combo.currentData() == 0.50
+    panel.speed_combo.setCurrentIndex(panel.speed_combo.findData(0.25))
     assert panel.speed == panel.speed_combo.currentData() == 0.25
     panel.speed_combo.setCurrentIndex(panel.speed_combo.findData(1.0))
     panel.set_context(fx.CONTEXT_WEAPON, fx.FxDocument())

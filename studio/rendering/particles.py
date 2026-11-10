@@ -174,13 +174,14 @@ class ParticleEmitter:
     stages: list[tuple[int, int, object]]
     owner: str
     seed: int
+    block_index: int = -1
 
     @property
     def duration_ticks(self) -> float:
         a = self.attributes
         return max(0, a.context_stop_generation) + max(0, a.lifetime)
 
-    def samples(self, ticks: float):
+    def samples(self, ticks: float, *, limit: int = 6000):
         """Preview one native burst with the shared destruction-FX simulator."""
         spec = EmitterSpec.from_attributes(
             (0.0, 0.0, 0.0), self.attributes, len(self.stages))
@@ -190,7 +191,7 @@ class ParticleEmitter:
             rotation=self.matrix, source=0, vp=0, trail=(1.0, 1.0, 1.0),
             tint=None, alpha=lambda _t: 1.0)
         sprites = []
-        _emit_particles(sprites, instance, 0, 0, spec, ticks, self.seed, 6000)
+        _emit_particles(sprites, instance, 0, 0, spec, ticks, self.seed, limit)
         for sprite in sprites:
             if sprite.size > 0:
                 yield sprite.position, sprite.size, self.stages[sprite.stage]

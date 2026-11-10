@@ -6,6 +6,8 @@ from __future__ import annotations
 from contextlib import contextmanager
 from functools import wraps
 
+from studio.rendering.playback import DEFAULT_ANIMATION_SPEED
+
 from PySide6.QtCore import (
     QEasingCurve, QEvent, QEventLoop, QLocale, QPointF, QPropertyAnimation, QSize, Qt, QTimer, Signal,
 )
@@ -635,13 +637,15 @@ class TexturePickerDialog(QDialog):
     """Searchable texture chooser with incremental thumbnails."""
 
     def __init__(self, names: list[str], current: str, thumbnail_loader,
-                 parent=None, *, frame_loader=None) -> None:
+                 parent=None, *, frame_loader=None,
+                 playback_speed=DEFAULT_ANIMATION_SPEED) -> None:
         super().__init__(parent)
         self.setWindowTitle("Choose Texture")
         self.resize(720, 520)
         self._thumbnail_loader = thumbnail_loader
         self._pending_items: list[QListWidgetItem] = []
         self._frame_loader = frame_loader
+        self._playback_speed = playback_speed
         self._frames = []
         self._frame_index = 0
         self._preview_timer = QTimer(self)
@@ -712,7 +716,7 @@ class TexturePickerDialog(QDialog):
         image, duration = self._frames[self._frame_index]
         self.preview.setPixmap(checker_thumbnail(image, 180))
         if len(self._frames) > 1:
-            self._preview_timer.start(max(1, round(duration)))
+            self._preview_timer.start(max(1, round(duration / self._playback_speed)))
 
     def _advance_frame(self):
         if self._frames:

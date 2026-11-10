@@ -606,16 +606,19 @@ def _material_resources(family, block) \
         for bitmap_name in getattr(animation, "bitmap_names", ()):
             add_texture(str(bitmap_name))
 
-    for descriptor in (
-            getattr(block, "texture", None),
-            getattr(block, "tracy_texture", None)):
-        name = str(getattr(descriptor, "name", "") or "")
-        if not name:
-            continue
-        if str(getattr(descriptor, "kind", "")).casefold() == "bmpanim":
-            add_animation(name)
-        else:
-            add_texture(name)
+    def add_block_resources(material):
+        for descriptor in (material.texture, material.tracy_texture):
+            name = str(getattr(descriptor, "name", "") or "")
+            if not name:
+                continue
+            if descriptor.kind.casefold() == "bmpanim":
+                add_animation(name)
+            else:
+                add_texture(name)
+        for stage in getattr(material, "particle_stages", ()):
+            add_block_resources(stage)
+
+    add_block_resources(block)
     return tuple(
         snapshots[key] for key in sorted(snapshots))
 
@@ -743,6 +746,30 @@ def transfer_material_resources(family, clipboard: MaterialBlockClipboard):
                 snapshot.reference)
         imported.append((snapshot.resource_kind, snapshot.logical_name))
     return tuple(imported)
+
+
+def copy_particle_emitter(source_family, source, target_family, block, point_id):
+    """Copy a native emitter and resolve its stages before changing the owner."""
+    if (block.class_id or "").lower() != "particle.class":
+        raise MappingEditError("the selected block is not a particle emitter")
+    copied = copy.deepcopy(block)
+    copied.source_objt_bytes = rewrite_ade_point_template(copied, point_id)
+    copied.ade_point_id = point_id
+    if source_family is not target_family:
+        resources = _material_resources(source_family, block)
+        clipboard = MaterialBlockClipboard(
+            source_family_identity=id(source_family),
+            source_owner=source.owner_path,
+            source_block_index=0,
+            class_id="particle.class",
+            block_template=copied,
+            resources=resources,
+            indexed_profile_signature=(
+                _indexed_profile_signature(source_family) if resources else None),
+            area_vertex_count=None,
+        )
+        transfer_material_resources(target_family, clipboard)
+    return copied
 
 
 def paste_material_block(
@@ -1686,6 +1713,41 @@ def rewrite_ade_point_template(block, point_id: int) -> bytes:
             or verified.root.ades[0].ade_point_id != int(point_id):
         raise MappingEditError("the rewritten point reference did not verify")
     return verified.root.ades[0].source_objt_bytes
+
+
+def update_particle_emitter(block, attributes):
+    """Rewrite the known PTCL/ATTS v1 fields, preserving stages and extra bytes."""
+    original = block.particle_attributes
+    if (block.class_id or "").lower() != "particle.class" \
+            or original is None or original.version != 1 or attributes.version != 1:
+        raise MappingEditError("only decoded version 1 emitter settings are editable")
+    wrapped = _wrap_ades_objt(block.source_objt_bytes)
+    parsed = parse_base_bytes(wrapped, "<particle-attributes>")
+    if parsed.root is None or parsed.tree is None or len(parsed.root.ades) != 1:
+        raise MappingEditError("the emitter template could not be parsed")
+    template = parsed.root.ades[0]
+    chunk = next((node for node in parsed.tree.iter_all()
+                  if node.offset == template.atts_chunk_offset), None)
+    if chunk is None or template.particle_attributes != original:
+        raise MappingEditError("the emitter attributes differ from their source bytes")
+    payload = bytearray(chunk.payload(wrapped))
+    struct.pack_into(
+        ">11i", payload, struct.calcsize(">h12f"),
+        attributes.collide, attributes.start_speed, attributes.num_contexts,
+        attributes.context_lifetime, attributes.context_start_generation,
+        attributes.context_stop_generation, attributes.birth_rate,
+        attributes.lifetime, attributes.start_size, attributes.end_size,
+        attributes.noise)
+    rebuilt = _rebuild_iff_chunk(
+        wrapped, parsed.tree.roots[0], {chunk.offset: bytes(payload)})
+    verified = parse_base_bytes(rebuilt, "<particle-attributes-rewritten>")
+    if verified.root is None or len(verified.root.ades) != 1 \
+            or verified.root.ades[0].particle_attributes != attributes:
+        raise MappingEditError("the new emitter attributes could not be verified")
+    result = copy.deepcopy(block)
+    result.source_objt_bytes = verified.root.ades[0].source_objt_bytes
+    result.particle_attributes = attributes
+    return result
 
 
 def save_model_base_copy(data: bytes, uv_edits: list[UVEdit],

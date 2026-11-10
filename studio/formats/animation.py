@@ -40,6 +40,7 @@ class VanmData:
     warnings: list[str] = field(default_factory=list)
     original_data: bytes = b""
     texcoord_offsets: list[int] = field(default_factory=list)
+    timeline_dirty: bool = False
 
     @property
     def total_duration_ms(self) -> float:
@@ -190,6 +191,90 @@ def parse_anm_file(path: str | Path) -> VanmData:
         raise AnmParseError(f"Could not open file: {exc}") from exc
     anm = parse_anm_bytes(data, file_path.name)
     return anm
+
+
+def _place_new_phase(anm: VanmData, frame: VanmFrame) -> list[tuple[int, int]]:
+    def bounds(points):
+        u, v = zip(*points)
+        return min(u), min(v), max(u), max(v)
+
+    points = anm.texcoord_groups[frame.texcoords_id]
+    if not points:
+        raise AnmParseError("the selected UV phase is empty")
+    left, top, right, bottom = bounds(points)
+    width, height = right - left, bottom - top
+    occupied = {bounds(group) for other in anm.frames
+                if other.frame_id == frame.frame_id
+                and 0 <= other.texcoords_id < len(anm.texcoord_groups)
+                and (group := anm.texcoord_groups[other.texcoords_id])}
+    # A nearest free rectangle touches either an atlas boundary, its original
+    # coordinate, or an occupied rectangle plus the chosen margin.
+    for gap in (4, 1):
+        xs = {0, left, 255 - width}
+        ys = {0, top, 255 - height}
+        for x0, y0, x1, y1 in occupied:
+            xs.update((x0 - width - gap, x1 + gap))
+            ys.update((y0 - height - gap, y1 + gap))
+        candidates = sorted(
+            (abs(x - left) + abs(y - top), y, x)
+            for x in xs if 0 <= x <= 255 - width
+            for y in ys if 0 <= y <= 255 - height)
+        for _, y, x in candidates:
+            if all(x + width + gap <= x0 or x >= x1 + gap
+                   or y + height + gap <= y0 or y >= y1 + gap
+                   for x0, y0, x1, y1 in occupied):
+                return [(u + x - left, v + y - top) for u, v in points]
+    raise AnmParseError("there is no free UV area for a phase of this size")
+
+
+def edit_anm_phase(anm: VanmData, index: int, *, duplicate: bool) -> VanmData:
+    """Duplicate or remove a timeline entry, keeping other UV indices stable."""
+    from dataclasses import replace
+
+    data = export_anm_bytes(anm)
+    if not 0 <= index < len(anm.frames) or not anm.texcoord_offsets:
+        raise AnmParseError("select a valid animation frame")
+    groups = list(anm.texcoord_groups)
+    frames = list(anm.frames)
+    if duplicate:
+        frame = frames[index]
+        if not 0 <= frame.texcoords_id < len(groups):
+            raise AnmParseError("the selected frame has an invalid UV phase")
+        groups.append(_place_new_phase(anm, frame))
+        frames.insert(index + 1, replace(frame, texcoords_id=len(groups) - 1))
+    elif len(frames) > 1:
+        frames.pop(index)
+    else:
+        raise AnmParseError("an animation must keep at least one frame")
+    word_count = sum(len(group) + 1 for group in groups)
+    if word_count > 32767 or len(frames) > 32767:
+        raise AnmParseError("VANM table exceeds the format limit")
+    start = anm.texcoord_offsets[0] - 4
+    end = anm.texcoord_offsets[-1] + len(anm.texcoord_groups[-1]) * 2 + 2 + 8 * len(anm.frames)
+    payload = struct.pack(">h", word_count)
+    payload += b"".join(struct.pack(">h", len(group))
+                        + bytes(channel for uv in group for channel in uv) for group in groups)
+    payload += struct.pack(">h", len(frames))
+    payload += b"".join(struct.pack(">ihh", frame.frame_time, frame.frame_id, frame.texcoords_id)
+                        for frame in frames)
+    if anm.has_form:
+        root = read_iff_bytes(data, anm.source_name).roots[0]
+        chunk = root.find_first("DATA")
+        if chunk is None or chunk not in root.children or end > chunk.available_payload_end:
+            raise AnmParseError("unsupported VANM container")
+        body = data[chunk.payload_offset:start] + payload + data[end:chunk.available_payload_end]
+        replacement = b"DATA" + struct.pack(">I", len(body)) + body + b"\0" * (len(body) % 2)
+        old_end = chunk.available_payload_end + chunk.size % 2
+        tail = data[8:chunk.offset] + replacement + data[old_end:]
+        result = data[:4] + struct.pack(">I", root.size + len(replacement) - (old_end - chunk.offset)) + tail
+    else:
+        result = data[:start] + payload + data[end:]
+    parsed = parse_anm_bytes(result, anm.source_name)
+    if parsed.frames != frames or parsed.texcoord_groups != groups \
+            or parsed.bitmap_names != anm.bitmap_names:
+        raise AnmParseError("edited animation failed round-trip verification")
+    parsed.timeline_dirty = True
+    return parsed
 
 
 # ----------------------------------------------------------------------------

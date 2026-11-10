@@ -465,6 +465,24 @@ class _PaintingMixin:
             for path in highlight_paths.values():
                 painter.drawPath(path.simplified())
 
+        if not clean and not self._snapshot_active and self._selected_emitter is not None:
+            outline = QPainterPath()
+            outline.setFillRule(Qt.FillRule.WindingFill)
+            for face in self._faces:
+                if (face.owner, face.emitter_block) != self._selected_emitter:
+                    continue
+                polygon = source_polygons.get(id(face))
+                if polygon is not None and id(face) in visible_faces:
+                    outline.addPolygon(polygon)
+                    outline.closeSubpath()
+            if not outline.isEmpty():
+                painter.setBrush(Qt.BrushStyle.NoBrush)
+                painter.setPen(QPen(QColor(18, 26, 34, 190), 3.0))
+                outline = outline.simplified()
+                painter.drawPath(outline)
+                painter.setPen(QPen(QColor("white"), 1.25))
+                painter.drawPath(outline)
+
         if not clean and self._show_wire_overlay and mode == "wireframe":
             painter.setPen(QPen(QColor(0, 0, 0, 130), 0.75))
             painter.setBrush(Qt.BrushStyle.NoBrush)
@@ -814,6 +832,24 @@ class _PaintingMixin:
                              QPointF(center.x(), center.y() + 6))
 
         self._draw_gizmo_handles(painter, target)
+
+        hover = getattr(self, "_emitter_anchor_hover", None)
+        emitter_anchors = {
+            block.ade_point_id for block in session.fam_obj.base_object.ades
+            if (block.class_id or "").lower() == "particle.class"
+        }
+        visible_anchors = emitter_anchors & (
+            self._edit_visible_vertices | session.selection)
+        painter.setPen(QPen(QColor(130, 225, 255), 1.5))
+        painter.setBrush(Qt.BrushStyle.NoBrush)
+        for index in visible_anchors:
+            if index != hover and 0 <= index < len(screen):
+                painter.drawEllipse(screen[index], 9, 9)
+
+        if hover is not None and 0 <= hover < len(screen):
+            painter.setPen(QPen(QColor("white"), 2))
+            painter.setBrush(Qt.BrushStyle.NoBrush)
+            painter.drawEllipse(screen[hover], 8, 8)
 
         if self._box_rect is not None:
             painter.setPen(QPen(QColor(90, 230, 255), 1.0,

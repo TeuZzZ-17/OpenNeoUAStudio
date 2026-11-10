@@ -487,7 +487,8 @@ class _AxisHandlesMixin:
                 self._particle_emitters.append(ParticleEmitter(
                     attributes, world_points[block.ade_point_id], matrix,
                     stages, owner,
-                    zlib.crc32(f"{owner}:{block_index}".encode("utf-8"))))
+                    zlib.crc32(f"{owner}:{block_index}".encode("utf-8")),
+                    block_index))
 
     @property
     def _particle_duration_ms(self) -> float:
@@ -512,7 +513,7 @@ class _AxisHandlesMixin:
                     vertices, list(uvs), mat_id, shade=stage.shade_val,
                     animated=bool(self._materials[mat_id].anim_frames),
                     primary=False, owner=emitter.owner, block_index=stage_id,
-                    billboard_center=position)
+                    billboard_center=position, emitter_block=emitter.block_index)
 
     def _refresh_particle_faces(self) -> None:
         self._faces = [face for face in self._faces

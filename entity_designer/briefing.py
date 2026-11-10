@@ -7,6 +7,8 @@ from contextlib import ExitStack
 from pathlib import Path
 from functools import lru_cache
 
+from studio.rendering.playback import DEFAULT_ANIMATION_SPEED
+
 from PySide6.QtCore import QRectF, QSize, Qt, QSignalBlocker, QTimer
 from PySide6.QtGui import QColor, QFontMetrics, QImage
 from PySide6.QtWidgets import (
@@ -201,7 +203,7 @@ class BriefingPreview(AcceleratedWidget):
         self.angle = (self.angle + elapsed * 200.0) % 360.0
         self._last_frame = now
         if self.renderer.has_animation:
-            self.renderer.seek_animation(self.renderer._anim_clock_ms + elapsed * 1000.0)
+            self.renderer.seek_animation(self.renderer._anim_clock_ms + elapsed * 1000.0 * DEFAULT_ANIMATION_SPEED)
         self.update()
 
     def refresh(self):

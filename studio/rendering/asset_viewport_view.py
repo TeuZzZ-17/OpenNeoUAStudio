@@ -432,6 +432,10 @@ class _ViewControlsMixin:
         self._anim_timer.stop()
         self._reset_animation_states()
 
+    @property
+    def animation_speed(self) -> float:
+        return self._anim_speed
+
     def set_animation_speed(self, speed: float) -> None:
         self._anim_speed = max(0.05, min(8.0, speed))
 
@@ -524,6 +528,10 @@ class _ViewControlsMixin:
             [tuple(uv) for uv in material.anim_uv_groups[uv_id]],
             description,
         )
+
+    def current_animation_index(self, owner: str, block_index: int) -> int:
+        material_id = self._block_material_ids.get((owner, block_index))
+        return self._anim_states.get(material_id, (0, 1))[0]
 
     def current_animation_group(
             self, owner: str, block_index: int

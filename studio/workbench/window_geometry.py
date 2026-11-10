@@ -652,6 +652,7 @@ class _GeometryEditMixin:
                 self.fx_combo.setCurrentIndex(
                     self._fx_combo_index(element.identity) if element else 0)
                 self.fx_combo.blockSignals(False)
+            self._select_emitter_from_vertex(_vertices if not resolved else ())
         if self._mapping_index is not None:
             self._fill_polygon_inspector(self._selected_poly)
         self._update_material_buttons()
@@ -903,6 +904,8 @@ class _GeometryEditMixin:
         return skeleton, base
 
     def can_overwrite_geometry(self) -> bool:
+        if self._has_uv_timeline_changes():
+            return False
         owner = self.viewport.edit_owner or self._selected_owner
         fam_obj = self._owner_to_obj.get(owner) if owner else None
         if self.can_save_as_geometry() and owner in self._bundle_targets:
@@ -1795,22 +1798,24 @@ class _GeometryEditMixin:
         select_none.setEnabled(active)
         menu.addAction(self.select_all_fx_action)
         menu.addAction(self.deselect_all_fx_action)
+        active_emitter = self._selected_emitter()
         deselect = menu.addAction(
             "Deselect",
-            lambda: self.viewport.deselect_at(position)
-            if position is not None else
-            self.viewport.select_no_edit_vertices())
+            self._clear_model_selection if active_emitter is not None else
+            lambda: self.viewport.deselect_at(position) if position is not None
+            else self.viewport.select_no_edit_vertices())
         has_selection = bool(self._selected_polys)
         if session is not None:
             has_selection = has_selection or bool(session.selection)
         has_selection = (
-            has_selection or self._active_fx_selection() is not None)
+            has_selection or self._active_fx_selection() is not None
+            or active_emitter is not None)
         deselect.setEnabled(has_selection)
         menu.addSeparator()
         active_fx = self._active_fx_selection()
         if active_fx is not None:
             menu.addAction(self.clone_fx_action)
-        else:
+        elif active_emitter is None:
             menu.addAction(self.copy_geometry_action)
             if not isinstance(self._geometry_clipboard, FxElementClipboard):
                 menu.addAction(self.paste_geometry_action)
@@ -1825,19 +1830,28 @@ class _GeometryEditMixin:
                 if len(active_fx_elements) > 1 else
                 self._delete_selected_fx_element)
             delete_geometry.setEnabled(self.can_delete_geometry())
-        else:
+        elif active_emitter is None:
             delete_geometry = menu.addAction("Delete", self._delete_geometry)
             delete_geometry.setEnabled(self.can_delete_geometry())
         menu.addAction(self.add_fx_action)
+        menu.addAction(self.add_emitter_action)
         if active_fx is not None:
             menu.addAction(self.rename_fx_action)
-        menu.addAction(self.edit_move_action)
-        scale = menu.addAction(
-            "Scale", self._scale_selected_geometry)
-        scale.setEnabled(editing and self._family is not None)
-        rotate = menu.addAction(
-            "Rotate", self._rotate_selected_geometry)
-        rotate.setEnabled(editing and self._family is not None)
+        if self.load_texture_button.isEnabled():
+            menu.addAction("Replace Texture", self._load_model_texture)
+        if active_emitter is not None:
+            menu.addAction(self.clone_emitter_action)
+            menu.addAction(self.reanchor_emitter_action)
+            menu.addAction(self.edit_emitter_action)
+            menu.addAction(self.delete_emitter_action)
+        else:
+            menu.addAction(self.edit_move_action)
+            scale = menu.addAction(
+                "Scale", self._scale_selected_geometry)
+            scale.setEnabled(editing and self._family is not None)
+            rotate = menu.addAction(
+                "Rotate", self._rotate_selected_geometry)
+            rotate.setEnabled(editing and self._family is not None)
         menu.addSeparator()
         reset_camera = menu.addAction(
             "Reset Camera", self._reset_view_and_gizmo)
@@ -1955,6 +1969,7 @@ class _GeometryEditMixin:
         self._sync_edit_action_states()
 
     def _sync_edit_action_states(self) -> None:
+        self._sync_emitter_actions()
         session = self.viewport.edit_session
         active = session is not None
         editing = self._editing_allowed()
@@ -2200,7 +2215,9 @@ class _GeometryEditMixin:
         })
 
     def _record_edit_command(self, command: dict) -> None:
-        if self._history_replaying or command.get("before") == command.get("after"):
+        if self._history_replaying or (
+                command.get("before") == command.get("after")
+                and command.get("resource_before") == command.get("resource_after")):
             return
         self._edit_undo_stack.append(command)
         del self._edit_undo_stack[:-100]
@@ -2303,7 +2320,10 @@ class _GeometryEditMixin:
         if fam_obj is None:
             return set()
         names = set()
-        for block in fam_obj.base_object.ades:
+        blocks = list(fam_obj.base_object.ades)
+        while blocks:
+            block = blocks.pop()
+            blocks.extend(block.particle_stages)
             texture = block.texture
             if texture is None or texture.kind != "bmpanim":
                 continue
@@ -2312,6 +2332,11 @@ class _GeometryEditMixin:
                 names.add(entry[0].casefold())
         return names
 
+    def _has_uv_timeline_changes(self):
+        return self._family is not None and any(
+            getattr(animation, "timeline_dirty", False)
+            for animation in getattr(self._family, "animations", {}).values())
+
     def _owner_vanm_uv_keys(self, owner: str | None):
         names = self._owner_animation_names(owner)
         return {
@@ -2319,7 +2344,7 @@ class _GeometryEditMixin:
             if key[0].casefold() in names}
 
     def _uv_storage(self, key):
-        owner, block_index, atts_index = key
+        owner, block_index, atts_index = key[:3]
         if owner == "@VANM":
             entry = self._animation_for_name(block_index)
             if entry is None:
@@ -2434,6 +2459,8 @@ class _GeometryEditMixin:
             self._restore_family_resource_state(family, previous)
             return False
         self._sync_animation_controls()   # undo/redo may add or remove animated materials
+        if self._selected_emitter() is not None:
+            self._show_emitter_stage()
         return True
 
     def _apply_edit_command(self, command: dict, redo: bool) -> bool:
@@ -2479,6 +2506,8 @@ class _GeometryEditMixin:
             self._history_replaying = False
         if not applied:
             return False
+        if kind in ("uv", "uv_multi") and self._selected_emitter() is not None:
+            self._refresh_selected_uvs()
         self._fill_polygon_inspector(self._selected_poly)
         self._sync_geometry_save_controls()
         self._update_editor_status()
@@ -2523,7 +2552,8 @@ class _GeometryEditMixin:
 
         model_dirty = bool(
             self._geom_dirty or self._texture_original
-            or self._uv_original or self._vanm_uv_original)
+            or self._uv_original or self._vanm_uv_original
+            or self._has_uv_timeline_changes())
         if not model_dirty:
             return True
         if self._skip_model_switch_warning:

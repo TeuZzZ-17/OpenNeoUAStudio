@@ -1524,7 +1524,7 @@ class _EditModeMixin:
             | set(session.selection)
         ) - self._edit_read_only_vertices
 
-    def _nearest_edit_vertex(self, point: QPoint) -> int | None:
+    def _nearest_edit_vertex(self, point: QPoint, *, radius: float = 12.0) -> int | None:
         """Return the vertex under the cursor using the visible pick radius."""
 
         session = self._edit_session
@@ -1539,7 +1539,7 @@ class _EditModeMixin:
             dx = screen.x() - point.x()
             dy = screen.y() - point.y()
             dist = dx * dx + dy * dy
-            if dist >= 12.0 ** 2:
+            if dist >= radius ** 2:
                 continue
             candidate = (
                 dist,

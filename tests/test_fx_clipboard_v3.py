@@ -954,6 +954,8 @@ class FxClipboardV3Tests(unittest.TestCase):
                 window._on_polygon_picked(0)
                 self.assertTrue(window.copy_geometry_action.isEnabled())
                 self.assertTrue(window.add_fx_action.isEnabled())
+                self.assertIn("GLOW.ANM", window.model_texture_label.text())
+                self.assertIsNotNone(window.uv_editor._image)
                 self.assertIn(
                     "FX2 VANM Element",
                     window.copy_geometry_action.toolTip())
@@ -966,10 +968,13 @@ class FxClipboardV3Tests(unittest.TestCase):
                 self.assertIn("UV phases shown together", window.uv_editor.toolTip())
                 self.assertEqual(window.uv_editor.uvs(), UVS)
                 self.assertFalse(window.uv_editor._image.isNull())
+                active_before = window.uv_editor._timeline_active
                 window.viewport.step_animation()
                 self.assertEqual(
                     window.uv_editor.uvs(), UVS)
-                self.assertEqual(window.uv_editor.loop_count(), 1)
+                self.assertEqual(window.uv_editor.loop_count(), 2)
+                self.assertNotEqual(window.uv_editor._timeline_active, active_before)
+                self.assertIn("Frame 2/2", window.uv_phase_combo.itemText(0))
                 animation_uvs = [
                     list(group)
                     for group in family.animations[

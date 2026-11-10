@@ -434,6 +434,9 @@ class _ModelFilesMixin:
                 f"{base_target.name}.", 9000)
 
     def _overwrite_model(self) -> None:
+        if self._has_uv_timeline_changes():
+            self._notify("Use Export Asset Family to save the edited ANM timeline.", 8000)
+            return
         sklt_context = self._sklt_save_context()
         if sklt_context is not None:
             owner, _family, fam_obj, model = sklt_context

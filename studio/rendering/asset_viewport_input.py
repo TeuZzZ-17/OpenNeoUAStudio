@@ -165,6 +165,11 @@ class _InteractionMixin:
                     and event.button() == Qt.MouseButton.LeftButton:
                 pressed = self._vertex_press
                 self._vertex_press = None
+                if self._pick_emitter_at(event.position().toPoint()):
+                    self._press_pos = None
+                    self._press_additive = False
+                    event.accept()
+                    return
                 self._edit_session.selection = {pressed.vertex}
                 self._active_edit_vertex = pressed.vertex
                 self._emit_selection_hint("vertex")
@@ -187,7 +192,9 @@ class _InteractionMixin:
                 if abs(delta.x()) <= 4 and abs(delta.y()) <= 4:
                     point = event.position().toPoint()
                     nearest = self._nearest_edit_vertex(point)
-                    if self._edit_pick_polygons \
+                    if not additive and self._pick_emitter_at(point):
+                        pass
+                    elif self._edit_pick_polygons \
                             and (nearest is None
                                  or (self._direct_grab_selected_only
                                      and nearest not in
@@ -205,10 +212,21 @@ class _InteractionMixin:
             delta = event.position().toPoint() - self._press_pos
             if abs(delta.x()) <= 4 and abs(delta.y()) <= 4:
                 additive = self._press_additive
-                self.pick_at(event.position().toPoint(), additive)
+                point = event.position().toPoint()
+                if not self._pick_emitter_at(point):
+                    self.pick_at(point, additive)
         self._press_pos = None
         self._press_additive = False
         event.accept()
+
+    def _pick_emitter_at(self, point: QPoint) -> bool:
+        if not self._particle_emitters or self._snapshot_active:
+            return False
+        hit = resolve_pick_shape(self._pick_shapes, QPointF(point))
+        if hit is None or hit.face.emitter_block < 0:
+            return False
+        self.emitterPicked.emit(hit.face.owner, hit.face.emitter_block)
+        return True
 
     def pick_at(self, point: QPoint, additive: bool = False) -> int | None:
         """Select the geometrically nearest rendered polygon under the cursor."""
@@ -218,6 +236,9 @@ class _InteractionMixin:
         hit = resolve_pick_shape(self._pick_shapes, QPointF(point))
         if hit is not None:
             face = hit.face
+            if face.emitter_block >= 0:
+                self.emitterPicked.emit(face.owner, face.emitter_block)
+                return None
             self._selected_owner = face.owner
             self.objectPicked.emit(face.owner)
             if face.primary:
