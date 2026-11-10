@@ -583,8 +583,8 @@ class FxEffectsView(QWidget):
                        for row in self.list.selectedItems())
         for index, action in enumerate(self.actions):
             action.setEnabled(available and (index < 2 or selected))
-        # Model-state rows cannot be deleted: only effects can.
-        self.delete_action.setEnabled(bool(self.panel.document.items) and bool(self.selected_indexes()))
+        self.delete_action.setEnabled(bool(self.selected_indexes())
+                                      and self.panel.text_session.can_add())
         session = self.panel.text_session
         self.add_action.setEnabled(session.can_add())
         reason = session.source_error or ("Open a definition from a script first."
@@ -594,9 +594,11 @@ class FxEffectsView(QWidget):
         self.add_button.setToolTip(tip)
 
     def selected_indexes(self) -> list[int]:
-        return sorted(row.data(Qt.ItemDataRole.UserRole) for row in self.list.selectedItems()
-                      if row.data(Qt.ItemDataRole.UserRole) is not None
-                      and row.data(Qt.ItemDataRole.UserRole) >= 0)
+        indexes = {row.data(Qt.ItemDataRole.UserRole) for row in self.list.selectedItems()}
+        if CHILD_CRATER_INDEX in indexes and self.panel.owns_cluster_craters():
+            indexes.add(fx_visuals.CRATER_INDEX)
+        return sorted(index for index in indexes if index is not None
+                      and (index >= 0 or index in fx_visuals.DELETABLE_KEYS))
 
     def delete_selected(self) -> None:
         self.panel.delete_effects(self.selected_indexes())
@@ -700,13 +702,14 @@ class DestructionFxPanel(QWidget):
         # (time, simulation, angles) of the last shake handed to the viewport.
         self._shake_cache = None
         self.unit = fx.UnitPhases()
+        self.kamikaze = False
         self.current_trigger = fx.SEQUENCE_TRIGGER
         self.origin = (0.0, 0.0, 0.0)
         self.ground_y = 0.0
         self.unit_radius = 0.0
         self.seed = 1
         self.time_ms = 0.0
-        self.speed = 1.0
+        self.speed = 0.25
         self.hidden_items: set[int] = set()
         self.highlight: int | None = None
         self.simulation: fx.PreviewSimulation | None = None
@@ -716,6 +719,7 @@ class DestructionFxPanel(QWidget):
         # Other projectiles of the same firing event (fire_x positions).
         self.volley: tuple = ()
         self.sound = FxSoundPlayer()
+        self.sound.set_speed(self.speed)
         self._sound_events: list = []
         # Clock position the sounds were last advanced to (-1 = before 0 ms).
         self._sound_cursor = -1.0
@@ -740,6 +744,10 @@ class DestructionFxPanel(QWidget):
         layout = QVBoxLayout(preview)
         layout.setContentsMargins(6, 4, 6, 4)
         layout.setSpacing(4)
+        self.carrier_combo = QComboBox(preview)
+        self.carrier_combo.setToolTip("Choose which carrier or payload effects to preview and edit.")
+        self.carrier_combo.hide()
+        layout.addWidget(self.carrier_combo)
         self.weapon_box = QWidget(self)
         weapon_row = QHBoxLayout(self.weapon_box)
         weapon_row.setContentsMargins(0, 0, 0, 0)
@@ -893,7 +901,7 @@ class DestructionFxPanel(QWidget):
         self.speed_combo.setToolTip("Playback speed")
         for speed in SPEEDS:
             self.speed_combo.addItem(f"{speed:g}×", speed)
-        self.speed_combo.setCurrentIndex(SPEEDS.index(1.0))
+        self.speed_combo.setCurrentIndex(self.speed_combo.findData(self.speed))
         self.speed_combo.setSizeAdjustPolicy(
             QComboBox.SizeAdjustPolicy.AdjustToMinimumContentsLengthWithIcon)
         self.speed_combo.setMinimumContentsLength(3)
@@ -924,10 +932,12 @@ class DestructionFxPanel(QWidget):
     def set_context(self, context: str, document: fx.FxDocument, *,
                     catalog=None, unit: fx.UnitPhases | None = None,
                     keep_view: bool = False, weapons=None, debuffs=None,
-                    decals=None, settings=None) -> None:
+                    decals=None, settings=None, kamikaze=False) -> None:
         """Show one definition; ``keep_view`` keeps time and hidden effects."""
 
         self.context = context
+        self.kamikaze = kamikaze
+        self.carrier_combo.setVisible(kamikaze)
         self.document = document
         self.text_session = FxTextSession(document, context)
         if self.code_drawer is not None:
@@ -946,10 +956,9 @@ class DestructionFxPanel(QWidget):
             self.highlight = None
             self.seed = 1
             self.time_ms = 0.0
-            self.current_trigger = (fx.WEAPON_HIT_GROUND
-                                    if context == fx.CONTEXT_WEAPON
+            self.current_trigger = (fx.WEAPON_HIT_GROUND if self.unit.weapon
                                     else fx.SEQUENCE_TRIGGER)
-        weapon = context == fx.CONTEXT_WEAPON
+        weapon = context == fx.CONTEXT_WEAPON and not kamikaze
         self.weapon_box.setVisible(weapon)
         self.follow_unit.setText(
             "Follow weapon with camera" if weapon
@@ -1088,6 +1097,13 @@ class DestructionFxPanel(QWidget):
                  if child.unit.crater is not None]
                 if self.context == fx.CONTEXT_WEAPON else [])
 
+    def owns_cluster_craters(self) -> bool:
+        """A self-spawning weapon uses the same script keys for both crater rows."""
+
+        identity = self.state_session.identity
+        return (identity is not None and fx_visuals.CRATER_INDEX in self.visible_state_indexes()
+                and all(child.weapon_id == identity[1] for child in self.cluster_crater_weapons()))
+
     def visible_state_indexes(self) -> list[int]:
         session = self.state_session
         return [index for index in fx_visuals.STATE_INDEXES if index in session.originals
@@ -1225,19 +1241,25 @@ class DestructionFxPanel(QWidget):
     def delete_effects(self, indexes) -> bool:
         """Remove effects from their script file and from the preview, after asking."""
 
+        states = set(indexes).intersection(fx_visuals.DELETABLE_KEYS, self.visible_state_indexes())
         indexes = sorted({i for i in indexes if 0 <= i < len(self.document.items)})
-        if not indexes:
+        if not indexes and not states:
             return False
         session = self.text_session
-        if session.source_error or len(session.sources) != len(self.document.items):
+        if not session.can_add() or (states and self.state_session.source_error):
             QMessageBox.warning(
                 self, "Effects were not deleted",
-                session.source_error or "No script source is attached to these effects.")
+                session.source_error or self.state_session.source_error
+                or "No script source is attached to these effects.")
             return False
-        files = ", ".join(sorted({session.sources[i].path.name for i in indexes}))
-        count = len(indexes)
+        sources = {session.sources[i].path for i in indexes if not session.is_pending(i)}
+        keys = {key for index in states for key in fx_visuals.DELETABLE_KEYS[index]}
+        if any(self.state_session.originals[index].strip() for index in states):
+            sources.update(path for path, _, _ in session.origins)
+        files = ", ".join(sorted({path.name for path in sources}))
+        count = len(indexes) + len(states)
         # An effect that was never saved is not in the file: no question needed.
-        if not all(session.is_pending(i) for i in indexes):
+        if sources:
             answer = QMessageBox.question(
                 self, "Delete effects",
                 f"Delete {count} effect{'s' if count > 1 else ''} from {files}?\n"
@@ -1251,11 +1273,28 @@ class DestructionFxPanel(QWidget):
             drawer.timer.stop()      # an edit waiting for the timer must not revive a deleted effect
         total = len(self.document.items)
         try:
-            paths = session.delete(indexes)
+            paths = session.delete(indexes, keys=keys)
         except (OSError, ValueError, RuntimeError, UnicodeError) as exc:
             QMessageBox.warning(self, "Effects were not deleted", str(exc))
             return False
         self.state_session.refresh_snapshots(paths, session.origins)
+        for index in states:
+            self.state_session.originals[index] = self.state_session.drafts[index] = ""
+        for key in keys:
+            self.state_session.values.pop(key, None)
+        self._linked_states.difference_update(states)
+        if fx_visuals.DECAL_INDEX in states:
+            self.unit = replace(self.unit, ground_decal_id=-1, decal_size=(0.0, 0.0))
+        if fx_visuals.CRATER_INDEX in states:
+            self.unit = replace(self.unit, crater=None)
+        identity = self.state_session.identity
+        if self.unit.weapon and identity is not None and (child := self.weapons.get(identity[1])):
+            child_unit = child.unit
+            if fx_visuals.CRATER_INDEX in states:
+                child_unit = replace(child_unit, crater=None)
+            if fx_visuals.DECAL_INDEX in states:
+                child_unit = replace(child_unit, ground_decal_id=-1, decal_size=(0.0, 0.0))
+            self.weapons[child.weapon_id] = replace(child, unit=child_unit)
         gone = set(indexes)
         for index in reversed(indexes):
             del self.document.items[index]
@@ -1264,18 +1303,21 @@ class DestructionFxPanel(QWidget):
         position = {old: new for new, old in enumerate(
             i for i in range(total) if i not in gone)}
         self.hidden_items = {position[i] if i >= 0 else i
-                             for i in self.hidden_items if i < 0 or i in position}
-        self.highlight = position.get(self.highlight)
+                             for i in self.hidden_items - states if i < 0 or i in position}
+        if self.highlight not in self.visible_state_indexes():
+            self.highlight = position.get(self.highlight)
         self.timeline.highlight = self.highlight
         if drawer is not None:
             if drawer.index in position:
                 drawer.index = position[drawer.index]
-            else:
+            elif drawer.index not in self.visible_state_indexes():
                 drawer.reset()
         self._fill_list()
         self._rebuild_simulation()
         self.update_text_status()
         self.sourceSaved.emit(paths)
+        if states and not self.has_unsaved_text:
+            self.visualsSaved.emit()
         self.documentEdited.emit()
         return True
 
@@ -1379,9 +1421,13 @@ class DestructionFxPanel(QWidget):
     def _rebuild_simulation(self) -> None:
         enabled = set(range(len(self.document.items))) - self.hidden_items
         shot = self.shot if self.context == fx.CONTEXT_WEAPON else None
+        if self.kamikaze and self.unit.weapon:
+            shot = None
+            trigger = fx.KAMIKAZE_PAYLOAD_TRIGGER
+        else:
+            trigger = fx.WEAPON_HIT_GROUND if shot else self.current_trigger
         self.simulation = fx.PreviewSimulation(
-            self.document, self.context,
-            fx.WEAPON_HIT_GROUND if shot else self.current_trigger, seed=self.seed,
+            self.document, self.context, trigger, seed=self.seed,
             origin=self.origin, ground_y=self.ground_y,
             unit_radius=self.unit_radius, legacy_catalog=self.catalog,
             enabled=enabled, unit=self.unit, weapons=self.weapons,

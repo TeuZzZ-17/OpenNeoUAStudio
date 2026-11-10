@@ -2569,6 +2569,7 @@ class UnitPhases:
 
 # Preview events of the Visuals & FX tab.
 SEQUENCE_TRIGGER = "sequence"          # vehicle: full death
+KAMIKAZE_PAYLOAD_TRIGGER = "kamikaze_payload"
 WEAPON_HIT_UNIT = "hit_unit"           # weapon: detonate on a unit
 WEAPON_HIT_GROUND = "hit_ground"       # weapon: impact_world on terrain
 SEQUENCE_PREROLL_MS = 120.0
@@ -2742,6 +2743,11 @@ class PreviewSimulation:
         self._cluster_projectiles = 0
         if trigger == SEQUENCE_TRIGGER and context == CONTEXT_VEHICLE:
             self._build_vehicle_sequence()
+        elif trigger == KAMIKAZE_PAYLOAD_TRIGGER and context == CONTEXT_WEAPON:
+            self._build_event("detonate", 0.0, self.origin)
+            self._build_event("death", 0.0, self.origin)
+            self._build_event("impact_world", 0.0, self.origin)
+            self._build_event("megadeth", 0.0, self.origin)
         elif trigger in (WEAPON_HIT_UNIT, WEAPON_HIT_GROUND) \
                 and context == CONTEXT_WEAPON:
             self._build_weapon_sequence(trigger == WEAPON_HIT_GROUND)

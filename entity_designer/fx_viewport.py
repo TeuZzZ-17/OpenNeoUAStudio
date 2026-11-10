@@ -1084,6 +1084,8 @@ class FxPreviewViewportMixin:
     # Dug ground: cells per side of the drawn grid and pixels of its texture.
     CRATER_CELLS = 40
     CRATER_TEXTURE = 512
+    # Depth below the ground where the lip of the opening ends (world units).
+    CRATER_LIP = 2.0
     # Neutral ground colour of the preview (Studio has no level terrain).
     CRATER_GROUND = (96, 108, 116)
 
@@ -1119,7 +1121,7 @@ class FxPreviewViewportMixin:
         if self._fx_crater_cache is None or self._fx_crater_cache[0] != key:
             self._fx_crater_cache = (key, *self._crater_patch(
                 shapes, low_x, low_z, side, ground_y, covered))
-        _key, texture, heights, empty = self._fx_crater_cache
+        _key, texture, heights, empty, opening, raised = self._fx_crater_cache
 
         # Drawing the cells is the slow part (one transform each): a frame with
         # the same craters, decals and camera shows the layer of the last one.
@@ -1135,106 +1137,115 @@ class FxPreviewViewportMixin:
         cells = self.CRATER_CELLS
         step = side / cells
         pixels = self.CRATER_TEXTURE / cells
-        quads = []
-
-        hidden = self._crater_hidden_cells(shapes, low_x, low_z, step, ground_y, camera)
-        for i in range(cells):
-            for k in range(cells):
-                world = [(low_x + (i + a) * step, heights[k + b, i + a], low_z + (k + b) * step)
-                         for a, b in ((0, 0), (1, 0), (1, 1), (0, 1))]
-                camera_points = [self._camera_vertex(point, camera) for point in world]
-                if not all(self._camera_point_is_projectable(point) for point in camera_points):
-                    continue
-                if hidden[k, i] or empty[k, i]:
-                    continue
-                screen = [self._project(point, target, camera) for point in camera_points]
-                # Order of a height field seen from above: by the cell's place on
-                # the flat ground, far to near (its dug depth would mix the walls).
-                flat = self._camera_vertex(
-                    (low_x + (i + 0.5) * step, ground_y, low_z + (k + 0.5) * step), camera)
-                quads.append((flat[2], i, k, screen))
-        quads.sort(key=lambda entry: entry[0])     # Far cells first.
-        # The cells go to a layer of their own where each one replaces what it
-        # covers: overlapping edges then never add up their transparency.
         width = max(1, int(math.ceil(target.width())))
         height = max(1, int(math.ceil(target.height())))
-        layer_image = QImage(width, height, QImage.Format.Format_ARGB32_Premultiplied)
-        layer_image.fill(Qt.GlobalColor.transparent)
-        layer = QPainter(layer_image)
-        layer.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform, True)
-        layer.setCompositionMode(QPainter.CompositionMode.CompositionMode_Source)
         base = QTransform.fromTranslate(-target.left(), -target.top())
-        painter_for_cells = layer
-        for _depth, i, k, screen in quads:
-            source = QRectF(i * pixels, k * pixels, pixels, pixels)
-            corners = [source.topLeft(), source.topRight(), source.bottomRight(), source.bottomLeft()]
-            transform = QTransform()
-            # Half a pixel wider on screen, so neighbours leave no seam; the
-            # texture side stays exact, so the mapping never runs to infinity.
-            wide = _grown(screen, 0.5)
-            if _convex(wide) and QTransform.quadToQuad(QPolygonF(corners), QPolygonF(wide), transform):
-                painter_for_cells.setTransform(transform * base)
-                painter_for_cells.drawImage(source, texture, source)
-                continue
-            # A cell seen edge-on folds over itself on screen: two triangles,
-            # each mapped exactly and cut to its own shape.
-            for a, b, c in ((0, 1, 2), (0, 2, 3)):
-                affine = _affine((corners[a], corners[b], corners[c]), (screen[a], screen[b], screen[c]))
-                if affine is None:
+
+        def draw(image, grid, chosen):
+            """A layer with the chosen cells of `image`, on a grid of heights.
+
+            Each cell replaces what it covers: overlapping edges then never
+            add up their transparency.
+            """
+
+            quads = []
+            for i in range(cells):
+                for k in range(cells):
+                    if not chosen[k, i]:
+                        continue
+                    world = [(low_x + (i + a) * step, grid[k + b, i + a], low_z + (k + b) * step)
+                             for a, b in ((0, 0), (1, 0), (1, 1), (0, 1))]
+                    camera_points = [self._camera_vertex(point, camera) for point in world]
+                    if not all(self._camera_point_is_projectable(point) for point in camera_points):
+                        continue
+                    screen = [self._project(point, target, camera) for point in camera_points]
+                    # Order of a height field seen from above: by the cell's place on
+                    # the flat ground, far to near (its dug depth would mix the walls).
+                    flat = self._camera_vertex(
+                        (low_x + (i + 0.5) * step, ground_y, low_z + (k + 0.5) * step), camera)
+                    quads.append((flat[2], i, k, screen))
+            quads.sort(key=lambda entry: entry[0])     # Far cells first.
+            layer_image = QImage(width, height, QImage.Format.Format_ARGB32_Premultiplied)
+            layer_image.fill(Qt.GlobalColor.transparent)
+            layer = QPainter(layer_image)
+            layer.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform, True)
+            layer.setCompositionMode(QPainter.CompositionMode.CompositionMode_Source)
+            for _depth, i, k, screen in quads:
+                source = QRectF(i * pixels, k * pixels, pixels, pixels)
+                corners = [source.topLeft(), source.topRight(), source.bottomRight(), source.bottomLeft()]
+                transform = QTransform()
+                # Half a pixel wider on screen, so neighbours leave no seam; the
+                # texture side stays exact, so the mapping never runs to infinity.
+                wide = _grown(screen, 0.5)
+                if _convex(wide) and QTransform.quadToQuad(QPolygonF(corners), QPolygonF(wide), transform):
+                    layer.setTransform(transform * base)
+                    layer.drawImage(source, image, source)
                     continue
-                painter_for_cells.setTransform(affine * base)
-                path = QPainterPath()
-                path.addPolygon(QPolygonF([corners[a], corners[b], corners[c]]))
-                path.closeSubpath()
-                painter_for_cells.save()
-                painter_for_cells.setClipPath(path)
-                painter_for_cells.drawImage(source, texture, source)
-                painter_for_cells.restore()
-        layer.end()
+                # A cell seen edge-on folds over itself on screen: two triangles,
+                # each mapped exactly and cut to its own shape.
+                for a, b, c in ((0, 1, 2), (0, 2, 3)):
+                    affine = _affine((corners[a], corners[b], corners[c]), (screen[a], screen[b], screen[c]))
+                    if affine is None:
+                        continue
+                    layer.setTransform(affine * base)
+                    path = QPainterPath()
+                    path.addPolygon(QPolygonF([corners[a], corners[b], corners[c]]))
+                    path.closeSubpath()
+                    layer.save()
+                    layer.setClipPath(path)
+                    layer.drawImage(source, image, source)
+                    layer.restore()
+            layer.end()
+            return layer_image
+
+        drop = heights - ground_y           # World Y points down: positive = dug.
+        corners_low = _np.maximum.reduce([drop[:-1, :-1], drop[1:, :-1], drop[:-1, 1:], drop[1:, 1:]])
+        corners_high = _np.minimum.reduce([drop[:-1, :-1], drop[1:, :-1], drop[:-1, 1:], drop[1:, 1:]])
+        if not self._crater_seen_from_above(camera, ground_y):
+            # From under the ground (the game never shows this): the whole bowl.
+            layer_image = draw(texture, heights, ~empty)
+        else:
+            # The preview ground plane is see-through, the game's ground is not:
+            # what is dug below the ground shows only through the crater's
+            # opening. So the dug part is cut with the outline of the opening as
+            # it lies on the ground (a smooth line, whatever the cells are),
+            # and what stands at ground level or above goes over it, uncut.
+            flat = _np.full_like(heights, ground_y)
+            dug = corners_low > 0.0
+            layer_image = draw(texture, heights, dug & ~empty)
+            through = draw(opening, flat, dug)
+            over = draw(raised, heights, (corners_high < self.CRATER_LIP) & ~empty)
+            layer = QPainter(layer_image)
+            layer.setCompositionMode(QPainter.CompositionMode.CompositionMode_DestinationIn)
+            layer.drawImage(0, 0, through)
+            layer.setCompositionMode(QPainter.CompositionMode.CompositionMode_SourceOver)
+            layer.drawImage(0, 0, over)
+            layer.end()
+        self._fx_crater_layer = (view_key, layer_image)
+        painter.drawImage(QPointF(target.left(), target.top()), layer_image)
+        return {id(item) for item in covered}
         self._fx_crater_layer = (view_key, layer_image)
         painter.drawImage(QPointF(target.left(), target.top()), layer_image)
         return {id(item) for item in covered}
 
-    def _crater_hidden_cells(self, shapes, low_x, low_z, step, ground_y, camera):
-        """Cells below the ground that the intact ground in front of them hides.
+    @staticmethod
+    def _crater_seen_from_above(camera, ground_y) -> bool:
+        """Whether the eye is above the ground the craters were dug in."""
 
-        The preview ground plane is see-through, the game's ground is not: a dug
-        point stays visible only when the line of sight enters the ground
-        through the crater's opening. A cell is dropped only when all four of
-        its corners are hidden: at the near lip some corners pass the test and
-        the cell must stay, or the see-through plane shows through the gap.
-        """
-
-        cells = self.CRATER_CELLS
-        points = low_x + _np.arange(cells + 1) * step, low_z + _np.arange(cells + 1) * step
-        xs, zs = _np.meshgrid(*points)
-        ys = ground_y + crater_preview.sample(shapes, xs, zs)[0]
-        none = _np.zeros((cells, cells), bool)
-        # The eye in world space: camera space (0, 0, 4) taken back through _camera_vertex.
         if not all(key in camera for key in ("center", "scale", "yaw", "pitch")) or not camera["scale"]:
-            return none
-        yaw, pitch = math.radians(camera["yaw"]), math.radians(camera["pitch"])
-        cam_y, cam_z = 0.0, 4.0
-        y = cam_y * math.cos(pitch) + cam_z * math.sin(pitch)
-        xz_z = -cam_y * math.sin(pitch) + cam_z * math.cos(pitch)
-        x = -xz_z * math.sin(yaw)
-        z = xz_z * math.cos(yaw)
-        centre, scale = camera["center"], camera["scale"]
-        eye = (x / scale + centre[0], -y / scale + centre[1], z / scale + centre[2])
-        below = ys > ground_y + 0.5
-        if eye[1] >= ground_y or not _np.any(below):
-            return none
-        t = (ground_y - eye[1]) / _np.maximum(ys - eye[1], 1e-6)
-        enter_x = eye[0] + t * (xs - eye[0])
-        enter_z = eye[2] + t * (zs - eye[2])
-        opening = crater_preview.sample(shapes, enter_x, enter_z)[0] > 0.5
-        point_hidden = below & ~opening
-        return (point_hidden[:-1, :-1] & point_hidden[1:, :-1]
-                & point_hidden[:-1, 1:] & point_hidden[1:, 1:])
+            return True
+        # The eye in world space: camera space (0, 0, 4) taken back through _camera_vertex.
+        pitch = math.radians(camera["pitch"])
+        eye_y = -(4.0 * math.sin(pitch)) / camera["scale"] + camera["center"][1]
+        return eye_y < ground_y
 
     def _crater_patch(self, shapes, low_x, low_z, side, ground_y, decals):
-        """(texture seen from above, heights of the grid points, cells with
-        nothing to draw) of the dug square."""
+        """What the dug square is drawn with.
+
+        (texture seen from above, heights of the grid points, cells with nothing
+        to draw, the opening of the craters as a mask, the texture without what
+        lies inside the opening).
+        """
 
         size = self.CRATER_TEXTURE
         cells = self.CRATER_CELLS
@@ -1286,7 +1297,22 @@ class FxPreviewViewportMixin:
         empty = _np.ones((cells, cells), bool)
         for shape in shapes:
             empty &= _np.hypot(cx - shape.x, cz - shape.z) > crater_preview.reach(shape) + step * 0.75
-        return texture, heights, empty
+        # Where the ground is dug below its level (the opening one looks into),
+        # and the same texture with that part taken out: a little of both along
+        # the lip, so no line of the see-through plane shows between them.
+        lip = self.CRATER_LIP
+        mask = _np.zeros((size, size, 4), _np.uint8)
+        mask[..., :3] = 255
+        mask[..., 3] = (_np.clip(drop / (lip * 0.25), 0.0, 1.0) * 255.0).astype(_np.uint8)
+        opening = QImage(mask.tobytes(), size, size, size * 4, QImage.Format.Format_RGBA8888).copy()
+        mask[..., 3] = (_np.clip((drop - lip * 0.25) / (lip * 0.75), 0.0, 1.0) * 255.0).astype(_np.uint8)
+        inside = QImage(mask.tobytes(), size, size, size * 4, QImage.Format.Format_RGBA8888).copy()
+        raised = texture.copy()
+        cutter = QPainter(raised)
+        cutter.setCompositionMode(QPainter.CompositionMode.CompositionMode_DestinationOut)
+        cutter.drawImage(0, 0, inside)
+        cutter.end()
+        return texture, heights, empty, opening, raised
 
     def _draw_fx_decals(self, painter, target, camera, decals) -> None:
         for item in decals:

@@ -312,6 +312,47 @@ def test_same_view_reuses_the_drawn_crater_and_a_new_view_redraws_it(app):
         viewport.close()
 
 
+def test_dug_ground_never_shows_below_the_ground_line(app):
+    """Camera almost level with the ground: the bowl is under the ground, which
+    hides it. Nothing of it may hang below the ground line (no saw teeth)."""
+    from PySide6.QtGui import QColor, QImage, QPainter
+    from entity_designer.viewport import CollisionViewport
+
+    unit = _weapon({"crater_radius": "300", "crater_depth": "150", "crater_rim": "0"})
+    simulation = fx.PreviewSimulation(fx.FxDocument(), fx.CONTEXT_WEAPON,
+                                      fx.WEAPON_HIT_GROUND, unit=unit)
+    craters = _craters(simulation, fx.WEAPON_FLIGHT_MS + 50)
+    viewport = CollisionViewport()
+    viewport.resize(900, 520)
+    try:
+        for pitch, yaw in ((1.5, 20), (0.5, 300), (3, 140)):
+            viewport.set_fx_preview(active=True, items=craters, show_unit=False,
+                                    time_ms=1500.0, weapon_context=True)
+            viewport._yaw, viewport._pitch, viewport._scale = float(yaw), float(pitch), 1.0 / 420
+            viewport._center = tuple(craters[0].position)
+            target, camera = viewport.rect().toRectF(), viewport._camera_state()
+            image = QImage(900, 520, QImage.Format.Format_RGBA8888)
+            image.fill(QColor(255, 0, 255))
+            painter = QPainter(image)
+            viewport._draw_fx_craters(painter, target, camera, craters, [])
+            painter.end()
+            raw = np.frombuffer(image.constBits(), np.uint8).reshape(
+                520, image.bytesPerLine() // 4, 4)[:, :900, :3].astype(int)
+            drawn = ~((abs(raw[..., 0] - 255) < 12) & (raw[..., 1] < 12) & (abs(raw[..., 2] - 255) < 12))
+            assert drawn.any(), (pitch, yaw)
+            # With no rim nothing stands above the ground: all that is drawn lies
+            # inside the flat square the craters were dug in, as seen on screen.
+            x, y, z = craters[0].position
+            reach = cp.reach(cp.Shape(x, y, z, *craters[0].scale))
+            corners = [viewport._fx_project((x + a * reach, y, z + b * reach), target, camera)
+                       for a, b in ((-1, -1), (1, -1), (1, 1), (-1, 1))]
+            lowest = max(point.y() for point in corners)
+            rows = np.nonzero(drawn.any(axis=1))[0]
+            assert rows.max() <= lowest + 2.0, (pitch, yaw, int(rows.max()), lowest)
+    finally:
+        viewport.close()
+
+
 def test_near_lip_of_a_deep_crater_leaves_no_gap(app):
     """Low camera over a deep crater: no see-through slivers at the near lip."""
     from PySide6.QtGui import QColor, QImage, QPainter
