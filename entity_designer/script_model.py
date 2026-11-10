@@ -56,6 +56,7 @@ OPENNEOUA = "openneoua"
 
 
 VEHICLE = "vehicle"  # target category only
+BUILDING = "building"
 
 
 WEAPON = "weapon"    # target category only
@@ -136,6 +137,7 @@ def _clamp_gun_angle(field: str, value: int) -> int:
 
 SCRIPT_TYPES = (
     "new_vehicle", "modify_vehicle", "new_weapon", "modify_weapon",
+    "new_building", "modify_building",
 )
 
 
@@ -195,6 +197,8 @@ _WEAPON_TAB_GROUPS = (
 def _tab_applies(kind: str, group: str) -> bool:
     """Whether a tab writes into this kind of definition (weapon or vehicle)."""
 
+    if "building" in kind:
+        return group in {_SCRIPT_TAB_GUN, _SCRIPT_TAB_ICON, _SCRIPT_TAB_BRIEFING}
     if "weapon" in kind:
         return group in _WEAPON_TAB_GROUPS
     return group != _SCRIPT_TAB_FIRE_AREA
@@ -216,7 +220,7 @@ _RADIUS_LOG_MAX = 6.0
 
 
 _HEADER_RE = re.compile(
-    r"^\s*(new_vehicle|modify_vehicle|new_weapon|modify_weapon)"
+    r"^\s*((?:new|modify)_(?:vehicle|weapon|building))"
     r"\s+(-?\d+)\b", re.IGNORECASE,
 )
 
@@ -526,6 +530,7 @@ class GunPoint:
     gun_type: int = 0
     name: str = ""
     icon: str = ""
+    loaded_position: tuple[float, float, float] | None = field(default=None, compare=False)
 
     @property
     def position(self) -> tuple[float, float, float]:
@@ -539,7 +544,7 @@ class GunPoint:
         return GunPoint(
             self.scheme, self.x, self.y, self.z,
             self.dir_x, self.dir_y, self.dir_z,
-            self.gun_type, self.name, self.icon,
+            self.gun_type, self.name, self.icon, self.loaded_position,
         )
 
 
@@ -673,7 +678,7 @@ class CollisionProject:
             tuple((
                 point.scheme, point.x, point.y, point.z,
                 point.dir_x, point.dir_y, point.dir_z, point.gun_type,
-                point.name, point.icon,
+                point.name, point.icon, point.loaded_position,
             ) for point in self.gun_points),
             tuple((
                 vehicle_id, limits.enabled, limits.side, limits.up,
@@ -831,6 +836,21 @@ def find_script_blocks(text: str) -> list[ScriptBlock]:
             kind, object_id, index, end_line, name, complete))
         index = cursor + 1 if complete else len(lines)
     return blocks
+
+
+def validate_definition_source(text: str, first: int, last: int,
+                               expected: tuple[str, int] | None = None) -> tuple[str, int]:
+    """Ensure a source span is exactly one complete intended definition."""
+    block = next((item for item in find_script_blocks(text)
+                  if item.complete and item.start_line == first and item.end_line == last), None)
+    if block is None:
+        raise ValueError("The definition's source position is stale. Reload the definition before saving.")
+    identity = (block.kind.split("_", 1)[-1], block.object_id)
+    if expected is not None:
+        wanted = (expected[0].split("_", 1)[-1], expected[1])
+        if identity != wanted:
+            raise ValueError("The source points to a different definition. Reload before saving.")
+    return identity
 
 
 def _parameter_rows(lines: list[str], block: ScriptBlock):
@@ -1321,13 +1341,13 @@ def import_briefing_xyz_block(text: str, block: ScriptBlock) -> tuple[bool, floa
 
 
 def briefing_size_data_lines(project: CollisionProject) -> list[str]:
-    if project.target_category != VEHICLE or not project.briefing_size_enabled:
+    if project.target_category == WEAPON or not project.briefing_size_enabled:
         return []
     return [f"briefing_size = {int(round(project.briefing_size))}"]
 
 
 def briefing_xyz_data_lines(project: CollisionProject) -> list[str]:
-    if project.target_category != VEHICLE or not project.briefing_xyz_enabled:
+    if project.target_category == WEAPON or not project.briefing_xyz_enabled:
         return []
     return [f"briefing_xyz = {project.briefing_x:g}|{project.briefing_y:g}|{project.briefing_z:g}"]
 
@@ -1373,7 +1393,7 @@ def import_type_icon_block(text: str, block: ScriptBlock) -> int:
 
 
 def type_icon_data_lines(project: CollisionProject) -> list[str]:
-    if project.target_category != VEHICLE or not project.type_icon:
+    if project.target_category == WEAPON or not project.type_icon:
         return []
     return [f"type_icon = {glyph_token(project.type_icon)}"]
 
@@ -1465,6 +1485,17 @@ _GUN_POINT_KEYS = {
 }
 
 
+_BUILDING_GUN_KEYS = {"sbact_act", "sbact_vehicle"} | {
+    f"sbact_{field}_{axis}" for field in ("pos", "dir") for axis in "xyz"
+}
+
+
+def _script_tab_keys(kind: str, group: str) -> set[str]:
+    if group == _SCRIPT_TAB_GUN and "building" in kind:
+        return _BUILDING_GUN_KEYS
+    return _SCRIPT_TAB_KEYS[group]
+
+
 _SCRIPT_TAB_KEYS = {
     _SCRIPT_TAB_BRIEFING: {"briefing_size", "briefing_xyz"},
     _SCRIPT_TAB_COLLISION: {
@@ -1519,6 +1550,7 @@ _MANAGED_SCRIPT_FAMILIES = (
         "cockpit view",
         frozenset({"cockpit_camera_offset_xyz"}),
         frozenset({"cockpit camera offset", "cockpit view"})),
+    _ManagedScriptFamily("building gun points", frozenset(_BUILDING_GUN_KEYS)),
     _ManagedScriptFamily("briefing size", frozenset({"briefing_size", "briefing_xyz"})),
     _ManagedScriptFamily(
         "fire area", frozenset(FIRE_AREA_KEYS), frozenset({"fire area"})),
@@ -1593,6 +1625,21 @@ def gun_point_families_in_block(
 
 
 def import_gun_points_block(
+        text: str, block: ScriptBlock) -> tuple[bool, list[GunPoint], str]:
+    if "building" not in block.kind:
+        return _import_vehicle_gun_points_block(text, block)
+    from map_editor.core.building_defs import parse_building_text
+
+    source = "\n".join(text.splitlines()[block.start_line:block.end_line + 1])
+    mounts = parse_building_text(source)[block.object_id].guns
+    points = [GunPoint("sbact", *mount.pos, *mount.direction, mount.vehicle)
+              for mount in mounts]
+    enabled = any(key in _BUILDING_GUN_KEYS
+                  for _, key, _, _ in _top_level_assignment_rows(text, block))
+    return enabled, points, ""
+
+
+def _import_vehicle_gun_points_block(
         text: str, block: ScriptBlock,
 ) -> tuple[bool, list[GunPoint], str]:
     """Read Host Station and generic OpenNeoUA vehicle gun mounts.
@@ -1796,7 +1843,26 @@ def gun_direction_index(dir_x: float, dir_z: float) -> int | None:
     return int(math.floor(angle / (math.pi / 4.0) + 0.5)) % 8
 
 
+def _building_gun_data_lines(points: list[GunPoint]) -> list[str]:
+    lines = []
+    for index, point in enumerate(points):
+        lines.extend([f"sbact_act = {index}", f"sbact_vehicle = {point.gun_type}"])
+        for field, values in (("pos", point.position), ("dir", point.direction)):
+            lines.extend(f"sbact_{field}_{axis} = {_number(value)}"
+                         for axis, value in zip("xyz", values))
+    # A modify_building block inherits earlier slots. Terminate the mounted
+    # list explicitly so shortening it cannot bring old slots back.
+    lines.extend([f"sbact_act = {len(points)}", "sbact_vehicle = 0"])
+    return lines
+
+
 def gun_point_data_lines(project: CollisionProject) -> list[str]:
+    if project.target_category == BUILDING:
+        return _building_gun_data_lines(project.gun_points)
+    return _vehicle_gun_data_lines(project)
+
+
+def _vehicle_gun_data_lines(project: CollisionProject) -> list[str]:
     """Render gun mounts without changing their script family."""
 
     lines: list[str] = []
@@ -1877,7 +1943,7 @@ def collision_data_lines(project: CollisionProject) -> list[str]:
             f"fire_z = {_number(project.fire_z)}",
             f"num_weapons = {_num_weapons_text(project)}",
         ])
-    if project.target_category == VEHICLE and project.gun_points_enabled:
+    if project.target_category != WEAPON and project.gun_points_enabled:
         gun_lines = gun_point_data_lines(project)
         if gun_lines:
             if lines:
@@ -2044,17 +2110,24 @@ def _script_tab_data_lines(
     if group == _SCRIPT_TAB_FIRE:
         return _fire_tab_data_lines(project)
     if group == _SCRIPT_TAB_GUN:
-        if project.target_category != VEHICLE or not project.gun_points_enabled:
+        if project.target_category == WEAPON or not project.gun_points_enabled:
             return []
         return gun_point_data_lines(project)
     if group == _SCRIPT_TAB_COCKPIT:
         return cockpit_camera_data_lines(project)
     if group == _SCRIPT_TAB_BRIEFING:
-        return briefing_size_data_lines(project) + briefing_xyz_data_lines(project)
+        size = briefing_size_data_lines(project)
+        position = briefing_xyz_data_lines(project)
+        if project.target_category == BUILDING:
+            return (size or ["briefing_size = 0"]) + (position or ["briefing_xyz = 0|0|0"])
+        return size + position
     if group == _SCRIPT_TAB_FIRE_AREA:
         return fire_area_data_lines(project)
     if group == _SCRIPT_TAB_ICON:
-        return type_icon_data_lines(project)
+        icon = type_icon_data_lines(project)
+        if project.target_category == BUILDING and not icon:
+            return ["type_icon = A"]
+        return icon
     if group == _SCRIPT_TAB_WIREFRAME:
         return wireframe_data_lines(project)
     raise CollisionScriptError(f"Gruppo script sconosciuto: {group}")
@@ -2117,7 +2190,7 @@ def _validate_editable_tab_lines(
         group: str, lines: list[str], kind: str, object_id: int) -> None:
     """Reject unsupported code before an editable overwrite is applied."""
 
-    allowed = _SCRIPT_TAB_KEYS[group]
+    allowed = _script_tab_keys(kind, group)
     for line in lines:
         code = _active_code(line)
         if not code:
@@ -2147,6 +2220,19 @@ def _validate_editable_tab_lines(
     elif group == _SCRIPT_TAB_FIRE:
         import_fire_points_block(text, block)
     elif group == _SCRIPT_TAB_GUN:
+        if "building" in kind:
+            for _, key, raw, _ in _top_level_assignment_rows(text, block):
+                if key in {"sbact_act", "sbact_vehicle"}:
+                    maximum = 65535 if key == "sbact_act" else 255
+                    if not 0 <= _script_integer(raw, key) <= maximum:
+                        raise CollisionScriptError(f"{key} fuori intervallo: {raw}")
+                else:
+                    try:
+                        value = float(raw)
+                    except ValueError:
+                        value = math.nan
+                    if not math.isfinite(value):
+                        raise CollisionScriptError(f"{key} non numerico: {raw}")
         import_gun_points_block(text, block)
     elif group == _SCRIPT_TAB_COCKPIT:
         import_cockpit_camera_block(text, block)
@@ -2171,6 +2257,8 @@ def _resolve_patch_target_block(
         raise CollisionScriptError(f"Target {kind} {object_id} non trovato.")
     if len(matches) == 1:
         block = matches[0]
+    elif kind == "modify_building":
+        block = matches[-1]
     elif turret and kind == "modify_vehicle":
         authored = [
             candidate for candidate in matches
@@ -2387,7 +2475,9 @@ def _patch_top_level_keys(
 
 def apply_editable_overwrite_preview(
         source_text: str, patch_text: str,
-        expected_kind: str, expected_id: int,
+        expected_kind: str, expected_id: int, *,
+        turret_files: dict[tuple[str, int], Path] | None = None,
+        related_texts: dict[Path, str] | None = None,
 ) -> tuple[str, set[str]]:
     """Apply the user-edited overwrite patch to the original script text."""
 
@@ -2467,7 +2557,7 @@ def apply_editable_overwrite_preview(
             target = _resolve_patch_target_block(
                 updated, expected_kind, expected_id)
             updated = _patch_top_level_keys(
-                updated, target, _SCRIPT_TAB_KEYS[group], replacement)
+                updated, target, _script_tab_keys(expected_kind, group), replacement)
             selected_groups.add(group)
 
     for block in patch_blocks:
@@ -2499,10 +2589,16 @@ def apply_editable_overwrite_preview(
             if value < 0:
                 raise CollisionScriptError(
                     f"Valore negativo non valido per {key}: {raw}")
+        path = (turret_files or {}).get((block.kind, block.object_id))
+        destination = related_texts[path] if path is not None else updated
         target = _resolve_patch_target_block(
-            updated, block.kind, block.object_id, turret=True)
-        updated = _patch_top_level_keys(
-            updated, target, _TURRET_LIMIT_KEY_SET, replacement)
+            destination, block.kind, block.object_id, turret=True)
+        destination = _patch_top_level_keys(
+            destination, target, _TURRET_LIMIT_KEY_SET, replacement)
+        if path is None:
+            updated = destination
+        else:
+            related_texts[path] = destination
         selected_groups.add(_SCRIPT_TAB_GUN)
 
     return updated, selected_groups
@@ -2525,10 +2621,10 @@ def plan_script_update(
     ]
     if not matches:
         raise CollisionScriptError(f"Target {kind} {object_id} non trovato.")
-    if len(matches) > 1:
+    if len(matches) > 1 and kind != "modify_building":
         raise CollisionScriptError(
             f"Target ambiguo: {len(matches)} blocchi {kind} {object_id}.")
-    block = matches[0]
+    block = matches[-1]
     if not block.complete:
         raise CollisionScriptError(
             f"Parsing incompleto: manca end per {kind} {object_id}.")
@@ -2546,7 +2642,7 @@ def plan_script_update(
     cockpit_rows = [
         row for row in rows if row[1] == "cockpit_camera_offset_xyz"
     ]
-    gun_rows = [row for row in rows if row[1] in _GUN_POINT_KEYS]
+    gun_rows = [row for row in rows if row[1] in _script_tab_keys(kind, _SCRIPT_TAB_GUN)]
     coll_rows = [row for row in rows if row[1].startswith("coll_")]
     shape_rows = [row for row in rows if row[1] == "collision_shape"]
     indent = next(
@@ -2557,7 +2653,12 @@ def plan_script_update(
     delete: set[int] = set()
     insert_before_end: list[str] = []
 
-    if replace_all_managed:
+    if "building" in kind and project.target_category != BUILDING:
+        raise CollisionScriptError("Load a building before editing a building definition.")
+    if project.target_category == BUILDING and "building" not in kind:
+        raise CollisionScriptError("Select a building definition.")
+
+    if replace_all_managed or "building" in kind:
         # The loaded-script workflow treats each editor family as canonical,
         # but each family keeps its own original position in the target block.
         # num_weapons is not exclusively a Fire Point parameter. If the source
@@ -2572,7 +2673,7 @@ def plan_script_update(
         for group in _SCRIPT_TAB_ORDER:
             if not _tab_applies(kind, group):
                 continue
-            group_keys = set(_SCRIPT_TAB_KEYS[group])
+            group_keys = set(_script_tab_keys(kind, group))
             if group == _SCRIPT_TAB_FIRE and preserve_standalone_num_weapons:
                 group_keys.discard("num_weapons")
             target = _resolve_patch_target_block(updated, kind, object_id)
@@ -2625,7 +2726,7 @@ def plan_script_update(
                 f"coll_radius = {_number(sphere.radius)}",
             ])
     replace_group(radius_rows, legacy_lines, "legacy radius")
-    if "vehicle" in kind and (project.briefing_size_enabled or project.briefing_xyz_enabled):
+    if "weapon" not in kind and (project.briefing_size_enabled or project.briefing_xyz_enabled):
         briefing_rows = [row for row in rows if row[1] in {"briefing_size", "briefing_xyz"}]
         replace_group(briefing_rows, briefing_size_data_lines(project) + briefing_xyz_data_lines(project), "briefing size")
     # Overeof is a separate vanilla ground-alignment parameter, not a
@@ -2652,7 +2753,7 @@ def plan_script_update(
             ],
             "fire points",
         )
-    if "vehicle" in kind and project.gun_points_enabled:
+    if ("vehicle" in kind or "building" in kind) and project.gun_points_enabled:
         replace_group(
             gun_rows, gun_point_data_lines(project), "gun points")
     replace_group(coll_rows, compound_lines, "compound collisions")
@@ -2663,7 +2764,7 @@ def plan_script_update(
     ]
     replace_group(shape_rows, shape_lines, "collision shape")
     top_rows = list(_top_level_assignment_rows(text, block))
-    if "vehicle" in kind and project.type_icon:
+    if "weapon" not in kind and project.type_icon:
         replace_group(
             [row for row in top_rows if row[1] == "type_icon"],
             type_icon_data_lines(project), "type icon")
@@ -2765,10 +2866,10 @@ def validate_project(
                 project.cockpit_camera_offset_y,
                 project.cockpit_camera_offset_z)):
             errors.append("Cockpit Camera X/Y/Z devono essere numeri finiti.")
-    if project.target_category == VEHICLE and project.briefing_size_enabled:
+    if project.target_category != WEAPON and project.briefing_size_enabled:
         if not math.isfinite(project.briefing_size) or not 1 <= project.briefing_size <= 10000:
             errors.append("Briefing Model Size deve essere tra 1 e 10000.")
-    if project.target_category == VEHICLE and project.briefing_xyz_enabled:
+    if project.target_category != WEAPON and project.briefing_xyz_enabled:
         if not all(math.isfinite(value) and -100000 <= value <= 100000 for value in (project.briefing_x, project.briefing_y, project.briefing_z)):
             errors.append("Briefing XYZ deve restare tra -100000 e 100000.")
     if project.target_category == VEHICLE and project.fire_points_enabled:
@@ -2781,17 +2882,17 @@ def validate_project(
             errors.append(
                 "Num Weapons deve essere 0, un valore 1-255 o un range "
                 "min~max interamente compreso tra 1 e 255.")
-    if project.target_category == VEHICLE and project.gun_points_enabled:
-        if len(project.gun_points) > 40:
+    if project.target_category != WEAPON and project.gun_points_enabled:
+        if project.target_category == VEHICLE and len(project.gun_points) > 40:
             errors.append(
                 "Gun Points oltre il limite combinato di 20 robo + 20 unit.")
-        family_counts = {"robo": 0, "unit": 0}
+        family_counts = {"sbact": 0} if project.target_category == BUILDING else {"robo": 0, "unit": 0}
         for index, point in enumerate(project.gun_points):
             if point.scheme not in family_counts:
                 errors.append(f"Gun Point {index}: famiglia script non valida.")
                 continue
             family_counts[point.scheme] += 1
-            if family_counts[point.scheme] > 20:
+            if point.scheme != "sbact" and family_counts[point.scheme] > 20:
                 errors.append(
                     f"Gun Point {index}: massimo 20 punti {point.scheme}.")
             if not all(math.isfinite(value) for value in (
@@ -2799,9 +2900,10 @@ def validate_project(
                     point.dir_x, point.dir_y, point.dir_z)):
                 errors.append(
                     f"Gun Point {index}: posizione/direzione non numerica.")
-            if not (0 <= int(point.gun_type) <= 255):
+            minimum_id, maximum_id = (1, 255) if point.scheme == "sbact" else (0, 255)
+            if not (minimum_id <= int(point.gun_type) <= maximum_id):
                 errors.append(
-                    f"Gun Point {index}: gun type deve essere 0..255.")
+                    f"Gun Point {index}: gun type deve essere {minimum_id}..{maximum_id}.")
         for vehicle_id, limits in project.turret_limits.items():
             if not limits.enabled:
                 continue

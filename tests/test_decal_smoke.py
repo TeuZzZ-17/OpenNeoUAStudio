@@ -110,6 +110,7 @@ def test_profile_without_smoke_keys_stays_vanilla():
 
 def test_smoke_keys_are_read_and_known_to_studio():
     spec = _spec(RISE + "    effect_chance = 80\n    effect_active_time = 5000~3000\n"
+                 "    effect_retrigger_interval = 9000~7000\n"
                  "    effect_fade_inout = 100|200\n    effect_count = 30\n"
                  "    effect_size = 16~30\n    effect_growth = 4\n    effect_rise_speed = 10\n"
                  "    effect_puff_time = 4000~7500\n    effect_drift = 5\n    effect_spread = 60\n"
@@ -119,6 +120,7 @@ def test_smoke_keys_are_read_and_known_to_studio():
     assert (smoke.chance, smoke.fade_in, smoke.fade_out) == (80, 100, 200)
     assert smoke.count == (30, 30)                             # a single value is a fixed count
     assert smoke.active_time == (3000, 5000)                     # reversed range is normalized
+    assert smoke.retrigger == (7000, 9000)                       # same rule for the new key
     assert smoke.size == (16.0, 30.0) and smoke.puff_time == (4000, 7500)
     assert (smoke.growth, smoke.rise_speed, smoke.drift, smoke.spread, smoke.intensity) == (4, 10, 5, 60, 120)
     assert smoke.tint == (10, 20, 30, 40)
@@ -207,6 +209,31 @@ def test_short_smoke_is_previewed_to_its_end():
     assert track.end - track.start == pytest.approx(6000)
     assert not track.approximate
     assert not any("Decal smoke lasts" in note for note in simulation.notes)
+
+
+def test_retrigger_restarts_the_smoke_until_the_decal_ends():
+    retriggered = PROFILE.replace("effect_active_time = 60000~90000",
+                                  "effect_active_time = 2000~2000")
+    retriggered = retriggered.replace(
+        "    effect_intensity = 120\n",
+        "    effect_intensity = 120\n    effect_retrigger_interval = 5000~5000\n")
+    simulation = _simulation(retriggered)
+    start = fx.WEAPON_FLIGHT_MS
+    assert [i for i in simulation.items_at(start + 1000) if i.kind == "decal_smoke"]
+    assert not [i for i in simulation.items_at(start + 3000) if i.kind == "decal_smoke"]
+    assert [i for i in simulation.items_at(start + 5500) if i.kind == "decal_smoke"]
+    track = next(t for t in simulation.tracks if t.label.endswith("Decal smoke"))
+    assert track.end - track.start == pytest.approx(fx.SMOKE_PREVIEW_MS)
+    assert track.approximate
+    assert any("restarts every" in note for note in simulation.notes)
+
+
+def test_activation_helper_matches_the_engine_cycle():
+    spec = ds.SmokeSpec(enabled=True, active_time=(2000, 2000), retrigger=(5000, 5000))
+    assert ds.activation(spec, 1, 1000) == (1000, 2000)
+    assert ds.activation(spec, 1, 3000) is None
+    cycle_age, length = ds.activation(spec, 1, 5500)
+    assert cycle_age == 500 and length == 2000
 
 
 def test_no_smoke_items_without_smoke_keys():

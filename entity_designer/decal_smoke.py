@@ -32,8 +32,8 @@ RISE_KEYS = ("effect_fade_inout", "effect_count", "effect_size", "effect_growth"
 
 # Every effect key of a profile; any of them marks the profile as having an effect.
 SMOKE_KEYS = (
-    "effect_mode", "effect_3ds", "effect_active_time", "effect_chance",
-    "effect_spread", "effect_tint",
+    "effect_mode", "effect_3ds", "effect_active_time", "effect_retrigger_interval",
+    "effect_chance", "effect_spread", "effect_tint",
 ) + GROUND_PULSE_KEYS + RISE_KEYS
 
 
@@ -54,6 +54,7 @@ class SmokeSpec:
     mesh_scale: float = 0.1
     chance: int = 100
     active_time: tuple[int, int] = (20000, 25000)
+    retrigger: tuple[int, int] = (0, 0)   # ms between activations; (0, 0) = one activation
     fade_in: int = 3000
     fade_out: int = 20000
     count: tuple[int, int] = (10, 30)     # puffs at once on a decal of radius 50, rolled per decal
@@ -163,6 +164,38 @@ def emitter_count(spec: SmokeSpec, seed: int) -> int:
 def emitter_duration(spec: SmokeSpec, seed: int) -> int:
     return int(_range_from(hash32(seed, 0x53445552, 0),
                            float(spec.active_time[0]), float(spec.active_time[1])))
+
+
+def retrigger_interval(spec: SmokeSpec, seed: int) -> int:
+    """Delay between two activations of the whole effect; 0 means one activation."""
+
+    low, high = spec.retrigger
+    if high <= 0:
+        return 0
+    low = max(0, low)
+    high = max(low, high)
+    if high <= low:
+        return max(200, low)
+    return max(200, int(_range_from(hash32(seed, 0x52545247, 0),
+                                    float(low), float(high))))
+
+
+def activation(spec: SmokeSpec, seed: int, age: float) -> tuple[float, int] | None:
+    """Age inside the current activation and its length, or None while waiting.
+
+    Without a retrigger interval the effect runs once for ``effect_active_time``.
+    With one, every interval starts a new activation of at most that length.
+    """
+
+    active = emitter_duration(spec, seed)
+    if active <= 0 or age < 0:
+        return None
+    retrigger = retrigger_interval(spec, seed)
+    if retrigger <= 0:
+        return (age, active) if age < active else None
+    cycle_age = age % retrigger
+    length = min(active, retrigger)
+    return (cycle_age, length) if cycle_age < length else None
 
 
 def evaluate(spec: SmokeSpec, radius: float, seed: int, count: int,

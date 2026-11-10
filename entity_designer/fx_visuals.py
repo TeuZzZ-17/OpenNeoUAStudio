@@ -16,7 +16,7 @@ from pathlib import Path
 
 from entity_designer.script_model import (
     _GENERIC_PARAM_RE, _top_level_assignment_rows, find_script_blocks,
-    read_script_file, write_script_file,
+    read_script_file, validate_definition_source, write_script_file,
 )
 from studio.exchange.portable import commit_verified_files
 from entity_designer import crater_preview
@@ -56,18 +56,10 @@ def managed_keys() -> set[str]:
 
 
 def block_for_origin(text: str, origin):
-    """The definition of ``text`` that ends where the origin's span ends."""
+    """Find the definition at the validated source header."""
 
-    _path, first, last = origin
-    blocks = find_script_blocks(text)
-    # The span start is stable when effects inside the block are saved; its end is not.
-    for block in blocks:
-        if block.start_line <= first <= block.end_line:
-            return block
-    for block in blocks:
-        if block.start_line <= last <= block.end_line:
-            return block
-    return None
+    _path, first, _last = origin
+    return next((block for block in find_script_blocks(text) if block.start_line == first), None)
 
 
 def read_values(text: str, block) -> dict[str, str]:
@@ -198,7 +190,7 @@ def _insert_position(lines, block, end_line: int, key: str):
     return end_line, "        "
 
 
-def save_values(origins, updates: dict[str, str], snapshots=None) -> Path:
+def save_values(origins, updates: dict[str, str], snapshots=None, expected=None) -> Path:
     """Write ``updates`` into the last script part of the definition and verify it.
 
     ``snapshots`` maps a path to the bytes the editor loaded: a file changed
@@ -217,6 +209,9 @@ def save_values(origins, updates: dict[str, str], snapshots=None) -> Path:
     block = block_for_origin(text, origin)
     if block is None or not block.complete:
         raise ValueError("The definition was not found in its script file.")
+    if expected is not None and (block.kind.split("_", 1)[-1], block.object_id) != (
+            expected[0].split("_", 1)[-1], expected[1]):
+        raise ValueError("The source points to a different definition. Reload before saving.")
     clean = {key: normalize_value(key, value) for key, value in updates.items()}
     patched = patch_values(text, block, clean)
     if patched == text:
@@ -346,8 +341,68 @@ def parse_crater_text(text: str) -> dict[str, str]:
     return updates
 
 
-_PARSERS = {MODEL_INDEX: parse_model_text, DECAL_INDEX: parse_decal_text,
-            CRATER_INDEX: parse_crater_text}
+# A state row registers its keys and parser together. Add uses this same
+# registry to route drafts without hard-coding each type in the editor.
+_ROW_HANDLERS = {
+    MODEL_INDEX: (all_keys, parse_model_text),
+    DECAL_INDEX: (lambda: DECAL_KEYS, parse_decal_text),
+    CRATER_INDEX: (lambda: CRATER_KEYS, parse_crater_text),
+}
+_PARSERS = {index: handler[1] for index, handler in _ROW_HANDLERS.items()}
+
+
+def state_index_for_key(key: str, available) -> int | None:
+    return next((index for index in available
+                 if index in _ROW_HANDLERS and key.casefold() in _ROW_HANDLERS[index][0]()), None)
+
+
+def split_state_text(text: str, available) -> dict[int, str] | None:
+    """Group the lines of a new draft by the state row that owns their keys.
+
+    Returns ``{row index: its lines}`` in order of appearance, or None when the
+    draft has no state key at all. A key that no row of ``available`` owns raises
+    ValueError: state keys cannot share an effect with anything else. Comments
+    and blank lines follow the key line before them.
+    """
+    from entity_designer.destruction_fx import engine_tokens
+
+    groups: dict[int, list[str]] = {}
+    current = None
+    lead: list[str] = []
+    foreign = None
+    for line in text.splitlines():
+        tokens = engine_tokens(line)
+        if tokens is None:
+            (groups[current] if current is not None else lead).append(line)
+            continue
+        owner = state_index_for_key(tokens[0], available)
+        if owner is None:
+            foreign = foreign or tokens[0]
+            continue
+        current = owner
+        groups.setdefault(owner, lead[:] if not groups else []).append(line)
+        lead = []
+    if not groups:
+        return None
+    if foreign:
+        raise ValueError(
+            f"{foreign} cannot share an effect with Model, Ground decal or Crater keys. "
+            "Write each kind in its own effect.")
+    return {index: "\n".join(lines) for index, lines in groups.items()}
+
+
+def merge_new_state_text(index: int, text: str, original: str) -> str:
+    """Preserve existing fields that the new draft does not mention."""
+    from entity_designer.destruction_fx import engine_tokens
+
+    _PARSERS[index](text)
+    current = _PARSERS[index](original)
+    mentioned = {tokens[0].casefold() for line in text.splitlines()
+                 if (tokens := engine_tokens(line))}
+    kept = [f"{key} = {value}" for key, value in current.items()
+            if value and key not in mentioned]
+    separator = "\n" if kept and text and not text.endswith(("\n", "\r")) else ""
+    return text + separator + "\n".join(kept)
 
 
 class StateSession:
@@ -356,17 +411,22 @@ class StateSession:
     The Crater row exists for weapons only (``weapon``).
     """
 
-    def __init__(self, origins, weapon: bool = False) -> None:
+    def __init__(self, origins, weapon: bool = False, expected=None) -> None:
         self.weapon = weapon
         self.origins = [(Path(path), first, last) for path, first, last in origins]
         self.source_error = ""
         self.snapshots: dict[Path, bytes] = {}
-        for path, _first, _last in self.origins:
+        for path, first, last in self.origins:
             try:
                 self.snapshots[path] = path.read_bytes()
-            except OSError as exc:
+                text, _encoding, _bom = read_script_file(path)
+                identity = validate_definition_source(text, first, last, expected)
+                if expected is None:
+                    expected = identity
+            except (OSError, UnicodeError, ValueError) as exc:
                 self.source_error = str(exc)
-        self.values = read_effective_values(self.origins) if self.origins else {}
+        self.identity = expected
+        self.values = read_effective_values(self.origins) if self.origins and not self.source_error else {}
         self.originals = self._texts() if self.origins else {}
         self.drafts = dict(self.originals)
 
@@ -405,7 +465,7 @@ class StateSession:
         updates: dict[str, str] = {}
         for index in indexes:
             updates.update(_PARSERS[index](self.drafts[index]))
-        path = save_values(self.origins, updates, self.snapshots)
+        path = save_values(self.origins, updates, self.snapshots, self.identity)
         self.snapshots[path] = path.read_bytes()
         self.values = read_effective_values(self.origins)
         texts = self._texts()
@@ -414,9 +474,11 @@ class StateSession:
             self.drafts[index] = texts[index]
         return {path}
 
-    def refresh_snapshots(self, paths) -> None:
+    def refresh_snapshots(self, paths, origins=None) -> None:
         """Another save (effect code) changed these files; their keys are still ours."""
 
+        if origins is not None:
+            self.origins = list(origins)
         for path in paths:
             path = Path(path)
             if path in self.snapshots:

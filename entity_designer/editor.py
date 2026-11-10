@@ -108,6 +108,7 @@ from entity_designer.script_model import (
     TurretLimits,
     TYPE_LABELS,
     validate_project,
+    BUILDING,
     VEHICLE,
     VehicleModelReference,
     WEAPON,
@@ -218,6 +219,7 @@ class CollisionEditorWindow(
         self._new_gun_point_scheme = "unit"
         # Reset All returns Gun Points and their referenced turret limits to
         # the source state captured by the last explicit script load/import.
+        self._building_had_mounts = False
         self._loaded_gun_points_enabled = False
         self._loaded_gun_points: list[GunPoint] = []
         self._loaded_unit_gun_default_icon = ""
@@ -680,7 +682,7 @@ class CollisionEditorWindow(
             QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Expanding)
         source_layout = QVBoxLayout(source_panel)
         from studio.ui.browsers import GameObjectBrowser, configure_resource_tree, entity_list_panel
-        self.game_object_browser = GameObjectBrowser(self, kinds=("vehicle", "weapon"))
+        self.game_object_browser = GameObjectBrowser(self)
         self.game_object_browser.selected.connect(self._open_game_object)
         self.game_object_browser.setChanged.connect(self._game_set_changed)
         self.model_search = QLineEdit(self)
@@ -1372,14 +1374,16 @@ class CollisionEditorWindow(
             "Add a real vehicle-side gun mount using the Gun Point type "
             "selected above.")
         self.add_gun_point_button.clicked.connect(self.add_gun_point)
-        self.remove_gun_point_button = QPushButton("Remove")
+        self.remove_gun_point_button = QPushButton("Delete")
         self.remove_gun_point_button.clicked.connect(self.remove_gun_point)
-        self.reset_gun_point_button = QPushButton("Reset Position")
+        self.reset_gun_point_button = QPushButton("Restore Loaded Position")
         self.reset_gun_point_button.setToolTip(
-            "Reset the selected Gun Point position to 0 / 0 / 0 without "
-            "changing its direction, type, name or script family.")
-        self.reset_gun_point_button.clicked.connect(
-            self._reset_gun_point_position)
+            "Restore the selected Gun Point's X/Y/Z as loaded from the script.")
+        self.reset_gun_point_button.clicked.connect(self._reset_gun_point_position)
+        self.zero_gun_point_button = QPushButton("Move to 0 / 0 / 0")
+        self.zero_gun_point_button.setToolTip(
+            "Move the selected Gun Point to the model origin.")
+        self.zero_gun_point_button.clicked.connect(self._zero_gun_point_position)
         self.reset_all_gun_points_button = QPushButton("Reset All")
         self.reset_all_gun_points_button.setToolTip(
             "Restore every Gun Point and all referenced turret angles to the "
@@ -1390,10 +1394,17 @@ class CollisionEditorWindow(
         gun_buttons.addWidget(self.add_gun_point_button, 0, 0)
         gun_buttons.addWidget(self.remove_gun_point_button, 0, 1)
         gun_buttons.addWidget(self.reset_gun_point_button, 1, 0)
-        gun_buttons.addWidget(self.reset_all_gun_points_button, 1, 1)
+        gun_buttons.addWidget(self.zero_gun_point_button, 1, 1)
+        gun_buttons.addWidget(self.reset_all_gun_points_button, 2, 0, 1, 2)
         gun_buttons.setColumnStretch(0, 1)
         gun_buttons.setColumnStretch(1, 1)
         gun_layout.addLayout(gun_buttons)
+        self.show_mounted_flak = QCheckBox("Show Mounted Flak")
+        self.show_mounted_flak.setChecked(True)
+        self.show_mounted_flak.setToolTip(
+            "Show the model mounted at each point. Use Direction or the Dir fields to aim.")
+        self.show_mounted_flak.toggled.connect(self._sync_workspace_overlay_visibility)
+        gun_layout.addWidget(self.show_mounted_flak)
 
         self.gun_family_value = QLabel("No point selected")
         self.gun_family_value.setStyleSheet(
@@ -1407,8 +1418,6 @@ class CollisionEditorWindow(
         # The right pane is now deliberately wider, so Gun Point authoring can
         # stay compact without truncating signed coordinates: X/Y/Z share one
         # row, direction shares a second row, and Vehicle/Name share a third.
-        # Dir Y remains intentionally non-authorable; imported values are
-        # preserved internally and on rewrite.
         gun_fields_grid = QGridLayout()
         self.gun_fields_grid = gun_fields_grid
         gun_fields_grid.setHorizontalSpacing(5)
@@ -1441,13 +1450,17 @@ class CollisionEditorWindow(
             gun_fields_grid.addWidget(spin, 0, field_column)
             gun_fields_grid.setColumnStretch(field_column, 1)
 
-        for pair, axis in enumerate(("X", "Z")):
+        for pair, axis in enumerate(("X", "Z", "Y")):
             label_column = pair * 2
             field_column = label_column + 1
-            gun_fields_grid.addWidget(QLabel(f"Dir {axis}"), 1, label_column)
+            label = QLabel(f"Dir {axis}")
+            gun_fields_grid.addWidget(label, 1, label_column)
+            if axis == "Y":
+                self.gun_dir_y_label = label
             dir_spin = CompactScaleSpinBox()
             dir_spin.setRange(-1.0, 1.0)
             dir_spin.setDecimals(0)
+            dir_spin.setSingleStep(1.0)
             dir_spin.setSingleStep(1.0)
             dir_spin.setKeyboardTracking(True)
             dir_spin.setMinimumWidth(82)
@@ -1455,8 +1468,7 @@ class CollisionEditorWindow(
             dir_spin.setSizePolicy(
                 QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
             dir_spin.setToolTip(
-                f"Gun mount local direction {axis}: canonical values -1, 0 or 1. "
-                "Dir Y is intentionally not authorable in this editor.")
+                f"Gun mount local direction {axis}.")
             dir_field = f"dir_{axis.lower()}"
             dir_spin.valueChanged.connect(
                 lambda value, name=dir_field:
@@ -1506,6 +1518,14 @@ class CollisionEditorWindow(
         self.gun_type_spin.editingFinished.connect(
             lambda: self._finish_vehicle_preview_edit("gun_type"))
         gun_fields_grid.addWidget(self.gun_type_spin, 3, 1)
+        self.sector_flak_combo = QComboBox()
+        self.sector_flak_combo.setToolTip(
+            "This gun point accepts only vehicles with model = gun.")
+        self.sector_flak_combo.setPlaceholderText("Select Flak")
+        self.sector_flak_combo.currentIndexChanged.connect(
+            self._sector_flak_changed)
+        gun_fields_grid.addWidget(self.sector_flak_combo, 3, 1)
+        self.sector_flak_combo.hide()
 
         gun_fields_grid.addWidget(QLabel("Name"), 3, 2)
         self.gun_name_edit = QLineEdit()
@@ -1786,6 +1806,9 @@ class CollisionEditorWindow(
         self.move_strength_spin = QSpinBox()
         self.move_strength_spin.setRange(1, 1_000_000)
         self.move_strength_spin.setValue(1)
+        self._gun_move_strength = 50
+        self._other_move_strength = 1
+        self._move_strength_on_gun_tab = False
         # Leave enough room for the full 1,000,000 range plus the
         # QSpinBox step buttons; the old 58-72 px box clipped typed values.
         self.move_strength_spin.setMinimumWidth(96)
@@ -2205,6 +2228,7 @@ class CollisionEditorWindow(
         self.viewport.play_animation(self.play_button.isChecked())
 
     def _sync_all(self):
+        self._sync_move_strength_context()
         self._selected_sphere_indices()
         self._syncing = True
         blockers = [
@@ -2234,38 +2258,50 @@ class CollisionEditorWindow(
             self.project.model_scale_x, self.project.model_scale_y,
             self.project.model_scale_z)
         vehicle_mode = self.project.target_category == VEHICLE
+        building_mode = self.project.target_category == BUILDING
+        gun_mode = vehicle_mode or (building_mode and self._building_had_mounts)
         fire_count = (len(fire_point_positions(self.project))
                       if (vehicle_mode and self.project.fire_points_enabled)
                       else 0)
         if not (0 <= self._selected_fire_point < fire_count):
             self._selected_fire_point = -1
         gun_count = (len(self.project.gun_points)
-                     if (vehicle_mode and self.project.gun_points_enabled)
+                     if (gun_mode and self.project.gun_points_enabled)
                      else 0)
         if not (0 <= self._selected_gun_point < gun_count):
             self._selected_gun_point = -1
         self.viewport.set_ground_alignment(
             vehicle_mode, self.project.overeof_enabled,
             self.project.overeof)
-        # Weapons keep the tabs that also apply to projectiles.
-        if (not vehicle_mode
+        if (not vehicle_mode and not building_mode
                 and self.properties_tabs.currentIndex()
                 not in (self.collision_tab_index, self.collision_shape_tab_index,
                         self.fx_tab_index, self.wireframe_tab_index,
                         self.fire_area_tab_index)):
             self.properties_tabs.setCurrentIndex(self.collision_tab_index)
-        for index in (
-                self.ground_tab_index,
-                self.fire_points_tab_index, self.gun_points_tab_index,
-                self.cockpit_tab_index, self.briefing_tab_index,
-                self.icon_tab_index):
+        for index in (self.ground_tab_index, self.fire_points_tab_index,
+                      self.cockpit_tab_index):
             self.properties_tabs.setTabEnabled(index, vehicle_mode)
+        for index in (self.briefing_tab_index, self.icon_tab_index):
+            self.properties_tabs.setTabEnabled(index, vehicle_mode or building_mode)
+        self.properties_tabs.setTabEnabled(self.gun_points_tab_index, gun_mode)
         # ai_fire_trigger_* belong to the weapon: the tab is grey once a vehicle
         # definition is loaded. With nothing loaded yet it stays open and empty.
-        vehicle_loaded = vehicle_mode and self._active_script_kind == "new_vehicle"
+        vehicle_loaded = building_mode or (
+            vehicle_mode and self._active_script_kind == "new_vehicle")
         if vehicle_loaded and self.properties_tabs.currentIndex() == self.fire_area_tab_index:
             self.properties_tabs.setCurrentIndex(self.collision_tab_index)
         self.properties_tabs.setTabEnabled(self.fire_area_tab_index, not vehicle_loaded)
+        if building_mode:
+            for index in (self.collision_tab_index, self.collision_shape_tab_index,
+                          self.fx_tab_index, self.wireframe_tab_index):
+                self.properties_tabs.setTabEnabled(index, False)
+            if not self.properties_tabs.isTabEnabled(self.properties_tabs.currentIndex()):
+                self.properties_tabs.setCurrentIndex(self.gun_points_tab_index if gun_mode else self.icon_tab_index)
+        else:
+            for index in (self.collision_tab_index, self.collision_shape_tab_index,
+                          self.fx_tab_index, self.wireframe_tab_index):
+                self.properties_tabs.setTabEnabled(index, True)
         self.properties_tab_strip.refresh()
         self._sync_fire_area()
 
@@ -2388,23 +2424,53 @@ class CollisionEditorWindow(
                 self.num_weapons_spin, self.num_weapons_max_spin):
             widget.setEnabled(fire_controls_enabled)
 
-        self.gun_points_box.setVisible(vehicle_mode)
-        gun = self._selected_gun() if vehicle_mode else None
+        self.gun_points_box.setVisible(gun_mode)
+        gun = self._selected_gun() if gun_mode else None
         displayed_scheme = (
-            gun.scheme if gun is not None and gun.scheme in {"robo", "unit"}
-            else self._new_gun_point_scheme)
+            "sbact" if building_mode else
+            gun.scheme if gun is not None else self._new_gun_point_scheme)
+        building_scheme = self.gun_point_type_combo.findData("sbact")
+        if building_mode and building_scheme < 0:
+            self.gun_point_type_combo.addItem("Building (sbact_*)", "sbact")
+        elif not building_mode and building_scheme >= 0:
+            self.gun_point_type_combo.removeItem(building_scheme)
         scheme_index = self.gun_point_type_combo.findData(displayed_scheme)
         self.gun_point_type_combo.setCurrentIndex(
             scheme_index if scheme_index >= 0 else 1)
         self.gun_point_type_combo.setEnabled(vehicle_mode)
-        self.add_gun_point_button.setEnabled(vehicle_mode)
+        flak_required = self._gun_point_requires_flak(displayed_scheme)
+        flaks = self._sector_flak_vehicles() if flak_required else []
+        self.add_gun_point_button.setEnabled(
+            gun_mode and (not self._gun_point_requires_flak(
+                "sbact" if building_mode else self._new_gun_point_scheme)
+                or bool(self._sector_flak_vehicles())))
+        self.gun_type_spin.setVisible(not flak_required)
+        self.sector_flak_combo.setVisible(flak_required)
+        with QSignalBlocker(self.sector_flak_combo):
+            self.sector_flak_combo.clear()
+            for obj in flaks:
+                self.sector_flak_combo.addItem(
+                    f"{obj.object_id} - {obj.name}", obj.object_id)
+            self.sector_flak_combo.setCurrentIndex(
+                self.sector_flak_combo.findData(gun.gun_type)
+                if gun is not None else -1)
+        self.sector_flak_combo.setEnabled(gun is not None and bool(flaks))
         self.remove_gun_point_button.setEnabled(gun is not None)
-        self.reset_gun_point_button.setEnabled(gun is not None)
-        self.reset_all_gun_points_button.setEnabled(vehicle_mode)
+        self.reset_gun_point_button.setEnabled(
+            gun is not None and gun.loaded_position is not None
+            and gun.position != gun.loaded_position)
+        self.zero_gun_point_button.setEnabled(
+            gun is not None and gun.position != (0.0, 0.0, 0.0))
+        self.reset_all_gun_points_button.setEnabled(gun_mode)
         referenced_vehicle = (
             self._resolve_referenced_turret_limits(int(gun.gun_type))
             if gun is not None else None)
         direction_index = None
+        self.gun_dir_y_label.setVisible(building_mode)
+        self.gun_dir_spins["y"].setVisible(building_mode)
+        for spin in self.gun_dir_spins.values():
+            spin.setDecimals(3 if building_mode else 0)
+            spin.setSingleStep(0.1 if building_mode else 1.0)
         if gun is None:
             self.gun_family_value.setText("No point selected")
             for spin in self.gun_point_spins.values():
@@ -2420,22 +2486,23 @@ class CollisionEditorWindow(
             family_text = (
                 "Host Station legacy · robo_*" if gun.scheme == "robo"
                 else "Generic vehicle · unit_*")
-            self.gun_family_value.setText(family_text)
+            self.gun_family_value.setText("Building · sbact_*" if building_mode else family_text)
             self.gun_point_spins["x"].setValue(gun.x)
             self.gun_point_spins["y"].setValue(gun.y)
             self.gun_point_spins["z"].setValue(gun.z)
             self.gun_dir_spins["x"].setValue(gun.dir_x)
+            self.gun_dir_spins["y"].setValue(gun.dir_y)
             self.gun_dir_spins["z"].setValue(gun.dir_z)
             direction_index = gun_direction_index(gun.dir_x, gun.dir_z)
             if direction_index is None:
                 self.gun_direction_slider.setValue(0)
-                self.gun_direction_value.setText("Unset")
+                self.gun_direction_value.setText(
+                    "Custom" if any(gun.direction) else "Unset")
             else:
                 self.gun_direction_slider.setValue(direction_index)
                 self.gun_direction_value.setText(
                     GUN_DIRECTION_LABELS[direction_index])
-            self.gun_type_spin.setValue(
-                max(0, min(255, int(gun.gun_type))))
+            self.gun_type_spin.setValue(int(gun.gun_type))
             if referenced_vehicle is not None:
                 self.gun_name_edit.setText(referenced_vehicle.source_name)
                 self.gun_name_edit.setReadOnly(True)
@@ -2445,7 +2512,7 @@ class CollisionEditorWindow(
                     "robo_gun_name / unit_gun_name is preserved unchanged.")
             else:
                 self.gun_name_edit.setText(gun.name)
-                self.gun_name_edit.setReadOnly(False)
+                self.gun_name_edit.setReadOnly(building_mode)
                 self.gun_name_edit.setToolTip(
                     "Referenced Vehicle not found in the loaded script. "
                     "Edit robo_gun_name / unit_gun_name for this mount.")
@@ -2455,10 +2522,12 @@ class CollisionEditorWindow(
                 self.gun_direction_slider,
                 self.gun_type_spin, self.gun_name_edit):
             widget.setEnabled(gun is not None)
+        if building_mode:
+            self.gun_name_edit.setToolTip("Name of the vehicle referenced by sbact_vehicle.")
         self.gun_direction_value.setEnabled(gun is not None)
 
         limits = referenced_vehicle
-        limits_available = vehicle_mode and gun is not None and limits is not None
+        limits_available = gun_mode and gun is not None and limits is not None
         if gun is None:
             self.turret_limits_source.setText("Select a Gun Point")
         elif limits is None:
@@ -2657,7 +2726,7 @@ class CollisionEditorWindow(
                       and getattr(self, "_fire_point_mirrored", False)))
         gun_points = []
         gun_directions = []
-        if vehicle_mode and self.project.gun_points_enabled:
+        if gun_mode and self.project.gun_points_enabled:
             gun_points = [
                 (point.x, point.y + preview_offset_y, point.z)
                 for point in self.project.gun_points
@@ -2668,6 +2737,7 @@ class CollisionEditorWindow(
             ]
         self.viewport.set_gun_points(
             gun_points, gun_directions, self._selected_gun_point)
+        self._sync_mounted_flak(gun_points, gun_directions)
         if gun is not None and limits is not None:
             self.viewport.set_turret_limits(
                 (gun.x, gun.y + preview_offset_y, gun.z),

@@ -2890,6 +2890,73 @@ class CollisionEditorTests(unittest.TestCase):
         window.add_gun_point()
         self.assertEqual(window.project.gun_points[-1].scheme, "robo")
 
+    def test_sector_gun_points_only_accept_flak_vehicles(self):
+        from entity_designer.script_model import BUILDING
+        from studio.assets.catalog import GameObject
+
+        window = self._window()
+        window.project.target_category = BUILDING
+        window._building_had_mounts = True
+        catalog = [
+            GameObject("vehicle", 31, Path("Vehicles.cfg"), {"model": "flyer"}),
+            GameObject("vehicle", 137, Path("Vehicles.cfg"), {"model": "Gun"}),
+            GameObject("vehicle", 138, Path("Vehicles.cfg"), {"model": "gun"}),
+        ]
+        window.game_object_browser.objects = catalog
+        window._sync_all()
+        window.add_gun_point()
+
+        point = window.project.gun_points[0]
+        self.assertEqual((point.scheme, point.gun_type), ("sbact", 137))
+        combo = window.sector_flak_combo
+        self.assertEqual([combo.itemData(i) for i in range(combo.count())],
+                         [137, 138])
+        window._gun_type_changed(31)
+        self.assertEqual(point.gun_type, 137)
+        combo.setCurrentIndex(combo.findData(138))
+        self.assertEqual(point.gun_type, 138)
+
+        window.game_object_browser.objects = catalog[:1]
+        window._sync_all()
+        self.assertFalse(window.add_gun_point_button.isEnabled())
+        window.add_gun_point()
+        self.assertEqual(len(window.project.gun_points), 1)
+
+    def test_host_station_gun_points_require_gun_class(self):
+        from studio.assets.catalog import GameObject
+
+        window = self._window()
+        window._active_script_id = 200
+        window.game_object_browser.objects = [
+            GameObject("vehicle", 200, Path("Vehicles.cfg"), {"model": "robo"}),
+            GameObject("vehicle", 31, Path("Vehicles.cfg"), {"model": "flyer"}),
+            GameObject("vehicle", 137, Path("Vehicles.cfg"), {"model": "gun"}),
+            GameObject("vehicle", 138, Path("Vehicles.cfg"), {"model": "gun"}),
+        ]
+        for scheme in ("robo", "unit"):
+            window._new_gun_point_scheme = scheme
+            window._sync_all()
+            window.add_gun_point()
+            point = window.project.gun_points[-1]
+            self.assertEqual((point.scheme, point.gun_type), (scheme, 137))
+            window._gun_type_changed(31)
+            self.assertEqual(point.gun_type, 137)
+            window.sector_flak_combo.setCurrentIndex(
+                window.sector_flak_combo.findData(138))
+            self.assertEqual(point.gun_type, 138)
+            window._select_gun_point(-1)
+
+    def test_gun_points_move_strength_starts_at_50(self):
+        window = self._window()
+        self.assertEqual(window.move_strength_spin.value(), 1)
+        window.properties_tabs.setCurrentIndex(window.gun_points_tab_index)
+        self.assertEqual(window.move_strength_spin.value(), 50)
+        window.move_strength_spin.setValue(75)
+        window.properties_tabs.setCurrentIndex(window.collision_tab_index)
+        self.assertEqual(window.move_strength_spin.value(), 1)
+        window.properties_tabs.setCurrentIndex(window.gun_points_tab_index)
+        self.assertEqual(window.move_strength_spin.value(), 75)
+
     def test_107_weapon_target_hides_gun_point_editor(self):
         window = self._window()
         window.project.target_category = WEAPON
@@ -3481,9 +3548,12 @@ class CollisionEditorTests(unittest.TestCase):
             gun_type=90, name="FLAK1")
         window.project.gun_points_enabled = True
         window.project.gun_points = [point]
+        window._capture_loaded_gun_points()
         window._select_gun_point(0)
-        window._reset_gun_point_position()
+        window._zero_gun_point_position()
         self.assertEqual(point.position, (0.0, 0.0, 0.0))
+        window._reset_gun_point_position()
+        self.assertEqual(point.position, (12, -4, 9))
         self.assertEqual((point.dir_x, point.dir_y, point.dir_z), (1, 0, -1))
         self.assertEqual(point.gun_type, 90)
         self.assertEqual(point.name, "FLAK1")
@@ -3555,7 +3625,10 @@ class CollisionEditorTests(unittest.TestCase):
         gun_menu = window._create_gun_point_context_menu()
         gun_texts = [action.text() for action in gun_menu.actions()]
         self.assertIn("Add Gun Point", gun_texts)
-        self.assertIn("Remove Selected Gun Point", gun_texts)
+        self.assertIn("Delete", gun_texts)
+        self.assertIn("Restore Loaded Position", gun_texts)
+        self.assertIn("Move to 0 / 0 / 0", gun_texts)
+        self.assertNotIn("Add Legacy Radius", gun_texts)
         self.assertIn("Reset All", gun_texts)
         self.assertNotIn("Reset All Gun Points", gun_texts)
         gun_submenus = {

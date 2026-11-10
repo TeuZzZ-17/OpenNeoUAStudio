@@ -87,7 +87,7 @@ def test_crater_row_reads_checks_and_summarises_the_keys():
     assert fx_visuals.crater_summary({}) == "Not set"
     assert "needs radius and depth" in fx_visuals.crater_summary({"crater_radius": "100"})
     assert fx_compat.crater_level({"crater_depth": "30"}) == fx_compat.OPENNEOUA
-    assert fx_compat.crater_level({}) == fx_compat.VANILLA
+    assert fx_compat.crater_level({}) == fx_compat.OPENNEOUA
 
 
 def test_saving_the_crater_row_keeps_the_rest_of_the_script(tmp_path):
@@ -124,7 +124,7 @@ def _craters(simulation, time_ms):
 def test_a_ground_hit_digs_one_crater_inside_the_ranges():
     simulation = fx.PreviewSimulation(fx.FxDocument(), fx.CONTEXT_WEAPON,
                                       fx.WEAPON_HIT_GROUND, unit=_weapon())
-    impact = fx.WEAPON_FLIGHT_MS
+    impact = simulation.tracks[0].end
     assert not _craters(simulation, impact - 50)
     craters = _craters(simulation, impact + 50)
     assert len(craters) == 1
@@ -137,22 +137,106 @@ def test_a_ground_hit_digs_one_crater_inside_the_ranges():
 def test_unit_hit_previews_crater_and_respects_visibility_and_missing_keys():
     on_unit = fx.PreviewSimulation(fx.FxDocument(), fx.CONTEXT_WEAPON,
                                    fx.WEAPON_HIT_UNIT, unit=_weapon())
-    assert not _craters(on_unit, fx.WEAPON_FLIGHT_MS - 50)
-    assert len(_craters(on_unit, fx.WEAPON_FLIGHT_MS + 50)) == 1
+    impact = on_unit.tracks[0].end
+    assert not _craters(on_unit, impact - 50)
+    assert len(_craters(on_unit, impact + 50)) == 1
     hidden_unit = fx.PreviewSimulation(fx.FxDocument(), fx.CONTEXT_WEAPON,
                                        fx.WEAPON_HIT_UNIT, unit=_weapon(), craters=False)
-    assert not _craters(hidden_unit, fx.WEAPON_FLIGHT_MS + 50)
+    assert not _craters(hidden_unit, impact + 50)
     hidden = fx.PreviewSimulation(fx.FxDocument(), fx.CONTEXT_WEAPON,
                                   fx.WEAPON_HIT_GROUND, unit=_weapon(), craters=False)
-    assert not _craters(hidden, fx.WEAPON_FLIGHT_MS + 50)
+    assert not _craters(hidden, impact + 50)
     plain = fx.PreviewSimulation(fx.FxDocument(), fx.CONTEXT_WEAPON,
                                  fx.WEAPON_HIT_GROUND, unit=_weapon({}))
-    assert not _craters(plain, fx.WEAPON_FLIGHT_MS + 50)
+    assert not _craters(plain, impact + 50)
 
 
 def test_unit_look_reads_the_crater_of_weapons_only():
     assert fx.unit_look(PIKE, weapon=True)["crater"].radius == (120.0, 150.0)
     assert fx.unit_look(PIKE, weapon=False)["crater"] is None
+
+
+def _cluster_weapons():
+    parent = fx.weapon_def_from_text(42, "new_weapon 42\nmodel = bomb\nvp_normal = 1\n"
+        "cluster_weapon_id = 43\ncluster_count = 3\ncluster_trigger_time = 100\n"
+        "cluster_spread_xy = 20|20\nend\n")
+    child = fx.weapon_def_from_text(43, "new_weapon 43\nmodel = bomb\nvp_normal = 2\n"
+        "crater_radius = 20~30\ncrater_depth = 10~15\ncrater_rim = 5~10\nend\n")
+    return parent, child
+
+
+@pytest.mark.parametrize("trigger", [fx.WEAPON_HIT_GROUND, fx.WEAPON_HIT_UNIT])
+def test_cluster_child_craters_have_visible_timeline_and_persist(trigger):
+    parent, child = _cluster_weapons()
+    sim = fx.PreviewSimulation(parent.document, fx.CONTEXT_WEAPON, trigger,
+                               unit=parent.unit, weapons={43: child})
+    events = [event for event in sim._events if event[1] == "crater"]
+    assert len(events) == 3
+    last_impact = max(event[2] for event in events)
+    assert len(_craters(sim, last_impact + 1)) == 3
+    assert any("Cluster craters" in track.label for track in sim.tracks)
+    assert sim.duration >= last_impact + 4000
+
+    root_hidden = fx.PreviewSimulation(parent.document, fx.CONTEXT_WEAPON, trigger,
+                                       unit=parent.unit, weapons={43: child}, root_craters=False)
+    assert len(_craters(root_hidden, root_hidden.duration - 1)) == 3
+    children_hidden = fx.PreviewSimulation(parent.document, fx.CONTEXT_WEAPON, trigger,
+                                           unit=parent.unit, weapons={43: child}, child_craters=False)
+    assert not _craters(children_hidden, children_hidden.duration)
+
+
+def test_child_crater_row_only_exists_when_child_has_craters(app):
+    from PySide6.QtCore import Qt
+    from entity_designer.fx_panel import DestructionFxPanel
+
+    parent, child = _cluster_weapons()
+    panel = DestructionFxPanel()
+    try:
+        panel.set_context(fx.CONTEXT_WEAPON, parent.document, unit=parent.unit,
+                          weapons={43: child})
+        rows = [panel.effects_list.item(i) for i in range(panel.effects_list.count())]
+        child_row = next(row for row in rows if "Cluster craters" in row.text())
+        assert "43" in child_row.text() and "Not vanilla compatible" in child_row.toolTip()
+        assert child_row.checkState() == Qt.CheckState.Checked
+        assert _craters(panel.simulation, panel.simulation.duration - 1)
+        child_row.setCheckState(Qt.CheckState.Unchecked)
+        assert not _craters(panel.simulation, panel.simulation.duration - 1)
+        parent_without = fx.PreviewSimulation(parent.document, fx.CONTEXT_WEAPON,
+                                               fx.WEAPON_HIT_GROUND, unit=parent.unit)
+        assert not _craters(parent_without, parent_without.duration)
+    finally:
+        panel.close()
+
+
+def test_cluster_child_craters_are_drawn_in_the_viewport(app):
+    from PySide6.QtCore import Qt
+    from PySide6.QtGui import QImage, QPainter
+    from entity_designer.viewport import CollisionViewport
+
+    parent, child = _cluster_weapons()
+    simulation = fx.PreviewSimulation(parent.document, fx.CONTEXT_WEAPON,
+                                      fx.WEAPON_HIT_GROUND, unit=parent.unit,
+                                      weapons={43: child})
+    impact = max(event[2] for event in simulation._events if event[1] == "crater") + 1
+    craters = _craters(simulation, impact)
+    viewport = CollisionViewport()
+    viewport.resize(600, 400)
+
+    def frame(items):
+        viewport.set_fx_preview(active=True, items=items, show_unit=False, time_ms=impact,
+                                weapon_context=True)
+        viewport._yaw, viewport._pitch, viewport._scale = 35.0, 32.0, 1.0 / 260.0
+        image = QImage(600, 400, QImage.Format.Format_RGBA8888)
+        image.fill(Qt.GlobalColor.black)
+        painter = QPainter(image)
+        viewport._paint_fx_viewport(painter)
+        painter.end()
+        return image
+
+    flat, dug = frame([]), frame(craters)
+    assert any(flat.pixelColor(x, y) != dug.pixelColor(x, y)
+               for x in range(0, 600, 3) for y in range(0, 400, 3))
+    viewport.close()
 
 
 def test_viewport_digs_the_ground_and_puts_the_decal_on_it(app):
@@ -194,3 +278,69 @@ def test_viewport_digs_the_ground_and_puts_the_decal_on_it(app):
                                         crater, [decal])
     painter.end()
     assert covered == {id(decal)}, "a decal on the crater is painted on the dug ground"
+
+
+def test_same_view_reuses_the_drawn_crater_and_a_new_view_redraws_it(app):
+    from PySide6.QtGui import QColor, QImage, QPainter
+    from entity_designer.viewport import CollisionViewport
+
+    simulation = fx.PreviewSimulation(fx.FxDocument(), fx.CONTEXT_WEAPON,
+                                      fx.WEAPON_HIT_GROUND, unit=_weapon())
+    craters = _craters(simulation, fx.WEAPON_FLIGHT_MS + 50)
+    viewport = CollisionViewport()
+    viewport.resize(600, 400)
+    try:
+        viewport.set_fx_preview(active=True, items=craters, show_unit=False, time_ms=1500.0,
+                                weapon_context=True)
+        viewport._yaw, viewport._pitch, viewport._scale = 35.0, 32.0, 1.0 / 260.0
+
+        def frame():
+            image = QImage(600, 400, QImage.Format.Format_RGBA8888)
+            image.fill(QColor(255, 0, 255))
+            painter = QPainter(image)
+            viewport._draw_fx_craters(painter, viewport.rect().toRectF(),
+                                      viewport._camera_state(), craters, [])
+            painter.end()
+            return image
+
+        first = frame()
+        layer = viewport._fx_crater_layer[1]
+        assert frame() == first and viewport._fx_crater_layer[1] is layer, "same view: same layer"
+        viewport._yaw = 80.0
+        assert frame() != first and viewport._fx_crater_layer[1] is not layer, "new view: drawn again"
+    finally:
+        viewport.close()
+
+
+def test_near_lip_of_a_deep_crater_leaves_no_gap(app):
+    """Low camera over a deep crater: no see-through slivers at the near lip."""
+    from PySide6.QtGui import QColor, QImage, QPainter
+    from entity_designer.viewport import CollisionViewport
+
+    unit = _weapon({"crater_radius": "300", "crater_depth": "150", "crater_rim": "20"})
+    simulation = fx.PreviewSimulation(fx.FxDocument(), fx.CONTEXT_WEAPON,
+                                      fx.WEAPON_HIT_GROUND, unit=unit)
+    craters = _craters(simulation, fx.WEAPON_FLIGHT_MS + 50)
+    viewport = CollisionViewport()
+    viewport.resize(900, 520)
+    try:
+        for pitch, yaw in ((20, 35), (25, 35), (25, 200), (10, 0)):
+            viewport.set_fx_preview(active=True, items=craters, show_unit=False,
+                                    time_ms=1500.0, weapon_context=True)
+            viewport._yaw, viewport._pitch, viewport._scale = float(yaw), float(pitch), 1.0 / 160
+            image = QImage(900, 520, QImage.Format.Format_RGBA8888)
+            image.fill(QColor(255, 0, 255))
+            painter = QPainter(image)
+            viewport._draw_fx_craters(painter, viewport.rect().toRectF(),
+                                      viewport._camera_state(), craters, [])
+            painter.end()
+            raw = np.frombuffer(image.constBits(), np.uint8).reshape(
+                520, image.bytesPerLine() // 4, 4)[:, :900, :3].astype(int)
+            empty = (abs(raw[..., 0] - 255) < 12) & (raw[..., 1] < 12) & (abs(raw[..., 2] - 255) < 12)
+            solid = ~empty
+            # An empty pixel with crater above and below it in its column is a gap.
+            above = np.maximum.accumulate(solid, axis=0)
+            below = np.maximum.accumulate(solid[::-1], axis=0)[::-1]
+            assert int((empty & above & below).sum()) < 40, (pitch, yaw)
+    finally:
+        viewport.close()

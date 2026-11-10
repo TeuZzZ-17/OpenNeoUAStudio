@@ -151,7 +151,7 @@ class BriefingPreview(AcceleratedWidget):
                 oy = offset.briefing_y if offset.briefing_xyz_enabled else 0.0
                 oz = offset.briefing_z if offset.briefing_xyz_enabled else 0.0
                 # Keep the projected position independent of the size camera distance.
-                base_radius = offset.legacy.radius if offset.legacy is not None else 25.0
+                base_radius = self.base_radius
                 position_scale = self.radius / max(.001, base_radius)
                 return (rx + (left + right) * .5 * distance + ox * position_scale,
                         -ry - (top + bottom) * .5 * distance - oy * position_scale,
@@ -165,7 +165,7 @@ class BriefingPreview(AcceleratedWidget):
         self.renderer.set_cockpit_preview_active(True)
         self.renderer.set_ground_alignment(False, False, 0)
         self.angle = 0.0
-        self.radius = 25.0
+        self.radius = self.base_radius = 25.0
         self.rectangle = (-0.98750001, 0.34999999, -0.003125, 0.85416669)
         self.background = QImage()
         self._family_key = None
@@ -207,16 +207,31 @@ class BriefingPreview(AcceleratedWidget):
     def refresh(self):
         install = bootstrap.installation()
         project = self.editor.project
-        self.radius = BRIEFING_SIZE_REFERENCE / project.briefing_size if (
-            project.briefing_size_enabled and project.briefing_size > 0) else (
-            project.legacy.radius if project.legacy is not None else 25.0)
+        building = project.target_category == "building"
+        self.base_radius = (3600.0 / 7.0 if building else
+                            project.legacy.radius if project.legacy is not None else 25.0)
+        reference = self.base_radius * 100.0 if building else BRIEFING_SIZE_REFERENCE
+        self.radius = reference / project.briefing_size if (
+            project.briefing_size_enabled and project.briefing_size > 0) else self.base_radius
         self.radius = max(.001, self.radius)
         family_key = id(self.editor.family), self.editor._current_owner
         if family_key != self._family_key:
             self._family_key = family_key
-            self.renderer.load_family(self.editor.family,
-                {self.editor._current_owner} if self.editor._current_owner else None,
-                primary_owner=self.editor._current_owner)
+            if self.editor.family is None:
+                self.renderer.clear()
+            else:
+                self.renderer.load_family(self.editor.family,
+                    {self.editor._current_owner} if self.editor._current_owner else None,
+                    primary_owner=self.editor._current_owner)
+        structure = self.editor.viewport._building_structure if building else (None, ())
+        self.renderer.set_building_structure(*structure)
+        # The briefing uses script-local positions without the ground preview offset.
+        mounts = ()
+        if self.editor.family is not None and project.gun_points_enabled:
+            mounts = tuple((point.gun_type, point.position, point.direction)
+                           for point in project.gun_points)
+        self.editor._set_mounted_flak_preview(self.renderer, mounts)
+        self.renderer.set_mounted_flak_visible(bool(mounts))
         self.renderer.set_model_preview_scale(project.model_scale_x, project.model_scale_y, project.model_scale_z)
         if install is not None:
             self.rectangle = briefing_layout(install)
@@ -237,7 +252,7 @@ class BriefingPreview(AcceleratedWidget):
         target = QRectF((self.width() - width) / 2, (self.height() - height) / 2, width, height)
         if not self.background.isNull():
             painter.drawImage(target, self.background)
-        if self.renderer.has_model and self.editor.project.target_category == "vehicle":
+        if self.renderer.has_model and self.editor.project.target_category != "weapon":
             try:
                 self.renderer.set_cockpit_runtime_aspect(aspect)
                 # Bound preview resolution; camera proportions still match the displayed screen.
@@ -380,7 +395,7 @@ class BriefingControls(QWidget):
             self.xyz_enabled.setChecked(project.briefing_xyz_enabled)
             for axis, value in (("x", project.briefing_x), ("y", project.briefing_y), ("z", project.briefing_z)):
                 self.xyz_values[axis].setValue(value)
-        self.setEnabled(project.target_category == "vehicle")
+        self.setEnabled(project.target_category != "weapon")
         size_text = f"briefing_size = {round(project.briefing_size)}" if project.briefing_size_enabled else "Uses the vehicle's radius."
         self.output.setText(size_text)
         self._update_position_text()

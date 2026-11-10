@@ -277,6 +277,11 @@ class CollisionViewport(FxPreviewViewportMixin, AssetViewport):
         self._gun_directions: list[tuple[float, float, float]] = []
         self._gun_point_selected = -1
         self._gun_points_visible = True
+        self._building_structure = (None, ())
+        self._mounted_flak_visible = False
+        self._mounted_flak_key = (None, ())
+        self._mounted_flak_faces = []
+        self._mounted_render_sources = {}
         self._turret_limits: tuple[
             tuple[float, float, float], tuple[float, float, float],
             int, int, int,
@@ -489,8 +494,13 @@ class CollisionViewport(FxPreviewViewportMixin, AssetViewport):
 
     def _resolve_indexed_surface(
             self, adapter, face, material, frame_index: int):
-        surface = super()._resolve_indexed_surface(
-            adapter, face, material, frame_index)
+        source = self._mounted_render_sources.get(id(face))
+        if source is None:
+            surface = super()._resolve_indexed_surface(
+                adapter, face, material, frame_index)
+        else:
+            library, original = source
+            surface = library.surface_for(original)
         if (self._cockpit_preview_active
                 and surface.kind == "texture"
                 and surface.map_mode != "depth"):
@@ -1666,6 +1676,9 @@ class CollisionViewport(FxPreviewViewportMixin, AssetViewport):
             if screen is None:
                 continue
             selected = index == self._gun_point_selected
+            painter.save()
+            if not selected and self._mounted_flak_visible and self._mounted_flak_faces:
+                painter.setOpacity(0.65)
             if selected:
                 self._draw_fire_marker(
                     painter, screen, QPen(QColor(255, 255, 255), 6.0),
@@ -1693,6 +1706,7 @@ class CollisionViewport(FxPreviewViewportMixin, AssetViewport):
             painter.setPen(QPen(
                 QColor(255, 255, 255) if selected else GUN_POINT_COLOR, 1.5))
             painter.drawText(screen + QPointF(9.0, -9.0), f"G{index + 1}")
+            painter.restore()
 
     def _draw_turret_limits_overlay(self, painter: QPainter) -> None:
         if not (self._ground_alignment_source_loaded
@@ -1904,6 +1918,89 @@ class CollisionViewport(FxPreviewViewportMixin, AssetViewport):
                     if first is not None and second is not None:
                         painter.drawLine(first, second)
         painter.restore()
+
+    def _framing_points(self):
+        _library, structure = self._building_structure
+        points = ([(vx + x, vy, vz + z) for face, x, z in structure
+                   for vx, vy, vz in face.vertices]
+                  if structure else list(super()._framing_points()))
+        if self._mounted_flak_visible:
+            points.extend(vertex for face, _, _ in self._mounted_flak_faces
+                          for vertex in face.vertices)
+        return points
+
+    def set_building_structure(self, library, faces) -> None:
+        if self._building_structure[0] is library and self._building_structure[1] is faces:
+            return
+        self._building_structure = (library, faces)
+        self._invalidate_indexed_view_cache()
+        self.update()
+
+    def set_mounted_flak_visible(self, visible: bool) -> None:
+        if self._mounted_flak_visible != visible:
+            self._mounted_flak_visible = visible
+            self._invalidate_indexed_view_cache()
+            self.update()
+
+    def set_mounted_flak(self, library, mounts) -> None:
+        if self._mounted_flak_key == (library, mounts):
+            return
+        from dataclasses import replace
+        from map_editor.render.sector_mesh import gun_rotation
+        import numpy as np
+
+        self._mounted_flak_key = (library, mounts)
+        self._mounted_flak_faces = []
+        for vehicle, position, direction in mounts:
+            if vehicle <= 0:
+                continue
+            if not np.isfinite(direction).all() or np.linalg.norm(direction) < .001:
+                direction = (0., 0., 1.)
+            rotation = gun_rotation(direction)
+            try:
+                mesh = library.vehicle_mesh(vehicle)
+            except (OSError, ValueError, RuntimeError):
+                continue
+            visual = library.vehicles.get(vehicle)
+            for face, x, z in mesh.faces:
+                model_vertices = face.vertices
+                if visual is not None:
+                    model_vertices = [
+                        visual_transform_point(vertex, visual.scale, visual.rotation)
+                        for vertex in model_vertices
+                    ]
+                vertices = (np.asarray(model_vertices) + (x, 0, z)) @ rotation.T + position
+                self._mounted_flak_faces.append(
+                    (replace(face, vertices=[tuple(vertex) for vertex in vertices]), 0, 0))
+        self._invalidate_indexed_view_cache()
+        self.update()
+
+    def _render_scene(self, *args, **kwargs):
+        from dataclasses import replace
+        from studio.rendering.asset_viewport import ViewMaterial
+
+        structure_library, structure = self._building_structure
+        gun_library, _mounts = self._mounted_flak_key
+        guns = self._mounted_flak_faces if self._mounted_flak_visible else ()
+        if not structure and not guns:
+            return super()._render_scene(*args, **kwargs)
+        body, materials = self._faces, self._materials
+        self._faces = [] if structure else list(body)
+        self._materials = [*materials, ViewMaterial("Mounted model")]
+        try:
+            for library, faces in ((structure_library, structure), (gun_library, guns)):
+                for original, x, z in faces:
+                    face = replace(
+                        original, material=len(materials), primary=False, owner="",
+                        uvs=library.face_uvs(original),
+                        vertices=[(vx + x, vy, vz + z) for vx, vy, vz in original.vertices],
+                    )
+                    self._mounted_render_sources[id(face)] = (library, original)
+                    self._faces.append(face)
+            return super()._render_scene(*args, **kwargs)
+        finally:
+            self._faces, self._materials = body, materials
+            self._mounted_render_sources.clear()
 
     def _paint_viewport(self, painter: QPainter) -> None:
         if self._cockpit_preview_active:

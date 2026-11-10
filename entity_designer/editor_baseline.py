@@ -38,6 +38,7 @@ from entity_designer.script_model import (
     import_wireframe_block,
     OPENNEOUA,
     read_script_file,
+    BUILDING,
     VEHICLE,
     WEAPON,
 )
@@ -85,6 +86,8 @@ class _TabBaselineMixin:
     def _capture_loaded_gun_points(self) -> None:
         """Snapshot source-authored mounts and turret limits for Reset All."""
 
+        for point in self.project.gun_points:
+            point.loaded_position = point.position
         self._loaded_gun_points_enabled = bool(
             self.project.gun_points_enabled)
         self._loaded_gun_points = [
@@ -199,7 +202,8 @@ class _TabBaselineMixin:
                 authored_number(area.max_inclination),
             )
         if group == _SCRIPT_TAB_ICON:
-            return (int(project.type_icon),)
+            default_icon = 65 if project.target_category == BUILDING else 0
+            return (int(project.type_icon or default_icon),)
         if group == _SCRIPT_TAB_WIREFRAME:
             return (project.wireframe.replace("\\", "/").strip(),)
         raise ValueError(group)
@@ -213,6 +217,8 @@ class _TabBaselineMixin:
             groups.update((
                 _SCRIPT_TAB_FIRE, _SCRIPT_TAB_GUN, _SCRIPT_TAB_COCKPIT,
                 _SCRIPT_TAB_BRIEFING, _SCRIPT_TAB_ICON))
+        elif self.project.target_category == BUILDING:
+            groups = {_SCRIPT_TAB_GUN, _SCRIPT_TAB_BRIEFING, _SCRIPT_TAB_ICON}
         else:
             groups.add(_SCRIPT_TAB_FIRE_AREA)
         return {
@@ -254,7 +260,7 @@ class _TabBaselineMixin:
                 if baseline.target_category == VEHICLE:
                     baseline.overeof_enabled, baseline.overeof = (
                         import_overeof_block(text, block))
-            if baseline.target_category == VEHICLE:
+            if baseline.target_category in {VEHICLE, BUILDING}:
                 if _SCRIPT_TAB_FIRE in groups:
                     (baseline.fire_points_enabled, baseline.fire_x,
                      baseline.fire_y, baseline.fire_z, baseline.num_weapons,
@@ -269,6 +275,17 @@ class _TabBaselineMixin:
                     # from other files: replace only limits actually edited
                     # and written by this workspace, not every catalog entry.
                     source_limits = import_turret_limits(text)
+                    if getattr(self, "_fx_source_from_catalog", False):
+                        from map_editor import bootstrap
+                        from studio.assets.catalog import load_game_objects
+
+                        install = bootstrap.installation()
+                        for obj in load_game_objects(install) if install is not None else ():
+                            current = self.project.turret_limits.get(obj.object_id)
+                            if obj.kind == VEHICLE and current is not None and current.dirty:
+                                saved = import_turret_limits(obj.effective_text)[obj.object_id]
+                                saved.source_kind = current.source_kind
+                                source_limits[obj.object_id] = saved
                     for vehicle_id, current in self.project.turret_limits.items():
                         if current.dirty:
                             if vehicle_id in source_limits:
@@ -294,7 +311,9 @@ class _TabBaselineMixin:
 
             if _SCRIPT_TAB_GUN in groups:
                 imported_schemes = gun_point_families_in_block(text, block)
-                if len(imported_schemes) == 1:
+                if baseline.target_category == BUILDING:
+                    baseline_scheme = "sbact"
+                elif len(imported_schemes) == 1:
                     baseline_scheme = next(iter(imported_schemes))
                 elif "unit" in imported_schemes:
                     baseline_scheme = "unit"
@@ -302,6 +321,8 @@ class _TabBaselineMixin:
                     baseline_scheme = self._tab_reset_gun_point_scheme
                 self._tab_reset_gun_point_scheme = baseline_scheme
                 self._loaded_gun_points_enabled = baseline.gun_points_enabled
+                for point in baseline.gun_points:
+                    point.loaded_position = point.position
                 self._loaded_gun_points = [
                     point.clone() for point in baseline.gun_points]
                 self._loaded_unit_gun_default_icon = (

@@ -8,6 +8,7 @@ import math
 from entity_designer.script_model import (
     _fire_point_preview_count,
     _project_num_weapons_range,
+    BUILDING,
     GunPoint,
     VEHICLE,
 )
@@ -235,25 +236,56 @@ class _WeaponPointsMixin:
         self._sync_all()
 
 
-    def add_gun_point(self):
+    def _gun_point_requires_flak(self, scheme):
+        if scheme in {"sbact", "robo"}:
+            return True
         if self.project.target_category != VEHICLE:
+            return False
+        vehicle = next((obj for obj in self.game_object_browser.objects
+                        if obj.kind == "vehicle"
+                        and obj.object_id == self._active_script_id), None)
+        model = (vehicle.values.get("model", "") if vehicle is not None
+                 else getattr(self, "_active_vehicle_model", ""))
+        return model.strip().strip('"').casefold() == "robo"
+
+    def _sector_flak_vehicles(self):
+        return sorted(
+            (obj for obj in self.game_object_browser.objects
+             if obj.kind == "vehicle" and 0 < obj.object_id <= 255
+             and obj.values.get("model", "").strip().casefold() == "gun"),
+            key=lambda obj: obj.object_id)
+
+    def add_gun_point(self):
+        if not self.add_gun_point_button.isEnabled():
             return
-        scheme = (
-            self._new_gun_point_scheme
-            if self._new_gun_point_scheme in {"robo", "unit"}
-            else "unit")
+        scheme = self._new_gun_point_scheme
+        if self.project.target_category == BUILDING:
+            scheme = "sbact"
+        elif scheme not in {"robo", "unit"}:
+            scheme = "unit"
         family_count = sum(
             point.scheme == scheme for point in self.project.gun_points)
-        if family_count >= 20:
+        if scheme != "sbact" and family_count >= 20:
             family_name = (
                 "Vanilla robo_*" if scheme == "robo"
                 else "OpenNeoUA unit_*")
             self.statusBar().showMessage(
                 f"{family_name} supports at most 20 gun points.", 5000)
             return
+        point = GunPoint(scheme=scheme)
+        if self._gun_point_requires_flak(scheme):
+            flaks = self._sector_flak_vehicles()
+            if not flaks:
+                return
+            selected = self._selected_gun()
+            flak_ids = {obj.object_id for obj in flaks}
+            point.gun_type = (
+                selected.gun_type if selected and selected.gun_type in flak_ids
+                else flaks[0].object_id)
+        if scheme == "sbact":
+            point.dir_z = 1.0
         self._vehicle_preview_active_edits.clear()
         self._push_undo()
-        point = GunPoint(scheme=scheme)
         self.project.gun_points.append(point)
         self.project.gun_points_enabled = True
         self._selected_gun_point = len(self.project.gun_points) - 1

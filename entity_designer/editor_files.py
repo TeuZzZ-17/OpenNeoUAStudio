@@ -13,6 +13,7 @@ from PySide6.QtWidgets import (
     QDialog,
     QFileDialog,
     QMessageBox,
+    QTreeWidgetItem,
 )
 
 from entity_designer import destruction_fx as fx
@@ -23,13 +24,16 @@ from entity_designer.dialogs import (
 from entity_designer.fire_area import FireArea
 from entity_designer.script_model import (
     _number,
+    _top_level_assignment_rows,
     _public_dependency,
     _reference_for_visual_source,
     _resolve_data_asset_path,
     _resolve_script_visual_source,
     _SCRIPT_TAB_LABELS,
     _SCRIPT_TAB_ORDER,
+    BUILDING,
     CollisionProject,
+    find_script_blocks,
     CollisionScriptError,
     gun_point_families_in_block,
     import_briefing_size_block,
@@ -62,6 +66,7 @@ from studio.assets.visproto import (
     VPEmbeddedError,
 )
 from entity_designer.editor_common import (
+    _MODEL_NAME_ROLE,
     _vp_ids_per_model,
 )
 
@@ -137,7 +142,8 @@ class _ScriptFilesMixin:
             self.model_search.setEnabled(enabled)
 
     def _current_visual_resource_is_open(self) -> bool:
-        return bool(self.family is not None or self._active_base_path is not None)
+        return bool(self.family is not None or self._active_base_path is not None
+                    or self._active_script_path is not None)
 
     def _sync_close_archive_action(self) -> None:
         action = getattr(self, "close_bas_archive_action", None)
@@ -308,11 +314,14 @@ class _ScriptFilesMixin:
 
     def _clear_script_link(self) -> None:
         self._active_script_path = None
+        self._building_had_mounts = False
+        self.viewport.set_building_structure(None, ())
         self._fx_set_cache = None
         if hasattr(self, "fx_panel"):
             self.fx_panel.set_context(fx.CONTEXT_VEHICLE, fx.FxDocument())
         self._active_script_kind = ""
         self._active_script_id = None
+        self._active_vehicle_model = ""
         self._active_model_reference = None
         self._active_visual_reference = None
         self._model_state_vps = {}
@@ -327,6 +336,7 @@ class _ScriptFilesMixin:
     def reload_game_resources(self):
         from studio.assets.catalog import clear_visual_cache
         clear_visual_cache()
+        self._gun_library = (None, None)
         self.game_object_browser.reload()
 
     def _refresh_game_objects(self):
@@ -361,8 +371,22 @@ class _ScriptFilesMixin:
         if self._modified and not self._confirm_script_unit_switch():
             return False
         try:
-            from studio.assets.catalog import set_assets
+            from map_editor import bootstrap
+            from studio.assets.catalog import load_game_objects, set_assets
+            # Earlier saves may have moved definitions in a script while the
+            # Entity List still holds the previous text and source positions.
+            objects = load_game_objects(bootstrap.installation())
+            fresh = next((item for item in objects
+                          if (item.kind, item.object_id) == (obj.kind, obj.object_id)), None)
+            if fresh is None:
+                raise ValueError("The selected definition is no longer in the game scripts. Reload the Entity List.")
+            browser = self.game_object_browser
+            browser.objects = [item for item in objects
+                               if browser.kinds is None or item.kind in browser.kinds]
+            obj = fresh
             assets = set_assets(self.game_object_browser.set_number)
+            if obj.kind == BUILDING:
+                return self._open_building(obj, assets)
             result = self.open_vehicle_script(obj.source, object_id=obj.object_id,
                 object_kind=f"new_{obj.kind}", set_bas_path=assets.setbas_path,
                 resolved_text=obj.effective_text)
@@ -370,6 +394,128 @@ class _ScriptFilesMixin:
         except (OSError, ValueError, RuntimeError) as exc:
             QMessageBox.warning(self, "Game object unavailable", str(exc))
             return False
+
+    def _sync_mounted_flak(self, positions, directions):
+        mounts = ()
+        if positions and self.properties_tabs.currentIndex() == self.gun_points_tab_index:
+            mounts = tuple((point.gun_type, position, direction)
+                           for point, position, direction in zip(
+                               self.project.gun_points, positions, directions))
+        self._set_mounted_flak_preview(self.viewport, mounts)
+
+    def _set_mounted_flak_preview(self, renderer, mounts):
+        library = self._gun_mesh_library() if mounts else None
+        renderer.set_mounted_flak(library, mounts if library is not None else ())
+
+    def _gun_mesh_library(self):
+        from map_editor.render.sector_mesh import SectorMeshLibrary
+        from studio.assets.catalog import set_assets
+
+        number = self.game_object_browser.set_number
+        cached_number, library = getattr(self, "_gun_library", (None, None))
+        if number != cached_number:
+            try:
+                library = SectorMeshLibrary(set_assets(number))
+            except (OSError, ValueError, RuntimeError):
+                library = None
+            self._gun_library = (number, library)
+        return library
+
+    def _open_building(self, obj, assets) -> bool:
+        from studio.assets.catalog import visual_choices
+
+        if not obj.body_sources:
+            raise CollisionScriptError(f"Building {obj.object_id}: missing complete definition.")
+        text = obj.effective_text
+        block = find_script_blocks(text)[0]
+        has_mount_rows, mounts, _ = import_gun_points_block(text, block)
+        size_enabled, size = import_briefing_size_block(text, block)
+        xyz_enabled, x, y, z = import_briefing_xyz_block(text, block)
+        path, start, _end = obj.body_sources[-1]
+        source_text, _encoding, _bom = read_script_file(path)
+        source = next((candidate for candidate in find_script_blocks(source_text)
+                       if candidate.start_line == start and candidate.complete
+                       and candidate.object_id == obj.object_id
+                       and candidate.kind.endswith("_building")), None)
+        if source is None:
+            raise CollisionScriptError(f"Building {obj.object_id}: source definition changed.")
+        choices = visual_choices(obj, self.game_object_browser.set_number)
+        choice = next((item for item in choices if item.label.endswith(" — Intact")), None)
+        family = model = None
+        if choice is not None and choice.base_name:
+            model = assets.base_object(choice.base_name)
+            family = assets.family
+        elif choice is not None:
+            family = self._load_family(choice.path, setbas=assets.setbas_path)
+            model = family.root_object
+        if not self.fx_panel.confirm_text_changes():
+            return False
+
+        self._clear_script_link()
+        self.family = family
+        self._vp_embedded = None
+        self._vp_table = None
+        self._vp_table_source = ""
+        self._active_base_path = choice.path if choice is not None else None
+        self._last_directory = path.parent
+        self.project = CollisionProject(
+            name=obj.name, source_model=model.display_name if model is not None else obj.name,
+            source_base=choice.path.name if choice is not None else "",
+            target_category=BUILDING, gun_points_enabled=has_mount_rows,
+            gun_points=mounts, type_icon=import_type_icon_block(text, block),
+            briefing_size_enabled=size_enabled, briefing_size=size,
+            briefing_xyz_enabled=xyz_enabled, briefing_x=x, briefing_y=y, briefing_z=z,
+        )
+        self._active_script_path = path
+        self._fx_source_from_catalog = True
+        self._active_script_kind = source.kind
+        self._active_script_id = obj.object_id
+        self._new_gun_point_scheme = "sbact"
+        self._capture_loaded_gun_points()
+        self._building_had_mounts = bool(mounts)
+        sector_type = int(obj.number("sec_type"))
+        self._capture_tab_reset_baseline()
+        self._selected = self._selected_fire_point = self._selected_gun_point = -1
+        self._selected_spheres.clear()
+        self._undo.clear()
+        self._redo.clear()
+        self._vehicle_preview_active_edits.clear()
+        self._model_info_by_vp = {}
+        self._script_unit_references = []
+        self._script_unit_visual_reference = None
+        self._set_script_unit_mode(False)
+        with QSignalBlocker(self.model_tree):
+            self.model_tree.clear()
+            if model is not None:
+                item = QTreeWidgetItem([model.display_name, "—"])
+                item.setData(0, Qt.ItemDataRole.UserRole, model.owner_path)
+                item.setData(0, _MODEL_NAME_ROLE, model.display_name)
+                self.model_tree.addTopLevelItem(item)
+                self.model_tree.setCurrentItem(item)
+        if model is None:
+            self._current_owner = self._viewport_owner = None
+            self._normal_state_owner = self._current_owner_base_bounds = None
+            self.viewport.clear()
+            self._fill_model_state_combo()
+            self._refresh_collision_geometry_widget()
+            self._sync_animation_controls()
+        else:
+            self._show_model_item(item)
+        self._set_model_browser_enabled(False)
+        self.game_object_browser.select_object(obj)
+        library = self._gun_mesh_library() if model is not None else None
+        if library is not None:
+            self.viewport.set_building_structure(
+                library, library.mesh(sector_type).faces)
+            self.viewport._fit_view_to_model(self.viewport.size())
+            self.viewport.capture_reset_view()
+        self._sync_close_archive_action()
+        self.game_object_browser.set_source(path)
+        self._set_modified(False)
+        self._sync_all()
+        if model is None:
+            self.statusBar().showMessage(f"{obj.name}: no intact model in this set.", 7000)
+        return True
 
     def open_vehicle_script_dialog(self):
         path, _ = QFileDialog.getOpenFileName(
@@ -614,8 +760,13 @@ class _ScriptFilesMixin:
         self._capture_loaded_cockpit_camera()
         self._capture_tab_reset_baseline()
         self._active_script_path = script_path
+        self._building_had_mounts = False
         self._active_script_kind = block.kind
         self._active_script_id = block.object_id
+        self._active_vehicle_model = next(
+            (value for _, key, value, _ in reversed(
+                list(_top_level_assignment_rows(text, block))) if key == "model"),
+            "")
         self._active_model_reference = reference
         self._active_visual_reference = active_visual_reference
         self._active_base_path = chosen_asset
@@ -733,6 +884,33 @@ class _ScriptFilesMixin:
         self._sync_cockpit_preview_model()
 
 
+    def _related_turret_scripts(self):
+        from map_editor import bootstrap
+        from studio.assets.catalog import load_game_objects
+
+        install = bootstrap.installation()
+        dirty = {vehicle: limits for vehicle, limits in self.project.turret_limits.items()
+                 if limits.dirty}
+        if install is None or not dirty:
+            return {}
+        main = self._active_script_path
+        main_text, _, _ = read_script_file(main)
+        local = {(block.kind, block.object_id) for block in find_script_blocks(main_text)}
+        routes = {}
+        for obj in load_game_objects(install):
+            limits = dirty.get(obj.object_id) if obj.kind == VEHICLE else None
+            if limits is None:
+                continue
+            key = (limits.source_kind, obj.object_id)
+            if not getattr(self, "_fx_source_from_catalog", False) and key in local:
+                continue
+            source = self._catalog_turret_source(obj)
+            if source is not None:
+                path, kind = source
+                if kind == limits.source_kind and path.resolve() != main.resolve():
+                    routes[key] = path
+        return routes
+
     def overwrite_loaded_script(self):
         if (self._active_script_path is None
                 or self._active_script_id is None
@@ -742,8 +920,7 @@ class _ScriptFilesMixin:
                 "Import a vehicle or weapon from a script first. For an "
                 "arbitrary target, use Apply to Script.")
             return
-        expected_category = (
-            WEAPON if "weapon" in self._active_script_kind else VEHICLE)
+        expected_category = self._active_script_kind.split("_", 1)[-1]
         if self.project.target_category != expected_category:
             QMessageBox.warning(
                 self, "Target category mismatch",
@@ -762,8 +939,14 @@ class _ScriptFilesMixin:
             return
         if not self._validate_for_output():
             return
+        try:
+            turret_files = self._related_turret_scripts()
+        except (OSError, ValueError) as exc:
+            QMessageBox.warning(self, "Turret script unavailable", str(exc))
+            return
         dialog = ApplyScriptDialog(
             self, self.project,
+            turret_files=turret_files,
             replace_all_managed=True,
             initial_path=self._active_script_path,
             initial_kind=self._active_script_kind,

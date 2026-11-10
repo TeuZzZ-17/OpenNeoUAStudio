@@ -975,6 +975,7 @@ def _interpret_smoke(rows: dict[str, str], issue) -> decal_smoke.SmokeSpec:
         mesh_scale=number("effect_scale", 0.001, 10.0, 0.1),
         chance=bounded_int("effect_chance", 0, 100, defaults.chance),
         active_time=int_range("effect_active_time", 0, 3600000, defaults.active_time),
+        retrigger=int_range("effect_retrigger_interval", 0, 3600000, defaults.retrigger),
         fade_in=fade[0],
         fade_out=fade[1],
         count=int_range("effect_count", 0, decal_smoke.MAX_PUFFS, defaults.count),
@@ -2575,7 +2576,8 @@ SEQUENCE_PREROLL_MS = 120.0
 MEGADETH_HOLD_MS = 1200.0
 # Weapon flight shown before the impact: a vertical drop above the target.
 WEAPON_FLIGHT_MS = 900.0
-WEAPON_LAUNCH_HEIGHT = 550.0
+WEAPON_LAUNCH_HEIGHT = 550.0  # Reference distance for the existing preview speed.
+DEFAULT_PROJECTILE_ALTITUDE = 300.0
 
 
 def _uniform(rng: random.Random, low: float, high: float) -> float:
@@ -2696,6 +2698,7 @@ class PreviewSimulation:
                  debuffs: dict[int, DebuffSpec] | None = None,
                  decals: dict[int, DecalProfile] | None = None,
                  craters: bool = True,
+                 root_craters: bool = True, child_craters: bool = True,
                  settings: EffectSettings | None = None,
                  shot: tuple[tuple, tuple] | None = None,
                  volley: tuple = ()) -> None:
@@ -2732,6 +2735,8 @@ class PreviewSimulation:
         self.debuffs = debuffs or {}
         self.decals = decals or {}
         self.craters = craters
+        self.root_craters = root_craters
+        self.child_craters = child_craters
         self.settings = settings or EffectSettings()
         self._root = _Def(self.unit, document, self._specs, enabled)
         self._cluster_projectiles = 0
@@ -2811,7 +2816,9 @@ class PreviewSimulation:
         """
 
         unit = definition.unit
-        if (not self.craters or unit.crater is None or not unit.weapon
+        if (not self.craters or (definition.source is None and not self.root_craters)
+                or (definition.source is not None and not self.child_craters)
+                or unit.crater is None or not unit.weapon
                 or trigger != "impact_world"):
             return
         rng = self._rng(CRATER_SOURCE, trigger + definition.salt + repr(tuple(origin)))
@@ -3192,7 +3199,7 @@ class PreviewSimulation:
             # The flight length stands in for the fall height in the timing below.
             height = max(math.dist(launch, target), 1.0)
         else:
-            height = unit.altitude if unit.altitude > 0 else WEAPON_LAUNCH_HEIGHT
+            height = unit.altitude if unit.altitude > 0 else DEFAULT_PROJECTILE_ALTITUDE
             target = (self.origin[0],
                       self.ground_y if hit_ground else self.origin[1],
                       self.origin[2])
@@ -3538,7 +3545,12 @@ class PreviewSimulation:
         # Rows of clusters that split again stay; the children's own effect
         # rows would only clutter the timeline.
         nested = [track for track in self._tracks if track.source == -4]
+        crater_tracks = [track for track in self._tracks if track.source == CRATER_SOURCE]
         self._tracks = saved_tracks + nested
+        if crater_tracks:
+            self._tracks.append(PreviewTrack(
+                CRATER_SOURCE, "Cluster craters", min(track.start for track in crater_tracks),
+                max(track.end for track in crater_tracks)))
         if spawned:
             self._tracks.append(PreviewTrack(
                 -4, f"Cluster × {spawned} · weapon {spec.weapon_id}", at, last))
@@ -3673,27 +3685,37 @@ class PreviewSimulation:
         if spec.smoke is not None:
             self._build_decal_smoke(source, spec.smoke, rng, start, position,
                                     0.5 * math.hypot(size * stretch_x, size * stretch_z),
-                                    prefix)
+                                    prefix, end)
 
     def _build_decal_smoke(self, source, smoke, rng, start, position, radius,
-                           prefix) -> None:
+                           prefix, decal_end) -> None:
         seed = rng.getrandbits(24)
         if not decal_smoke.rolls_smoke(smoke, seed):
             return
         count = decal_smoke.scaled_count(decal_smoke.emitter_count(smoke, seed), radius)
         real = decal_smoke.emitter_duration(smoke, seed)
+        retrigger = decal_smoke.retrigger_interval(smoke, seed)
         # effect_count only matters for rise; ground_pulse flashes ignore it.
         if not decal_smoke.emits(smoke) or real <= 0 or (
                 smoke.mode == decal_smoke.MODE_RISE and count <= 0):
             return
-        shown = min(float(real), SMOKE_PREVIEW_MS)
-        self._events.append((source, "decal_smoke", start, start + shown,
+        if retrigger > 0:
+            # The effect restarts until the decal ends; the preview shows a window.
+            shown_end = min(decal_end, start + SMOKE_PREVIEW_MS)
+        else:
+            shown_end = start + min(float(real), SMOKE_PREVIEW_MS)
+        shown = max(0.0, shown_end - start)
+        self._events.append((source, "decal_smoke", start, shown_end,
                              (smoke, position, radius, seed, count, real)))
         self._tracks.append(PreviewTrack(
-            source, f"{prefix}Decal smoke", start, start + shown,
+            source, f"{prefix}Decal smoke", start, shown_end,
             float(smoke.fade_in), float(smoke.fade_out) if real <= shown else 0.0,
-            approximate=real > shown))
-        if real > shown:
+            approximate=real > shown or retrigger > 0))
+        if retrigger > 0 and (math.isinf(decal_end) or decal_end > shown_end + 0.5):
+            self.notes.append(
+                f"Decal smoke restarts every {retrigger / 1000:.1f} s; the "
+                f"preview plays its first {shown / 1000:.0f} s.")
+        elif real > shown:
             self.notes.append(
                 f"Decal smoke lasts {real / 1000:.0f} s in the engine; the "
                 f"preview plays its first {shown / 1000:.0f} s.")
@@ -3910,9 +3932,14 @@ class PreviewSimulation:
                 # Like the engine: no valid mode or no model, nothing is drawn.
                 if not decal_smoke.emits(smoke):
                     continue
+                state = decal_smoke.activation(smoke, seed, age)
+                if state is None:
+                    continue
+                cycle_age, active = state
                 if smoke.mode == decal_smoke.MODE_GROUND_PULSE:
-                    cycle, cycle_start, interval = decal_smoke.pulse_cycle(smoke, seed, age)
-                    elapsed = age - cycle_start
+                    cycle, cycle_start, interval = decal_smoke.pulse_cycle(
+                        smoke, seed, cycle_age)
+                    elapsed = cycle_age - cycle_start
                     life = min(smoke.pulse_time, interval)
                     if elapsed < life:
                         angle = 2.0 * math.pi * decal_smoke.hash_unit(
@@ -3932,7 +3959,7 @@ class PreviewSimulation:
                 gain = smoke.intensity * 0.01 * smoke.tint[3] / 255.0
                 for slot in range(count):
                     puff = decal_smoke.evaluate(
-                        smoke, radius, seed, count, real, slot, age)
+                        smoke, radius, seed, count, active, slot, cycle_age)
                     if puff is None:
                         continue
                     shade = min(1.0, (0.85 + 0.5 * puff.phase) * puff.shade)

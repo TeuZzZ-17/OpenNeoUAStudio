@@ -224,12 +224,16 @@ class ApplyScriptDialog(QDialog):
             initial_kind: str | None = None,
             initial_id: int | None = None,
             changed_groups: set[str] | frozenset[str] | None = None,
+            turret_files: dict[tuple[str, int], Path] | None = None,
     ) -> None:
         super().__init__(parent)
         self.setWindowTitle("Apply to Script")
         self.resize(820, 620)
         self.project = project
         self.updated_text = ""
+        self._turret_files = turret_files or {}
+        self._related_sources = {}
+        self._related_updates = {}
         self._source_text = ""
         self._source_encoding = "utf-8"
         self._source_bom = False
@@ -353,7 +357,10 @@ class ApplyScriptDialog(QDialog):
         if path.is_file():
             try:
                 source_text, _encoding, _bom = read_script_file(path)
-                self._script_blocks = find_script_blocks(source_text)
+                self._script_blocks = [
+                    block for block in find_script_blocks(source_text)
+                    if ("building" in block.kind) == (self.project.target_category == "building")
+                ]
             except (OSError, UnicodeError):
                 pass
         self._filter_script_blocks(refresh=False)
@@ -425,6 +432,9 @@ class ApplyScriptDialog(QDialog):
             (self._source_text, self._source_encoding,
              self._source_bom) = read_script_file(path)
             if self._editable_overwrite:
+                self._related_sources = {
+                    path: read_script_file(path) for path in set(self._turret_files.values())
+                }
                 target = _resolve_patch_target_block(
                     self._source_text, self.kind_combo.currentText(),
                     self.id_spin.value())
@@ -461,10 +471,12 @@ class ApplyScriptDialog(QDialog):
         if self._setting_preview or not self._editable_overwrite:
             return
         self.error_label.clear()
+        related = {path: original[0] for path, original in self._related_sources.items()}
         try:
             updated, groups = apply_editable_overwrite_preview(
                 self._source_text, self.preview.toPlainText(),
-                self.kind_combo.currentText(), self.id_spin.value())
+                self.kind_combo.currentText(), self.id_spin.value(),
+                turret_files=self._turret_files, related_texts=related)
         except CollisionScriptError as exc:
             self.updated_text = self._source_text
             self.applied_groups = set()
@@ -473,7 +485,12 @@ class ApplyScriptDialog(QDialog):
             return
         self.updated_text = updated
         self.applied_groups = groups
-        self.apply_button.setEnabled(updated != self._source_text)
+        self._related_updates = {path: text for path, text in related.items()
+                                 if text != self._related_sources[path][0]}
+        if self._related_updates:
+            self.error_label.setText("Also updates: " + ", ".join(
+                str(path) for path in sorted(self._related_updates)))
+        self.apply_button.setEnabled(updated != self._source_text or bool(self._related_updates))
 
     def _apply(self):
         if self._editable_overwrite:
@@ -481,20 +498,31 @@ class ApplyScriptDialog(QDialog):
             if not self.apply_button.isEnabled():
                 return
         path = Path(self.path_edit.text())
+        sources = {path: (self._source_text, self._source_encoding, self._source_bom)}
+        sources.update({item: self._related_sources[item] for item in self._related_updates})
+        updates = {path: self.updated_text, **self._related_updates}
+        written = []
         try:
+            for item, original in sources.items():
+                if read_script_file(item) != original:
+                    raise ValueError(f"Script changed since preview: {item}")
             self._write_type_icon_key(path)
+            for item, updated in updates.items():
+                original, encoding, bom = sources[item]
+                if updated != original:
+                    written.append(item)
+                    write_script_file(item, updated, encoding, bom)
         except (OSError, ValueError) as exc:
-            QMessageBox.critical(
-                self, "Write failed", f"No file was modified.\n\n{exc}")
-            return
-        try:
-            write_script_file(
-                path, self.updated_text,
-                self._source_encoding, self._source_bom)
-        except OSError as exc:
-            QMessageBox.critical(
-                self, "Write failed",
-                f"No further file was modified.\n\n{exc}")
+            restore_errors = []
+            for item in reversed(written):
+                try:
+                    write_script_file(item, *sources[item])
+                except (OSError, ValueError) as restore_error:
+                    restore_errors.append(f"{item}: {restore_error}")
+            message = str(exc)
+            if restore_errors:
+                message += "\n\nCould not restore:\n" + "\n".join(restore_errors)
+            QMessageBox.critical(self, "Write failed", message)
             return
         self.accept()
 
@@ -506,9 +534,9 @@ class ApplyScriptDialog(QDialog):
         """
 
         project = self.project
-        if (project.target_category != VEHICLE or not project.type_icon
+        if (project.target_category == WEAPON or not project.type_icon
                 or project.type_icon_cell is None
-                or "vehicle" not in self.kind_combo.currentText()):
+                or "weapon" in self.kind_combo.currentText()):
             return
         if (self._editable_overwrite
                 and _SCRIPT_TAB_ICON not in self.applied_groups):

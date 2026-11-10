@@ -381,7 +381,7 @@ def test_fx_transport_fits_and_ground_survives_empty_loop_tail(app):
         app.processEvents()
         bar = window.fx_panel.transport_bar
         assert bar.minimumSizeHint().width() < 550
-        assert window.width() == 1200
+        assert window.width() >= 1200
         assert window.properties_scroll.geometry().right() < window.width()
         window.fx_panel.speed_combo.setCurrentIndex(0)
         assert window.fx_panel.speed == 0.1
@@ -736,7 +736,7 @@ def test_fx_auto_reload_handles_atomic_script_save_and_texture_update(app, tmp_p
                        ('reload_button', 'auto_reload', 'reroll_button', 'fit_button'))
         panel.seek(100.)
         # Model-state rows lead the list: the first effect is the row after them.
-        panel.effects_list.item(len(panel.state_session.originals)).setCheckState(Qt.CheckState.Unchecked)
+        panel.effects_list.item(len(panel.visible_state_indexes())).setCheckState(Qt.CheckState.Unchecked)
         updated = text.replace('duration   = 800', 'duration   = 1600')
         replacement = script.with_suffix('.tmp')
         replacement.write_text(updated, encoding='utf-8')

@@ -239,6 +239,9 @@ class FxPreviewViewportMixin:
         self._fx_tinted_stage_cache: dict[tuple, QImage] = {}
         # Dug ground of the weapon craters: (key, texture, grid) of the last frame.
         self._fx_crater_cache: tuple | None = None
+        # The same dug ground as drawn on screen: (view key, layer) of the last
+        # frame, reused while neither the camera nor the craters change.
+        self._fx_crater_layer: tuple | None = None
         # External 3DS/BASE models: path -> hidden renderer (None = failed).
         self._fx_external_loader = None
         self._fx_external_cache: dict[str, AssetViewport | None] = {}
@@ -1116,27 +1119,24 @@ class FxPreviewViewportMixin:
         if self._fx_crater_cache is None or self._fx_crater_cache[0] != key:
             self._fx_crater_cache = (key, *self._crater_patch(
                 shapes, low_x, low_z, side, ground_y, covered))
-        _key, texture, heights = self._fx_crater_cache
+        _key, texture, heights, empty = self._fx_crater_cache
+
+        # Drawing the cells is the slow part (one transform each): a frame with
+        # the same craters, decals and camera shows the layer of the last one.
+        pan = camera.get("pan")
+        view_key = (key, camera.get("yaw"), camera.get("pitch"), camera.get("zoom"),
+                    (pan.x(), pan.y()) if pan is not None else None,
+                    tuple(camera.get("center") or ()), camera.get("scale"),
+                    target.left(), target.top(), target.width(), target.height())
+        if self._fx_crater_layer is not None and self._fx_crater_layer[0] == view_key:
+            painter.drawImage(QPointF(target.left(), target.top()), self._fx_crater_layer[1])
+            return {id(item) for item in covered}
 
         cells = self.CRATER_CELLS
         step = side / cells
         pixels = self.CRATER_TEXTURE / cells
         quads = []
 
-        def facing(points):
-            # Camera space: the eye sits at z = 4 (AssetViewport convention).
-            (ax, ay, az), (bx, by, bz), (cx, cy, cz), (dx, dy, dz) = points
-            ux, uy, uz = cx - ax, cy - ay, cz - az
-            vx, vy, vz = dx - bx, dy - by, dz - bz
-            nx, ny, nz = uy * vz - uz * vy, uz * vx - ux * vz, ux * vy - uy * vx
-            mx, my, mz = (ax + cx) * 0.5, (ay + cy) * 0.5, (az + cz) * 0.5
-            return nx * -mx + ny * -my + nz * (4.0 - mz)
-
-        # The side the flat ground shows the camera: cells turned the other way
-        # are the underside of the dug ground, hidden by the ground in front.
-        middle_x, middle_z = low_x + side * 0.5, low_z + side * 0.5
-        front = facing([self._camera_vertex((middle_x + a * step, ground_y, middle_z + b * step), camera)
-                        for a, b in ((0, 0), (1, 0), (1, 1), (0, 1))]) > 0.0
         hidden = self._crater_hidden_cells(shapes, low_x, low_z, step, ground_y, camera)
         for i in range(cells):
             for k in range(cells):
@@ -1145,7 +1145,7 @@ class FxPreviewViewportMixin:
                 camera_points = [self._camera_vertex(point, camera) for point in world]
                 if not all(self._camera_point_is_projectable(point) for point in camera_points):
                     continue
-                if (facing(camera_points) > 0.0) != front or hidden[k, i]:
+                if hidden[k, i] or empty[k, i]:
                     continue
                 screen = [self._project(point, target, camera) for point in camera_points]
                 # Order of a height field seen from above: by the cell's place on
@@ -1191,6 +1191,7 @@ class FxPreviewViewportMixin:
                 painter_for_cells.drawImage(source, texture, source)
                 painter_for_cells.restore()
         layer.end()
+        self._fx_crater_layer = (view_key, layer_image)
         painter.drawImage(QPointF(target.left(), target.top()), layer_image)
         return {id(item) for item in covered}
 
@@ -1199,16 +1200,19 @@ class FxPreviewViewportMixin:
 
         The preview ground plane is see-through, the game's ground is not: a dug
         point stays visible only when the line of sight enters the ground
-        through the crater's opening.
+        through the crater's opening. A cell is dropped only when all four of
+        its corners are hidden: at the near lip some corners pass the test and
+        the cell must stay, or the see-through plane shows through the gap.
         """
 
         cells = self.CRATER_CELLS
-        centres = low_x + (_np.arange(cells) + 0.5) * step, low_z + (_np.arange(cells) + 0.5) * step
-        xs, zs = _np.meshgrid(*centres)
+        points = low_x + _np.arange(cells + 1) * step, low_z + _np.arange(cells + 1) * step
+        xs, zs = _np.meshgrid(*points)
         ys = ground_y + crater_preview.sample(shapes, xs, zs)[0]
+        none = _np.zeros((cells, cells), bool)
         # The eye in world space: camera space (0, 0, 4) taken back through _camera_vertex.
         if not all(key in camera for key in ("center", "scale", "yaw", "pitch")) or not camera["scale"]:
-            return _np.zeros(xs.shape, bool)
+            return none
         yaw, pitch = math.radians(camera["yaw"]), math.radians(camera["pitch"])
         cam_y, cam_z = 0.0, 4.0
         y = cam_y * math.cos(pitch) + cam_z * math.sin(pitch)
@@ -1219,15 +1223,18 @@ class FxPreviewViewportMixin:
         eye = (x / scale + centre[0], -y / scale + centre[1], z / scale + centre[2])
         below = ys > ground_y + 0.5
         if eye[1] >= ground_y or not _np.any(below):
-            return _np.zeros(xs.shape, bool)
+            return none
         t = (ground_y - eye[1]) / _np.maximum(ys - eye[1], 1e-6)
         enter_x = eye[0] + t * (xs - eye[0])
         enter_z = eye[2] + t * (zs - eye[2])
         opening = crater_preview.sample(shapes, enter_x, enter_z)[0] > 0.5
-        return below & ~opening
+        point_hidden = below & ~opening
+        return (point_hidden[:-1, :-1] & point_hidden[1:, :-1]
+                & point_hidden[:-1, 1:] & point_hidden[1:, 1:])
 
     def _crater_patch(self, shapes, low_x, low_z, side, ground_y, decals):
-        """(texture seen from above, heights of the grid points) of the dug square."""
+        """(texture seen from above, heights of the grid points, cells with
+        nothing to draw) of the dug square."""
 
         size = self.CRATER_TEXTURE
         cells = self.CRATER_CELLS
@@ -1272,7 +1279,14 @@ class FxPreviewViewportMixin:
         points = _np.arange(cells + 1) / cells * side
         gx, gz = _np.meshgrid(low_x + points, low_z + points)
         heights = ground_y + crater_preview.sample(shapes, gx, gz)[0]
-        return texture, heights
+        # Cells past every crater's reach are clear in the texture: not drawn.
+        step = side / cells
+        cx, cz = _np.meshgrid(low_x + (_np.arange(cells) + 0.5) * step,
+                              low_z + (_np.arange(cells) + 0.5) * step)
+        empty = _np.ones((cells, cells), bool)
+        for shape in shapes:
+            empty &= _np.hypot(cx - shape.x, cz - shape.z) > crater_preview.reach(shape) + step * 0.75
+        return texture, heights, empty
 
     def _draw_fx_decals(self, painter, target, camera, decals) -> None:
         for item in decals:

@@ -13,7 +13,7 @@ from dataclasses import replace
 from time import perf_counter
 
 from PySide6.QtCore import QPointF, QRectF, QSignalBlocker, QSize, Qt, QTimer, Signal, QItemSelectionModel
-from PySide6.QtGui import QAction, QColor, QIcon, QPainter, QPen, QPixmap, QPolygonF
+from PySide6.QtGui import QAction, QColor, QIcon, QPainter, QPen, QPixmap, QPolygonF, QTextCursor
 from PySide6.QtWidgets import (
     QAbstractItemView, QButtonGroup, QCheckBox, QComboBox, QFrame, QGridLayout, QGroupBox, QHBoxLayout, QLabel, QListWidget, QMenu,
     QListWidgetItem, QPushButton, QScrollArea, QSizePolicy, QSlider, QSpinBox, QStyle, QStyledItemDelegate, QStyleOptionViewItem,
@@ -39,6 +39,7 @@ LOOP_TAIL_MS = 400.0
 # Longest gap between two painted frames whose skipped shakes still count.
 SHAKE_LOOK_BACK_MS = 400.0
 EMPTY_TIMELINE_MS = 2000.0
+CHILD_CRATER_INDEX = -5  # Read-only visibility row for configured cluster descendants.
 
 def _palette_icon(muted: bool) -> QIcon:
     """Palette glyph (three color dots); a white slash when switched off."""
@@ -380,9 +381,11 @@ class FxEffectsView(QWidget):
         self.delete_action.triggered.connect(self.delete_selected)
         # Add writes a new, empty effect: what is typed in it decides its type.
         self.add_action = QAction("Add Effect", self)
-        self.add_action.setToolTip(
+        self._add_tooltip = (
             "Add an empty effect and open it in the code editor. What you write in it "
-            "decides its type; saving writes it into the script file.")
+            "decides its type; saving writes it into the script file. Model, ground decal "
+            "and crater keys open their existing row and retain its other values.")
+        self.add_action.setToolTip(self._add_tooltip)
         self.add_action.triggered.connect(self.panel.add_effect)
         self.add_button = QPushButton("Add", self)
         self.add_button.setToolTip(self.add_action.toolTip())
@@ -410,13 +413,14 @@ class FxEffectsView(QWidget):
         with QSignalBlocker(self.list):
             self.list.clear()
             self._add_state_rows(selected if keep_selection else set())
+            self._add_child_crater_row(selected if keep_selection else set())
             for index, item in enumerate(panel.document.items):
                 level = None
                 if isinstance(item, fx.FxBlank):
                     color = "#6f7682"
                     issues = ()
                     title = "New effect"
-                    detail = "Empty · write a begin_fx, a dest_fx or snd_ / pal_ / shk_ keys"
+                    detail = "Empty · write an effect or model, decal / crater keys"
                 elif isinstance(item, fx.FxKeyGroup):
                     level = fx_compat.key_group_level(item, panel.context)
                     issues = fx.key_group_issues(item, panel.context)
@@ -456,11 +460,6 @@ class FxEffectsView(QWidget):
                 self.list.addItem(row)
                 if keep_selection and index in selected:
                     row.setSelected(True)
-            if not panel.document.items and not panel.state_session.originals:
-                placeholder = QListWidgetItem(
-                    "No destruction effects in this definition.")
-                placeholder.setFlags(Qt.ItemFlag.NoItemFlags)
-                self.list.addItem(placeholder)
             if current is not None:
                 self.list.setCurrentRow(current, QItemSelectionModel.SelectionFlag.NoUpdate)
         self.update_actions()
@@ -483,15 +482,23 @@ class FxEffectsView(QWidget):
         panel = self.panel
         session = panel.state_session
         for index in fx_visuals.STATE_INDEXES:
-            if index not in session.originals:
+            if index not in panel.visible_state_indexes():
                 continue
+            source = session.drafts[index] if session.drafts[index].strip() else session.originals[index]
             if index == fx_visuals.MODEL_INDEX:
-                values = fx_visuals.parse_model_text(session.originals[index])
+                parser = fx_visuals.parse_model_text
+                try:
+                    values = parser(source)
+                except ValueError:
+                    values = parser(session.originals[index])
                 level = fx_compat.model_level(values)
                 text = "Model\n" + fx_visuals.model_summary(values)
                 tip = "vp_ / base_ / 3ds_ of every model state"
             elif index == fx_visuals.CRATER_INDEX:
-                values = fx_visuals.parse_crater_text(session.originals[index])
+                try:
+                    values = fx_visuals.parse_crater_text(source)
+                except ValueError:
+                    values = fx_visuals.parse_crater_text(session.originals[index])
                 level = fx_compat.crater_level(values)
                 text = "Crater\n" + fx_visuals.crater_summary(values)
                 tip = ("crater_radius and crater_depth (a number or min~max) dig the ground "
@@ -499,7 +506,10 @@ class FxEffectsView(QWidget):
                        "raised border in % of the depth (default 20). The depth never goes "
                        "past half the radius. Both radius and depth are needed.")
             else:
-                values = fx_visuals.parse_decal_text(session.originals[index])
+                try:
+                    values = fx_visuals.parse_decal_text(source)
+                except ValueError:
+                    values = fx_visuals.parse_decal_text(session.originals[index])
                 level = fx_compat.decal_level(values)
                 text = "Ground decal\n" + fx_visuals.decal_summary(values)
                 profiles = ", ".join(str(number) for number in sorted(panel.decals))
@@ -524,11 +534,30 @@ class FxEffectsView(QWidget):
             for position in range(self.list.count()):
                 row = self.list.item(position)
                 index = row.data(Qt.ItemDataRole.UserRole)
-                if index is not None:
+                if index is not None and index != CHILD_CRATER_INDEX:
                     lines = row.text().split("\n", 1)
                     lines[0] = lines[0].removesuffix(" *") + (
                         " *" if self.panel.session_for(index).is_dirty(index) else "")
                     row.setText("\n".join(lines))
+
+    def _add_child_crater_row(self, selected) -> None:
+        children = self.panel.cluster_crater_weapons()
+        if not children:
+            return
+        names = ", ".join(str(child.weapon_id) for child in children)
+        row = QListWidgetItem(f"Cluster craters\nWeapon {names}")
+        row.setFlags(row.flags() | Qt.ItemFlag.ItemIsUserCheckable)
+        row.setCheckState(Qt.CheckState.Unchecked if CHILD_CRATER_INDEX in self.panel.hidden_items
+                          else Qt.CheckState.Checked)
+        row.setIcon(self._dot_icon(COMPAT_STYLES[OPENNEOUA].color))
+        row.setForeground(QColor("#edf1f7"))
+        row.setToolTip(f"{COMPAT_STYLES[OPENNEOUA].title}\n"
+                       "These craters belong to the cluster's child weapons. "
+                       f"Open weapon {names} to edit their crater settings.")
+        row.setData(Qt.ItemDataRole.UserRole, CHILD_CRATER_INDEX)
+        self.list.addItem(row)
+        if CHILD_CRATER_INDEX in selected:
+            row.setSelected(True)
 
     def sync_checks(self) -> None:
         with QSignalBlocker(self.list):
@@ -549,14 +578,20 @@ class FxEffectsView(QWidget):
     # -- actions ------------------------------------------------------------------------
 
     def update_actions(self) -> None:
-        available = bool(self.panel.document.items) or bool(self.panel.state_session.originals)
+        available = self.panel.has_rows()
         selected = any(row.data(Qt.ItemDataRole.UserRole) is not None
                        for row in self.list.selectedItems())
         for index, action in enumerate(self.actions):
             action.setEnabled(available and (index < 2 or selected))
         # Model-state rows cannot be deleted: only effects can.
         self.delete_action.setEnabled(bool(self.panel.document.items) and bool(self.selected_indexes()))
-        self.add_action.setEnabled(self.panel.text_session.can_add())
+        session = self.panel.text_session
+        self.add_action.setEnabled(session.can_add())
+        reason = session.source_error or ("Open a definition from a script first."
+                                          if session.end_line is None else "")
+        tip = f"Cannot add an effect: {reason}" if reason else self._add_tooltip
+        self.add_action.setToolTip(tip)
+        self.add_button.setToolTip(tip)
 
     def selected_indexes(self) -> list[int]:
         return sorted(row.data(Qt.ItemDataRole.UserRole) for row in self.list.selectedItems()
@@ -573,7 +608,7 @@ class FxEffectsView(QWidget):
         edit = menu.addAction("Edit Effect Code")
         current = self.list.currentItem()
         index = current.data(Qt.ItemDataRole.UserRole) if current else None
-        edit.setEnabled(index is not None)
+        edit.setEnabled(index is not None and index != CHILD_CRATER_INDEX)
         edit.triggered.connect(lambda: self.panel.edit_effect_code(index))
         menu.addAction(self.delete_action)
         menu.addSeparator()
@@ -656,6 +691,7 @@ class DestructionFxPanel(QWidget):
         self.text_session = FxTextSession(self.document, self.context)
         self.code_drawer = None
         self._pending_code_index = None
+        self._linked_states: set[int] = set()   # state rows filled by one Add
         self.catalog: dict[int, fx.LegacyFxVehicle] = {}
         self.weapons: dict[int, fx.WeaponDef] = {}
         self.debuffs: dict[int, fx.DebuffSpec] = {}
@@ -929,7 +965,7 @@ class DestructionFxPanel(QWidget):
         # Vehicles: kill height of flying units (0 = ground). Weapons: the
         # height the projectile falls from, so it can never be 0.
         minimum = 50 if weapon else 0
-        self.altitude_label.setText("Missile altitude" if weapon else "Flight altitude")
+        self.altitude_label.setText("Projectile altitude" if weapon else "Flight altitude")
         self.altitude_label.setToolTip(
             "Height the weapon starts from before it falls onto the target. "
             "Higher means a longer flight." if weapon else
@@ -940,7 +976,7 @@ class DestructionFxPanel(QWidget):
             for widget in (self.altitude_spin, self.altitude_slider):
                 widget.setRange(minimum, 3000)
             value = int(self.unit.altitude) if self.unit.altitude > 0 else int(
-                fx.WEAPON_LAUNCH_HEIGHT if weapon else 0)
+                fx.DEFAULT_PROJECTILE_ALTITUDE if weapon else 0)
             self.altitude_spin.setValue(value)
             self.altitude_slider.setValue(value)
         count = len(self.document.items)
@@ -989,9 +1025,11 @@ class DestructionFxPanel(QWidget):
     def _show_effects_context_menu(self, position):
         self.effects_view.show_context_menu(position)
 
-    def set_script_sources(self, origins) -> None:
-        self.text_session = FxTextSession(self.document, self.context, origins)
-        self.state_session = fx_visuals.StateSession(origins, weapon=self.context == fx.CONTEXT_WEAPON)
+    def set_script_sources(self, origins, expected=None) -> None:
+        self.text_session = FxTextSession(self.document, self.context, origins, expected)
+        self.state_session = fx_visuals.StateSession(
+            origins, weapon=self.context == fx.CONTEXT_WEAPON, expected=expected)
+        self._linked_states = set()
         self._fill_list(keep_selection=True)
         self.update_text_status()
         self.effects_view.update_actions()
@@ -1042,10 +1080,22 @@ class DestructionFxPanel(QWidget):
 
     def all_row_indexes(self) -> set[int]:
         return (set(range(len(self.document.items)))
-                | set(self.state_session.originals))
+                | set(self.visible_state_indexes())
+                | ({CHILD_CRATER_INDEX} if self.cluster_crater_weapons() else set()))
+
+    def cluster_crater_weapons(self):
+        return ([child for child in fx.cluster_chain(self.unit, self.weapons)
+                 if child.unit.crater is not None]
+                if self.context == fx.CONTEXT_WEAPON else [])
+
+    def visible_state_indexes(self) -> list[int]:
+        session = self.state_session
+        return [index for index in fx_visuals.STATE_INDEXES if index in session.originals
+                and (session.originals[index].strip() or session.drafts[index].strip())]
 
     def has_rows(self) -> bool:
-        return bool(self.document.items) or bool(self.state_session.originals)
+        return bool(self.document.items) or bool(self.visible_state_indexes()) \
+            or bool(self.cluster_crater_weapons())
 
     def is_valid_index(self, index) -> bool:
         if self.is_state_index(index):
@@ -1063,10 +1113,14 @@ class DestructionFxPanel(QWidget):
                    else [index for index in indexes if not self.is_state_index(index)])
         states = (self.state_session.indexes() if indexes is None
                   else [index for index in indexes if self.is_state_index(index)])
+        if self._linked_states.intersection(states):
+            # Rows filled by one Add are saved together.
+            states = sorted(set(states) | self._linked_states)
+            self._linked_states = set()
         paths = self.text_session.save(effects)
         if paths:
             self.sourceSaved.emit(paths)
-            self.state_session.refresh_snapshots(paths)
+            self.state_session.refresh_snapshots(paths, self.text_session.origins)
         visuals_saved = False
         if states:
             if self.text_session.dirty:
@@ -1105,6 +1159,57 @@ class DestructionFxPanel(QWidget):
         self.effects_view.select_effect(index)
         self.documentEdited.emit()
         self.edit_effect_code(index)
+
+    def redirect_new_state(self, index, text) -> int:
+        """Move a new draft of Model / Ground decal / Crater keys to its rows.
+
+        Keys of several rows may be written together: each row gets its own
+        lines, the editor keeps the first row and the others are saved with it.
+        """
+        session = self.text_session
+        if index < 0 or not session.is_pending(index):
+            return index
+        state = self.state_session
+        groups = fx_visuals.split_state_text(text, state.originals)
+        if groups is None:
+            return index
+        for target in groups:
+            if state.is_dirty(target):
+                raise ValueError(f"The {self.edit_title(target)} row already has an unsaved draft. "
+                                 "Save or reset that draft before adding these values.")
+        merged = {target: fx_visuals.merge_new_state_text(target, lines, state.originals[target])
+                  for target, lines in groups.items()}
+        for target, value in merged.items():
+            state.drafts[target] = value
+        self._linked_states = set(merged) if len(merged) > 1 else set()
+        target = next(iter(merged))
+        session.discard_pending(index)
+        self.document.items.pop(index)
+        self.hidden_items = {i - 1 if i > index else i for i in self.hidden_items if i != index}
+        if self.highlight == index:
+            self.highlight = None
+        elif self.highlight is not None and self.highlight > index:
+            self.highlight -= 1
+        self.timeline.highlight = self.highlight
+        self.code_drawer.index = target
+        if merged[target] != text:
+            editor = self.code_drawer.code.editor
+            saved_cursor = editor.textCursor()
+            with QSignalBlocker(self.code_drawer.code):
+                if merged[target].startswith(text):
+                    cursor = QTextCursor(editor.document())
+                    cursor.movePosition(QTextCursor.MoveOperation.End)
+                    cursor.insertText(merged[target][len(text):])
+                    editor.setTextCursor(saved_cursor)
+                else:
+                    # Lines of other rows left the editor: show this row's text only.
+                    editor.setPlainText(merged[target])
+                    editor.moveCursor(QTextCursor.MoveOperation.End)
+        self._fill_list()
+        self.effects_view.select_effect(target)
+        self._rebuild_simulation()
+        self.documentEdited.emit()
+        return target
 
     def _ensure_code_drawer(self):
         """Create the editor and its tab once the panel sits in its final window."""
@@ -1150,6 +1255,7 @@ class DestructionFxPanel(QWidget):
         except (OSError, ValueError, RuntimeError, UnicodeError) as exc:
             QMessageBox.warning(self, "Effects were not deleted", str(exc))
             return False
+        self.state_session.refresh_snapshots(paths, session.origins)
         gone = set(indexes)
         for index in reversed(indexes):
             del self.document.items[index]
@@ -1176,6 +1282,9 @@ class DestructionFxPanel(QWidget):
     def apply_text_item(self, index, item) -> None:
         if self.is_state_index(index):
             # A model state shows its new draft in the preview once it is saved.
+            self._fill_list(keep_selection=True)
+            if index in self.visible_state_indexes():
+                self.effects_view.select_effect(index)
             self.update_text_status()
             return
         if effect_text(self.document.items[index]) != effect_text(item):
@@ -1186,9 +1295,12 @@ class DestructionFxPanel(QWidget):
         self.update_text_status()
 
     def update_text_status(self) -> None:
+        error = self.text_session.source_error or self.state_session.source_error
         self.reload_note.setText(
+            "Editing unavailable · reload or check the source file" if error else
             "Unsaved effect code · preview updates live · Ctrl+S to save" if self.has_unsaved_text
             else "Auto reload enabled · source files are watched")
+        self.reload_note.setToolTip(error)
         self.effects_view.mark_dirty()
         self.draftStateChanged.emit()
 
@@ -1205,7 +1317,7 @@ class DestructionFxPanel(QWidget):
             try:
                 paths = self.text_session.save(range(len(self.document.items)))
                 self.sourceSaved.emit(paths)
-                self.state_session.refresh_snapshots(paths)
+                self.state_session.refresh_snapshots(paths, self.text_session.origins)
                 if self.state_session.save(self.state_session.indexes()):
                     self.visualsSaved.emit()
             except (OSError, ValueError, RuntimeError, UnicodeError) as exc:
@@ -1275,7 +1387,8 @@ class DestructionFxPanel(QWidget):
             enabled=enabled, unit=self.unit, weapons=self.weapons,
             debuffs=self.debuffs,
             decals={} if fx_visuals.DECAL_INDEX in self.hidden_items else self.decals,
-            craters=fx_visuals.CRATER_INDEX not in self.hidden_items,
+            root_craters=fx_visuals.CRATER_INDEX not in self.hidden_items,
+            child_craters=CHILD_CRATER_INDEX not in self.hidden_items,
             settings=self.settings,
             shot=shot, volley=self.volley if shot else ())
         self.timeline.set_tracks(self.simulation.tracks, self._length())

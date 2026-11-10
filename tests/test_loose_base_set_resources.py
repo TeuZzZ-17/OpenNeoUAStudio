@@ -37,6 +37,50 @@ def _mnojet(window):
     assert window._open_game_object(obj)
 
 
+def test_catalog_weapon_fx_remains_editable(window):
+    import copy
+    from map_editor import bootstrap
+    from studio.assets.catalog import load_game_objects
+
+    weapon = next(o for o in load_game_objects(bootstrap.installation())
+                  if o.kind == "weapon" and o.object_id == 37)
+    assert window._open_game_object(weapon)
+    session = window.fx_panel.text_session
+    assert session.can_add(), session.source_error
+    assert window.fx_panel.effects_view.add_button.isEnabled()
+
+    # An earlier edit elsewhere in the script can move this definition after
+    # the Entity List has already cached its old line numbers.
+    stale = copy.deepcopy(weapon)
+    stale.body_sources = [(path, first + 80, last + 80)
+                          for path, first, last in stale.body_sources]
+    window.game_object_browser.objects = [
+        stale if (obj.kind, obj.object_id) == (stale.kind, stale.object_id) else obj
+        for obj in window.game_object_browser.objects]
+    assert window._open_game_object(stale)
+    session = window.fx_panel.text_session
+    assert session.can_add(), session.source_error
+    assert window.fx_panel.effects_view.add_button.isEnabled()
+
+
+def test_cluster_uses_fresh_child_data_when_opened(window):
+    import copy
+    from map_editor import bootstrap
+    from studio.assets.catalog import load_game_objects
+    from entity_designer import destruction_fx as fx
+
+    objects = load_game_objects(bootstrap.installation())
+    parent = next(o for o in objects if o.kind == "weapon" and o.object_id == 42)
+    child = next(o for o in objects if o.kind == "weapon" and o.object_id == 43)
+    expected = fx.weapon_def_from_text(43, child.effective_text).unit.crater
+    stale = copy.deepcopy(child)
+    stale.bodies.append("crater_radius = 100\ncrater_depth = 50")
+    window.game_object_browser.objects = [stale if (o.kind, o.object_id) == ("weapon", 43)
+                                          else o for o in objects]
+    assert window._open_game_object(parent)
+    assert window.fx_panel.weapons[43].unit.crater == expected
+
+
 def test_gatling_tracer_is_available_for_collision_generation(window):
     from unittest.mock import patch
     from PySide6.QtTest import QTest

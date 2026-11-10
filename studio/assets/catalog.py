@@ -48,7 +48,7 @@ class GameObject:
 def load_game_objects(installation):
     scripts = installation.folder("scripts")
     objects = {}
-    for text, source in script_texts(scripts, with_source=True):
+    for text, source, offset in script_texts(scripts, with_source=True, with_offsets=True):
         active = None
         depth = 0
         body = []
@@ -63,14 +63,14 @@ def load_game_objects(installation):
                     objects[key] = GameObject(kind, key[1], scripts / source)
                 active = objects[key]
                 depth, body = 0, []
-                body_start = line_number
+                body_start = offset + line_number
                 continue
             if active is None:
                 continue
             token = code.split(None, 1)[0].casefold() if code else ""
             if token == "end" and depth == 0:
                 active.bodies.append("\n".join(body))
-                active.body_sources.append((scripts / source, body_start, line_number))
+                active.body_sources.append((scripts / source, body_start, offset + line_number))
                 active = None
                 continue
             body.append(raw)

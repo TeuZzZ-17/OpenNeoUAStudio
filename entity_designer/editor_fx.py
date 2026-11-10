@@ -189,8 +189,8 @@ class _FxPreviewMixin:
         if unit.flies:
             unit = replace(unit, altitude=fx.DEFAULT_FLIGHT_ALTITUDE)
         elif weapon:
-            # Artillery shells fall from their arc height, other weapons from 550.
-            unit = replace(unit, altitude=unit.altitude or fx.WEAPON_LAUNCH_HEIGHT)
+            # Artillery shells fall from their arc height; other projectiles use the preview default.
+            unit = replace(unit, altitude=unit.altitude or fx.DEFAULT_PROJECTILE_ALTITUDE)
         return unit
 
     def wireframe_export_name(self) -> str:
@@ -281,7 +281,8 @@ class _FxPreviewMixin:
                            if obj.object_id == block.object_id
                            and f"new_{obj.kind}" == block.kind), None)
             origins = getattr(source, "body_sources", ())
-        self.fx_panel.set_script_sources(origins if self._active_script_path else ())
+        self.fx_panel.set_script_sources(
+            origins if self._active_script_path else (), expected=(block.kind, block.object_id))
         self._fx_update_watcher()
         if not keep_view:
             # A fresh definition: what is on disk now is what the tab shows.
