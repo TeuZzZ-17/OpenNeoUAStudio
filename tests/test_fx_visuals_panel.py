@@ -7,7 +7,7 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 import pytest
 from PySide6.QtCore import Qt
 from PySide6.QtTest import QTest
-from PySide6.QtWidgets import QApplication
+from PySide6.QtWidgets import QApplication, QMessageBox
 
 from entity_designer import destruction_fx as fx
 from entity_designer import fx_visuals as visuals
@@ -104,6 +104,15 @@ def test_projectile_altitude_default_and_label(app):
         assert projectile.position[1] == pytest.approx(-300)
     finally:
         panel.close()
+
+
+def test_fx_timeline_starts_at_quarter_speed_and_can_be_changed(app):
+    panel = DestructionFxPanel()
+    assert panel.speed == panel.speed_combo.currentData() == 0.25
+    panel.speed_combo.setCurrentIndex(panel.speed_combo.findData(1.0))
+    panel.set_context(fx.CONTEXT_WEAPON, fx.FxDocument())
+    assert panel.speed == panel.speed_combo.currentData() == 1.0
+    panel.close()
 
 
 @pytest.mark.parametrize(("index", "old", "new"), [
@@ -300,6 +309,49 @@ def test_the_model_row_cannot_be_deleted(app, tmp_path):
     _rows(panel)[visuals.MODEL_INDEX].setSelected(True)
     assert panel.effects_view.selected_indexes() == []
     assert not panel.effects_view.delete_action.isEnabled()
+
+
+def test_delete_removes_crater_and_decal_from_all_definition_parts(app, tmp_path, monkeypatch):
+    base = SCRIPT.replace("    vp_normal = 20\n", "    vp_normal = 20\n"
+                          "    crater_radius = 50\n    crater_depth = 20\n"
+                          "    ground_decal_id = 1\n")
+    override = ("modify_weapon 6\n    crater_radius = 60\n    crater_rim = 15\n"
+                "    ground_decal_size = 30~50\n    energy = 5\nend\n")
+    panel, path = _panel(app, tmp_path, base)
+    extra = tmp_path / "Overrides.cfg"
+    extra.write_text(override, encoding="utf-8")
+    panel.set_script_sources([(path, 0, find_script_blocks(base)[0].end_line),
+                              (extra, 0, find_script_blocks(override)[0].end_line)])
+    monkeypatch.setattr(QMessageBox, "question", lambda *args: QMessageBox.StandardButton.Yes)
+    for index in (visuals.CRATER_INDEX, visuals.DECAL_INDEX):
+        _rows(panel)[index].setSelected(True)
+    assert panel.effects_view.delete_button.isEnabled()
+    panel.effects_view.delete_button.click()
+    assert path.read_text(encoding="utf-8") == SCRIPT
+    assert extra.read_text(encoding="utf-8") == "modify_weapon 6\n    energy = 5\nend\n"
+    assert set(_rows(panel)) == {visuals.MODEL_INDEX, 0}
+    assert panel.text_session.can_add()
+    assert panel.delete_effects([0])
+    assert "begin_fx" not in path.read_text(encoding="utf-8")
+
+
+def test_delete_cluster_crater_of_self_spawning_weapon(app, tmp_path, monkeypatch):
+    from entity_designer.fx_panel import CHILD_CRATER_INDEX
+
+    script = ("new_weapon 6\n    vp_normal = 20\n    crater_radius = 30\n"
+              "    crater_depth = 10\n    cluster_count = 2\n"
+              "    cluster_weapon_id = 6\n    cluster_trigger_time = 100\nend\n")
+    panel, path = _panel(app, tmp_path, script)
+    weapon = fx.weapon_def_from_text(6, script)
+    panel.set_context(fx.CONTEXT_WEAPON, weapon.document, unit=weapon.unit, weapons={6: weapon})
+    panel.set_script_sources([(path, 0, find_script_blocks(script)[0].end_line)])
+    monkeypatch.setattr(QMessageBox, "question", lambda *args: QMessageBox.StandardButton.Yes)
+    _rows(panel)[CHILD_CRATER_INDEX].setSelected(True)
+    assert panel.effects_view.delete_button.isEnabled()
+    panel.effects_view.delete_button.click()
+    assert "crater_" not in path.read_text(encoding="utf-8")
+    assert CHILD_CRATER_INDEX not in _rows(panel)
+    assert visuals.CRATER_INDEX not in _rows(panel)
 
 
 def test_preview_items_map_to_their_model_state():

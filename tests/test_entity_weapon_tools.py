@@ -4,7 +4,7 @@ from dataclasses import replace
 import pytest
 from PySide6.QtWidgets import QApplication, QMessageBox
 from entity_designer.editor import CollisionEditorWindow
-from entity_designer.script_model import WEAPON, VEHICLE, find_script_blocks
+from entity_designer.script_model import WEAPON, VEHICLE, find_script_blocks, script_model_references
 from entity_designer.shape import CollisionHull, CollisionShape, read_collision_shape, write_collision_shape
 from entity_designer.wireframe_generator import WireframeProjection
 
@@ -28,6 +28,55 @@ def test_weapon_briefing_is_disabled_and_recovers_for_vehicles(window):
     window.project.target_category = VEHICLE
     window._sync_all()
     assert window.properties_tabs.isTabEnabled(window.briefing_tab_index)
+
+
+def test_kamikaze_preview_uses_carrier_visuals_and_sources(window, tmp_path):
+    from entity_designer import destruction_fx as fx
+    from studio.assets.catalog import GameObject
+
+    weapon = "new_weapon 17\n    model = kamikaze\n    vp_normal = 22\nend\n"
+    source = tmp_path / "Weapons.cfg"
+    source.write_text(weapon, encoding="utf-8")
+    body = ("    model = plane\n    weapon_2 = 17\n    vp_normal = 51\n"
+            "    scale_xyz = 2|3|4\n    overeof = 20\n"
+            "    begin_fx\n        trigger = air_destroyed\n        mode = visual\n"
+            "        start_size = 1\n        end_size = 0\n"
+            "        duration = 1000\n        vp_model = 160\n    end")
+    vehicles = tmp_path / "Vehicles.cfg"
+    carrier = GameObject("vehicle", 91, vehicles,
+                         {"name": "Yang", "weapon_2": "17"}, [body])
+    text = carrier.effective_text
+    vehicles.write_text(text, encoding="utf-8")
+    carrier.body_sources = [(vehicles, 0, find_script_blocks(text)[0].end_line)]
+    reference = script_model_references(weapon)[0]
+    window._active_script_path = source
+    window._load_fx_context(weapon, reference.block, reference, objects=[carrier])
+
+    panel = window.fx_panel
+    assert panel.carrier_combo.currentData() is None
+    assert panel.context == fx.CONTEXT_WEAPON
+    assert not panel.simulation.shows_unit
+    panel.carrier_combo.blockSignals(True)
+    panel.carrier_combo.setCurrentIndex(panel.carrier_combo.findData(91))
+    panel.carrier_combo.blockSignals(False)
+    window._load_fx_context(weapon, reference.block, reference, keep_view=True, objects=[carrier])
+    assert panel.carrier_combo.currentData() == 91
+    assert panel.context == fx.CONTEXT_VEHICLE
+    assert panel.weapon_box.isHidden()
+    assert panel.text_session.sources[0].path == vehicles
+    assert panel.unit.scale == (2, 3, 4)
+    assert panel.origin == (0, -20, 0)
+    assert {item.vp for item in panel.simulation.items_at(0) if item.kind == "unit"} == {51}
+    assert 160 in panel.required_vps()
+    assert any(item.vp == 160 for item in panel.simulation.items_at(200))
+
+    panel.carrier_combo.blockSignals(True)
+    panel.carrier_combo.setCurrentIndex(panel.carrier_combo.findData(None))
+    panel.carrier_combo.blockSignals(False)
+    window._load_fx_context(weapon, reference.block, reference, keep_view=True, objects=[carrier])
+    assert panel.context == fx.CONTEXT_WEAPON
+    assert panel.text_session.origins[0][0] == source
+    assert not panel.simulation.shows_unit
 
 
 def test_weapon_wireframe_stays_selected_and_loads_its_current_file(window, tmp_path):

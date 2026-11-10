@@ -9,6 +9,7 @@ import tempfile
 
 from entity_designer import destruction_fx as fx
 from entity_designer.script_model import (
+    _top_level_assignment_rows,
     find_script_blocks, read_script_file, validate_definition_source, write_script_file,
 )
 from studio.exchange.portable import commit_verified_files
@@ -224,39 +225,52 @@ class FxTextSession:
         self._check_spans(self.sources, self.originals)
         return paths
 
-    def delete(self, indexes) -> set[Path]:
+    def delete(self, indexes, *, keys=()) -> set[Path]:
         """Remove effects from their script files and from this session.
 
         Only the lines of the chosen effects leave the files. Drafts of the
         other effects stay as they are, under their new positions.
         """
         removed = sorted(set(indexes))
-        if not removed:
+        if not removed and not keys:
             return set()
-        if self.source_error or len(self.sources) != len(self.originals):
+        if not self.can_add():
             raise ValueError(self.source_error or "No script source is attached to this effect.")
         gone = set(removed)
         paths = {self.sources[index].path for index in removed}
+        if keys:
+            # Remove inherited values too, so an earlier definition cannot
+            # restore a deleted effect when a modify_* block is reloaded.
+            paths.update(path for path, _, _ in self.origins)
         self._check_unchanged(paths)
         updated = {}
+        changes = {}
         for path in paths:
-            lines = self._decode(path).splitlines(keepends=True)
-            for index in sorted((i for i in removed if self.sources[i].path == path),
-                                key=lambda i: self.sources[i].first, reverse=True):
-                del lines[self.sources[index].first:self.sources[index].last + 1]
-            updated[path] = "".join(lines)
+            text = self._decode(path)
+            spans = {(self.sources[i].first, self.sources[i].last)
+                     for i in removed if self.sources[i].path == path}
+            if keys:
+                starts = {first for source, first, _ in self.origins if source == path}
+                for block in find_script_blocks(text):
+                    if block.start_line in starts:
+                        spans.update((line, line) for line, key, _, _
+                                     in _top_level_assignment_rows(text, block) if key in keys)
+            lines = text.splitlines(keepends=True)
+            for first, last in sorted(spans, reverse=True):
+                del lines[first:last + 1]
+            changes[path] = [(first, last, 0) for first, last in spans]
+            if (patched := "".join(lines)) != text:
+                updated[path] = patched
         self._write_files(updated)
-        for path in paths:
-            self._shift_origins(path, [(self.sources[i].first, self.sources[i].last, 0)
-                                       for i in removed if self.sources[i].path == path])
+        for path, spans in changes.items():
+            self._shift_origins(path, spans)
         # Later effects of the same file move up by the number of removed lines.
         kept = [index for index in range(len(self.originals)) if index not in gone]
         sources = []
         for index in kept:
             source = self.sources[index]
-            moved = sum(self.sources[i].last - self.sources[i].first + 1 for i in removed
-                        if self.sources[i].path == source.path
-                        and self.sources[i].last < source.first)
+            moved = sum(last - first + 1 for first, last, _ in changes.get(source.path, ())
+                        if last < source.first)
             sources.append(EffectSource(source.path, source.first - moved, source.last - moved))
         originals = [self.originals[index] for index in kept]
         # The file is already written. The session switches to its new state only
@@ -268,7 +282,7 @@ class FxTextSession:
         self.drafts = {new: self.drafts[old] for new, old in enumerate(kept)}
         for path in paths:
             self.snapshots[path] = path.read_bytes()
-        return paths
+        return set(updated)
 
     # -- shared file steps --------------------------------------------------------------
 

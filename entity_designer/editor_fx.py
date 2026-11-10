@@ -74,10 +74,10 @@ class _FxPreviewMixin:
                  self.project.model_rotation_z))
 
 
-    def _fx_unit_transform(self):
+    def _fx_unit_transform(self, scale_rotation=None):
         """Preview scale/rotation of the unit as a matrix (static preview)."""
 
-        scale, rotation = self._fx_unit_scale_rotation()
+        scale, rotation = scale_rotation or self._fx_unit_scale_rotation()
         columns = [visual_transform_point(axis, scale, rotation)
                    for axis in ((1.0, 0.0, 0.0), (0.0, 1.0, 0.0), (0.0, 0.0, 1.0))]
         return tuple(tuple(columns[column][row] for column in range(3))
@@ -152,7 +152,8 @@ class _FxPreviewMixin:
         return decals
 
     def _fx_unit_phases(self, text: str, block: ScriptBlock,
-                        reference: VehicleModelReference) -> fx.UnitPhases:
+                        reference: VehicleModelReference, *,
+                        carrier: bool = False) -> fx.UnitPhases:
         """Death models of the definition, resolved like the engine."""
 
         def value(key: str) -> str:
@@ -170,7 +171,14 @@ class _FxPreviewMixin:
 
         weapon = block.kind.endswith("weapon")
         model = value("model").casefold()
-        scale, euler = self._fx_unit_scale_rotation()
+        scale_rotation = (
+            ((reference.scale_x, reference.scale_y, reference.scale_z),
+             (reference.rotation_x, reference.rotation_y, reference.rotation_z))
+            if carrier else self._fx_unit_scale_rotation())
+        scale, euler = scale_rotation
+        overeof = (self.project.overeof if self.project.overeof_enabled else 0.0)
+        if carrier:
+            overeof = fx._full_float(value("overeof")) or 0.0
         normal = state("normal")
         fire = state("fire")
         wait = state("wait")
@@ -182,9 +190,7 @@ class _FxPreviewMixin:
         unit = fx.UnitPhases(
             normal=normal, dead=state("dead"), megadeth=state("megadeth"),
             main_visuals=main_visuals, model=model, weapon=weapon,
-            transform=self._fx_unit_transform(),
-            overeof=(self.project.overeof
-                     if self.project.overeof_enabled else 0.0),
+            transform=self._fx_unit_transform(scale_rotation), overeof=overeof,
             scale=scale, euler=euler, **look)
         if unit.flies:
             unit = replace(unit, altitude=fx.DEFAULT_FLIGHT_ALTITUDE)
@@ -261,28 +267,54 @@ class _FxPreviewMixin:
                                                (bootstrap.find_ci(scripts, "Startup.cfg"),
                                                 bootstrap.find_ci(scripts, "startup.scr"))
                                                if path is not None and path.is_file())
-        unit = self._fx_unit_phases(text, block, reference)
-        self._fx_base_unit = unit
-        unit = self._fx_unit_in_model_state(unit)
-        if keep_view and (unit.weapon or self.fx_panel.unit.flies):
-            unit = replace(unit, altitude=self.fx_panel.unit.altitude)
-        self.fx_panel.set_context(
-            fx.CONTEXT_WEAPON if unit.weapon else fx.CONTEXT_VEHICLE,
-            fx.extract_fx_document(text, block.start_line, block.end_line),
-            catalog=self._fx_catalog, unit=unit, keep_view=keep_view,
-            weapons=self._build_fx_weapons(text, objects),
-            debuffs=self._build_fx_debuffs(text),
-            decals=self._build_fx_decals(text),
-            settings=self._fx_effect_settings())
+        self._fx_base_unit = self._fx_unit_phases(text, block, reference)
+        unit = self._fx_unit_in_model_state(self._fx_base_unit)
+        kamikaze = unit.weapon and unit.model == "kamikaze"
+        candidates = objects if objects is not None else self.game_object_browser.objects
         origins = [(self._active_script_path, block.start_line, block.end_line)]
         if self._fx_source_from_catalog:
-            candidates = objects if objects is not None else self.game_object_browser.objects
             source = next((obj for obj in candidates
                            if obj.object_id == block.object_id
                            and f"new_{obj.kind}" == block.kind), None)
             origins = getattr(source, "body_sources", ())
+        preview_text, preview_block = text, block
+        panel = self.fx_panel
+        previous_carrier = getattr(self, "_fx_preview_carrier", None)
+        self._fx_preview_carrier = None
+        if kamikaze:
+            carriers = self._fx_kamikaze_carriers(block.object_id, candidates)
+            combo = panel.carrier_combo
+            choice = combo.currentData() if keep_view and panel.kamikaze else None
+            with QSignalBlocker(combo):
+                combo.clear()
+                for obj, _body, _ref in carriers:
+                    combo.addItem(f"Carrier: {obj.name} ({obj.object_id})", obj.object_id)
+                combo.addItem("Payload effects" if carriers else "Payload effects (no carrier found)", None)
+                if combo.findData(choice) >= 0:
+                    combo.setCurrentIndex(combo.findData(choice))
+            if combo.currentIndex() < len(carriers):
+                obj, preview_text, carrier_ref = carriers[combo.currentIndex()]
+                self._fx_preview_carrier = obj.object_id
+                preview_block = carrier_ref.block
+                unit = self._fx_unit_phases(preview_text, preview_block, carrier_ref, carrier=True)
+                origins = obj.body_sources
+        same_preview = (keep_view and panel.kamikaze == kamikaze
+                        and previous_carrier == self._fx_preview_carrier)
+        if same_preview and (unit.weapon or panel.unit.flies):
+            unit = replace(unit, altitude=panel.unit.altitude)
+        panel.set_context(
+            fx.CONTEXT_WEAPON if unit.weapon else fx.CONTEXT_VEHICLE,
+            fx.extract_fx_document(preview_text, preview_block.start_line, preview_block.end_line),
+            catalog=self._fx_catalog, unit=unit, keep_view=same_preview,
+            weapons=self._build_fx_weapons(text, objects),
+            debuffs=self._build_fx_debuffs(text),
+            decals=self._build_fx_decals(text),
+            settings=self._fx_effect_settings(), kamikaze=kamikaze)
         self.fx_panel.set_script_sources(
-            origins if self._active_script_path else (), expected=(block.kind, block.object_id))
+            origins if self._active_script_path else (),
+            expected=(preview_block.kind, preview_block.object_id))
+        if self._fx_preview_carrier is not None:
+            self._fx_script_sources.update(str(Path(path).resolve()) for path, _, _ in origins)
         self._fx_update_watcher()
         if not keep_view:
             # A fresh definition: what is on disk now is what the tab shows.
@@ -290,6 +322,41 @@ class _FxPreviewMixin:
             self._fx_loaded_signatures = self._fx_signatures(self._fx_tracked)
             self._fx_failed_signatures = None
         self._sync_fx_preview()
+
+    @staticmethod
+    def _fx_kamikaze_carriers(weapon_id, objects):
+        vehicles = [obj for obj in objects if obj.kind == "vehicle"]
+        users = {obj.object_id for obj in vehicles
+                 if any(fx.script_int(obj.values.get(key), -1) == weapon_id
+                        for key in ("weapon", "weapon_2", "weapon_3", "weapon_4")
+                        if key == "weapon" or weapon_id > 0)}
+        carriers = []
+        for obj in vehicles:
+            body = obj.effective_text
+            try:
+                if obj.object_id not in users:
+                    if not any(key.endswith("_gun_type") for key in obj.values):
+                        continue
+                    _, mounts, _ = import_gun_points_block(body, find_script_blocks(body)[0])
+                    if not any(point.gun_type > 0 and point.gun_type in users for point in mounts):
+                        continue
+                reference = next(iter(script_model_references(body)), None)
+            except CollisionScriptError:
+                continue
+            if reference is not None:
+                carriers.append((obj, body, reference))
+        return carriers
+
+    def _fx_carrier_changed(self, _index) -> None:
+        panel = self.fx_panel
+        if not panel.kamikaze:
+            return
+        if not panel.confirm_text_changes():
+            with QSignalBlocker(panel.carrier_combo):
+                panel.carrier_combo.setCurrentIndex(
+                    panel.carrier_combo.findData(self._fx_preview_carrier))
+            return
+        self.reload_fx_from_file()
 
     def _fx_script_values(self, text: str, block: ScriptBlock,
                           reference: VehicleModelReference) -> dict:
@@ -412,6 +479,12 @@ class _FxPreviewMixin:
                 text = match.effective_text
             else:
                 text, _encoding, _bom = read_script_file(self._active_script_path)
+                if self.fx_panel.kamikaze:
+                    from map_editor import bootstrap
+                    from studio.assets.catalog import load_game_objects
+                    installation = bootstrap.installation()
+                    if installation is not None:
+                        objects = load_game_objects(installation)
             block = _resolve_patch_target_block(
                 text, kind, self._active_script_id)
         except (OSError, UnicodeError, CollisionScriptError, RuntimeError) as exc:
@@ -693,13 +766,18 @@ class _FxPreviewMixin:
             self._fx_edit_camera = None
             self._fx_fitted_definition = None
             self.viewport.update()
-        scale, euler = self._fx_unit_scale_rotation()
-        self.fx_panel.set_scene(
-            (0.0, self.viewport.overeof_preview_offset, 0.0), 0.0,
-            self._fx_unit_radius(), transform=self._fx_unit_transform(),
-            overeof=self.project.overeof if self.project.overeof_enabled else 0.,
-            scale=scale, euler=euler,
-            )
+        carrier_id = getattr(self, "_fx_preview_carrier", None) if self.fx_panel.kamikaze else None
+        if carrier_id is not None:
+            unit = self.fx_panel.unit
+            carrier = self._fx_catalog[carrier_id]
+            self.fx_panel.set_scene((0.0, -unit.overeof, 0.0), 0.0, carrier.radius)
+        else:
+            scale, euler = self._fx_unit_scale_rotation()
+            self.fx_panel.set_scene(
+                (0.0, self.viewport.overeof_preview_offset, 0.0), 0.0,
+                self._fx_unit_radius(), transform=self._fx_unit_transform(),
+                overeof=self.project.overeof if self.project.overeof_enabled else 0.,
+                scale=scale, euler=euler)
         self._fx_update_watcher()
         definition = (self._active_script_path, self._active_script_kind,
                       self._active_script_id)
@@ -736,7 +814,9 @@ class _FxPreviewMixin:
             return
         center, radius = extent
         if self.fx_panel.follow_unit.isChecked():
-            bounds = self.viewport._owner_bounds.get(self._current_owner)
+            owner = (self._fx_owner_map.get(self.fx_panel.unit.normal.vp)
+                     if self.fx_panel.kamikaze else self._current_owner)
+            bounds = self.viewport._owner_bounds.get(owner)
             if bounds is not None:
                 center = tuple((bounds[axis] + bounds[axis + 3]) * .5 for axis in range(3))
                 # Leave room around the unit while avoiding the full debris envelope.
@@ -871,7 +951,7 @@ class _FxPreviewMixin:
             active=True, items=items, owner_by_vp=self._fx_owner_map,
             unit_owners={self._current_owner} if self._current_owner else set(),
             boxes=panel.offset_boxes(), time_ms=panel.time_ms,
-            show_unit=show_unit and not phased,
+            show_unit=show_unit and not phased and not panel.kamikaze,
             weapon_context=panel.context == fx.CONTEXT_WEAPON,
             data_root=_data_root_for_path(
                 self._active_script_path, self._active_base_path),
@@ -884,4 +964,4 @@ class _FxPreviewMixin:
         # The Fire Area camera stays on the volume instead of following the shot.
         self.viewport.set_fx_follow_unit(
             panel.follow_unit.isChecked() and not fire_area_tab, tracked_unit,
-            self._current_owner)
+            None if panel.kamikaze else self._current_owner)

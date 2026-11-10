@@ -488,7 +488,8 @@ class _ModelBrowserMixin:
         self._refresh_collision_geometry_widget()
         self._sync_animation_controls()
         base_unit = getattr(self, "_fx_base_unit", None)
-        if base_unit is not None and self._active_script_path is not None:
+        if (base_unit is not None and self._active_script_path is not None
+                and not self.fx_panel.kamikaze):
             # Visuals & FX draws the unit from its own phases: swap the model.
             self.fx_panel.unit = replace(
                 self.fx_panel.unit,

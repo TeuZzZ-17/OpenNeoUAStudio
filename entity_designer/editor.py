@@ -799,6 +799,7 @@ class CollisionEditorWindow(
         self.fx_panel.draftStateChanged.connect(self._fx_draft_state_changed)
         self.fx_panel.sourceSaved.connect(self._fx_sources_saved)
         self.fx_panel.visualsSaved.connect(self.reload_fx_from_file)
+        self.fx_panel.carrier_combo.currentIndexChanged.connect(self._fx_carrier_changed)
         # The playback bar uses the full width under the viewport.
         self.viewport_layout.addWidget(self.fx_panel.transport_bar, 1, 0)
         # The bar keeps its natural height; the viewport takes the rest.
