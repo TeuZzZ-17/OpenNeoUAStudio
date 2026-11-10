@@ -1,4 +1,8 @@
 import unittest
+from pathlib import Path
+
+from entity_designer.script_model import BUILDING
+from map_editor.core.building_defs import parse_building_text
 
 from entity_designer import (
     CollisionProject,
@@ -21,6 +25,39 @@ def _apply(source: str, patch: str) -> str:
 
 
 class CollisionEditorOverwriteV2Tests(unittest.TestCase):
+    def test_building_overwrite_clears_inherited_mounts_and_updates_shared_limits(self):
+        building = """new_building 2
+    sec_type = 5
+    sbact_act = 0
+    sbact_vehicle = 90
+    sbact_act = 1
+    sbact_vehicle = 91
+end
+modify_building 2
+    power = 50
+end
+"""
+        vehicle = Path("Vehicles.cfg")
+        related = {vehicle: "new_vehicle 90\n    model = gun\n    gun_side_angle = 500\nend\n"}
+        project = CollisionProject(
+            target_category=BUILDING, gun_points_enabled=True,
+            gun_points=[GunPoint("sbact", 1, -3, 2, 1, .5, 0, 90)],
+            turret_limits={90: TurretLimits(90, True, 1800, 200, 300, dirty=True)},
+        )
+        patch = build_editable_overwrite_preview("modify_building", 2, project, {"gun"})
+        updated, groups = apply_editable_overwrite_preview(
+            building, patch, "modify_building", 2,
+            turret_files={("new_vehicle", 90): vehicle}, related_texts=related,
+        )
+        self.assertEqual(groups, {"gun"})
+        self.assertIn("power = 50", updated)
+        mounts = parse_building_text(updated)[2].guns
+        self.assertEqual([(mount.vehicle, mount.pos, mount.direction) for mount in mounts],
+                         [(90, (1, -3, 2), (1, .5, 0))])
+        self.assertIn("gun_side_angle = 1800", related[vehicle])
+        self.assertIn("model = gun", related[vehicle])
+
+
     def test_noop_overwrite_has_no_patch_and_changes_nothing(self):
         source = (
             "; keep\n"

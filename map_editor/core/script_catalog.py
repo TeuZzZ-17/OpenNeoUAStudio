@@ -7,7 +7,13 @@ from studio.exchange.portable import find_existing_path
 SUFFIXES = {'.cfg', '.scr', '.ini'}
 
 
-def script_texts(scripts: Path, extra: str = '', with_source=False):
+def script_texts(scripts: Path, extra: str = '', with_source=False, with_offsets=False):
+    def chunk(lines, source, start):
+        text = '\n'.join(lines)
+        if with_source:
+            return (text, source, start) if with_offsets else (text, source)
+        return text
+
     def label(path):
         try:
             return str(path.relative_to(scripts))
@@ -33,20 +39,23 @@ def script_texts(scripts: Path, extra: str = '', with_source=False):
 
     def expand(text, directory, stack, source):
         pending = []
-        for line in text.splitlines():
+        pending_start = 0
+        for line_number, line in enumerate(text.splitlines()):
             code = line.split(';', 1)[0].strip()
             match = re.fullmatch(r'include\s+(.+)', code, re.I)
             if match:
                 if pending:
-                    yield ('\n'.join(pending), source) if with_source else '\n'.join(pending)
+                    yield chunk(pending, source, pending_start)
                     pending.clear()
                 path = include_path(match[1], directory)
                 if path is not None and path.is_file() and path not in stack:
                     yield from expand(decode(path), path.parent, stack | {path}, label(path))
             else:
+                if not pending:
+                    pending_start = line_number
                 pending.append(line)
         if pending:
-            yield ('\n'.join(pending), source) if with_source else '\n'.join(pending)
+            yield chunk(pending, source, pending_start)
 
     entry = find_existing_path(scripts, 'Startup.cfg') or find_existing_path(scripts, 'startup.scr')
     if entry is not None:

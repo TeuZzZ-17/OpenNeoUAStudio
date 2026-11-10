@@ -44,7 +44,7 @@ UNIT = (
 
 def _offset(panel):
     """Model-state rows lead the effects list; effect N is the row after them."""
-    return len(panel.state_session.originals)
+    return len(panel.visible_state_indexes())
 
 
 def _item(panel, number):
@@ -264,14 +264,14 @@ def test_weapon_drops_vertically_to_the_target_and_explodes():
     document = fx.extract_fx_document(weapon, 0, weapon.count("\n") - 1)
     unit = fx.UnitPhases(normal=fx.VisualRef(60), dead=fx.VisualRef(61),
                          megadeth=fx.VisualRef(62), weapon=True)
-    impact = fx.WEAPON_FLIGHT_MS
     on_unit = fx.PreviewSimulation(document, fx.CONTEXT_WEAPON,
                                    fx.WEAPON_HIT_UNIT, unit=unit)
+    impact = on_unit.tracks[0].end
     flying = next(item for item in on_unit.items_at(impact / 2)
                   if item.kind == "unit")
     assert flying.vp == 60
     assert flying.position == pytest.approx(
-        (0.0, -fx.WEAPON_LAUNCH_HEIGHT / 2, 0.0))
+        (0.0, -fx.DEFAULT_PROJECTILE_ALTITUDE / 2, 0.0))
     assert tuple(flying.rotation[row][2] for row in range(3)) == pytest.approx(
         (0.0, 1.0, 0.0))
     after = on_unit.items_at(impact + 10)
@@ -283,7 +283,7 @@ def test_weapon_drops_vertically_to_the_target_and_explodes():
     falling_ground = next(item for item in on_ground.items_at(impact / 2)
                           if item.kind == "unit")
     assert falling_ground.position == pytest.approx(
-        (0.0, -fx.WEAPON_LAUNCH_HEIGHT / 2, 0.0))
+        (0.0, -fx.DEFAULT_PROJECTILE_ALTITUDE / 2, 0.0))
     landed = next(item for item in on_ground.items_at(impact + 10)
                   if item.kind == "unit")
     assert tuple(landed.rotation[row][2] for row in range(3)) == pytest.approx(
@@ -435,7 +435,8 @@ def test_tapered_tracer_is_split_and_glow_adds_additive_layers():
         "mesh_tracer_size_xyz": "4|4|300", "mesh_tracer_tail_size": "0",
         "mesh_tracer_glow_rate": "5"})
     unit = fx.UnitPhases(normal=fx.VisualRef(60), weapon=True, tracer=spec)
-    pieces = [i for i in _weapon_simulation(unit).items_at(500)
+    simulation = _weapon_simulation(unit)
+    pieces = [i for i in simulation.items_at(simulation.tracks[0].end * .9)
               if i.kind == "tracer"]
     body = [i for i in pieces if not i.additive]
     glow = [i for i in pieces if i.additive]
@@ -604,7 +605,7 @@ def test_hit_unit_preview_also_shows_the_weapon_ground_decal():
     on_unit = fx.PreviewSimulation(document, fx.CONTEXT_WEAPON,
                                    fx.WEAPON_HIT_UNIT, unit=unit,
                                    decals=DECAL_PROFILES)
-    impact = fx.WEAPON_FLIGHT_MS
+    impact = on_unit.tracks[0].end
     shown = [i for i in on_unit.items_at(impact + 50)
              if i.kind == fx.MODE_DECAL]
     assert len(shown) == 1 and shown[0].position[1] == 0.0
@@ -638,7 +639,7 @@ def test_launch_trigger_is_a_weapon_only_begin_fx_at_the_muzzle():
                                       fx.WEAPON_HIT_UNIT, unit=unit)
     flash = next(i for i in simulation.items_at(500) if i.kind == "visual")
     assert flash.vp == 130
-    assert flash.position[1] == pytest.approx(-fx.WEAPON_LAUNCH_HEIGHT)
+    assert flash.position[1] == pytest.approx(-fx.DEFAULT_PROJECTILE_ALTITUDE)
     assert not [i for i in simulation.items_at(1005) if i.kind == "visual"]
 
 
@@ -662,9 +663,9 @@ def test_weapon_motion_moves_the_model_off_the_line_and_freezes_at_impact():
     simulation = _weapon_simulation(unit)
     flight = simulation.tracks[0].end
     # The weapon falls straight down: visual deviation is sideways, never Y.
-    for moment in (100, 250, 600):
+    for moment in (flight * .2, flight * .5, flight * .8):
         item = next(i for i in simulation.items_at(moment) if i.kind == "unit")
-        straight = -fx.WEAPON_LAUNCH_HEIGHT + fx.WEAPON_LAUNCH_HEIGHT * moment / flight
+        straight = -fx.DEFAULT_PROJECTILE_ALTITUDE + fx.DEFAULT_PROJECTILE_ALTITUDE * moment / flight
         assert item.position[1] == pytest.approx(straight, abs=1e-6)
         assert 0.0 < math.hypot(item.position[0], item.position[2]) <= 30.0
     # After impact the last pose stays frozen on the dead model.
@@ -681,7 +682,7 @@ def test_tracer_follows_chaos_instead_of_a_straight_line():
     unit = fx.UnitPhases(normal=fx.VisualRef(60), weapon=True, tracer=spec,
                          motion=motion)
     simulation = _weapon_simulation(unit)
-    pieces = [i for i in simulation.items_at(600) if i.kind == "tracer"]
+    pieces = [i for i in simulation.items_at(simulation.tracks[0].end * .9) if i.kind == "tracer"]
     assert len(pieces) > 4
     assert sum(i.scale[2] for i in pieces) == pytest.approx(200.0, rel=0.02)
     radii = [math.hypot(i.position[0], i.position[2]) for i in pieces]
@@ -841,7 +842,7 @@ def test_wav_files_of_the_game_are_converted_to_16_bit():
     sounds = Path(__file__).resolve().parents[3] / "UA Rising" / "Data" / "Sounds"
     if not sounds.is_dir():
         pytest.skip("game sounds are not installed")
-    for name, rate, channels in (("AAGun.wav", 22050, 1), ("New/Expl04.wav", 48000, 2)):
+    for name, rate, channels in (("AAGun.wav", 22050, 1), ("New/Expl14.wav", 48000, 2)):
         if not (sounds / name).is_file():
             continue
         decoded = fx_audio.read_wav(sounds / name)
@@ -1089,7 +1090,7 @@ def test_delay_time_sticks_the_weapon_and_detonates_later_with_a_debuff():
     simulation = fx.PreviewSimulation(
         definition.document, fx.CONTEXT_WEAPON, fx.WEAPON_HIT_UNIT,
         unit=definition.unit, debuffs=fx.debuff_profiles_from_text(DEBUFF_TEXT))
-    flight = fx.WEAPON_FLIGHT_MS
+    flight = fx.WEAPON_FLIGHT_MS * fx.DEFAULT_PROJECTILE_ALTITUDE / fx.WEAPON_LAUNCH_HEIGHT
     stuck = [i for i in simulation.items_at(flight + 2000) if i.kind == "unit"]
     assert stuck and stuck[0].vp == 60 and stuck[0].position[1] == 0.0
     assert not [i for i in simulation.items_at(flight + 2000) if i.kind == "visual"]

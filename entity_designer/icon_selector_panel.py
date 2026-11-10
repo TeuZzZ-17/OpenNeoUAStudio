@@ -24,7 +24,7 @@ from PySide6.QtWidgets import (
 
 from map_editor import bootstrap
 from map_editor.core.resource_catalog import preview_image
-from entity_designer.script_model import VEHICLE, _data_root_for_path
+from entity_designer.script_model import WEAPON, _data_root_for_path
 from entity_designer.type_icons import (
     FREE, TAKEN, IconAtlas, load_atlas, new_key_allowed, parse_symbol,
     symbol_text, vanilla_readable,
@@ -356,7 +356,7 @@ class IconSelectorControls(QWidget):
         """
 
         project = self.editor.project
-        return project.target_category == VEHICLE and bool(project.source_model)
+        return project.target_category != WEAPON and bool(project.source_model)
 
     def _project_cell(self):
         project = self.editor.project

@@ -65,6 +65,8 @@ class VehicleVisual:
     guns: list[GunMount] = field(default_factory=list)
     viewer: tuple[float, float, float] = (0.0, 0.0, 0.0)
     type_icon: str = ""
+    scale: tuple[float, float, float] = (1.0, 1.0, 1.0)
+    rotation: tuple[float, float, float] = (0.0, 0.0, 0.0)
 
 
 def parse_vehicle_text(text: str, result=None):
@@ -102,6 +104,10 @@ def parse_vehicle_text(text: str, result=None):
                     active.base_normal = value.strip('"')
                 elif key == '3ds_normal':
                     active.three_ds_normal = value.strip('"')
+                elif key == 'scale_xyz':
+                    active.scale = _script_tuple(value, active.scale)
+                elif key == 'rotation_xyz':
+                    active.rotation = _script_tuple(value, active.rotation)
                 elif key == 'energy':
                     active.energy = _script_int(value, active.energy)
                 elif key in ('enable', 'disable'):

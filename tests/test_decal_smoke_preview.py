@@ -1,5 +1,7 @@
 from entity_designer import destruction_fx as fx
 
+IMPACT_MS = fx.WEAPON_FLIGHT_MS * fx.DEFAULT_PROJECTILE_ALTITUDE / fx.WEAPON_LAUNCH_HEIGHT
+
 
 def profile(rows):
     return fx.decal_profiles_from_text('new_decal 1\n duration = permanent\n'+rows+'\nend\n')[1]
@@ -46,7 +48,7 @@ def test_mesh_puffs_are_short_pulses_instead_of_smoke_discs():
     sim = simulation(' effect_mode = ground_pulse\n effect_3ds = Data/Models/3ds/Spark.3ds\n'
                      ' effect_pulse_interval = 900\n effect_pulse_time = 120\n'
                      ' effect_active_time = 4000\n effect_fade_inout = 0|0')
-    start = fx.WEAPON_FLIGHT_MS
+    start = IMPACT_MS
     first = sim.items_at(start + 30)
     assert any(item.label == 'decal mesh pulse' for item in first)
     assert not any(item.kind == 'decal_smoke' for item in first)
@@ -57,18 +59,18 @@ def test_mesh_puffs_are_short_pulses_instead_of_smoke_discs():
 
 def test_original_vp_pulses_use_active_set_without_external_mesh():
     sim = simulation(' effect_mode = ground_pulse\n effect_vp = 2\n effect_active_time = 4000\n effect_fade_inout = 0|0')
-    items = sim.items_at(fx.WEAPON_FLIGHT_MS + 30)
+    items = sim.items_at(IMPACT_MS + 30)
     pulse = next(item for item in items if item.label == 'decal mesh pulse')
     assert pulse.vp == 2 and not pulse.external
     assert not any(item.kind == 'decal_smoke' for item in items)
     assert not any(item.label == 'decal mesh pulse'
-                   for item in sim.items_at(fx.WEAPON_FLIGHT_MS + 300))
+                   for item in sim.items_at(IMPACT_MS + 300))
 
 
 def test_base_model_is_an_effect_source():
     path = 'Data/Models/Base/New/Effect_Smoke/Effect_Smoke.BASE'
     sim = simulation(f' effect_mode = ground_pulse\n effect_base = {path}\n effect_active_time = 4000\n effect_fade_inout = 0|0')
-    pulse = next(item for item in sim.items_at(fx.WEAPON_FLIGHT_MS + 30)
+    pulse = next(item for item in sim.items_at(IMPACT_MS + 30)
                  if item.label == 'decal mesh pulse')
     assert pulse.external == (path,)
 

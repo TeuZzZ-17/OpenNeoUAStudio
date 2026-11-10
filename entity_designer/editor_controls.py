@@ -52,7 +52,7 @@ class _EditControlsMixin:
     def _reset_all_gun_points(self) -> None:
         """Restore all mounts and turret limits captured from the script."""
 
-        if self.project.target_category != VEHICLE:
+        if self.project.target_category == WEAPON:
             return
         selected_index = self._selected_gun_point
         baseline = [point.clone() for point in self._loaded_gun_points]
@@ -85,22 +85,26 @@ class _EditControlsMixin:
         self._sync_all()
 
     def _reset_gun_point_position(self) -> None:
-        """Reset only the selected Gun Point translation to the origin."""
-
         point = self._selected_gun()
-        if point is None or point.position == (0.0, 0.0, 0.0):
+        if point is not None and point.loaded_position is not None:
+            self._set_gun_point_position(point.loaded_position)
+
+    def _zero_gun_point_position(self) -> None:
+        self._set_gun_point_position((0.0, 0.0, 0.0))
+
+    def _set_gun_point_position(self, position) -> None:
+        point = self._selected_gun()
+        if point is None or point.position == position:
             return
         self._vehicle_preview_active_edits.clear()
         self._push_undo()
-        point.x = 0.0
-        point.y = 0.0
-        point.z = 0.0
+        point.x, point.y, point.z = position
         self.project.gun_points_enabled = True
         self._set_modified()
         self._sync_all()
 
     def _gun_point_value_changed(self, field: str, value: float) -> None:
-        if self._syncing or self.project.target_category != VEHICLE:
+        if self._syncing or self.project.target_category == WEAPON:
             return
         point = self._selected_gun()
         if point is None or not hasattr(point, field):
@@ -134,7 +138,7 @@ class _EditControlsMixin:
         self._gun_direction_slider_active = False
 
     def _gun_direction_slider_changed(self, index: int) -> None:
-        if self._syncing or self.project.target_category != VEHICLE:
+        if self._syncing or self.project.target_category == WEAPON:
             return
         point = self._selected_gun()
         if point is None:
@@ -166,7 +170,7 @@ class _EditControlsMixin:
 
     def _turret_limit_value_changed(
             self, field: str, value: int, *, from_slider: bool = False) -> None:
-        if self._syncing or self.project.target_category != VEHICLE:
+        if self._syncing or self.project.target_category == WEAPON:
             return
         limits = self._selected_turret_limits()
         if limits is None or field not in {"side", "up", "down"}:
@@ -185,13 +189,22 @@ class _EditControlsMixin:
         self._set_modified()
         self._sync_all()
 
+    def _sector_flak_changed(self, index: int) -> None:
+        vehicle_id = self.sector_flak_combo.itemData(index)
+        if vehicle_id is not None:
+            self._gun_type_changed(vehicle_id)
+            self._finish_vehicle_preview_edit("gun_type")
+
     def _gun_type_changed(self, value: int) -> None:
-        if self._syncing or self.project.target_category != VEHICLE:
+        if self._syncing or self.project.target_category == WEAPON:
             return
         point = self._selected_gun()
         if point is None:
             return
         value = max(0, min(255, int(value)))
+        if self._gun_point_requires_flak(point.scheme) and not any(
+                obj.object_id == value for obj in self._sector_flak_vehicles()):
+            return
         if point.gun_type == value:
             return
         self._begin_vehicle_preview_edit("gun_type")
@@ -201,7 +214,7 @@ class _EditControlsMixin:
         self._sync_all()
 
     def _gun_name_changed(self) -> None:
-        if self._syncing or self.project.target_category != VEHICLE:
+        if self._syncing or self.project.target_category == WEAPON:
             return
         point = self._selected_gun()
         if point is None:
@@ -620,7 +633,7 @@ class _EditControlsMixin:
         with QSignalBlocker(self.gun_point_tree):
             self.gun_point_tree.clear()
             selected_item = None
-            if (self.project.target_category == VEHICLE
+            if (self.project.target_category != WEAPON
                     and self.project.gun_points_enabled):
                 for index, point in enumerate(self.project.gun_points):
                     label = f"G{index + 1}"
@@ -629,7 +642,7 @@ class _EditControlsMixin:
                     full_label = label
                     label = f"G{index + 1}"
                     family_label = (
-                        "Vanilla" if point.scheme == "robo" else "OpenNeoUA")
+                        {"robo": "Vanilla", "sbact": "Building"}.get(point.scheme, "OpenNeoUA"))
                     limits = self.project.turret_limits.get(
                         int(point.gun_type))
                     angle_values = (

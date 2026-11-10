@@ -538,17 +538,20 @@ class _SpheresMixin:
         self._context_action(menu, "Add Gun Point", self.add_gun_point,
                              self.add_gun_point_button.isEnabled())
         self._context_action(
-            menu, "Remove Selected Gun Point", self.remove_gun_point,
+            menu, self.remove_gun_point_button.text(), self.remove_gun_point,
             self.remove_gun_point_button.isEnabled())
         self._context_action(
-            menu, "Reset Selected Position to 0 / 0 / 0",
-            self._reset_gun_point_position,
-            self.reset_gun_point_button.isEnabled())
+            menu, self.reset_gun_point_button.text(),
+            self._reset_gun_point_position, self.reset_gun_point_button.isEnabled())
+        self._context_action(
+            menu, self.zero_gun_point_button.text(),
+            self._zero_gun_point_position, self.zero_gun_point_button.isEnabled())
         self._context_action(
             menu, "Reset All", self._reset_all_gun_points,
             self.reset_all_gun_points_button.isEnabled())
 
         type_menu = menu.addMenu("Gun Point Type")
+        type_menu.setEnabled(self.gun_point_type_combo.isEnabled())
         for index in range(self.gun_point_type_combo.count()):
             text = self.gun_point_type_combo.itemText(index)
             data = self.gun_point_type_combo.itemData(index)
@@ -666,6 +669,9 @@ class _SpheresMixin:
             key = self.viewport._hit_collision_component(
                 QPointF(self.viewport.mapFromGlobal(global_pos)))
             self._create_collision_shape_context_menu(key).exec(global_pos)
+            return
+        if self.properties_tabs.currentIndex() == self.gun_points_tab_index:
+            self._create_gun_point_context_menu().exec(global_pos)
             return
         self._create_sphere_context_menu(index).exec(global_pos)
 
@@ -849,6 +855,26 @@ class _SpheresMixin:
             return None
         return self.project.turret_limits.get(int(gun.gun_type))
 
+    def _catalog_turret_source(self, obj):
+        from entity_designer.script_model import (
+            _TURRET_LIMIT_KEY_SET, _top_level_assignment_rows, find_script_blocks,
+        )
+
+        fallback = None
+        for path, first, _last in reversed(obj.body_sources):
+            text, _encoding, _bom = read_script_file(path)
+            block = next((block for block in find_script_blocks(text)
+                          if block.start_line == first and block.complete
+                          and block.object_id == obj.object_id
+                          and block.kind.endswith("_vehicle")), None)
+            if block is None:
+                continue
+            fallback = fallback or (path, block.kind)
+            if any(key in _TURRET_LIMIT_KEY_SET for _, key, _, _
+                   in _top_level_assignment_rows(text, block)):
+                return path, block.kind
+        return fallback
+
     def _resolve_referenced_turret_limits(self, vehicle_id: int) -> TurretLimits | None:
         """Resolve a mount's Vehicle through the same catalog as the browser."""
         existing = self.project.turret_limits.get(vehicle_id)
@@ -864,10 +890,9 @@ class _SpheresMixin:
                 return None
             # Effective catalog text is a synthetic new_* block. Saving must
             # retain the actual new/modify block kind in the source file.
-            source_text, _encoding, _bom = read_script_file(obj.source)
-            source_limits = import_turret_limits(source_text).get(vehicle_id)
-            if source_limits is not None:
-                limits.source_kind = source_limits.source_kind
+            source = self._catalog_turret_source(obj)
+            if source is not None:
+                _path, limits.source_kind = source
         except (OSError, UnicodeError, CollisionScriptError):
             return None
         self.project.turret_limits[vehicle_id] = limits
@@ -1138,6 +1163,8 @@ class _SpheresMixin:
             gun_tab and wanted("Show Gun Points"))
         self.viewport.set_turret_limits_visible(
             gun_tab and wanted("Show Turret Limits"))
+        self.viewport.set_mounted_flak_visible(
+            gun_tab and self.show_mounted_flak.isChecked())
 
     def _is_cockpit_tab_selected(self) -> bool:
         return (hasattr(self, "properties_tabs")
@@ -1174,7 +1201,22 @@ class _SpheresMixin:
         slot.setMaximumHeight(wanted if on_cockpit else _NO_HEIGHT_LIMIT)
         self._properties_layout.setStretch(self._properties_tail_index, int(on_cockpit))
 
+    def _sync_move_strength_context(self):
+        if not hasattr(self, "move_strength_spin"):
+            return
+        on_gun_tab = self.properties_tabs.currentIndex() == self.gun_points_tab_index
+        if on_gun_tab == self._move_strength_on_gun_tab:
+            return
+        if on_gun_tab:
+            self._other_move_strength = self.move_strength_spin.value()
+            self.move_strength_spin.setValue(self._gun_move_strength)
+        else:
+            self._gun_move_strength = self.move_strength_spin.value()
+            self.move_strength_spin.setValue(self._other_move_strength)
+        self._move_strength_on_gun_tab = on_gun_tab
+
     def _properties_tab_changed(self, _index: int) -> None:
+        self._sync_move_strength_context()
         # Changing workspace must never modify authored data. It only switches
         # the viewport presentation and which object the shared gizmo moves.
         QTimer.singleShot(0, self._fit_cockpit_tab_height)

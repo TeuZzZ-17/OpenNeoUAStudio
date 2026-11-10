@@ -8,6 +8,7 @@ An assistant should start with `studio_help()`: it explains the workflow, conven
 Ground-decal effects need an explicit `effect_mode` (`ground_pulse` or `rise`) and an authored model, and are previewed by Entity Designer.
 `effect_mode = ground_pulse` uses `effect_3ds`, `effect_base` or `effect_vp`, `effect_pulse_interval` (fixed ms or min~max, rolled per flash), `effect_pulse_time` and `effect_scale`.  In `rise`, `effect_scale` is not accepted: the puff size comes from `effect_size` only.
 `effect_mode = rise` previews camera-facing puffs; the engine renders the assigned `effect_3ds` only.
+`effect_retrigger_interval` (fixed ms or min~max, 0 = off) restarts the whole effect every interval for the whole decal life; each activation lasts at most the interval.
 
 ## Tools
 

@@ -23,13 +23,13 @@ def app():
     return QApplication.instance() or QApplication([])
 
 
-def _panel(app, tmp_path):
+def _panel(app, tmp_path, script=SCRIPT):
     path = tmp_path / "Weapons.cfg"
-    path.write_text(SCRIPT, encoding="utf-8")
-    block = find_script_blocks(SCRIPT)[0]
+    path.write_text(script, encoding="utf-8")
+    block = find_script_blocks(script)[0]
     panel = DestructionFxPanel()
     panel.set_context(fx.CONTEXT_WEAPON,
-                      fx.extract_fx_document(SCRIPT, block.start_line, block.end_line))
+                      fx.extract_fx_document(script, block.start_line, block.end_line))
     panel.set_script_sources([(path, block.start_line, block.end_line)])
     return panel, path
 
@@ -37,6 +37,73 @@ def _panel(app, tmp_path):
 def _rows(panel):
     return {panel.effects_list.item(i).data(Qt.ItemDataRole.UserRole): panel.effects_list.item(i)
             for i in range(panel.effects_list.count())}
+
+
+def test_only_existing_effect_rows_are_shown(app, tmp_path):
+    panel, _path = _panel(app, tmp_path)
+    try:
+        assert set(_rows(panel)) == {visuals.MODEL_INDEX, 0}
+        empty = "new_weapon 6\n    name = Test\nend\n"
+        path = tmp_path / "Empty.cfg"
+        path.write_text(empty, encoding="utf-8")
+        block = find_script_blocks(empty)[0]
+        panel.set_context(fx.CONTEXT_WEAPON, fx.extract_fx_document(empty, 0, block.end_line))
+        panel.set_script_sources([(path, 0, block.end_line)])
+        assert panel.effects_list.count() == 0
+    finally:
+        panel.close()
+
+
+def test_new_crater_row_is_red_and_disappears_on_reset(app, tmp_path):
+    panel, _path = _panel(app, tmp_path)
+    panel.show()
+    try:
+        assert visuals.CRATER_INDEX not in _rows(panel)
+        panel.add_effect()
+        drawer = panel.code_drawer
+        drawer.code.setPlainText("crater_radius = 300\ncrater_depth = 150")
+        assert drawer._apply()
+        row = _rows(panel)[visuals.CRATER_INDEX]
+        assert "Radius 300" in row.text() and "Depth 150" in row.text()
+        assert "Not vanilla compatible" in row.toolTip()
+        assert row.icon().pixmap(12, 12).toImage().pixelColor(6, 6).name() == "#e0524a"
+        drawer._reset()
+        assert visuals.CRATER_INDEX not in _rows(panel)
+    finally:
+        panel.close()
+
+
+def test_saved_crater_row_is_not_vanilla_compatible(app, tmp_path):
+    text = "new_weapon 6\n    crater_radius = 300\n    crater_depth = 150\nend\n"
+    path = tmp_path / "Weapons.cfg"
+    path.write_text(text, encoding="utf-8")
+    block = find_script_blocks(text)[0]
+    panel = DestructionFxPanel()
+    try:
+        panel.set_context(fx.CONTEXT_WEAPON, fx.extract_fx_document(text, 0, block.end_line))
+        panel.set_script_sources([(path, 0, block.end_line)])
+        row = _rows(panel)[visuals.CRATER_INDEX]
+        assert "Not vanilla compatible" in row.toolTip()
+        assert row.icon().pixmap(12, 12).toImage().pixelColor(6, 6).name() == "#e0524a"
+        assert visuals.DECAL_INDEX not in _rows(panel)
+    finally:
+        panel.close()
+
+
+def test_projectile_altitude_default_and_label(app):
+    panel = DestructionFxPanel()
+    try:
+        panel.set_context(fx.CONTEXT_WEAPON, fx.FxDocument(),
+                          unit=fx.UnitPhases(normal=fx.VisualRef(60), weapon=True))
+        assert panel.altitude_label.text() == "Projectile altitude"
+        assert panel.altitude_spin.value() == 300
+        assert panel.altitude_slider.value() == 300
+        simulation = fx.PreviewSimulation(fx.FxDocument(), fx.CONTEXT_WEAPON,
+                                          fx.WEAPON_HIT_GROUND, unit=panel.unit)
+        projectile = next(item for item in simulation.items_at(0) if item.kind == "unit")
+        assert projectile.position[1] == pytest.approx(-300)
+    finally:
+        panel.close()
 
 
 @pytest.mark.parametrize(("index", "old", "new"), [
@@ -97,9 +164,7 @@ def test_one_model_row_leads_the_effects_list(app, tmp_path):
     panel, _path = _panel(app, tmp_path)
     rows = _rows(panel)
     assert list(rows)[0] == visuals.MODEL_INDEX and 0 in rows
-    # Weapons also get the Crater row.
-    assert [i for i in rows if i < 0] == [visuals.MODEL_INDEX, visuals.DECAL_INDEX,
-                                          visuals.CRATER_INDEX]
+    assert [i for i in rows if i < 0] == [visuals.MODEL_INDEX]
     assert rows[visuals.MODEL_INDEX].text().splitlines() == [
         "Model", "Normal: VP 20", "Dead: BASE Data/Models/Base/D.BASE"]
     assert not hasattr(panel, "show_unit")
@@ -174,6 +239,7 @@ def test_ground_decal_row_writes_the_size_after_the_decal_id(app, tmp_path):
     drawer.code.setPlainText("")
     assert drawer._save()
     assert "ground_decal" not in path.read_text(encoding="utf-8")
+    assert visuals.DECAL_INDEX not in _rows(panel)
 
 
 def test_a_wrong_decal_size_is_refused_and_the_file_stays(app, tmp_path):
@@ -189,7 +255,8 @@ def test_a_wrong_decal_size_is_refused_and_the_file_stays(app, tmp_path):
 
 
 def test_unchecking_the_decal_row_hides_only_the_profile_decal(app, tmp_path):
-    panel, _path = _panel(app, tmp_path)
+    script = SCRIPT.replace("    vp_normal = 20\n", "    vp_normal = 20\n    ground_decal_id = 1\n")
+    panel, _path = _panel(app, tmp_path, script)
     panel.decals = {1: object()}
     _rows(panel)[visuals.DECAL_INDEX].setCheckState(Qt.CheckState.Unchecked)
     assert visuals.DECAL_INDEX in panel.hidden_items
@@ -221,7 +288,7 @@ def test_row_dots_follow_the_vanilla_compatibility_level(app, tmp_path):
     assert fx_compat.model_level({"vp_normal": "20"}) == VANILLA
     assert fx_compat.model_level({"vp_normal": "20", "base_dead": "D.BASE"}) == RISKY
     assert fx_compat.model_level({"base_normal": "N.BASE"}) == OPENNEOUA
-    assert fx_compat.decal_level({}) == VANILLA
+    assert fx_compat.decal_level({}) == OPENNEOUA
     assert fx_compat.decal_level({"ground_decal_size": "30~50"}) == OPENNEOUA
     assert fx_compat.decal_level({"ground_decal_id": "1"}) == OPENNEOUA
     assert fx_compat.dest_line_level(fx.DestFxLine("dest_fx = death_46_0_0_0")) == VANILLA

@@ -211,10 +211,12 @@ class FxCodeDrawer(QFrame):
         if self.index == -1 or not panel.is_valid_index(self.index):
             current = panel.effects_list.currentItem()
             row = current.data(Qt.ItemDataRole.UserRole) if current is not None else None
-            first = panel.effects_list.item(0)
             self.index = -1
-            if row is None and first is not None:
-                row = first.data(Qt.ItemDataRole.UserRole)
+            if not panel.is_valid_index(row):
+                row = next((candidate for position in range(panel.effects_list.count())
+                            if (candidate := panel.effects_list.item(position).data(
+                                Qt.ItemDataRole.UserRole)) is not None
+                            and panel.is_valid_index(candidate)), None)
             if row is not None:
                 self.load_effect(row)
         else:
@@ -281,8 +283,9 @@ class FxCodeDrawer(QFrame):
     def _apply(self):
         if self.index == -1:
             return False
-        session = self.panel.session_for(self.index)
         try:
+            self.index = self.panel.redirect_new_state(self.index, self.code.toPlainText())
+            session = self.panel.session_for(self.index)
             item, issues = session.set_draft(self.index, self.code.toPlainText())
         except ValueError as exc:
             self.code.set_error(f"Preview keeps the last valid version. {exc}")

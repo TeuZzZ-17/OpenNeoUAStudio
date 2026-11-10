@@ -24,7 +24,7 @@ EFFECT = "begin_fx\n    trigger = destroyed\n    mode = visual\n    vp_model = 1
 
 def _offset(panel):
     """Model-state rows lead the effects list; effect N is the row after them."""
-    return len(panel.state_session.originals)
+    return len(panel.visible_state_indexes())
 
 
 def _item(panel, number):
@@ -127,7 +127,7 @@ def test_catalog_tracks_effects_from_new_and_modify_files(tmp_path):
     (tmp_path / "first.cfg").write_text(first, encoding="utf-8")
     (tmp_path / "second.cfg").write_text(second, encoding="utf-8")
     with patch("studio.assets.catalog.script_texts",
-               return_value=[(first, "first.cfg"), (second, "second.cfg")]):
+               return_value=[(first, "first.cfg", 0), (second, "second.cfg", 0)]):
         obj = load_game_objects(SimpleNamespace(folder=lambda _name: tmp_path))[0]
     assert len(obj.body_sources) == 2
     document, _ = _document(obj.effective_text)
@@ -137,6 +137,136 @@ def test_catalog_tracks_effects_from_new_and_modify_files(tmp_path):
     session.save([1])
     assert (tmp_path / "first.cfg").read_text() == first
     assert (tmp_path / "second.cfg").read_text() == second.replace("400", "750")
+
+
+def test_catalog_source_offsets_remain_correct_after_an_include(tmp_path):
+    from studio.assets.catalog import load_game_objects
+
+    (tmp_path / "Startup.cfg").write_text("include Weapons.cfg\n", encoding="utf-8")
+    (tmp_path / "Other.cfg").write_text("new_weapon 5\nname = Other\nend\n", encoding="utf-8")
+    source = ("new_weapon 1\nname = First\nend\ninclude Other.cfg\n"
+              "new_weapon 37\nname = Target\n" + EFFECT + "\nend\n")
+    path = tmp_path / "Weapons.cfg"
+    path.write_text(source, encoding="utf-8")
+    objects = load_game_objects(SimpleNamespace(folder=lambda _name: tmp_path))
+    target = next(item for item in objects if item.kind == "weapon" and item.object_id == 37)
+    document, _ = _document(target.effective_text)
+    session = FxTextSession(document, fx.CONTEXT_WEAPON, target.body_sources,
+                            expected=("new_weapon", 37))
+    assert session.can_add(), session.source_error
+    assert target.body_sources[0][1] == 4
+    assert path.read_text(encoding="utf-8") == source
+
+
+def test_stale_source_span_cannot_insert_into_another_definition(tmp_path):
+    text = ("new_weapon 37\n    name = Target\n" + EFFECT + "\nend\n"
+            "\nnew_weapon 38\n    name = Other\nend\n")
+    path = tmp_path / "Weapons.cfg"
+    path.write_text(text, encoding="utf-8")
+    document, block = _document(text)
+    session = FxTextSession(document, fx.CONTEXT_WEAPON,
+                            [(path, block.start_line + 1, block.end_line + 1)])
+    assert not session.can_add()
+    with pytest.raises(ValueError):
+        session.add_blank()
+    assert path.read_text(encoding="utf-8") == text
+
+
+def test_exact_span_of_another_weapon_is_rejected(tmp_path):
+    from entity_designer import fx_visuals
+
+    text = ("new_weapon 37\n" + EFFECT + "\nend\n"
+            "new_weapon 38\n" + EFFECT + "\nvp_normal = 999\nend\n")
+    path = tmp_path / "Weapons.cfg"
+    path.write_text(text, encoding="utf-8")
+    document, _ = _document(text)
+    other = find_script_blocks(text)[1]
+    origin = [(path, other.start_line, other.end_line)]
+    session = FxTextSession(document, fx.CONTEXT_WEAPON, origin, expected=("new_weapon", 37))
+    states = fx_visuals.StateSession(origin, weapon=True, expected=("new_weapon", 37))
+    assert not session.can_add() and "different definition" in session.source_error
+    assert "different definition" in states.source_error and not states.values
+    states.set_draft(fx_visuals.MODEL_INDEX, "vp_normal = 111")
+    with pytest.raises(ValueError, match="different definition"):
+        states.save([fx_visuals.MODEL_INDEX])
+    assert path.read_text(encoding="utf-8") == text
+
+
+def test_save_effect_and_model_targets_the_correct_modify_block(app, tmp_path):
+    from entity_designer import fx_visuals
+
+    text = ("new_vehicle 1\nname = Target\n" + EFFECT + "\nend\n"
+            "modify_vehicle 1\nenergy = 20\nend\n"
+            "new_vehicle 2\nname = Other\nend\n")
+    path = tmp_path / "Vehicles.cfg"
+    path.write_text(text, encoding="utf-8")
+    blocks = find_script_blocks(text)
+    effective = "new_vehicle 1\nname = Target\n" + EFFECT + "\nenergy = 20\nend\n"
+    document, _ = _document(effective)
+    panel = DestructionFxPanel()
+    try:
+        panel.set_context(fx.CONTEXT_VEHICLE, document)
+        panel.set_script_sources([(path, b.start_line, b.end_line) for b in blocks[:2]],
+                                 expected=("new_vehicle", 1))
+        panel.text_session.set_draft(0, EFFECT.replace("    duration", "; one\n; two\n    duration"))
+        panel.state_session.set_draft(fx_visuals.MODEL_INDEX, "vp_normal = 211")
+        panel.save_rows(None)
+        saved = path.read_text(encoding="utf-8")
+        updated = find_script_blocks(saved)
+        lines = saved.splitlines()
+        first = "\n".join(lines[updated[0].start_line:updated[0].end_line + 1])
+        second = "\n".join(lines[updated[1].start_line:updated[1].end_line + 1])
+        assert "vp_normal" not in first
+        assert "vp_normal = 211" in second
+        assert saved.endswith("new_vehicle 2\nname = Other\nend\n")
+    finally:
+        panel.close()
+
+
+def test_unavailable_source_explains_why_add_is_disabled(app, tmp_path):
+    text = "new_vehicle 1\n" + EFFECT + "\nend\n"
+    path = tmp_path / "Vehicles.cfg"
+    path.write_text(text, encoding="utf-8")
+    document, block = _document(text)
+    panel = DestructionFxPanel()
+    try:
+        panel.set_context(fx.CONTEXT_VEHICLE, document)
+        panel.set_script_sources([(path, block.start_line + 1, block.end_line + 1)])
+        assert not panel.effects_view.add_button.isEnabled()
+        assert "stale" in panel.effects_view.add_button.toolTip()
+        assert "Editing unavailable" in panel.reload_note.text()
+        assert path.read_text(encoding="utf-8") == text
+    finally:
+        panel.close()
+
+
+def test_delete_effect_keeps_the_modify_block_editable(app, tmp_path):
+    from entity_designer import fx_visuals
+
+    text = ("new_vehicle 1\nname = Target\n" + EFFECT + "\nend\n"
+            "modify_vehicle 1\nenergy = 20\nend\n"
+            "new_vehicle 2\nname = Other\nend\n")
+    path = tmp_path / "Vehicles.cfg"
+    path.write_text(text, encoding="utf-8")
+    blocks = find_script_blocks(text)
+    document, _ = _document(text)
+    panel = DestructionFxPanel()
+    try:
+        panel.set_context(fx.CONTEXT_VEHICLE, document)
+        panel.set_script_sources([(path, b.start_line, b.end_line) for b in blocks[:2]],
+                                 expected=("new_vehicle", 1))
+        with patch.object(QMessageBox, "question", return_value=QMessageBox.StandardButton.Yes):
+            assert panel.delete_effects([0])
+        panel.state_session.set_draft(fx_visuals.MODEL_INDEX, "vp_normal = 211")
+        panel.save_rows([fx_visuals.MODEL_INDEX])
+        saved = path.read_text(encoding="utf-8")
+        updated = find_script_blocks(saved)
+        lines = saved.splitlines()
+        second = "\n".join(lines[updated[1].start_line:updated[1].end_line + 1])
+        assert "vp_normal = 211" in second
+        assert saved.endswith("new_vehicle 2\nname = Other\nend\n")
+    finally:
+        panel.close()
 
 
 def test_click_opens_attached_editor_and_live_drafts_keep_last_valid_preview(app, tmp_path):
@@ -371,7 +501,7 @@ def _three_effects(tmp_path, newline="\n"):
 def test_session_delete_removes_only_the_chosen_effects_and_keeps_drafts(tmp_path):
     for newline in ("\n", "\r\n"):
         path, text, document, block = _three_effects(tmp_path, newline)
-        session = FxTextSession(document, fx.CONTEXT_VEHICLE, [(path, 0, block.end_line)])
+        session = FxTextSession(document, fx.CONTEXT_VEHICLE, [(path, block.start_line, block.end_line)])
         assert not session.source_error
         # An unsaved edit of the last effect must survive the deletion of the first.
         session.set_draft(2, session.drafts[2].replace("600", "650"))
@@ -395,14 +525,14 @@ def test_session_delete_removes_only_the_chosen_effects_and_keeps_drafts(tmp_pat
 
 def test_session_delete_refuses_files_changed_outside_and_detects_wrong_spans(tmp_path):
     path, text, document, block = _three_effects(tmp_path)
-    session = FxTextSession(document, fx.CONTEXT_VEHICLE, [(path, 0, block.end_line)])
+    session = FxTextSession(document, fx.CONTEXT_VEHICLE, [(path, block.start_line, block.end_line)])
     path.write_text(text + "; external\n", encoding="latin-1")
     with pytest.raises(ValueError, match="changed outside"):
         session.delete([1])
     assert path.read_text(encoding="latin-1") == text + "; external\n"
     # The read-back check notices an effect that is not where the session believes.
     path.write_text(text, encoding="latin-1")
-    fresh = FxTextSession(document, fx.CONTEXT_VEHICLE, [(path, 0, block.end_line)])
+    fresh = FxTextSession(document, fx.CONTEXT_VEHICLE, [(path, block.start_line, block.end_line)])
     fresh.sources[1].first += 1
     fresh.sources[1].last += 1
     with pytest.raises(RuntimeError, match="does not contain the effects"):
@@ -415,7 +545,7 @@ def test_delete_button_and_menu_remove_effects_from_the_script_and_the_preview(a
     window = _in_wide_window(panel, app)
     try:
         panel.set_context(fx.CONTEXT_VEHICLE, document)
-        panel.set_script_sources([(path, 0, block.end_line)])
+        panel.set_script_sources([(path, block.start_line, block.end_line)])
         view = panel.effects_view
         assert not view.delete_button.isEnabled()
         # The list keeps its room: the five buttons are small.
@@ -545,6 +675,197 @@ def test_add_button_writes_a_new_effect_whose_type_comes_from_its_text(app, tmp_
             assert not ask.called
         assert len(panel.document.items) == 2
         assert path.read_text(encoding="utf-8") == saved
+    finally:
+        panel.close()
+        window.close()
+
+
+def test_new_effect_crater_text_can_be_saved_and_reloaded(app, tmp_path):
+    from entity_designer.fx_visuals import CRATER_INDEX, StateSession
+
+    text = "new_weapon 1\n    name = Test\n    energy = 500\nend\n"
+    path = tmp_path / "Weapons.cfg"
+    path.write_text(text, encoding="utf-8")
+    document, block = _document(text)
+    panel = DestructionFxPanel()
+    window = _in_wide_window(panel, app)
+    try:
+        panel.set_context(fx.CONTEXT_WEAPON, document)
+        panel.set_script_sources([(path, 0, block.end_line)])
+        panel.effects_view.add_button.click()
+        drawer = _open_drawer(panel, app)
+        draft = "crater_radius = 300~400\ncrater_depth = 150~200\ncrater_rim = 15~20"
+        drawer.code.setPlainText(draft)
+        QTest.qWait(300)
+        assert drawer.index == CRATER_INDEX
+        assert drawer.code.toPlainText() == draft
+        assert drawer.code.save_button.isEnabled()
+        drawer.code.save_button.click()
+        saved = path.read_text(encoding="utf-8")
+        assert "name = Test" in saved and "energy = 500" in saved
+        assert all(line in saved for line in draft.splitlines())
+        assert saved.count("crater_radius") == 1
+        end = find_script_blocks(saved)[0].end_line
+        reopened = StateSession([(path, 0, end)], weapon=True)
+        assert reopened.originals[CRATER_INDEX] == draft
+        assert not panel.has_unsaved_text
+    finally:
+        panel.close()
+        window.close()
+
+
+@pytest.mark.parametrize("original,draft,expected", [
+    ("    crater_radius = 100\n    crater_depth = 40\n", "crater_rim = 15~20", "crater_radius = 100\ncrater_depth = 40\ncrater_rim = 15~20"),
+    ("    crater_radius = 100\n    crater_depth = 40\n", "crater_radius = 300", "crater_radius = 300\ncrater_depth = 40"),
+    ("    ground_decal_id = 2\n", "ground_decal_size = 120~150", "ground_decal_id = 2\nground_decal_size = 120~150"),
+    ("    vp_normal = 20\n", "vp_genesis = 30", "vp_normal = 20\n\nvp_genesis = 30"),
+])
+def test_new_effect_routes_state_keys_and_preserves_existing_values(app, tmp_path, original, draft, expected):
+    from entity_designer import fx_visuals
+
+    text = "new_weapon 1\n" + original + "end\n"
+    path = tmp_path / "Weapons.cfg"
+    path.write_text(text, encoding="utf-8")
+    document, block = _document(text)
+    panel = DestructionFxPanel()
+    window = _in_wide_window(panel, app)
+    try:
+        panel.set_context(fx.CONTEXT_WEAPON, document)
+        panel.set_script_sources([(path, 0, block.end_line)])
+        panel.add_effect()
+        drawer = _open_drawer(panel, app)
+        drawer.code.setPlainText(draft)
+        QTest.qWait(300)
+        assert drawer.index in fx_visuals.STATE_INDEXES
+        assert drawer.code.save_button.isEnabled()
+        drawer.code.save_button.click()
+        saved = path.read_text(encoding="utf-8")
+        end = find_script_blocks(saved)[0].end_line
+        reopened = fx_visuals.StateSession([(path, 0, end)], weapon=True)
+        assert reopened.originals[drawer.index] == expected
+    finally:
+        panel.close()
+        window.close()
+
+
+def test_one_new_effect_can_fill_several_state_rows(app, tmp_path):
+    from entity_designer import fx_visuals
+
+    text = "new_weapon 1\n    name = Test\nend\n"
+    path = tmp_path / "Weapons.cfg"
+    path.write_text(text, encoding="utf-8")
+    document, block = _document(text)
+    panel = DestructionFxPanel()
+    window = _in_wide_window(panel, app)
+    try:
+        panel.set_context(fx.CONTEXT_WEAPON, document)
+        panel.set_script_sources([(path, 0, block.end_line)])
+        panel.add_effect()
+        drawer = _open_drawer(panel, app)
+        drawer.code.setPlainText("crater_radius = 300\ncrater_depth = 100\n"
+                                 "ground_decal_id = 2\nvp_normal = 20")
+        QTest.qWait(300)
+        # The editor keeps the first row, the other rows hold their own lines.
+        assert drawer.index == fx_visuals.CRATER_INDEX
+        assert drawer.code.toPlainText() == "crater_radius = 300\ncrater_depth = 100"
+        assert panel.state_session.drafts[fx_visuals.DECAL_INDEX] == "ground_decal_id = 2"
+        assert panel.state_session.drafts[fx_visuals.MODEL_INDEX] == "vp_normal = 20"
+        assert not panel.document.items
+        drawer.code.save_button.click()
+        saved = path.read_text(encoding="utf-8")
+        assert all(line in saved for line in
+                   ("crater_radius = 300", "ground_decal_id = 2", "vp_normal = 20"))
+        assert not panel.has_unsaved_text
+    finally:
+        panel.close()
+        window.close()
+
+
+@pytest.mark.parametrize("context,draft,message", [
+    (fx.CONTEXT_WEAPON, "future_param = 5", "future_param is not an effect"),
+    (fx.CONTEXT_VEHICLE, "crater_radius = 5", "only for weapons"),
+    (fx.CONTEXT_VEHICLE, "snd_future_sample = a.wav", "unknown sound event"),
+    (fx.CONTEXT_VEHICLE, "vp_normal = 5\nsnd_explode_sample = a.wav", "own effect"),
+])
+def test_new_effect_explains_what_it_cannot_take(app, tmp_path, context, draft, message):
+    kind = "weapon" if context == fx.CONTEXT_WEAPON else "vehicle"
+    text = f"new_{kind} 1\n    name = Test\nend\n"
+    path = tmp_path / "x.cfg"
+    path.write_text(text, encoding="utf-8")
+    document, block = _document(text)
+    panel = DestructionFxPanel()
+    window = _in_wide_window(panel, app)
+    try:
+        panel.set_context(context, document)
+        panel.set_script_sources([(path, 0, block.end_line)])
+        panel.add_effect()
+        drawer = _open_drawer(panel, app)
+        drawer.code.setPlainText(draft)
+        QTest.qWait(300)
+        assert message in drawer.code._error_message
+        assert not drawer.code.save_button.isEnabled()
+        assert path.read_text(encoding="utf-8") == text
+    finally:
+        panel.close()
+        window.close()
+
+
+def test_new_state_key_does_not_replace_an_existing_unsaved_draft(app, tmp_path):
+    from entity_designer.fx_visuals import CRATER_INDEX
+
+    path = tmp_path / "Weapons.cfg"
+    text = "new_weapon 1\n    name = Test\nend\n"
+    path.write_text(text, encoding="utf-8")
+    document, block = _document(text)
+    panel = DestructionFxPanel()
+    window = _in_wide_window(panel, app)
+    try:
+        panel.set_context(fx.CONTEXT_WEAPON, document)
+        panel.set_script_sources([(path, 0, block.end_line)])
+        previous = "crater_radius = 100\ncrater_depth = 40"
+        panel.state_session.set_draft(CRATER_INDEX, previous)
+        panel.add_effect()
+        drawer = _open_drawer(panel, app)
+        drawer.code.setPlainText("crater_radius = 300")
+        QTest.qWait(300)
+        assert drawer.index == 0 and not drawer.code.save_button.isEnabled()
+        assert drawer.code.toPlainText() == "crater_radius = 300"
+        assert panel.state_session.drafts[CRATER_INDEX] == previous
+        assert path.read_text(encoding="utf-8") == text
+    finally:
+        panel.close()
+        window.close()
+
+
+@pytest.mark.parametrize("draft", [
+    EFFECT,
+    EFFECT.replace("    duration = 400", "    duration = 400\n    future_parameter = 123"),
+    "    dest_fx = death_46_0_0_0",
+    "    snd_explode_sample = sounds/engine.wav\n    snd_explode_volume = 100",
+    "    pal_explode_slot = 1\n    pal_explode_time = 300",
+    "    shk_explode_slot = 1\n    shk_explode_time = 300",
+])
+def test_add_effect_saves_and_reloads_supported_or_unknown_block_keys(app, tmp_path, draft):
+    path = tmp_path / "Vehicles.cfg"
+    text = "new_vehicle 1\n    name = Test\nend\n"
+    path.write_text(text, encoding="utf-8")
+    document, block = _document(text)
+    panel = DestructionFxPanel()
+    window = _in_wide_window(panel, app)
+    try:
+        panel.set_context(fx.CONTEXT_VEHICLE, document)
+        panel.set_script_sources([(path, 0, block.end_line)])
+        panel.add_effect()
+        drawer = _open_drawer(panel, app)
+        drawer.code.setPlainText(draft)
+        QTest.qWait(300)
+        assert drawer.code.save_button.isEnabled()
+        drawer.code.save_button.click()
+        saved = path.read_text(encoding="utf-8")
+        reopened, _ = _document(saved)
+        assert len(reopened.items) == 1
+        assert effect_text(reopened.items[0]) == draft
+        assert "name = Test" in saved
     finally:
         panel.close()
         window.close()

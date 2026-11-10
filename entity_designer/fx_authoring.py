@@ -8,13 +8,36 @@ from pathlib import Path
 import tempfile
 
 from entity_designer import destruction_fx as fx
-from entity_designer.script_model import find_script_blocks, read_script_file, write_script_file
+from entity_designer.script_model import (
+    find_script_blocks, read_script_file, validate_definition_source, write_script_file,
+)
 from studio.exchange.portable import commit_verified_files
 
 
 def effect_text(item) -> str:
     return ("\n".join(item.lines)
             if isinstance(item, (fx.FxBlock, fx.FxKeyGroup, fx.FxBlank)) else item.line)
+
+
+def _not_an_effect_message(text: str, context: str) -> str:
+    """Say why the text is not one effect, naming its first unknown key."""
+    from entity_designer import fx_visuals
+
+    weapon = context == fx.CONTEXT_WEAPON
+    kinds = ("one begin_fx block, one dest_fx line, the snd_ / pal_ / shk_ keys of one "
+             "sound event, or the Model / Ground decal" + (" / Crater" if weapon else "")
+             + " keys")
+    key = next((tokens[0] for line in text.splitlines()
+                if (tokens := fx.engine_tokens(line)) is not None), "")
+    if not key:
+        return f"Enter {kinds}."
+    prefix = key.casefold().partition("_")[0]
+    if key.casefold() in fx_visuals.CRATER_KEYS and not weapon:
+        return f"{key}: craters exist only for weapons."
+    if prefix in fx.KEY_GROUP_KINDS:
+        events = fx.WEAPON_SOUND_EVENTS if weapon else fx.VEHICLE_SOUND_EVENTS
+        return (f"{key}: unknown sound event. Known events: {', '.join(events)}.")
+    return f"{key} is not an effect. Enter {kinds}."
 
 
 def parse_effect_text(text: str, context: str):
@@ -34,9 +57,7 @@ def parse_effect_text(text: str, context: str):
         raise ValueError("Edit one effect at a time; extra closing blocks are not allowed.")
     ranges = list(fx._fx_item_ranges(lines, block.start_line, block.end_line))
     if len(ranges) != 1:
-        raise ValueError(
-            "Enter one begin_fx block, one dest_fx line or the snd_ / pal_ / shk_ "
-            "keys of one sound event.")
+        raise ValueError(_not_an_effect_message(text, context))
     first, last, _kind = ranges[0]
     if any(fx.engine_tokens(lines[index]) is not None
            for index in range(1, len(lines) - 1) if not first <= index <= last):
@@ -65,9 +86,10 @@ class EffectSource:
 class FxTextSession:
     """Keep drafts separate from files and from the last valid preview."""
 
-    def __init__(self, document, context, origins=()):
+    def __init__(self, document, context, origins=(), expected=None):
         self.context = context
         origins = [(Path(path), first, last) for path, first, last in origins]
+        self.origins = list(origins)
         # (file, line of the definition's closing ``end``): where new effects go.
         self.end_line = (origins[-1][0], origins[-1][2]) if origins else None
         self.original_items = copy.deepcopy(document.items)
@@ -82,6 +104,9 @@ class FxTextSession:
             for path, first, last in origins:
                 path = Path(path)
                 text, encoding, bom = read_script_file(path)
+                identity = validate_definition_source(text, first, last, expected)
+                if expected is None:
+                    expected = identity
                 self.snapshots[path] = path.read_bytes()
                 self.encodings[path] = encoding, bom
                 lines = text.splitlines()
@@ -93,7 +118,7 @@ class FxTextSession:
                 self.source_error = (
                     "The loaded effects do not match their current source files. "
                     "Reload the definition before saving.")
-        except (OSError, UnicodeError, IndexError) as exc:
+        except (OSError, UnicodeError, IndexError, ValueError) as exc:
             self.sources.clear()
             self.source_error = str(exc)
 
@@ -123,6 +148,16 @@ class FxTextSession:
         source = self.sources[index] if index < len(self.sources) else None
         return (source is not None and source.last < source.first
                 and self.originals[index] == "")
+
+    def discard_pending(self, index) -> None:
+        """Remove an unsaved placeholder without touching the script."""
+        if not self.is_pending(index):
+            raise ValueError("Only a new unsaved effect can be redirected.")
+        self.originals.pop(index)
+        self.original_items.pop(index)
+        self.sources.pop(index)
+        self.drafts = {new: self.drafts[old] for new, old in enumerate(
+            i for i in range(len(self.drafts)) if i != index)}
 
     @property
     def dirty(self) -> bool:
@@ -168,9 +203,7 @@ class FxTextSession:
             changed = {index: (self.sources[index].first, self.sources[index].last,
                                len(self.drafts[index].splitlines()))
                        for index in indexes if self.sources[index].path == path}
-            if self.end_line is not None and self.end_line[0] == path:
-                self.end_line = (path, self.end_line[1] + sum(
-                    count - (last - first + 1) for first, last, count in changed.values()))
+            self._shift_origins(path, changed.values())
             for position, source in enumerate(self.sources):
                 if source.path != path:
                     continue
@@ -213,10 +246,9 @@ class FxTextSession:
                 del lines[self.sources[index].first:self.sources[index].last + 1]
             updated[path] = "".join(lines)
         self._write_files(updated)
-        if self.end_line is not None:
-            self.end_line = (self.end_line[0], self.end_line[1] - sum(
-                self.sources[i].last - self.sources[i].first + 1 for i in removed
-                if self.sources[i].path == self.end_line[0]))
+        for path in paths:
+            self._shift_origins(path, [(self.sources[i].first, self.sources[i].last, 0)
+                                       for i in removed if self.sources[i].path == path])
         # Later effects of the same file move up by the number of removed lines.
         kept = [index for index in range(len(self.originals)) if index not in gone]
         sources = []
@@ -239,6 +271,18 @@ class FxTextSession:
         return paths
 
     # -- shared file steps --------------------------------------------------------------
+
+    def _shift_origins(self, path, changes) -> None:
+        changes = list(changes)
+
+        def shifted(line):
+            return line + sum(count - (last - first + 1) for first, last, count in changes
+                              if last < line)
+
+        self.origins = [(source, shifted(first), shifted(last)) if source == path
+                        else (source, first, last) for source, first, last in self.origins]
+        if self.origins:
+            self.end_line = (self.origins[-1][0], self.origins[-1][2])
 
     def _check_unchanged(self, paths) -> None:
         for path in paths:
