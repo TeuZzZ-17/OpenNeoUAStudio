@@ -83,7 +83,14 @@ def generate_genesis(family, obj):
     triangle = _material(reference.TRIANGLE_AREA)
     quad = _material(reference.QUAD_AREA)
     tri_animation = parse_anm_bytes(reference.TRIANGLE_ANIMATION, "GENES3-1.ANM")
-    quad_animation = parse_anm_bytes(reference.QUAD_ANIMATION, "GENES4-1.ANM")
+    # Build rectangular atlas regions from the existing triangle animation.
+    quad_groups = []
+    for group in tri_animation.texcoord_groups:
+        left, right = min(u for u, _ in group), max(u for u, _ in group)
+        top, bottom = min(v for _, v in group), max(v for _, v in group)
+        quad_groups.append([(right, bottom), (left, bottom),
+                            (left, top), (right, top)])
+    quad_animation = _animation_bytes(tri_animation, quad_groups, "GENQ4-1.ANM")
     bitmap_name = next((name for name in family.textures
                         if name.casefold() == "fx2.ilbm"), "FX2.ILBM")
     for animation in (tri_animation, quad_animation):
