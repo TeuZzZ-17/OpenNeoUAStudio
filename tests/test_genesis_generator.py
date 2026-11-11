@@ -1,6 +1,7 @@
 """Genesis conversion, native serialization, and editor history contracts."""
 
 import copy
+import hashlib
 import os
 from pathlib import Path
 import tempfile
@@ -49,6 +50,15 @@ def test_conversion_keeps_geometry_and_uses_reference_timeline():
                    for uvs in parsed.texcoord_groups)
         assert parsed.bitmap_names == ["FX2.ILBM"]
     assert family.textures["FX2.ILBM"].has_body
+
+
+def test_quad_animation_does_not_embed_removed_asset():
+    family, obj = model()
+    generate_genesis(family, obj)
+    block = obj.base_object.ades[1]
+    data = export_anm_bytes(family.animations[block.texture.name])
+    assert hashlib.sha1(b"blob " + str(len(data)).encode() + b"\0" + data).hexdigest() != "1605d43c99eca1582ce37eac324827bebe44b175"
+    assert not hasattr(genesis_reference, "QUAD_ANIMATION")
 
 
 def test_shared_animation_collision_gets_new_name_without_overwrite():
