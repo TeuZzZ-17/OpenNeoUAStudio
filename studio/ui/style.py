@@ -100,6 +100,10 @@ def apply_studio_style(theme: str | None = None, *, persist: bool = False) -> No
         else:
             palette.setColor(role, QColor(color))
     colors["Accent"] = data["tone"]["Accent"]
+    disabled, menu_background = QColor(colors["Disabled.Text"]), QColor(colors["Window"])
+    colors["MenuDisabled"] = QColor.fromRgbF(
+        *(0.7 * getattr(disabled, channel)() + 0.3 * getattr(menu_background, channel)()
+          for channel in ("redF", "greenF", "blueF"))).name()
     for key, value in data["lists"].items():
         colors["List" + key] = value
     icons = Path(__file__).resolve().parents[2] / "icons"

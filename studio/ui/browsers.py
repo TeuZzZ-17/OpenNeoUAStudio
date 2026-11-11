@@ -335,7 +335,7 @@ class GameFileBrowser(QWidget):
         with QSignalBlocker(self.tree):
             current = self.tree.currentItem()
             self._apply_pins()
-            self.tree.setCurrentItem(current)
+            self.tree.setCurrentItem(current if current and self.tree.indexOfTopLevelItem(current) >= 0 else None)
         self._filter(self.search.text())
 
     def set_modified(self, paths):
@@ -350,10 +350,29 @@ class GameFileBrowser(QWidget):
         from studio.ui.style import theme_list_color
         labels = {path: label for path, label in self._pinned}
         items = [self.tree.takeTopLevelItem(0) for _ in range(self.tree.topLevelItemCount())]
+        listed = {Path(item.data(0, Qt.ItemDataRole.UserRole)).resolve() for item in items}
+        install = bootstrap.installation()
+
+        def display_path(path):
+            try:
+                return str(path.relative_to(install.data.resolve())) if install else str(path)
+            except ValueError:
+                return str(path)
+
+        for path, _label in self._pinned:
+            if path not in listed:
+                display = display_path(path)
+                item = QTreeWidgetItem([display])
+                item.setData(0, Qt.ItemDataRole.UserRole, path)
+                item.setData(0, Qt.ItemDataRole.UserRole + 2, True)
+                item.setToolTip(0, display)
+                items.append(item)
         pinned, others = [], []
         for item in items:
             # Listed paths are already resolved by game_files/folder_files.
             path = Path(item.data(0, Qt.ItemDataRole.UserRole))
+            if path not in labels and item.data(0, Qt.ItemDataRole.UserRole + 2):
+                continue
             base_text = item.data(0, Qt.ItemDataRole.UserRole + 1) or item.text(0)
             item.setData(0, Qt.ItemDataRole.UserRole + 1, base_text)
             label = labels.get(path)
@@ -362,10 +381,12 @@ class GameFileBrowser(QWidget):
             item.setFont(0, font)
             if label is None:
                 item.setText(0, base_text)
+                item.setToolTip(0, str(path))
                 item.setBackground(0, QBrush())
                 others.append(item)
             else:
                 item.setText(0, f"{label}  ·  {base_text}")
+                item.setToolTip(0, display_path(path))
                 item.setBackground(0, QBrush(theme_list_color("DependencySelected")))
                 pinned.append(item)
         order = {path: index for index, (path, _label) in enumerate(self._pinned)}
