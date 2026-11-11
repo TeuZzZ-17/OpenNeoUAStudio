@@ -1835,7 +1835,6 @@ class _GeometryEditMixin:
             delete_geometry.setEnabled(self.can_delete_geometry())
         menu.addAction(self.add_fx_action)
         menu.addAction(self.add_emitter_action)
-        menu.addAction(self.paste_emitter_action)
         if active_fx is not None:
             menu.addAction(self.rename_fx_action)
         if self.load_texture_button.isEnabled():
@@ -1843,8 +1842,6 @@ class _GeometryEditMixin:
         if active_emitter is not None:
             menu.addAction(self.copy_emitter_action)
             menu.addAction(self.cut_emitter_action)
-            menu.addAction(self.clone_emitter_action)
-            menu.addAction(self.reanchor_emitter_action)
             menu.addAction(self.edit_emitter_action)
             menu.addAction(self.delete_emitter_action)
         else:
