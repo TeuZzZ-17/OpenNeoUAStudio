@@ -1035,7 +1035,10 @@ class AssemblyWindow(
         for attr, label, handler in (
                 ("add_emitter_action", "Add Emitter", self._add_emitter),
                 ("clone_emitter_action", "Clone Emitter", self._clone_emitter),
-                ("reanchor_emitter_action", "Change Emitter Anchor", self._reanchor_emitter),
+                ("copy_emitter_action", "Copy Emitter", self._copy_emitter),
+                ("cut_emitter_action", "Cut Emitter", self._cut_emitter),
+                ("paste_emitter_action", "Paste Emitter", self._paste_emitter),
+                ("reanchor_emitter_action", "Move Emitter", self._reanchor_emitter),
                 ("edit_emitter_action", "Edit Emitter Settings", self._edit_emitter_settings),
                 ("delete_emitter_action", "Delete Emitter", self._delete_emitter)):
             action = QAction(label, self)

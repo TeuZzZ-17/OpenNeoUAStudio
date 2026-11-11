@@ -5,6 +5,7 @@ from __future__ import annotations
 from dataclasses import replace
 from bisect import bisect_right
 from itertools import accumulate
+import copy
 
 from PySide6.QtCore import QEvent, QObject, QPoint, QSignalBlocker, QTimer, Qt
 from PySide6.QtGui import QCursor, QImage, QPainter, QPixmap
@@ -138,6 +139,7 @@ class _EmitterAnchorPick(QObject):
 
 class _EmittersMixin:
     def _setup_emitter_preview(self):
+        self._emitter_clipboard = None
         self._emitter_sequence = None
         self._emitter_clock = PreviewClock(lambda: self.viewport.animation_speed)
         self._emitter_timer = QTimer(self, interval=65)
@@ -219,8 +221,9 @@ class _EmittersMixin:
             anchor, = selected
             matches = [index for index, block in emitter_blocks(self._workbench_obj)
                        if block.ade_point_id == anchor]
-            if len(matches) == 1:
-                self._select_emitter_block(matches[0])
+            if matches:
+                current = self._selected_emitter()
+                self._select_emitter_block(current[0] if current and current[0] in matches else matches[0])
                 return
         self._clear_emitter_selection()
 
@@ -330,6 +333,14 @@ class _EmittersMixin:
         self.delete_emitter_action.setEnabled(can_edit)
         can_copy = can_edit and bool(selection[1].source_objt_bytes)
         self.clone_emitter_action.setEnabled(can_copy)
+        self.copy_emitter_action.setEnabled(can_copy)
+        self.cut_emitter_action.setEnabled(can_copy)
+        clipboard = self._emitter_clipboard
+        self.paste_emitter_action.setEnabled(bool(
+            can_add and clipboard and clipboard[0] is self._family
+            and clipboard[1] is self._workbench_obj
+            and (not clipboard[3] or any(
+                block is clipboard[2] for block in self._workbench_obj.base_object.ades))))
         self.reanchor_emitter_action.setEnabled(can_copy and bool(
             self._workbench_obj.skeleton.points))
         attrs = selection[1].particle_attributes if selection is not None else None
@@ -339,6 +350,7 @@ class _EmittersMixin:
     def _show_emitter_context_menu(self, position):
         menu = QMenu(self)
         for action in (self.add_emitter_action, self.clone_emitter_action,
+                       self.copy_emitter_action, self.cut_emitter_action, self.paste_emitter_action,
                        self.reanchor_emitter_action, self.edit_emitter_action,
                        self.delete_emitter_action):
             menu.addAction(action)
@@ -363,10 +375,11 @@ class _EmittersMixin:
             index = self._apply_material_structure(label, operation)
         except MappingEditError as exc:
             self._notify(str(exc), 9000)
-            return
+            return False
         if index is not None:
             self._select_emitter_block(index)
         self._notify(label, 4500)
+        return True
 
     def _add_emitter(self):
         if self._material_structure_reason():
@@ -403,7 +416,47 @@ class _EmittersMixin:
             return
         _, block = selection
         self._pick_emitter_anchor(lambda anchor: self._insert_emitter(
-            self._family, self._workbench_obj, block, anchor, "Clone emitter"))
+            self._family, self._workbench_obj, block, anchor, "Clone emitter"),
+            preview=emitter_preview(self._family, block, sample_limit=48))
+
+    def _copy_emitter(self, cut=False):
+        selection = self._selected_emitter()
+        if selection is None or self._material_structure_reason():
+            return
+        block = selection[1] if cut else copy.deepcopy(selection[1])
+        self._emitter_clipboard = (self._family, self._workbench_obj, block, cut)
+        self._sync_emitter_actions()
+        self._notify('Emitter ready to move' if cut else 'Emitter copied', 4500)
+
+    def _cut_emitter(self):
+        self._copy_emitter(cut=True)
+
+    def _paste_emitter(self):
+        clipboard = self._emitter_clipboard
+        if not clipboard or not self.paste_emitter_action.isEnabled():
+            return
+        family, owner, block, cut = clipboard
+
+        def paste(anchor):
+            if self._emitter_clipboard is not clipboard or owner is not self._workbench_obj:
+                return
+            if cut and not any(item is block for item in owner.base_object.ades):
+                return
+            if cut:
+                index = next(i for i, item in enumerate(owner.base_object.ades) if item is block)
+                if anchor == block.ade_point_id:
+                    return
+                def operation():
+                    owner.base_object.ades[index] = copy_particle_emitter(
+                        family, owner, family, block, anchor)
+                    return index
+                if self._edit_emitter_blocks('Move emitter', operation):
+                    self._emitter_clipboard = None
+                    self._sync_emitter_actions()
+            else:
+                self._insert_emitter(family, owner, block, anchor, 'Paste emitter')
+
+        self._pick_emitter_anchor(paste, preview=emitter_preview(family, block, sample_limit=48))
 
     def _reanchor_emitter(self):
         selection = self._selected_emitter()
@@ -421,7 +474,8 @@ class _EmittersMixin:
                 return index
             self._edit_emitter_blocks("Change emitter anchor", operation)
 
-        self._pick_emitter_anchor(reanchor)
+        self._pick_emitter_anchor(reanchor, preview=emitter_preview(
+            self._family, block, sample_limit=48))
 
     def _edit_emitter_settings(self):
         selection = self._selected_emitter()

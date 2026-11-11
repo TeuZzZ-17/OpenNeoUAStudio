@@ -1509,6 +1509,10 @@ class _EditModeMixin:
             self._edit_owner or "",
             target=target if target is not None else QRectF(self.rect()),
         )
+        self._edit_visible_vertices.update(
+            block.ade_point_id for block in session.fam_obj.base_object.ades
+            if (block.class_id or '').lower() == 'particle.class'
+            and 0 <= block.ade_point_id < len(points))
         self._edit_visibility_ready = True
         self._edit_visibility_view_key = view_key
         return set(self._edit_visible_vertices)

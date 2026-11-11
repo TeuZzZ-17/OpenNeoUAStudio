@@ -652,7 +652,7 @@ class _GeometryEditMixin:
                 self.fx_combo.setCurrentIndex(
                     self._fx_combo_index(element.identity) if element else 0)
                 self.fx_combo.blockSignals(False)
-            self._select_emitter_from_vertex(_vertices if not resolved else ())
+            self._select_emitter_from_vertex(_vertices)
         if self._mapping_index is not None:
             self._fill_polygon_inspector(self._selected_poly)
         self._update_material_buttons()
@@ -1835,11 +1835,14 @@ class _GeometryEditMixin:
             delete_geometry.setEnabled(self.can_delete_geometry())
         menu.addAction(self.add_fx_action)
         menu.addAction(self.add_emitter_action)
+        menu.addAction(self.paste_emitter_action)
         if active_fx is not None:
             menu.addAction(self.rename_fx_action)
         if self.load_texture_button.isEnabled():
             menu.addAction("Replace Texture", self._load_model_texture)
         if active_emitter is not None:
+            menu.addAction(self.copy_emitter_action)
+            menu.addAction(self.cut_emitter_action)
             menu.addAction(self.clone_emitter_action)
             menu.addAction(self.reanchor_emitter_action)
             menu.addAction(self.edit_emitter_action)
@@ -1864,6 +1867,14 @@ class _GeometryEditMixin:
         if self.viewport.paste_preview_active:
             self.viewport.cancel_paste_preview()
             return
+        if self.viewport.edit_session is not None:
+            index = self.viewport._nearest_edit_vertex(position)
+            if index is not None and self._workbench_obj is not None and any(
+                    (block.class_id or '').lower() == 'particle.class'
+                    and block.ade_point_id == index
+                    for block in self._workbench_obj.base_object.ades):
+                self._select_emitter_from_vertex((index,))
+                self._sync_emitter_actions()
         menu = self._create_viewport_context_menu(position)
         menu.exec(self.viewport.mapToGlobal(position))
 
