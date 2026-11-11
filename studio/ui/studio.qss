@@ -59,8 +59,9 @@ QComboBox { padding-right: 24px; }
 QComboBox QLineEdit { border: none; padding: 0; background: transparent; }
 QMenu { border: 1px solid @Mid; padding: 4px; }
 QMenu::item { padding: 5px 24px 5px 12px; background: transparent; }
+QMenu::item:enabled { color: @Text; }
 QMenu::item:selected:enabled { background: @Highlight; color: @HighlightedText; }
-QMenu::item:disabled { color: @Disabled.Text; }
+QMenu::item:disabled { color: @MenuDisabled; }
 QMenu::separator { height: 1px; background: @Mid; margin: 4px 8px; }
 QMenuBar::item { padding: 5px 10px; background: transparent; }
 QMenuBar::item:selected, QMenuBar::item:pressed { background: @Highlight; color: @HighlightedText; }

@@ -28,6 +28,113 @@ class WireframeEditorUiTests(unittest.TestCase):
         self.addCleanup(window.outline_editor.mark_clean)
         return window
 
+    def test_add_component_menu_keeps_all_types_available(self):
+        from studio.assets.catalog import GameObject
+        window = self._window()
+        window._open_game_object(GameObject("vehicle", 123, Path("Vehicles.cfg")))
+        self.addCleanup(window._leave_game_object)
+        self.assertEqual(set(window.component_add_actions), {
+            "hud_wireframe", "mg_wireframe", "wpn_wireframe_1",
+            "wpn_wireframe_2", "wireframe"})
+        self.assertTrue(all(action.isEnabled() for action in window.component_add_actions.values()))
+
+    def test_add_menu_marks_present_and_unsupported_components_disabled(self):
+        from studio.assets.catalog import GameObject
+        window = self._window()
+        self.assertTrue(all(not action.isEnabled() for action in window.component_add_actions.values()))
+        self.addCleanup(window._leave_game_object)
+        window._open_game_object(GameObject("vehicle", 123, Path("Vehicles.cfg")))
+        window._add_component_model("mg_wireframe", create_minimal_sklt_model(), Path("example.SKL"))
+        self.assertFalse(window.component_add_actions["mg_wireframe"].isEnabled())
+        self.assertTrue(window.component_add_actions["hud_wireframe"].isEnabled())
+        menu = QMenu()
+        window.outline_editor._add_add_actions_to_menu(menu)
+        submenu = menu.actions()[0].menu()
+        items = {a.text(): a for a in submenu.actions()}
+        self.assertFalse(items["Add MG wireframe…"].isEnabled())
+        self.assertTrue(items["Add HUD wireframe…"].isEnabled())
+        self.assertNotIn("Add MGUN wireframe…", items)
+
+    def test_weapon_allows_only_its_wireframe(self):
+        from studio.assets.catalog import GameObject
+        window = self._window()
+        self.addCleanup(window._leave_game_object)
+        window._open_game_object(GameObject("weapon", 7, Path("Weapons.cfg")))
+        self.assertTrue(window.component_add_actions["wireframe"].isEnabled())
+        for key in ("hud_wireframe", "mg_wireframe", "wpn_wireframe_1", "wpn_wireframe_2"):
+            self.assertFalse(window.component_add_actions[key].isEnabled())
+
+    def test_missing_component_is_added_as_separate_unsaved_part(self):
+        from studio.assets.catalog import GameObject
+        window = self._window()
+        obj = GameObject("vehicle", 123, Path("Vehicles.cfg"), {"name": "Example"})
+        window._open_game_object(obj)
+        self.addCleanup(window._leave_game_object)
+        model = create_minimal_sklt_model()
+        window._add_component_model("mg_wireframe", model, Path("example.SKL"))
+        self.assertEqual(window._game_object, obj)
+        self.assertEqual(window._components[-1].key, "mg_wireframe")
+        self.assertTrue(window._dirty_names())
+
+    def test_new_component_save_writes_file_and_association(self):
+        from studio.assets.catalog import GameObject
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            script = root / "Vehicles.cfg"
+            script.write_text("new_vehicle 123\n name = Example\nend\n", encoding="utf-8")
+            obj = GameObject("vehicle", 123, script, {"name": "Example"}, body_sources=[(script, 0, 2)])
+            window = self._window()
+            self.addCleanup(window._leave_game_object)
+            window._open_game_object(obj)
+            output = root / "mg.SKL"
+            window._pending_component_values["mg_wireframe"] = "wireless/mg.SKL"
+            window._script_snapshots[script] = script.read_bytes()
+            window._add_component_model("mg_wireframe", create_minimal_sklt_model(), output)
+            with patch("wireframe_editor.window.QMessageBox"):
+                window.save_current_file()
+            self.assertTrue(output.exists())
+            self.assertIn("mg_wireframe = wireless/mg.SKL", script.read_text())
+            self.assertFalse(window._dirty_names())
+            self.assertEqual(window.game_file_browser.tree.currentItem().data(0, Qt.ItemDataRole.UserRole), output.resolve())
+            self.assertIn("MG", window.game_file_browser.tree.currentItem().text(0))
+
+    def test_new_component_does_not_save_over_externally_changed_script(self):
+        from studio.assets.catalog import GameObject
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            script = root / "Vehicles.cfg"
+            script.write_text("new_vehicle 123\n name = Example\nend\n", encoding="utf-8")
+            obj = GameObject("vehicle", 123, script, {"name": "Example"}, body_sources=[(script, 0, 2)])
+            window = self._window()
+            self.addCleanup(window._leave_game_object)
+            window._open_game_object(obj)
+            output = root / "mg.SKL"
+            window._pending_component_values["mg_wireframe"] = "wireless/mg.SKL"
+            window._script_snapshots[script] = script.read_bytes()
+            window._add_component_model("mg_wireframe", create_minimal_sklt_model(), output)
+            script.write_text("changed outside editor", encoding="utf-8")
+            with patch("wireframe_editor.window.QMessageBox"):
+                window.save_current_file()
+            self.assertFalse(output.exists())
+            self.assertEqual(script.read_text(), "changed outside editor")
+            self.assertTrue(window._dirty_names())
+
+    def test_component_picker_previews_game_entity_wireframe(self):
+        from studio.assets.catalog import GameObject
+        from wireframe_editor.window import ComponentPicker, _write_wireframe
+        from studio.workbench.outline import EditorState
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            path = root / "mg.SKL"
+            state = EditorState("poo2", (), ((0., 0., 0.), (20., 0., 20.)), ((0, 1),), -1, (), ())
+            _write_wireframe(create_minimal_sklt_model(), state, path)
+            obj = GameObject("vehicle", 123, root / "Vehicles.cfg", {"name": "Example", "mg_wireframe": str(path)})
+            picker = ComponentPicker([obj], "mg_wireframe")
+            picker.items.setCurrentRow(0)
+            self.assertEqual(picker.source_path, path)
+            self.assertIsNotNone(picker.preview.pixmap())
+            self.assertTrue(picker.buttons.button(picker.buttons.StandardButton.Ok).isEnabled())
+
     def test_file_menu_uses_import_and_export_labels(self):
         window = self._window()
         file_menu = window.file_menu
@@ -37,7 +144,7 @@ class WireframeEditorUiTests(unittest.TestCase):
             if not action.isSeparator()
         ]
         self.assertEqual(
-            labels, ["New", "Import", "Overwrite", "Export", "Exit"])
+            labels, ["New", "Import", "Overwrite", "Save Entity Layout", "Export", "Exit"])
         self.assertIs(window.overwrite_action, window.save_action)
         self.assertIs(window.export_action, window.save_as_action)
         self.assertFalse(hasattr(window, "export_as_action"))
@@ -61,6 +168,42 @@ class WireframeEditorUiTests(unittest.TestCase):
         box.setText.assert_called_once()
         self.assertTrue(box.setText.call_args.args[0].startswith("Overwrite changes to"))
         box.button.return_value.setText.assert_called_with("Overwrite")
+
+    def test_dirty_entity_prompt_refers_to_layout(self):
+        from studio.assets.catalog import GameObject
+        window = self._window()
+        self.addCleanup(window._leave_game_object)
+        window._open_game_object(GameObject("vehicle", 123, Path("Vehicles.cfg"), {"name": "Tiger"}))
+        window._add_component_model("mg_wireframe", create_minimal_sklt_model(), Path("example.SKL"))
+        box = unittest.mock.MagicMock()
+        box.exec.return_value = QMessageBox.StandardButton.Cancel
+        with patch("wireframe_editor.window.QMessageBox") as message_class:
+            message_class.return_value = box
+            message_class.StandardButton = QMessageBox.StandardButton
+            self.assertFalse(window._maybe_save_dirty())
+        self.assertIn("Tiger", box.setText.call_args.args[0])
+        self.assertIn("layout", box.setText.call_args.args[0].lower())
+        self.assertNotIn("example.SKL", box.setText.call_args.args[0])
+        box.button.return_value.setText.assert_called_with("Update Layout")
+
+    def test_pending_pinned_file_displays_path_relative_to_data(self):
+        from types import SimpleNamespace
+        from studio.ui.browsers import GameFileBrowser
+        with tempfile.TemporaryDirectory() as directory:
+            data = Path(directory).resolve()
+            target = data / "Wireless" / "New" / "example.SKL"
+            with patch("studio.ui.browsers.bootstrap.installation", return_value=SimpleNamespace(data=data, folders={})):
+                browser = GameFileBrowser({".skl"})
+                browser.set_pinned([(target, "MG")])
+                item = browser.tree.topLevelItem(0)
+                self.assertEqual(item.text(0), f"MG  ·  {target.relative_to(data)}")
+                self.assertEqual(item.toolTip(0), str(target.relative_to(data)))
+                target.parent.mkdir(parents=True)
+                target.write_bytes(b"")
+                browser.reload()
+                item = browser.tree.topLevelItem(0)
+                self.assertEqual(item.text(0), f"MG  ·  {target.relative_to(data)}")
+                self.assertEqual(item.toolTip(0), str(target.relative_to(data)))
 
     def test_export_saves_a_copy_and_switches_to_it(self):
         window = self._window()
@@ -778,12 +921,20 @@ class WireframeVehicleModeTests(unittest.TestCase):
             window = self._open_vehicle(directory)
             labels = [part.label for part in window._components]
             self.assertEqual(labels, ["HUD", "Weapon 1 + Weapon 2", "Unit"])
+            tree = window.game_file_browser.tree
+            self.assertEqual(tree.topLevelItemCount(), 3)
+            self.assertTrue(all(tree.topLevelItem(i).background(0).style() != Qt.BrushStyle.NoBrush
+                                for i in range(3)))
+            self.assertFalse(window.component_add_actions["wpn_wireframe_2"].isEnabled())
+            self.assertIn("missing.SKL", window.statusBar().currentMessage())
+            window._activate_component(2)
+            self.assertEqual(tree.currentItem().data(0, Qt.ItemDataRole.UserRole), Path(directory, "unit.SKL").resolve())
+            window._activate_component(0)
             self.assertEqual(window._current_file_path.name, "hud.SKL")
             layers = window.outline_editor.canvas._reference_layers
             self.assertEqual(
                 [layer.label for layer in layers], ["Screen", "Weapon 1 + Weapon 2", "Unit"])
             self.assertFalse(layers[0].selectable)
-            self.assertIn("missing.SKL", window.statusBar().currentMessage())
 
     def test_switching_parts_keeps_edits_and_overwrite_saves_them_all(self):
         from studio.formats.sklt import parse_sklt_file

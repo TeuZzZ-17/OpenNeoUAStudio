@@ -11,12 +11,14 @@ from pathlib import Path
 import sys
 
 from PySide6.QtCore import QEvent, QPointF, Qt
-from PySide6.QtGui import QAction, QColor, QKeySequence, QPainter, QPen
+from PySide6.QtGui import QAction, QColor, QKeySequence, QPainter, QPen, QPixmap
 from PySide6.QtWidgets import (
     QApplication,
     QAbstractSpinBox,
     QCheckBox,
     QComboBox,
+    QDialog,
+    QDialogButtonBox,
     QHBoxLayout,
     QLineEdit,
     QPlainTextEdit,
@@ -34,6 +36,7 @@ from PySide6.QtWidgets import (
     QSplitter,
     QSizePolicy,
     QToolBar,
+    QPushButton,
     QVBoxLayout,
     QWidget,
 )
@@ -100,6 +103,91 @@ class WireComponent:
     session: OutlineSession
     key: str = ""
     placement: Placement = (1.0, 1.0, 0.0, 0.0)
+    new_file: bool = False
+
+
+class ComponentPicker(QDialog):
+    """Choose a wireframe from game definitions or a file and preview its geometry."""
+
+    def __init__(self, objects, key, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Choose wireframe")
+        self.resize(650, 480)
+        self.model = None
+        self.source_path = None
+        layout = QVBoxLayout(self)
+        self.search = QLineEdit(self)
+        self.search.setPlaceholderText("Search entity or file")
+        layout.addWidget(self.search)
+        self.items = QListWidget(self)
+        layout.addWidget(self.items, 1)
+        self.preview = QLabel("Select a wireframe to preview", self)
+        self.preview.setMinimumHeight(190)
+        self.preview.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        layout.addWidget(self.preview)
+        browse = QPushButton("Browse files…", self)
+        layout.addWidget(browse)
+        self.buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel, self)
+        self.buttons.button(QDialogButtonBox.StandardButton.Ok).setEnabled(False)
+        layout.addWidget(self.buttons)
+        self.buttons.accepted.connect(self.accept)
+        self.buttons.rejected.connect(self.reject)
+        browse.clicked.connect(self._browse)
+        self.search.textChanged.connect(self._filter)
+        self.items.currentItemChanged.connect(self._select)
+        from entity_designer.wireframe_panel import resolve_wireframe_path
+        for obj in objects:
+            value = obj.values.get(key)
+            path = resolve_wireframe_path(value, obj.source) if value else None
+            if path:
+                self.items.addItem(f"{obj.name} ({obj.kind} {obj.object_id}) — {path.name}")
+                self.items.item(self.items.count() - 1).setData(Qt.ItemDataRole.UserRole, str(path))
+
+    def _filter(self, text):
+        for row in range(self.items.count()):
+            item = self.items.item(row)
+            item.setHidden(text.casefold() not in item.text().casefold())
+
+    def _browse(self):
+        path, _ = QFileDialog.getOpenFileName(self, "Choose wireframe", "", "Skeletons (*.skl *.SKL *.sklt *.SKLT)")
+        if path:
+            self._load(Path(path))
+
+    def _select(self, item, _previous):
+        if item:
+            self._load(Path(item.data(Qt.ItemDataRole.UserRole)))
+
+    def _load(self, path):
+        self.model = None
+        self.source_path = None
+        self.buttons.button(QDialogButtonBox.StandardButton.Ok).setEnabled(False)
+        try:
+            model = parse_sklt_file(path)
+            state = OutlineEditor.new_session(model).state
+            points = _state_points(state)
+            if not points:
+                raise ValueError("No editable wireframe geometry")
+        except (OSError, SkltParseError, ValueError) as exc:
+            self.preview.setText(str(exc))
+            return
+        pix = QPixmap(400, 190)
+        pix.fill(QColor("#15191e"))
+        painter = QPainter(pix)
+        painter.setPen(QPen(QColor("#58c9ff"), 2))
+        xs, ys = zip(*points)
+        scale = min(360 / max(max(xs) - min(xs), 1), 155 / max(max(ys) - min(ys), 1))
+        center_x, center_y = (min(xs) + max(xs)) / 2, (min(ys) + max(ys)) / 2
+        coords = [QPointF(200 + (x-center_x)*scale, 95 - (y-center_y)*scale) for x, y in points]
+        for group in state.groups:
+            valid = [i for i in group if 0 <= i < len(coords)]
+            for a, b in zip(valid, valid[1:]):
+                painter.drawLine(coords[a], coords[b])
+            if len(valid) > 2:
+                painter.drawLine(coords[valid[-1]], coords[valid[0]])
+        painter.end()
+        self.preview.setPixmap(pix)
+        self.model, self.source_path = model, path
+        self.buttons.button(QDialogButtonBox.StandardButton.Ok).setEnabled(True)
 
 
 def wireframe_parts(obj) -> tuple[list[tuple[str, Path, str]], list[str]]:
@@ -408,8 +496,12 @@ class WireframeEditorWindow(QMainWindow):
         self._components: list[WireComponent] = []
         self._active_component = -1
         self._layer_components: list[int] = []
+        self._pending_component_values = {}
+        self._script_snapshots = {}
 
         self.outline_editor = OutlineEditor()
+        self.outline_editor.component_add_enabled = True
+        self.outline_editor.component_add_available = self._can_add_component
         self.outline_editor.canvas.referenceLayerActivated.connect(self._activate_layer)
         self._mirror_pair_map: dict[int, int] = {}
         self._mirror_center_indices: set[int] = set()
@@ -647,6 +739,9 @@ class WireframeEditorWindow(QMainWindow):
 
         file_menu.addAction(self.import_action)
         file_menu.addAction(self.save_action)
+        self.save_entity_action = QAction("Save Entity Layout", self)
+        self.save_entity_action.triggered.connect(self.save_current_file)
+        file_menu.addAction(self.save_entity_action)
         file_menu.addAction(self.save_as_action)
 
         _close_action, self.exit_action = install_standard_file_menu_tail(
@@ -740,6 +835,16 @@ class WireframeEditorWindow(QMainWindow):
         add_menu.addAction(self.add_square_action)
         add_menu.addAction(self.add_pentagon_action)
         add_menu.addAction(self.add_circle_action)
+        add_menu.addSeparator()
+        self.component_add_actions = {}
+        for key, label in VEHICLE_WIREFRAME_KEYS:
+            if key == "mgun_wireframe":
+                continue
+            action = add_menu.addAction(f"Add {label} wireframe…")
+            action.triggered.connect(lambda checked=False, key=key: self._choose_component(key))
+            self.component_add_actions[key] = action
+        self.outline_editor.componentAddRequested.connect(self._choose_component)
+        self._update_component_add_actions()
 
     def _build_edit_toolbar(self) -> None:
         self.edit_toolbar = QToolBar("2D Edit Controls", self)
@@ -887,10 +992,11 @@ class WireframeEditorWindow(QMainWindow):
     def _dirty_names(self) -> list[str]:
         """Names of the open wireframes with unsaved changes."""
         if self._components:
-            return [
+            names = [
                 component.path.name for index, component in enumerate(self._components)
-                if self._component_dirty(index)
+                if self._component_dirty(index) or component.new_file
             ]
+            return names
         if not self.outline_editor.is_dirty:
             return []
         return [self._current_file_path.name if self._current_file_path else "current file"]
@@ -899,12 +1005,14 @@ class WireframeEditorWindow(QMainWindow):
         names = self._dirty_names()
         if not names:
             return True
-        title = ", ".join(names)
         message_box = QMessageBox(self)
         message_box.setIcon(QMessageBox.Icon.Question)
-        message_box.setWindowTitle("Overwrite changes?")
-        message_box.setText(
-            f"Overwrite changes to {title} before continuing?")
+        if self._game_object is not None:
+            message_box.setWindowTitle("Update entity layout?")
+            message_box.setText(f"Update the wireframe layout for {self._game_object.name} before continuing?")
+        else:
+            message_box.setWindowTitle("Overwrite changes?")
+            message_box.setText(f"Overwrite changes to {', '.join(names)} before continuing?")
         message_box.setStandardButtons(
             QMessageBox.StandardButton.Save
             | QMessageBox.StandardButton.Discard
@@ -912,7 +1020,7 @@ class WireframeEditorWindow(QMainWindow):
         message_box.setDefaultButton(QMessageBox.StandardButton.Save)
         overwrite_button = message_box.button(QMessageBox.StandardButton.Save)
         if overwrite_button:
-            overwrite_button.setText("Overwrite")
+            overwrite_button.setText("Update Layout" if self._game_object is not None else "Overwrite")
         reply = message_box.exec()
         if reply == QMessageBox.StandardButton.Cancel:
             return False
@@ -1106,6 +1214,8 @@ class WireframeEditorWindow(QMainWindow):
         if not self._maybe_save_dirty():
             self.game_object_browser.select_object(current)
             return
+        self._pending_component_values = {}
+        self._script_snapshots = {}
         parts, problems = wireframe_parts(obj)
         components = []
         for label, path, key in parts:
@@ -1116,10 +1226,11 @@ class WireframeEditorWindow(QMainWindow):
                 continue
             components.append(WireComponent(label, path, OutlineEditor.new_session(model), key))
         if not components:
-            details = "\n".join(problems) or "The definition names no wireframe."
-            QMessageBox.information(
-                self, "No wireframe", f"{obj.name} has no wireframe that can be opened.\n\n{details}")
-            self.game_object_browser.select_object(current)
+            self._start_new_session(mark_dirty=False)
+            self._game_object = obj
+            self.game_object_browser.select_object(obj)
+            self._update_component_add_actions()
+            self.statusBar().showMessage(f"{obj.name}: choose Add to create a wireframe component")
             return
 
         placements = assemble_parts(
@@ -1129,6 +1240,7 @@ class WireframeEditorWindow(QMainWindow):
             component.placement = placement
         self._game_object = obj
         self._components = components
+        self._update_component_add_actions()
         self._active_component = 0
         first = components[0]
         self._current_file_path = first.path
@@ -1149,6 +1261,8 @@ class WireframeEditorWindow(QMainWindow):
         if self._game_object is None and not self._components:
             return
         self._game_object = None
+        self._pending_component_values = {}
+        self._script_snapshots = {}
         self._components = []
         self._active_component = -1
         self._layer_components = []
@@ -1157,6 +1271,78 @@ class WireframeEditorWindow(QMainWindow):
         self.game_file_browser.set_pinned([])
         self.game_file_browser.set_modified([])
         self.game_object_browser.select_object(None)
+        self._update_component_add_actions()
+
+    def _can_add_component(self, key):
+        obj = self._game_object
+        if obj is None or (obj.kind == "weapon" and key != "wireframe"):
+            return False
+        if any(part.key == key for part in self._components):
+            return False
+        value = obj.values.get(key)
+        if value:
+            from entity_designer.wireframe_panel import resolve_wireframe_path
+            path = resolve_wireframe_path(value, obj.source)
+            if path is not None and self._component_index(path) >= 0:
+                return False
+        return True
+
+    def _update_component_add_actions(self):
+        for key, action in getattr(self, "component_add_actions", {}).items():
+            action.setEnabled(self._can_add_component(key))
+
+    def _choose_component(self, key):
+        if self._game_object is None:
+            QMessageBox.information(self, "Select an entity", "Select a vehicle or weapon first.")
+            return
+        if self._game_object.kind == "weapon" and key != "wireframe":
+            QMessageBox.information(self, "Weapon wireframe", "Weapons have one wireframe; choose Unit / Weapon.")
+            return
+        if any(part.key == key for part in self._components):
+            QMessageBox.information(self, "Already present", "This component is already open. Select it to edit it.")
+            return
+        picker = ComponentPicker(self.game_object_browser.objects, key, self)
+        if picker.exec() != QDialog.DialogCode.Accepted:
+            return
+        from map_editor import bootstrap
+        install = bootstrap.installation()
+        if install is None:
+            QMessageBox.warning(self, "Game data unavailable", "Select the game data folder first.")
+            return
+        target, _ = QFileDialog.getSaveFileName(self, "Save new component as", str(install.data / "Wireless" / "New" / (key + ".SKL")), "Skeletons (*.SKL *.sklt)")
+        if not target:
+            return
+        path = Path(target).resolve()
+        try:
+            relative = path.relative_to(install.data.resolve())
+            if path.exists():
+                raise ValueError("Choose a new file name; existing files are not overwritten.")
+            if any(part.path.resolve() == path for part in self._components):
+                raise ValueError("This file name is already used by another component.")
+            snapshots = {Path(origin[0]): Path(origin[0]).read_bytes() for origin in self._game_object.body_sources}
+        except (OSError, ValueError) as exc:
+            QMessageBox.warning(self, "Cannot add component", str(exc))
+            return
+        self._script_snapshots.update({p: self._script_snapshots.get(p, content) for p, content in snapshots.items()})
+        self._pending_component_values[key] = relative.as_posix()
+        self._add_component_model(key, picker.model, path)
+
+    def _add_component_model(self, key, model, path):
+        if self._components:
+            self._components[self._active_component].session = self.outline_editor.capture_session()
+        label = dict(VEHICLE_WIREFRAME_KEYS).get(key, key)
+        self._components.append(WireComponent(label, Path(path), OutlineEditor.new_session(model), key, new_file=True))
+        self._update_component_add_actions()
+        placements = assemble_parts([p.key for p in self._components], [_state_points(p.session.state) for p in self._components])
+        for part, placement in zip(self._components, placements):
+            part.placement = placement
+        self._active_component = len(self._components) - 1
+        part = self._components[-1]
+        self._current_file_path, self._current_model = part.path, part.session.model
+        self.outline_editor.restore_session(part.session)
+        self._update_reference_layers()
+        self.game_file_browser.set_pinned([(p.path, p.label) for p in self._components])
+        self._refresh_document_panels(part.session.model, part.path)
 
     def _component_index(self, path) -> int:
         if path is None:
@@ -1212,20 +1398,51 @@ class WireframeEditorWindow(QMainWindow):
         """Overwrite every part of the vehicle that has unsaved changes."""
         active = self._components[self._active_component]
         active.session = self.outline_editor.capture_session()
+        try:
+            for path, snapshot in self._script_snapshots.items():
+                if path.read_bytes() != snapshot:
+                    raise ValueError(f"{path.name} changed outside the editor. Reload before saving.")
+            for component in self._components:
+                if component.new_file and component.path.exists():
+                    raise ValueError(f"{component.path.name} already exists. Choose a new file.")
+        except (OSError, ValueError) as exc:
+            QMessageBox.warning(self, "Cannot save layout", str(exc))
+            return
         written = []
+        created = []
         for component in self._components:
-            if not component.session.is_dirty:
+            if not component.session.is_dirty and not component.new_file:
                 continue
             try:
                 _write_wireframe(component.session.model, component.session.state, component.path)
+                if component.new_file:
+                    created.append(component.path)
                 saved_model = parse_sklt_file(component.path)
             except (SkltParseError, OSError) as exc:
+                for path in created:
+                    path.unlink(missing_ok=True)
                 QMessageBox.warning(
                     self, "Could not overwrite file", f"{component.path.name}: {exc}")
                 self.statusBar().showMessage("Overwrite failed")
-                break
+                return
             component.session = OutlineEditor.new_session(saved_model)
             written.append(component.path.name)
+        if self._pending_component_values:
+            try:
+                from entity_designer.fx_visuals import save_values
+                save_values(self._game_object.body_sources, self._pending_component_values,
+                            snapshots=self._script_snapshots,
+                            expected=(self._game_object.kind, self._game_object.object_id))
+            except (OSError, ValueError) as exc:
+                for path in created:
+                    path.unlink(missing_ok=True)
+                QMessageBox.warning(self, "Could not save entity", str(exc))
+                return
+            self._game_object.values.update(self._pending_component_values)
+            self._pending_component_values.clear()
+            self._script_snapshots.clear()
+        for component in self._components:
+            component.new_file = False
         self.outline_editor.restore_session(active.session)
         self._current_model = active.session.model
         self._update_reference_layers()
@@ -1356,6 +1573,8 @@ class WireframeEditorWindow(QMainWindow):
             self.save_action.setEnabled(can_overwrite)
         if self.save_as_action:
             self.save_as_action.setEnabled(can_export)
+        if hasattr(self, "save_entity_action"):
+            self.save_entity_action.setEnabled(self._game_object is not None and can_overwrite)
         self._update_status_value()
 
     def _update_status_value(self) -> None:

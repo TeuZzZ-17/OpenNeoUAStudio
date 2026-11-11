@@ -1203,6 +1203,7 @@ class OutlineCanvas(AcceleratedWidget):
 
 
 class OutlineEditor(QWidget):
+    componentAddRequested = Signal(str)
     dirtyChanged = Signal(bool)
     selectionChanged = Signal(int)
     geometryChanged = Signal()
@@ -2325,6 +2326,14 @@ class OutlineEditor(QWidget):
         square_action = add_menu.addAction("Square")
         pentagon_action = add_menu.addAction("Pentagon")
         circle_action = add_menu.addAction("Circle")
+        if getattr(self, "component_add_enabled", False):
+            add_menu.addSeparator()
+            for key, label in (("hud_wireframe", "HUD"), ("mg_wireframe", "MG"),
+                               ("wpn_wireframe_1", "Weapon 1"), ("wpn_wireframe_2", "Weapon 2"),
+                               ("wireframe", "Unit / Weapon")):
+                action = add_menu.addAction(f"Add {label} wireframe…")
+                action.setEnabled(self.component_add_available(key))
+                action.triggered.connect(lambda checked=False, key=key: self.componentAddRequested.emit(key))
         return vertex_action, triangle_action, square_action, pentagon_action, circle_action
 
     def _handle_add_menu_action(
