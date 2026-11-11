@@ -941,8 +941,8 @@ class _FxPreviewMixin:
         phased = panel.simulation is not None and panel.simulation.shows_unit
         particles = []
         if panel.simulation is not None:
-            emitters = {vp: self.viewport.fx_vp_emitter_specs(vp)
-                        for vp in panel.required_vps()}
+            emitters = {key: self.viewport.fx_vp_emitter_specs(key)
+                        for key in panel.required_vps() | panel.simulation.emitter_keys()}
             particles = panel.simulation.particles_at(panel.time_ms, emitters)
             if not show_unit:
                 # Decorations and the tracer belong to the normal model and hide with it.

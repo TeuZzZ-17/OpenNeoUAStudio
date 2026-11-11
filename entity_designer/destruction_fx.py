@@ -2072,7 +2072,7 @@ def unit_look(values: dict[str, str], *, weapon: bool) -> dict:
             script_int(values.get("ground_decal_id"), -1)),
         # The unit's own size, written in its script; a bad value is ignored.
         "decal_size": _manual_decal_size(values.get("ground_decal_size", "0_0")),
-        "crater": crater_preview.config_from_values(values) if weapon else None,
+        "crater": crater_preview.config_from_values(values),
     }
 
 
@@ -2512,7 +2512,8 @@ class UnitPhases:
     ground_decal_id: int = -1
     # Manual world-space diameter range.
     decal_size: tuple[float, float] = (0.0, 0.0)
-    # Weapons: terrain crater (crater_radius / crater_depth / crater_rim), None = none.
+    # Terrain crater (crater_radius / crater_depth / crater_rim), None = none.
+    # A weapon digs it where it hits the ground, a vehicle where its wreck ends.
     crater: "crater_preview.CraterConfig | None" = None
 
     @property
@@ -2587,6 +2588,12 @@ def _uniform(rng: random.Random, low: float, high: float) -> float:
 
 def _randint(rng: random.Random, low: int, high: int) -> int:
     return low if low == high else rng.randint(min(low, high), max(low, high))
+
+
+def _base_key(ref: VisualRef | None) -> str:
+    """BASE path whose emitters a model uses (a 3DS model has none)."""
+
+    return ref.base_path if ref is not None and ref.base_path and not ref.mesh3ds else ""
 
 
 def _external_paths(ref: VisualRef | None) -> tuple[str, ...]:
@@ -2817,6 +2824,8 @@ class PreviewSimulation:
                       definition: "_Def") -> None:
         """The crater a weapon digs where it hits the ground (SpawnTerrainCrater).
 
+        A vehicle digs it under its wreck, at the same moment as its "destroyed"
+        ground decal (``MakeDestroyedCrater``).
         The unit-hit preview also calls this on the ground beneath the target.
         Preview ground is always flat, so it is a crater and never a dent.
         """
@@ -2824,8 +2833,8 @@ class PreviewSimulation:
         unit = definition.unit
         if (not self.craters or (definition.source is None and not self.root_craters)
                 or (definition.source is not None and not self.child_craters)
-                or unit.crater is None or not unit.weapon
-                or trigger != "impact_world"):
+                or unit.crater is None
+                or trigger != ("impact_world" if unit.weapon else "destroyed")):
             return
         rng = self._rng(CRATER_SOURCE, trigger + definition.salt + repr(tuple(origin)))
         shape = crater_preview.roll(unit.crater, rng, origin[0], self.ground_y, origin[2])
@@ -4037,8 +4046,13 @@ class PreviewSimulation:
                     source, kind, start, end, payload, self.unit))
         return self._instances
 
+    def emitter_keys(self) -> set:
+        """Every emitter key (VP, or (BASE path, VP)) of the instances of this preview."""
+
+        return {instance.emitter_key for instance in self.vp_instances()}
+
     def particles_at(self, time_ms: float,
-                     emitters: dict[int, list["EmitterSpec"]],
+                     emitters: dict[object, list["EmitterSpec"]],
                      limit: int = 6000) -> list["ParticleSprite"]:
         """Every live particle of every emitter VP at ``time_ms``."""
 
@@ -4046,7 +4060,7 @@ class PreviewSimulation:
         for index, instance in enumerate(self.vp_instances()):
             if instance.start > time_ms:
                 continue
-            for emitter_index, emitter in enumerate(emitters.get(instance.vp, ())):
+            for emitter_index, emitter in enumerate(emitters.get(instance.emitter_key, ())):
                 if instance.trail[2] != 1.0:
                     emitter = replace(emitter, lifetime=max(
                         1, int(emitter.lifetime * instance.trail[2])))
@@ -4063,8 +4077,12 @@ class VpInstance:
 
     def __init__(self, source: int, vp: int, start: float, end: float, *,
                  position, scale, rotation: Matrix3 = IDENTITY,
-                 tint=None, alpha=None, trail=(1.0, 1.0, 1.0)) -> None:
+                 tint=None, alpha=None, trail=(1.0, 1.0, 1.0),
+                 base_path: str = "") -> None:
         self.source = source
+        # BASE file drawn instead of the VP (base_*): its own particle.class
+        # emitters run, not the ones of the SET VP.
+        self.base_path = base_path
         # vp_trail_scale: X/Y size of the particles, Z their lifetime.
         self.trail = trail
         self.vp = vp
@@ -4075,6 +4093,11 @@ class VpInstance:
         self.rotation = rotation
         self.tint = tint
         self._alpha = alpha
+
+    @property
+    def emitter_key(self):
+        """Where the emitters come from: the VP, or (BASE path, VP) with the VP as fallback."""
+        return (self.base_path, self.vp) if self.base_path else self.vp
 
     def position(self, time_ms: float):
         return self._position(time_ms) if callable(self._position) else self._position
@@ -4187,7 +4210,8 @@ def _instances_for_event(source, kind, start, end, payload, unit=None):
     if kind == "cluster":
         ref, position, heading = payload
         return [VpInstance(source, ref.vp, start, end, position=position,
-                           scale=(1.0, 1.0, 1.0), rotation=heading)] if ref.vp > 0 else []
+                           scale=(1.0, 1.0, 1.0), rotation=heading,
+                           base_path=_base_key(ref))] if ref.vp > 0 else []
     if kind == "plasma":
         ref, position, total, _maxrot = payload
         if ref.vp <= 0:
@@ -4196,7 +4220,8 @@ def _instances_for_event(source, kind, start, end, payload, unit=None):
             source, ref.vp, start, end, position=position,
             scale=lambda time_ms, total=total, start=start:
                 (_plasma_scale(total, time_ms - start),) * 3,
-            tint=None if unit is None or unit.tint in (None, WHITE) else unit.tint)]
+            tint=None if unit is None or unit.tint in (None, WHITE) else unit.tint,
+            base_path=_base_key(ref))]
     if kind == MODE_VISUAL:
         spec, position, rotation = payload
         count = len(spec.visuals)
@@ -4212,7 +4237,7 @@ def _instances_for_event(source, kind, start, end, payload, unit=None):
         return [VpInstance(source, visual.vp, start + index * slice_ms,
                            start + (index + 1) * slice_ms, position=position,
                            scale=scale_at, rotation=rotation, tint=visual.tint,
-                           alpha=alpha_at)
+                           alpha=alpha_at, base_path=_base_key(visual))
                 for index, visual in enumerate(spec.visuals) if visual.vp > 0]
     if kind == MODE_PHYSICAL:
         spec, vp, path, rotation = payload
@@ -4221,7 +4246,8 @@ def _instances_for_event(source, kind, start, end, payload, unit=None):
             source, vp, start, end,
             position=lambda time_ms, path=path, start=start:
                 _path_position(path, time_ms - start),
-            scale=scale, rotation=rotation, tint=spec.physical_tint)] if vp > 0 else []
+            scale=scale, rotation=rotation, tint=spec.physical_tint,
+            base_path=_base_key(spec.physical_model))] if vp > 0 else []
     if kind == "impact":
         vp, position, scale, tint = payload
         return [VpInstance(source, vp, start, end, position=position,
@@ -4240,12 +4266,13 @@ def _instances_for_event(source, kind, start, end, payload, unit=None):
                            scale=scale_at, rotation=rotation)
                 for index, vp in enumerate(scale_fx.vps)]
     if kind in ("legacy", "unit"):
-        tint, trail = None, (1.0, 1.0, 1.0)
+        tint, trail, base_path = None, (1.0, 1.0, 1.0), ""
         if kind == "unit":
             # The main model's matrix already carries its preview scale.
             ref, flight, _label, main, owner = payload
             unit = owner
             vp = ref.vp
+            base_path = _base_key(ref)
             path, heading = flight.path, flight.heading
             scale_matrix = (tuple(tuple(unit.scale[row] if row == col else 0.0
                                         for col in range(3)) for row in range(3))
@@ -4264,7 +4291,7 @@ def _instances_for_event(source, kind, start, end, payload, unit=None):
         return [VpInstance(
             source, vp, start, end, position=position,
             scale=(1.0, 1.0, 1.0), rotation=rotation, tint=tint,
-            trail=trail)] if vp > 0 else []
+            trail=trail, base_path=base_path)] if vp > 0 else []
     return []
 
 

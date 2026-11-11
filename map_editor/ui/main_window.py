@@ -2920,6 +2920,8 @@ class MainWindow(QMainWindow):
             parts.append(f"GUNS x{len(definition.guns)}")
         if definition.is_radar:
             parts.append("RADAR")
+        if definition.building_time is not None:
+            parts.append(f"BUILD {definition.building_time:g}s")
         if definition.production_cost:
             parts.append(f"COST {definition.production_cost}")
         return " · ".join(parts)
@@ -2930,6 +2932,8 @@ class MainWindow(QMainWindow):
                  f"model={definition.model} sec_type={definition.sec_type} ({definition.sec_type:02x})",
                  f"power={definition.power} energy={definition.energy} cost={definition.production_cost}",
                  f"source={definition.source or 'installation scripts'}"]
+        if definition.building_time is not None:
+            lines.append(f"building_time={definition.building_time:g}s")
         for gun in definition.guns:
             lines.append(f"gun vehicle={gun.vehicle} pos={gun.pos} dir={gun.direction}")
         if definition.debug_note:

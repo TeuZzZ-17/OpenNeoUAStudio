@@ -5,7 +5,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 import re
 
-from .building_defs import GunMount
+from .building_defs import GunMount, parse_building_time
 
 ROBO_GUN_MAX_COUNT = 20
 
@@ -62,6 +62,7 @@ class VehicleVisual:
     three_ds_normal: str = ""
     enabled_factions: set = field(default_factory=set)
     energy: int = 0
+    building_time: float | None = None
     guns: list[GunMount] = field(default_factory=list)
     viewer: tuple[float, float, float] = (0.0, 0.0, 0.0)
     type_icon: str = ""
@@ -108,6 +109,8 @@ def parse_vehicle_text(text: str, result=None):
                     active.scale = _script_tuple(value, active.scale)
                 elif key == 'rotation_xyz':
                     active.rotation = _script_tuple(value, active.rotation)
+                elif key == 'building_time':
+                    active.building_time = parse_building_time(value)
                 elif key == 'energy':
                     active.energy = _script_int(value, active.energy)
                 elif key in ('enable', 'disable'):

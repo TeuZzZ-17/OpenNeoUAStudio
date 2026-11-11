@@ -214,6 +214,10 @@ class CollisionViewport(FxPreviewViewportMixin, AssetViewport):
     sphereBoxSelectionRequested = Signal(object, bool)
     firePointPicked = Signal(int)
     gunPointPicked = Signal(int)
+    # Visuals & FX preview: index of the effect clicked in the 3D view.
+    fxEffectPicked = Signal(int)
+    # Double click on no effect: deselect every effect.
+    fxDeselectRequested = Signal()
     sphereContextMenuRequested = Signal(int, QPoint)
     sphereNudgeRequested = Signal(object)
     cockpitNudgeRequested = Signal(object)
@@ -260,6 +264,7 @@ class CollisionViewport(FxPreviewViewportMixin, AssetViewport):
         self._shape_cursor_mouse_tracking_previous = None
         self._shape_selected_indices = set()
         self._shape_press_pos = None
+        self._fx_press_pos: QPointF | None = None
         self._geometry_component_preview: tuple | None = None
         self._geometry_component_highlight: tuple | None = None
         self._geometry_component_excluded: tuple | None = None
@@ -2138,6 +2143,21 @@ class CollisionViewport(FxPreviewViewportMixin, AssetViewport):
         super().mouseMoveEvent(event)
 
     def mouseReleaseEvent(self, event: QMouseEvent) -> None:  # noqa: N802
+        # A left click (no drag) in the Visuals & FX preview picks the effect under it;
+        # a drag keeps orbiting the camera as before.
+        click = None
+        if event.button() == Qt.MouseButton.LeftButton and self._fx_press_pos is not None:
+            delta = event.position() - self._fx_press_pos
+            self._fx_press_pos = None
+            if abs(delta.x()) <= 4.0 and abs(delta.y()) <= 4.0:
+                click = QPointF(event.position())
+        self._release_without_fx_pick(event)
+        if click is not None:
+            index = self.fx_pick_at(click)
+            if index is not None:
+                self.fxEffectPicked.emit(index)
+
+    def _release_without_fx_pick(self, event: QMouseEvent) -> None:
         if (event.button() == Qt.MouseButton.LeftButton
                 and self._fire_area_drag is not None):
             self._fire_area_drag = None
@@ -2205,6 +2225,8 @@ class CollisionViewport(FxPreviewViewportMixin, AssetViewport):
             event.accept()
             return
         if event.button() == Qt.MouseButton.LeftButton:
+            if self._fx_active and not self._fire_area_visible:
+                self._fx_press_pos = QPointF(event.position())
             if self._collision_shape_overlay_visible and (
                     self._collision_shape is not None or self._geometry_component_picks):
                 self._shape_press_pos = QPointF(event.position())
@@ -2295,6 +2317,12 @@ class CollisionViewport(FxPreviewViewportMixin, AssetViewport):
                     self._fire_area_handle = ""
                     self.fireAreaHandlePicked.emit("")
                     self.update()
+                event.accept()
+                return
+            if self._fx_active:
+                # Visuals & FX: a double click away from every effect deselects them all.
+                if self.fx_pick_at(event.position()) is None:
+                    self.fxDeselectRequested.emit()
                 event.accept()
                 return
             if self._collision_shape_overlay_visible:

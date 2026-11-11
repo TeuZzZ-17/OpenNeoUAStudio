@@ -8,6 +8,7 @@ original game used ``.scr`` files with the same block syntax. Both suffixes
 from __future__ import annotations
 
 import re
+import math
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -15,6 +16,15 @@ BUILDING_SUFFIXES = {".cfg", ".scr", ".ini"}
 
 _BEGIN = re.compile(r"(?im)^\s*(new|modify)_building\s+(\d+)\b")
 _ASSIGN = re.compile(r"(?im)^\s*([A-Za-z_0-9]+)\s*=\s*([^\n;]+)")
+
+
+def parse_building_time(value: str) -> float | None:
+    """Match the engine: explicit seconds in 0..100; invalid/missing means vanilla."""
+    try:
+        seconds = float(value)
+    except (ValueError, TypeError):
+        return None
+    return seconds if math.isfinite(seconds) and 0.0 <= seconds <= 100.0 else None
 
 
 @dataclass
@@ -33,6 +43,7 @@ class BuildingDef:
     power: int = 0
     energy: int = 0
     production_cost: int = 0
+    building_time: float | None = None
     description: str = ""
     script_class: str = ""
     type_icon: str = ""
@@ -183,6 +194,7 @@ def parse_building_text(text: str, source: str = "", result=None) -> dict[int, B
             power=_number(values.get("power", "0")),
             energy=_number(values.get("energy", "0")),
             production_cost=_number(values.get("production_cost", "0")),
+            building_time=parse_building_time(values.get("building_time", "")),
             description=values.get("building_description", values.get("description", "")),
             script_class=values.get("model", ""),
             type_icon=values.get("type_icon", "").strip(),
@@ -191,7 +203,7 @@ def parse_building_text(text: str, source: str = "", result=None) -> dict[int, B
             guns=mounts,
         )
         if previous is not None:
-            for key in ('name', 'model', 'sec_type', 'power', 'energy', 'production_cost', 'type_icon'):
+            for key in ('name', 'model', 'sec_type', 'power', 'energy', 'production_cost', 'building_time', 'type_icon'):
                 if key not in values:
                     setattr(definition, key, getattr(previous, key))
             if not guns:

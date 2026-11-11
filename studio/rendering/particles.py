@@ -157,7 +157,9 @@ def _add_particle(sprites, instance, index, emitter_index, emitter, time_ms,
     size *= math.sqrt(instance.trail[0] * instance.trail[1])
     stage =min(int(age / (emitter.lifetime / emitter.stages)), emitter.stages - 1)
     sprites.append(ParticleSprite(
-        instance.source, instance.vp, emitter_index, position, size, stage,
+        # emitter_key: the VP, or (BASE path, VP) when a loose BASE replaces it.
+        instance.source, getattr(instance, "emitter_key", instance.vp),
+        emitter_index, position, size, stage,
         instance.tint, instance.alpha(min(time_ms, instance.end - 1e-6))))
 
 

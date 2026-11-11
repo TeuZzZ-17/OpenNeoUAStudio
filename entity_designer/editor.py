@@ -802,6 +802,9 @@ class CollisionEditorWindow(
         self.fx_panel.sourceSaved.connect(self._fx_sources_saved)
         self.fx_panel.visualsSaved.connect(self.reload_fx_from_file)
         self.fx_panel.carrier_combo.currentIndexChanged.connect(self._fx_carrier_changed)
+        # Click an effect in the 3D view: select its row (the row drives the white outline).
+        self.viewport.fxEffectPicked.connect(self.fx_panel.effects_view.select_effect)
+        self.viewport.fxDeselectRequested.connect(self.fx_panel.effects_view.deselect_all)
         # The playback bar uses the full width under the viewport.
         self.viewport_layout.addWidget(self.fx_panel.transport_bar, 1, 0)
         # The bar keeps its natural height; the viewport takes the rest.

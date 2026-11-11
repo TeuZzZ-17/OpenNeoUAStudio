@@ -183,7 +183,7 @@ def test_exact_span_of_another_weapon_is_rejected(tmp_path):
     other = find_script_blocks(text)[1]
     origin = [(path, other.start_line, other.end_line)]
     session = FxTextSession(document, fx.CONTEXT_WEAPON, origin, expected=("new_weapon", 37))
-    states = fx_visuals.StateSession(origin, weapon=True, expected=("new_weapon", 37))
+    states = fx_visuals.StateSession(origin, expected=("new_weapon", 37))
     assert not session.can_add() and "different definition" in session.source_error
     assert "different definition" in states.source_error and not states.values
     states.set_draft(fx_visuals.MODEL_INDEX, "vp_normal = 111")
@@ -706,7 +706,7 @@ def test_new_effect_crater_text_can_be_saved_and_reloaded(app, tmp_path):
         assert all(line in saved for line in draft.splitlines())
         assert saved.count("crater_radius") == 1
         end = find_script_blocks(saved)[0].end_line
-        reopened = StateSession([(path, 0, end)], weapon=True)
+        reopened = StateSession([(path, 0, end)])
         assert reopened.originals[CRATER_INDEX] == draft
         assert not panel.has_unsaved_text
     finally:
@@ -741,7 +741,7 @@ def test_new_effect_routes_state_keys_and_preserves_existing_values(app, tmp_pat
         drawer.code.save_button.click()
         saved = path.read_text(encoding="utf-8")
         end = find_script_blocks(saved)[0].end_line
-        reopened = fx_visuals.StateSession([(path, 0, end)], weapon=True)
+        reopened = fx_visuals.StateSession([(path, 0, end)])
         assert reopened.originals[drawer.index] == expected
     finally:
         panel.close()
@@ -783,7 +783,6 @@ def test_one_new_effect_can_fill_several_state_rows(app, tmp_path):
 
 @pytest.mark.parametrize("context,draft,message", [
     (fx.CONTEXT_WEAPON, "future_param = 5", "future_param is not an effect"),
-    (fx.CONTEXT_VEHICLE, "crater_radius = 5", "only for weapons"),
     (fx.CONTEXT_VEHICLE, "snd_future_sample = a.wav", "unknown sound event"),
     (fx.CONTEXT_VEHICLE, "vp_normal = 5\nsnd_explode_sample = a.wav", "own effect"),
 ])

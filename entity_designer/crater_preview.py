@@ -67,7 +67,7 @@ def parse_range(key: str, value: str) -> tuple[float, float]:
 
 
 def config_from_values(values: dict[str, str]) -> CraterConfig | None:
-    """The crater of a weapon, or None when the engine digs none.
+    """The crater of a weapon or vehicle, or None when the engine digs none.
 
     Both crater_radius and crater_depth are needed; any invalid key switches
     the crater off (parsers_weapon.cpp).

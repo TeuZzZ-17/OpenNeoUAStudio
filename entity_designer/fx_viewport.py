@@ -48,6 +48,32 @@ _BLAST_RING_ALPHA = 105
 # How far a damage label floats up while it is visible, in pixels.
 _DAMAGE_LABEL_RISE = {DAMAGE_AREA: 14.0, DAMAGE_DIRECT: 10.0}
 _DAMAGE_RISE_MS = 1200.0
+# Click picking: more shapes than this are outlined as one hull; shapes smaller
+# than _PICK_TINY pixels (particles) also answer a click this close to them.
+_PICK_OUTLINE_MAX = 8
+_PICK_TINY = 14.0
+_PICK_MARGIN = 7.0
+
+
+def _screen_hull(points) -> list[QPointF]:
+    """Convex hull of screen points (monotone chain); fewer than 3 points stay as they are."""
+
+    unique = sorted({(round(p.x(), 1), round(p.y(), 1)) for p in points})
+    if len(unique) < 3:
+        return [QPointF(x, y) for x, y in unique]
+
+    def turn(o, a, b):
+        return (a[0] - o[0]) * (b[1] - o[1]) - (a[1] - o[1]) * (b[0] - o[0])
+
+    halves = []
+    for sequence in (unique, unique[::-1]):
+        half: list = []
+        for point in sequence:
+            while len(half) >= 2 and turn(half[-2], half[-1], point) <= 0:
+                half.pop()
+            half.append(point)
+        halves.append(half[:-1])
+    return [QPointF(x, y) for x, y in halves[0] + halves[1]]
 
 
 def anim_state_at(frames, anim_type: int, time_ms: float) -> tuple[int, int]:
@@ -256,6 +282,10 @@ class FxPreviewViewportMixin:
         self._fx_shake = (0.0, 0.0, 0.0)
         # Weapon damage overlay (DamageSample list): blast sphere and numbers.
         self._fx_damage = []
+        # Clickable screen shapes of the last frame: effect index -> [(polygon, depth)].
+        self._fx_pick_shapes: dict[int, list] = {}
+        # Screen -> scene map of the shk_* turn of the last frame (identity when still).
+        self._fx_pick_inverse = QTransform()
 
     def set_fx_preview(self, *, active: bool, items=(), owner_by_vp=None,
                        unit_owners=None, boxes=(), time_ms: float = 0.0,
@@ -370,13 +400,29 @@ class FxPreviewViewportMixin:
             return self._fx_set_vp_source(int(vp))
         return None
 
-    def fx_vp_emitter_specs(self, vp: int) -> list[EmitterSpec]:
-        """particle.class emitters of a VP, in model space."""
+    def fx_vp_emitter_specs(self, key) -> list[EmitterSpec]:
+        """particle.class emitters of a VP (or of its replacing BASE), in model space."""
 
+        return [spec for spec, _stages in self._fx_emitter_entries(key)]
+
+    def _fx_emitter_entries(self, key) -> list:
+        """(spec, stage looks) of an emitter key: a VP, or (BASE path, VP).
+
+        A BASE the engine loads instead of the VP runs its own emitters; the
+        VP's emitters are the fallback when that file cannot be loaded.
+        """
+
+        vp = key
+        if isinstance(key, tuple):
+            path, vp = key
+            helper = self._fx_external_helper(path)
+            if helper is not None:
+                family = helper._family_ref
+                return [entry for obj in family.all_objects()
+                        for entry in self._fx_emitters(
+                            getattr(obj, "owner_path", None), family)]
         source = self._fx_vp_source(vp)
-        if source is None:
-            return []
-        return [spec for spec, _stages in self._fx_emitters(source[1], source[0])]
+        return self._fx_emitters(source[1], source[0]) if source else []
 
     def _fx_emitters(self, owner: str | None, family=None) -> list:
         family = family if family is not None else self._family_ref
@@ -490,8 +536,7 @@ class FxPreviewViewportMixin:
         scale = float(camera["scale"])
         drawn = []
         for sprite in self._fx_particles:
-            source = self._fx_vp_source(sprite.vp)
-            emitters = self._fx_emitters(source[1], source[0]) if source else []
+            emitters = self._fx_emitter_entries(sprite.vp)
             if not 0 <= sprite.emitter < len(emitters):
                 continue
             stages = emitters[sprite.emitter][1]
@@ -517,6 +562,10 @@ class FxPreviewViewportMixin:
             half = math.hypot(edge.x() - middle.x(), edge.y() - middle.y())
             if half < 0.3 or half > target.width() * 4:
                 continue
+            self._fx_pick_add(sprite.source, [
+                QPointF(middle.x() + dx * half, middle.y() + dy * half)
+                for dx, dy in ((-1, -1), (1, -1), (1, 1), (-1, 1))],
+                _depth, hull=False)
             tint = sprite.tint
             if tint is not None and tuple(tint[:3]) != (255, 255, 255):
                 key = (id(image), tuple(tint[:3]))
@@ -546,24 +595,32 @@ class FxPreviewViewportMixin:
         """
 
         for path in item.external:
-            if path not in self._fx_external_cache:
-                helper = None
-                loader = self._fx_external_loader
-                family = loader(path) if loader is not None else None
-                if family is not None:
-                    helper = AssetViewport()
-                    helper.load_family(family, None)
-                    helper._fx_base_faces = [
-                        (face, [tuple(vertex) for vertex in face.vertices])
-                        for face in helper._faces]
-                    helper._fx_flat = str(family.base_path).casefold().endswith(".3ds")
-                self._fx_external_cache[path] = helper
-            helper = self._fx_external_cache[path]
+            helper = self._fx_external_helper(path)
             if helper is not None:
                 return helper
         if (item.vp or item.vp_zero_valid) and int(item.vp) not in self._fx_owner_by_vp:
             return self._fx_set_vp_helper(int(item.vp))
         return None
+
+    def _fx_external_helper(self, path: str) -> AssetViewport | None:
+        """Hidden renderer of one external 3DS/BASE model (cached, None = cannot load)."""
+
+        if path not in self._fx_external_cache:
+            helper = None
+            loader = self._fx_external_loader
+            if loader is None:
+                # Not set yet (first frame): do not remember a failure that is not one.
+                return None
+            family = loader(path)
+            if family is not None:
+                helper = AssetViewport()
+                helper.load_family(family, None)
+                helper._fx_base_faces = [
+                    (face, [tuple(vertex) for vertex in face.vertices])
+                    for face in helper._faces]
+                helper._fx_flat = str(family.base_path).casefold().endswith(".3ds")
+            self._fx_external_cache[path] = helper
+        return self._fx_external_cache[path]
 
     def _fx_set_vp_helper(self, vp: int) -> AssetViewport | None:
         """Hidden renderer shared by the SET VP models the unit's family lacks.
@@ -845,11 +902,19 @@ class FxPreviewViewportMixin:
         """
 
         turn_x, turn_y, turn_z = self._fx_shake
+        self._fx_pick_inverse = QTransform()
         if not (turn_x or turn_y or turn_z):
             self._paint_fx_scene(painter)
             return
         rect = QRectF(self.rect())
         focal = min(rect.width(), rect.height()) * 1.5 * self._zoom
+        # Same turn as the painter below, so clicks land on the shaken picture.
+        shake = QTransform()
+        shake.translate(rect.center().x(), rect.center().y())
+        shake.rotate(math.degrees(turn_z))
+        shake.translate(turn_y * focal, turn_x * focal)
+        shake.translate(-rect.center().x(), -rect.center().y())
+        self._fx_pick_inverse = shake.inverted()[0]
         painter.fillRect(rect, QColor(24, 26, 32))
         painter.save()
         painter.translate(rect.center())
@@ -867,6 +932,8 @@ class FxPreviewViewportMixin:
         saved_faces = self._faces
         saved_anim = dict(self._anim_states)
         templates = self._fx_templates()
+        self._fx_pick_shapes = {}
+        pick_boxes: dict[int, tuple] = {}
         fx_owners = set(templates)
         # The unit can also be an effect template (vp_normal phase items), so
         # it is chosen by owner; effect-only owners are never drawn in place.
@@ -891,9 +958,20 @@ class FxPreviewViewportMixin:
         for item in self._fx_items:
             if item.kind == "ground_decal":
                 decals.append(item)
+                self._fx_pick_add(
+                    item.source, [self._fx_project(corner, target, camera)
+                                  for corner in self._decal_corners(item)],
+                    self._fx_depth(item.position, camera))
                 continue
             if item.kind == "crater":
                 craters.append(item)
+                reach = crater_preview.reach(crater_preview.Shape(*item.position, *item.scale))
+                x, y, z = item.position
+                self._fx_pick_add(
+                    item.source, [self._fx_project(corner, target, camera) for corner in (
+                        (x - reach, y, z - reach), (x + reach, y, z - reach),
+                        (x + reach, y, z + reach), (x - reach, y, z + reach))],
+                    self._fx_depth(item.position, camera))
                 continue
             if item.kind == "decal_smoke":
                 smokes.append(item)
@@ -902,6 +980,8 @@ class FxPreviewViewportMixin:
             if helper is not None:
                 _tinted, rgb, _opacity, step = self._fx_item_look(item)
                 if step:
+                    self._fx_pick_box(item, self._fx_helper_faces(helper, item),
+                                      pick_boxes, target, camera)
                     externals.setdefault(
                         (id(helper), rgb, step, item.additive),
                         (helper, []))[1].append(item)
@@ -922,6 +1002,9 @@ class FxPreviewViewportMixin:
                     markers.append(item)
                 continue
             tinted, rgb, opacity, step = self._fx_item_look(item)
+            if step or (not tinted and opacity >= 0.999):
+                owner = self._fx_owner_by_vp.get(int(item.vp))
+                self._fx_pick_box(item, templates.get(owner, ()), pick_boxes, target, camera)
             if not tinted and opacity >= 0.999:
                 main_faces.extend(faces)
                 continue
@@ -983,6 +1066,7 @@ class FxPreviewViewportMixin:
         self._draw_fx_boxes(painter, target, camera)
         self._draw_fx_markers(painter, target, camera, markers)
         self._draw_fx_damage(painter, target, camera)
+        self._draw_fx_pick_outline(painter)
         # Fire Area tab: its volume is drawn over the unit and the shot.
         self._draw_fire_area_overlay(painter)
 
@@ -1027,6 +1111,87 @@ class FxPreviewViewportMixin:
         if not self._camera_point_is_projectable(camera_point):
             return None
         return self._project(camera_point, target, camera)
+
+    # -- click picking of effects -------------------------------------------------------
+
+    def _fx_pick_add(self, source, points, depth: float = 0.0, *, hull: bool = True) -> None:
+        """Remember the screen shape of effect ``source`` for clicks and the white outline.
+
+        The unit (source -1) and shapes with no visible point are not pickable.
+        """
+
+        if source is None or int(source) < 0:
+            return
+        points = [point for point in points if point is not None]
+        if not points:
+            return
+        polygon = QPolygonF(_screen_hull(points) if hull else points)
+        self._fx_pick_shapes.setdefault(int(source), []).append((polygon, depth))
+
+    def _fx_pick_box(self, item, pairs, cache, target, camera) -> None:
+        """Pickable hull of a model item: its local bounding box, placed like the model."""
+
+        if int(item.source) < 0:
+            return
+        low_high = cache.get(id(pairs))
+        if low_high is None:
+            vertices = [vertex for _face, face_vertices in pairs for vertex in face_vertices]
+            if not vertices:
+                return
+            low_high = cache[id(pairs)] = (
+                tuple(min(vertex[axis] for vertex in vertices) for axis in range(3)),
+                tuple(max(vertex[axis] for vertex in vertices) for axis in range(3)))
+        low, high = low_high
+        corners = [(x, y, z) for x in (low[0], high[0])
+                   for y in (low[1], high[1]) for z in (low[2], high[2])]
+        self._fx_pick_add(
+            item.source,
+            [self._fx_project(_transform(item, corner), target, camera) for corner in corners],
+            self._fx_depth(item.position, camera))
+
+    def _fx_depth(self, position, camera) -> float:
+        return float(self._camera_vertex(position, camera)[2])
+
+    def fx_pick_at(self, position) -> int | None:
+        """Effect under a click: the smallest shape wins, so particles beat the model behind."""
+
+        point = self._fx_pick_inverse.map(QPointF(position))
+        best = None
+        for source, shapes in self._fx_pick_shapes.items():
+            for polygon, depth in shapes:
+                rect = polygon.boundingRect()
+                if not polygon.containsPoint(point, Qt.FillRule.OddEvenFill):
+                    # A tiny sprite is hard to hit: it gets a small click margin.
+                    center = rect.center()
+                    if (max(rect.width(), rect.height()) > _PICK_TINY
+                            or math.hypot(point.x() - center.x(),
+                                          point.y() - center.y()) > _PICK_MARGIN):
+                        continue
+                key = (max(rect.width() * rect.height(), 1.0), depth)
+                if best is None or key < best[0]:
+                    best = (key, source)
+        return best[1] if best else None
+
+    def _draw_fx_pick_outline(self, painter) -> None:
+        """White border around the selected effect (a dark rim keeps it visible on light FX)."""
+
+        shapes = (self._fx_pick_shapes.get(self._fx_highlight)
+                  if self._fx_highlight is not None else None)
+        if not shapes:
+            return
+        polygons = [polygon for polygon, _depth in shapes]
+        if len(polygons) > _PICK_OUTLINE_MAX:
+            polygons = [QPolygonF(_screen_hull(
+                [point for polygon in polygons for point in polygon]))]
+        painter.save()
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+        painter.setBrush(Qt.BrushStyle.NoBrush)
+        for width, color in ((4.0, QColor(0, 0, 0, 150)), (2.0, QColor(255, 255, 255))):
+            painter.setPen(QPen(color, width, Qt.PenStyle.SolidLine,
+                                Qt.PenCapStyle.RoundCap, Qt.PenJoinStyle.RoundJoin))
+            for polygon in polygons:
+                painter.drawPolygon(polygon)
+        painter.restore()
 
     def _decal_image(self, texture: str, edge_fade: float = 0.0) -> QImage | None:
         """Decal texture with its radial edge fade baked in (None = not loadable).
@@ -1370,6 +1535,11 @@ class FxPreviewViewportMixin:
             half = math.hypot(edge.x() - middle.x(), edge.y() - middle.y())
             if half < 0.3 or half > target.width() * 4:
                 continue
+            self._fx_pick_add(item.source, [
+                QPointF(middle.x() + math.cos(angle) * half,
+                        middle.y() + math.sin(angle) * half)
+                for angle in (index * math.pi / 6 for index in range(12))],
+                _depth, hull=False)
             red, green, blue = item.tint[:3]
             opacity = max(0.0, min(1.0, item.alpha))
             gradient = QRadialGradient(middle, half)
@@ -1412,6 +1582,7 @@ class FxPreviewViewportMixin:
             diamond = QPolygonF([
                 point + QPointF(0, -size), point + QPointF(size, 0),
                 point + QPointF(0, size), point + QPointF(-size, 0)])
+            self._fx_pick_add(item.source, list(diamond), 0.0, hull=False)
             painter.setPen(QPen(QColor(255, 120, 90), 1.4))
             painter.setBrush(QColor(255, 120, 90, 60))
             painter.drawPolygon(diamond)
