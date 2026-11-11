@@ -834,9 +834,11 @@ class _PaintingMixin:
         self._draw_gizmo_handles(painter, target)
 
         hover = getattr(self, "_emitter_anchor_hover", None)
+        cut_block = getattr(self, "_emitter_cut_block", None)
         emitter_anchors = {
             block.ade_point_id for block in session.fam_obj.base_object.ades
             if (block.class_id or "").lower() == "particle.class"
+            and block is not cut_block
         }
         visible_anchors = emitter_anchors & (
             self._edit_visible_vertices | session.selection)
@@ -846,7 +848,9 @@ class _PaintingMixin:
             if index != hover and 0 <= index < len(screen):
                 painter.drawEllipse(screen[index], 9, 9)
 
-        if hover is not None and 0 <= hover < len(screen):
+        hidden_cut_anchor = (cut_block is not None and hover == cut_block.ade_point_id
+                             and hover not in emitter_anchors)
+        if hover is not None and not hidden_cut_anchor and 0 <= hover < len(screen):
             painter.setPen(QPen(QColor("white"), 2))
             painter.setBrush(Qt.BrushStyle.NoBrush)
             painter.drawEllipse(screen[hover], 8, 8)
