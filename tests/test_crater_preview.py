@@ -94,8 +94,7 @@ def test_saving_the_crater_row_keeps_the_rest_of_the_script(tmp_path):
     script = tmp_path / "Weapons.cfg"
     script.write_text("new_weapon 24\n    ground_decal_id = 1\n    ground_decal_size = 120~150\n"
                       "    name = Pike_Rocket\n    energy = 100\nend\n", encoding="utf-8")
-    assert fx_visuals.CRATER_INDEX not in fx_visuals.StateSession([(script, 0, 5)]).originals
-    session = fx_visuals.StateSession([(script, 0, 5)], weapon=True)
+    session = fx_visuals.StateSession([(script, 0, 5)])
     session.set_draft(fx_visuals.CRATER_INDEX, "crater_radius = 120~150\ncrater_depth = 140\ncrater_rim = 35")
     session.save([fx_visuals.CRATER_INDEX])
     text = script.read_text(encoding="utf-8")
@@ -151,9 +150,10 @@ def test_unit_hit_previews_crater_and_respects_visibility_and_missing_keys():
     assert not _craters(plain, impact + 50)
 
 
-def test_unit_look_reads_the_crater_of_weapons_only():
+def test_unit_look_reads_the_crater_of_weapons_and_vehicles():
     assert fx.unit_look(PIKE, weapon=True)["crater"].radius == (120.0, 150.0)
-    assert fx.unit_look(PIKE, weapon=False)["crater"] is None
+    assert fx.unit_look(PIKE, weapon=False)["crater"].radius == (120.0, 150.0)
+    assert fx.unit_look({}, weapon=False)["crater"] is None
 
 
 def _cluster_weapons():
@@ -385,3 +385,32 @@ def test_near_lip_of_a_deep_crater_leaves_no_gap(app):
             assert int((empty & above & below).sum()) < 40, (pitch, yaw)
     finally:
         viewport.close()
+
+
+def test_a_vehicle_digs_its_crater_under_the_wreck_with_the_destroyed_decal():
+    def run(unit):
+        simulation = fx.PreviewSimulation(fx.FxDocument(), fx.CONTEXT_VEHICLE,
+                                          fx.SEQUENCE_TRIGGER, unit=unit)
+        end = max(track.end for track in simulation.tracks)
+        return simulation, _craters(simulation, end + 60000)
+
+    unit = fx.UnitPhases(normal=fx.VisualRef(60), dead=fx.VisualRef(61),
+                         crater=cp.config_from_values(PIKE))
+    simulation, craters = run(unit)
+    assert len(craters) == 1
+    radius, depth, rim = craters[0].scale
+    assert 120 <= radius <= 150 and depth == pytest.approx(radius * 0.5)
+    assert any(track.label.endswith("Crater") for track in simulation.tracks)
+    # Off unless both keys are set: no crater, the preview stays as before.
+    assert run(fx.UnitPhases(normal=fx.VisualRef(60), dead=fx.VisualRef(61)))[1] == []
+
+
+def test_the_crater_row_exists_for_vehicles_too(tmp_path):
+    script = tmp_path / "Vehicles.cfg"
+    script.write_text("new_vehicle 5\n    name = Tank\n    energy = 100\nend\n", encoding="utf-8")
+    session = fx_visuals.StateSession([(script, 0, 3)])
+    assert fx_visuals.CRATER_INDEX in session.originals
+    session.set_draft(fx_visuals.CRATER_INDEX, "crater_radius = 90\ncrater_depth = 30")
+    session.save([fx_visuals.CRATER_INDEX])
+    text = script.read_text(encoding="utf-8")
+    assert "crater_radius = 90" in text and "name = Tank" in text and text.endswith("end\n")

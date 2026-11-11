@@ -26,15 +26,12 @@ def _not_an_effect_message(text: str, context: str) -> str:
 
     weapon = context == fx.CONTEXT_WEAPON
     kinds = ("one begin_fx block, one dest_fx line, the snd_ / pal_ / shk_ keys of one "
-             "sound event, or the Model / Ground decal" + (" / Crater" if weapon else "")
-             + " keys")
+             "sound event, or the Model / Ground decal / Crater keys")
     key = next((tokens[0] for line in text.splitlines()
                 if (tokens := fx.engine_tokens(line)) is not None), "")
     if not key:
         return f"Enter {kinds}."
     prefix = key.casefold().partition("_")[0]
-    if key.casefold() in fx_visuals.CRATER_KEYS and not weapon:
-        return f"{key}: craters exist only for weapons."
     if prefix in fx.KEY_GROUP_KINDS:
         events = fx.WEAPON_SOUND_EVENTS if weapon else fx.VEHICLE_SOUND_EVENTS
         return (f"{key}: unknown sound event. Known events: {', '.join(events)}.")

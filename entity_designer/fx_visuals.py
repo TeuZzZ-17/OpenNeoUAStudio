@@ -2,7 +2,7 @@
 
 The Visuals & FX list shows and edits ``vp_<state>``, ``base_<state>`` and
 ``3ds_<state>`` (Model row), ``ground_decal_id`` / ``ground_decal_size``
-(Ground decal row) and, for weapons, ``crater_radius`` / ``crater_depth`` /
+(Ground decal row) and ``crater_radius`` / ``crater_depth`` /
 ``crater_rim`` (Crater row) of the previewed definition. Pure Python:
 reading and patching text, and one verified write that keeps encoding and every
 untouched byte.
@@ -409,11 +409,9 @@ def merge_new_state_text(index: int, text: str, original: str) -> str:
 class StateSession:
     """Draft and saving of the Model, Ground decal and Crater rows, like ``FxTextSession`` does for effects.
 
-    The Crater row exists for weapons only (``weapon``).
     """
 
-    def __init__(self, origins, weapon: bool = False, expected=None) -> None:
-        self.weapon = weapon
+    def __init__(self, origins, expected=None) -> None:
         self.origins = [(Path(path), first, last) for path, first, last in origins]
         self.source_error = ""
         self.snapshots: dict[Path, bytes] = {}
@@ -432,10 +430,8 @@ class StateSession:
         self.drafts = dict(self.originals)
 
     def _texts(self) -> dict[int, str]:
-        texts = {MODEL_INDEX: model_text(self.values), DECAL_INDEX: decal_text(self.values)}
-        if self.weapon:
-            texts[CRATER_INDEX] = crater_text(self.values)
-        return texts
+        return {MODEL_INDEX: model_text(self.values), DECAL_INDEX: decal_text(self.values),
+                CRATER_INDEX: crater_text(self.values)}
 
     def indexes(self) -> list[int]:
         return list(self.originals)

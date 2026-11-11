@@ -356,6 +356,7 @@ class FxEffectsView(QWidget):
         self.list.editRequested.connect(self.panel.edit_effect_code)
         self.list.itemChanged.connect(self._item_toggled)
         self.list.currentRowChanged.connect(self._row_selected)
+        self.list.itemSelectionChanged.connect(self._row_selected)
         layout.addWidget(self.list, 1)
         buttons = QGridLayout()
         self.actions = []
@@ -504,7 +505,7 @@ class FxEffectsView(QWidget):
                 level = fx_compat.crater_level(values)
                 text = "Crater\n" + fx_visuals.crater_summary(values)
                 tip = ("crater_radius and crater_depth (a number or min~max) dig the ground "
-                       "where the weapon hits it, and dent roofs and walls; crater_rim is the "
+                       "where the weapon hits it (a vehicle: under its wreck), and dent roofs and walls; crater_rim is the "
                        "raised border in % of the depth (default 20). The depth never goes "
                        "past half the radius. Both radius and depth are needed.")
             else:
@@ -574,8 +575,17 @@ class FxEffectsView(QWidget):
     def select_effect(self, index) -> None:
         for position in range(self.list.count()):
             if self.list.item(position).data(Qt.ItemDataRole.UserRole) == index:
+                self.list.clearSelection()
                 self.list.setCurrentRow(position)
+                self.list.item(position).setSelected(True)
+                self.list.scrollToItem(self.list.item(position))
                 return
+
+    def deselect_all(self) -> None:
+        """No row selected: the white outline in the preview goes away too."""
+
+        self.list.clearSelection()
+        self.list.setCurrentRow(-1)
 
     # -- actions ------------------------------------------------------------------------
 
@@ -664,9 +674,17 @@ class FxEffectsView(QWidget):
         (hidden.discard if row.checkState() == Qt.CheckState.Checked else hidden.add)(index)
         self.panel.set_hidden_items(hidden)
 
-    def _row_selected(self, position: int) -> None:
-        row = self.list.item(position) if position >= 0 else None
-        self.panel.set_highlight(self._highlight_of(row))
+    def _row_selected(self, _position: int = -1) -> None:
+        """The white outline follows the selected effect row, never a bare current row."""
+
+        row = self.list.currentItem()
+        if row is None or not row.isSelected():
+            chosen = [item for item in self.list.selectedItems()
+                      if self._highlight_of(item) is not None]
+            row = chosen[-1] if chosen else None
+        index = self._highlight_of(row)
+        if index != self.panel.highlight:
+            self.panel.set_highlight(index)
 
     @staticmethod
     def _highlight_of(row):
@@ -1038,8 +1056,7 @@ class DestructionFxPanel(QWidget):
 
     def set_script_sources(self, origins, expected=None) -> None:
         self.text_session = FxTextSession(self.document, self.context, origins, expected)
-        self.state_session = fx_visuals.StateSession(
-            origins, weapon=self.context == fx.CONTEXT_WEAPON, expected=expected)
+        self.state_session = fx_visuals.StateSession(origins, expected=expected)
         self._linked_states = set()
         self._fill_list(keep_selection=True)
         self.update_text_status()
