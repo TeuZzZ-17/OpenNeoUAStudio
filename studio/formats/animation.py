@@ -41,6 +41,8 @@ class VanmData:
     original_data: bytes = b""
     texcoord_offsets: list[int] = field(default_factory=list)
     timeline_dirty: bool = False
+    # Created by Studio and not written to the model folder yet (see convert_polygon_to_animation).
+    new_file: bool = False
 
     @property
     def total_duration_ms(self) -> float:
@@ -193,7 +195,7 @@ def parse_anm_file(path: str | Path) -> VanmData:
     return anm
 
 
-def _place_new_phase(anm: VanmData, frame: VanmFrame) -> list[tuple[int, int]]:
+def place_new_phase(anm: VanmData, frame: VanmFrame) -> list[tuple[int, int]]:
     def bounds(points):
         u, v = zip(*points)
         return min(u), min(v), max(u), max(v)
@@ -227,8 +229,11 @@ def _place_new_phase(anm: VanmData, frame: VanmFrame) -> list[tuple[int, int]]:
     raise AnmParseError("there is no free UV area for a phase of this size")
 
 
-def edit_anm_phase(anm: VanmData, index: int, *, duplicate: bool) -> VanmData:
-    """Duplicate or remove a timeline entry, keeping other UV indices stable."""
+def edit_anm_phase(anm: VanmData, index: int, *, duplicate: bool,
+                   uvs: list[tuple[int, int]] | None = None) -> VanmData:
+    """Duplicate or remove a timeline entry, keeping other UV indices stable.
+
+    ``uvs`` (duplicate only) = where the new phase sits; None = the nearest free area."""
     from dataclasses import replace
 
     data = export_anm_bytes(anm)
@@ -240,12 +245,25 @@ def edit_anm_phase(anm: VanmData, index: int, *, duplicate: bool) -> VanmData:
         frame = frames[index]
         if not 0 <= frame.texcoords_id < len(groups):
             raise AnmParseError("the selected frame has an invalid UV phase")
-        groups.append(_place_new_phase(anm, frame))
+        if uvs is None:
+            groups.append(place_new_phase(anm, frame))
+        else:
+            placed = [tuple(uv) for uv in uvs]
+            if len(placed) != len(groups[frame.texcoords_id]) \
+                    or any(not 0 <= c <= 255 for uv in placed for c in uv):
+                raise AnmParseError("the new phase needs one UV (0..255) for every vertex of the copied phase")
+            groups.append(placed)
         frames.insert(index + 1, replace(frame, texcoords_id=len(groups) - 1))
     elif len(frames) > 1:
         frames.pop(index)
     else:
         raise AnmParseError("an animation must keep at least one frame")
+    return _rewrite_anm_tables(anm, data, groups, frames)
+
+
+def _rewrite_anm_tables(anm: VanmData, data: bytes, groups, frames) -> VanmData:
+    """Write new UV groups + frame table into the VANM bytes ``data`` and verify the round trip."""
+
     word_count = sum(len(group) + 1 for group in groups)
     if word_count > 32767 or len(frames) > 32767:
         raise AnmParseError("VANM table exceeds the format limit")
@@ -274,7 +292,34 @@ def edit_anm_phase(anm: VanmData, index: int, *, duplicate: bool) -> VanmData:
             or parsed.bitmap_names != anm.bitmap_names:
         raise AnmParseError("edited animation failed round-trip verification")
     parsed.timeline_dirty = True
+    parsed.new_file = anm.new_file
     return parsed
+
+
+
+FRAME_MIN_MS = 10
+FRAME_MAX_MS = 60000
+
+
+def ms_to_ticks(ms: float) -> int:
+    """Milliseconds -> 1024 Hz VANM ticks (at least 1)."""
+    return max(1, round(ms * 1024 / 1000))
+
+
+def set_anm_frame_times(anm: VanmData, indices, milliseconds: float) -> VanmData:
+    """Give the timeline entries ``indices`` the same duration (speed of those phases)."""
+    from dataclasses import replace
+
+    data = export_anm_bytes(anm)
+    wanted = set(indices)
+    if not wanted or not all(0 <= index < len(anm.frames) for index in wanted) or not anm.texcoord_offsets:
+        raise AnmParseError("select a valid animation frame")
+    if not FRAME_MIN_MS <= milliseconds <= FRAME_MAX_MS:
+        raise AnmParseError(f"a phase lasts {FRAME_MIN_MS}..{FRAME_MAX_MS} ms")
+    ticks = ms_to_ticks(milliseconds)
+    frames = [replace(frame, frame_time=ticks) if index in wanted else frame
+              for index, frame in enumerate(anm.frames)]
+    return _rewrite_anm_tables(anm, data, list(anm.texcoord_groups), frames)
 
 
 # ----------------------------------------------------------------------------

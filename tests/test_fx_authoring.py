@@ -145,6 +145,35 @@ class FxAuthoringTests(unittest.TestCase):
             with self.assertRaises(MappingEditError):
                 stage_fx_clipboard(family, obj, clipboard)
 
+    def test_import_preview_starts_when_source_block_index_is_missing_in_target(self):
+        """Regression: imported FX use SOURCE block indices, absent in the target."""
+        import dataclasses
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            family, obj = _writable_family(root, "STONE")
+            source_family, source = _writable_family(root, "FX2", vanm=True)
+            element = detect_fx_elements(source, source_family.animations)[0]
+            clipboard = prepare_fx_clipboard(obj, source_family, source, element)
+            far = 7  # the target model has no material block with this index
+            clipboard = dataclasses.replace(
+                clipboard,
+                polygons=tuple(dataclasses.replace(p, block_index=far)
+                               for p in clipboard.polygons),
+                materials=tuple(dataclasses.replace(m, source_block_index=far)
+                                for m in clipboard.materials))
+            window = self.window(family, obj)
+            try:
+                window._geometry_clipboard = clipboard
+                self.assertTrue(window.viewport.begin_paste_preview(
+                    clipboard, window.viewport.rect().center()),
+                    window.viewport.paste_preview_error)
+                self.assertEqual(window.viewport.paste_preview_error, "")
+                # The real family must stay untouched by the preview.
+                self.assertNotIn("GLOW.ANM", family.animations)
+                window.viewport.cancel_paste_preview()
+            finally:
+                window.close()
+
     def test_uv_edit_delete_undo_redo_preserves_tracking(self):
         with tempfile.TemporaryDirectory() as directory:
             family, obj = _writable_family(Path(directory), "FX1", bilateral=True)
@@ -273,8 +302,8 @@ class FxAuthoringTests(unittest.TestCase):
                 self.assertEqual(obj.base_object.ades[0].texture.name, 'FX1.ILBM')
                 menu = window._create_viewport_context_menu()
                 labels = [a.text() for a in menu.actions()]
-                self.assertIn('Clone FX Element', labels)
-                self.assertIn('Rename FX', labels)
+                self.assertIn('Clone ANM Element', labels)
+                self.assertIn('Rename ANM', labels)
                 self.assertNotIn('Copy FX Element', labels)
                 self.assertNotIn('Replace FX Element', labels)
             finally:

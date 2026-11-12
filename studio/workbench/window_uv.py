@@ -4,6 +4,7 @@ choice and loading."""
 from __future__ import annotations
 
 import copy
+from pathlib import Path
 
 from PySide6.QtCore import Qt
 from PySide6.QtGui import (
@@ -16,13 +17,23 @@ from PySide6.QtWidgets import (
     QMessageBox,
 )
 
+from studio.assets.animated_polygons import (
+    convert_polygon_to_animation,
+    new_animation_name,
+    suggest_second_phase,
+)
 from studio.assets.catalog import build_texture_catalog, classify_texture_assignment
 from studio.assets.mapping import (
     MappingEditError,
     rewrite_block_texture_template,
 )
 from studio.formats.setbas import decode_texture
-from studio.formats.animation import AnmParseError, edit_anm_phase
+from studio.formats.animation import (
+    AnmParseError,
+    edit_anm_phase,
+    place_new_phase,
+    set_anm_frame_times,
+)
 from studio.ui.uv_editor import (
     apply_uv_vertex_deletion,
     apply_uv_vertex_insertion,
@@ -86,7 +97,7 @@ class _UvTexturesMixin:
                 element.owner_path == owner and poly_id in element.poly_ids
                 for element in self._fx_elements):
             return (
-                "Fixed-shape FX polygons do not support vertex topology edits.")
+                "Fixed-shape ANM polygons do not support vertex topology edits.")
         model = getattr(fam_obj, "skeleton", None)
         if model is None:
             return "The selected model has no editable skeleton."
@@ -165,7 +176,8 @@ class _UvTexturesMixin:
                             and self._animation_uv_writable(name, group))
                 if editable:
                     self._uv_contexts[key] = (obj, None, name, group, poly_id)
-                shape = (bitmap, tuple(sorted(uvs)))
+                # Same picture = same name, even when the ANM lists it under two bitmap indices.
+                shape = (animation.bitmap_names[bitmap].casefold(), tuple(sorted(uvs)))
                 previous = by_shape.get(shape)
                 if previous and previous[1] != uvs and len(set(uvs)) == len(uvs):
                     primary, primary_uvs = previous
@@ -226,10 +238,12 @@ class _UvTexturesMixin:
                 title = "Frames " + ", ".join(numbers)
                 combo.setItemText(row, title + (" · Playing" if combo.itemData(row) == keys[index] else ""))
 
-    def _change_uv_phase(self, *, duplicate):
+    def _uv_phase_target(self):
+        """(animation name, timeline index) of the frame Add/Delete UV Phase works on, or None."""
+
         timeline = getattr(self, "_uv_timeline", None)
-        if timeline is None or self._material_structure_reason():
-            return
+        if timeline is None:
+            return None
         name, provider, keys, _labels, _bitmaps = timeline
         selected = self.uv_phase_combo.currentData()
         if selected is None:
@@ -239,13 +253,43 @@ class _UvTexturesMixin:
         index = min(max(0, provider()), len(keys) - 1)
         if selected in keys and selected is not None and selected != keys[index]:
             index = keys.index(selected)
+        return name, index
+
+    def _change_uv_phase(self, *, duplicate):
+        if getattr(self, "_uv_timeline", None) is None:
+            # A still polygon has no phases yet: Add UV Phase creates its animation.
+            if duplicate:
+                self._add_still_phase()
+            return
+        if self._material_structure_reason():
+            return
+        name, index = self._uv_phase_target()
+        if not duplicate:
+            self._apply_uv_phase(name, index, duplicate=False)
+            return
+        # Add UV Phase: grey preview on the free area; the user drops it where it belongs.
+        try:
+            animation = self._animation_for_name(name)[1]
+            offer = place_new_phase(animation, animation.frames[index])
+        except (AnmParseError, IndexError, TypeError) as exc:
+            self._notify(f"Add UV Phase refused: {exc}", 8000)
+            return
+        self._begin_uv_placement(
+            offer, lambda uvs: self._apply_uv_phase(name, index, duplicate=True, uvs=uvs),
+            "Add UV Phase")
+
+    def _apply_uv_phase(self, name, index, *, duplicate, uvs=None):
+        """Add (at ``uvs``, else on a free area) or delete the timeline phase of frame ``index``."""
+
+        if self._material_structure_reason():
+            return
         try:
             animation = edit_anm_phase(self._animation_for_name(name)[1], index,
-                                       duplicate=duplicate)
+                                       duplicate=duplicate, uvs=uvs)
             self._apply_material_structure(
                 "Add UV phase" if duplicate else "Delete UV phase",
                 lambda: self._family.animations.__setitem__(name, animation))
-        except (MappingEditError, AnmParseError, ValueError, IndexError) as exc:
+        except (MappingEditError, AnmParseError, ValueError, IndexError, TypeError) as exc:
             self._notify(str(exc), 7000)
             return
         if self._selected_emitter() is not None:
@@ -253,15 +297,181 @@ class _UvTexturesMixin:
         if duplicate:
             updated = getattr(self, "_uv_timeline", None)
             if updated is not None and updated[0] == name and index + 1 < len(updated[2]):
-                key = updated[2][index + 1]
-                combo = self.uv_phase_combo
-                # Qt's QVariant search does not compare Python tuple keys reliably.
-                for row in range(1, combo.count()):
-                    if combo.itemData(row) == key:
-                        combo.setCurrentIndex(row)
-                        self._select_uv_phase(row)
-                        break
+                self._show_all_phases_selecting(updated[2][index + 1])
         self._sync_uv_add_vertex_button()
+
+    def _begin_uv_placement(self, uvs, commit, label: str) -> None:
+        """Grey transparent preview in the UV editor: LMB/Enter places it (``commit(uvs)``), RMB/Esc cancels."""
+
+        self._uv_placement_commit = commit
+        self.uv_editor.begin_placement(uvs)
+        self._notify(
+            f"{label}: move the grey preview over the texture. "
+            "LMB/Enter places it, RMB/Esc cancels.", 12000)
+
+    def _on_uv_placement_finished(self, uvs) -> None:
+        commit, self._uv_placement_commit = getattr(self, "_uv_placement_commit", None), None
+        if commit is not None:
+            commit(uvs)
+
+    def _on_uv_placement_cancelled(self) -> None:
+        self._uv_placement_commit = None
+        self._notify("UV placement cancelled.", 4000)
+
+    def _add_still_phase(self) -> None:
+        """Add UV Phase on a still polygon: preview of the 2nd phase, then the animation is created."""
+
+        reason = self._uv_still_animation_reason()
+        if reason:
+            self._notify(f"Add UV Phase refused: {reason}", 8000)
+            return
+        key, context = next(iter(self._uv_contexts.items()))
+        block, atts_index = context[1], context[3]
+        uvs = [tuple(uv) for uv in block.olpl[atts_index]]
+        try:
+            offer = suggest_second_phase(uvs, block.texture.name)
+        except (AnmParseError, MappingEditError) as exc:
+            self._notify(f"Add UV Phase refused: {exc}", 8000)
+            return
+        self._begin_uv_placement(
+            offer, lambda placed: self._animate_still_polygon(placed), "Add UV Phase")
+
+    def _begin_phase_placement(self, uvs, label: str) -> bool:
+        """Preview of ``uvs`` that becomes a new UV phase of the visible polygon when placed (False: no target)."""
+
+        if getattr(self, "_uv_timeline", None) is not None:
+            target = self._uv_phase_target()
+            if target is None or self._material_structure_reason():
+                return False
+            name, index = target
+            self._begin_uv_placement(
+                uvs, lambda placed: self._apply_uv_phase(name, index, duplicate=True, uvs=placed), label)
+            return True
+        if self._uv_still_animation_reason():
+            return False
+        self._begin_uv_placement(uvs, lambda placed: self._animate_still_polygon(placed), label)
+        return True
+
+    def _show_all_phases_selecting(self, key) -> None:
+        """Keep (or return to) "All UV phases" and only highlight the phase ``key``, so no phase vanishes."""
+
+        self.uv_phase_combo.setCurrentIndex(0)
+        self.uv_editor.set_visible_loop_key(None)
+        count = len(self.uv_editor.loop_uvs().get(key, ()))
+        self.uv_editor.select_handles({(key, i) for i in range(count)})
+        self._sync_uv_add_vertex_button()
+
+    # ---- speed of the selected UV phase(s) --------------------------------------------------
+    def _uv_speed_targets(self):
+        """(animation name, timeline indices) the speed control edits, or None without an animation.
+
+        The selected phase (phase selector or selected handles); with none selected, every frame."""
+
+        timeline = getattr(self, "_uv_timeline", None)
+        if timeline is None:
+            return None
+        name, _provider, keys, _labels, _bitmaps = timeline
+        selected = self.uv_phase_combo.currentData()
+        if selected is None:
+            selected_loops = {key for key, _ in self.uv_editor.selected_handles()}
+            if len(selected_loops) == 1:
+                selected, = selected_loops
+        indices = [i for i, key in enumerate(keys) if key == selected] if selected in keys \
+            else list(range(len(keys)))
+        return name, indices
+
+    def _sync_uv_speed_control(self) -> None:
+        spin = getattr(self, "uv_speed_spin", None)
+        if spin is None:
+            return
+        target = self._uv_speed_targets()
+        entry = self._animation_for_name(target[0]) if target else None
+        frames = entry[1].frames if entry else []
+        indices = [i for i in (target[1] if target else []) if i < len(frames)]
+        spin.setEnabled(bool(indices) and not self._material_structure_reason())
+        if indices:
+            spin.blockSignals(True)
+            spin.setValue(round(frames[indices[0]].duration_ms))
+            spin.blockSignals(False)
+
+    def _set_uv_phase_duration(self, milliseconds: int) -> None:
+        target = self._uv_speed_targets()
+        entry = self._animation_for_name(target[0]) if target else None
+        if entry is None or self._material_structure_reason():
+            return
+        name, indices = target
+        try:
+            animation = set_anm_frame_times(entry[1], indices, milliseconds)
+            self._apply_material_structure(
+                "UV phase speed",
+                lambda: self._family.animations.__setitem__(name, animation))
+        except (MappingEditError, AnmParseError, ValueError, IndexError) as exc:
+            self._notify(f"Speed refused: {exc}", 7000)
+        self._sync_uv_speed_control()
+
+    def _uv_still_animation_reason(self) -> str:
+        """Why the visible polygon cannot become an animation (empty text = it can)."""
+
+        if getattr(self, "_uv_timeline", None) is not None:
+            return "This polygon already plays an animation."
+        reason = self._material_structure_reason()
+        if reason:
+            return reason[:1].upper() + reason[1:] + "."
+        if len(self._uv_contexts) != 1 or self.uv_editor.loop_count() != 1:
+            return "Select exactly one still textured polygon first."
+        key, context = next(iter(self._uv_contexts.items()))
+        fam_obj, block, _block_index, _atts_index, poly_id = context
+        if key[0] == "@VANM" or block is None:
+            return "This polygon already uses a UV animation."
+        texture = block.texture
+        if (block.class_id or "").lower() != "amesh.class" or block.uses_atts_only_mapping \
+                or texture is None or texture.kind != "ilbm":
+            return "Only a still textured polygon can become an animation."
+        if any(element.owner_path == fam_obj.owner_path and poly_id in element.poly_ids
+               for element in self._fx_elements):
+            return "ANM polygons keep their fixed shape: use Add ANM for animated effects."
+        return ""
+
+    def _new_animation_name(self) -> str:
+        """Free UVAnnn.ANM name: not in the family, in the set archive or beside the BASE."""
+
+        family = self._family
+        archive = self._setbas or getattr(family, "setbas_archive", None)
+        folder = Path(family.base_path).parent if family.base_path else None
+
+        def taken(name: str) -> bool:
+            return (any(key.casefold() == name.casefold() for key in family.animations)
+                    or (archive is not None and bool(archive.find(name, "bmpanim.class")))
+                    or (folder is not None and (folder / name).exists()))
+
+        return new_animation_name(taken)
+
+    def _animate_still_polygon(self, second_uvs=None) -> bool:
+        """Still polygon -> 2-phase animation: phase 1 = its UVs, phase 2 = second_uvs (None = a free-area copy)."""
+
+        reason = self._uv_still_animation_reason()
+        if reason:
+            self._notify(f"Add UV Phase refused: {reason}", 8000)
+            return False
+        _key, context = next(iter(self._uv_contexts.items()))
+        fam_obj, _block, _block_index, _atts_index, poly_id = context
+        try:
+            name = self._new_animation_name()
+            self._apply_material_structure(
+                "Add UV phase",
+                lambda: convert_polygon_to_animation(
+                    self._family, fam_obj, poly_id, name, second_uvs=second_uvs))
+        except (MappingEditError, AnmParseError, ValueError, IndexError) as exc:
+            self._notify(f"Add UV Phase refused: {exc}", 8000)
+            return False
+        timeline = getattr(self, "_uv_timeline", None)
+        if timeline is not None and len(timeline[2]) > 1:
+            self._show_all_phases_selecting(timeline[2][1])
+        self._notify(
+            f"Polygon #{poly_id} now plays {name} (2 phases). The file is written beside "
+            "the BASE when you save or export. Undo is available.", 9000)
+        self._sync_uv_add_vertex_button()
+        return True
 
     def _sync_uv_add_vertex_button(self, *_args) -> None:
         combo = getattr(self, "uv_phase_combo", None)
@@ -277,11 +487,17 @@ class _UvTexturesMixin:
                 self._refresh_uv_timeline()
             elif combo.count():
                 combo.setItemText(0, "All UV phases")
+        self._sync_uv_speed_control()
         if hasattr(self, "uv_add_phase_button"):
             timeline = getattr(self, "_uv_timeline", None)
             count = len(timeline[2]) if timeline else 0
             enabled = count > 0 and not self._material_structure_reason()
-            self.uv_add_phase_button.setEnabled(enabled)
+            still = not count and not self._uv_still_animation_reason()
+            self.uv_add_phase_button.setEnabled(enabled or still)
+            self.uv_add_phase_button.setToolTip(
+                "Make this still polygon an animation: phase 1 keeps its UVs, phase 2 is a copy on a "
+                "free area of its texture (a new UVAnnn.ANM)." if not count else
+                "Copy the selected or playing frame to a free area on its texture.")
             self.uv_delete_phase_button.setEnabled(enabled and count > 1)
         add_button = getattr(self, "uv_add_vertex_button", None)
         if add_button is not None:
@@ -452,6 +668,9 @@ class _UvTexturesMixin:
     def _copy_uv_position(self, key) -> None:
         self._uv_position_clipboard = list(self.uv_editor.loop_uvs().get(key, ()))
         self.statusBar().showMessage("UV position copied.", 4000)
+        # Like Copy Geometry: carry the grey copy around, LMB places it as a new phase.
+        if self._uv_position_clipboard:
+            self._begin_phase_placement(self._uv_position_clipboard, "Copy UV Position")
 
     def _uv_paste_targets(self) -> list:
         """Visible editable faces with as many vertices as the copied one."""
@@ -475,6 +694,8 @@ class _UvTexturesMixin:
         reason = self._uv_paste_reason()
         if reason:
             self._notify(f"Paste UV Position refused: {reason}", 6000)
+            return
+        if self._begin_phase_placement(self._uv_position_clipboard, "Paste UV Position"):
             return
         self.uv_editor.replace_loop_uvs({
             key: self._uv_position_clipboard for key in self._uv_paste_targets()})

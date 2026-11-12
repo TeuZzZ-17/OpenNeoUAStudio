@@ -68,6 +68,8 @@ PASTE_GHOST_OPACITY = 0.18
 
 # Canonical red used for selected editable vertices in the Model Editor.
 MODEL_EDIT_SELECTION_RED = QColor(255, 32, 48)
+# Edit-mode vertices of animated (ANM) segments.
+ANIMATED_VERTEX_COLOR = QColor(255, 214, 40)
 
 
 

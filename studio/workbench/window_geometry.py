@@ -294,14 +294,14 @@ class _GeometryEditMixin:
 
     def _mirrored_fx_element_polygons(
             self, selected_polys, point_match) -> set[int]:
-        """Resolve atomic FX counterparts hidden by bilateral POL2 ambiguity.
+        """Resolve atomic ANM counterparts hidden by bilateral POL2 ambiguity.
 
         A bilateral FX1/FX2 element is stored as two opposite-winding POL2
         faces that share one vertex set.  The generic polygon matcher correctly
-        treats the two mirrored target faces as ambiguous, but at FX-element
+        treats the two mirrored target faces as ambiguous, but at ANM-element
         level they are one unique editable object.  Match those complete
         elements by their reflected POO2 vertex sets without guessing between
-        genuinely distinct overlapping FX elements.
+        genuinely distinct overlapping ANM elements.
         """
 
         owner = self.viewport.edit_owner
@@ -506,7 +506,7 @@ class _GeometryEditMixin:
             fam_obj = self._owner_to_obj.get(element.owner_path)
             if family is None or fam_obj is None:
                 raise GeometryClipboardError(
-                    "the source FX model is unavailable")
+                    "the source ANM model is unavailable")
             clipboard = build_fx_elements_clipboard(
                 fam_obj, fx_elements, family.animations)
             self._selected_polys = {
@@ -904,8 +904,6 @@ class _GeometryEditMixin:
         return skeleton, base
 
     def can_overwrite_geometry(self) -> bool:
-        if self._has_uv_timeline_changes():
-            return False
         owner = self.viewport.edit_owner or self._selected_owner
         fam_obj = self._owner_to_obj.get(owner) if owner else None
         if self.can_save_as_geometry() and owner in self._bundle_targets:
@@ -945,7 +943,7 @@ class _GeometryEditMixin:
                 self._geometry_clipboard, position, operation="copy"):
             self.viewport.setFocus()
             label = (
-                "Paste FX Preview"
+                "Paste ANM Preview"
                 if isinstance(self._geometry_clipboard, FxElementClipboard)
                 else "Copy Preview")
             self._notify(
@@ -1305,7 +1303,7 @@ class _GeometryEditMixin:
                 "resource_before": resources_before,
                 "resource_after": self._capture_family_resource_state(self._family),
                 "label": (
-                    f"Paste {clipboard.fx_name} FX"
+                    f"Paste {clipboard.fx_name} ANM"
                     if isinstance(clipboard, FxElementClipboard)
                     else "Paste Geometry"),
             })
@@ -1314,7 +1312,7 @@ class _GeometryEditMixin:
             pasted_label = (
                 f"Pasted {clipboard.fx_name} "
                 f"{'VANM ' if clipboard.source_kind == 'VANM' else ''}"
-                "FX Element"
+                "ANM Element"
                 if isinstance(clipboard, FxElementClipboard)
                 else f"Pasted {len(result.polygon_indices)} polygon(s)")
             self._notify(
@@ -1529,18 +1527,18 @@ class _GeometryEditMixin:
             return
         count = len(plan.deleted_polygon_indices)
         question = (
-            f"Delete {len(fx_elements)} complete FX elements "
+            f"Delete {len(fx_elements)} complete ANM elements "
             f"({count} polygon(s))?\n"
             if len(fx_elements) > 1 else
             f"Delete the complete {element.fx_name} "
             f"{'VANM ' if element.source_kind == 'VANM' else ''}"
-            f"FX element ({count} polygon(s))?\n"
+            f"ANM element ({count} polygon(s))?\n"
             if element is not None else
             f"Delete {count} selected polygon(s)?\n"
         ) + "This operation can be undone."
         answer = QMessageBox.question(
             self,
-            f"Delete {element.fx_name} FX?"
+            f"Delete {element.fx_name} ANM?"
             if element is not None else "Delete geometry?",
             question,
             QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
@@ -1554,17 +1552,17 @@ class _GeometryEditMixin:
             deleted = self._apply_delete_plan(
                 owner, fam_obj, plan,
                 label=(
-                    "Delete FX elements"
+                    "Delete ANM elements"
                     if len(fx_elements) > 1 else
-                    f"Delete {element.fx_name} FX"
+                    f"Delete {element.fx_name} ANM"
                     if element is not None else "Delete Geometry"))
         except GeometryClipboardError as exc:
             self._notify(f"Delete refused: {exc}.", 8000)
             return
         deleted_message = (
-            f"Deleted {len(fx_elements)} complete FX elements. "
+            f"Deleted {len(fx_elements)} complete ANM elements. "
             if len(fx_elements) > 1 else
-            f"Deleted complete {element.fx_name} FX element. "
+            f"Deleted complete {element.fx_name} ANM element. "
             if element is not None else
             f"Deleted {deleted} selected polygon(s). "
         ) + "This operation can be undone."
@@ -1627,6 +1625,26 @@ class _GeometryEditMixin:
             "Model centered at the origin. Undo restores it."
             + (" Child BASE objects keep their own offset." if children
                else ""), 7000)
+
+    def _center_selection_at_origin(self) -> None:
+        """Send only the selected element to the origin (0, 0, 0)."""
+
+        if not self._require_editing("Center Selection at Origin"):
+            return
+        if self.viewport.paste_preview_active:
+            self._notify(
+                "Center refused: finish or cancel the active placement first.",
+                7000)
+            return
+        session = self.viewport.edit_session
+        if session is None or not session.selection:
+            self._notify("Center Selection: select an element first.", 5000)
+            return
+        if not self.viewport.center_edit_model_at_origin(selection_only=True):
+            self._notify("The selection is already centered at the origin.", 4500)
+            return
+        self._notify(
+            "Selection centered at the origin. Undo restores it.", 7000)
 
     def _move_selected_geometry(self) -> None:
         if not self._require_editing("Move"):
@@ -1823,9 +1841,9 @@ class _GeometryEditMixin:
         if active_fx is not None:
             active_fx_elements = self._active_fx_elements()
             delete_geometry = menu.addAction(
-                "Delete FX Elements"
+                "Delete ANM Elements"
                 if len(active_fx_elements) > 1 else
-                "Delete FX Element",
+                "Delete ANM Element",
                 self._delete_geometry
                 if len(active_fx_elements) > 1 else
                 self._delete_selected_fx_element)
@@ -2044,7 +2062,7 @@ class _GeometryEditMixin:
         if hasattr(self, "copy_geometry_action"):
             self.copy_geometry_action.setEnabled(can_copy)
             copy_tip = (
-                f"Copy {fx_descriptor} and start Paste FX Preview."
+                f"Copy {fx_descriptor} and start Paste ANM Preview."
                 if active_fx is not None else
                 "Copy the selected geometry and start Copy Preview.")
             self.copy_geometry_action.setToolTip(copy_tip)
@@ -2067,7 +2085,7 @@ class _GeometryEditMixin:
                 self._geometry_clipboard, FxElementClipboard)
             paste_reason = (
                 f"Confirm the current {(preview_operation or 'copy').title()} "
-                f"{'FX ' if fx_clipboard else ''}Preview."
+                f"{'ANM ' if fx_clipboard else ''}Preview."
                 if paste_preview else self._preview_geometry_reason())
             if not paste_reason and not self.can_commit_geometry():
                 paste_reason = (
@@ -2075,7 +2093,7 @@ class _GeometryEditMixin:
                     f"{self._commit_geometry_reason()}.")
             if not paste_reason:
                 paste_reason = (
-                    "Start a Paste FX Preview."
+                    "Start a Paste ANM Preview."
                     if fx_clipboard else "Start a Copy Preview.")
             self.paste_geometry_action.setToolTip(paste_reason)
             self.paste_geometry_action.setStatusTip(paste_reason)
@@ -2116,10 +2134,10 @@ class _GeometryEditMixin:
             self.delete_fx_button.setEnabled(can_delete_fx)
             if element is None:
                 delete_fx_tip = (
-                    f"Delete the {len(multi_fx)} selected FX elements. "
+                    f"Delete the {len(multi_fx)} selected ANM elements. "
                     "The operation can be undone."
                     if multi_fx else
-                    "Select an FX element from the list first.")
+                    "Select an ANM element from the list first.")
             elif element.shared_state == "invalid":
                 delete_fx_tip = (
                     f"{element.fx_name} is structurally invalid and "
@@ -2128,7 +2146,7 @@ class _GeometryEditMixin:
                 delete_fx_tip = (
                     f"Delete unavailable: {delete_reason}."
                     if delete_reason else
-                    f"Delete the complete {element.fx_name} FX element. "
+                    f"Delete the complete {element.fx_name} ANM element. "
                     "The operation can be undone.")
             self.delete_fx_button.setToolTip(delete_fx_tip)
         if hasattr(self, "model_gizmo"):
@@ -2156,6 +2174,10 @@ class _GeometryEditMixin:
             self.edit_center_action.setEnabled(can_center)
             if hasattr(self, "center_origin_button"):
                 self.center_origin_button.setEnabled(can_center)
+            can_center_selection = bool(can_center and session.selection)
+            self.edit_center_selection_action.setEnabled(can_center_selection)
+            if hasattr(self, "center_selection_button"):
+                self.center_selection_button.setEnabled(can_center_selection)
         if hasattr(self, "edit_rotate_action"):
             self.edit_rotate_action.setEnabled(
                 editing and self._family is not None and not paste_preview)

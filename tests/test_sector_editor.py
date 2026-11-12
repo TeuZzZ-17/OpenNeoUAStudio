@@ -860,7 +860,8 @@ def test_current_view_export_and_reset_use_real_sector_geometry(real_window):
     assert any(image.pixelColor(x, y).alpha() for y in range(image.height()) for x in range(image.width()))
 
 
-def test_subcell_picker_uses_nearest_visible_geometry():
+def test_subcell_picker_uses_nearest_visible_geometry(tmp_path, monkeypatch):
+    monkeypatch.setenv("NME_GAME_DATA", str(tmp_path))   # the viewport reads the game folder of the session
     from types import SimpleNamespace
     from PySide6.QtCore import QPointF
     from studio.rendering.asset_viewport import ViewFace

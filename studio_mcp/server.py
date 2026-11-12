@@ -140,7 +140,7 @@ def studio_select(source: str, points: Annotated[Any, Field(description=SELECTOR
 
 @mcp.tool()
 def studio_effects(source: str, set_hint: str = "") -> str:
-    """List a model's FX elements (flames/smoke planes, with the index studio_add_fx/studio_delete_fx use),
+    """List a model's ANM elements (flames/smoke planes, with the index studio_add_fx/studio_delete_fx use),
     particle emitters (block + anchor point) and animated polygons."""
     return _guard(lambda: analysis.effects(core.resolve_source(source, set_hint)))
 

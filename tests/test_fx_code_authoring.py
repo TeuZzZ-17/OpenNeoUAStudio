@@ -32,6 +32,8 @@ def _item(panel, number):
 
 
 def _set_row(panel, number):
+    # Qt adds the row to a multi-selection: clear it first so exactly this row is selected.
+    panel.effects_list.clearSelection()
     panel.effects_list.setCurrentRow(number + _offset(panel))
 
 

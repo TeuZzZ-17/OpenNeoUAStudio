@@ -333,7 +333,7 @@ def op_auto_shade(ctx, select=None, base: float = SHADE_BASE, vertical: float = 
     """Bake the light the way the original models do (the engine has no lighting; 0 = bright, higher = darker):
     shade = base + vertical*ny - front*nz + offset from each face's outward normal, which gives about top 5,
     front 30, sides 50, back 70, belly 95. Run it as the LAST step on new or repainted parts; animated,
-    transparent (FX) and untextured polygons are left alone. offset darkens (+) or lightens (-) a whole selection."""
+    transparent (ANM) and untextured polygons are left alone. offset darkens (+) or lightens (-) a whole selection."""
     lm = ctx.lm
     ids = ctx.polygons(select) if select is not None else list(range(len(lm.polygons)))
     table = lm.slot_table()

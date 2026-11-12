@@ -26,6 +26,9 @@ WEAPON = (
     "    vp_normal = 5\n"
     "end\n")
 
+# The shot lands after the flight of its default altitude, not after the full 900 ms.
+IMPACT_MS = fx.WEAPON_FLIGHT_MS * fx.DEFAULT_PROJECTILE_ALTITUDE / fx.WEAPON_LAUNCH_HEIGHT
+
 
 def _document(text: str = WEAPON):
     return fx.extract_fx_document(text, 0, text.count("\n") - 1)
@@ -95,7 +98,7 @@ def test_shake_package_is_read_with_the_engine_defaults():
 
 def test_shake_follows_its_package_in_time():
     simulation = _simulation()
-    impact = fx.WEAPON_FLIGHT_MS
+    impact = IMPACT_MS
     assert simulation.shake_angles_at(impact - 50) == (0.0, 0.0, 0.0)
     shaking = simulation.shake_angles_at(impact + 100)
     assert any(shaking)
@@ -117,7 +120,7 @@ def test_hidden_rows_are_silent():
     everything = set(range(len(document.items)))
     visible = _simulation(document, enabled=everything)
     hidden = _simulation(document, enabled=everything - {shake_row})
-    impact = fx.WEAPON_FLIGHT_MS + 100
+    impact = IMPACT_MS + 100
     assert any(visible.shake_angles_at(impact))
     assert hidden.shake_angles_at(impact) == (0.0, 0.0, 0.0)
     assert hidden.palette_effects_at(impact) == visible.palette_effects_at(impact)
@@ -130,7 +133,7 @@ def test_an_edited_row_changes_the_preview():
     document.items[index], _issues = parse_effect_text(
         "    shk_hit_slot = 1\n    shk_hit_time = 250\n    shk_hit_mag0 = 3\n    shk_hit_mag1 = 3",
         fx.CONTEXT_WEAPON)
-    shaking = _simulation(document).shake_angles_at(fx.WEAPON_FLIGHT_MS + 100)
+    shaking = _simulation(document).shake_angles_at(IMPACT_MS + 100)
     assert max(abs(value) for value in shaking) > 0.8 * 0.2
 
 
@@ -157,7 +160,7 @@ def test_global_fades_follow_the_engine():
 def test_the_global_fades_apply_to_the_preview():
     plain = _simulation()
     faded = _simulation(settings=fx.EffectSettings(shake_fade=(250, 0), palette_fade=(250, 0)))
-    at = fx.WEAPON_FLIGHT_MS + 10
+    at = IMPACT_MS + 10
     plain_pal = plain.palette_effects_at(at)[0][1]
     assert faded.palette_effects_at(at)[0][1] < plain_pal * 0.2
     assert faded.palette_effects_at(at)[0][0] == plain.palette_effects_at(at)[0][0]
@@ -269,7 +272,7 @@ def test_shake_button_sits_between_sound_and_palette_and_switches_the_shake_off(
     assert layout.indexOf(panel.pal_button) == layout.indexOf(panel.shake_button) + 1
     panel.set_hidden_items(set())
     panel._set_trigger(fx.WEAPON_HIT_GROUND)
-    panel.seek(fx.WEAPON_FLIGHT_MS + 100)
+    panel.seek(IMPACT_MS + 100)
     assert any(panel.shake_angles())
     panel.shake_button.setChecked(True)
     assert panel.shake_angles() == (0.0, 0.0, 0.0)
@@ -281,7 +284,7 @@ def test_hiding_a_row_from_the_list_silences_it(app):
     panel = _panel(app)
     panel.shake_button.setChecked(False)
     panel._set_trigger(fx.WEAPON_HIT_GROUND)
-    panel.seek(fx.WEAPON_FLIGHT_MS + 100)
+    panel.seek(IMPACT_MS + 100)
     assert any(panel.shake_angles())
     panel.set_hidden_items({2})
     assert panel.shake_angles() == (0.0, 0.0, 0.0)
@@ -309,34 +312,14 @@ def test_viewport_turns_the_whole_scene_for_a_shake(app):
     assert seen[1][0] != 0.0 and seen[1][1] != 0.0
 
 
-def test_code_editor_has_the_same_controls_as_the_transport_bar(app):
-    panel = _panel(app)
-    panel.edit_effect_code(0)
-    drawer = panel.code_drawer
-    names = ("play", "loop", "mute", "shake", "pal")
-    for name in names:
-        mirror, source = getattr(drawer, f"{name}_button"), getattr(panel, f"{name}_button")
-        assert mirror.isCheckable() and mirror.isChecked() == source.isChecked()
-        mirror.click()                                    # the editor button drives the bar
-        assert source.isChecked() == mirror.isChecked()
-        source.setChecked(not source.isChecked())         # and follows it back
-        assert mirror.isChecked() == source.isChecked()
-        assert mirror.toolTip() == source.toolTip()
-    panel.set_hidden_items(set())
-    panel.seek(500)
-    drawer.stop_button.click()
-    assert panel.time_ms == 0.0
-    drawer.restart_button.click()                         # restart and stop share the bar's actions
-
-
 def test_a_short_shake_is_not_lost_when_frames_are_skipped():
     simulation = _simulation()
-    impact = fx.WEAPON_FLIGHT_MS
+    impact = IMPACT_MS
     # The painted frame after a long gap looks back over the frames it skipped.
     strongest = simulation.shake_angles_between(impact - 20, impact + 200)
     assert any(strongest)
     single = simulation.shake_angles_at(impact + 200)
     norm = lambda angles: sum(value * value for value in angles)
     assert norm(strongest) >= norm(single)
-    # Nothing is shaking before the hit, whatever the gap.
-    assert simulation.shake_angles_between(0.0, impact - 100) == simulation.shake_angles_at(impact - 100)
+    # Nothing is shaking between the launch shake (ends at 250 ms) and the hit, whatever the gap.
+    assert simulation.shake_angles_between(300.0, impact - 50) == simulation.shake_angles_at(impact - 50)

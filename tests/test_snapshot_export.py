@@ -15,6 +15,7 @@ from PySide6.QtCore import QSize, Qt
 from PySide6.QtGui import QColor, QImage
 from PySide6.QtWidgets import QApplication, QGroupBox
 
+from studio.rendering.playback import DEFAULT_ANIMATION_SPEED
 from studio.exchange.sevenzip import SIGNATURE as SEVENZIP_SIGNATURE
 from snapshot_studio.batch_export import (
     BatchManifestRow,
@@ -258,7 +259,7 @@ class SnapshotExportTests(unittest.TestCase):
             # Export Zoom is plain text, not an editable control.
             self.assertEqual(window.snapshot_export_zoom_label.text(), "100%")
             self.assertEqual(window.snapshot_fps_box.value(), 25)
-            self.assertEqual(window.snapshot_export_speed_box.value(), 1.0)
+            self.assertEqual(window.snapshot_export_speed_box.value(), DEFAULT_ANIMATION_SPEED)
         finally:
             window.close()
 

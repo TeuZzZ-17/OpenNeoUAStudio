@@ -13,6 +13,7 @@ from PySide6.QtWidgets import (
     QDialog, QDialogButtonBox, QFormLayout, QLabel, QMenu, QSpinBox,
 )
 
+from studio.ui.cursor_themes import studio_cursor
 from studio.assets.mapping import (
     MappingEditError, copy_particle_emitter, update_particle_emitter,
 )
@@ -47,7 +48,7 @@ class _EmitterAnchorPick(QObject):
             self.ghost_timer.start()
             self._animate_ghost()
         viewport.setMouseTracking(True)
-        viewport.setCursor(Qt.CursorShape.CrossCursor)
+        viewport.setCursor(studio_cursor("place"))
         viewport.installEventFilter(self)
         viewport.setFocus()
         position = viewport.mapFromGlobal(QCursor.pos())

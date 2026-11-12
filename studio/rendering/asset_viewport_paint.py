@@ -27,6 +27,7 @@ from studio.rendering.indexed import (
 from studio.rendering.asset_viewport_common import (
     _PICK_CAMERA_DISTANCE,
     PASTE_GHOST_OPACITY,
+    ANIMATED_VERTEX_COLOR,
     MODEL_EDIT_SELECTION_RED,
     ViewMaterial,
     ViewFace,
@@ -34,6 +35,22 @@ from studio.rendering.asset_viewport_common import (
     PickShape,
     _apply,
 )
+
+
+def animated_vertices(session) -> set[int]:
+    """Vertices of every polygon that plays an ANM (bmpanim material)."""
+
+    model = session.model
+    polygons = model.polygons
+    result: set[int] = set()
+    for block in session.fam_obj.base_object.ades:
+        texture = block.texture
+        if texture is None or texture.kind != "bmpanim":
+            continue
+        for entry in block.atts:
+            if 0 <= entry.poly_id < len(polygons):
+                result.update(polygons[entry.poly_id])
+    return result
 
 
 class _PaintingMixin:
@@ -584,7 +601,7 @@ class _PaintingMixin:
                         for y in range(indexed.height()))
 
     def _draw_particle_layers(self, painter, polygons, camera) -> None:
-        """Use the engine's RGBA FX overrides with the usual particle blending."""
+        """Use the engine's RGBA ANM overrides with the usual particle blending."""
         faces = sorted(
             (face for face in self._faces if face.billboard_center is not None
              and id(face) in polygons),
@@ -787,13 +804,22 @@ class _PaintingMixin:
                 painter.setPen(QPen(color, 1.2, Qt.PenStyle.DashLine))
                 painter.drawLine(a, b)
 
+        animated = animated_vertices(session)
         painter.setPen(QPen(QColor(20, 22, 26), 1.0))
         painter.setBrush(QColor(208, 212, 220))
         for index, point in enumerate(screen):
-            if index in session.selection or index not in available:
+            if index in session.selection or index not in available                     or index in animated:
                 continue
             painter.drawRect(QRectF(point.x() - 2.5, point.y() - 2.5,
                                     5.0, 5.0))
+        # Animated (ANM) segments: yellow vertices tell them from still textures.
+        painter.setBrush(ANIMATED_VERTEX_COLOR)
+        for index in animated:
+            if index in session.selection or index not in available                     or index >= len(screen):
+                continue
+            point = screen[index]
+            painter.drawRect(QRectF(point.x() - 3.0, point.y() - 3.0,
+                                    6.0, 6.0))
         painter.setPen(QPen(QColor(90, 92, 100), 1.0))
         painter.setBrush(QColor(105, 108, 118))
         for index in sorted(
@@ -810,12 +836,16 @@ class _PaintingMixin:
             "rotate": QColor(70, 130, 255),
             "scale": QColor(62, 205, 105),
         }[self._direct_transform_mode]
-        painter.setPen(QPen(mode_color.lighter(165), 1.8))
         painter.setBrush(mode_color)
         for index in session.selection:
             if index < len(screen):
                 point = screen[index]
                 radius = 5.5 if index == self._active_edit_vertex else 4.5
+                # A selected ANM vertex keeps its mode color with a yellow rim.
+                painter.setPen(QPen(
+                    ANIMATED_VERTEX_COLOR if index in animated
+                    else mode_color.lighter(165),
+                    2.2 if index in animated else 1.8))
                 painter.drawRect(QRectF(
                     point.x() - radius, point.y() - radius,
                     radius * 2.0, radius * 2.0))
@@ -934,7 +964,7 @@ class _PaintingMixin:
         mode = f"Axis {state.axis}" if state.axis else "View Plane"
         action = "Move" if state.operation == "move" else "Copy"
         label = (
-            f"{action} {getattr(state.clipboard, 'fx_name')} FX Preview"
+            f"{action} {getattr(state.clipboard, 'fx_name')} ANM Preview"
             if getattr(state.clipboard, "fx_name", None)
             else f"{action} Preview")
         lines = [

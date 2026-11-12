@@ -238,6 +238,9 @@ class UVEditorWidget(AcceleratedWidget):
     handleContextMenuRequested = Signal(object, int, object)
     # Right click on the bare texture (no handle): global position + (u, v).
     backgroundContextMenuRequested = Signal(object, object)
+    # Grey placement preview: LMB/Enter places it (final UVs), RMB/Esc cancels it.
+    placementFinished = Signal(list)
+    placementCancelled = Signal()
 
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
@@ -276,6 +279,9 @@ class UVEditorWidget(AcceleratedWidget):
         self._rclick_pos: QPointF | None = None
         self._auto_align_enabled = True
         self._snap_guides: tuple[tuple[str, int, str], ...] = ()
+        # Placement preview: the shape (UVs) that follows the pointer, or None.
+        self._place_base: list[tuple[int, int]] | None = None
+        self._place_uvs: list[tuple[int, int]] = []
 
     def set_data(self, image: QImage | None, uvs: list[tuple[int, int]],
                  editable: bool, message: str = "") -> None:
@@ -287,6 +293,9 @@ class UVEditorWidget(AcceleratedWidget):
     def set_loops(self, image: QImage | None, loops: list[UVLoop],
                   message: str = "") -> None:
         old_lengths = {loop.key: len(loop.uvs) for loop in self._loops}
+        # A refresh with the same loops (playback) keeps the preview; other loops mean another target.
+        if self._place_base is not None and set(old_lengths) != {loop.key for loop in loops}:
+            self.cancel_placement()
         previous_selection = set(self._selected_handles)
         previous_active = self._active_handle
         self._image = image
@@ -327,6 +336,57 @@ class UVEditorWidget(AcceleratedWidget):
         self._press_selection.clear()
         self._snap_guides = ()
         self.update()
+
+    # ---- placement preview (Add UV Phase / Copy / Paste UV Position) -------------------------
+    @property
+    def placement_active(self) -> bool:
+        return self._place_base is not None
+
+    def placement_uvs(self) -> list[tuple[int, int]]:
+        return list(self._place_uvs)
+
+    def begin_placement(self, uvs) -> None:
+        """Show ``uvs`` as a grey transparent preview at its own position; it then follows the pointer."""
+        self._place_base = [tuple(uv) for uv in uvs]
+        self._place_uvs = list(self._place_base)
+        self.setMouseTracking(True)
+        self.setFocus()
+        self.update()
+
+    def cancel_placement(self) -> bool:
+        if self._place_base is None:
+            return False
+        self._end_placement()
+        self.placementCancelled.emit()
+        return True
+
+    def finish_placement(self) -> bool:
+        if self._place_base is None:
+            return False
+        uvs = list(self._place_uvs)
+        self._end_placement()
+        self.placementFinished.emit(uvs)
+        return True
+
+    def _end_placement(self) -> None:
+        self._place_base = None
+        self._place_uvs = []
+        self.setMouseTracking(False)
+        self.update()
+
+    def _move_placement(self, pos: QPointF) -> None:
+        """Center the preview on the pointer; it never leaves the 0..255 texture."""
+        base = self._place_base
+        if not base:
+            return
+        us, vs = [uv[0] for uv in base], [uv[1] for uv in base]
+        u, v = self._screen_to_uv(pos)
+        du = max(-min(us), min(255 - max(us), u - (min(us) + max(us)) // 2))
+        dv = max(-min(vs), min(255 - max(vs), v - (min(vs) + max(vs)) // 2))
+        placed = [(x + du, y + dv) for x, y in base]
+        if placed != self._place_uvs:
+            self._place_uvs = placed
+            self.update()
 
     def set_preview_image(self, image: QImage) -> None:
         """Change the playback frame without interrupting a UV gesture."""
@@ -943,6 +1003,11 @@ class UVEditorWidget(AcceleratedWidget):
                         QColor("#50d8ff") if selected
                         else QColor(20, 20, 20), 1.4))
                     painter.drawEllipse(point, HANDLE_RADIUS, HANDLE_RADIUS)
+        if self._place_base is not None:
+            ghost = QPolygonF([self._uv_to_screen(uv) for uv in self._place_uvs])
+            painter.setPen(QPen(QColor(235, 235, 235, 230), 1.4, Qt.PenStyle.DashLine))
+            painter.setBrush(QColor(170, 170, 170, 110))
+            painter.drawPolygon(ghost)
         if self._snap_guides:
             painter.setPen(QPen(
                 QColor(120, 230, 255, 180), 1.0, Qt.PenStyle.DashLine))
@@ -1007,6 +1072,15 @@ class UVEditorWidget(AcceleratedWidget):
 
     def mousePressEvent(self, event) -> None:  # noqa: N802
         pos = event.position()
+        if self._place_base is not None \
+                and event.button() != Qt.MouseButton.MiddleButton:
+            self._move_placement(pos)
+            if event.button() == Qt.MouseButton.LeftButton:
+                self.finish_placement()
+            elif event.button() == Qt.MouseButton.RightButton:
+                self.cancel_placement()
+            event.accept()
+            return
         hit = self._hit_point(pos)
         if event.button() == Qt.MouseButton.LeftButton:
             additive = bool(event.modifiers()
@@ -1058,6 +1132,8 @@ class UVEditorWidget(AcceleratedWidget):
 
     def mouseMoveEvent(self, event) -> None:  # noqa: N802
         pos = event.position()
+        if self._place_base is not None:
+            self._move_placement(pos)
         if event.buttons() & Qt.MouseButton.LeftButton \
                 and self._press_hit is not None and not self._dragging \
                 and self.loop_editable(self._press_hit[0]) \
@@ -1167,6 +1243,15 @@ class UVEditorWidget(AcceleratedWidget):
         event.accept()
 
     def keyPressEvent(self, event) -> None:  # noqa: N802
+        if self._place_base is not None:
+            if event.key() in (Qt.Key.Key_Return, Qt.Key.Key_Enter):
+                self.finish_placement()
+                event.accept()
+                return
+            if event.key() == Qt.Key.Key_Escape:
+                self.cancel_placement()
+                event.accept()
+                return
         if event.key() == Qt.Key.Key_A \
                 and event.modifiers() & Qt.KeyboardModifier.ControlModifier:
             self.select_all()

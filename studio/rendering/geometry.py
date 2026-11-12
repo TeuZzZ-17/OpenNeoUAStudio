@@ -1,4 +1,4 @@
-"""Geometry editing engine: edit sessions, clipboard, mirror/delete plans, FX authoring and FX atlas/element editing.
+"""Geometry editing engine: edit sessions, clipboard, mirror/delete plans, ANM authoring and ANM atlas/element editing.
 """
 
 from __future__ import annotations
@@ -571,7 +571,7 @@ def build_geometry_clipboard(
                 f"polygon #{poly_id} uses animated BMPANIM/VANM material")
         if poly_id in unsafe_fx:
             raise GeometryClipboardError(
-                f"FX polygon #{poly_id} has shared or ambiguous references")
+                f"ANM polygon #{poly_id} has shared or ambiguous references")
         uvs = (
             tuple(tuple(uv) for uv in block.olpl[ref.atts_index])
             if ref.atts_index < len(block.olpl) else ())
@@ -772,7 +772,7 @@ def plan_delete_geometry(
     unsafe = set(unsafe_fx_poly_ids)
     if unsafe.intersection(selected):
         raise GeometryClipboardError(
-            "the selection contains shared or partially selected FX geometry")
+            "the selection contains shared or partially selected ANM geometry")
 
     selected_set = set(selected)
     survivors = [
@@ -897,7 +897,7 @@ def apply_delete_geometry(model: SkltModel, blocks,
 
 
 def unsafe_fx_geometry_polys(fx_elements, owner: str, selected_polys) -> set[int]:
-    """Selected polygons that belong to a shared, invalid or partly selected FX element."""
+    """Selected polygons that belong to a shared, invalid or partly selected ANM element."""
 
     selected = set(selected_polys)
     unsafe = set()
@@ -1508,7 +1508,7 @@ class FxElementClipboard:
 
 def _texture_snapshot(texture: TextureRef | None) -> FxTextureSnapshot:
     if texture is None:
-        raise GeometryClipboardError("the FX material has no texture reference")
+        raise GeometryClipboardError("the ANM material has no texture reference")
     return FxTextureSnapshot(
         class_id=texture.class_id,
         kind=texture.kind,
@@ -1558,18 +1558,18 @@ def _validate_animation_snapshot(
                 "the referenced VANM contains an invalid UV-group index")
         if len(snapshot.texcoord_groups[texcoords_id]) < polygon_size:
             raise GeometryClipboardError(
-                "the referenced VANM UV group is shorter than the FX polygon")
+                "the referenced VANM UV group is shorter than the ANM polygon")
 
 
 def build_fx_element_clipboard(
         fam_obj: FamilyObject, element: FxElement,
         animations: Mapping[str, VanmData] | None = None,
         ) -> FxElementClipboard:
-    """Copy one complete valid FX element without static conversion."""
+    """Copy one complete valid ANM element without static conversion."""
 
     model = fam_obj.skeleton
     if model is None or element.owner_path != fam_obj.owner_path:
-        raise GeometryClipboardError("the selected FX owner is not editable")
+        raise GeometryClipboardError("the selected ANM owner is not editable")
     if element.shared_state == "invalid":
         raise GeometryClipboardError(
             f"{element.fx_name} is structurally invalid")
@@ -1578,7 +1578,7 @@ def build_fx_element_clipboard(
             len(element.block_indices) == count
             == len(element.atts_indices)):
         raise GeometryClipboardError(
-            "the FX element has an incomplete material mapping")
+            "the ANM element has an incomplete material mapping")
 
     animation_map = animations or {}
     original_to_local: dict[int, int] = {}
@@ -1591,44 +1591,44 @@ def build_fx_element_clipboard(
     for block_index, atts_index, poly_id in zip(
             element.block_indices, element.atts_indices, element.poly_ids):
         if not (0 <= block_index < len(fam_obj.base_object.ades)):
-            raise GeometryClipboardError("the FX material block is invalid")
+            raise GeometryClipboardError("the ANM material block is invalid")
         block = fam_obj.base_object.ades[block_index]
         block_class = (block.class_id or "").lower()
         if block_class not in ("amesh.class", "area.class") \
                 or not (0 <= atts_index < len(block.atts)):
             raise GeometryClipboardError(
-                f"the FX uses unsupported class "
+                f"the ANM uses unsupported class "
                 f"{block.class_id or '<missing class>'!r}")
         if block_class == "area.class" and (
                 atts_index != 0
                 or block.ade_strc_chunk_offset < 0
                 or not block.source_objt_bytes):
             raise GeometryClipboardError(
-                "the FX area.class has no writable FORM ADE/STRC source")
+                "the ANM area.class has no writable FORM ADE/STRC source")
         entry = block.atts[atts_index]
         if entry.poly_id != poly_id \
                 or not (0 <= poly_id < len(model.polygons)):
             raise GeometryClipboardError(
-                "the FX ATTS/POL2 association changed")
+                "the ANM ATTS/POL2 association changed")
         polygon = tuple(model.polygons[poly_id])
         if len(polygon) < 3 or len(set(polygon)) != len(polygon) \
                 or any(index < 0 or index >= len(model.points)
                        for index in polygon):
-            raise GeometryClipboardError("the FX polygon is structurally invalid")
+            raise GeometryClipboardError("the ANM polygon is structurally invalid")
         points = [model.points[index] for index in polygon]
         if not all(math.isfinite(value) for point in points for value in point):
             raise GeometryClipboardError(
-                "the FX polygon contains non-finite coordinates")
+                "the ANM polygon contains non-finite coordinates")
 
         source = _rendered_fx(block.texture, animation_map)
         if source is None or source.fx_name != element.fx_name:
             raise GeometryClipboardError(
-                "the FX material no longer resolves to its source")
+                "the ANM material no longer resolves to its source")
         if source_kind is None:
             source_kind = source.source_kind
         elif source_kind != source.source_kind:
             raise GeometryClipboardError(
-                "one FX element mixes direct and VANM materials")
+                "one ANM element mixes direct and VANM materials")
         texture = _texture_snapshot(block.texture)
         current_animation = (
             _animation_snapshot(animation_map, texture.name)
@@ -1639,18 +1639,18 @@ def build_fx_element_clipboard(
                 animation_snapshot = current_animation
             elif animation_snapshot != current_animation:
                 raise GeometryClipboardError(
-                    "one FX element references different VANM timelines")
+                    "one ANM element references different VANM timelines")
 
         if atts_index < len(block.olpl):
             olpl = tuple(tuple(uv) for uv in block.olpl[atts_index])
             if len(olpl) != len(polygon):
                 raise GeometryClipboardError(
-                    "the FX OLPL does not match its polygon winding")
+                    "the ANM OLPL does not match its polygon winding")
         elif source.source_kind == "VANM" and not block.olpl:
             olpl = None
         else:
             raise GeometryClipboardError(
-                "the FX has no demonstrated OLPL/VANM mapping semantics")
+                "the ANM has no demonstrated OLPL/VANM mapping semantics")
         face_uv_source = (
             "VANM" if source.source_kind == "VANM"
             else "OLPL" if olpl is not None else "none")
@@ -1658,7 +1658,7 @@ def build_fx_element_clipboard(
             uv_source = face_uv_source
         elif uv_source != face_uv_source:
             raise GeometryClipboardError(
-                "one FX element mixes incompatible UV sources")
+                "one ANM element mixes incompatible UV sources")
 
         local_indices = []
         for original_index in polygon:
@@ -1722,30 +1722,30 @@ def build_fx_elements_clipboard(
         fam_obj: FamilyObject, elements,
         animations: Mapping[str, VanmData] | None = None,
         ) -> FxElementClipboard:
-    """Copy one or more complete FX elements as one mirrored selection."""
+    """Copy one or more complete ANM elements as one mirrored selection."""
 
     selected = tuple(elements)
     if not selected:
-        raise GeometryClipboardError("select one or more complete FX elements")
+        raise GeometryClipboardError("select one or more complete ANM elements")
     if len(selected) == 1:
         return build_fx_element_clipboard(
             fam_obj, selected[0], animations)
     owner = fam_obj.owner_path
     if any(element.owner_path != owner for element in selected):
         raise GeometryClipboardError(
-            "the selected FX elements do not share one editable owner")
+            "the selected ANM elements do not share one editable owner")
     if any(element.shared_state == "invalid" for element in selected):
         raise GeometryClipboardError(
-            "the mirrored FX selection contains invalid geometry")
+            "the mirrored ANM selection contains invalid geometry")
     poly_ids = [
         poly_id for element in selected for poly_id in element.poly_ids]
     if len(set(poly_ids)) != len(poly_ids):
         raise GeometryClipboardError(
-            "the mirrored FX selection contains overlapping elements")
+            "the mirrored ANM selection contains overlapping elements")
     fx_names = {element.fx_name for element in selected}
     if len(fx_names) != 1:
         raise GeometryClipboardError(
-            "FX1 and FX2 cannot be combined in one Paste FX Preview")
+            "FX1 and FX2 cannot be combined in one Paste ANM Preview")
 
     bounds = [
         element.uv_bounds for element in selected
@@ -1781,18 +1781,18 @@ def build_fx_elements_clipboard(
 
 def detach_shared_fx_vertices(
         fam_obj: FamilyObject, element: FxElement) -> int:
-    """Duplicate only FX vertices also used outside the selected FX element."""
+    """Duplicate only ANM vertices also used outside the selected ANM element."""
 
     model = fam_obj.skeleton
     if model is None or element.owner_path != fam_obj.owner_path:
-        raise GeometryClipboardError("the selected FX owner is not editable")
+        raise GeometryClipboardError("the selected ANM owner is not editable")
     if element.shared_state != "shared":
         return 0
     selected = set(element.poly_ids)
     if not selected or any(
             poly_id < 0 or poly_id >= len(model.polygons)
             for poly_id in selected):
-        raise GeometryClipboardError("the shared FX polygon set is invalid")
+        raise GeometryClipboardError("the shared ANM polygon set is invalid")
     users: dict[int, set[int]] = {}
     for poly_id, polygon in enumerate(model.polygons):
         for vertex in set(polygon):
@@ -1805,12 +1805,12 @@ def detach_shared_fx_vertices(
         return 0
     if len(model.points) + len(shared) > 0x10000:
         raise GeometryClipboardError(
-            "detaching the shared FX exceeds the POO2 index limit")
+            "detaching the shared ANM exceeds the POO2 index limit")
     replacements = {}
     for vertex in sorted(shared):
         if not (0 <= vertex < len(model.points)):
             raise GeometryClipboardError(
-                "the shared FX references an invalid POO2 vertex")
+                "the shared ANM references an invalid POO2 vertex")
         replacements[vertex] = len(model.points)
         model.points.append(tuple(model.points[vertex]))
     for poly_id in selected:
@@ -1824,20 +1824,20 @@ def validate_fx_element_clipboard(
         fam_obj: FamilyObject, clipboard: FxElementClipboard,
         animations: Mapping[str, VanmData] | None = None,
         ) -> None:
-    """Validate the typed FX target without changing any live list."""
+    """Validate the typed ANM target without changing any live list."""
 
     model = fam_obj.skeleton
     blocks = fam_obj.base_object.ades
     if clipboard.fx_name not in ("FX1", "FX2", "FX3", "VANM") \
             or clipboard.source_kind not in ("direct", "VANM"):
-        raise GeometryClipboardError("the FX clipboard type is invalid")
+        raise GeometryClipboardError("the ANM clipboard type is invalid")
     if clipboard.shared_state not in (
             "exclusive", "bilateral", "selection") \
             or clipboard.bilateral != (
                 clipboard.shared_state == "bilateral"):
-        raise GeometryClipboardError("the FX clipboard grouping is invalid")
+        raise GeometryClipboardError("the ANM clipboard grouping is invalid")
     if not clipboard.points or not clipboard.polygons:
-        raise GeometryClipboardError("the FX clipboard is empty")
+        raise GeometryClipboardError("the ANM clipboard is empty")
     if (clipboard.shared_state == "exclusive"
             and len(clipboard.polygons) != 1) \
             or (clipboard.shared_state == "bilateral"
@@ -1845,7 +1845,7 @@ def validate_fx_element_clipboard(
             or (clipboard.shared_state == "selection"
                 and len(clipboard.polygons) < 2):
         raise GeometryClipboardError(
-            "the FX clipboard polygon grouping is invalid")
+            "the ANM clipboard polygon grouping is invalid")
     if tuple(
             copied.block_index for copied in clipboard.polygons
             ) != clipboard.block_indices \
@@ -1854,7 +1854,7 @@ def validate_fx_element_clipboard(
             ) != clipboard.source_poly_ids \
             or len(clipboard.atts_indices) != len(clipboard.polygons):
         raise GeometryClipboardError(
-            "the FX clipboard source mapping is inconsistent")
+            "the ANM clipboard source mapping is inconsistent")
     if len(clipboard.local_points) != len(clipboard.points) \
             or any(
                 abs(
@@ -1864,36 +1864,36 @@ def validate_fx_element_clipboard(
                 for index, point in enumerate(clipboard.points)
                 for axis in range(3)):
         raise GeometryClipboardError(
-            "the FX clipboard pivot coordinates are inconsistent")
+            "the ANM clipboard pivot coordinates are inconsistent")
     if any(
             original < 0
             or local < 0 or local >= len(clipboard.points)
             for original, local in clipboard.original_to_local):
         raise GeometryClipboardError(
-            "the FX clipboard vertex mapping is invalid")
+            "the ANM clipboard vertex mapping is invalid")
     expected_signature = tuple(
         (copied.block_index, copied.texture)
         for copied in clipboard.polygons)
     if clipboard.material_signature != expected_signature:
         raise GeometryClipboardError(
-            "the FX clipboard material signature is invalid")
+            "the ANM clipboard material signature is invalid")
     if model is None or id(model) != clipboard.model_identity \
             or fam_obj.owner_path != clipboard.owner:
         raise GeometryClipboardError(
-            "FX can only be pasted into its source model")
+            "ANM can only be pasted into its source model")
     if len(model.points) + len(clipboard.points) > 0x10000 \
             or len(model.polygons) + len(clipboard.polygons) > 0x8000:
-        raise GeometryClipboardError("FX paste exceeds the model index limits")
+        raise GeometryClipboardError("ANM paste exceeds the model index limits")
     animation_map = animations or {}
     for copied in clipboard.polygons:
         if len(copied.local_indices) < 3 \
                 or len(set(copied.local_indices)) \
                 != len(copied.local_indices):
             raise GeometryClipboardError(
-                "the FX clipboard polygon is structurally invalid")
+                "the ANM clipboard polygon is structurally invalid")
         if copied.uvs != (copied.olpl or ()):
             raise GeometryClipboardError(
-                "the FX clipboard UV snapshot is inconsistent")
+                "the ANM clipboard UV snapshot is inconsistent")
         if copied.block_class_id == "area.class":
             block = copied.block_template
             if block is None \
@@ -1902,34 +1902,34 @@ def validate_fx_element_clipboard(
                     or not block.source_objt_bytes \
                     or _texture_snapshot(block.texture) != copied.texture:
                 raise GeometryClipboardError(
-                    "the FX area.class template changed after Copy")
+                    "the ANM area.class template changed after Copy")
         elif copied.block_class_id == "amesh.class":
             if not (0 <= copied.block_index < len(blocks)):
-                raise GeometryClipboardError("the FX material block was removed")
+                raise GeometryClipboardError("the ANM material block was removed")
             block = blocks[copied.block_index]
             if (block.class_id or "").lower() != "amesh.class" \
                     or _texture_snapshot(block.texture) != copied.texture:
                 raise GeometryClipboardError(
-                    "the FX material changed after Copy")
+                    "the ANM material changed after Copy")
         else:
             raise GeometryClipboardError(
-                f"the FX clipboard uses unsupported class "
+                f"the ANM clipboard uses unsupported class "
                 f"{copied.block_class_id!r}")
         if clipboard.source_kind == "VANM":
             if copied.texture.kind != "bmpanim":
                 raise GeometryClipboardError(
-                    "the VANM FX clipboard lost its bmpanim material")
+                    "the VANM ANM clipboard lost its bmpanim material")
             current = _animation_snapshot(
                 animation_map, copied.texture.name)
             if current != clipboard.animation:
                 raise GeometryClipboardError(
-                    "the FX VANM timeline changed after Copy")
+                    "the ANM VANM timeline changed after Copy")
             _validate_animation_snapshot(current, len(copied.local_indices))
         elif copied.texture.kind == "bmpanim" \
                 or normalize_fx_name(copied.texture.name) \
                 != clipboard.fx_name:
             raise GeometryClipboardError(
-                "the direct FX clipboard material is inconsistent")
+                "the direct ANM clipboard material is inconsistent")
         if copied.olpl is None:
             if copied.texture.kind != "bmpanim" or block.olpl:
                 raise GeometryClipboardError(
@@ -1937,11 +1937,11 @@ def validate_fx_element_clipboard(
         elif copied.block_class_id == "amesh.class" \
                 and len(block.atts) != len(block.olpl):
             raise GeometryClipboardError(
-                "the target FX ATTS/OLPL mapping is ambiguous")
+                "the target ANM ATTS/OLPL mapping is ambiguous")
         if any(local_index < 0 or local_index >= len(clipboard.points)
                for local_index in copied.local_indices):
             raise GeometryClipboardError(
-                "the FX clipboard is structurally invalid")
+                "the ANM clipboard is structurally invalid")
 
 
 def append_fx_element_clipboard(
@@ -1949,13 +1949,13 @@ def append_fx_element_clipboard(
         delta: tuple[float, float, float],
         animations: Mapping[str, VanmData] | None = None,
         ) -> TopologyAppendResult:
-    """Append one FX clipboard while retaining its typed material semantics."""
+    """Append one ANM clipboard while retaining its typed material semantics."""
 
     validate_fx_element_clipboard(fam_obj, clipboard, animations)
     model = fam_obj.skeleton
     blocks = fam_obj.base_object.ades
     if not all(math.isfinite(value) for value in delta):
-        raise GeometryClipboardError("FX paste delta is not finite")
+        raise GeometryClipboardError("ANM paste delta is not finite")
     animation_map = animations or {}
     first_point = len(model.points)
     new_points = list(model.points)
@@ -1974,21 +1974,21 @@ def append_fx_element_clipboard(
             block = copy.deepcopy(copied.block_template)
             if block is None:
                 raise GeometryClipboardError(
-                    "the FX area.class template is unavailable")
+                    "the ANM area.class template is unavailable")
         else:
             if not (0 <= copied.block_index < len(blocks)):
-                raise GeometryClipboardError("the FX material block was removed")
+                raise GeometryClipboardError("the ANM material block was removed")
             block = blocks[copied.block_index]
             if (block.class_id or "").lower() != "amesh.class" \
                     or _texture_snapshot(block.texture) != copied.texture:
                 raise GeometryClipboardError(
-                    "the FX material changed after Copy")
+                    "the ANM material changed after Copy")
         if clipboard.source_kind == "VANM":
             current = _animation_snapshot(
                 animation_map, copied.texture.name)
             if current != clipboard.animation:
                 raise GeometryClipboardError(
-                    "the FX VANM timeline changed after Copy")
+                    "the ANM VANM timeline changed after Copy")
             _validate_animation_snapshot(current, len(copied.local_indices))
         polygon = [
             first_point + local_index
@@ -1997,7 +1997,7 @@ def append_fx_element_clipboard(
         if any(index < first_point
                or index >= first_point + len(clipboard.points)
                for index in polygon):
-            raise GeometryClipboardError("the FX clipboard is structurally invalid")
+            raise GeometryClipboardError("the ANM clipboard is structurally invalid")
         poly_id = len(new_polygons)
         new_polygons.append(polygon)
         entry = AttsEntry(
@@ -2017,7 +2017,7 @@ def append_fx_element_clipboard(
                         "the target no longer has ATTS-only VANM semantics")
             elif len(atts) != len(olpl):
                 raise GeometryClipboardError(
-                    "the target FX ATTS/OLPL mapping is ambiguous")
+                    "the target ANM ATTS/OLPL mapping is ambiguous")
             atts.append(entry)
             if copied.olpl is not None:
                 olpl.append(list(copied.olpl))
@@ -2064,7 +2064,7 @@ class _FxFace:
 
 
 def normalize_fx_name(name: str | None) -> str | None:
-    """Return the FX atlas identifier for a matching logical resource name."""
+    """Return the ANM atlas identifier for a matching logical resource name."""
 
     if not name:
         return None
@@ -2093,7 +2093,7 @@ def _animation_for_name(animations: Mapping[str, VanmData],
 
 def _rendered_fx(ref: TextureRef | None,
                  animations: Mapping[str, VanmData]) -> _FxSource | None:
-    """Resolve FX used by the diffuse material rendered by the viewport."""
+    """Resolve ANM used by the diffuse material rendered by the viewport."""
 
     if ref is None or not ref.name:
         return None
@@ -2269,7 +2269,7 @@ def detect_fx_elements(
 
     ``tracy_texture`` is intentionally not considered: the current viewport
     does not render mapped-tracy second textures, so treating one as a visible
-    FX element would disagree with the preview.
+    ANM element would disagree with the preview.
     """
 
     skeleton = fam_obj.skeleton
@@ -2404,7 +2404,7 @@ def stage_fx_clipboard(family, target, clipboard, delta=(0.0, 0.0, 0.0)):
     """Build and validate a complete result without touching the target family."""
     if clipboard.owner != target.owner_path \
             or clipboard.model_identity != id(target.skeleton):
-        raise GeometryClipboardError("the FX target changed during preview")
+        raise GeometryClipboardError("the ANM target changed during preview")
     staged_family = copy.copy(family)
     for name in ("textures", "texture_refs", "animations", "animation_refs"):
         setattr(staged_family, name, dict(getattr(family, name)))

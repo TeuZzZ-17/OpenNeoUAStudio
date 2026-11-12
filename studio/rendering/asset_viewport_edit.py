@@ -73,9 +73,9 @@ class _EditModeMixin:
         self.update()
 
     def set_edit_read_only_vertices(self, indices) -> None:
-        """Mark unsafe shared FX vertices.
+        """Mark unsafe shared ANM vertices.
 
-        Only single-vertex picking and the FX commands stay clear of them: the
+        Only single-vertex picking and the ANM commands stay clear of them: the
         mass selections (select all, selection box) include them on purpose, so
         the whole model shape can be selected and transformed as one piece.
         """
@@ -561,6 +561,41 @@ class _EditModeMixin:
         state = self._paste_preview
         return state.clipboard if state is not None else None
 
+    def _imported_preview_materials(self, materials) -> dict[int, int]:
+        """Ghost materials for imported ANM, keyed by SOURCE block index.
+
+        Resources (textures/animations) are copied into a scratch family, so
+        the real family stays untouched until the placement is confirmed.
+        """
+
+        family = self._family_ref
+        if not materials or family is None:
+            return {}
+        import copy
+        from studio.assets.mapping import (
+            MappingEditError, transfer_material_resources)
+        scratch = copy.copy(family)
+        for name in ("textures", "texture_refs", "animations",
+                     "animation_refs"):
+            setattr(scratch, name, dict(getattr(family, name)))
+        material_index: dict[str, int] = {}
+        result: dict[int, int] = {}
+        for material in materials:
+            try:
+                transfer_material_resources(scratch, material)
+            except MappingEditError as exc:
+                self.paste_preview_error = str(exc)
+                continue
+            block = material.block_template
+            texture = getattr(block, "texture", None)
+            name = texture.name if texture is not None else ""
+            kind = texture.kind if texture is not None else ""
+            result[material.source_block_index] = self._ensure_material(
+                f"__import__|{material.source_block_index}|{name}|{kind}",
+                name, kind, scratch, material_index,
+                anim_name=name if kind == "bmpanim" else "", block=block)
+        return result
+
     def begin_paste_preview(self, clipboard: object,
                             position: QPoint, *,
                             operation: str = "copy") -> bool:
@@ -568,30 +603,43 @@ class _EditModeMixin:
         operation = str(operation).casefold()
         if operation not in ("copy", "move"):
             operation = "copy"
+        self.paste_preview_error = ""
         if session is None or self._edit_owner != clipboard.owner \
                 or id(session.model) != clipboard.model_identity:
+            self.paste_preview_error = "activate the source owner in Edit Mode"
             self.statusMessage.emit(
                 "Paste Geometry: activate the source owner in Edit Mode.")
             return False
         if self._modal_op is not None or session.modal_active:
+            self.paste_preview_error = "finish the current modal operation first"
             self.statusMessage.emit(
                 "Paste Geometry: finish the current modal operation first.")
             return False
+        # Imported FX carry SOURCE block indices: the target viewport has no
+        # material for them, so their ghost materials are built from the
+        # clipboard's own resources.
+        imported = tuple(getattr(clipboard, "materials", ()))
+        imported_ids = self._imported_preview_materials(imported)
         material_ids = []
         for polygon in clipboard.polygons:
-            material_id = self._block_material_ids.get(
-                (clipboard.owner, polygon.block_index))
+            if imported:
+                material_id = imported_ids.get(polygon.block_index)
+            else:
+                material_id = self._block_material_ids.get(
+                    (clipboard.owner, polygon.block_index))
+                if material_id is None:
+                    face = next(
+                        (candidate for candidate in self._faces
+                         if candidate.owner == clipboard.owner
+                         and candidate.poly_id == polygon.source_poly_id),
+                        None,
+                    )
+                    material_id = face.material if face is not None else None
             if material_id is None:
-                face = next(
-                    (candidate for candidate in self._faces
-                     if candidate.owner == clipboard.owner
-                     and candidate.poly_id == polygon.source_poly_id),
-                    None,
-                )
-                material_id = face.material if face is not None else None
-            if material_id is None:
+                self.paste_preview_error = self.paste_preview_error or (
+                    "a copied material is no longer renderable")
                 self.statusMessage.emit(
-                    "Paste Geometry: a copied material is no longer renderable.")
+                    f"Paste Geometry: {self.paste_preview_error}.")
                 return False
             material_ids.append(material_id)
 
@@ -871,7 +919,7 @@ class _EditModeMixin:
             if self._precision_guides else "")
         action = "Move" if state.operation == "move" else "Copy"
         label = (
-            f"{action} {getattr(state.clipboard, 'fx_name')} FX Preview"
+            f"{action} {getattr(state.clipboard, 'fx_name')} ANM Preview"
             if getattr(state.clipboard, "fx_name", None)
             else f"{action} Preview")
         self.editHint.emit(
@@ -1045,10 +1093,10 @@ class _EditModeMixin:
         self.update()
 
     def _select_all_model_vertices(self) -> bool:
-        """Select every POO2 index, protected FX vertices included.
+        """Select every POO2 index, protected ANM vertices included.
 
         Mass selections cover the whole model shape on purpose: transforms can
-        then move the model as one piece instead of leaving the FX behind.
+        then move the model as one piece instead of leaving the ANM behind.
         """
 
         session = self._edit_session
@@ -1415,12 +1463,14 @@ class _EditModeMixin:
         self.update()
         return True
 
-    def center_edit_model_at_origin(self) -> bool:
-        """Move the whole edited skeleton so its bounding-box center is (0,0,0).
+    def center_edit_model_at_origin(self, selection_only: bool = False) -> bool:
+        """Move the edited skeleton so a bounding-box center is (0,0,0).
 
-        Every vertex gets the same offset, so shape, polygon indices and FX
-        mapping stay identical. Only vertices used by a polygon define the
-        bounds: leftovers of deleted parts must not shift the center.
+        Default: the whole model, every vertex gets the same offset, so shape,
+        polygon indices and ANM mapping stay identical. Only vertices used by a
+        polygon define the bounds: leftovers of deleted parts must not shift
+        the center. ``selection_only``: only the selected vertices move, so
+        the center of the selection lands on the origin.
         """
 
         session = self._edit_session
@@ -1428,10 +1478,14 @@ class _EditModeMixin:
             return False
         model = session.model
         points = model.points
-        used = {
-            index for polygon in model.polygons for index in polygon
-            if 0 <= index < len(points)
-        } or set(range(len(points)))
+        if selection_only:
+            used = {index for index in session.selection
+                    if 0 <= index < len(points)}
+        else:
+            used = {
+                index for polygon in model.polygons for index in polygon
+                if 0 <= index < len(points)
+            } or set(range(len(points)))
         if not used:
             return False
         offset = tuple(
@@ -1441,9 +1495,11 @@ class _EditModeMixin:
         if all(abs(value) < 1e-6 for value in offset):
             return False
         before = [tuple(point) for point in points]
+        moved = used if selection_only else range(len(before))
         points[:] = [
             (x + offset[0], y + offset[1], z + offset[2])
-            for x, y, z in before
+            if index in moved else (x, y, z)
+            for index, (x, y, z) in enumerate(before)
         ]
         session.dirty = True
         self._refresh_edit_faces()

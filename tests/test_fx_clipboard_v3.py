@@ -972,8 +972,9 @@ class FxClipboardV3Tests(unittest.TestCase):
                 window.viewport.step_animation()
                 self.assertEqual(
                     window.uv_editor.uvs(), UVS)
-                self.assertEqual(window.uv_editor.loop_count(), 2)
-                self.assertNotEqual(window.uv_editor._timeline_active, active_before)
+                # The 2nd phase is the same picture reversed: it is linked to phase 1 and shown as one loop.
+                self.assertEqual(window.uv_editor.loop_count(), 1)
+                self.assertEqual(window.uv_editor._timeline_active, active_before)   # linked: same loop plays both frames
                 self.assertIn("Frame 2/2", window.uv_phase_combo.itemText(0))
                 animation_uvs = [
                     list(group)
@@ -996,7 +997,7 @@ class FxClipboardV3Tests(unittest.TestCase):
                     window._geometry_clipboard, FxElementClipboard)
                 self.assertTrue(window.viewport.paste_preview_active)
                 self.assertIn(
-                    "Copy FX Preview",
+                    "Copy ANM Preview",
                     window.paste_geometry_action.toolTip())
                 self.assertIn(
                     "FX", window.viewport._paste_preview.clipboard.fx_name)

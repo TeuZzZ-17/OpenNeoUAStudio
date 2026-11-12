@@ -26,11 +26,12 @@ def test_mcp_paths_follow_existing_spelling(lower_data):
         core.ensure_writable("scripts/x.cfg")
 
 
-def test_location_sound_and_sky_resolve_without_case(tmp_path):
+def test_location_sound_and_sky_resolve_without_case(tmp_path, monkeypatch):
     from map_editor.core.game_installation import GameInstallation
     from map_editor.core.resource_catalog import ResourceCatalog
 
     data = tmp_path / "Data"
+    monkeypatch.setenv("NME_GAME_DATA", str(data))      # the catalog reads the game folder of the session
     (data / "sounds" / "locations").mkdir(parents=True)
     (data / "objects").mkdir()
     (data / "objects" / "custom.base").write_bytes(b"x")

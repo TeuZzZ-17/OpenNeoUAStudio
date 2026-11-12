@@ -171,7 +171,10 @@ class ModelImportTests(unittest.TestCase):
 
     def test_probe_includes_animation_frame_textures(self):
         with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp)
+            # The probe also searches the parent folder: keep it private so no stray FX2.ILBM of the
+            # shared temp folder can make the name ambiguous.
+            root = Path(tmp) / "family"
+            root.mkdir()
             base, _path, archive = self._fixture(root)
             (root / "FLASH.ANM").write_bytes(_vanm().replace(b"MTL.ILBM", b"FX2.ILBM"))
             _asset, probes = probe_family_requirements(base, setbas=archive)

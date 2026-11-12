@@ -54,6 +54,7 @@ from PySide6.QtWidgets import (
 )
 
 from studio.assets.dependencies import DependencyProfile
+from studio.formats.animation import FRAME_MAX_MS, FRAME_MIN_MS
 from studio.assets.family import (
     AssetFamily,
     load_asset_family,
@@ -404,7 +405,7 @@ class AssemblyWindow(
         self.poly_uv_label.setMinimumHeight(200)
         self.fx_combo = QComboBox()
         self.fx_combo.setToolTip(
-            "Choose an FX element to select it and edit its vertices.")
+            "Choose an ANM element to select it and edit its vertices.")
         self.fx_combo.currentIndexChanged.connect(self._on_fx_selected)
         self.blocks_list = QListWidget()
         use_standard_list_style(self.blocks_list)
@@ -957,7 +958,7 @@ class AssemblyWindow(
         edit_menu.addSeparator()
         self.edit_select_all_action = QAction("Select All Geometry", self)
         self.edit_select_all_action.setStatusTip(
-            "Select the whole model shape, protected FX vertices included.")
+            "Select the whole model shape, protected ANM vertices included.")
         self.edit_select_all_action.triggered.connect(
             self.viewport.select_all_edit_vertices)
         edit_menu.addAction(self.edit_select_all_action)
@@ -967,16 +968,16 @@ class AssemblyWindow(
         self.edit_select_none_action.triggered.connect(
             self.viewport.select_no_edit_vertices)
         edit_menu.addAction(self.edit_select_none_action)
-        self.select_all_fx_action = QAction("Select All FX", self)
+        self.select_all_fx_action = QAction("Select All ANM", self)
         self.select_all_fx_action.setStatusTip(
-            "Select every FX element of the current model and no other "
+            "Select every ANM element of the current model and no other "
             "geometry.")
         self.select_all_fx_action.triggered.connect(
             self._select_all_fx_elements)
         edit_menu.addAction(self.select_all_fx_action)
-        self.deselect_all_fx_action = QAction("Deselect All FX", self)
+        self.deselect_all_fx_action = QAction("Deselect All ANM", self)
         self.deselect_all_fx_action.setStatusTip(
-            "Remove every FX element of the current model from the selection; "
+            "Remove every ANM element of the current model from the selection; "
             "other selected geometry stays selected.")
         self.deselect_all_fx_action.triggered.connect(
             self._deselect_all_fx_elements)
@@ -1020,16 +1021,16 @@ class AssemblyWindow(
         self.delete_geometry_action.triggered.connect(self._delete_geometry)
         self.viewport.addAction(self.delete_geometry_action)
         edit_menu.addAction(self.delete_geometry_action)
-        self.add_fx_action = QAction("Add FX", self)
+        self.add_fx_action = QAction("Add ANM", self)
         self.add_fx_action.setEnabled(False)
         self.add_fx_action.setStatusTip(
-            "Add an FX from this model or another model.")
+            "Add an ANM from this model or another model.")
         self.add_fx_action.triggered.connect(self._add_fx_element)
         edit_menu.addAction(self.add_fx_action)
-        self.clone_fx_action = QAction("Clone FX Element", self)
+        self.clone_fx_action = QAction("Clone ANM Element", self)
         self.clone_fx_action.triggered.connect(self._copy_geometry)
         edit_menu.addAction(self.clone_fx_action)
-        self.rename_fx_action = QAction("Rename FX", self)
+        self.rename_fx_action = QAction("Rename ANM", self)
         self.rename_fx_action.triggered.connect(self._rename_selected_fx)
         edit_menu.addAction(self.rename_fx_action)
         for attr, label, handler in (
@@ -1058,10 +1059,19 @@ class AssemblyWindow(
         edit_menu.addAction(self.edit_rotate_action)
         self.edit_center_action = QAction("Center Model at Origin", self)
         self.edit_center_action.setStatusTip(
-            "Move the whole model so the center of its bounding box sits at "
-            "the model origin (0, 0, 0). Undo restores it.")
+            "Center the whole model: move every part together so the center "
+            "of the model's bounding box sits at the origin (0, 0, 0). "
+            "Undo restores it.")
         self.edit_center_action.triggered.connect(self._center_model_at_origin)
         edit_menu.addAction(self.edit_center_action)
+        self.edit_center_selection_action = QAction(
+            "Center Selection at Origin", self)
+        self.edit_center_selection_action.setStatusTip(
+            "Move only the selected element so the center of the selection "
+            "sits at the origin (0, 0, 0). Undo restores it.")
+        self.edit_center_selection_action.triggered.connect(
+            self._center_selection_at_origin)
+        edit_menu.addAction(self.edit_center_selection_action)
 
         view_menu = self.menuBar().addMenu("&View")
         self.view_menu = view_menu
@@ -1228,6 +1238,10 @@ class AssemblyWindow(
         self.play_button = QPushButton("Play")
         self.play_button.setCheckable(True)
         self.play_button.setEnabled(False)
+        self.play_button.setProperty("studioRole", "play")   # highlighted by studio.qss
+        self.play_button.setToolTip(
+            "Play / Pause: runs every animation and emitter preview of the model. "
+            "It stays on through your edits until you press Pause.")
         self.play_button.toggled.connect(self._toggle_play)
         anim_bar.addWidget(self.play_button)
 
@@ -1394,21 +1408,6 @@ class AssemblyWindow(
             "rotate": 1.0,
             "scale": 1.0,
         }
-        mode_row = QHBoxLayout()
-        mode_row.setSpacing(3)
-        self.transform_mode_buttons = {}
-        for mode, label in (
-                ("move", "Move"), ("rotate", "Rotate"), ("scale", "Scale")):
-            button = QPushButton(label)
-            button.setCheckable(True)
-            button.setChecked(mode == "move")
-            button.setMinimumHeight(25)
-            button.clicked.connect(
-                lambda _checked=False, selected=mode:
-                self._set_transform_mode(selected))
-            self.transform_mode_buttons[mode] = button
-            mode_row.addWidget(button)
-        gizmo_layout.addLayout(mode_row)
         self.model_gizmo = ModelSpaceGizmo()
         self.model_gizmo.setEnabled(False)
         self.model_gizmo.nudgeStarted.connect(self._begin_gizmo_nudge)
@@ -1468,19 +1467,48 @@ class AssemblyWindow(
         for column in range(3):
             transform_options.setColumnStretch(column, 1)
         gizmo_layout.addLayout(transform_options)
-        self.center_origin_button = QPushButton("Center at Origin")
+        # Under Mirror Select / Auto Align: centering buttons, then Move / Rotate / Scale.
+        center_row = QHBoxLayout()
+        center_row.setSpacing(3)
+        self.center_origin_button = QPushButton("Center Model at Origin")
         self.center_origin_button.setEnabled(False)
         self.center_origin_button.setToolTip(
-            "Move the whole model so the center of its bounding box sits at "
-            "the model origin (0, 0, 0). Undo restores it.")
+            "Center the whole model: move every part together so the center "
+            "of the model's bounding box sits at the origin (0, 0, 0). "
+            "Undo restores it.")
         self.center_origin_button.clicked.connect(
             self.edit_center_action.trigger)
-        gizmo_layout.addWidget(self.center_origin_button)
+        self.center_selection_button = QPushButton("Center Selection at Origin")
+        self.center_selection_button.setEnabled(False)
+        self.center_selection_button.setToolTip(
+            "Move only the selected element to the origin (0, 0, 0): the "
+            "center of the selection lands on 0, the rest of the model stays "
+            "where it is. Undo restores it.")
+        self.center_selection_button.clicked.connect(
+            self.edit_center_selection_action.trigger)
+        center_row.addWidget(self.center_origin_button)
+        center_row.addWidget(self.center_selection_button)
+        gizmo_layout.addLayout(center_row)
+        mode_row = QHBoxLayout()
+        mode_row.setSpacing(3)
+        self.transform_mode_buttons = {}
+        for mode, label in (
+                ("move", "Move"), ("rotate", "Rotate"), ("scale", "Scale")):
+            button = QPushButton(label)
+            button.setCheckable(True)
+            button.setChecked(mode == "move")
+            button.setMinimumHeight(25)
+            button.clicked.connect(
+                lambda _checked=False, selected=mode:
+                self._set_transform_mode(selected))
+            self.transform_mode_buttons[mode] = button
+            mode_row.addWidget(button)
+        gizmo_layout.addLayout(mode_row)
         self.viewport.set_direct_transform("move", 0.50)
         self._apply_transform_mode_colors()
         model_layout.addWidget(gizmo_box)
 
-        fx_box = QGroupBox("Effects and Emitters")
+        fx_box = QGroupBox("ANM")
         fx_layout = QVBoxLayout(fx_box)
         fx_layout.setContentsMargins(5, 4, 5, 5)
         fx_layout.setSpacing(4)
@@ -1497,18 +1525,18 @@ class AssemblyWindow(
             Qt.ContextMenuPolicy.CustomContextMenu)
         self.fx_combo.customContextMenuRequested.connect(
             self._show_fx_combo_context_menu)
-        self.add_fx_button = QPushButton("Add FX")
+        self.add_fx_button = QPushButton("Add ANM")
         self.add_fx_button.setEnabled(False)
         self.add_fx_button.setToolTip(
-            "Browse effects from the active set, current model or an external file.")
+            "Browse ANM animations from the active set, current model or an external file.")
         self.add_fx_button.clicked.connect(self.add_fx_action.trigger)
-        self.clone_fx_button = QPushButton("Clone FX")
+        self.clone_fx_button = QPushButton("Clone ANM")
         self.clone_fx_button.setEnabled(False)
         self.clone_fx_button.clicked.connect(self.clone_fx_action.trigger)
-        self.delete_fx_button = QPushButton("Delete FX")
+        self.delete_fx_button = QPushButton("Delete ANM")
         self.delete_fx_button.setEnabled(False)
         self.delete_fx_button.setToolTip(
-            "Delete the complete editable FX element selected in the list. "
+            "Delete the complete editable ANM element selected in the list. "
             "The operation can be undone.")
         self.delete_fx_button.clicked.connect(
             self._delete_selected_fx_element)
@@ -1524,6 +1552,10 @@ class AssemblyWindow(
             self.delete_fx_button,
             self.load_texture_button,
         ]))
+        emitter_box = QGroupBox("Emitters")
+        fx_layout = QVBoxLayout(emitter_box)
+        fx_layout.setContentsMargins(5, 4, 5, 5)
+        fx_layout.setSpacing(4)
         self.emitter_combo = QComboBox()
         self.emitter_combo.addItem("No emitter selected")
         self.emitter_combo.setEnabled(False)
@@ -1547,13 +1579,17 @@ class AssemblyWindow(
                 lambda button=button, action=action: button.setEnabled(action.isEnabled()))
             emitter_buttons.append(button)
         fx_layout.addWidget(_ResponsiveButtonGrid(emitter_buttons))
+        # Emitters sit above the ANM box.
+        model_layout.addWidget(emitter_box)
         model_layout.addWidget(fx_box)
 
-        uv_box = QGroupBox("Effects, Emitters and Textures · Preview and Editor")
+        uv_box = QGroupBox("ANM, Emitters and Textures · Preview and Editor")
         uv_layout = QVBoxLayout(uv_box)
         uv_layout.setContentsMargins(5, 5, 5, 5)
         self.uv_editor = UVEditorWidget()
         self.uv_editor.loopsChanged.connect(self._on_uv_changed)
+        self.uv_editor.placementFinished.connect(self._on_uv_placement_finished)
+        self.uv_editor.placementCancelled.connect(self._on_uv_placement_cancelled)
         self.uv_editor.editFinished.connect(self._on_uv_edit_finished)
         self.uv_editor.selectionChanged.connect(
             self._sync_uv_add_vertex_button)
@@ -1576,7 +1612,21 @@ class AssemblyWindow(
         self.uv_phase_combo.setToolTip(
             "Choose which UV phase is visible. All UV phases is the default.")
         self.uv_phase_combo.activated.connect(self._select_uv_phase)
-        uv_layout.addWidget(self.uv_phase_combo)
+        self.uv_speed_spin = QSpinBox()
+        self.uv_speed_spin.setRange(FRAME_MIN_MS, FRAME_MAX_MS)
+        self.uv_speed_spin.setSuffix(" ms")
+        self.uv_speed_spin.setKeyboardTracking(False)
+        self.uv_speed_spin.setEnabled(False)
+        self.uv_speed_spin.setToolTip(
+            "How long the selected UV phase stays on screen (its frames in the ANM timeline). "
+            "Without a selected phase it sets every frame of the animation.")
+        self.uv_speed_spin.valueChanged.connect(self._set_uv_phase_duration)
+        phase_row = QHBoxLayout()
+        phase_row.setSpacing(4)
+        phase_row.addWidget(self.uv_phase_combo, 1)
+        phase_row.addWidget(QLabel("Speed"))
+        phase_row.addWidget(self.uv_speed_spin, 1)
+        uv_layout.addLayout(phase_row)
         self.uv_add_phase_button = QPushButton("Add UV Phase")
         self.uv_add_phase_button.setToolTip(
             "Copy the selected or playing frame to a free area on its texture.")

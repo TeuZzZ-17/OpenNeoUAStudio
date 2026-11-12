@@ -182,7 +182,7 @@ class GeometryDeleteV2Tests(unittest.TestCase):
             plan_delete_geometry(obj, {0}, MappingIndex(obj))
         block.atts[1].poly_id = 1
         with self.assertRaisesRegex(
-                GeometryClipboardError, "FX geometry"):
+                GeometryClipboardError, "ANM geometry"):
             plan_delete_geometry(
                 obj, {0}, MappingIndex(obj), unsafe_fx_poly_ids={0})
 
