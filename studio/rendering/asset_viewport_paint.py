@@ -817,9 +817,7 @@ class _PaintingMixin:
         for index in animated:
             if index in session.selection or index not in available                     or index >= len(screen):
                 continue
-            point = screen[index]
-            painter.drawRect(QRectF(point.x() - 3.0, point.y() - 3.0,
-                                    6.0, 6.0))
+            painter.drawEllipse(screen[index], 3.5, 3.5)
         painter.setPen(QPen(QColor(90, 92, 100), 1.0))
         painter.setBrush(QColor(105, 108, 118))
         for index in sorted(
@@ -846,9 +844,12 @@ class _PaintingMixin:
                     ANIMATED_VERTEX_COLOR if index in animated
                     else mode_color.lighter(165),
                     2.2 if index in animated else 1.8))
-                painter.drawRect(QRectF(
-                    point.x() - radius, point.y() - radius,
-                    radius * 2.0, radius * 2.0))
+                if index in animated:
+                    painter.drawEllipse(point, radius, radius)
+                else:
+                    painter.drawRect(QRectF(
+                        point.x() - radius, point.y() - radius,
+                        radius * 2.0, radius * 2.0))
 
         pivot = session.selection_pivot()
         if pivot is not None:

@@ -112,9 +112,7 @@ class ModelEditorWindow(EntityListMixin, SetBasMixin, AssemblyWindow):
         toolbar = self.animation_toolbar
         toolbar.addSeparator()
         toolbar.addWidget(QLabel(" Polygon ID: "))
-        toolbar.addWidget(self.poly_id_previous_button)
         toolbar.addWidget(self.poly_id_spin)
-        toolbar.addWidget(self.poly_id_next_button)
         self.file_menu.aboutToShow.connect(self._sync_generator_actions)
         self.edit_menu.aboutToShow.connect(self._sync_generator_actions)
         self._sync_generator_actions()
