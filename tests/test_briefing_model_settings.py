@@ -95,11 +95,13 @@ def test_briefing_preview_advances_its_own_animation(monkeypatch):
             "rotor", anim_frames=[(102, 0, 0), (102, 1, 0)])]
         view.renderer.seek_animation(0)
         view._last_frame = 10.0
-        monkeypatch.setattr(briefing.time, "monotonic", lambda: 10.12)
+        # The preview plays at DEFAULT_ANIMATION_SPEED: 0.12 s of animation takes 0.12 / speed real seconds.
+        real = 0.12 / briefing.DEFAULT_ANIMATION_SPEED
+        monkeypatch.setattr(briefing.time, "monotonic", lambda: 10.0 + real)
         view._tick()
         assert view.renderer._anim_clock_ms == pytest.approx(120)
         assert view.renderer._anim_states[0][0] == 1
-        monkeypatch.setattr(briefing.time, "monotonic", lambda: 10.24)
+        monkeypatch.setattr(briefing.time, "monotonic", lambda: 10.0 + 2 * real)
         view._tick()
         assert view.renderer._anim_states[0][0] == 0
     finally:

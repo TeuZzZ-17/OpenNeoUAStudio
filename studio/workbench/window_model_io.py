@@ -433,10 +433,15 @@ class _ModelFilesMixin:
                 f"Exported complete asset family rooted at "
                 f"{base_target.name}.", 9000)
 
+    def _changed_animation_names(self, family) -> set[str]:
+        """Animations (casefolded names) created or edited in this session: Overwrite writes their ANM files."""
+
+        edited = {key[0].casefold() for key in self._vanm_uv_original}
+        return {name.casefold() for name, animation in family.animations.items()
+                if animation.new_file or animation.timeline_dirty
+                or name.casefold() in edited}
+
     def _overwrite_model(self) -> None:
-        if self._has_uv_timeline_changes():
-            self._notify("Use Export Asset Family to save the edited ANM timeline.", 8000)
-            return
         sklt_context = self._sklt_save_context()
         if sklt_context is not None:
             owner, _family, fam_obj, model = sklt_context
@@ -501,11 +506,14 @@ class _ModelFilesMixin:
             return
         skeleton_target, base_target = targets
         if inplace:
+            changed = self._changed_animation_names(family)
+            animation_files = sorted(name for name in family.animations if name.casefold() in changed)
             answer = QMessageBox.question(
                 self, "Overwrite BASE",
                 f"Overwrite the model opened from disk?\n\n{base_target}\n"
                 f"{skeleton_target}"
-                + ("\n\nA .bak copy of each file is created first."
+                + "".join(f"\n{base_target.parent / name}" for name in animation_files)
+                + ("\n\nA .bak copy of each existing file is created first."
                    if backup_enabled() else ""),
                 QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
                 QMessageBox.StandardButton.No)
@@ -829,6 +837,8 @@ class _ModelFilesMixin:
                 ))
 
                 temp_animations = []
+                changed_animation_pairs = []
+                changed_names = self._changed_animation_names(family)
                 for canonical, animation, relative in animation_exports:
                     data = export_anm_bytes(animation)
                     verified = parse_anm_bytes(data, canonical)
@@ -840,6 +850,8 @@ class _ModelFilesMixin:
                     temp_animation.parent.mkdir(parents=True, exist_ok=True)
                     temp_animation.write_bytes(data)
                     temp_animations.append((temp_animation, target))
+                    if canonical.casefold() in changed_names:
+                        changed_animation_pairs.append((temp_animation, target))
                     ref_entry = self._matching_ref(
                         family.animation_refs, canonical)
                     source = (str(ref_entry.path)
@@ -984,6 +996,10 @@ class _ModelFilesMixin:
                 if not inplace:
                     commit_pairs += [
                         *temp_animations, *temp_textures, *temp_profiles]
+                else:
+                    # Overwrite also writes the ANM files this session created or changed,
+                    # beside the overwritten BASE, or the model would lose its animations.
+                    commit_pairs += changed_animation_pairs
 
                 def verify_destination_package() -> None:
                     # The JSON manifest is a staging/verification aid, not a
@@ -1066,6 +1082,10 @@ class _ModelFilesMixin:
             return False
         self._bundle_base_snapshots[owner] = verified_base_bytes
         self._adopt_saved_block_sources(fam_obj, verified_base_bytes)
+        for _name, animation, _relative in animation_exports:
+            animation.timeline_dirty = False
+            if inplace:
+                animation.new_file = False
 
         self._geom_dirty.pop(owner, None)
         self._geom_original[owner] = list(model.points)

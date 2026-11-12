@@ -22,7 +22,7 @@ Ground-decal effects need an explicit `effect_mode` (`ground_pulse` or `rise`) a
 | `studio_describe_model` / `studio_materials` | Objects, counts, size; material blocks with texture, shading, UV box and a sample polygon to copy |
 | `studio_get_geometry` | Points and polygons, optionally filtered by selectors and with UVs |
 | `studio_select` | Test a selector: which point / polygon indices does it hit? |
-| `studio_effects` / `studio_list_textures` | FX elements, particle emitters, animated polygons; textures a model can use |
+| `studio_effects` / `studio_list_textures` | ANM elements, particle emitters, animated polygons; textures a model can use |
 | `studio_analyze_model` | Quality report: no-area polygons, doubled points, inside-out solids, non-flat/non-convex polygons, UV and symmetry |
 | `studio_compare_models` / `studio_validate_model` | Diff of two models; load + mapping checks |
 | `studio_render_model` | Textured render, several views; `label_points`, `label_polygons`, `highlight_polygons`, `show_wire` draw indices on the image; `compare_with` shows a reference model beside it at the same scale. Polygons without material are outlined in magenta instead of blocking the render |
@@ -77,7 +77,7 @@ Selectors describe *which* points or polygons to edit (`{"x":[0,null]}`, `{"faci
 * Edits run on an in-memory copy of Studio's own data structures; the files are written **once**, after the
   staged result was re-read and checked. If any step of a batch fails, nothing is written.
 * The commit reuses the Studio window's writers (`build_topology_states`, `save_model_base_copy`,
-  `save_sklt_with_poo2_pol2_structure`) and its clipboard / material / FX routines: no format is re-implemented.
+  `save_sklt_with_poo2_pol2_structure`) and its clipboard / material / ANM routines: no format is re-implemented.
 * Writes are limited to `Data/Models`, `Data/Wireless`, `Data/Sets` (set tools only) and a temp work folder (more
   roots via `ONUA_MCP_WRITE_ROOTS`). Set.BAS files are only read.
 * Set edits use `SetDocument` (`sector_editor/document.py`) for every table change and save. The Sector Editor is

@@ -13,7 +13,16 @@ from map_editor.core.ldf_model import LdfDocument
 from map_editor.ui import dialogs
 
 
+class _Installation:
+    """Game folders of the fake catalog: nothing exists, so no cloud profile is found."""
+
+    @staticmethod
+    def folder(name):
+        return Path("missing-game") / name
+
+
 class _EmptyCatalog:
+    installation = _Installation()
     briefings = {"mb": {}, "db": {}}
     skies = {}
     music = []

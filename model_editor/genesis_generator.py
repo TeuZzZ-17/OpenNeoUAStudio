@@ -4,9 +4,9 @@ from __future__ import annotations
 
 import copy
 import math
-import struct
 
 from studio.formats.animation import parse_anm_bytes
+from studio.assets.animated_polygons import build_vanm
 from studio.assets.mapping import MappingEditError, _wrap_ades_objt, rewrite_block_texture_template
 from studio.formats.base_format import AttsEntry, parse_base_bytes
 from studio.formats.images import parse_ilbm_bytes
@@ -42,30 +42,7 @@ def _adapt_animation(source, vertices, name):
             (1-x)*(1-y)*quad[2][axis] + x*(1-y)*quad[3][axis]
             + (1-x)*y*quad[1][axis] + x*y*quad[0][axis])
             for axis in range(2)) for x, y in coordinates])
-    return _animation_bytes(source, groups, name)
-
-
-def _animation_bytes(source, groups, name):
-    """Build native VANM data and immediately verify it with the shared parser."""
-    bitmap_class = source.bitmap_class.encode("latin-1") + b"\0"
-    bitmaps = b"".join(n.encode("latin-1") + b"\0" for n in source.bitmap_names)
-    count = sum(len(group) + 1 for group in groups)
-    if count > 32767:
-        raise MappingEditError("Genesis animation exceeds the VANM UV limit.")
-    data = struct.pack(">h", len(bitmap_class)) + bitmap_class
-    data += struct.pack(">h", len(bitmaps)) + bitmaps + struct.pack(">h", count)
-    for group in groups:
-        data += struct.pack(">h", len(group)) + bytes(c for uv in group for c in uv)
-    data += struct.pack(">h", len(source.frames))
-    data += b"".join(struct.pack(">ihh", f.frame_time, f.frame_id, f.texcoords_id)
-                     for f in source.frames)
-    chunk = b"DATA" + struct.pack(">I", len(data)) + data
-    chunk += b"\0" if len(data) % 2 else b""
-    encoded = b"FORM" + struct.pack(">I", len(chunk) + 4) + b"VANM" + chunk
-    parsed = parse_anm_bytes(encoded, name)
-    if parsed.warnings or parsed.texcoord_groups != groups or parsed.frames != source.frames:
-        raise MappingEditError("Generated Genesis animation failed verification.")
-    return parsed
+    return build_vanm(source, groups, name)
 
 
 def _animation_signature(animation):
@@ -90,13 +67,13 @@ def generate_genesis(family, obj):
         top, bottom = min(v for _, v in group), max(v for _, v in group)
         quad_groups.append([(right, bottom), (left, bottom),
                             (left, top), (right, top)])
-    quad_animation = _animation_bytes(tri_animation, quad_groups, "GENQ4-1.ANM")
+    quad_animation = build_vanm(tri_animation, quad_groups, "GENQ4-1.ANM")
     bitmap_name = next((name for name in family.textures
                         if name.casefold() == "fx2.ilbm"), "FX2.ILBM")
     for animation in (tri_animation, quad_animation):
         if animation.bitmap_names != [bitmap_name]:
             animation.bitmap_names = [bitmap_name]
-            updated = _animation_bytes(animation, animation.texcoord_groups,
+            updated = build_vanm(animation, animation.texcoord_groups,
                                        animation.source_name)
             animation.original_data = updated.original_data
             animation.texcoord_offsets = updated.texcoord_offsets

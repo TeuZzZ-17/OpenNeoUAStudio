@@ -34,6 +34,17 @@ QPushButton:disabled, QToolButton:disabled {
     color: @Disabled.Text;
     background-color: @Button;
 }
+/* The Play button drives every animation and emitter preview: it stands out, and is filled while playing. */
+QPushButton[studioRole="play"] {
+    border: 2px solid @Accent; font-weight: 700; padding: 4px 16px; min-width: 56px;
+}
+QPushButton[studioRole="play"]:hover { background-color: @Midlight; }
+QPushButton[studioRole="play"]:checked {
+    background-color: @Accent; color: @Window; border-color: @Accent;
+}
+QPushButton[studioRole="play"]:disabled {
+    border: 1px solid @Mid; font-weight: 400; background-color: @Button; color: @Disabled.Text;
+}
 QFrame#FxCodeDrawer {
     background-color: @Window;
     border: 1px solid @Mid;

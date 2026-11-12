@@ -105,12 +105,13 @@ def test_preview_confirms_clicked_anchor(app):
 @pytest.mark.parametrize("shared", [False, True])
 @pytest.mark.parametrize("hover", [None, 0])
 def test_cut_hides_only_marker_without_another_emitter(shared, hover):
-    block = SimpleNamespace(class_id="particle.class", ade_point_id=0)
+    block = SimpleNamespace(class_id="particle.class", ade_point_id=0, texture=None, atts=[])
     blocks = [block]
     if shared:
-        blocks.append(SimpleNamespace(class_id="particle.class", ade_point_id=0))
+        blocks.append(SimpleNamespace(class_id="particle.class", ade_point_id=0, texture=None, atts=[]))
     session = SimpleNamespace(
         fam_obj=SimpleNamespace(base_object=SimpleNamespace(ades=blocks)),
+        model=SimpleNamespace(polygons=[]),
         selection=set(), selection_pivot=lambda: None)
     viewport = SimpleNamespace(
         _edit_session=session, _edit_screen_points=lambda *args: [QPointF(20, 20)],

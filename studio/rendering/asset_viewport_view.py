@@ -419,6 +419,7 @@ class _ViewControlsMixin:
         self.animationFrameChanged.emit(self.current_frame_text())
 
     def play_animation(self, playing: bool) -> None:
+        self._play_requested = bool(playing)
         self._anim_playing = playing and self.has_animation
         if self._anim_playing:
             self._anim_last_time = time.perf_counter()

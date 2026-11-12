@@ -1,4 +1,4 @@
-"""AssemblyWindow mixin: FX Elements: add, edit and remove FX element geometry."""
+"""AssemblyWindow mixin: ANM Elements: add, edit and remove ANM element geometry."""
 
 from __future__ import annotations
 
@@ -51,7 +51,7 @@ class _FxElementsMixin(_EmittersMixin):
         return value if isinstance(value, FxElement) else None
 
     def _active_fx_selection(self) -> FxElement | None:
-        """Resolve an explicit combo/polygon/complete-vertex FX selection."""
+        """Resolve an explicit combo/polygon/complete-vertex ANM selection."""
 
         owner = self.viewport.edit_owner
         resolved = self._resolved_geometry_polys()
@@ -66,7 +66,7 @@ class _FxElementsMixin(_EmittersMixin):
             None)
 
     def _active_fx_elements(self) -> tuple[FxElement, ...]:
-        """Resolve an exact selection made only of complete FX elements."""
+        """Resolve an exact selection made only of complete ANM elements."""
 
         owner = self.viewport.edit_owner
         resolved = self._resolved_geometry_polys()
@@ -91,7 +91,7 @@ class _FxElementsMixin(_EmittersMixin):
         resolved = self._resolved_geometry_polys()
         if resolved and not self._active_fx_elements():
             return (
-                "FX elements cannot be combined with other polygons in one "
+                "ANM elements cannot be combined with other polygons in one "
                 "Copy, Move or Delete operation")
         return ""
 
@@ -110,7 +110,7 @@ class _FxElementsMixin(_EmittersMixin):
 
         self.fx_combo.blockSignals(True)
         self.fx_combo.clear()
-        self.fx_combo.addItem("No FX element selected", None)
+        self.fx_combo.addItem("No ANM selected", None)
         selected_index = 0
         for element in self._fx_elements:
             capabilities = self._fx_capabilities(element)
@@ -197,11 +197,11 @@ class _FxElementsMixin(_EmittersMixin):
         self._sync_edit_action_states()
 
     def _sync_fx_combo_label(self) -> None:
-        """Name the neutral FX entry after the real multi-element selection."""
+        """Name the neutral ANM entry after the real multi-element selection."""
 
-        label = ("Multiple FX selected"
+        label = ("Multiple ANM selected"
                  if len(self._active_fx_elements()) > 1
-                 else "No FX element selected")
+                 else "No ANM selected")
         self.fx_combo.setItemText(0, label)
 
     def _fx_combo_index(self, identity) -> int:
@@ -243,7 +243,7 @@ class _FxElementsMixin(_EmittersMixin):
 
     def _detach_fx_for_editing(
             self, element: FxElement) -> FxElement | None:
-        """Make one shared FX independently editable as one undoable edit."""
+        """Make one shared ANM independently editable as one undoable edit."""
 
         owner = element.owner_path
         fam_obj = self._owner_to_obj.get(owner)
@@ -251,7 +251,7 @@ class _FxElementsMixin(_EmittersMixin):
             return None
         reason = self._geometry_writer_reason(owner, fam_obj)
         if reason:
-            self._notify(f"FX edit unavailable: {reason}.", 8000)
+            self._notify(f"ANM edit unavailable: {reason}.", 8000)
             return None
         before = self._capture_topology_state(owner)
         if before is None:
@@ -278,7 +278,7 @@ class _FxElementsMixin(_EmittersMixin):
                 if candidate.identity == element.identity), None)
             if updated is None or not updated.editable:
                 raise GeometryClipboardError(
-                    "the detached FX did not become independently editable")
+                    "the detached ANM did not become independently editable")
             self.fx_combo.blockSignals(True)
             self.fx_combo.setCurrentIndex(
                 self._fx_combo_index(updated.identity))
@@ -287,7 +287,7 @@ class _FxElementsMixin(_EmittersMixin):
             after = self._capture_topology_state(owner)
             if after is None:
                 raise GeometryClipboardError(
-                    "the detached FX could not be verified")
+                    "the detached ANM could not be verified")
             self._record_edit_command({
                 "kind": "topology",
                 "owner": owner,
@@ -315,11 +315,11 @@ class _FxElementsMixin(_EmittersMixin):
                 self._geom_dirty.pop(owner, None)
             self._edit_undo_stack[:] = previous_undo
             self._edit_redo_stack[:] = previous_redo
-            self._notify(f"FX detach failed and was rolled back: {exc}.", 9000)
+            self._notify(f"ANM detach failed and was rolled back: {exc}.", 9000)
             return None
 
     def _detach_mirrored_shared_fx(self, polygon_ids) -> bool:
-        """Detach every shared FX touched by Mirror Select before transforms."""
+        """Detach every shared ANM touched by Mirror Select before transforms."""
 
         pending = {int(poly_id) for poly_id in polygon_ids}
         while True:
@@ -396,7 +396,7 @@ class _FxElementsMixin(_EmittersMixin):
         )
 
     def _delete_selected_fx_element(self) -> None:
-        if not self._require_editing("Delete FX Element"):
+        if not self._require_editing("Delete ANM Element"):
             return
         element = self._selected_fx_element()
         if element is None:
@@ -405,7 +405,7 @@ class _FxElementsMixin(_EmittersMixin):
             if self._active_fx_elements():
                 self._delete_geometry()
                 return
-            self._notify("Select an FX element from the list first.", 5000)
+            self._notify("Select an ANM element from the list first.", 5000)
             return
         if element.shared_state == "invalid":
             self._notify(
@@ -422,7 +422,7 @@ class _FxElementsMixin(_EmittersMixin):
         index = self._fx_combo_index(identity)
         if index <= 0:
             self._notify(
-                "Delete refused: the selected FX element is no longer "
+                "Delete refused: the selected ANM element is no longer "
                 "available in the active owner.", 7000)
             return
         self.fx_combo.blockSignals(True)
@@ -438,7 +438,7 @@ class _FxElementsMixin(_EmittersMixin):
             return
         key = (element.owner_path, element.poly_ids)
         value, accepted = QInputDialog.getText(
-            self, "Rename FX", "Name in this editing session (empty resets):",
+            self, "Rename ANM", "Name in this editing session (empty resets):",
             text=self._fx_aliases.get(key, ""))
         if not accepted:
             return
@@ -454,12 +454,12 @@ class _FxElementsMixin(_EmittersMixin):
         menu = QMenu(self.fx_combo)
         menu.addAction(self.select_all_fx_action)
         add_action = menu.addAction(
-            "Add FX", self._add_fx_element)
+            "Add ANM", self._add_fx_element)
         add_action.setEnabled(self._can_add_fx_element())
         menu.addAction(self.clone_fx_action)
         menu.addAction(self.rename_fx_action)
         delete_action = menu.addAction(
-            "Delete Selected FX Element",
+            "Delete Selected ANM Element",
             self._delete_selected_fx_element)
         delete_action.setEnabled(self._can_delete_selected_fx_element())
         menu.exec(self.fx_combo.mapToGlobal(position))
@@ -591,7 +591,7 @@ class _FxElementsMixin(_EmittersMixin):
 
     def _add_fx_element(
             self, *, preferred: FxElement | None = None) -> None:
-        if not self._require_editing("Add FX Element"):
+        if not self._require_editing("Add ANM Element"):
             return
         templates = self._fx_add_templates()
         dialog = AddFxElementDialog(
@@ -601,13 +601,13 @@ class _FxElementsMixin(_EmittersMixin):
             active_source=lambda: self._catalog_source("fx"),
             external_source=lambda: self._catalog_source("fx", external=True))
         if dialog.exec() != QDialog.DialogCode.Accepted:
-            self._notify("Add FX Element cancelled.", 3000)
+            self._notify("Add ANM Element cancelled.", 3000)
             return
         template = dialog.selected_template()
         family = self._family
         fam_obj = self._owner_to_obj.get(self.viewport.edit_owner)
         if template is None or family is None or fam_obj is None:
-            self._notify("Add FX Element refused: the target changed.", 7000)
+            self._notify("Add ANM Element refused: the target changed.", 7000)
             return
         try:
             context = dialog.source_context(template)
@@ -620,26 +620,27 @@ class _FxElementsMixin(_EmittersMixin):
                 clipboard = build_fx_element_clipboard(
                     fam_obj, template, family.animations)
         except (GeometryClipboardError, MappingEditError) as exc:
-            self._notify(f"Add FX Element refused: {exc}.", 9000)
+            self._notify(f"Add ANM Element refused: {exc}.", 9000)
             return
         self._geometry_clipboard = clipboard
         position = self._current_viewport_position()
         if not self.viewport.begin_paste_preview(clipboard, position):
             self._notify(
-                "Add FX Element prepared, but its preview could not start: "
-                f"{self._preview_geometry_reason()}.", 9000)
+                "Add ANM Element prepared, but its preview could not start: "
+                f"{self._preview_geometry_reason() or self.viewport.paste_preview_error or 'unknown reason'}.",
+                9000)
             return
         self.viewport.setFocus()
         self._sync_edit_action_states()
         self._notify(
             f"Clone {clipboard.fx_name} "
             f"{'VANM ' if clipboard.source_kind == 'VANM' else ''}"
-            "FX Preview. Paste/LMB/Enter confirms; RMB/Esc cancels. "
+            "ANM Preview. Paste/LMB/Enter confirms; RMB/Esc cancels. "
             "Scale and orientation are unchanged.",
             12000)
 
     def _deselect_all_fx_elements(self) -> None:
-        """Remove every FX element from the selection; other geometry stays selected."""
+        """Remove every ANM element from the selection; other geometry stays selected."""
 
         elements = tuple(self._fx_elements)
         if not elements or self.viewport.paste_preview_active:
@@ -657,10 +658,10 @@ class _FxElementsMixin(_EmittersMixin):
         self._sync_poly_id_control()
         self._fill_polygon_inspector(self._selected_poly)
         self._sync_edit_action_states()
-        self.statusBar().showMessage("FX elements deselected.", 4000)
+        self.statusBar().showMessage("ANM elements deselected.", 4000)
 
     def _select_all_fx_elements(self) -> None:
-        """Select every FX element of the current model and nothing else."""
+        """Select every ANM element of the current model and nothing else."""
 
         if self.viewport.paste_preview_active:
             self._notify(
@@ -670,7 +671,7 @@ class _FxElementsMixin(_EmittersMixin):
         elements = tuple(self._fx_elements)
         if not elements:
             self.statusBar().showMessage(
-                "Select All FX: the current model has no FX element.", 6000)
+                "Select All ANM: the current model has no ANM element.", 6000)
             return
         owner = elements[0].owner_path
         if self._selected_owner != owner:
@@ -707,7 +708,7 @@ class _FxElementsMixin(_EmittersMixin):
         self._sync_fx_combo_label()
         self._sync_edit_action_states()
         self.statusBar().showMessage(
-            f"Selected {len(elements)} FX element(s): "
+            f"Selected {len(elements)} ANM element(s): "
             + ", ".join(element.fx_name for element in elements)
             + " | polyIDs "
             + ",".join(str(poly_id) for poly_id in sorted(fx_polys)))
@@ -755,8 +756,8 @@ class _FxElementsMixin(_EmittersMixin):
             return
         if element.shared_state == "invalid":
             QMessageBox.information(
-                self, "Invalid FX element",
-                "This FX element has invalid or ambiguous geometry/mapping "
+                self, "Invalid ANM element",
+                "This ANM element has invalid or ambiguous geometry/mapping "
                 "references and cannot be edited safely."
             )
             return

@@ -371,7 +371,7 @@ def diagnose_polygon_references(fam_obj, fx_elements=()) -> list[str]:
         if count not in (1, 2) or (
                 getattr(element, "bilateral", False) and count != 2):
             issues.append(
-                f"{getattr(element, 'fx_name', 'FX')} element is incomplete")
+                f"{getattr(element, 'fx_name', 'ANM')} element is incomplete")
     return issues
 
 

@@ -216,7 +216,7 @@ class EffectCatalogDialog(QDialog):
                  external_source=None, preferred=None, local_preview=None,
                  playback_speed=None):
         super().__init__(parent)
-        self.setWindowTitle("Add Emitter" if kind == "emitter" else "Add Effect")
+        self.setWindowTitle("Add Emitter" if kind == "emitter" else "Add ANM")
         self.resize(870, 690)
         self._kind = kind
         self._current = current
@@ -440,7 +440,7 @@ class EffectCatalogDialog(QDialog):
 
 
 class AddFxElementDialog(EffectCatalogDialog):
-    """FX catalog with the existing clipboard template interface."""
+    """ANM catalog with the existing clipboard template interface."""
 
     def __init__(self, templates, parent=None, *, preferred=None,
                  preview_provider=None, active_source=None, external_source=None,

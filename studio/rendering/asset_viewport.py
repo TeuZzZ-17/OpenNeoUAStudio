@@ -164,6 +164,8 @@ class AssetViewport(
         self._modal_denom = 4.0
         self._modal_pivot_world = (0.0, 0.0, 0.0)
         self._paste_preview: PastePreviewState | None = None
+        # Why the last begin_paste_preview() refused to start ("" = no refusal).
+        self.paste_preview_error = ""
         self._auto_align_enabled = True
         self._alignment_targets: tuple[tuple[AlignmentTarget, ...], ...] = (
             (), (), ())
@@ -228,6 +230,8 @@ class AssetViewport(
         self._anim_timer.setInterval(16)
         self._anim_timer.timeout.connect(self._advance_animation)
         self._anim_playing = False
+        # The user's Play choice: reloading the family (any edit) must not silently pause it.
+        self._play_requested = False
         self._anim_speed = DEFAULT_ANIMATION_SPEED
         self._anim_clock_ms = 0.0
         self._particle_emitters: list[ParticleEmitter] = []
@@ -411,6 +415,9 @@ class AssetViewport(
             # overwrite the stored home camera.
             self._home_camera_state = self._camera_state()
         self._reset_animation_states()
+        # clear() stopped the timer: playback stays on until the user presses Pause.
+        if self._play_requested and self.has_animation:
+            self.play_animation(True)
 
     # -- object selection / isolation ---------------------------------------------
 

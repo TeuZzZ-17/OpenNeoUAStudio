@@ -209,7 +209,7 @@ def compare(first, second) -> dict:
 
 
 def effects(source) -> dict:
-    """FX elements (flames, smoke planes), particle emitters and animated polygons of a model."""
+    """ANM elements (animated segments: flames, smoke planes, UV animations), particle emitters and animated polygons of a model."""
     family = core.load_family(source)
     objects = [o for o in family.all_objects() if o.skeleton is not None]
     if not objects:

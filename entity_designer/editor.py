@@ -627,6 +627,7 @@ class CollisionEditorWindow(
         self.play_button = QPushButton("Play")
         self.play_button.setCheckable(True)
         self.play_button.setEnabled(False)
+        self.play_button.setProperty("studioRole", "play")   # highlighted by studio.qss
         self.play_button.toggled.connect(self._toggle_play)
         toolbar.addWidget(self.play_button)
         self.step_button = QPushButton(">>")

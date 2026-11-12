@@ -1,5 +1,5 @@
 """Shared pieces of the asset workbench window: item roles, small widgets,
-path helpers and the Add FX Element dialog."""
+path helpers and the Add ANM Element dialog."""
 
 from __future__ import annotations
 

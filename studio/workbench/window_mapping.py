@@ -593,11 +593,11 @@ class _PolygonMappingMixin:
                   in self._fx_face_records(element)]
         label = ", ".join(dict.fromkeys(value for value in labels if value))
         self.model_texture_label.setText(
-            "Current FX Texture: " + (label or "-"))
+            "Current ANM Texture: " + (label or "-"))
         self.poly_uv_label.setText(
             f"{element.fx_name} · Polygon {poly_id} · {element.uv_source}")
         self.load_texture_button.setToolTip(
-            "Replace the selected FX segment texture or VANM binding without "
+            "Replace the selected ANM segment texture or VANM binding without "
             "changing its geometry, winding or animation data.")
         self.load_texture_button.setEnabled(
             self._editing_allowed() and bool(classify_texture_assignment(

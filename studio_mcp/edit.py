@@ -558,7 +558,7 @@ def paste_records(lm, records, source_points, block_map=None, notes=None) -> tup
 def clipboard_copy(lm, obj, ids, notes) -> tuple[list[int], list[int]]:
     """Copy animated/area polygons with the editor's own clipboard (it also carries their typed material).
 
-    The clipboard refuses some polygons (shared FX, animations without UVs); those are skipped one by one
+    The clipboard refuses some polygons (shared ANM, animations without UVs); those are skipped one by one
     with a note, so one refusal does not stop the rest."""
     fx = detect_fx_elements(obj, lm.family.animations if obj is lm.fam_obj else {})
     polys, points, skipped = [], [], []
@@ -575,7 +575,7 @@ def clipboard_copy(lm, obj, ids, notes) -> tuple[list[int], list[int]]:
         points += list(result.point_indices)
     if skipped:
         notes.append("not copied: " + "; ".join(skipped[:6]) + (f" ... {len(skipped)} in total" if len(skipped) > 6 else "")
-                     + ". FX polygons travel with studio_add_fx.")
+                     + ". ANM polygons travel with studio_add_fx.")
     return polys, points
 
 

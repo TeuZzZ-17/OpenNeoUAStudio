@@ -545,8 +545,8 @@ def test_fx_unit_vanm_uses_toolbar_frames_and_effects_use_scene_clock(app):
                             unit_owners={'root'}, time_ms=0.)
     viewport.play_animation(True)
     viewport._anim_timer.stop()
-    # Playback follows the real clock: pretend 20 ms passed since the last tick.
-    viewport._anim_last_time -= 0.02
+    # Playback follows the real clock at the preview speed: pretend 20 ms of animation passed since the last tick.
+    viewport._anim_last_time -= 0.02 / viewport._anim_speed
     viewport._advance_animation()
     assert viewport._anim_states[0] == (1, 1)
     rendered = []

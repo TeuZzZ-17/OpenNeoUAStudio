@@ -71,6 +71,70 @@ class CenterAtOriginTests(unittest.TestCase):
         finally:
             window.close()
 
+    def test_selection_goes_to_the_origin_and_the_rest_stays(self):
+        window, _obj, model = _prepare_window()
+        try:
+            model.points[:] = [(x + 10.0, y - 4.0, z + 2.5)
+                               for x, y, z in model.points]
+            original = list(model.points)
+            session = window.viewport.edit_session
+            selected = [0, 1]
+            window.viewport.select_edit_vertices(selected)
+            window._sync_edit_action_states()
+            self.assertTrue(window.center_selection_button.isEnabled())
+
+            window.center_selection_button.click()
+
+            for axis in range(3):
+                values = [model.points[i][axis] for i in selected]
+                self.assertAlmostEqual((min(values) + max(values)) / 2.0, 0.0)
+            for index in range(len(original)):
+                if index not in selected:
+                    self.assertEqual(model.points[index], original[index])
+            self.assertEqual(len(window._edit_undo_stack), 1)
+            window._undo_edit()
+            self.assertEqual(model.points, original)
+        finally:
+            window.close()
+
+    def test_buttons_sit_under_mirror_select_in_this_order(self):
+        from PySide6.QtCore import QPoint
+        window, _obj, _model = _prepare_window()
+        try:
+            window.show()
+            self.app.processEvents()
+            top = lambda widget: widget.mapTo(window.transform_box, QPoint(0, 0)).y()
+            self.assertLess(top(window.mirror_select_check), top(window.center_origin_button))
+            self.assertEqual(top(window.center_origin_button), top(window.center_selection_button))
+            self.assertLess(top(window.center_origin_button), top(window.transform_mode_buttons["move"]))
+            self.assertLess(top(window.model_gizmo), top(window.mirror_select_check))
+        finally:
+            window.close()
+
+    def test_emitters_box_sits_above_the_anm_box(self):
+        from PySide6.QtCore import QPoint
+        from PySide6.QtWidgets import QGroupBox
+        window, _obj, _model = _prepare_window()
+        try:
+            window.show()
+            self.app.processEvents()
+            boxes = {box.title(): box for box in window.findChildren(QGroupBox)}
+            top = lambda box: box.mapTo(window, QPoint(0, 0)).y()
+            self.assertLess(top(boxes["Transform"]), top(boxes["Emitters"]))
+            self.assertLess(top(boxes["Emitters"]), top(boxes["ANM"]))
+        finally:
+            window.close()
+
+    def test_selection_button_needs_a_selection(self):
+        window, _obj, _model = _prepare_window()
+        try:
+            window.viewport.select_edit_vertices([])
+            window._sync_edit_action_states()
+            self.assertFalse(window.center_selection_button.isEnabled())
+            self.assertTrue(window.center_origin_button.isEnabled())
+        finally:
+            window.close()
+
     def test_action_is_disabled_outside_edit_mode(self):
         window, _obj, _model = _prepare_window()
         try:
@@ -78,6 +142,7 @@ class CenterAtOriginTests(unittest.TestCase):
             window._sync_edit_action_states()
             self.assertFalse(window.edit_center_action.isEnabled())
             self.assertFalse(window.center_origin_button.isEnabled())
+            self.assertFalse(window.center_selection_button.isEnabled())
         finally:
             window.close()
 

@@ -319,7 +319,7 @@ class AreaFxStructuralTests(unittest.TestCase):
                 window.viewport.set_selected_owner("root")
                 window._show_model_editor()
                 window._apply_delete_plan(
-                    "root", obj, plan, label="Delete FX2 FX")
+                    "root", obj, plan, label="Delete FX2 ANM")
                 self.assertEqual(len(obj.skeleton.polygons), 20)
                 self.assertEqual(len(obj.skeleton.points), old_point_count - 4)
                 self.assertEqual(len(obj.base_object.ades), 5)
@@ -477,10 +477,10 @@ class AreaFxStructuralTests(unittest.TestCase):
                 self.assertEqual(window._delete_geometry_reason(), "")
                 menu = window._create_viewport_context_menu()
                 labels = [action.text() for action in menu.actions()]
-                self.assertIn("Clone FX Element", labels)
+                self.assertIn("Clone ANM Element", labels)
                 self.assertIn("Move", labels)
-                self.assertIn("Delete FX Element", labels)
-                self.assertIn("Add FX", labels)
+                self.assertIn("Delete ANM Element", labels)
+                self.assertIn("Add ANM", labels)
             finally:
                 dispose_window(window)
 
@@ -505,10 +505,10 @@ class AreaFxStructuralTests(unittest.TestCase):
                 self.assertTrue(fx_polys)
                 self.assertTrue(window.select_all_fx_action.isEnabled())
                 self.assertIn(
-                    "Select All FX",
+                    "Select All ANM",
                     [action.text() for action in window.edit_menu.actions()])
                 self.assertIn(
-                    "Select All FX",
+                    "Select All ANM",
                     [action.text()
                      for action in
                      window._create_viewport_context_menu().actions()])
@@ -530,9 +530,9 @@ class AreaFxStructuralTests(unittest.TestCase):
                 # Selected FX is available for it.
                 self.assertGreater(len(window._fx_elements), 1)
                 self.assertEqual(
-                    window.fx_combo.itemText(0), "Multiple FX selected")
+                    window.fx_combo.itemText(0), "Multiple ANM selected")
                 self.assertEqual(
-                    window.fx_combo.currentText(), "Multiple FX selected")
+                    window.fx_combo.currentText(), "Multiple ANM selected")
                 self.assertTrue(window.delete_fx_button.isEnabled())
 
                 # One click removes every selected FX element at once.

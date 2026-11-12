@@ -7,6 +7,8 @@ from dataclasses import replace
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
+from studio.rendering.playback import DEFAULT_ANIMATION_SPEED
+
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 from PySide6.QtCore import QEvent, QPoint, QPointF, QRectF, Qt
@@ -1600,7 +1602,7 @@ class CollisionEditorTests(unittest.TestCase):
         alignment = item.textAlignment(1)
         self.assertTrue(alignment & int(Qt.AlignmentFlag.AlignRight))
         self.assertGreaterEqual(window.main_splitter.widget(0).minimumWidth(), 230)
-        self.assertLessEqual(window.main_splitter.widget(0).maximumWidth(), 440)
+        self.assertLessEqual(window.main_splitter.widget(0).maximumWidth(), 600)
         self.assertFalse(window.model_tree.header().stretchLastSection())
         self.assertEqual(item.toolTip(0), "models/root.sklt")
 
@@ -1608,7 +1610,9 @@ class CollisionEditorTests(unittest.TestCase):
         window = self._window()
         window.properties_tabs.setCurrentIndex(window.collision_tab_index)
         from studio.ui.shell import compatibility_entries
-        _, level, note = compatibility_entries(window, "entity_designer")[0]
+        title = window.properties_tabs.tabText(window.collision_tab_index)
+        _, level, note = next(entry for entry in compatibility_entries(window, "entity_designer")
+                              if entry[0] == title)
         self.assertEqual(level, "mixed")
         self.assertIn("vanilla Urban Assault", note)
         self.assertIn("Legacy Radius", note)
@@ -3582,6 +3586,7 @@ class CollisionEditorTests(unittest.TestCase):
         self.assertEqual(window.project.gun_points[0].x, 7)
 
         window.properties_tabs.setCurrentIndex(window.gun_points_tab_index)
+        window.move_strength_spin.setValue(2)               # every tab remembers its own step
         window._gizmo_nudge((1, 0, 0))
         self.assertEqual(window.project.gun_points[0].x, 9.0)
         self.assertEqual(window.project.compound[0].x, 1)
@@ -3848,7 +3853,7 @@ class CollisionEditorTests(unittest.TestCase):
         self.assertEqual(window.toolbar_reset_view_button.text(), "Reset View")
         self.assertEqual(window.play_button.text(), "Play")
         self.assertEqual(window.step_button.text(), ">>")
-        self.assertEqual(window.speed_spin.value(), 1.0)
+        self.assertEqual(window.speed_spin.value(), DEFAULT_ANIMATION_SPEED)
 
     def test_132a_collision_tab_owns_sphere_editing_and_history_buttons(self):
         window = self._window()

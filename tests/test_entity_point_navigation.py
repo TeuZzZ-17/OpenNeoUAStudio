@@ -40,10 +40,13 @@ def test_catalog_turret_is_editable_and_patches_the_actual_modify_block(tmp_path
               "modify_vehicle 147\n gun_up_angle = 1500\nend\n")
     path = tmp_path / "Vehicles.cfg"
     path.write_text(source)
+    from entity_designer.script_model import find_script_blocks
     window = CollisionEditorWindow()
     try:
         window.game_object_browser.objects = [SimpleNamespace(
             kind="vehicle", object_id=147, source=path,
+            body_sources=[(path, block.start_line, block.end_line)
+                          for block in find_script_blocks(source) if block.object_id == 147],
             effective_text="new_vehicle 147\n model = gun\n name = Turret\n"
                            " gun_side_angle = 3200\n gun_up_angle = 1500\n"
                            " gun_down_angle = 1300\nend\n")]

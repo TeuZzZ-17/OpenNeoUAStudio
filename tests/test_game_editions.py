@@ -156,8 +156,8 @@ def test_a_saved_data_folder_is_still_understood(openneoua):
     ("Microsoft Urban Assault Espansione", EXPANSION, [1, 2, 3, 4, 5, 6, 46]),
 ])
 def test_the_real_original_games(folder, edition, sets):
-    if not ORIGINALS.is_dir():
-        pytest.skip("original games are not on this computer")
+    if not (ORIGINALS / folder / "Data").is_dir():
+        pytest.skip("this original game is not extracted on this computer")
     install = GameInstallation.suggest(ORIGINALS / folder)
     assert install.edition == edition
     assert install.available_sets() == sets

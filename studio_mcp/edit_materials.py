@@ -1,6 +1,6 @@
 """Modeling operations that touch materials, other models and effects (registered into edit.OPS).
 
-They reuse the editor's own routines: material block clipboard/paste, FX element clipboard, texture retargeting.
+They reuse the editor's own routines: material block clipboard/paste, ANM element clipboard, texture retargeting.
 Nothing here re-implements a format; each op only prepares inputs and checks results.
 """
 
@@ -82,7 +82,7 @@ def op_import_geometry(ctx, source=None, select=None, translate=None, rotate_deg
     """Paste polygons from ANOTHER model (cross-model copy/paste): `source` is 'set1:77' / 'set1:VP_X' / a .BASE
     path; `select` is a polygon selector on the SOURCE (omit = the whole model). Materials are matched to existing
     blocks (same texture and shading) or added as new blocks. translate/rotate_deg/scale then place the copy
-    (around its own center). exclude_fx=true leaves out flame/smoke (FX) polygons, which can only travel with
+    (around its own center). exclude_fx=true leaves out flame/smoke (ANM) polygons, which can only travel with
     studio_add_fx. Returns the new polygon/point indices and any new blocks."""
     lm = ctx.lm
     lm.require_topology_edit()
@@ -92,7 +92,7 @@ def op_import_geometry(ctx, source=None, select=None, translate=None, rotate_deg
     fx = detect_fx_elements(obj, family.animations)
     if exclude_fx:
         in_fx = {pid for element in fx for pid in element.poly_ids}
-        ctx.notes.append(f"{len(set(ids) & in_fx)} FX polygon(s) were left out")
+        ctx.notes.append(f"{len(set(ids) & in_fx)} ANM polygon(s) were left out")
         ids = [pid for pid in ids if pid not in in_fx]
     if not ids:
         raise core.McpToolError("The selector matched no polygons in the source")
@@ -277,16 +277,6 @@ def op_generate_genesis(ctx):
     return {"blocks": len(lm.blocks), "new_animations": created}
 
 
-# Opaque animated-polygon material (area.class + bmpanim.class "SIMPEL.ANM"), taken from the original Weasel.
-_ANIMATED_POLYGON_TEMPLATE = bytes.fromhex(
-    "464f524d000000a84f424a54434c49440000000b617265612e636c6173730000"
-    "464f524d0000008841524541464f524d0000002241444520464f524d00000004"
-    "524f4f54535452430000000a00010006000000000000535452430000000a0001"
-    "0001003a00008000464f524d000000404f424a54434c49440000000e626d7061"
-    "6e696d2e636c61737300464f524d0000001e42414e4953545243000000110001"
-    "0006000053494d50454c2e414e4d0000")
-
-
 @op("animate_polygons")
 @_guard_errors
 def op_animate_polygons(ctx, select=None, shifts=None, frames=None, name: str = "ANIM"):
@@ -295,10 +285,8 @@ def op_animate_polygons(ctx, select=None, shifts=None, frames=None, name: str = 
     in play order, looping: shifts [[0,-36]] + frames [[1,1500],[0,700]] = state 1 for 1.5 s, state 0 for 0.7 s.
     Polygons with equal UVs share one .ANM written beside the BASE (named NAME, at most 5 letters, + a letter). The polygons leave
     their amesh block and each gets an opaque animated block."""
-    from model_editor.genesis_generator import _animation_bytes
-    from studio.assets.mapping import _wrap_ades_objt
+    from studio.assets.animated_polygons import animated_polygon_block, build_vanm
     from studio.formats.animation import VanmData, VanmFrame
-    from studio.formats.base_format import parse_base_bytes
     lm = ctx.lm
     lm.require_topology_edit()
     ids = ctx.polygons(_need(select, "polygon"))
@@ -315,7 +303,6 @@ def op_animate_polygons(ctx, select=None, shifts=None, frames=None, name: str = 
             raise core.McpToolError(f"Polygon #{pid} is not an ordinary textured face")
         per_uv.setdefault(tuple(map(tuple, block.olpl[atts_index])), []).append(pid)
     created = {}
-    base_block = parse_base_bytes(_wrap_ades_objt(_ANIMATED_POLYGON_TEMPLATE), "<animated polygon>").root.ades[0]
     for letter, (uvs, polys) in zip("ABCDEFGHIJKLMNOPQRSTUVWXYZ", per_uv.items()):
         groups = []
         for du, dv in shifts:
@@ -332,28 +319,21 @@ def op_animate_polygons(ctx, select=None, shifts=None, frames=None, name: str = 
         source = VanmData(source_name=f"{clean}{letter}.ANM", bitmap_class="ilbm.class",
                           bitmap_names=[first.texture.name], frames=sequence)
         anm_name = f"{clean}{letter}.ANM"
-        animation = _animation_bytes(source, groups, anm_name)
+        animation = build_vanm(source, groups, anm_name)
         animation.source_name = anm_name
         lm.family.animations[anm_name] = animation
         lm.extra_files[anm_name] = export_anm_bytes(animation)
         created[anm_name] = polys
-        template = rewrite_block_texture_template(base_block, anm_name)
-        animated = parse_base_bytes(_wrap_ades_objt(template), "<animated polygon>").root.ades[0]
         for pid in polys:
             block_index, atts_index = lm.slot_table()[pid]
             old = lm.blocks[block_index]
-            entry = copy.deepcopy(old.atts[atts_index])
             old.atts.pop(atts_index)
             old.olpl.pop(atts_index)
-            block = copy.deepcopy(animated)
-            block.ade_poly_id = pid
-            entry.shade_val, entry.tracy_val = 0, 128   # animated faces are drawn unshaded, like the originals
-            block.atts = [entry]
-            lm.blocks.append(block)
+            lm.blocks.append(animated_polygon_block(anm_name, pid))
     return {"animations": created, "polygons": sorted(ids)}
 
 
-# --- effects: FX elements and particle emitters --------------------------------------------------
+# --- effects: ANM elements and particle emitters --------------------------------------------------
 
 
 def _fx_list(lm):
@@ -369,7 +349,7 @@ def _fx_at(elements, index, what="fx"):
 @op("delete_fx")
 @_guard_errors
 def op_delete_fx(ctx, fx: int = -1):
-    """Delete one FX element (flame/smoke/atlas polygons) by its index from studio_effects."""
+    """Delete one ANM element (flame/smoke/atlas polygons) by its index from studio_effects."""
     lm = ctx.lm
     lm.require_topology_edit()
     element = _fx_at(_fx_list(lm), fx)
@@ -382,7 +362,7 @@ def op_delete_fx(ctx, fx: int = -1):
 @_guard_errors
 def op_add_fx(ctx, fx: int = 0, source=None, translate=None, rotate_deg=None, scale=None,
               source_owner: str = "", save_as=None):
-    """Clone an FX element (flame/smoke/atlas polygons): `fx` is its index from studio_effects, in this model or
+    """Clone an ANM element (flame/smoke/atlas polygons): `fx` is its index from studio_effects, in this model or
     (with `source`) in another model. The copy gets its own points; translate/rotate_deg/scale then place it."""
     lm = ctx.lm
     lm.require_topology_edit()
