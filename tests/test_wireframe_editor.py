@@ -98,6 +98,34 @@ class WireframeEditorUiTests(unittest.TestCase):
             self.assertEqual(window.game_file_browser.tree.currentItem().data(0, Qt.ItemDataRole.UserRole), output.resolve())
             self.assertIn("MG", window.game_file_browser.tree.currentItem().text(0))
 
+    def test_export_in_entity_mode_switches_part_and_queues_script_link(self):
+        from types import SimpleNamespace
+        from studio.assets.catalog import GameObject
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory).resolve()
+            script = root / "Vehicles.cfg"
+            script.write_text("new_vehicle 123\n name = Example\nend\n", encoding="utf-8")
+            obj = GameObject("vehicle", 123, script, {"name": "Example"}, body_sources=[(script, 0, 2)])
+            window = self._window()
+            self.addCleanup(window._leave_game_object)
+            window._open_game_object(obj)
+            window._add_component_model("mg_wireframe", create_minimal_sklt_model(), root / "old.SKL")
+            window._pending_component_values.clear()
+            exported = root / "Wireless" / "New" / "mg2.SKL"
+            exported.parent.mkdir(parents=True)
+            with patch("map_editor.bootstrap.installation", return_value=SimpleNamespace(data=root, folders={})), \
+                    patch("wireframe_editor.window.QFileDialog") as dialog, \
+                    patch("wireframe_editor.window.QMessageBox"):
+                dialog.getSaveFileName.return_value = (str(exported), "")
+                window.save_outline_as()
+                # The part now points at the exported file, and Overwrite is available.
+                self.assertEqual(window._components[window._active_component].path, exported)
+                self.assertEqual(window._pending_component_values["mg_wireframe"], "Wireless/New/mg2.SKL")
+                self.assertTrue(window._dirty_names())
+                window.save_current_file()
+            self.assertIn("mg_wireframe = Wireless/New/mg2.SKL", script.read_text())
+            self.assertFalse(window._dirty_names())
+
     def test_new_component_does_not_save_over_externally_changed_script(self):
         from studio.assets.catalog import GameObject
         with tempfile.TemporaryDirectory() as directory:
