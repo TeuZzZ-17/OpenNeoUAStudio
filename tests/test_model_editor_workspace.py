@@ -140,8 +140,7 @@ class ModelEditorWorkspaceTests(unittest.TestCase):
                           window.poly_id_box)
             self.assertIs(window.generate_genesis_button.parentWidget(),
                           window.poly_id_box)
-            self.assertEqual(window.poly_id_previous_button.width(), 36)
-            self.assertEqual(window.poly_id_next_button.width(), 36)
+            self.assertFalse(hasattr(window, "poly_id_previous_button"))
             self.assertGreaterEqual(window.poly_id_spin.minimumWidth(), 72)
             self.assertLessEqual(window.poly_id_spin.maximumWidth(), 96)
         finally:

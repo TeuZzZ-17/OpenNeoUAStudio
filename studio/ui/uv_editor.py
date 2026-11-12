@@ -19,6 +19,12 @@ from studio.rendering.gpu import AcceleratedWidget
 # (formerly uv_topology_editor.py)
 # ----------------------------------------------------------------------------
 
+# Same look as the 3D view: selected handles are red with a yellow rim, the lines of a selected loop
+# use the selection-line color of the 3D polygons.
+UV_SELECTED_COLOR = QColor(255, 32, 48)
+UV_SELECTED_RIM_COLOR = QColor(255, 214, 40)
+UV_SELECTED_LINE_COLOR = QColor(90, 230, 255)
+
 class UVTopologyError(ValueError):
     pass
 
@@ -986,22 +992,28 @@ class UVEditorWidget(AcceleratedWidget):
                     painter.setPen(QPen(QColor(20, 20, 20), 4.5))
                     painter.setBrush(Qt.BrushStyle.NoBrush)
                     painter.drawPolygon(QPolygonF(points))
-                border = QColor("#50d8ff") if selected_loop else QColor("white") if playing else outline
+                if playing and selected_loop:
+                    # The playing frame passes over the selection: its cyan lines glow yellow at the edges.
+                    painter.setPen(QPen(outline, 4.5))
+                    painter.drawPolygon(QPolygonF(points))
+                border = UV_SELECTED_LINE_COLOR if selected_loop else outline
                 painter.setPen(QPen(border, 2.5 if playing or selected_loop else 1.3))
                 painter.setBrush(Qt.BrushStyle.NoBrush)
                 painter.drawPolygon(QPolygonF(points))
-                if dimmed:
+                # The frame the animation sits on shows only its lines until it is selected.
+                if dimmed or (playing and not selected_loop):
                     continue
                 for index, point in enumerate(points):
                     handle = (loop.key, index)
                     active = handle == self._active_handle
                     selected = handle in self._selected_handles
                     painter.setBrush(
-                        self._opposite_loop_color(color)
-                        if (active or selected) and self._timeline_visible is None else color)
+                        UV_SELECTED_COLOR if selected
+                        else self._opposite_loop_color(color)
+                        if active and self._timeline_visible is None else color)
                     painter.setPen(QPen(
-                        QColor("#50d8ff") if selected
-                        else QColor(20, 20, 20), 1.4))
+                        UV_SELECTED_RIM_COLOR if selected
+                        else QColor(20, 20, 20), 1.8 if selected else 1.4))
                     painter.drawEllipse(point, HANDLE_RADIUS, HANDLE_RADIUS)
         if self._place_base is not None:
             ghost = QPolygonF([self._uv_to_screen(uv) for uv in self._place_uvs])

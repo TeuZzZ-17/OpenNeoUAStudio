@@ -1375,23 +1375,9 @@ class AssemblyWindow(
         self.poly_id_spin.valueChanged.connect(self._on_poly_id_changed)
         self.poly_id_spin.editingFinished.connect(
             lambda: self._on_poly_id_changed(self.poly_id_spin.value()))
-        self.poly_id_previous_button = QPushButton("<")
-        self.poly_id_previous_button.setEnabled(False)
-        self.poly_id_previous_button.setFixedWidth(36)
-        self.poly_id_previous_button.setToolTip("Previous polygon")
-        self.poly_id_previous_button.clicked.connect(
-            lambda: self._step_poly_id(-1))
-        self.poly_id_next_button = QPushButton(">")
-        self.poly_id_next_button.setEnabled(False)
-        self.poly_id_next_button.setFixedWidth(36)
-        self.poly_id_next_button.setToolTip("Next polygon")
-        self.poly_id_next_button.clicked.connect(
-            lambda: self._step_poly_id(1))
-        # "<" value ">" centered in the group, arrows on either side.
+        # The spin box alone (its own arrows step the polygon), centered in the group.
         poly_id_row.addStretch(1)
-        poly_id_row.addWidget(self.poly_id_previous_button)
         poly_id_row.addWidget(self.poly_id_spin)
-        poly_id_row.addWidget(self.poly_id_next_button)
         poly_id_row.addStretch(1)
         model_layout.addWidget(self.poly_id_box)
 

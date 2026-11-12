@@ -89,26 +89,12 @@ class _PolygonMappingMixin:
             spin.setValue(0)
         spin.blockSignals(False)
         spin.setEnabled(enabled)
-        previous = getattr(self, "poly_id_previous_button", None)
-        following = getattr(self, "poly_id_next_button", None)
-        if previous is not None:
-            previous.setEnabled(enabled and spin.value() > 0)
-        if following is not None:
-            following.setEnabled(enabled and spin.value() + 1 < count)
 
     def _on_poly_id_changed(self, poly_id: int) -> None:
         if self._mapping_index is None \
                 or not (0 <= poly_id < self._mapping_index.poly_count):
             return
         self._on_polygon_picked(poly_id, False)
-
-    def _step_poly_id(self, direction: int) -> None:
-        if self._mapping_index is None:
-            return
-        target = max(
-            0, min(self._mapping_index.poly_count - 1,
-                   self.poly_id_spin.value() + int(direction)))
-        self.poly_id_spin.setValue(target)
 
     def _rebuild_workbench(self, family: AssetFamily,
                            owner: str | None = None) -> None:

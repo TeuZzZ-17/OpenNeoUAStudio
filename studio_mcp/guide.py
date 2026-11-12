@@ -120,6 +120,13 @@ Bake the light:     {"op":"auto_shade"}   (last step; offset=+20 darkens a selec
 New model from scratch: studio_new_model (empty, plain blocks kept), then loft / primitives with `swatch`.
 New model from an old one: export it, {"op":"clear"}, then build with create_primitive/add_polygons using
 `material` blocks the exported copy kept (studio_materials shows them; they keep their textures).
+
+ANM (animated parts). Studio calls every animated segment an ANM (the .ANM file of the engine); older text said FX.
+List them with studio_effects. Still polygon -> blinking/animated face: {"op":"animate_polygons","select":[...],
+"shifts":[[0,-36]],"frames":[[1,1500],[0,700]],"name":"GRNOS"}  (frames = [state, ms]; the face keeps its UVs as
+state 0). The polygon becomes an animated area.class block (drawn unshaded) and its .ANM is written beside the
+BASE, exactly like Studio's Add UV Phase / Overwrite. Clone / remove an animated part: add_fx / delete_fx
+(the `fx` argument is the ANM index from studio_effects). Whole-model spawn-in look: generate_genesis.
 """
 
 
