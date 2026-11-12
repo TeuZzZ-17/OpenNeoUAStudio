@@ -996,6 +996,9 @@ class WireframeEditorWindow(QMainWindow):
                 component.path.name for index, component in enumerate(self._components)
                 if self._component_dirty(index) or component.new_file
             ]
+            if not names and self._pending_component_values:
+                # Only a script link is waiting (e.g. after exporting a part).
+                names = [self._game_object.name]
             return names
         if not self.outline_editor.is_dirty:
             return []
@@ -1146,7 +1149,11 @@ class WireframeEditorWindow(QMainWindow):
 
         self._last_directory = output_path.parent
         if self._components:
-            # The vehicle keeps editing the files its script names; the copy is only listed.
+            # Vehicle/weapon mode: the exported copy replaces the part in the open
+            # entity and is queued as its script value (written by Overwrite).
+            if self._adopt_exported_component(output_path, saved_model):
+                return
+            # Outside the game data (or no script slot): the copy is only listed.
             self.game_file_browser.reload()
             self.game_file_browser.select_path(self._current_file_path)
             return
@@ -1156,6 +1163,46 @@ class WireframeEditorWindow(QMainWindow):
         self._current_file_path = output_path
         self.game_file_browser.reload()
         self._show_model(saved_model, output_path)
+
+    def _adopt_exported_component(self, output_path: Path, saved_model) -> bool:
+        """Switch the active part of the open entity to the file just exported.
+
+        The part keeps its script key; the new path is queued in
+        ``_pending_component_values`` like a newly added component, so Overwrite
+        writes the script line. Returns False when it cannot be linked.
+        """
+        active = self._components[self._active_component]
+        if not active.key or self._game_object is None:
+            return False
+        try:
+            from map_editor import bootstrap
+            install = bootstrap.installation()
+            if install is None:
+                return False
+            path = output_path.resolve()
+            relative = path.relative_to(install.data.resolve())
+            if any(i != self._active_component and part.path == path
+                   for i, part in enumerate(self._components)):
+                return False
+            snapshots = {Path(o[0]): Path(o[0]).read_bytes() for o in self._game_object.body_sources}
+        except (OSError, ValueError):
+            return False
+        self._script_snapshots.update(
+            {p: self._script_snapshots.get(p, content) for p, content in snapshots.items()})
+        self._pending_component_values[active.key] = relative.as_posix()
+        active.path = path
+        active.session = OutlineEditor.new_session(saved_model)
+        active.new_file = False
+        self._current_file_path = path
+        self._current_model = saved_model
+        self.outline_editor.restore_session(active.session)
+        self._update_reference_layers()
+        self.game_file_browser.set_pinned([(p.path, p.label) for p in self._components])
+        self.game_file_browser.reload()
+        self._refresh_document_panels(saved_model, path)
+        self.statusBar().showMessage(
+            f"{active.label} now uses {path.name}; Overwrite saves the script link.")
+        return True
 
     def _write_edited_file(self, output_path: Path) -> Path | None:
         if not self._current_model:
