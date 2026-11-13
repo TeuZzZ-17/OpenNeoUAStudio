@@ -7,9 +7,10 @@ from unittest.mock import patch
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-from PySide6.QtCore import QEvent, QPoint, QPointF, Qt
+from PySide6.QtCore import QEvent, QPoint, QPointF, QSignalBlocker, Qt
 from PySide6.QtGui import QColor, QImage, QMouseEvent, QPainter, QWheelEvent
-from PySide6.QtWidgets import QApplication, QMenu, QMessageBox
+from PySide6.QtTest import QTest
+from PySide6.QtWidgets import QApplication, QMenu, QMessageBox, QTreeWidgetItem
 
 from studio.rendering.asset_viewport import MODEL_EDIT_SELECTION_RED
 from studio.workbench.outline import OutlineCanvas, OutlineEditor
@@ -27,6 +28,41 @@ class WireframeEditorUiTests(unittest.TestCase):
         self.addCleanup(window.close)
         self.addCleanup(window.outline_editor.mark_clean)
         return window
+
+    def test_copy_path_context_menu_uses_clicked_row_without_opening_it(self):
+        window = self._window()
+        tree = window.game_file_browser.tree
+        with QSignalBlocker(tree):
+            tree.clear()
+            current = QTreeWidgetItem([r"Wireless\FIRST.SKL"])
+            clicked = QTreeWidgetItem([r"HUD  ·  Wireless\New\SECOND.SKL"])
+            clicked.setData(0, Qt.ItemDataRole.UserRole + 1, r"Wireless\New\SECOND.SKL")
+            tree.addTopLevelItems([current, clicked])
+            tree.setCurrentItem(current)
+        window.show()
+        self.app.processEvents()
+        clipboard = self.app.clipboard()
+        old_clipboard = clipboard.text()
+        self.addCleanup(clipboard.setText, old_clipboard)
+        with patch.object(QMenu, "exec", autospec=True,
+                          side_effect=lambda menu, _pos: menu.actions()[0]) as execute:
+            QTest.mouseClick(tree.viewport(), Qt.MouseButton.RightButton,
+                             pos=tree.visualItemRect(clicked).center())
+        execute.assert_called_once()
+        self.assertEqual(execute.call_args.args[0].actions()[0].text(), "Copy Path")
+        self.assertEqual(clipboard.text(), r"Wireless\New\SECOND.SKL")
+        self.assertEqual(window.statusBar().currentMessage(),
+                         r"Path copied: Wireless\New\SECOND.SKL")
+        self.assertIs(tree.currentItem(), current)
+        self.assertIsNone(window._current_file_path)
+
+    def test_copy_path_context_menu_ignores_empty_space(self):
+        window = self._window()
+        with QSignalBlocker(window.game_file_browser.tree):
+            window.game_file_browser.tree.clear()
+        with patch.object(QMenu, "exec", autospec=True) as execute:
+            window._show_game_file_context_menu(QPoint(5, 5))
+        execute.assert_not_called()
 
     def test_add_component_menu_keeps_all_types_available(self):
         from studio.assets.catalog import GameObject

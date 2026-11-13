@@ -1343,7 +1343,10 @@ def test_preview_tab_shows_effects_and_reloads_from_file(app, tmp_path):
         window._load_fx_context(UNIT, block, reference)
         panel = window.fx_panel
         assert _effect_rows(panel) == 3
-        assert panel.unit.flies and panel.unit.altitude == fx.DEFAULT_FLIGHT_ALTITUDE
+        assert panel.unit.flies and panel.unit.altitude == 300
+        assert panel.altitude_spin.value() == 300
+        panel.altitude_spin.setValue(450)
+        assert panel.unit.altitude == 450 and panel.altitude_slider.value() == 450
         assert panel.unit.dead.base_path == "Data/Models/Base/WRECK.BASE"
         # Hide one effect: the preview keeps only the others.
         _item(panel, 1).setCheckState(Qt.CheckState.Unchecked)

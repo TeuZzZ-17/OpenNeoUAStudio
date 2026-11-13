@@ -78,6 +78,28 @@ def _open_drawer(panel, app):
     return panel.code_drawer
 
 
+def test_effect_list_updates_comment_and_models_with_live_edits(app):
+    text = "new_vehicle 1\n" + EFFECT.replace(
+        "begin_fx", "begin_fx ; Frammenti") + "\nend\n"
+    document, _ = _document(text)
+    panel = DestructionFxPanel()
+    try:
+        panel.set_context(fx.CONTEXT_VEHICLE, document)
+        row = _item(panel, 0).text()
+        assert "Frammenti" in row and "1 VP: 129" in row
+        edited, _ = parse_effect_text(
+            EFFECT.replace("begin_fx", "begin_fx ; Spore")
+            .replace("vp_model = 129", "vp_model = 129\n    vp_model = 204\n"
+                     "    base_model = Data/Models/Spore.BASE"),
+            fx.CONTEXT_VEHICLE)
+        panel.apply_text_item(0, edited)
+        row = _item(panel, 0).text()
+        assert "Spore" in row and "Frammenti" not in row
+        assert "2 VP: 129, 204" in row and "BASE Spore.BASE" in row
+    finally:
+        panel.close()
+
+
 def test_invalid_or_extra_code_does_not_become_an_effect():
     for text in (EFFECT.removesuffix("end"), EFFECT + "\nenergy = 500", "end\n" + EFFECT):
         with pytest.raises(ValueError):

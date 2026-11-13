@@ -533,6 +533,12 @@ class FxBlock:
 
     lines: list[str]
 
+    @property
+    def comment(self) -> str:
+        """Comment on the begin_fx line, without changing the source text."""
+
+        return self.lines[0].partition(";")[2].strip() if self.lines else ""
+
     def rows(self) -> list[tuple[int, str, str]]:
         """Active (line index, lowercase key, value) rows of the body."""
 
@@ -2449,7 +2455,7 @@ def weapon_vps(unit: "UnitPhases", document: "FxDocument", weapons: dict,
 # Classes that fly: their preview starts in the air.
 FLYING_MODELS = frozenset({
     "plane", "heli", "flyer", "glider", "zeppelin", "cruiser", "ufo"})
-DEFAULT_FLIGHT_ALTITUDE = 500.0
+DEFAULT_FLIGHT_ALTITUDE = 300.0
 
 
 @dataclass(frozen=True)
@@ -4329,21 +4335,41 @@ def _scale_fx_size(scale_fx: ScaleFx, age_ms: float) -> float:
 # -- summaries ---------------------------------------------------------------
 
 def block_summary(block: FxBlock, context: str) -> str:
-    """One readable line, e.g. 'Visual · 3 VP · 0→2.5 · 800 ms'."""
+    """Summarize authored model IDs and file names alongside effect settings."""
 
     spec = interpret_block(block, context)
     mode = (block.value("mode") or MODE_VISUAL).casefold()
     parts = [mode.replace("_", " ").title()]
+    rows = block.rows()
+    model_values = [value for _, key, value in rows if key == "vp_model"]
+    if mode == MODE_PHYSICAL:
+        # The physical parser replaces its VP list when the key is repeated.
+        models = parse_int_list(model_values[-1], allow_zero=True) if model_values else []
+    else:
+        # A visual block adds one VP per line, in animation order.
+        models = [_stol(value)[0] for value in model_values]
+    if models:
+        parts.append(f"{len(models)} VP: {', '.join(map(str, models))}")
+
+    for key, label in (("base_model", "BASE"), ("3ds_model", "3DS")):
+        paths = [value for _, name, value in rows if name == key and value != "0"]
+        if mode == MODE_PHYSICAL:
+            paths = paths[-1:]
+        for path in paths:
+            filename = path.replace("\\", "/").rsplit("/", 1)[-1]
+            parts.append(f"{label} {filename}")
+
+    if mode == MODE_PHYSICAL:
+        impacts = block.value("vp_impact")
+        if impacts:
+            parts.append(f"Impact VP: {impacts.replace('|', ', ')}")
     if spec.mode == MODE_VISUAL and spec.visuals:
-        parts.append(f"{len(spec.visuals)} VP")
         sizes = [format_number(spec.start_size)]
         if spec.mid_size is not None:
             sizes.append(format_number(spec.mid_size))
         sizes.append(format_number(spec.end_size))
         parts.append("→".join(sizes))
         parts.append(f"{spec.duration} ms")
-    elif spec.mode == MODE_PHYSICAL and spec.vp_models:
-        parts.append(f"VP {'/'.join(str(vp) for vp in spec.vp_models)}")
     if spec.count != (1, 1):
         parts.append(f"×{format_range(*spec.count)}")
     return " · ".join(parts)

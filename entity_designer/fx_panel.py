@@ -447,6 +447,8 @@ class FxEffectsView(QWidget):
                     summary = parts[1] if len(parts) > 1 else ""
                     mode, _, detail = summary.partition(" · ")
                     title = f"{mode} · {trigger}"
+                    if isinstance(item, fx.FxBlock) and item.comment:
+                        title += f" · {item.comment}"
                 if level is not None:
                     color = COMPAT_STYLES[level].color
                 glyph, meaning = STATUS_GLYPHS.get(_issues_status(issues), ("", ""))

@@ -32,6 +32,7 @@ from PySide6.QtWidgets import (
     QLabel,
     QListWidget,
     QMainWindow,
+    QMenu,
     QMessageBox,
     QSplitter,
     QSizePolicy,
@@ -572,6 +573,12 @@ class WireframeEditorWindow(QMainWindow):
         self._start_new_session(mark_dirty=False)
 
     def eventFilter(self, watched, event) -> bool:
+        if (event.type() == QEvent.Type.MouseButtonPress
+                and event.button() == Qt.MouseButton.RightButton
+                and watched is self.game_file_browser.tree.viewport()):
+            # Do not select/open the clicked file just to copy its path.
+            self._show_game_file_context_menu(event.position().toPoint())
+            return True
         if event.type() == QEvent.Type.KeyPress and event.key() == Qt.Key.Key_Escape:
             self._finish_mirror_drag()
         if event.type() == QEvent.Type.ShortcutOverride:
@@ -587,6 +594,19 @@ class WireframeEditorWindow(QMainWindow):
                 event.accept()
                 return True
         return super().eventFilter(watched, event)
+
+    def _show_game_file_context_menu(self, position) -> None:
+        tree = self.game_file_browser.tree
+        item = tree.itemAt(position)
+        if item is None:
+            return
+        # Pinned rows prepend a role such as "HUD ·"; copy the path alone.
+        path = item.data(0, Qt.ItemDataRole.UserRole + 1) or item.text(0)
+        menu = QMenu(tree)
+        copy_action = menu.addAction("Copy Path")
+        if menu.exec(tree.viewport().mapToGlobal(position)) == copy_action:
+            QApplication.clipboard().setText(path)
+            self.statusBar().showMessage(f"Path copied: {path}")
 
     def _build_ui(self) -> None:
         side_panel = QWidget()
