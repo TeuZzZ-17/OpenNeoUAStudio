@@ -69,7 +69,7 @@ def usable_family(model: str) -> str | None:
     """"below" or "forward": the volumes the engine accepts for this weapon class.
 
     None when the class is not known here, so no advice is shown for it
-    (kamikaze and artillery_shell never use a volume).
+    (kamikaze, artillery_shell and orbiter never use a volume).
     """
 
     model = model.strip().casefold()
