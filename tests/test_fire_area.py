@@ -837,3 +837,28 @@ def test_external_fire_area_update_keeps_unsaved_effect_code(tmp_path):
         if window.fx_panel.text_session.dirty:
             window.fx_panel.text_session.revert(0)
         _close(app, window)
+
+
+def test_vehicle_target_capacity_and_all_weapon_slots_are_read():
+    from entity_designer.fire_area_units import find_firing_units
+    script = ("new_vehicle 171\nmodel = plane\nname = Ying\nvp_normal = 242\n"
+              "weapon_3 = 114\nnum_weapons = 4\nnum_weapons_3 = 3\nnum_targets = 2\nend\n")
+    units = find_firing_units(114, (), script)
+    assert len(units) == 1
+    assert units[0].projectiles == 3 and units[0].num_targets == 2
+
+
+def test_laser_preview_converges_distinct_muzzles_on_one_aim_point():
+    from entity_designer.fire_area_units import FiringUnit
+    app, window, _pytest = _weapon_window(fa.FireArea(box_forward=(100, 80, 1200)))
+    try:
+        window._fire_area_weapon_family = "both"
+        window._fire_area_units = [FiringUnit(
+            171, "Ying", 242, (30, 0, 20), "plane", 7, (1, 1, 1), (0, 0, 0), projectiles=3)]
+        window._fire_area_unit_id = 171
+        shots = window._fire_area_shots()
+        assert len(shots) == 3
+        assert len({launch for launch, target in shots}) == 3
+        assert len({target for launch, target in shots}) == 1
+    finally:
+        _close(app, window)

@@ -1861,7 +1861,7 @@ def _non_negative_int(text: str | None, default: int = 0) -> int:
 
 @dataclass(frozen=True)
 class TracerSpec:
-    """mesh_tracer_* of a weapon (TWeaponTracerConfig)."""
+    """tracer_* of a weapon (TWeaponTracerConfig)."""
 
     mesh: str
     tint: Tint = (255, 210, 80, 180)
@@ -1878,10 +1878,10 @@ class TracerSpec:
     pulse_speed: float = 0.0
 
 
-def parse_tracer(values: dict[str, str], prefix: str = "mesh_tracer_") -> TracerSpec | None:
+def parse_tracer(values: dict[str, str], prefix: str = "tracer_") -> TracerSpec | None:
     """Tracer the engine would start (ConfigureWeaponTracer), else None."""
 
-    if not values.get(prefix + "path"):
+    if not values.get(prefix + "3ds"):
         return None
 
     def bounded(text: str | None, maximum: float, default: float) -> float:
@@ -1915,7 +1915,7 @@ def parse_tracer(values: dict[str, str], prefix: str = "mesh_tracer_") -> Tracer
     if size_z <= 0.01 or size_x <= 0.01 or tint[3] <= 0:
         return None
     return TracerSpec(
-        mesh=values[prefix + "path"], tint=tint,
+        mesh=values[prefix + "3ds"], tint=tint,
         tint_head=(_tint_value(values, prefix + "head_tint", WHITE)
                    if prefix + "head_tint" in values else None),
         tint_tail=(_tint_value(values, prefix + "tail_tint", WHITE)
@@ -2334,29 +2334,27 @@ class LaserSpec:
     """model = laser: the beam is drawn instead of a flying projectile."""
 
     spacing: float = 40.0
-    mesh: str = ""
-    tint: Tint = WHITE
-    size_x: float = 5.0
-    size_y: float = 5.0
-    glow_rate: float = 1.0
-    impact_fade: float = 0.0
+    fade_in: float = 0.0
+    fade_out: float = 0.0
+    # laser_burn_decal_frequency: decals per 100 world units while the ground contact moves
+    # (a continuous burn strip). 0 = off; positive values are kept between 0.05 and 10.
+    burn_decal_frequency: float = 0.0
 
 
 def parse_laser(values: dict[str, str]) -> LaserSpec | None:
-    if values.get("model", "").casefold() not in ("laser", "vertical_laser"):
+    if values.get("model", "").casefold() != "laser":
         return None
+    parts = split_tuple(values.get("laser_fade_inout"), 2)
+    fades = tuple(_full_float(part) for part in parts) if parts else (0.0, 0.0)
+    if any(value is None or not math.isfinite(value) or value < 0 for value in fades):
+        fades = (0.0, 0.0)
+    fades = tuple(min(50000.0, value) for value in fades)
     spacing = _stof(values.get("laser_spacing", "40"))
-    size_parts = split_tuple(values.get("laser_mesh_size_xy"), 2) or ("5", "")
-    size_x = _stof(size_parts[0])
-    size_y = _full_float(size_parts[1])
+    burn = _stof(values.get("laser_burn_decal_frequency", "0"))
     return LaserSpec(
-        spacing=min(max(spacing, 5.0), 400.0) if math.isfinite(spacing) and spacing > 0 else 40.0,
-        mesh=values.get("laser_mesh_path", ""),
-        tint=_tint_value(values, "laser_mesh_tint", WHITE),
-        size_x=size_x if math.isfinite(size_x) and size_x > 0 else 5.0,
-        size_y=size_y if size_y and size_y > 0 else (size_x if size_x > 0 else 5.0),
-        glow_rate=max(0.0, min(10.0, _stof(values.get("laser_mesh_glow_rate", "1")))),
-        impact_fade=max(0.0, _stof(values.get("laser_mesh_impact_fade_length", "0"))))
+        spacing=min(max(spacing, 20.0), 500.0) if math.isfinite(spacing) and spacing > 0 else 40.0,
+        fade_in=fades[0], fade_out=fades[1],
+        burn_decal_frequency=min(max(burn, 0.05), 10.0) if math.isfinite(burn) and burn > 0 else 0.0)
 
 
 @dataclass(frozen=True)
@@ -3117,37 +3115,6 @@ class PreviewSimulation:
         self._tracks.append(PreviewTrack(
             -1, "Unit · genesis plasma", start, end, approximate=True))
 
-    def _laser_mesh_items(self, payload, time_ms: float) -> list[PreviewItem]:
-        """Mesh laser: one beam from the muzzle to the contact, with a glow."""
-
-        spec, launch, target = payload
-        length = math.dist(launch, target)
-        if length <= 0.01:
-            return []
-        direction = tuple((t - l) / length for l, t in zip(launch, target))
-        basis = _tracer_rotation(direction)
-        label = "laser " + spec.mesh.replace("\\", "/").rsplit("/", 1)[-1]
-        pieces = 8 if spec.impact_fade > 0 else 1
-        fade = min(spec.impact_fade, length)
-        items = []
-        for index in range(pieces):
-            low, high = index / pieces, (index + 1) / pieces
-            middle = (low + high) * 0.5
-            alpha = 1.0
-            if pieces > 1 and fade > 0 and middle * length > length - fade:
-                ratio = (middle * length - (length - fade)) / fade
-                alpha = 1.0 + (0.02 - 1.0) * min(1.0, ratio)
-            center = tuple(l + (t - l) * middle for l, t in zip(launch, target))
-            for additive, power in ((False, 1.0), (True, min(1.0, spec.glow_rate * 0.1))):
-                if power <= 0:
-                    continue
-                tint = (*spec.tint[:3], round(spec.tint[3] * alpha))
-                items.append(PreviewItem(
-                    -3, "tracer", 0, center, basis,
-                    (spec.size_x, spec.size_y, length / pieces), power, tint,
-                    label, (spec.mesh,), additive))
-        return items
-
     def _build_vehicle_sequence(self) -> None:
         unit = self.unit
         death = max(SEQUENCE_PREROLL_MS, self._decoration_window())
@@ -3382,10 +3349,6 @@ class PreviewSimulation:
         spec = unit.laser
         length = math.dist(launch, target)
         if length <= 0.01:
-            return
-        if spec.mesh:
-            self._events.append((-3, "laser_mesh", start, end,
-                                 (spec, tuple(launch), tuple(target))))
             return
         # Legacy beam: normal-state models every ``spacing`` units.
         count = min(120, int(length // spec.spacing) + 1)
@@ -3912,12 +3875,15 @@ class PreviewSimulation:
                 ref, positions, heading, owner = payload
                 tint = owner.tint
                 rotation = _mat_mul(heading, owner.visual_matrix(time_ms))
-                items.extend(PreviewItem(
-                    -1, "laser", ref.vp, position, rotation, (1.0, 1.0, 1.0), 1.0,
-                    None if tint in (None, WHITE) else tint, "laser beam",
-                    _external_paths(ref)) for position in positions)
-            elif kind == "laser_mesh":
-                items.extend(self._laser_mesh_items(payload, time_ms))
+                for index, position in enumerate(positions):
+                    distance = (index + 0.5) * owner.laser.spacing
+                    total = len(positions) * owner.laser.spacing
+                    alpha = min(1.0,
+                                distance / owner.laser.fade_in if owner.laser.fade_in > 0 else 1.0,
+                                (total-distance) / owner.laser.fade_out if owner.laser.fade_out > 0 else 1.0)
+                    items.append(PreviewItem(
+                        -1, "laser", ref.vp, position, rotation, (1.0, 1.0, 1.0), alpha,
+                        None if tint in (None, WHITE) else tint, "laser beam", _external_paths(ref)))
             elif kind == "debuff":
                 ref, position, spec = payload
                 age = time_ms - start

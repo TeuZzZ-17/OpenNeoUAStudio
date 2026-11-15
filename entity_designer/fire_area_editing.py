@@ -164,10 +164,13 @@ class FireAreaEditingMixin:
         muzzle = self._fire_area_muzzle()
         tilt = self.project.fire_area.max_inclination if self._fire_area_tilt_applies() else 0.0
         shots = []
+        shared_target = fa.shot_path(shape, size, muzzle, 0.0, tilt, self._fire_area_aim)[1]
         for x in (unit.muzzle_xs() if unit is not None else [0.0]):
             shots.append(fa.shot_path(
                 shape, size, (muzzle[0] + x, muzzle[1], muzzle[2]), 0.0,
                 tilt, self._fire_area_aim))
+        if self._fire_area_weapon_family == "both":
+            shots = [(launch, shared_target) for launch, _target in shots]
         return shots
 
     def _fire_area_extra_vps(self) -> set[int]:
@@ -199,6 +202,8 @@ class FireAreaEditingMixin:
 
     def _fire_area_note(self) -> str:
         family = self._fire_area_weapon_family
+        if family == "both":
+            return "Laser requires one volume. The preview converges the vehicle muzzle beams on one aim point; num_targets controls target distribution in game."
         if family == "below":
             return "This weapon is dropped: the engine accepts only the Below volumes."
         if family == "forward":
@@ -219,7 +224,9 @@ class FireAreaEditingMixin:
             self._fire_area_handle = ""
         _errors, warnings = fire_area_problems(area)
         family = self._fire_area_weapon_family
-        if shape is not None and family and fa.is_below(shape) != (family == "below"):
+        if family == "both" and area.active_shape() is None:
+            warnings.append("Laser requires exactly one valid fire box or cone; the engine rejects this weapon at startup.")
+        if shape is not None and family in ("below", "forward") and fa.is_below(shape) != (family == "below"):
             warnings.append(
                 f"{fa.SHAPE_LABELS[shape]} is not used by this weapon class: "
                 "the engine ignores it.")

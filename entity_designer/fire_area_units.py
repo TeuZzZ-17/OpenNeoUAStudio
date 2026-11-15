@@ -19,9 +19,9 @@ from entity_designer.destruction_fx import (
 )
 from entity_designer.script_model import find_script_blocks
 
-_WEAPON_KEYS = ("weapon", "weapon_2")
+_WEAPON_KEYS = ("weapon", "weapon_2", "weapon_3", "weapon_4")
 # Projectiles per firing event of each weapon slot, like the engine's num_weapons keys.
-_COUNT_KEYS = {"weapon": "num_weapons", "weapon_2": "num_weapons_2"}
+_COUNT_KEYS = {"weapon": "num_weapons", **{f"weapon_{i}": f"num_weapons_{i}" for i in (2, 3, 4)}}
 FIRE_X_MAX_SLOTS = 256
 MAX_PREVIEW_PROJECTILES = 8
 FIRE_X_MODES = frozenset({"sequence", "random", "salve_sequence", "salve_mirror"})
@@ -61,6 +61,7 @@ class FiringUnit:
     fire_x_mode: str = "vanilla"
     # (start, step, slots) of a valid fire_x rack, only for sequence / random.
     rack: tuple[float, float, int] | None = None
+    num_targets: int = 0
     projectiles: int = 1
     external: tuple[str, ...] = ()
     vp_zero_valid: bool = False
@@ -177,6 +178,7 @@ def unit_from_values(vehicle_id: int, values: dict[str, str],
         overeof=_number(values.get("overeof")),
         scale=_numbers(values.get("scale_xyz"), (1.0, 1.0, 1.0)),
         rotation=_numbers(values.get("rotation_xyz"), (0.0, 0.0, 0.0)),
+        num_targets=max(0, min(255, script_int(values.get("num_targets", "0")))),
         fire_x_mode=mode,
         rack=_rack(values, mode),
         projectiles=_projectiles(values.get(_COUNT_KEYS[key])),

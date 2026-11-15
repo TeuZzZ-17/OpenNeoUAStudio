@@ -8,7 +8,7 @@ from .test_special_objects import app, win
 SCRIPT = '''
 new_cloud 2
     name = spores
-    mesh_3ds = Data/Models/3ds/Spore.3ds
+    3ds = Data/Models/3ds/Spore.3ds
     count = 900
     lifetime_minmax = 9000~5000
     scale_xyz = 3.2|0|3.2
@@ -19,7 +19,7 @@ new_cloud 7
     count = 10
 end
 new_cloud 1 ; first
-    mesh_3ds = x.3ds
+    3ds = x.3ds
     count = 5
 end
 '''
@@ -75,7 +75,7 @@ def test_fade_and_simulation_stay_bounded():
 
 
 def test_map_count_keeps_game_density():
-    profile = CloudProfile(1, mesh_3ds='x.3ds', count=100, spawn_radius=(1000.0, 500.0, 1000.0))
+    profile = CloudProfile(1, path_3ds='x.3ds', count=100, spawn_radius=(1000.0, 500.0, 1000.0))
     assert map_particle_count(profile, 4000.0 * 4000.0) == 400
     assert map_particle_count(profile, 1000.0) == 100
     assert map_particle_count(profile, 1e12) == 4000

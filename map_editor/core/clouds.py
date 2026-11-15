@@ -28,7 +28,9 @@ FALLBACK_LIFETIME_MS = 1000
 class CloudProfile:
     id: int
     name: str = ''
-    mesh_3ds: str = ''
+    vp: int = 0
+    path_3ds: str = ''
+    base: str = ''
     count: int = 0
     spawn_radius: tuple = (0.0, 0.0, 0.0)
     spawn_offset: tuple = (0.0, 0.0, 0.0)
@@ -69,8 +71,8 @@ def _tint(value: str):
 
 
 def _finish(profile: CloudProfile):
-    """Same acceptance rules as the engine: a mesh and a positive count are required."""
-    if not profile.mesh_3ds or profile.count <= 0:
+    """Same acceptance rules as the engine: a vp, 3ds or base and a positive count are required."""
+    if not (profile.vp > 0 or profile.path_3ds or profile.base) or profile.count <= 0:
         return None
     profile.count = min(profile.count, MAX_COUNT)
     low, high = profile.lifetime
@@ -116,8 +118,15 @@ def parse_cloud_profiles(text: str) -> dict[int, CloudProfile]:
         key, value = key.strip().lower(), value.strip()
         if key == 'name':
             current.name = value
-        elif key == 'mesh_3ds':
-            current.mesh_3ds = value
+        elif key == '3ds':
+            current.path_3ds = value
+        elif key == 'base':
+            current.base = value
+        elif key == 'vp':
+            try:
+                current.vp = int(value, 0)
+            except ValueError:
+                pass
         elif key == 'count':
             try:
                 current.count = int(value, 0)

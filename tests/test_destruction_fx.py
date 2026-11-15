@@ -328,9 +328,9 @@ LOOK = (
     "    spin_xyz = 0|0|2\n"
     "    vp_trail_tint = 50|150|255|130\n"
     "    vp_trail_scale_xyz = 2|1|0.4\n"
-    "    mesh_tracer_path = Data/Models/3ds/Tracer.3ds\n"
-    "    mesh_tracer_tint = 255|180|60|120\n"
-    "    mesh_tracer_size_xyz = 1|1|80\n"
+    "    tracer_3ds = Data/Models/3ds/Tracer.3ds\n"
+    "    tracer_tint = 255|180|60|120\n"
+    "    tracer_size_xyz = 1|1|80\n"
     "    decoration_fx_mode = periodic\n"
     "    decoration_fx_vp = 224\n"
     "    decoration_fx_interval = 300~300\n"
@@ -370,12 +370,12 @@ def test_look_keys_are_read_from_the_top_level_only():
 
 
 def test_tracer_needs_path_and_valid_sizes():
-    base = {"mesh_tracer_path": "Data/a.3ds"}
+    base = {"tracer_3ds": "Data/a.3ds"}
     assert fx.parse_tracer(base) is not None
     assert fx.parse_tracer({}) is None
-    assert fx.parse_tracer({**base, "mesh_tracer_size_xyz": "3|3|0"}) is None
-    assert fx.parse_tracer({**base, "mesh_tracer_tint": "1|2|3|0"}) is None
-    spec = fx.parse_tracer({**base, "mesh_tracer_head_size": "9"})
+    assert fx.parse_tracer({**base, "tracer_size_xyz": "3|3|0"}) is None
+    assert fx.parse_tracer({**base, "tracer_tint": "1|2|3|0"}) is None
+    spec = fx.parse_tracer({**base, "tracer_head_size": "9"})
     assert spec.head_size == 9.0 and spec.tail_size is None
     assert spec.tint == (255, 210, 80, 180) and spec.size_z == 300.0
 
@@ -431,9 +431,9 @@ def test_tracer_trails_behind_the_projectile_and_ends_at_impact():
 
 def test_tapered_tracer_is_split_and_glow_adds_additive_layers():
     spec = fx.parse_tracer({
-        "mesh_tracer_path": "Data/a.3ds",
-        "mesh_tracer_size_xyz": "4|4|300", "mesh_tracer_tail_size": "0",
-        "mesh_tracer_glow_rate": "5"})
+        "tracer_3ds": "Data/a.3ds",
+        "tracer_size_xyz": "4|4|300", "tracer_tail_size": "0",
+        "tracer_glow_rate": "5"})
     unit = fx.UnitPhases(normal=fx.VisualRef(60), weapon=True, tracer=spec)
     simulation = _weapon_simulation(unit)
     pieces = [i for i in simulation.items_at(simulation.tracks[0].end * .9)
@@ -677,8 +677,8 @@ def test_weapon_motion_moves_the_model_off_the_line_and_freezes_at_impact():
 def test_tracer_follows_chaos_instead_of_a_straight_line():
     motion = fx.parse_motion({"chaos_factor": "2", "chaos_radius": "30"})
     spec = fx.parse_tracer({
-                            "mesh_tracer_path": "Data/a.3ds",
-                            "mesh_tracer_size_xyz": "3|3|200"})
+                            "tracer_3ds": "Data/a.3ds",
+                            "tracer_size_xyz": "3|3|200"})
     unit = fx.UnitPhases(normal=fx.VisualRef(60), weapon=True, tracer=spec,
                          motion=motion)
     simulation = _weapon_simulation(unit)
@@ -1160,18 +1160,28 @@ def test_laser_draws_a_beam_of_models_from_the_muzzle_to_the_contact():
     assert not [i for i in simulation.items_at(100) if i.kind == "unit"]
 
 
-def test_mesh_laser_is_one_stretched_beam_with_a_glow():
+def test_laser_spatial_fades_apply_to_both_ends():
     laser = fx.weapon_def_from_text(125, (
-        "new_weapon 125\n    model = laser\n    vp_normal = 60\n"
-        "    laser_mesh_path = Data/Models/3ds/laser.3ds\n"
-        "    laser_mesh_size_xy = 8|0\n    laser_mesh_glow_rate = 5\n"
-        "    laser_mesh_tint = 10|20|30|200\nend\n"))
+        "new_weapon 125\nmodel = laser\nvp_normal = 60\n"
+        "laser_spacing = 40\nlaser_fade_inout = 200|200\nend\n"))
     simulation = _weapon_simulation(__import__("dataclasses").replace(laser.unit, altitude=800))
-    pieces = [i for i in simulation.items_at(100) if i.kind == "tracer"]
-    body = [i for i in pieces if not i.additive]
-    assert len(body) == 1 and body[0].scale == pytest.approx((8.0, 8.0, 800.0))
-    assert body[0].tint == (10, 20, 30, 200) and body[0].external == ("Data/Models/3ds/laser.3ds",)
-    assert [i for i in pieces if i.additive][0].alpha == pytest.approx(0.5)
+    pieces = [i for i in simulation.items_at(100) if i.kind == "laser"]
+    assert pieces[0].alpha < pieces[len(pieces)//2].alpha
+    assert pieces[-1].alpha < pieces[len(pieces)//2].alpha
+    assert laser.unit.laser.fade_in == 200 and laser.unit.laser.fade_out == 200
+
+
+def test_laser_burn_decal_frequency_is_read_with_the_engine_limits():
+    def frequency(text):
+        return fx.weapon_def_from_text(125, (
+            "new_weapon 125\nmodel = laser\nvp_normal = 60\n" + text + "end\n")).unit.laser.burn_decal_frequency
+    assert frequency("laser_burn_decal_frequency = 5\n") == 5
+    assert frequency("laser_burn_decal_frequency = 0.5\n") == 0.5
+    assert frequency("laser_burn_decal_frequency = 0.001\n") == 0.05
+    assert frequency("laser_burn_decal_frequency = 99999\n") == 10
+    assert frequency("laser_burn_decal_frequency = -5\n") == 0
+    assert frequency("laser_burn_decal_frequency = abc\n") == 0
+    assert frequency("") == 0
 
 
 def test_artillery_barrage_falls_from_its_arc_height_at_the_shell_speed():
@@ -1366,3 +1376,11 @@ def test_preview_tab_shows_effects_and_reloads_from_file(app, tmp_path):
     finally:
         window._modified = False
         window.close()
+
+
+def test_laser_aggregate_fades_validate_the_whole_tuple():
+    for raw, expected in (("90|90", (90, 90)), ("0|90", (0, 90)),
+                          ("60000|20", (50000, 20)), ("-1|90", (0, 0)),
+                          ("nan|90", (0, 0)), ("90", (0, 0)), ("90|90|90", (0, 0))):
+        spec = fx.parse_laser({"model": "laser", "laser_fade_inout": raw})
+        assert (spec.fade_in, spec.fade_out) == expected

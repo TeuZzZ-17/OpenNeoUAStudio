@@ -49,9 +49,9 @@ class CloudOverlay:
     def _prepare(self, profile):
         panel = self.window.level_panel
         doc = self.window.view.doc
-        key = (str(panel.catalog.installation.data), profile.mesh_3ds)
+        key = (str(panel.catalog.installation.data), profile.path_3ds)
         if key != self._mesh_key:
-            self._mesh = load_cloud_mesh(panel.catalog.installation.data, profile.mesh_3ds)
+            self._mesh = load_cloud_mesh(panel.catalog.installation.data, profile.path_3ds)
             self._mesh_key = key
             self._simulation = None
         if self._mesh is None:

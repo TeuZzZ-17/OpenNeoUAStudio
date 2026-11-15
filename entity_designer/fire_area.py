@@ -73,8 +73,10 @@ def usable_family(model: str) -> str | None:
     """
 
     model = model.strip().casefold()
-    if model in ("bomb", "homing_bomb", "vertical_laser"):
+    if model in ("bomb", "homing_bomb"):
         return "below"
+    if model == "laser":
+        return "both"
     if model in ("rocket", "missile", "grenade", "arc_grenade", "laser"):
         return "forward"
     return None
