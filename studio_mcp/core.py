@@ -371,6 +371,90 @@ def export_model(source: Source, out_dir: str, base_name: str, skeleton_stem: st
             "use_in_cfg": "Data/" + base_file.relative_to(data_root()).as_posix() if _is_under(base_file, data_root()) else str(base_file)}
 
 
+def clone_loose_model(source: Source, out_dir: str, base_name: str, skeleton_stem: str) -> dict:
+    """Clone one loose BASE and all of its resolved loose dependencies into a new folder.
+
+    Replacing a same-length skeleton reference keeps the original BASE chunks intact. This operation
+    deliberately refuses multi-object families and resources available only in SET.BAS: copying an
+    incomplete family without saying so would make an apparently valid restoration unsafe to install.
+    """
+    if source.set_object is not None:
+        raise McpToolError("Use studio_export_model for a Set.BAS object; this tool clones a loose BASE")
+    if not re.fullmatch(r"[A-Za-z0-9_-]{1,64}(?:\.BASE)?", base_name, re.I):
+        raise McpToolError("base_name must be a plain file name, without a folder")
+    target_dir = ensure_writable(out_dir)
+    if target_dir.exists():
+        raise McpToolError(f"Destination already exists; choose a new folder: {target_dir}")
+    family = load_family(source)
+    objects = family.all_objects()
+    if len(objects) != 1 or objects[0].skeleton is None or objects[0].skeleton_ref is None:
+        raise McpToolError("Cloning currently requires exactly one object with a resolved skeleton")
+    obj = objects[0]
+    old_path = obj.base_object.skeleton_name
+    old_stem = Path(old_path.replace("\\", "/")).stem
+    if not re.fullmatch(r"[A-Za-z0-9_]+", skeleton_stem) or len(skeleton_stem) != len(old_stem):
+        raise McpToolError(f"skeleton_stem must have {len(old_stem)} safe characters like '{old_stem}'")
+    if skeleton_stem.casefold() == old_stem.casefold():
+        raise McpToolError("Choose a different skeleton_stem to avoid resource clashes")
+    old_bytes = old_path.encode("latin-1")
+    new_path = old_path[:len(old_path) - len(Path(old_path.replace("\\", "/")).name)] + skeleton_stem + Path(old_path.replace("\\", "/")).suffix
+    new_bytes = new_path.encode("latin-1")
+    payload = source.base_path.read_bytes()
+    if len(old_bytes) != len(new_bytes) or payload.count(old_bytes) != 1:
+        raise McpToolError("Could not uniquely replace the skeleton reference in the BASE")
+    payload = payload.replace(old_bytes, new_bytes, 1)
+    if obj.skeleton_ref.path is None:
+        raise McpToolError("The skeleton is not a loose file; export it before cloning")
+
+    files = {f"{skeleton_stem}.sklt": Path(obj.skeleton_ref.path).read_bytes()}
+    dependency_sources = {f"{skeleton_stem}.sklt": str(obj.skeleton_ref.path)}
+    for refs in (family.texture_refs, family.animation_refs):
+        for logical, ref in refs.items():
+            if ref.path is None:
+                raise McpToolError(f"Dependency {logical} is missing or only in SET.BAS; export it first")
+            name = Path(logical.replace("\\", "/")).name
+            if not name or name in (".", ".."):
+                raise McpToolError(f"Invalid dependency name: {logical}")
+            data = Path(ref.path).read_bytes()
+            previous = next((key for key in files if key.casefold() == name.casefold()), None)
+            if previous and files[previous] != data:
+                raise McpToolError(f"Conflicting dependencies named {name}")
+            key = previous or name
+            files[key] = data
+            dependency_sources[key] = str(ref.path)
+    final_name = base_name if base_name.lower().endswith(".base") else base_name + ".BASE"
+    if any(name.casefold() == final_name.casefold() for name in files):
+        raise McpToolError(f"BASE name conflicts with a dependency: {final_name}")
+
+    target_dir.parent.mkdir(parents=True, exist_ok=True)
+    with tempfile.TemporaryDirectory(prefix="onua_clone_", dir=target_dir.parent) as tmp:
+        staging = Path(tmp)
+        for name, data in files.items():
+            (staging / name).write_bytes(data)
+        staged_base = staging / final_name
+        staged_base.write_bytes(payload)
+        clone_source = Source(staged_base, source.setbas_path, final_name)
+        cloned = load_family(clone_source)
+        cloned_objects = cloned.all_objects()
+        if len(cloned_objects) != 1 or cloned_objects[0].skeleton is None:
+            raise McpToolError("Cloned BASE did not reload with its skeleton")
+        clone_obj = cloned_objects[0]
+        if (clone_obj.skeleton.points != obj.skeleton.points or
+                clone_obj.skeleton.polygons != obj.skeleton.polygons or
+                len(clone_obj.base_object.ades) != len(obj.base_object.ades)):
+            raise McpToolError("Cloned model differs from the original geometry or materials")
+        for refs in (cloned.texture_refs, cloned.animation_refs):
+            for logical, ref in refs.items():
+                if ref.path is None or Path(ref.path).resolve().parent != staging.resolve():
+                    raise McpToolError(f"Cloned dependency did not resolve inside the new folder: {logical}")
+        validation = validate(clone_source)
+        os.replace(staging, target_dir)
+    base_file = target_dir / final_name
+    return {"base_file": str(base_file), "skeleton_file": str(target_dir / f"{skeleton_stem}.sklt"),
+            "copied_dependencies": sorted(files), "dependency_sources": dependency_sources, "validation": validation,
+            "use_in_cfg": "Data/" + base_file.relative_to(data_root()).as_posix() if _is_under(base_file, data_root()) else str(base_file)}
+
+
 # Small Set1 vehicles used as an empty starting shell, one per skeleton-name length (the BASE stores that length).
 NEW_MODEL_DONORS = {6: "set1:VP_MIG", 7: "set1:VP_JET1", 8: "set1:VP_FLSML"}
 

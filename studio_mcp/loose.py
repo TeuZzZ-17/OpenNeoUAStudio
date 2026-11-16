@@ -106,7 +106,7 @@ class LooseModel:
         self.base_bytes = base_path.read_bytes() if needs_loose else b""
         self._orig_points = [tuple(p) for p in self.model.points]
         self._orig_polygons = [list(p) for p in self.model.polygons]
-        self._orig_blocks = copy.deepcopy([(b.atts, b.olpl) for b in self.blocks])
+        self._orig_blocks = self._block_states()
         self._orig_unmapped = len(self.mapping().unmapped)
         self.block_memory = self._remember_blocks()
         self.log: list[str] = []
@@ -402,6 +402,15 @@ class LooseModel:
 
     # --- commit -------------------------------------------------------------------
 
+    def _block_states(self) -> list:
+        # Texture-only changes do not alter ATTS or UVs. Track the material and
+        # its serialized template as well, otherwise commit can discard them.
+        return copy.deepcopy([
+            (b.atts, b.olpl, _block_material_metadata(b), b.ade_poly_id,
+             b.payload_form_type, b.source_objt_bytes)
+            for b in self.blocks
+        ])
+
     @property
     def points_changed(self) -> bool:
         return [tuple(p) for p in self.points] != self._orig_points
@@ -412,7 +421,7 @@ class LooseModel:
 
     @property
     def blocks_changed(self) -> bool:
-        return copy.deepcopy([(b.atts, b.olpl) for b in self.blocks]) != self._orig_blocks
+        return self._block_states() != self._orig_blocks
 
     @property
     def dirty(self) -> bool:
@@ -488,6 +497,8 @@ class LooseModel:
             if asset.root is None or len(asset.root.ades) != len(self.blocks):
                 raise core.McpToolError("Staged BASE failed to re-parse; nothing was written")
             for saved, current in zip(asset.root.ades, self.blocks):
+                if _block_material_metadata(saved) != _block_material_metadata(current):
+                    raise core.McpToolError("Staged BASE material differs from the edit; nothing was written")
                 if [tuple(vars(e).values()) for e in saved.atts] != [tuple(vars(e).values()) for e in current.atts]:
                     raise core.McpToolError("Staged BASE material mapping differs from the edit; nothing was written")
                 if not current.uses_atts_only_mapping and \

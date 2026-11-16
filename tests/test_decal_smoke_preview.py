@@ -30,7 +30,7 @@ def test_preview_smoke_uses_round_puffs_and_stops():
 
 
 def test_effect_without_a_model_draws_nothing():
-    base = ' effect_base = Data/Models/Base/New/Effect_Smoke/Effect_Smoke.BASE\n'
+    base = ' effect_base = Data/Models/Base/New/Shared/Effect_Smoke/Effect_Smoke.BASE\n'
     for rows in (' effect_count = 5\n effect_active_time = 2000',
                  ' effect_mode = rise\n' + base + ' effect_active_time = 2000'):
         sim=simulation(rows)
@@ -68,7 +68,7 @@ def test_original_vp_pulses_use_active_set_without_external_mesh():
 
 
 def test_base_model_is_an_effect_source():
-    path = 'Data/Models/Base/New/Effect_Smoke/Effect_Smoke.BASE'
+    path = 'Data/Models/Base/New/Shared/Effect_Smoke/Effect_Smoke.BASE'
     sim = simulation(f' effect_mode = ground_pulse\n effect_base = {path}\n effect_active_time = 4000\n effect_fade_inout = 0|0')
     pulse = next(item for item in sim.items_at(IMPACT_MS + 30)
                  if item.label == 'decal mesh pulse')

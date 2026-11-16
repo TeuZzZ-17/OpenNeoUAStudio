@@ -511,6 +511,17 @@ def _existing_file(folder: Path, name: str) -> Path:
     return current
 
 
+def _skeleton_target(ctx: SetContext, logical: str) -> Path:
+    """Place new skeletons where the runtime can open the unembedded resource."""
+    name = Path(logical.replace("\\", "/")).name
+    if ctx.doc.number in LOOSE_SETS:
+        return _existing_file(_loose_folder(ctx, "SKLT"), name)
+    # Outside Set1-Set7 there is no Runtime Loose lookup; normal rsrc reads
+    # truncate .sklt to the legacy .skl extension.
+    legacy = str(Path(logical.replace("\\", "/")).with_suffix(".skl"))
+    return _existing_file(ctx.folder, legacy)
+
+
 def _target_palette(ctx: SetContext):
     return textures.set_palette(f"set{ctx.doc.number}")
 
@@ -558,6 +569,11 @@ def op_add_texture(ctx, name=None, layers=None, source: str = "", size=None, rep
 
 def _texture_bytes(ctx: SetContext, name: str, ref, texture_set: str) -> bytes | None:
     """The texture a model uses, re-mapped to this set's palette, or None when the set already has it."""
+    if Path(name).stem.casefold() in {"fx1", "fx2", "fx3"}:
+        # The engine resolves these names through its shared HI effect atlases.
+        # Installing a loose namesake can change effects throughout the set.
+        ctx.notes.append(f"{name}: retained the set's shared FX atlas; no loose replacement was installed")
+        return None
     path = getattr(ref, "path", None)
     if getattr(ref, "status", "") == "setbas":
         return None
@@ -583,7 +599,7 @@ def op_install_model(ctx, model=None, name=None, replace=None, collision="same",
                      shield=None, collision_mode=None, effects=None, comment=None, texture_set: str = "",
                      save_as=None):
     """Bring a loose model (built with the model tools, e.g. Models/Base/New/Tower_Intact/NXTOWR1.BASE) into
-    this set: the BASE goes to Objects/<name>.bas, its skeleton to Skeleton/, missing textures and animations
+    this set: the BASE goes to Objects/<name>.bas, its skeleton to the runtime-readable set path, missing textures and animations
     (re-mapped to this set's palette) where the engine reads them, and a model row is added (or `replace` = an
     existing row now shows the new model; buildings and sectors using it follow).
     name: the row's BASE name (default the file name; vanilla damage chains use XX_NAME, XXxNAME, XXyNAME,
@@ -622,7 +638,7 @@ def op_install_model(ctx, model=None, name=None, replace=None, collision="same",
         if archive is not None and archive.find(Path(logical).name, "sklt.class"):
             raise core.McpToolError(f"skeleton {Path(logical).name} already exists in this SET.BAS: export the "
                                     "model again with a new skeleton_stem")
-        ctx.pending[_existing_file(ctx.folder, logical)] = Path(ref.path).read_bytes()
+        ctx.pending[_skeleton_target(ctx, logical)] = Path(ref.path).read_bytes()
         skeletons.append(logical)
     copied = []
     for kind, refs in (("ILBM", family.texture_refs), ("ANM", family.animation_refs)):
@@ -655,7 +671,7 @@ def op_install_model(ctx, model=None, name=None, replace=None, collision="same",
                                                                   or core.under_data(collision).is_file()):
         source = core.resolve_existing(collision)
         sklt = f"Skeleton/{source.name}"
-        ctx.pending[_existing_file(ctx.folder, sklt)] = source.read_bytes()
+        ctx.pending[_skeleton_target(ctx, sklt)] = source.read_bytes()
     else:
         sklt = str(collision)
     row = with_fields(template, base=row_name, sklt=sklt,

@@ -13,14 +13,16 @@ START = """WORKFLOW (read-only steps are always safe)
    Add label_points / label_polygons / highlight_polygons (selectors) to SEE the numbers the edit tools need.
 3. Make an editable copy: studio_export_model('set1:VPwGLID2', out_dir, base_name, skeleton_stem).
    The skeleton_stem must be as long as the original (VPWGLID2 -> VPKGLID2) and different.
+   For a single-object loose BASE with loose resources, studio_clone_loose_model copies its skeleton,
+   textures and animations to a new folder. It refuses missing or embedded-only dependencies.
    A NEW design instead starts empty: studio_new_model(out_dir, base_name, skeleton_stem) - see studio_help('design').
 4. Edit. studio_edit_batch(model, operations=[...]) runs several steps on one in-memory copy and writes ONCE,
    after verification; if any step fails nothing is written. Every single-purpose tool (studio_extrude, ...) is the
    same engine with one step.
 5. Check: studio_render_model again, studio_analyze_model, studio_validate_model. Wrong? studio_undo / studio_redo.
 `model` is the .BASE path, or a folder holding exactly one .BASE; relative paths start at the game Data folder.
-Model writes go under Data/Models (set tools write Data/Sets). Every write keeps an undo snapshot
-(studio_history / studio_set_history list them).
+Model writes go under Data/Models (set tools write Data/Sets). Edits keep undo snapshots
+(studio_history / studio_set_history list them); cloning creates a new folder and leaves the source untouched.
 SETS AND SECTORS (whole sets, sector variants, new buildings and textures): studio_help('sets').
 """
 
@@ -65,7 +67,7 @@ CONVENTIONS = """CONVENTIONS
 - Limits: 65536 points and 32768 polygons per skeleton.
 - Renumbering: delete_polygons, subdivide, weld and cleanup shift indices. Inside a batch use save_as/named
   selections; across separate calls re-run studio_select.
-- Organize model folders under Data/Models/Base/Alpha_Models, Original_Refined or New; use descriptive unit and state folder names, while preserving the BASE filename.
+- Organize model folders as Data/Models/Base/<origin>/<faction>/<name>/<state>, where origin is Alpha_Models, Original_Refined or New; preserve the BASE filename.
 """
 
 SELECTORS = """SELECTORS (which points / polygons an operation affects)
@@ -203,19 +205,20 @@ d. studio_set_edit('set3', [
      ... the same for NXxSIGT1, NXySIGT1, NXzSIGT1 ...,
      {"op":"new_sector","copy_of":5,"save_as":"s"},
      {"op":"place_model","sector":{"named":"s"},"cells":[4],"model":"NX_SIGT1"}])   (the chain is automatic)
-   install_model copies the BASE to Objects/, its skeleton to Skeleton/ and the textures the set lacks (in the
+   install_model copies the BASE to Objects/, its skeleton to Loose/SKLT (Set1-Set7) and missing textures (in the
    set palette); like= copies shield, collision mode and explosions from a similar original.
 e. Change it later: edit the model in Data/Models, then install_model again with replace=<model id>.
 Changing an ORIGINAL set model: studio_export_model('set3:ST_CITY1', 'Models/Base/Original_Refined/
    City1_Intact', 'SX_CITY1', 'SX_CITY1'), edit it, then install_model with replace=<its row id> and
    collision='keep' (every sector using it changes).
 
-NEW TEXTURES: studio_help('textures'). NEW SET: studio_set_create(8, from_set='set3') = full copy without sectors;
-then textures, models and sectors as above; a map must use set 8 to show it.
+NEW TEXTURES: studio_help('textures'). NEW SET: studio_set_create(8, from_set='set1') = full copy without sectors;
+a source with Loose resources can only be copied to Set1-Set7. A map must use the new set to show it.
 
 ENGINE FACTS (OpenNeoUA source, Nov 2026) - the tools follow them:
 - override.lst 'lego <id> <file>' loads Objects/<file>; the BASE name in SET.SDF alone changes nothing visible.
-- A new model's skeleton lives in SetN/Skeleton/, new textures in SetN/Loose/ILBM (Set1-Set7) or the set root.
+- New skeletons use SetN/Loose/SKLT in Set1-Set7; later sets use Skeleton/*.skl. New textures use
+  SetN/Loose/ILBM (Set1-Set7) or the set root.
 - SET.BAS names win: new skeleton, texture and model names must be new in that set (the tools refuse clashes).
 - Repainting an existing texture (add_texture replace=true) works only in Set1-Set7 (Loose overrides).
 - Not checked by any tool: the look in game, collisions, explosions, AI behaviour. Tell the user.

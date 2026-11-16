@@ -7,7 +7,7 @@ import pytest
 from PySide6.QtWidgets import QApplication
 
 DATA = Path(os.environ.get("NME_GAME_DATA", ""))
-BOMB = DATA / "Models/Base/New/Mnosjetz_Bomb/Mnosjetz_Bomb_Normal_Wait/VP_MNOBOMB_NORMAL.BASE"
+BOMB = DATA / "Models/Base/New/Taerkasten/Mnosjetz_Bomb/Mnosjetz_Bomb_Normal_Wait/VP_MNOBOMB_NORMAL.BASE"
 
 pytestmark = pytest.mark.skipif(
     not (BOMB.is_file() and (DATA / "Sets/Set1").is_dir()),
@@ -363,7 +363,7 @@ def test_fire_area_loads_air_cube_external_normal_model(window):
     item = next(item for item in window.viewport._fx_items
                 if item.label.startswith("firing unit ·"))
     assert item.external == (
-        "Data/Models/Base/Original_Refined/6P0_Air_Cube/6P0_Air_Cube_Normal/6P0_Air_Cube_Normal.BASE",)
+        "Data/Models/Base/Original_Refined/Mykonian/6P0_Air_Cube/6P0_Air_Cube_Normal/6P0_Air_Cube_Normal.BASE",)
     helper = window.viewport._fx_external_for(item)
     assert helper is not None
     assert helper._family_ref.base_path.name == "6P0_Air_Cube_Normal.BASE"

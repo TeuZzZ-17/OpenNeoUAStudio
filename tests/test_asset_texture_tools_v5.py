@@ -162,6 +162,27 @@ class AssetResolverIntegrityTests(unittest.TestCase):
     def setUp(self):
         DirectoryIndex.clear_cache()
 
+    def test_flat_model_skeleton_precedes_later_set_skeleton(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            model = root / "Model"
+            model.mkdir()
+            local = model / "BODY.sklt"
+            local.write_bytes(b"model")
+            set_skeleton = root / "Set3" / "Skeleton"
+            set_skeleton.mkdir(parents=True)
+            remote = set_skeleton / "BODY.sklt"
+            remote.write_bytes(b"set")
+            resolver = AssetResolver([model, set_skeleton.parent], prefer_earliest_root=True)
+            self.assertEqual(resolver.resolve("Skeleton/BODY.sklt", "skeleton").path, local)
+            # A path explicitly present inside the same model folder still wins.
+            local_subfolder = model / "Skeleton"
+            local_subfolder.mkdir()
+            explicit = local_subfolder / "BODY.sklt"
+            explicit.write_bytes(b"model-subfolder")
+            DirectoryIndex.clear_cache()
+            self.assertEqual(resolver.resolve("Skeleton/BODY.sklt", "skeleton").path, explicit)
+
     def test_same_name_in_two_set_roots_is_visible_ambiguity(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)

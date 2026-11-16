@@ -558,6 +558,14 @@ class AssetResolver:
                     exact_matches.extend(
                         (match, root)
                         for match in index.find_relative(relative_name))
+                # Exported standalone families often flatten Skeleton/X.sklt
+                # beside the BASE. Keep that local file ahead of a same-named
+                # exact path in a later set root, so editing the family cannot
+                # silently edit the set's skeleton instead.
+                if self.prefer_earliest_root and not exact_matches:
+                    for name in names:
+                        exact_matches.extend((match, root) for match in index.find_name(name)
+                                             if match.parent == root)
                 if exact_matches:
                     # Package/base-local paths have explicit precedence over
                     # later SET roots.  Do not merge a lower-priority root

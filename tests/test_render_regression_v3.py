@@ -58,7 +58,7 @@ class RenderRegressionV3Tests(unittest.TestCase):
     def test_alpha_station_renders_mapped_faces_with_unmapped_polygons(self):
         from studio_mcp import core
 
-        source = ("Models/Base/Alpha_Models/Myko_Station_01/"
+        source = ("Models/Base/Alpha_Models/Mykonian/Myko_Station_01/"
                   "Myko_Station_Alpha_Normal_Fire_Wait/ALPHA_VP_BRGRO_NORMAL.BASE")
         try:
             family = core.load_family(core.resolve_source(source))

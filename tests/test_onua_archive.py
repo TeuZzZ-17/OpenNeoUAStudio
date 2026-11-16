@@ -18,7 +18,7 @@ from model_editor.window import ModelEditorWindow
 
 SET1 = Path(r"C:\Users\proto\Desktop\ProgettoUA\UA Rising\Data\Sets\Set1\Objects\SET.BAS")
 MODEL = Path(r"C:\Users\proto\Desktop\ProgettoUA\UA Rising\Data\Models\Base\New"
-             r"\Taer_Radar\Taer_Radar_Normal\Taer_Radar_Normal.BASE")
+             r"\Taerkasten\Taer_Radar\Taer_Radar_Normal\Taer_Radar_Normal.BASE")
 
 
 @pytest.fixture(scope="module")

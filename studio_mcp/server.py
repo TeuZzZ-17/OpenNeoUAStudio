@@ -330,6 +330,19 @@ def studio_export_model(source: str, out_dir: str, base_name: str, skeleton_stem
     return _guard(lambda: core.export_model(core.resolve_source(source), out_dir, base_name, skeleton_stem))
 
 
+@mcp.tool()
+def studio_clone_loose_model(source: str, out_dir: str, base_name: str, skeleton_stem: str,
+                             set_hint: str = "") -> str:
+    """Clone a loose single-object BASE, its skeleton, textures and animations to a new folder.
+
+    The new skeleton stem must be unique and the same length as the original. Dependencies must be
+    resolved as loose files; embedded-only or missing resources and existing target folders are refused.
+    The original stays untouched and the clone is reloaded and checked before writing the destination.
+    """
+    return _guard(lambda: core.clone_loose_model(
+        core.resolve_source(source, set_hint), out_dir, base_name, skeleton_stem))
+
+
 def _history_key(model: str) -> Path:
     """Undo stacks belong to a .BASE model, a bare wireframe .SKL file or a texture made by studio_make_texture."""
     path = core.resolve_existing(model)

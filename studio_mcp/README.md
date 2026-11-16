@@ -33,7 +33,8 @@ Ground-decal effects need an explicit `effect_mode` (`ground_pulse` or `rise`) a
 |---|---|
 | `studio_new_model` | Start a new design: an empty loose model (no polygons, plain material blocks kept); `donor` picks the Set.BAS object whose blocks it keeps (e.g. a set building) |
 | `studio_export_model` | Copy a Set.BAS model into a loose BASE + skeleton under `Data/Models` |
-| `studio_undo` / `studio_redo` / `studio_history` | Every write keeps a snapshot of the BASE and skeleton |
+| `studio_clone_loose_model` | Copy a single-object loose BASE and its resolved loose skeleton, textures and animations to a new folder; refuse missing or embedded-only dependencies |
+| `studio_undo` / `studio_redo` / `studio_history` | Edits keep a snapshot of the BASE and skeleton |
 
 **Edit** (one tool per operation, plus `studio_edit_batch` to chain several steps atomically)
 
@@ -59,8 +60,9 @@ Ground-decal effects need an explicit `effect_mode` (`ground_pulse` or `rise`) a
 | `studio_set_undo` / `studio_set_redo` / `studio_set_history` | Undo snapshots of SET.SDF, override.lst and every file an edit wrote (new files are removed) |
 
 `install_model` brings a loose model from `Data/Models` into a set: BASE to `Objects/<name>.bas` (loaded through
-`Scripts/override.lst`), skeleton to `Skeleton/`, missing textures re-mapped to the set palette into `Loose/ILBM`
+`Scripts/override.lst`), skeleton to `Loose/SKLT` (Set1-Set7) or `Skeleton/*.skl` (later sets), missing textures re-mapped to the set palette into `Loose/ILBM`
 (Set1-Set7) or the set root. New skeleton, texture and model names must not exist in the set's SET.BAS.
+Copying a set with Loose resources to Set8 or later is refused: the engine cannot load those overrides there.
 
 **Textures** (`textures.py`; help: `studio_help('textures')`)
 

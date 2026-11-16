@@ -9,6 +9,8 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import patch
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
@@ -27,6 +29,19 @@ except core.McpToolError:
 
 
 class PureTests(unittest.TestCase):
+    def test_install_does_not_replace_shared_fx_texture(self):
+        ctx = SimpleNamespace(folder=Path(tempfile.gettempdir()) / "set3", doc=object(), notes=[])
+        ref = SimpleNamespace(status="loose", path=Path(tempfile.gettempdir()) / "source" / "FX2.ILBM")
+        image = SimpleNamespace(width=2, height=2)
+        with patch.object(sets, "_assets", return_value=SimpleNamespace(archive=None)), \
+             patch.object(sets, "set_textures", return_value={}), \
+             patch.object(sets, "_target_palette", return_value=[]), \
+             patch.object(textures, "parse_ilbm_file", return_value=image), \
+             patch.object(textures, "reindex", return_value=b"pixels"), \
+             patch.object(textures, "ilbm_bytes", return_value=b"replacement"):
+            self.assertIsNone(sets._texture_bytes(ctx, "FX2.ILBM", ref, "set3"))
+        self.assertTrue(any("FX2.ILBM" in note for note in ctx.notes))
+
     def test_palette_mapping_never_uses_the_see_through_index(self):
         palette = [(0, 0, 0)] + [(i, i, i) for i in range(1, 256)]
         pixels = textures.to_indices(Image.new("RGB", (4, 4), (0, 0, 0)), palette)
@@ -130,6 +145,8 @@ class SetToolTests(unittest.TestCase):
         self.assertEqual(sets.info("set3")["problems"], [])
         added = {p.name.casefold() for p in folder.rglob("*") if p.is_file()} - {p.name.casefold() for p in before}
         self.assertTrue({"nx_tblk1.bas", "nx_tblk1.sklt", "nxtbk.ilbm"} <= added)
+        # The engine resolves a new .sklt through its canonical per-set loose path.
+        self.assertTrue((folder / "Loose" / "SKLT" / "NX_TBLK1.sklt").is_file())
         override = sets.open_document("set3").override_path.read_text()
         self.assertIn(f"lego {install['model']} NX_TBLK1.base", override)
         with self.assertRaises(core.McpToolError):   # the same name twice needs replace=
@@ -150,9 +167,13 @@ class SetToolTests(unittest.TestCase):
         self.assertTrue(result["results"][0]["replaced"])
 
     def test_create_set_keeps_border_sectors_and_writes_textures_at_the_root(self):
-        result = sets.create(9, "set3")
+        result = sets.create(9, "set1")
         self.assertEqual(result["sectors"], 8)
         self.assertEqual(sorted(sets.open_document("set9").sdf.sectors), list(range(248, 256)))
+        made = core.export_model(core.resolve_source("set3:ST_CITY1"), "Models/Base/New/Test_Set9",
+                                 "S9_CITY1", "S9_CITY1")
+        sets.run("set9", [{"op": "install_model", "model": made["base_file"], "like": "ST_CITY1"}])
+        self.assertTrue((sets.set_folder("set9") / "Skeleton" / "S9_CITY1.skl").is_file())
         out = sets.run("set9", [{"op": "add_texture", "name": "NXGRD.ILBM", "source": "set3:BODEN2.ILBM"},
                                 {"op": "new_sector", "models": "ST_CITY1", "ground": 1, "symbol": 7}])
         self.assertEqual(Path(out["results"][0]["file"]).parent, sets.set_folder("set9"))
@@ -160,6 +181,18 @@ class SetToolTests(unittest.TestCase):
             sets.run("set9", [{"op": "add_texture", "name": "BODEN2.ILBM", "replace": True}])
         with self.assertRaises(core.McpToolError):
             sets.create(9, "set3")
+
+    def test_create_refuses_loose_resources_in_later_sets_before_copying(self):
+        loose = sets.set_folder("set1") / "Loose" / "SKLT"
+        loose.mkdir(parents=True, exist_ok=True)
+        marker = loose / "ONLYTEST.sklt"
+        marker.write_bytes(b"test")
+        try:
+            with self.assertRaisesRegex(core.McpToolError, "only reads Loose overrides"):
+                sets.create(10, "set1")
+            self.assertFalse((self.data / "Sets" / "Set10").exists())
+        finally:
+            marker.unlink()
 
     def test_cells_buildings_and_import_in_one_batch(self):
         result = sets.run("set3", [

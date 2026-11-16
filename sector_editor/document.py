@@ -692,9 +692,19 @@ class SetDocument:
         for model in self.sdf.models:
             if self.assets.base_object(model.base, set_only=True) is None:
                 issues.append(f"Model {model.id}: BASE {model.base} is missing from this set.")
-            loose = bootstrap.find_ci(self.folder, model.sklt)
+            logical = Path(model.sklt.replace("\\", "/"))
+            # Direct rsrc reads use the legacy three-letter extension. For
+            # Set1-Set7 the engine first searches canonical and legacy Loose
+            # paths, where the original .sklt spelling is also accepted.
+            legacy = logical.with_suffix(".skl") if logical.suffix.casefold() == ".sklt" else logical
+            candidates = [legacy.as_posix()]
+            if 1 <= self.number <= 7:
+                for part in (logical.name, legacy.name):
+                    candidates.extend((f"Loose/SKLT/{part}", f"Loose/Skeleton/{part}"))
+            loose = next((path for relative in candidates
+                          if (path := bootstrap.find_ci(self.folder, relative)) is not None and path.is_file()), None)
             embedded = self.assets.archive.find(model.sklt, "sklt.class") if self.assets.archive else []
-            if (loose is None or not loose.is_file()) and not embedded:
+            if loose is None and not embedded:
                 issues.append(f"Model {model.id}: collision {model.sklt} is missing from this set.")
         self._asset_check = (key, issues)
         return list(issues)
@@ -831,6 +841,15 @@ class SetDocument:
         match = re.fullmatch(r"Set(\d+)", target.name, re.IGNORECASE)
         if not match or not 1 <= int(match[1]) <= 255:
             raise ValueError("The destination must be named Set1 … Set255.")
+        # A direct copy cannot preserve Loose overrides in Set8 or later;
+        # the engine enables that resolver only for Set1-Set7.
+        if 1 <= self.number <= 7 and int(match[1]) > 7:
+            loose = bootstrap.find_ci(self.folder, "Loose")
+            if loose is not None and any(path.is_file() for path in loose.rglob("*")):
+                raise ValueError(
+                    f"Cannot copy {self.folder.name} with Loose resources to {target.name}: "
+                    "the engine only reads Loose overrides in Set1-Set7. Choose a Set1-Set7 destination."
+                )
         outputs = self.output_files()
         files = list(self._resource_files())
         with tempfile.TemporaryDirectory(prefix="sector-copy-", dir=target.parent) as directory:
