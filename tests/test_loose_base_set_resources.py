@@ -234,6 +234,45 @@ def test_animation_controls_and_frames_of_a_loose_unit(window):
     assert unit_helper._anim_states[animated[0]] == (2, 1)
 
 
+def test_laser_collision_preview_uses_script_tint_and_animates(window):
+    from PySide6.QtCore import Qt
+    from PySide6.QtGui import QImage, QPainter
+    from map_editor import bootstrap
+    from studio.assets.catalog import load_game_objects
+
+    weapon = next(o for o in load_game_objects(bootstrap.installation())
+                  if o.kind == "weapon" and o.object_id == 114)
+    assert window._open_game_object(weapon)
+    view = window.viewport
+    assert not window.properties_tabs.isTabEnabled(window.collision_shape_tab_index)
+    assert view.model_preview_tint == (255, 25, 15, 255)
+    animated = next(i for i, material in enumerate(view._materials)
+                    if len(material.anim_frames) > 1 and material.anim_frames[0][0] > 0)
+    view.resize(600, 400)
+    view._show_grid = view._show_axes = False
+    view.play_animation(True)
+    frames = []
+    material = view._materials[animated]
+    changed_uv = next(i for i, frame in enumerate(material.anim_frames)
+                      if material.anim_uv_groups[frame[2]] != material.anim_uv_groups[material.anim_frames[0][2]])
+    later_clock = sum(frame[0] for frame in material.anim_frames[:changed_uv]) * 1000 / 1024 + 1
+    for clock in (0.0, later_clock):
+        view.seek_animation(clock)
+        image = QImage(600, 400, QImage.Format.Format_ARGB32)
+        image.fill(Qt.GlobalColor.transparent)
+        painter = QPainter(image)
+        try:
+            view._paint_viewport(painter)
+        finally:
+            painter.end()
+        frames.append(image)
+    view.play_animation(False)
+    assert frames[0] != frames[1]
+    assert any(c.red() > 50 and c.red() > 2 * max(c.green(), c.blue())
+               for y in range(0, 400, 2) for x in range(0, 600, 2)
+               if (c := frames[0].pixelColor(x, y)))
+
+
 def test_firing_unit_in_fire_area_follows_the_toolbar_play(window):
     """The Mnosjetz propellers must turn with the toolbar Play, not only with the shot."""
 

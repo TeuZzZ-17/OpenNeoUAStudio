@@ -24,6 +24,7 @@ from entity_designer.script_model import (
     _data_root_for_path,
     CollisionProject,
     VEHICLE,
+    WEAPON,
 )
 from entity_designer.shape import (
     geometry_fingerprint,
@@ -177,6 +178,10 @@ class _CollisionShapeMixin:
                     "selection or one or more selected components disappeared")
         return warnings
 
+    def _is_laser_weapon(self) -> bool:
+        return (self.project.target_category == WEAPON
+                and getattr(self, "_active_vehicle_model", "").strip().casefold() == "laser")
+
     def _sync_collision_shape_status(self) -> None:
         shape = self.project.collision_shape
         self.viewport.set_collision_shape(shape)
@@ -209,7 +214,9 @@ class _CollisionShapeMixin:
                 if scale_warning else
                 "rotation differs from the generated shape.")
         self.collision_shape_status.setText(details)
-        self.export_collision_shape_button.setEnabled(enabled_count > 0 and self._collision_bake_process is None)
+        self.export_collision_shape_button.setEnabled(
+            enabled_count > 0 and self._collision_bake_process is None
+            and not self._is_laser_weapon())
         self._sync_collision_overwrite_button()
 
     def _sync_collision_overwrite_button(self) -> None:
@@ -219,7 +226,8 @@ class _CollisionShapeMixin:
         self.overwrite_collision_shape_button.setEnabled(
             shape is not None and any(h.enabled for h in shape.hulls)
             and bool(self.project.collision_shape_file_path)
-            and self._collision_bake_process is None)
+            and self._collision_bake_process is None
+            and not self._is_laser_weapon())
 
     def _collision_shape_components_changed(self) -> None:
         shape = self.project.collision_shape
@@ -373,23 +381,24 @@ class _CollisionShapeMixin:
 
     def _sync_collision_generation_controls(self) -> None:
         process_running = self._collision_bake_process is not None
+        shape_allowed = not self._is_laser_weapon()
         widget = getattr(self, "collision_geometry_widget", None)
         has_selection = bool(
             widget is not None and widget.selected_components())
         if hasattr(self, "generate_collision_shape_button"):
             self.generate_collision_shape_button.setEnabled(
-                self.family is not None and has_selection and not process_running)
+                shape_allowed and self.family is not None and has_selection and not process_running)
             self.collision_shape_quality.setEnabled(not process_running)
             self.import_collision_shape_button.setEnabled(
-                self._current_set_bas_path() is not None and not process_running)
+                shape_allowed and self._current_set_bas_path() is not None and not process_running)
             self.export_collision_shape_button.setEnabled(
                 self.project.collision_shape is not None
                 and any(h.enabled for h in self.project.collision_shape.hulls)
-                and not process_running)
+                and not process_running and shape_allowed)
             self.export_collision_shape_action.setEnabled(
                 self.export_collision_shape_button.isEnabled())
             self.delete_collision_shape_button.setEnabled(
-                self.project.collision_shape is not None and not process_running)
+                self.project.collision_shape is not None and not process_running and shape_allowed)
             self._sync_collision_overwrite_button()
             self.collision_shape_progress.setVisible(
                 process_running and not self._collision_bake_cancelled)
@@ -397,7 +406,7 @@ class _CollisionShapeMixin:
                 widget.setEnabled(not process_running)
 
     def generate_collision_shape(self) -> None:
-        if self._collision_bake_process is not None:
+        if self._is_laser_weapon() or self._collision_bake_process is not None:
             return
         self._refresh_collision_geometry_widget()
         if self.family is None:

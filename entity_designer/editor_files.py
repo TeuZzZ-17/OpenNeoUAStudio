@@ -322,6 +322,8 @@ class _ScriptFilesMixin:
         self._active_script_kind = ""
         self._active_script_id = None
         self._active_vehicle_model = ""
+        self._fx_base_unit = None
+        self.viewport.set_model_preview_tint(None)
         self._active_model_reference = None
         self._active_visual_reference = None
         self._model_state_vps = {}

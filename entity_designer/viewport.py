@@ -259,6 +259,7 @@ class CollisionViewport(FxPreviewViewportMixin, AssetViewport):
         self._pick_cycle_offset = -1
         self._model_preview_scale = (1.0, 1.0, 1.0)
         self._model_preview_rotation = (0.0, 0.0, 0.0)
+        self._model_preview_tint = None
         self._collision_shape: CollisionShape | None = None
         self._collision_shape_overlay_visible = False
         self._shape_cursor_mouse_tracking_previous = None
@@ -321,6 +322,16 @@ class CollisionViewport(FxPreviewViewportMixin, AssetViewport):
     @property
     def model_preview_rotation(self) -> tuple[float, float, float]:
         return self._model_preview_rotation
+
+    @property
+    def model_preview_tint(self):
+        return self._model_preview_tint
+
+    def set_model_preview_tint(self, tint) -> None:
+        tint = tuple(tint) if tint is not None else None
+        if self._model_preview_tint != tint:
+            self._model_preview_tint = tint
+            self.update()
 
     @property
     def overeof_preview_offset(self) -> float:
@@ -2041,7 +2052,21 @@ class CollisionViewport(FxPreviewViewportMixin, AssetViewport):
 
         if self._collision_show_model:
             painter.save()
-            super()._paint_viewport(painter)
+            tint = self._model_preview_tint
+            if (tint is not None and tint != (255, 255, 255, 255)
+                    and self._mode == "textured" and self._faces
+                    and not self._snapshot_active):
+                target = QRectF(self.rect())
+                camera = self._camera_state()
+                painter.fillRect(target, QColor(24, 26, 32))
+                if self._show_grid:
+                    self._draw_grid(painter, target, camera)
+                if self._show_axes:
+                    self._draw_axes(painter, target, camera)
+                self._draw_fx_layer(painter, target, camera,
+                                    tint[3] / 255.0, tint[:3])
+            else:
+                super()._paint_viewport(painter)
             painter.restore()
         else:
             painter.fillRect(self.rect(), QColor(24, 26, 32))

@@ -268,6 +268,8 @@ class _FxPreviewMixin:
                                                 bootstrap.find_ci(scripts, "startup.scr"))
                                                if path is not None and path.is_file())
         self._fx_base_unit = self._fx_unit_phases(text, block, reference)
+        self._active_vehicle_model = self._fx_base_unit.model
+        self.viewport.set_model_preview_tint(self._fx_base_unit.tint)
         unit = self._fx_unit_in_model_state(self._fx_base_unit)
         kamikaze = unit.weapon and unit.model == "kamikaze"
         candidates = objects if objects is not None else self.game_object_browser.objects
@@ -511,6 +513,7 @@ class _FxPreviewMixin:
             return
         self._load_fx_context(text, block, reference,
                               keep_view=True, objects=objects)
+        self._sync_all()
         self._fx_failed_signatures = None
         self._fx_loaded_signatures = {
             path: snapshot[path] if path in snapshot else self._fx_file_signature(path)

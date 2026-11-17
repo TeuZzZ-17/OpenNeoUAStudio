@@ -474,26 +474,6 @@ class _EditControlsMixin:
         self._set_modified()
         self._sync_all()
 
-    def _visibility_changed(self, visible: bool):
-        if self._syncing:
-            return
-        entries = self._selected_sphere_entries()
-        if not entries:
-            return
-        value = bool(visible)
-        changing = [
-            sphere for _index, sphere in entries
-            if sphere.visible != value
-        ]
-        if not changing and not self.project.sphere_isolation_active:
-            return
-        self._push_undo()
-        for sphere in changing:
-            sphere.visible = value
-        self.project.sphere_isolation_active = False
-        self._set_modified()
-        self._sync_all()
-
     def _begin_radius_slider(self):
         if not self._selected_spheres_with_common_radius():
             return

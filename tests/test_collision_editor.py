@@ -14,14 +14,14 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 from PySide6.QtCore import QEvent, QPoint, QPointF, QRectF, Qt
 from PySide6.QtGui import QColor, QKeyEvent, QImage, QMouseEvent, QPainter, QWheelEvent
 from PySide6.QtWidgets import (
-    QAbstractItemView, QApplication, QDialog, QGridLayout, QHeaderView, QLabel,
+    QAbstractItemView, QApplication, QCheckBox, QDialog, QGridLayout, QHeaderView, QLabel,
     QMessageBox, QSizePolicy, QPushButton, QToolBar, QToolButton,
     QTreeWidgetItem,
 )
 
 from studio.assets.family import AssetFamily, FamilyObject, MaterialGroup
 from studio.formats.base_format import AmeshBlock, BaseObject
-from studio.rendering.asset_viewport import PREVIEW_SCALE
+from studio.rendering.asset_viewport import PREVIEW_SCALE, ViewMaterial
 from studio.rendering.indexed import IndexedSurface
 import entity_designer.editor as editor_module
 import entity_designer.editor_files as editor_files_module
@@ -578,9 +578,15 @@ class CollisionEditorTests(unittest.TestCase):
             float(third.text(1)), window.project.compound[1].radius)
         window.sphere_tree.setCurrentItem(
             window.sphere_tree.topLevelItem(1))
-        window.visible_check.setChecked(False)
+        for category in (VEHICLE, WEAPON):
+            window.project.target_category = category
+            window._sync_all()
+            self.assertFalse(any(
+                check.text() == "Active / Visible"
+                for check in window.findChildren(QCheckBox)))
+        window.hide_spheres_button.click()
         self.assertEqual(window.sphere_tree.topLevelItem(1).text(2), "Hidden")
-        window.visible_check.setChecked(True)
+        window.hide_spheres_button.click()
         self.assertEqual(
             window.sphere_tree.topLevelItem(1).text(2), "Visible")
 
@@ -1254,7 +1260,7 @@ class CollisionEditorTests(unittest.TestCase):
         window._selected_spheres = {0, 1}
         window._sync_all()
 
-        window._visibility_changed(False)
+        window.hide_spheres_button.click()
 
         self.assertFalse(window.project.compound[0].visible)
         self.assertFalse(window.project.compound[1].visible)
@@ -4304,6 +4310,83 @@ class CollisionEditorTests(unittest.TestCase):
             source, preview, "new_weapon", 5)
         self.assertEqual(groups, {"collision"})
         self.assertIn("collision_shape = Data/Collisions/RocketFF.collision", updated)
+
+    def test_139c_laser_disables_shape_and_restores_it_for_rocket(self):
+        text = ("new_weapon 7\n model = LaSeR\n name = Beam\n"
+                " vp_normal = 1\n radius = 5\nend\n")
+        window, script = self._script_unit_window(
+            object_id=7, object_kind="new_weapon", script_text=text)
+        tab = window.collision_shape_tab_index
+        self.assertFalse(window.properties_tabs.isTabEnabled(tab))
+        self.assertFalse(window.generate_collision_shape_button.isEnabled())
+        self.assertFalse(window.export_collision_shape_action.isEnabled())
+        with patch.object(window, "_refresh_collision_geometry_widget") as refresh:
+            window.generate_collision_shape()
+        refresh.assert_not_called()
+
+        script.write_text(text.replace("LaSeR", "rocket"), encoding="utf-8")
+        window.reload_fx_from_file()
+        self.assertTrue(window.properties_tabs.isTabEnabled(tab))
+        window.properties_tabs.setCurrentIndex(tab)
+        script.write_text(text, encoding="utf-8")
+        window.reload_fx_from_file()
+        self.assertFalse(window.properties_tabs.isTabEnabled(tab))
+        self.assertEqual(window.properties_tabs.currentIndex(), window.collision_tab_index)
+
+    def test_139c_laser_collision_preview_uses_authored_tint(self):
+        text = ("new_weapon 7\n model = laser\n name = Beam\n vp_normal = 1\n"
+                " tint = 255|25|15|200\n scale_xyz = 0.05|0.05|0.6\nend\n")
+        window, script = self._script_unit_window(
+            object_id=7, object_kind="new_weapon", script_text=text)
+        view = window.viewport
+        self.assertEqual(view.model_preview_scale, (0.05, 0.05, 0.6))
+        image = QImage(480, 360, QImage.Format.Format_ARGB32)
+        painter = QPainter(image)
+        try:
+            with patch.object(view, "_draw_fx_layer") as layer:
+                view._paint_viewport(painter)
+            self.assertEqual(layer.call_args.args[-1], (255, 25, 15))
+            self.assertAlmostEqual(layer.call_args.args[-2], 200 / 255)
+        finally:
+            painter.end()
+        script.write_text(text.replace("255|25|15|200", "40|255|20|255"), encoding="utf-8")
+        window.reload_fx_from_file()
+        self.assertEqual(view.model_preview_tint, (40, 255, 20, 255))
+
+    def test_139c_tinted_preview_keeps_animation_frames(self):
+        text = ("new_weapon 7\n model = laser\n vp_normal = 1\n"
+                " tint = 255|25|15|255\nend\n")
+        window, _script = self._script_unit_window(
+            object_id=7, object_kind="new_weapon", script_text=text)
+        view = window.viewport
+        view.resize(480, 360)
+        view._show_grid = view._show_axes = False
+        view._materials = [ViewMaterial("animated", anim_frames=[(100, 0, 0), (100, 1, 0)])]
+        view._reset_animation_states()
+        view.play_animation(True)
+        self.assertTrue(view._anim_playing)
+        rendered = []
+
+        def draw_model(painter, target, *_args, **_kwargs):
+            rendered.append(view._anim_states[0][0])
+            painter.fillRect(QRectF(20, 20, 20, 20), QColor(10, 200, 100))
+
+        try:
+            for time_ms in (0, 110):
+                view.seek_animation(time_ms)
+                image = QImage(480, 360, QImage.Format.Format_ARGB32)
+                painter = QPainter(image)
+                try:
+                    with patch.object(view, "_render_scene", side_effect=draw_model):
+                        view._paint_viewport(painter)
+                finally:
+                    painter.end()
+                pixel = image.pixelColor(25, 25)
+                self.assertGreater(pixel.red(), pixel.green() * 3)
+                self.assertGreater(pixel.red(), pixel.blue() * 3)
+            self.assertEqual(rendered, [0, 1])
+        finally:
+            view.play_animation(False)
 
     def test_139d_overwrite_blocks_unexported_weapon_shape(self):
         window = self._window()

@@ -1777,11 +1777,9 @@ class CollisionEditorWindow(
         self.type_value = QLabel("None", self)
         self.index_value = QLabel("None", self)
         self.selected_element_label = QLabel("None", self)
-        self.visible_check = QCheckBox("Active / Visible", self)
-        self.visible_check.toggled.connect(self._visibility_changed)
         self.runtime_radius_value = QLabel("", self)
         for control in (self.type_value, self.index_value, self.selected_element_label,
-                        self.visible_check, self.runtime_radius_value):
+                        self.runtime_radius_value):
             control.hide()
 
         transform_box = QGroupBox("Move Element")
@@ -2242,7 +2240,7 @@ class CollisionEditorWindow(
         blockers = [
             QSignalBlocker(widget) for widget in (
                 self.radius_slider,
-                self.radius_spin, self.visible_check,
+                self.radius_spin,
                 self.model_scale_x_spin, self.model_scale_y_spin,
                 self.model_scale_z_spin, self.overeof_check,
                 self.overeof_spin,
@@ -2310,6 +2308,14 @@ class CollisionEditorWindow(
             for index in (self.collision_tab_index, self.collision_shape_tab_index,
                           self.fx_tab_index, self.wireframe_tab_index):
                 self.properties_tabs.setTabEnabled(index, True)
+            if self._is_laser_weapon():
+                if self.properties_tabs.currentIndex() == self.collision_shape_tab_index:
+                    self.properties_tabs.setCurrentIndex(self.collision_tab_index)
+                self.properties_tabs.setTabEnabled(self.collision_shape_tab_index, False)
+        self.properties_tabs.setTabToolTip(
+            self.collision_shape_tab_index,
+            "Laser weapons use collision spheres, not collision shapes."
+            if self._is_laser_weapon() else "")
         self.properties_tab_strip.refresh()
         self._sync_fire_area()
 
@@ -2576,13 +2582,9 @@ class CollisionEditorWindow(
             and 0 <= self._selected_fire_point
             < len(fire_point_positions(self.project)))
         gun_selected = gun is not None
-        enabled = sphere is not None
         radius_enabled = bool(self._selected_spheres_with_common_radius())
         self.radius_slider.setEnabled(radius_enabled)
         self.radius_spin.setEnabled(radius_enabled)
-        self.visible_check.setEnabled(enabled)
-        self.visible_check.setVisible(enabled)
-        self.visible_check.setTristate(selected_sphere_count > 1)
         if selected_sphere_count > 1:
             radius_tip = (
                 "Selected spheres have different radii. Select spheres with "
@@ -2648,7 +2650,6 @@ class CollisionEditorWindow(
                 self.selected_element_label.setText("None")
             self.radius_spin.setValue(1.0)
             self.radius_slider.setValue(0)
-            self.visible_check.setChecked(False)
             self.runtime_radius_value.clear()
             self.runtime_radius_value.hide()
             self.radius_spin.setToolTip("")
@@ -2683,15 +2684,6 @@ class CollisionEditorWindow(
             self.radius_spin.setValue(sphere.radius)
             self.radius_slider.setValue(
                 self._radius_to_slider(sphere.radius))
-            visibility_values = {
-                candidate.visible
-                for _index, candidate in selected_sphere_entries
-            }
-            if selected_sphere_count > 1 and len(visibility_values) > 1:
-                self.visible_check.setCheckState(
-                    Qt.CheckState.PartiallyChecked)
-            else:
-                self.visible_check.setChecked(sphere.visible)
             self.runtime_radius_value.clear()
             self.runtime_radius_value.hide()
             if sphere.category == LEGACY:
@@ -2944,6 +2936,8 @@ class CollisionEditorWindow(
         self.project.fire_area = imported_fire_area
         self.project.target_category = (
             WEAPON if "weapon" in block.kind else VEHICLE)
+        self._active_vehicle_model = (fx.top_level_value(
+            text, block.start_line, block.end_line, "model") or "")
         self.project.type_icon = (
             import_type_icon_block(text, block)
             if self.project.target_category == VEHICLE else 0)
