@@ -28,8 +28,9 @@ TYPE_ICON_FONT = "TYPE_NS"
 # Vanilla reads one byte per symbol, in the .FON and in the script. A new key
 # is therefore one byte; ASCII keys stay readable by vanilla in any script
 # encoding, Latin-1 keys only through OpenNeoUA in a UTF-8 script.
-# ';' '#' '=' cannot stand bare after "type_icon =", U+00AD is invisible.
-_ASCII_KEYS = tuple(code for code in range(0x21, 0x7f) if chr(code) not in ";#=")
+# ';' '#' '=' '\' cannot stand bare after "type_icon =" ('\' continues the line in
+# vanilla), U+00AD is invisible.
+_ASCII_KEYS = tuple(code for code in range(0x21, 0x7f) if chr(code) not in ";#=\\")
 _LATIN1_KEYS = tuple(code for code in range(0xa1, 0x100) if code != 0xad)
 _SYMBOL_RE = re.compile(r"U\+[0-9A-Fa-f]{1,6}")
 

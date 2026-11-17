@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from studio.ui.playback_controls import PlaybackButton, PlaybackStepButton, PlaybackSpeedSpinBox
 from copy import deepcopy
 from dataclasses import replace
 import math
@@ -12,7 +13,7 @@ from zipfile import ZipFile, ZIP_DEFLATED
 from PySide6.QtCore import QBuffer, QByteArray, QIODevice, QTimer, Qt, QItemSelectionModel, QEvent, Signal
 from PySide6.QtGui import QAction, QIcon, QKeySequence, QKeyEvent
 from PySide6.QtWidgets import (
-    QApplication, QButtonGroup, QCheckBox, QComboBox, QDialog, QDialogButtonBox, QFileDialog,
+    QApplication, QButtonGroup, QCheckBox, QComboBox, QDialog, QDialogButtonBox, QDoubleSpinBox, QFileDialog,
     QFormLayout, QAbstractItemView, QGridLayout, QHBoxLayout, QInputDialog, QLabel, QLineEdit,
     QListWidgetItem, QMainWindow, QMenu, QMessageBox, QPlainTextEdit, QPushButton, QRadioButton,
     QSizePolicy, QSpinBox, QSplitter, QTabWidget, QToolButton, QVBoxLayout, QWidget,
@@ -36,9 +37,11 @@ from studio.ui.widgets import (
 from .document import AUTO, SetDocument, SET_FOLDERS, table_issues, MODEL_LIMIT, BUILDING_LIMIT
 from .viewport import SectorViewport, covers_sector
 from .interactions import ModelList, SectorList
-from .visual_aids import GroundPreview, SymbolPreview
+from .visual_aids import GroundPreview, MapIconPreview, SymbolPreview
 from .previews import CardPreviews, visible_items
 from .textures import LOOSE_SETS, import_textures
+from .effects_editor import DestructionEffectsEditor
+from .playback_scene import sector_transition_steps
 from studio.ui.cursor_themes import studio_cursor
 
 STATES = ("Intact", "Damaged", "Heavily damaged", "Destroyed")
@@ -239,6 +242,12 @@ class SectorEditorWindow(QMainWindow):
         self.setWindowTitle("OpenNeoUA Studio - Sector Editor")
         self.resize(1450, 900)
         configure_operation_status_bar(self)
+        from PySide6.QtCore import QElapsedTimer
+        self._animation_clock = QElapsedTimer()
+        self._animation_clock.start()
+        self._animation_timer = QTimer(self)
+        self._animation_timer.setInterval(33)
+        self._animation_timer.timeout.connect(self._animation_tick)
         self._build_ui()
         self._build_actions()
         self.previews = CardPreviews(self.view, self)
@@ -260,6 +269,7 @@ class SectorEditorWindow(QMainWindow):
             self.sets.setCurrentIndex(max(0, index))
             self.sets.blockSignals(False)
             self.open_set(bootstrap.set_dir(self.sets.currentData()))
+        self.play_button.setChecked(True)
 
     def _add_actions(self, menu, entries):
         for key, text, shortcut, callback in entries:
@@ -275,10 +285,20 @@ class SectorEditorWindow(QMainWindow):
         file = self.menuBar().addMenu("File")
         self._add_actions(file, (
             ("new", "New Set", QKeySequence.StandardKey.New, self.new_set),
-            ("open", "Open Set", QKeySequence.StandardKey.Open, self.choose_set),
+            ("open", "Import Set", QKeySequence.StandardKey.Open, self.choose_set),
             ("save", "Overwrite Set", QKeySequence.StandardKey.Save, self.save),
             ("export", "Export Set", QKeySequence.StandardKey.SaveAs, self.export_set),
         ))
+        file.addSeparator()
+        self._add_actions(file, (
+            ("import_sector", "Import Sector File", None, self.import_sector),
+            ("export_sector", "Export Sector File", None, self.export_sector),
+        ))
+        self.actions["import_sector"].setToolTip(
+            "External sector (.sector folder or .onua archive), or native SET.SDF definitions (.sdf)")
+        self.actions["export_sector"].setToolTip(
+            "External sector (.sector in its own folder) or .onua archive (current sector), "
+            "or native SET.SDF definitions (.sdf)")
         file.addSeparator()
         self._add_actions(file, (("textures", "Import custom textures", None, self.import_custom_textures),))
         file.addSeparator()
@@ -321,16 +341,6 @@ class SectorEditorWindow(QMainWindow):
             ("clear_sector", "Clear sector", None, self.clear_sectors),
             ("wipe_sector", "Wipe sector", None, self.wipe_sectors),
         ))
-        sector.addSeparator()
-        self._add_actions(sector, (
-            ("import_sector", "Import sector definition", None, self.import_definitions),
-            ("export_sector", "Export sector definition", None, self.export_definition),
-        ))
-        sector.addSeparator()
-        self._add_actions(sector, (
-            ("import_external", "Import external sector", None, self.import_external_sector),
-            ("export_external", "Export external sector", None, self.export_external_sector),
-        ))
 
         view = self.menuBar().addMenu("View")
         view.addAction("Reset View", self.view.reset_camera)
@@ -363,7 +373,29 @@ class SectorEditorWindow(QMainWindow):
         self.view_preset.addItems(SECTOR_VIEWS)
         self.view_preset.activated.connect(self._change_view)
         toolbar.addWidget(self.view_preset)
-        toolbar.addAction("Reset View", self.view.reset_camera)
+        toolbar.addAction("Reset View", self._reset_active_view)
+        # Animation playback, same controls as the Model Editor: animated textures and
+        # particle emitters of the model in the selected cell (or the whole one-cell sector).
+        from studio.rendering.playback import DEFAULT_ANIMATION_SPEED
+        self.play_button = PlaybackButton()
+        self.play_button.setCheckable(True)
+        self.play_button.setProperty("studioRole", "play")
+        self.play_button.setToolTip("Animate the whole sector in the main preview. Changing damage state "
+                                    "also plays the destruction effects of all cells.")
+        self.play_button.toggled.connect(self._toggle_play)
+        toolbar.addWidget(self.play_button)
+        self.step_button = PlaybackStepButton()
+        self.step_button.setToolTip("Next animation frame")
+        self.step_button.setEnabled(False)
+        self.step_button.clicked.connect(self._step_animation)
+        toolbar.addWidget(self.step_button)
+        toolbar.addWidget(QLabel(" Speed "))
+        self.speed_spin = PlaybackSpeedSpinBox()
+        self.speed_spin.setRange(0.05, 8.0)
+        self.speed_spin.setSingleStep(0.25)
+        self.speed_spin.setValue(DEFAULT_ANIMATION_SPEED)
+        self.speed_spin.valueChanged.connect(lambda v: self._animation_clock.restart())
+        toolbar.addWidget(self.speed_spin)
         for menu in self.findChildren(QMenu):
             menu.installEventFilter(self)
 
@@ -420,12 +452,16 @@ class SectorEditorWindow(QMainWindow):
         self.preview_mode.addItems(("Sector preview", "Selected model preview"))
         self.preview_mode.currentIndexChanged.connect(lambda: self._preview(reset=True))
         row.addWidget(self.preview_mode, 1)
-        button("Frame selection", lambda: self.view.frame_selection(), row)
+        button("Frame selection", self._reset_active_view, row)
         layout.addLayout(row)
         self.view = SectorViewport()
         self._connect_cell_view(self.view)
         self.view.backendChanged.connect(lambda name: self.statusBar().showMessage(name, 5000))
         layout.addWidget(self.view, 1)
+        self.play_view = None          # Entity Designer viewport (FX pass), created on the first Play
+        self._play_state = 0           # damage state shown by Play (transitions start from it)
+        self._transition = None        # running explosion preview: [simulation, time ms, owners, vp source]
+        self._center_layout = layout
         self.free_hint = QLabel("Free sector slot\n\nDouble-click it in the list, or press New, to create a sector here.")
         self.free_hint.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.free_hint.setWordWrap(True)
@@ -563,11 +599,11 @@ class SectorEditorWindow(QMainWindow):
         self.model_comment = QLineEdit()
         form.addRow("Description", self.model_comment)
         layout.addLayout(form)
-        effect_hint = QLabel("Destruction effects · one per line: effect ID, X, Z, Y")
+        effect_hint = QLabel("Destruction effects")
         effect_hint.setWordWrap(True)
         layout.addWidget(effect_hint)
-        self.effects = QPlainTextEdit()
-        self.effects.setMaximumHeight(110)
+        self.effects = DestructionEffectsEditor()
+        self.effects.previewRequested.connect(self._preview_selected_effect)
         layout.addWidget(self.effects)
         self.update_model_button = button("Apply changes", self.update_model, layout)
         for control, signal in ((self.base, "currentTextChanged"), (self.sklt, "currentTextChanged"),
@@ -581,6 +617,33 @@ class SectorEditorWindow(QMainWindow):
         layout.addStretch()
         self.definitions_page = scroll_page(definitions)
         self.tabs.addTab(self.definitions_page, "Definitions")
+
+        icons = QWidget()
+        layout = QVBoxLayout(icons)
+        self.map_icon_preview = MapIconPreview()
+        layout.addWidget(self.map_icon_preview)
+        row = QHBoxLayout()
+        generate = button("Generate icons", self.generate_map_icons, row)
+        generate.setToolTip("Draw the map icons of this sector's own models (every zoom and damage state) "
+                            "and of the sector. Set models keep their vanilla symbol.")
+        load = button("Load cell icon", self.load_cell_icons, row)
+        load.setToolTip("PNG or SVG for the models of the selected cells in this damage state: "
+                        "1 file for every zoom, or 3 files for zoom 3, 4 and 5")
+        layout.addLayout(row)
+        row = QHBoxLayout()
+        load = button("Load sector icon", self.load_sector_icon, row)
+        load.setToolTip("PNG or SVG of the whole sector: 1 file for both, or 2 files for zoom 1 and 2")
+        clear = button("Clear icons", self.clear_map_icons, row)
+        clear.setToolTip("Remove the icons of the selected cells' models and of the sector")
+        layout.addLayout(row)
+        self.auto_icons = QCheckBox("Generate missing icons on export")
+        self.auto_icons.setChecked(True)
+        self.auto_icons.setToolTip("File > Export Sector File draws the icons that this sector's own models still lack")
+        layout.addWidget(self.auto_icons)
+        layout.addStretch()
+        self.icons_page = scroll_page(icons)
+        self.tabs.addTab(self.icons_page, "Map icons")
+        self.tabs.currentChanged.connect(lambda _index: self._follow_selected_model())
         self.issues = QPlainTextEdit(self)
         self.issues.setReadOnly(True)
         self.issues.hide()
@@ -642,9 +705,194 @@ class SectorEditorWindow(QMainWindow):
         if name in VIEW_PRESET_ANGLES:
             self.view.set_camera_angles(*VIEW_PRESET_ANGLES[name])
 
+    def _reset_active_view(self):
+        self.view.frame_selection()
+
     def _state_view_changed(self, index):
         self._preview()
         self._load_sector_fields()
+        self._refresh_map_icons()
+        self._reload_play()
+        self._follow_selected_model()
+
+    def _follow_selected_model(self):
+        """Definitions show the model of the selected cell in the current damage state.
+
+        Unapplied edits in the form keep the current model (switching would ask to discard them).
+        """
+        if self.tabs.currentWidget() is not getattr(self, "definitions_page", None):
+            return
+        models = self._selected_cell_models()
+        if not models or self._syncing or self._pending_model():
+            return
+        index = self.model_combo.findData(models[0])
+        if index >= 0 and index != self.model_combo.currentIndex():
+            self.model_combo.setCurrentIndex(index)
+
+    # --- animation playback -------------------------------------------------------------------
+
+    def _start_transition(self, old_state, new_state, obj, family):
+        """Explosions of the damage steps old_state -> new_state of the played cell (engine order)."""
+        from .transition_fx import required_vps, transition_simulation
+        sector = self.document.sdf.sectors.get(self.current_sector)
+        if sector is None or old_state == new_state:
+            return
+        steps = sector_transition_steps(self.document, self.current_sector, old_state, new_state)
+        simulation = transition_simulation(steps)
+        self._begin_effect_simulation(simulation, obj, family)
+
+    def _preview_selected_effect(self, effect):
+        from .transition_fx import transition_simulation
+        if not self.play_button.isChecked():
+            self.play_button.setChecked(True)
+        if self.assets is None or self.view.lib is None:
+            return
+        family, obj = None, None
+        sector = self.document.sdf.sectors.get(self.current_sector)
+        if sector is not None and not sector.single and self.preview_mode.currentIndex() == 0:
+            cell = min(self.selected_cells, default=4)
+            effect_id, x, z, height = effect
+            effect = (effect_id, x + (cell % 3 - 1) * 300, z - (1 - cell // 3) * 300, height)
+        self._begin_effect_simulation(transition_simulation([[effect]]), obj, family)
+
+    def _begin_effect_simulation(self, simulation, obj, family):
+        from .transition_fx import required_vps
+        from entity_designer.viewport import CollisionViewport
+        if simulation is None:
+            return
+        if self.play_view is None:
+            # Resource sampler only. Never inserted into the layout or shown.
+            self.play_view = CollisionViewport(self)
+            self.play_view.hide()
+        vp_kids = self.assets.family.root_object.kids[0].kids
+        owners = {vp: vp_kids[vp].owner_path for vp in required_vps(simulation)
+                  if 0 <= vp < len(vp_kids)}
+        self.play_view.set_fx_preview(active=True, owner_by_vp={},
+            vp_source=lambda vp: (self.assets.family, owners[vp]) if vp in owners else None,
+            required_vps=set(owners), show_unit=False)
+        self._transition = [simulation, 0.0]
+        if simulation.notes:
+            self.statusBar().showMessage(" · ".join(dict.fromkeys(simulation.notes)), 8000)
+
+    def _tick_transition(self, delta_ms=0.0):
+        if self._transition is None or self.view.lib is None:
+            return
+        simulation, time_ms = self._transition
+        time_ms += delta_ms
+        self._transition[1] = time_ms
+        if time_ms > simulation.duration + 250.0:
+            self._transition = None
+            self.view.lib.effects, self.view.lib.sources = [], {}
+            return
+        self.view.lib.sample_effects(self.play_view, simulation, time_ms)
+
+    def _reload_play(self):
+        if not getattr(self, "play_button", None) or self.document is None:
+            return
+        key = (self.current_sector, self.preview_mode.currentIndex(), self.state.currentIndex())
+        previous = getattr(self, "_play_key", None)
+        self._play_key = key
+        self.step_button.setEnabled(self.view.lib is not None)
+        if previous and previous[:2] == key[:2] and previous[2] != key[2] and self.play_button.isChecked():
+            self._start_transition(previous[2], key[2], None, None)
+        elif previous != key:
+            self._transition = None
+
+    def _step_animation(self):
+        self._advance_animation(1000.0 / 30)
+
+    def _advance_animation(self, delta_ms):
+        if self.view.lib is None:
+            return
+        self._tick_transition(delta_ms)
+        self.view.sample_animation(getattr(self.view, "animation_time_ms", 0.0) + delta_ms)
+
+    def _animation_tick(self):
+        delta = self._animation_clock.restart() * self.speed_spin.value()
+        if self.play_button.isChecked() and self.isVisible():
+            self._pending_animation_ms = getattr(self, "_pending_animation_ms", 0.0) + delta
+            # Let an asynchronous software frame finish before invalidating it.
+            # Otherwise continuous playback can discard every frame on slower PCs.
+            if self.view._software_fallback and self.view._job is not None:
+                return
+            delta, self._pending_animation_ms = self._pending_animation_ms, 0.0
+            self._advance_animation(delta)
+
+    def _toggle_play(self, playing):
+        self._animation_clock.restart()
+        self._pending_animation_ms = 0.0
+        if playing:
+            self._animation_timer.start()
+        else:
+            self._animation_timer.stop()
+        self._reload_play()
+
+    # --- strategic-map icons (external sectors only) -----------------------------------------
+
+    def _refresh_map_icons(self):
+        if self.document is not None and hasattr(self, "map_icon_preview"):
+            self.map_icon_preview.show_sector(self.document, self.current_sector, self.state.currentIndex())
+
+    def _selected_cell_models(self):
+        sector = self.document.sdf.sectors.get(self.current_sector) if self.document else None
+        if sector is None:
+            return []
+        cells = [4] if sector.single else sorted(self.selected_cells)
+        return sorted({self.document.sdf.buildings[sector.subsects[0 if sector.single else c]]
+                       .state(self.state.currentIndex()) for c in cells})
+
+    def generate_map_icons(self):
+        if self.document is None or self.current_sector not in self.document.sdf.sectors:
+            return
+        try:
+            count = self.document.generate_map_icons(self.current_sector, replace_existing=True)
+        except (OSError, ValueError, RuntimeError) as exc:
+            QMessageBox.warning(self, "Cannot generate map icons", str(exc))
+            return
+        self.statusBar().showMessage(
+            f"{count} icon set(s) generated." if count else
+            "No own models in this sector: set models keep their vanilla map symbol.", 6000)
+        self._refresh_map_icons()
+
+    def _choose_icons(self, title):
+        files, _ = QFileDialog.getOpenFileNames(self, title, str(self.document.sectors_folder()),
+                                                "Map icons (*.png *.svg)")
+        return files
+
+    def load_cell_icons(self):
+        models = self._selected_cell_models()
+        if not models:
+            self.statusBar().showMessage("Select the cells first.", 5000)
+            return
+        files = self._choose_icons("Load cell icon")
+        if not files:
+            return
+        try:
+            for mid in models:
+                self.document.set_map_icon("model", mid, files)
+        except ValueError as exc:
+            QMessageBox.warning(self, "Cannot load map icon", str(exc))
+        self._refresh_map_icons()
+
+    def load_sector_icon(self):
+        if self.document is None or self.current_sector not in self.document.sdf.sectors:
+            return
+        files = self._choose_icons("Load sector icon")
+        if not files:
+            return
+        try:
+            self.document.set_map_icon("sector", self.current_sector, files)
+        except ValueError as exc:
+            QMessageBox.warning(self, "Cannot load map icon", str(exc))
+        self._refresh_map_icons()
+
+    def clear_map_icons(self):
+        if self.document is None:
+            return
+        for mid in self._selected_cell_models():
+            self.document.set_map_icon("model", mid, ())
+        self.document.set_map_icon("sector", self.current_sector, ())
+        self._refresh_map_icons()
 
     def _sector_menu(self, point):
         item = self.sectors.itemAt(point)
@@ -732,7 +980,7 @@ class SectorEditorWindow(QMainWindow):
 
     def _update_sector_actions(self):
         defined = bool(self.document and self._selected_sector_numbers())
-        for key in ("copy_sector", "cut_sector", "clear_sector", "wipe_sector", "export_sector", "export_external"):
+        for key in ("copy_sector", "cut_sector", "clear_sector", "wipe_sector", "export_sector"):
             self.actions[key].setEnabled(defined)
         self.actions["import_sector"].setEnabled(self.document is not None)
         if self.document is not None:
@@ -1032,50 +1280,18 @@ class SectorEditorWindow(QMainWindow):
         if choice == QMessageBox.StandardButton.Yes:
             self._run_edit(lambda: self.document.wipe_sectors(numbers))
 
-    def import_definitions(self):
-        if self.document is None or not self._commit_forms():
-            return
-        path, _ = QFileDialog.getOpenFileName(self, "Import native SDF definitions using this set's assets", "", "Set definitions (*.sdf *.SDF)")
-        if not path:
-            return
-        targets = self._selected_slots()
-        defined = [n for n in targets if n in self.document.sdf.sectors]
-        if defined:
-            choice = QMessageBox.question(self, "Import sector definition",
-                f"Replace the {len(defined)} selected defined sector(s) with the imported definitions? "
-                "Extra definitions go into free slots.")
-            if choice != QMessageBox.StandardButton.Yes:
-                return
-        def apply():
-            numbers = self.document.import_definitions(path, targets)
-            self.current_sector = numbers[0]
-            self.statusBar().showMessage(f"Imported {len(numbers)} sector(s) from slot {numbers[0]:03d}.", 6000)
-        self._run_edit(apply, reset=True)
-
-    def export_definition(self):
-        if self.document is None or not self._commit_forms():
-            return
-        numbers = self._selected_sector_numbers()
-        if not numbers:
-            return
-        name = f"Sector{numbers[0]:03d}.sdf" if len(numbers) == 1 else f"Set{self.document.number}-sectors.sdf"
-        path, _ = QFileDialog.getSaveFileName(self, "Export native definitions (assets remain in the set)",
-                                              name, "Set definitions (*.sdf)")
-        if path:
-            try:
-                self.document.export_definitions(numbers, path)
-                self.statusBar().showMessage(f"Exported {len(numbers)} definition(s) to {path}", 6000)
-            except (OSError, ValueError) as exc:
-                QMessageBox.warning(self, "Cannot export definitions", str(exc))
-
-    def import_external_sector(self):
-        """Open an external sector (.sector folder or .onua archive) for editing in a free slot."""
+    def import_sector(self):
+        """File > Import Sector: an external sector (.sector / .onua) or native .sdf definitions."""
         if self.document is None or not self._commit_forms():
             return
         path, _ = QFileDialog.getOpenFileName(
-            self, "Import external sector", str(self.document.sectors_folder()),
-            "External sectors (*.sector *.onua)")
+            self, "Import Sector File", str(self.document.sectors_folder()),
+            "Sectors (*.sector *.onua *.sdf *.SDF);;External sectors (*.sector *.onua);;"
+            "Native SET.SDF definitions (*.sdf *.SDF)")
         if not path:
+            return
+        if Path(path).suffix.casefold() == ".sdf":
+            self._import_definitions(path)
             return
         free = [n for n in self._selected_slots() if n not in self.document.sdf.sectors]
 
@@ -1086,32 +1302,63 @@ class SectorEditorWindow(QMainWindow):
                 raise ValueError(str(exc)) from exc
             self.statusBar().showMessage(
                 f"External sector opened in slot {self.current_sector:03d}. "
-                "Use Sector > Export external sector to write it back.", 8000)
+                "Use File > Export Sector File to write it back.", 8000)
         self._run_edit(apply, reset=True)
 
-    def export_external_sector(self):
-        """Write the current sector as an external sector folder or .onua archive."""
+    def _import_definitions(self, path):
+        targets = self._selected_slots()
+        defined = [n for n in targets if n in self.document.sdf.sectors]
+        if defined:
+            choice = QMessageBox.question(self, "Import Sector File",
+                f"Replace the {len(defined)} selected defined sector(s) with the imported definitions? "
+                "Extra definitions go into free slots.")
+            if choice != QMessageBox.StandardButton.Yes:
+                return
+        def apply():
+            numbers = self.document.import_definitions(path, targets)
+            self.current_sector = numbers[0]
+            self.statusBar().showMessage(f"Imported {len(numbers)} sector(s) from slot {numbers[0]:03d}.", 6000)
+        self._run_edit(apply, reset=True)
+
+    def export_sector(self):
+        """File > Export Sector: external folder / .onua (current sector) or native .sdf (selection)."""
         if self.document is None or not self._commit_forms():
             return
         numbers = self._selected_sector_numbers()
         if not numbers:
             return
         number = numbers[0]
-        folder_filter, archive_filter = "Sector folder (*)", "OpenNeoUA archive (*.onua)"
+        # Uncompressed export is a folder holding <name>.sector; the dialog names it NAME.sector.
+        folder_filter, archive_filter = "External sector (*.sector)", "OpenNeoUA archive (*.onua)"
+        sdf_filter = "Native SET.SDF definitions (*.sdf)"
         path, chosen = QFileDialog.getSaveFileName(
-            self, "Export external sector (SET resources stay in the SET)",
-            str(self.document.sectors_folder() / f"Sector{number:03d}"),
-            f"{folder_filter};;{archive_filter}")
+            self, "Export Sector File (SET resources stay in the SET)",
+            str(self.document.sectors_folder() / f"Sector{number:03d}.sector"),
+            f"{folder_filter};;{archive_filter};;{sdf_filter}")
         if not path:
             return
         target = Path(path)
-        if chosen == archive_filter and target.suffix.casefold() != ".onua":
-            target = target.with_suffix(".onua")
+        if chosen == folder_filter and target.suffix.casefold() in (".sector", ".onua"):
+            target = target.with_suffix("")          # the folder takes the bare name
         try:
-            written = self.document.export_external_sector(number, target)
+            if target.suffix.casefold() == ".sector":
+                target = target.with_suffix("")      # typed "X.sector" under another filter
+            if chosen == sdf_filter or target.suffix.casefold() == ".sdf":
+                target = target.with_suffix(".sdf")
+                self.document.export_definitions(numbers, target)
+                self.statusBar().showMessage(f"Exported {len(numbers)} definition(s) to {target}", 6000)
+                return
+            if chosen == archive_filter and target.suffix.casefold() != ".onua":
+                target = target.with_suffix(".onua")
+            written = self.document.export_external_sector(
+                number, target, generate_icons=self._generate_icons_on_export())
             self.statusBar().showMessage(f"Exported sector {number:03d} to {written}", 8000)
         except (OSError, ValueError, RuntimeError) as exc:
-            QMessageBox.warning(self, "Cannot export external sector", str(exc))
+            QMessageBox.warning(self, "Cannot export sector", str(exc))
+
+    def _generate_icons_on_export(self):
+        box = getattr(self, "auto_icons", None)
+        return box.isChecked() if box is not None else True
 
     def _sector_image(self, number, width):
         self.view.show_sector(self.library, number, state=self.state.currentIndex(), reset=True)
@@ -1252,6 +1499,7 @@ class SectorEditorWindow(QMainWindow):
                     raise ValueError("Objects/SET.BAS is required to preview this set.")
                 library = SectorMeshLibrary(assets, set_only=True)
             self.document, self.assets, self.library = document, assets, library
+            self.effects.load_catalog()
             self._sync_set_combo()
             document.assets = assets
             document.embedded_names = [obj.base_object.name for obj in assets.family.root_object.kids[1].kids]
@@ -1513,6 +1761,9 @@ class SectorEditorWindow(QMainWindow):
         else:
             summary = f"{len(selected)} cells selected" + (" · Different content" if len(set(bids)) > 1 else "")
         self.selection_info.setText(summary)
+        self._refresh_map_icons()
+        self._reload_play()
+        self._follow_selected_model()
         self.model_target.setText(f"Sector {self.current_sector:03d} · {summary} · Double-click a cell to place the model")
 
     def _pending_sector_fields(self):
@@ -1732,7 +1983,8 @@ class SectorEditorWindow(QMainWindow):
             self.preview_status.clear()
             return
         self.free_hint.hide()
-        self.view.show()
+        # A state/selection refresh must not reopen a second viewport during Play.
+        self.view.setVisible(True)
         defined = self.current_sector in self.document.sdf.sectors
         self.cell_grid.setVisible(defined)
         try:
@@ -1750,6 +2002,7 @@ class SectorEditorWindow(QMainWindow):
                 self.preview_cell_placement(target)
             else:
                 self._update_ghost()
+            self._reload_play()
         except (ValueError, OSError, RuntimeError, IndexError) as exc:
             self.preview_status.setText(f"Preview unavailable: {exc}")
 

@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+from studio.ui.playback_controls import PlaybackButton, PlaybackStepButton, PlaybackSpeedSpinBox
 from studio.rendering.playback import DEFAULT_ANIMATION_SPEED
 
 from pathlib import Path
@@ -1235,7 +1236,7 @@ class AssemblyWindow(
         self.animation_toolbar = anim_bar
 
         anim_bar.addWidget(QLabel(" Animation: "))
-        self.play_button = QPushButton("Play")
+        self.play_button = PlaybackButton()
         self.play_button.setCheckable(True)
         self.play_button.setEnabled(False)
         self.play_button.setProperty("studioRole", "play")   # highlighted by studio.qss
@@ -1245,13 +1246,13 @@ class AssemblyWindow(
         self.play_button.toggled.connect(self._toggle_play)
         anim_bar.addWidget(self.play_button)
 
-        self.step_button = QPushButton(">>")
+        self.step_button = PlaybackStepButton()
         self.step_button.setEnabled(False)
         self.step_button.clicked.connect(self.viewport.step_animation)
         anim_bar.addWidget(self.step_button)
 
         anim_bar.addWidget(QLabel(" Speed: "))
-        self.speed_spin = QDoubleSpinBox()
+        self.speed_spin = PlaybackSpeedSpinBox()
         self.speed_spin.setRange(0.05, 8.0)
         self.speed_spin.setSingleStep(0.25)
         self.speed_spin.setValue(DEFAULT_ANIMATION_SPEED)

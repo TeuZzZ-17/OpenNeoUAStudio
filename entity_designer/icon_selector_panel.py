@@ -13,12 +13,14 @@ import subprocess
 import sys
 import tempfile
 
-from PySide6.QtCore import QPoint, QRect, QRectF, Qt, QSignalBlocker, QTimer, QUrl, Signal
+from PySide6.QtCore import (
+    QPoint, QRect, QRectF, Qt, QSettings, QSignalBlocker, QTimer, QUrl, Signal,
+)
 from PySide6.QtGui import (
     QColor, QDesktopServices, QFont, QImage, QPainter, QPalette, QPen, QPixmap,
 )
 from PySide6.QtWidgets import (
-    QGridLayout, QGroupBox, QHBoxLayout, QLabel, QLineEdit, QMessageBox,
+    QFileDialog, QGridLayout, QGroupBox, QHBoxLayout, QLabel, QLineEdit, QMessageBox,
     QPushButton, QSizePolicy, QVBoxLayout, QWidget,
 )
 
@@ -37,6 +39,7 @@ from studio.formats.images import (
 )
 
 TAB_TITLE = "Icon Selector"
+_OPEN_WITH_SETTING = "icon_selector/open_with"  # last program chosen by Open With
 
 _KEY_MOVES = {
     Qt.Key.Key_Left: (-1, 0), Qt.Key.Key_A: (-1, 0),
@@ -317,7 +320,7 @@ class IconSelectorControls(QWidget):
         self.open_button.setToolTip("Open the font page with its default program.")
         self.open_button.clicked.connect(self._open_page)
         self.open_with_button = QPushButton("Open With")
-        self.open_with_button.setToolTip("Choose the program that opens the font page.")
+        self.open_with_button.setToolTip("Pick a program from disk and open the font page with it.")
         self.open_with_button.clicked.connect(self._open_page_with)
         self.folder_button = QPushButton("Show in Folder")
         self.folder_button.setToolTip("Show the font page in its folder.")
@@ -590,11 +593,22 @@ class IconSelectorControls(QWidget):
         source = self._page_path()
         if source is None:
             return
-        if sys.platform == "win32":
-            # Windows' own "Open with" chooser.
-            subprocess.Popen(["rundll32.exe", "shell32.dll,OpenAs_RunDLL", str(source)])
-        else:
-            self._open_page()
+        # Windows' own chooser (OpenAs_RunDLL) is unreliable on recent builds, so
+        # Studio asks for the program itself: same behaviour on every system.
+        settings = QSettings("OpenNeoUA", "Studio")
+        last = str(settings.value(_OPEN_WITH_SETTING, ""))
+        program, _ = QFileDialog.getOpenFileName(
+            self, "Open font page with...", last,
+            "Programs (*.exe *.bat *.cmd *.com);;All files (*)" if sys.platform == "win32"
+            else "All files (*)")
+        if not program:
+            return
+        try:
+            launch_with(program, source)
+        except OSError as exc:
+            QMessageBox.warning(self, "Open With", f"Cannot start {Path(program).name}: {exc}")
+            return
+        settings.setValue(_OPEN_WITH_SETTING, program)
 
     def _show_page(self) -> None:
         source = self._page_path()
@@ -620,6 +634,15 @@ class IconSelectorControls(QWidget):
             return
         self.sync()
         self.editor.statusBar().showMessage(f"Font page written: {target}", 8000)
+
+
+def launch_with(program, page) -> None:
+    """Start ``program`` on ``page`` without waiting for it; OSError if it cannot run."""
+
+    program = Path(program)
+    if not program.is_file():
+        raise FileNotFoundError(f"{program} does not exist")
+    subprocess.Popen([str(program), str(page)], close_fds=True)
 
 
 def convert_font_page(source: Path, target: Path) -> None:

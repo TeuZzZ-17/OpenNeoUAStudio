@@ -14,8 +14,9 @@ import re
 from studio.exchange.portable import backup_existing_file, find_existing_path
 
 # Characters that a script or .FON line cannot hold as a bare key: they are
-# written as U+XXXX instead (';' starts a comment, '=' separates, '#' is numeric).
-_UNSAFE_BARE_KEYS = frozenset(";#=")
+# written as U+XXXX instead (';' starts a comment, '=' separates, '#' is numeric,
+# a trailing '\' continues the line in vanilla scripts).
+_UNSAFE_BARE_KEYS = frozenset(";#=\\")
 _C_LONG_RE = re.compile(rb"[+-]?(?:0[xX][0-9a-fA-F]+|0[0-7]*|[1-9][0-9]*)")
 
 

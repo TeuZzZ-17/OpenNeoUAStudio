@@ -10,6 +10,7 @@ Layout of a file (ScriptParser syntax, ``;`` starts a comment)::
         cells = G|G|G|G|CORE|G|G|G|G   ; 9 piece names (SET.SDF order) or 1 (one large cell)
         ground = 0                     ; connection family 0-5
         map_symbol = 3                 ; 0-255, default 0
+        map_icon = map/sector.png      ; optional PNG/SVG map icon, 1 file or zoom 0|1
     end
     begin_piece CORE                   ; fills a cell
         states = ok|hit|heavy|flat     ; intact|damaged|heavy|destroyed, or 1 model for all
@@ -22,6 +23,7 @@ Layout of a file (ScriptParser syntax, ``;`` starts a comment)::
         map_symbol = 12                ; 0-255
         shield = 60                    ; 0-100
         explosion = 49|0|0|100         ; repeatable VP|x|y|z (SET.SDF effect group), or none
+        map_icon = map/ok.png          ; optional cell icon, 1 file or zoom 2|3|4
     end
 
 Files are searched beside the ``.sector`` first; a missing BASE/3DS uses the SET model with the same
@@ -37,6 +39,9 @@ import re
 SECTOR_SUFFIX = ".sector"
 SECTORS_FOLDER = ("Models", "Sectors")    # inside the game Data folder
 STATE_COUNT = 4
+SECTOR_ICON_ZOOMS = 2      # map zoom 0 and 1: one icon per sector
+MODEL_ICON_ZOOMS = 3       # map zoom 2, 3 and 4: one icon per building cell
+ICON_SUFFIXES = (".png", ".svg")
 
 
 class SectorFileError(ValueError):
@@ -52,6 +57,7 @@ class SectorModel:
     map_symbol: int | None = None
     shield: int | None = None
     explosions: tuple[tuple[int, int, int, int], ...] | None = None
+    map_icon: tuple[str, ...] = ()      # 1 file, or one per map zoom 2|3|4
 
 
 @dataclass
@@ -69,6 +75,7 @@ class SectorFile:
     cells: tuple[str, ...] = ()
     ground: int = 0
     map_symbol: int = 0
+    map_icon: tuple[str, ...] = ()      # 1 file, or one per map zoom 0|1
     pieces: list[SectorPiece] = field(default_factory=list)
     models: list[SectorModel] = field(default_factory=list)
     path: Path | None = None
@@ -164,6 +171,13 @@ def _int(value: str, low: int, high: int, where: str) -> int:
     return number
 
 
+def _icons(value: str, zooms: int, where: str) -> tuple[str, ...]:
+    files = tuple(part.strip() for part in value.split("|"))
+    if len(files) not in (1, zooms) or any(not f.casefold().endswith(ICON_SUFFIXES) for f in files):
+        raise SectorFileError(f"{where}: map_icon needs 1 or {zooms} PNG/SVG files.")
+    return files
+
+
 def _split_line(line: str) -> tuple[str, str]:
     body = line.split(";", 1)[0].strip()
     if not body:
@@ -209,6 +223,8 @@ def parse_sector_text(text: str, path: Path | None = None) -> SectorFile:
                 ground = _int(value, 0, 5, where)
             elif word == "map_symbol":
                 sector.map_symbol = _int(value, 0, 255, where)
+            elif word == "map_icon":
+                sector.map_icon = _icons(value, SECTOR_ICON_ZOOMS, where)
             else:
                 raise SectorFileError(f"{where}: unknown keyword {key}.")
         elif scope == "piece":
@@ -232,6 +248,8 @@ def parse_sector_text(text: str, path: Path | None = None) -> SectorFile:
                 current.map_symbol = _int(value, 0, 255, where)
             elif word == "shield":
                 current.shield = _int(value, 0, 100, where)
+            elif word == "map_icon":
+                current.map_icon = _icons(value, MODEL_ICON_ZOOMS, where)
             elif word == "explosion":
                 # The first explosion line replaces inherited ones; "none" keeps the list empty.
                 effects = list(current.explosions or ())
@@ -296,6 +314,11 @@ def sector_issues(sector: SectorFile) -> list[str]:
         for value in (model.name, model.visual, model.collision):
             if ";" in value or "\n" in value:
                 issues.append(f"model '{model.name}': names cannot contain ';' or line breaks.")
+    for owner, icons, zooms in (("sector", sector.map_icon, SECTOR_ICON_ZOOMS),
+                                *((f"model '{m.name}'", m.map_icon, MODEL_ICON_ZOOMS) for m in sector.models)):
+        if icons and (len(icons) not in (1, zooms) or
+                      any(not f.casefold().endswith(ICON_SUFFIXES) or "|" in f for f in icons)):
+            issues.append(f"{owner}: map_icon needs 1 or {zooms} PNG/SVG files.")
     for item in (*sector.pieces, *sector.models):
         if not re.fullmatch(r"[^\s|;=]+", item.name):
             issues.append(f"'{item.name}' is not a valid name (no spaces, '|', ';' or '=').")
@@ -315,8 +338,10 @@ def format_sector(sector: SectorFile, title: str = "") -> str:
              "begin_sector",
              f"    cells = {'|'.join(sector.cells)}",
              f"    ground = {sector.ground}",
-             f"    map_symbol = {sector.map_symbol}",
-             "end"]
+             f"    map_symbol = {sector.map_symbol}"]
+    if sector.map_icon:
+        lines.append(f"    map_icon = {'|'.join(sector.map_icon)}")
+    lines.append("end")
     for piece in sector.pieces:
         lines += ["", f"begin_piece {piece.name}", f"    states = {'|'.join(piece.states)}"]
         if piece.destructible:
@@ -333,8 +358,19 @@ def format_sector(sector: SectorFile, title: str = "") -> str:
         if model.explosions is not None:
             lines += [f"    explosion = {'|'.join(map(str, fx))}" for fx in model.explosions] \
                 or ["    explosion = none"]
+        if model.map_icon:
+            lines.append(f"    map_icon = {'|'.join(model.map_icon)}")
         lines.append("end")
     return "\n".join(lines) + "\n"
+
+
+def resolve_sector_file(folder: Path, value: str) -> Path:
+    """A file named in a .sector: Data/... as written, anything else beside the .sector."""
+    from map_editor import bootstrap
+    if value.replace("\\", "/").casefold().startswith("data/"):
+        return resolve_data_path(bootstrap.game_data_dir(), value)
+    relative = value.replace("\\", "/")
+    return bootstrap.find_ci(Path(folder), relative) or Path(folder) / relative
 
 
 def unique_name(text: str, used: set[str]) -> str:

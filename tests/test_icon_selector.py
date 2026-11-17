@@ -66,6 +66,9 @@ def test_font_keys_follow_the_engine():
     assert glyph_token(65) == "A"
     assert glyph_token(ord(";")) == "U+003B"
     assert glyph_token(0xec) == "U+00EC"
+    # A bare '\' ends a script line with "continue on the next line": always U+005C.
+    assert glyph_token(ord("\\")) == "U+005C" and script_glyph_key("U+005C") == ord("\\")
+    assert not vanilla_readable(ord("\\")) and not vanilla_readable(ord(";"))
     assert parse_symbol("é") == 0xe9 and parse_symbol("u+00e9") is None
     assert parse_symbol("U+00E9") == 0xe9 and parse_symbol(" ") is None
     assert symbol_text(0xad) == "U+00AD"
@@ -124,6 +127,76 @@ def test_png_page_converts_to_ilbm_and_back(app, tmp_path):
     png.unlink()
     convert_font_page(ilbm, png)
     assert QImage(str(png)).pixelColor(3, 4) == QColor(10, 20, 30)
+
+
+def test_convert_button_names_the_other_format(app, data, monkeypatch):
+    import entity_designer.icon_selector_panel as panel_module
+
+    page = QImage(316, 205, QImage.Format.Format_RGBA8888)
+    page.fill(QColor(255, 255, 0))
+    monkeypatch.setattr(panel_module, "page_image", lambda _path: page)
+    monkeypatch.setattr(panel_module.IconSelectorControls, "_data_root", lambda self: data)
+    window = _window(app)
+    try:
+        controls = window.icon_tab
+        controls._load()
+        controls._sync_page_buttons()
+        assert controls.page_label.text() == "PAGE.PNG"          # PNG page -> offer ILBM
+        assert controls.convert_button.text() == "Convert to ILBM"
+        png = data / "Fonts" / "PAGE.PNG"
+        png.unlink()
+        (data / "Fonts" / "PAGE.ILBM").write_bytes(b"")
+        controls._load()
+        controls._sync_page_buttons()
+        assert controls.page_label.text() == "PAGE.ILBM"         # ILBM page -> offer PNG
+        assert controls.convert_button.text() == "Convert to PNG"
+    finally:
+        window._modified = False
+        window.close()
+
+
+def test_open_with_runs_the_chosen_program(app, data, monkeypatch, tmp_path):
+    import entity_designer.icon_selector_panel as panel_module
+
+    page = QImage(316, 205, QImage.Format.Format_RGBA8888)
+    page.fill(QColor(255, 255, 0))
+    monkeypatch.setattr(panel_module, "page_image", lambda _path: page)
+    monkeypatch.setattr(panel_module.IconSelectorControls, "_data_root", lambda self: data)
+    program = tmp_path / "viewer.exe"
+    program.write_bytes(b"")
+    calls = []
+    monkeypatch.setattr(panel_module.subprocess, "Popen", lambda args, **kw: calls.append(args))
+    saved = {}
+
+    class Settings:                                   # keep the real registry untouched
+        def __init__(self, *_args):
+            pass
+
+        def value(self, key, default=""):
+            return saved.get(key, default)
+
+        def setValue(self, key, value):
+            saved[key] = value
+
+    monkeypatch.setattr(panel_module, "QSettings", Settings)
+    window = _window(app)
+    try:
+        controls = window.icon_tab
+        controls._load()
+        choice = [str(program)]
+        monkeypatch.setattr(panel_module.QFileDialog, "getOpenFileName",
+                            lambda *a, **k: (choice[0], ""))
+        controls._open_page_with()
+        assert calls == [[str(program), str(data / "Fonts" / "PAGE.PNG")]]
+        assert saved[panel_module._OPEN_WITH_SETTING] == str(program)
+        choice[0] = ""                                 # cancelled: nothing starts
+        controls._open_page_with()
+        assert len(calls) == 1
+        with pytest.raises(FileNotFoundError):
+            panel_module.launch_with(tmp_path / "missing.exe", "x.png")
+    finally:
+        window._modified = False
+        window.close()
 
 
 SCRIPT = ("new_vehicle 7\n"

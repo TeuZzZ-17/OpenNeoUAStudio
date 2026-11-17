@@ -326,6 +326,9 @@ class GpuRenderer:
         self.flat_buffer = Buffer()
         self.flat_offsets = {}
         self.instance_buffers = {}
+        # Template whose vertices each instance buffer currently holds: a rebuilt
+        # template under the same key (animated frames) must be uploaded again.
+        self.instance_templates = {}
         self.scene = None
         self._preview_buffers = OrderedDict()
         self.has_sky = False
@@ -402,6 +405,7 @@ class GpuRenderer:
             for buffer, data, _ in self.instance_buffers.values():
                 buffer.delete(); gl.glDeleteBuffers(1, [data])
             self.instance_buffers.clear()
+            self.instance_templates.clear()
             self.scene = scene
             self.material_count = 0
             tables = scene.lib.tables
@@ -415,6 +419,7 @@ class GpuRenderer:
         for key in list(self.instance_buffers):
             if key not in groups:
                 buffer, data, _ = self.instance_buffers.pop(key)
+                self.instance_templates.pop(key, None)
                 buffer.delete(); gl.glDeleteBuffers(1, [data])
         changed_templates = set(groups) if new_scene else getattr(scene, 'changed_templates', set())
         for key in changed_templates:
@@ -430,7 +435,10 @@ class GpuRenderer:
                 gl.glVertexAttribDivisor(5, 1)
             else:
                 buffer, data, _ = self.instance_buffers[key]
+                if self.instance_templates.get(key) is not template:
+                    buffer.upload(template.opaque)    # new animation frame under the same key
                 gl.glBindBuffer(gl.GL_ARRAY_BUFFER, data)
+            self.instance_templates[key] = template
             gl.glBufferData(gl.GL_ARRAY_BUFFER, instances.nbytes, instances, gl.GL_DYNAMIC_DRAW)
             self.instance_buffers[key] = (buffer, data, len(instances))
         for key in list(self.buffers):
@@ -773,6 +781,7 @@ class GpuRenderer:
         for buffer, data, _ in self.instance_buffers.values():
             buffer.delete(); gl.glDeleteBuffers(1, [data])
         self.instance_buffers.clear()
+        self.instance_templates.clear()
         for buffer in self.buffers.values():
             buffer.delete()
         self.buffers.clear()

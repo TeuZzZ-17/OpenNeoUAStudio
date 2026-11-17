@@ -326,6 +326,7 @@ class SectorMeshLibrary:
         from studio.rendering.indexed import IndexedFamilyAdapter
         adapter = IndexedFamilyAdapter(family)
         self._loader._faces = []
+        emitter_start = len(self._loader._particle_emitters)
         material_index = {}
         for obj in root.iter_tree():
             self._loader._load_object(obj, family, material_index,
@@ -333,6 +334,10 @@ class SectorMeshLibrary:
         faces = [face for face in self._loader._faces if face.mapped]
         for face in faces:
             self._material_adapters[face.material] = adapter
+        for emitter in self._loader._particle_emitters[emitter_start:]:
+            for material, stage_id, stage in emitter.stages:
+                adapter.block_map[(emitter.owner, stage_id)] = stage
+                self._material_adapters[material] = adapter
         self._loader._faces = []
         return faces
 

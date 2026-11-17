@@ -19,8 +19,8 @@ from map_editor.core.set_sdf_parser import (
 )
 from studio.exchange.portable import commit_verified_files
 from studio.formats.sector_file import (
-    SECTORS_FOLDER, SectorFile, SectorModel, SectorPiece, find_sector_file, format_sector,
-    read_sector, resolve_data_path, unique_name,
+    MODEL_ICON_ZOOMS, SECTOR_ICON_ZOOMS, SECTORS_FOLDER, SectorFile, SectorModel, SectorPiece,
+    find_sector_file, format_sector, read_sector, resolve_data_path, resolve_sector_file, unique_name,
 )
 
 SET_FOLDERS = ("HI", "Objects", "Palette", "Remap", "Scripts")
@@ -105,12 +105,17 @@ class SetDocument:
                     except ValueError:
                         pass
         self.saved = deepcopy(sdf)
-        # Rows created by "Import external sector". Unused ones are given back before a save;
+        # Rows created by File > Import Sector File. Unused ones are given back before a save;
         # rows whose BASE or collision lives in the sector's own folder (external_own) can be
         # edited and exported again, but never saved into this set.
         self.external_models: set[int] = set()
         self.external_buildings: set[int] = set()
         self.external_own: set[int] = set()
+        # Map icons of external sectors (map_icon): ("model", id) / ("sector", number) ->
+        # files, 1 for every zoom or one per zoom. Kept for editing and export only;
+        # they never enter SET.SDF (the vanilla map_symbol stays there).
+        self.map_icons: dict[tuple[str, int], tuple[Path, ...]] = {}
+        self._icon_folder: Path | None = None
         self.embedded_names = None
         self.assets = None
         self._asset_check = None
@@ -685,6 +690,66 @@ class SetDocument:
             files.setdefault(collision, skeleton)
         return visual, collision
 
+    # --- map icons of external sectors ------------------------------------------------------
+
+    def is_own_model(self, model_id):
+        """Our own model: a loose BASE that SET.BAS does not have (the only ones with generated icons)."""
+        assets = self._load_assets()
+        key = assets._key(self.sdf.models[model_id].base)
+        return assets._index_loose().get(key) is not None and assets._by_name.get(key) is None
+
+    def icon_folder(self) -> Path:
+        """Scratch folder of generated icons until they are exported with the sector."""
+        if self._icon_folder is None or not self._icon_folder.is_dir():
+            self._icon_folder = Path(tempfile.mkdtemp(prefix="sector-map-icons-"))
+        return self._icon_folder
+
+    def set_map_icon(self, kind, key, files):
+        """Assign icon files (PNG/SVG): 1 for every zoom, or one per zoom. Empty files clears."""
+        zooms = SECTOR_ICON_ZOOMS if kind == "sector" else MODEL_ICON_ZOOMS
+        files = tuple(Path(f) for f in files)
+        if not files:
+            self.map_icons.pop((kind, key), None)
+            return
+        if len(files) not in (1, zooms) or any(f.suffix.casefold() not in (".png", ".svg") or not f.is_file()
+                                               for f in files):
+            raise ValueError(f"Choose 1 or {zooms} existing PNG/SVG files.")
+        self.map_icons[(kind, key)] = files
+
+    def model_shapes(self, model_id):
+        from studio.assets.sector_map_icons import model_shapes
+        obj = self._load_assets().base_object(self.sdf.models[model_id].base, set_only=True)
+        return model_shapes(obj) if obj is not None else []
+
+    def generate_map_icons(self, number, *, replace_existing=False):
+        """Draw the map icons of a sector's own models (all damage states) and of the sector.
+
+        SET models keep their vanilla map symbol. Returns the number of icon sets written.
+        """
+        from studio.assets.sector_map_icons import is_empty, model_icons, save_icons, sector_icons
+        sector = self.sdf.sectors[number]
+        folder = self.icon_folder()
+        written, own_cells = 0, []
+        models = {self.sdf.buildings[bid].state(s) for bid in sector.subsects for s in range(4)}
+        for mid in sorted(models):
+            if not self.is_own_model(mid) or (("model", mid) in self.map_icons and not replace_existing):
+                continue
+            images = model_icons(self.model_shapes(mid), single=sector.single)
+            if is_empty(images):
+                continue
+            stem = f"{Path(self.sdf.models[mid].base).stem}{'_single' if sector.single else ''}"
+            self.map_icons[("model", mid)] = tuple(save_icons(images, folder, stem))
+            written += 1
+        for bid in sector.subsects:
+            mid = self.sdf.buildings[bid].state(0)
+            own_cells.append(self.model_shapes(mid) if self.is_own_model(mid) else None)
+        if any(own_cells) and (("sector", number) not in self.map_icons or replace_existing):
+            images = sector_icons(own_cells, single=sector.single)
+            if not is_empty(images):
+                self.map_icons[("sector", number)] = tuple(save_icons(images, folder, f"sector{number:03d}"))
+                written += 1
+        return written
+
     def external_sector(self, number):
         """Build the SectorFile of a sector plus the own files it needs ({file name: source})."""
         if number not in self.sdf.sectors:
@@ -703,7 +768,8 @@ class SetDocument:
                 models[mid] = unique_name(row.base, used_models)
                 result.models.append(SectorModel(
                     models[mid], visual, collision, row.numbers[3], row.numbers[1], row.numbers[2],
-                    tuple(tuple(e) for e in row.effects)))
+                    tuple(tuple(e) for e in row.effects),
+                    self._export_icons(("model", mid), models[mid], files)))
             return models[mid]
 
         for bid in sector.subsects:
@@ -714,10 +780,24 @@ class SetDocument:
                 result.pieces.append(SectorPiece(pieces[bid], states[:1] if len(set(states)) == 1 else states,
                                                  row.destructible == 1))
         result.cells = tuple(pieces[bid] for bid in sector.subsects)
+        result.map_icon = self._export_icons(("sector", number), "sector", files)
         return result, files
 
-    def export_external_sector(self, number, target, *, name=None):
-        """Write a sector as an external sector folder, or as a .onua archive of that folder."""
+    def _export_icons(self, key, stem, files):
+        """Queue the icon files of ``key`` as map/<stem>[_<n>].<ext>; returns the map_icon value."""
+        icons = self.map_icons.get(key, ())
+        names = []
+        for index, path in enumerate(icons):
+            name = f"map/{stem}{'' if len(icons) == 1 else '_' + str(index)}{path.suffix.lower()}"
+            files[name] = path
+            names.append(name)
+        return tuple(names)
+
+    def export_external_sector(self, number, target, *, name=None, generate_icons=False):
+        """Write a sector as an external sector folder, or as a .onua archive of that folder.
+
+        ``generate_icons`` first draws the missing map icons of the sector's own models.
+        """
         from studio.exchange.onua_archive import ONUA_SUFFIX, write_sector_onua
         target = Path(target).resolve()
         archive = target.suffix.casefold() == ONUA_SUFFIX
@@ -726,6 +806,8 @@ class SetDocument:
             raise ValueError("Sector names use letters, digits, '_' and '-' (max 40).")
         if not archive and target.exists() and any(target.iterdir()):
             raise FileExistsError(f"The destination folder is not empty: {target}")
+        if generate_icons:
+            self.generate_map_icons(number)
         sector, files = self.external_sector(number)
         text = format_sector(sector, f"{name}: sector {number} of Set{self.number}")
         with tempfile.TemporaryDirectory(prefix="sector-export-") as directory:
@@ -733,6 +815,7 @@ class SetDocument:
             stage.mkdir()
             (stage / f"{name}.sector").write_text(text, encoding="utf-8")
             for file_name, source in files.items():
+                (stage / file_name).parent.mkdir(parents=True, exist_ok=True)
                 shutil.copy2(source, stage / file_name)
             read_sector(stage / f"{name}.sector")
             if archive:
@@ -812,6 +895,10 @@ class SetDocument:
         if target is None or not 0 <= target < SECTOR_LIMIT:
             raise ValueError("No free sector slot (1-247).")
 
+        def icon_files(values):
+            files = tuple(resolve_sector_file(folder, v) for v in values)
+            return files if files and all(f.is_file() for f in files) else ()
+
         subset, own = SetSdf(), []
         for index, model in enumerate(sector.models):
             row, is_own = self._external_model_row(model, folder, visproto)
@@ -843,6 +930,13 @@ class SetDocument:
             self.external_own |= {ids[identity(m)] for m, is_own in zip(subset.models, own) if is_own}
             self.external_models |= created(models, self.sdf.models)
             self.external_buildings |= created(buildings, self.sdf.buildings)
+            for model in sector.models:
+                files = icon_files(model.map_icon)
+                if files:
+                    row = subset.models[names[model.name.casefold()]]
+                    self.map_icons[("model", ids[identity(row)])] = files
+            if icon_files(sector.map_icon):
+                self.map_icons[("sector", target)] = icon_files(sector.map_icon)
             self.validate_resources()
             return target
         return self.change("Import external sector", apply)
@@ -989,7 +1083,7 @@ class SetDocument:
         if blocked:
             raise ValueError(
                 f"Sector(s) {', '.join(map(str, blocked))} use models of an external sector. "
-                "Export them with Sector > Export external sector, then clear or wipe them before saving the set.")
+                "Export them with File > Export Sector File, then clear or wipe them before saving the set.")
         used = {bid for sector in self.sdf.sectors.values() for bid in sector.subsects}
         drop_buildings = {bid for bid in self.external_buildings if bid < len(buildings) and bid not in used}
         kept = [row for bid, row in enumerate(buildings) if bid not in drop_buildings]

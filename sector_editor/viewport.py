@@ -89,6 +89,7 @@ class SectorViewport(GpuMapViewport):
         self.selected_cells = {4}
         self.occupied_cells = set()
         self.top_down = top_down
+        self.animation_time_ms = 0.0
         self.model_source = None
         self.placement_active = False
         self.cell_details = {}
@@ -114,6 +115,13 @@ class SectorViewport(GpuMapViewport):
         self.set_sky_visible(False)
         self.setToolTip("Left click: select cell · Ctrl+click: add cell · Right drag: orbit · Middle drag: pan · Wheel: zoom")
 
+    def set_library(self, library):
+        if isinstance(library, PreviewLibrary) and not self.top_down:
+            from .playback_mesh import PlaybackMesh
+            library = PlaybackMesh(library, self.camera)
+            library.time_ms = self.animation_time_ms
+        super().set_library(library)
+
     def show_sector(self, library, number, *, state=0, model=None, reset=False):
         camera = self.camera.copy()
         self._source_library, self._number, self._state = library, number, state
@@ -122,7 +130,12 @@ class SectorViewport(GpuMapViewport):
         self.model_preview = model is not None
         sector = library.assets.sdf.sectors.get(number)
         self.single = sector.single if sector else False
-        self.set_library(PreviewLibrary(library, state, model))
+        preview = PreviewLibrary(library, state, model)
+        if not self.top_down:
+            from .playback_mesh import PlaybackMesh
+            preview = PlaybackMesh(preview, self.camera)
+            preview.time_ms = getattr(self, "animation_time_ms", 0.0)
+        self.set_library(preview)
         if self.doc is None:
             doc = LdfDocument(mw=1, mh=1)
             doc.grids["hgt"][0][0] = DEFAULT_HGT
@@ -147,6 +160,19 @@ class SectorViewport(GpuMapViewport):
         if self.top_down:
             self._fit_top()
         self.update()
+
+    def sample_animation(self, time_ms):
+        """Refresh animated geometry only; navigation and selection stay untouched."""
+        self.animation_time_ms = time_ms
+        if self.lib is None or self.top_down:
+            return
+        self.lib.time_ms = time_ms
+        self.lib.camera = self.camera
+        self.world_scene._templates.clear()
+        self.world_scene._previews.clear()
+        self.world_scene._cell_keys.clear()
+        self.world_scene._row_keys.clear()
+        self.scene_changed()
 
     def _fit_top(self):
         self.camera.yaw, self.camera.pitch = 180, 90

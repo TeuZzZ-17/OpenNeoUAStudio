@@ -703,7 +703,7 @@ def test_free_slot_controls_and_double_click_creates_a_sector(real_window):
 
 def test_panels_separate_cell_states_from_model_browser(real_window):
     window = real_window
-    assert [window.tabs.tabText(i) for i in range(window.tabs.count())] == ["Cells", "Models", "Definitions"]
+    assert [window.tabs.tabText(i) for i in range(window.tabs.count())] == ["Cells", "Models", "Definitions", "Map icons"]
     assert window.cells_page.isAncestorOf(window.state_models[0])
     assert window.models_page.isAncestorOf(window.models)
     assert window.definitions_page.isAncestorOf(window.model_combo)

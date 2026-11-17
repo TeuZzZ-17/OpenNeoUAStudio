@@ -8,6 +8,7 @@ the viewport (playback, speed and the visual timeline).
 
 from __future__ import annotations
 
+from studio.ui.playback_controls import PlaybackButton, PlaybackStepButton, PlaybackSpeedSpinBox
 from studio.rendering.playback import DEFAULT_ANIMATION_SPEED
 
 import math
@@ -864,7 +865,8 @@ class DestructionFxPanel(QWidget):
             return widget
 
         self.restart_button = button("Restart", "Play again from the start")
-        self.play_button = button("Play", "Play / pause", True)
+        self.play_button = PlaybackButton(bar)
+        controls.addWidget(self.play_button)
         self.stop_button = button("Stop", "Stop and rewind")
         self.loop_button = button("Loop", "Repeat the preview", True)
         self.loop_button.setChecked(True)
@@ -875,7 +877,6 @@ class DestructionFxPanel(QWidget):
             "Damage", "Hide the damage sphere and numbers of the weapon", True)
         for widget, symbol in (
                 (self.restart_button, QStyle.StandardPixmap.SP_MediaSkipBackward),
-                (self.play_button, QStyle.StandardPixmap.SP_MediaPlay),
                 (self.stop_button, QStyle.StandardPixmap.SP_MediaStop),
                 (self.loop_button, QStyle.StandardPixmap.SP_BrowserReload),
                 (self.mute_button, QStyle.StandardPixmap.SP_MediaVolume)):
@@ -1512,8 +1513,6 @@ class DestructionFxPanel(QWidget):
         if playing and self.code_drawer is not None and self.code_drawer.timer.isActive():
             self.code_drawer.timer.stop()
             self.code_drawer._apply()
-        self.play_button.setIcon(self._transport_icon(
-            QStyle.StandardPixmap.SP_MediaPause if playing else QStyle.StandardPixmap.SP_MediaPlay))
         self.play_button.setToolTip("Pause destruction preview" if playing else "Play destruction preview")
         if playing:
             if self.time_ms >= self._length():

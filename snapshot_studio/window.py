@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from studio.ui.playback_controls import PlaybackButton, PlaybackStepButton, PlaybackSpeedSpinBox
 from pathlib import Path
 
 from PySide6.QtCore import Qt
@@ -191,21 +192,21 @@ class SnapshotStudioWindow(EntityListMixin, SetBasMixin, AssemblyWindow):
         self._toolbar_step_button = self.step_button
         self._toolbar_speed_spin = self.speed_spin
 
-        self.play_button = QPushButton("Play")
+        self.play_button = PlaybackButton()
         self.play_button.setCheckable(True)
         self.play_button.setEnabled(False)
         self.play_button.toggled.connect(self._toggle_play)
 
-        self.step_button = QPushButton(">>")
+        self.step_button = PlaybackStepButton()
         self.step_button.setEnabled(False)
         self.step_button.clicked.connect(self.viewport.step_animation)
 
-        self.speed_spin = QDoubleSpinBox()
+        self.speed_spin = PlaybackSpeedSpinBox()
         self.speed_spin.setRange(0.05, 8.0)
         self.speed_spin.setSingleStep(0.25)
         self.speed_spin.setValue(
             self._toolbar_speed_spin.value())
-        self.speed_spin.setMaximumWidth(96)
+        self.speed_spin.setFixedWidth(112)
         self.speed_spin.valueChanged.connect(
             self._on_animation_speed_changed)
 

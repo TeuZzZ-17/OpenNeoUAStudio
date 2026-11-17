@@ -430,24 +430,26 @@ def _data_relative_path(value) -> Path:
 
 
 @set_op("export_external_sector")
-def op_export_external_sector(ctx, sector=None, name=None, archive: bool = False):
+def op_export_external_sector(ctx, sector=None, name=None, archive: bool = False, map_icons: bool = True):
     """Write a sector as an external sector folder: Data/Models/Sectors/<name>/<name>.sector plus our own model
     files. Models and skeletons that exist in SET.BAS are written by name only (the game takes them from the SET of
     the map). archive=true also writes Data/Models/Sectors/<name>.onua. The folder must be new. Written at once,
-    outside the set (no set undo). A building uses it with sec_type = <sector_file>|<fallback SET sector>."""
+    outside the set (no set undo). A building uses it with sec_type = <sector_file>|<fallback SET sector>.
+    map_icons=true draws the strategic-map icons of our own models (every zoom) into map/; set models keep their
+    vanilla map symbol."""
     number = ctx.sector(sector)
     if not name or not NAME_TOKEN.fullmatch(str(name)):
         raise core.McpToolError("give name: letters, digits, '_' or '-' (max 32)")
     folder = core.under_data("Models/Sectors") / name
     core.ensure_writable(folder / f"{name}.sector")
     try:
-        ctx.doc.export_external_sector(number, folder)
+        ctx.doc.export_external_sector(number, folder, generate_icons=bool(map_icons))
         result = {"sector_file": f"Data/Models/Sectors/{name}/{name}.sector",
                   "files": sorted(p.name for p in folder.iterdir() if p.is_file())}
         if archive:
             target = folder.parent / f"{name}.onua"
             core.ensure_writable(target)
-            ctx.doc.export_external_sector(number, target, name=name)
+            ctx.doc.export_external_sector(number, target, name=name, generate_icons=bool(map_icons))
             result["archive"] = str(target)
     except (OSError, ValueError, RuntimeError) as exc:
         raise core.McpToolError(str(exc)) from exc

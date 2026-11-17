@@ -206,6 +206,8 @@ Edit one:         [{"op":"import_external_sector","source":"Data/Models/Sectors/
                    ... edits on {"named":"s"} ...,
                    {"op":"export_external_sector","sector":{"named":"s"},"name":"Sulg_Power_V2"},
                    {"op":"wipe_sectors","sectors":[{"named":"s"}]}]   (its own models never enter the set)
+Map icons: export draws them for our own models (map/, every map zoom); map_icons=false keeps the vanilla
+map symbols only. The Sector Editor tab "Map icons" previews, generates and loads them (PNG/SVG).
 The .sector syntax is in the parameter guide (section Buildings, sec_type) and studio/formats/sector_file.py.
 
 NEW BUILDING (model + states + sector), e.g. for Set3:

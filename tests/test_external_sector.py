@@ -86,6 +86,20 @@ class FormatTests(unittest.TestCase):
             with self.subTest(label), self.assertRaises(SectorFileError):
                 parse_sector_text(text)
 
+    def test_transition_explosions_follow_the_engine(self):
+        from entity_designer import destruction_fx as fx
+        from sector_editor.transition_fx import effect_position, required_vps, transition_simulation
+        catalog = {7: fx.legacy_vehicle_from_text(7, "new_vehicle 7\nvp_dead = 30\nvp_megadeth = 31\nmass = 50\nend")}
+        self.assertEqual(effect_position((7, 10, 20, 250)), (10.0, -250.0, -20.0))
+        self.assertIsNone(transition_simulation([(), ()], catalog))
+        simulation = transition_simulation([((7, 0, 0, 200),)], catalog)
+        self.assertGreater(simulation.duration, 0)
+        self.assertEqual(required_vps(simulation), {30, 31})
+        start = simulation.items_at(1.0)[0]
+        self.assertEqual((start.vp, round(start.position[1])), (30, -200))
+        missing = transition_simulation([((99, 0, 0, 0),)], catalog)
+        self.assertTrue(any("99" in note for note in missing.notes))
+
     def test_names_may_repeat_between_models_and_pieces(self):
         text = SAMPLE.replace("begin_model core", "begin_model CORE")
         self.assertIsNotNone(parse_sector_text(text).model("core"))
@@ -181,6 +195,33 @@ class SectorEditorTests(unittest.TestCase):
         doc.wipe_sectors([slot])
         doc.save()
         self.assertEqual(doc.sdf.path.read_bytes(), sdf_before)
+
+    def test_map_icons_generate_export_and_reimport(self):
+        from PySide6.QtWidgets import QApplication
+        from sector_editor.visual_aids import map_zoom_image
+        QApplication.instance() or QApplication([])
+        doc = self.doc()
+        slot = doc.import_external_sector(self.own_sector("Icon_Post"))
+        self.assertGreater(doc.generate_map_icons(slot), 0)
+        own = next(iter(doc.external_own))
+        self.assertEqual(len(doc.map_icons[("model", own)]), 3)
+        # The small test turret vanishes at 4/8 px per sector: load the sector icon by hand.
+        doc.set_map_icon("sector", slot, doc.map_icons[("model", own)][:2])
+        self.assertEqual(len(doc.map_icons[("sector", slot)]), 2)
+        for zoom, size in enumerate((4, 8, 12, 24, 48)):
+            image = map_zoom_image(doc, slot, 0, zoom)
+            self.assertEqual((image.width(), image.height()), (size, size))
+        target = self.data / "Models" / "Sectors" / "Icon_Post_Out"
+        doc.export_external_sector(slot, target)
+        exported = read_sector(target / "Icon_Post_Out.sector")
+        self.assertEqual(len(exported.map_icon), 2)
+        icons = [m.map_icon for m in exported.models if m.map_icon]
+        self.assertEqual([len(i) for i in icons], [3])
+        self.assertTrue(all((target / f).is_file() for f in (*exported.map_icon, *icons[0])))
+        again = self.doc()
+        slot = again.import_external_sector(target)
+        self.assertIn(("sector", slot), again.map_icons)
+        self.assertTrue(any(key[0] == "model" for key in again.map_icons))
 
     def test_mcp_edit_flow_leaves_the_set_unchanged(self):
         from studio_mcp import sets

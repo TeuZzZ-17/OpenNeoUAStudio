@@ -182,3 +182,92 @@ class SymbolPreview(QWidget):
         except (OSError, RuntimeError, TypeError, ValueError):
             image = None
         _show_preview(self.preview, image, nearest=True)
+
+
+# --- strategic-map icons of a sector at the five map zoom levels ----------------------------
+
+MAP_ZOOM_TITLES = ("Zoom 1", "Zoom 2", "Zoom 3", "Zoom 4", "Zoom 5")
+
+
+def _font_tile(stem: str, tile_size: int, symbol: int) -> QImage:
+    directory = _font_directory()
+    path = bootstrap.find_ci(directory, stem + ".PNG", stem + ".ILB", stem + ".ILBM") if directory else None
+    if path is None or not path.is_file():
+        return QImage()
+    stat = path.stat()
+    return _symbol_tile(str(path), stat.st_mtime_ns, stat.st_size, symbol & 0xFF, tile_size)
+
+
+def _icon_image(files, zoom_index: int, size: int) -> QImage:
+    """One of the authored/generated icon files (1 for every zoom, or one per zoom)."""
+    if not files:
+        return QImage()
+    path = files[0 if len(files) == 1 else min(zoom_index, len(files) - 1)]
+    image = QImage(str(path))
+    if image.isNull():
+        return image
+    return image.scaled(QSize(size, size), Qt.AspectRatioMode.IgnoreAspectRatio,
+                        Qt.TransformationMode.FastTransformation)
+
+
+def map_zoom_image(document, number: int, state: int, zoom: int) -> QImage | None:
+    """The sector as the game map draws it: own icons where set, vanilla glyphs elsewhere."""
+    sector = document.sdf.sectors.get(number) if document else None
+    if sector is None:
+        return None
+    if zoom < 2:
+        size = 4 << zoom
+        image = _icon_image(document.map_icons.get(("sector", number)), zoom, size)
+        return image if not image.isNull() else _font_tile(f"sec{size}", size, sector.symbol)
+    cell = 4 << (zoom - 2)
+    stem = f"lego{cell}"
+    canvas = QImage(cell * 3, cell * 3, QImage.Format.Format_ARGB32_Premultiplied)
+    canvas.fill(Qt.GlobalColor.transparent)
+    painter = QPainter(canvas)
+    models = document.sdf.models
+    for index, bid in enumerate(sector.subsects):
+        model = models[document.sdf.buildings[bid].state(state)]
+        icons = document.map_icons.get(("model", model.id))
+        if sector.single:
+            image = _icon_image(icons, zoom - 2, cell * 3)
+            if not image.isNull():
+                painter.drawImage(0, 0, image)
+            else:
+                for row in range(3):
+                    for col in range(3):
+                        painter.drawImage(col * cell, row * cell,
+                                          _font_tile(stem, cell, model.numbers[1] + 16 * row + col))
+            break
+        image = _icon_image(icons, zoom - 2, cell)
+        if image.isNull():
+            image = _font_tile(stem, cell, model.numbers[1])
+        painter.drawImage((index % 3) * cell, (index // 3) * cell, image)
+    painter.end()
+    return canvas
+
+
+class MapIconPreview(QWidget):
+    """The current sector at every strategic-map zoom, enlarged without smoothing."""
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        from PySide6.QtWidgets import QGridLayout
+        layout = QGridLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        self.previews = []
+        for zoom, title in enumerate(MAP_ZOOM_TITLES):
+            label = _image_label(QSize(96, 96), self)
+            label.setToolTip(f"{title}: " + ("one symbol per sector" if zoom < 2 else "one symbol per cell"))
+            caption = QLabel(title, self)
+            caption.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            layout.addWidget(label, (zoom // 3) * 2, zoom % 3)
+            layout.addWidget(caption, (zoom // 3) * 2 + 1, zoom % 3)
+            self.previews.append(label)
+
+    def show_sector(self, document, number: int, state: int) -> None:
+        for zoom, label in enumerate(self.previews):
+            try:
+                image = map_zoom_image(document, number, state, zoom)
+            except (IndexError, OSError, RuntimeError, ValueError):
+                image = None
+            _show_preview(label, image, nearest=True)
