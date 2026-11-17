@@ -14,7 +14,9 @@ START = """WORKFLOW (read-only steps are always safe)
 3. Make an editable copy: studio_export_model('set1:VPwGLID2', out_dir, base_name, skeleton_stem).
    The skeleton_stem must be as long as the original (VPWGLID2 -> VPKGLID2) and different.
    For a single-object loose BASE with loose resources, studio_clone_loose_model copies its skeleton,
-   textures and animations to a new folder. It refuses missing or embedded-only dependencies.
+   authored loose textures and animations to a new folder. SET.BAS dependencies stay references;
+   the installed set supplies them directly. Missing dependencies are refused. Never publish original
+   game resources, including renamed or modified copies; only wholly authored payloads belong in new models.
    A NEW design instead starts empty: studio_new_model(out_dir, base_name, skeleton_stem) - see studio_help('design').
 4. Edit. studio_edit_batch(model, operations=[...]) runs several steps on one in-memory copy and writes ONCE,
    after verification; if any step fails nothing is written. Every single-purpose tool (studio_extrude, ...) is the
@@ -89,6 +91,7 @@ In studio_edit_batch any step may add "save_as":"name"; later steps can then use
 
 UV = """UV MODES (studio_set_uvs, and the `uv` argument of add_polygons / create_primitive / extrude)
 UVs are byte pairs 0..255 on the block's texture (256x256 bitmap), one per polygon corner.
+studio_set_uvs edits normal AMESH faces and static ILBM AREA terrain faces. Animated AREA faces keep their ANM UVs.
 DEFAULT: without a uv spec, new polygons get 'world' UVs with the SAME texel size and texture region as the
 model's original polygons of that material (measured when the model was opened), so additions look like part of it.
 - planar   project along the polygon's main plane and stretch over `rect` (default [16,16,240,240]; with a
@@ -97,7 +100,8 @@ model's original polygons of that material (measured when the model was opened),
 - world    constant texel size: "texels_per_unit": 1.0 means 1 texture pixel per model unit; optional
            "region":[u0,v0,u1,v1] keeps polygons inside that part of the texture (tiles wrap inside it)
 - copy     "from_polygon": ID  (same corner count: identical UVs; otherwise fitted into its UV box)
-- explicit "uvs": [[u,v],...] one pair per corner
+- explicit "uvs": [[u,v],...] one pair per corner in a UV spec. studio_set_uvs takes one UV list per selected
+           polygon, or a dictionary such as {"1": [[0,0],[127,0],[127,127],[0,127]]} keyed by polygon ID.
 - adjust   change what is there: "offset":[du,dv], "scale":n|[su,sv], "flip_u", "flip_v", "rotate_90":turns
 Open the texture with studio_render_model + studio_materials (uv_box per block) to see which areas exist.
 """
@@ -191,6 +195,18 @@ One big model:         {"op":"new_sector","layout":"single","models":"ST_MACHT.b
 Start in ruins:        {"op":"shift_state","sector":40,"cells":[4],"state":3}
 Explicit four states:  {"op":"place_states","sector":40,"cells":[1],"states":["ST_HO","STxHO","STyHO","STzHO"]}
 Take sectors from another set: {"op":"import_sectors","from_set":"set1","sectors":[5,6]}  (models must exist here)
+
+EXTERNAL SECTORS (OpenNeoUA: a building's sec_type can name a .sector file instead of a set sector)
+A sector folder Data/Models/Sectors/<Name>/ holds <Name>.sector (cells, pieces = the four damage states, models)
+and only OUR files (BASE, skeletons, textures). Anything missing there comes from the SET of the map being played,
+so models of SET.BAS are written by name only - never copied (copyright rule). Buildings.cfg:
+  sec_type = Data/Models/Sectors/<Name>/<Name>.sector|50   (50 = SET sector used if the file cannot load)
+Export a sector:  {"op":"export_external_sector","sector":40,"name":"Sulg_Power","archive":true}
+Edit one:         [{"op":"import_external_sector","source":"Data/Models/Sectors/Sulg_Power","save_as":"s"},
+                   ... edits on {"named":"s"} ...,
+                   {"op":"export_external_sector","sector":{"named":"s"},"name":"Sulg_Power_V2"},
+                   {"op":"wipe_sectors","sectors":[{"named":"s"}]}]   (its own models never enter the set)
+The .sector syntax is in the parameter guide (section Buildings, sec_type) and studio/formats/sector_file.py.
 
 NEW BUILDING (model + states + sector), e.g. for Set3:
 a. studio_new_model('Models/Base/New/Signal_Tower_Intact', 'NX_SIGT1', 'NX_SIGT1', donor='set3:ST_CITY1')

@@ -1685,6 +1685,30 @@ def rewrite_block_texture_template(
     return parsed.root.ades[0].source_objt_bytes
 
 
+def rewrite_area_uv_template(block, uvs) -> bytes:
+    """Rewrite a static AREA's primary OTL2, preserving its typed OBJT template."""
+    wrapped = _wrap_ades_objt(block.source_objt_bytes)
+    parsed = parse_base_bytes(wrapped, "<area-uv-template>")
+    if parsed.root is None or len(parsed.root.ades) != 1:
+        raise MappingEditError("AREA template could not be parsed")
+    original = parsed.root.ades[0]
+    if (original.class_id or "").lower() != "area.class" or original.texture is None \
+            or original.texture.kind != "ilbm" or len(original.olpl) != 1 \
+            or len(original.olpl[0]) != len(uvs):
+        raise MappingEditError("only same-size static AREA UVs can be rewritten")
+    outline = next((node for node in parsed.tree.iter_all() if node.tag == "OTL2"), None)
+    if outline is None:
+        raise MappingEditError("static AREA has no primary OTL2")
+    rebuilt = _rebuild_iff_chunk(wrapped, parsed.tree.roots[0],
+                                 {outline.offset: bytes(value for uv in uvs for value in uv)})
+    verified = parse_base_bytes(rebuilt, "<area-uv-verified>")
+    result = verified.root.ades[0]
+    if result.olpl != [list(uvs)] or result.texture.name != original.texture.name \
+            or result.ade_poly_id != original.ade_poly_id:
+        raise MappingEditError("static AREA UV rewrite did not round-trip")
+    return result.source_objt_bytes
+
+
 def rewrite_ade_point_template(block, point_id: int) -> bytes:
     """Return one ADES OBJT template whose ADE/STRC point reference (emitters, AREA) is ``point_id``."""
 
@@ -1731,6 +1755,11 @@ def update_particle_emitter(block, attributes):
     if chunk is None or template.particle_attributes != original:
         raise MappingEditError("the emitter attributes differ from their source bytes")
     payload = bytearray(chunk.payload(wrapped))
+    # four direction vectors (acceleration and magnify, start/end), then the integer fields
+    struct.pack_into(
+        ">12f", payload, struct.calcsize(">h"),
+        *attributes.accel_start, *attributes.accel_end,
+        *attributes.magnify_start, *attributes.magnify_end)
     struct.pack_into(
         ">11i", payload, struct.calcsize(">h12f"),
         attributes.collide, attributes.start_speed, attributes.num_contexts,

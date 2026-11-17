@@ -16,7 +16,7 @@ import uuid
 from pathlib import Path
 
 from studio.assets.family import load_asset_family
-from studio.assets.mapping import _block_material_metadata, MappingEditError, MappingIndex, rewrite_ade_point_template, save_model_base_copy
+from studio.assets.mapping import _block_material_metadata, MappingEditError, MappingIndex, rewrite_ade_point_template, rewrite_area_uv_template, save_model_base_copy
 from studio.exchange.portable import DirectoryIndex
 from studio.formats.base_format import AttsEntry, parse_base_bytes
 from studio.formats.sklt import (
@@ -283,6 +283,13 @@ class LooseModel:
         """Replace the UVs of a polygon; returns False when its block has no UVs to set."""
         block_index, atts_index = (table or self.slot_table())[poly_id]
         block = self.blocks[block_index]
+        if (self.block_class(block_index) == "area.class" and block.texture is not None
+                and block.texture.kind == "ilbm" and not block.uses_atts_only_mapping):
+            group = self.clean_uvs(uvs, len(self.polygons[poly_id]))
+            block.source_objt_bytes = rewrite_area_uv_template(block, group)
+            block.olpl[atts_index] = group
+            block.texture.outline_uvs = list(group)
+            return True
         if self.block_class(block_index) != "amesh.class":
             raise core.McpToolError(f"Polygon #{poly_id} belongs to a {block.class_id} block: its UVs are not editable here")
         if block.uses_atts_only_mapping:

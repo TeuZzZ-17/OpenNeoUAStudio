@@ -54,6 +54,20 @@ class SectorMeshLibrary:
         self._base_cache: dict[tuple[str, bool], list] = {}
         self._meshes: dict[tuple[int, int], SectorMesh] = {}
         self._filler_templates: dict[tuple, tuple] = {}
+        # Terrain overrides use the same positional IDs as the engine's slurp table.
+        self._filler_overrides = {}
+        directory = bootstrap.find_ci(assets.set_dir, 'scripts')
+        override = bootstrap.find_ci(directory, 'override.lst') if directory else None
+        if override is not None:
+            for line in override.read_text(encoding='cp1252').splitlines():
+                fields = line.split(';', 1)[0].split()
+                if len(fields) >= 3 and fields[0].casefold() == 'slurp':
+                    try:
+                        index = int(fields[1])
+                    except ValueError:
+                        continue
+                    if 0 <= index < 72:
+                        self._filler_overrides[index] = fields[2]
         scripts = (bootstrap.installation().folder('scripts')
                    if bootstrap.installation() else bootstrap.game_data_dir() / 'Scripts')
         self.buildings = load_building_files(scripts)
@@ -322,11 +336,48 @@ class SectorMeshLibrary:
         self._loader._faces = []
         return faces
 
+    def external_mesh(self, sector_file: str, state: int = STATE_INTACT) -> SectorMesh:
+        """Faces of an external .sector (Data/... path), resolved like the engine:
+        a BASE beside the file first, otherwise the SET model with the same name."""
+        from studio.formats.sector_file import SectorFileError, read_sector, resolve_data_path
+        from ..core.sector_resolver import ResolvedSub
+        key = (sector_file.casefold(), state)
+        if key in self._meshes:
+            return self._meshes[key]
+        mesh = SectorMesh(-1)
+        self._meshes[key] = mesh
+        try:
+            path = resolve_data_path(bootstrap.game_data_dir(), sector_file)
+            sector = read_sector(path)
+        except (OSError, SectorFileError):
+            mesh.missing.append(sector_file)
+            return mesh
+        self.assets.add_external_root(path.parent)
+        for index, cell in enumerate(sector.cells):
+            visual = sector.model(sector.piece(cell).state(state)).visual
+            local = bootstrap.find_ci(path.parent, visual.replace("\\", "/"))                 if visual.casefold().endswith(".base") else None
+            name = local.name if local is not None else visual
+            faces = self._base_faces(name)
+            if faces is None:
+                mesh.missing.append(name)
+                continue
+            ox, oz = ResolvedSub(4 if sector.single else index, -1, -1, None, None).offset
+            mesh.faces.extend((face, ox, oz) for face in faces)
+        return mesh
+
+    def definition_mesh(self, definition) -> SectorMesh:
+        """Sector of a building definition: its external .sector, else its SET sector."""
+        if getattr(definition, "sector_file", ""):
+            mesh = self.external_mesh(definition.sector_file)
+            if mesh.faces:
+                return mesh
+        return self.mesh(definition.sec_type)
+
     def building_preview(self, building_id):
         definition = self.buildings.get(building_id)
         if definition is None:
             return SectorMesh(-1)
-        sector = self.mesh(definition.sec_type)
+        sector = self.definition_mesh(definition)
         guns = self.building_mesh(building_id)
         return SectorMesh(definition.sec_type, faces=sector.faces + guns.faces,
                           missing=sector.missing + guns.missing)
@@ -341,12 +392,17 @@ class SectorMeshLibrary:
             index = int(vertical) * 36 + surface1 * 6 + surface2
             if not (0 <= surface1 < 6 and 0 <= surface2 < 6 and index < len(fillers)):
                 raise ValueError(f"Missing terrain transition: {surface1}/{surface2}")
-            obj = fillers[index]
-            self._loader._faces = []
-            self._loader._load_object(obj, self.assets.family, self._material_index,
-                                      primary=True, owner=obj.owner_path)
-            faces = [f for f in self._loader._faces if f.mapped]
-            self._loader._faces = []
+            override = self._filler_overrides.get(index)
+            obj = self.assets.base_object(override, set_only=True) if override else None
+            if obj is not None:
+                faces = self._base_faces(override, set_only=True)
+            else:
+                obj = fillers[index]
+                self._loader._faces = []
+                self._loader._load_object(obj, self.assets.family, self._material_index,
+                                          primary=True, owner=obj.owner_path)
+                faces = [f for f in self._loader._faces if f.mapped]
+                self._loader._faces = []
             self._filler_templates[key] = (obj.skeleton, faces)
         skeleton, faces = self._filler_templates[key]
         mesh = SectorMesh(-1)

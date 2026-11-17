@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import copy
 import functools
+import struct
 
 from studio.assets.mapping import (
     _block_material_metadata,
@@ -255,6 +256,36 @@ def op_set_texture(ctx, select=None, texture=None, slot: str = "texture"):
     return {"texture": loaded, "changed_blocks": changed, "new_blocks": split, "polygons": sorted(ids)}
 
 
+@op("use_set_animation")
+@_guard_errors
+def op_use_set_animation(ctx, old=None, new=None):
+    """Point the animated faces that use the loose animation `old` (e.g. 'MKEA31B.ANM') at the animation `new` of the
+    installed Set.BAS (e.g. '1210960B.ANM'). The model then needs no copy of the original file: the game finds it in the
+    set by itself. The loose `old` file is no longer written; delete it from the model folder."""
+    lm = ctx.lm
+    if not old or not new:
+        raise core.McpToolError("give `old` (the loose .ANM name in the model) and `new` (the .ANM name in the set)")
+    archive = getattr(lm.family, "setbas_archive", None) or core._setbas(lm.set_hint or "set1")[0]
+    resource = next(iter(archive.find(new, "bmpanim.class")), None)
+    if resource is None:
+        raise core.McpToolError(f"Animation {new!r} is not in the set (use set_hint to choose the set)")
+    target = resource.resource_name
+    changed = []
+    for index, block in enumerate(lm.blocks):
+        texture = getattr(block, "texture", None)
+        if texture is None or (texture.name or "").casefold() != str(old).casefold():
+            continue
+        block.source_objt_bytes = rewrite_block_texture_template(block, target, "texture")
+        texture.name = target
+        changed.append(index)
+    if not changed:
+        raise core.McpToolError(f"No face uses the animation {old!r}")
+    for table in (lm.family.animations, lm.extra_files):
+        for key in [k for k in table if k.casefold() == str(old).casefold()]:
+            table.pop(key)
+    return {"old": old, "new": target, "changed_blocks": changed}
+
+
 @op("generate_genesis")
 @_guard_errors
 def op_generate_genesis(ctx):
@@ -435,6 +466,43 @@ def op_move_emitter(ctx, block: int = -1, point=None, position=None):
     emitter.source_objt_bytes = rewrite_ade_point_template(emitter, anchor)
     emitter.ade_point_id = anchor
     return {"block": block, "point": anchor}
+
+
+_EMITTER_VECTORS = ("accel_start", "accel_end", "magnify_start", "magnify_end")
+_EMITTER_INTEGERS = ("collide", "start_speed", "num_contexts", "context_lifetime", "context_start_generation",
+                     "context_stop_generation", "birth_rate", "lifetime", "start_size", "end_size", "noise")
+
+
+@op("set_emitter")
+@_guard_errors
+def op_set_emitter(ctx, block: int = -1, settings=None):
+    """Change the settings of a particle emitter (block number from studio_effects). `settings` is a dictionary with
+    any of: accel_start, accel_end, magnify_start, magnify_end (each [x, y, z]; y DOWN, so a negative y goes up) and
+    collide, start_speed, num_contexts, context_lifetime, context_start_generation, context_stop_generation,
+    birth_rate (particles per second), lifetime, start_size, end_size, noise (whole numbers). Missing keys stay as they
+    are. Spray recipe: small `magnify` (the random part wins -> wide cone), high start_speed, positive y accel (gravity),
+    end_size smaller than start_size (the particles shrink out)."""
+    import dataclasses
+    from studio.assets.mapping import update_particle_emitter
+    lm = ctx.lm
+    block = int(block)
+    emitter = dict(_emitters(lm)).get(block)
+    if emitter is None:
+        raise core.McpToolError(f"Block #{block} is not a particle emitter")
+    if not isinstance(settings, dict) or not settings:
+        raise core.McpToolError("give `settings`, e.g. {'start_speed': 400, 'magnify_start': [0, -2, 0]}")
+    unknown = sorted(set(settings) - set(_EMITTER_VECTORS) - set(_EMITTER_INTEGERS))
+    if unknown:
+        raise core.McpToolError(f"unknown emitter setting(s) {unknown}; known: {list(_EMITTER_VECTORS + _EMITTER_INTEGERS)}")
+    changes = {}
+    for key, value in settings.items():
+        if key in _EMITTER_VECTORS:   # stored as 32-bit floats: round now so the written file reads back equal
+            changes[key] = tuple(struct.unpack(">f", struct.pack(">f", float(c)))[0] for c in _vec(value, key))
+        else:
+            changes[key] = int(value)
+    attributes = dataclasses.replace(emitter.particle_attributes, **changes, warnings=())
+    lm.blocks[block] = update_particle_emitter(emitter, attributes)
+    return {"block": block, "settings": {k: (list(v) if isinstance(v, tuple) else v) for k, v in changes.items()}}
 
 
 @op("delete_emitter")

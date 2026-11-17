@@ -45,7 +45,7 @@ Ground-decal effects need an explicit `effect_mode` (`ground_pulse` or `rise`) a
 | Add / remove geometry | `add_points`, `add_polygons`, `create_primitive` (box, wedge, prism/cylinder/cone, sphere, plane), `extrude_polygons`, `subdivide_polygons`, `duplicate_polygons`, `cut_paste`, `mirror_polygons`, `flip_polygons`, `weld_points`, `delete_polygons`, `cleanup_model`, `clear_model` |
 | Other models | `import_geometry` (copy/paste polygons from another model, materials are matched or added) |
 | Materials | `set_material`, `set_texture`, `set_uvs` (planar / rect / world / copy / explicit / adjust), `map_polygons`, `add_material_block`, `delete_material_block` |
-| Effects | `add_fx`, `delete_fx`, `add_emitter`, `move_emitter`, `delete_emitter`, `generate_genesis` |
+| Effects | `add_fx`, `delete_fx`, `add_emitter`, `move_emitter`, `set_emitter` (all emitter settings), `delete_emitter`, `use_set_animation` (point a loose `.ANM` at the same animation of the installed `Set.BAS`, so no copy is shipped), `generate_genesis` |
 | Wireframes (`.SKL`) | `studio_wire_get`, `studio_wire_render` (drawn like the game: +z up, first segment of each entry), `studio_wire_new`, `studio_wire_edit` (`add_lines`, `add_shape` circle/arc/rect/cross/brackets/dashes, `trace_image`, `normalize`, `split_outlines`, ...), `studio_wire_from_model` (Studio's wireframe generator, effects left out by default) |
 
 **Sets and sectors** (the Sector Editor's document, `sets.py`; help: `studio_help('sets')`, `'set_ops'`)

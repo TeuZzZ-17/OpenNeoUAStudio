@@ -333,10 +333,11 @@ def studio_export_model(source: str, out_dir: str, base_name: str, skeleton_stem
 @mcp.tool()
 def studio_clone_loose_model(source: str, out_dir: str, base_name: str, skeleton_stem: str,
                              set_hint: str = "") -> str:
-    """Clone a loose single-object BASE, its skeleton, textures and animations to a new folder.
+    """Clone a loose single-object BASE, its skeleton and authored loose dependencies to a new folder.
 
     The new skeleton stem must be unique and the same length as the original. Dependencies must be
-    resolved as loose files; embedded-only or missing resources and existing target folders are refused.
+    resolved; installed SET.BAS resources remain references and are not extracted. Missing resources
+    and existing target folders are refused. Use only authored loose resources in distributable models.
     The original stays untouched and the clone is reloaded and checked before writing the destination.
     """
     return _guard(lambda: core.clone_loose_model(

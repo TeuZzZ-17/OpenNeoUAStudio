@@ -977,6 +977,9 @@ def build_topology_states(
              if source and saved.source_objt_bytes == source), None)
         if exact is not None:
             return exact
+        if source and (block.class_id or "").lower() == "particle.class":
+            # emitter settings live in the OBJT itself (verified when edited): never fall back to an older look-alike
+            return source
         signature = template_signature(block)
         compatible = [
             saved for saved in saved_blocks

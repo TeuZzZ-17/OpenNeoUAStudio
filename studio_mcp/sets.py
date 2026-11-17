@@ -419,6 +419,55 @@ def op_import_sectors(ctx, from_set=None, sectors=None, to=None):
     return {"imported": dict(zip(numbers, imported))}
 
 
+def _data_relative_path(value) -> Path:
+    """A Data/... or Data-relative path given to a tool."""
+    text = str(value or "").replace("\\", "/")
+    if not text:
+        raise core.McpToolError("give a path")
+    if text.casefold().startswith("data/"):
+        text = text[5:]
+    return core.under_data(text)
+
+
+@set_op("export_external_sector")
+def op_export_external_sector(ctx, sector=None, name=None, archive: bool = False):
+    """Write a sector as an external sector folder: Data/Models/Sectors/<name>/<name>.sector plus our own model
+    files. Models and skeletons that exist in SET.BAS are written by name only (the game takes them from the SET of
+    the map). archive=true also writes Data/Models/Sectors/<name>.onua. The folder must be new. Written at once,
+    outside the set (no set undo). A building uses it with sec_type = <sector_file>|<fallback SET sector>."""
+    number = ctx.sector(sector)
+    if not name or not NAME_TOKEN.fullmatch(str(name)):
+        raise core.McpToolError("give name: letters, digits, '_' or '-' (max 32)")
+    folder = core.under_data("Models/Sectors") / name
+    core.ensure_writable(folder / f"{name}.sector")
+    try:
+        ctx.doc.export_external_sector(number, folder)
+        result = {"sector_file": f"Data/Models/Sectors/{name}/{name}.sector",
+                  "files": sorted(p.name for p in folder.iterdir() if p.is_file())}
+        if archive:
+            target = folder.parent / f"{name}.onua"
+            core.ensure_writable(target)
+            ctx.doc.export_external_sector(number, target, name=name)
+            result["archive"] = str(target)
+    except (OSError, ValueError, RuntimeError) as exc:
+        raise core.McpToolError(str(exc)) from exc
+    return result
+
+
+@set_op("import_external_sector")
+def op_import_external_sector(ctx, source=None, to=None):
+    """Open an external sector (its .sector file, its folder, or a .onua archive; Data/... path) into a free slot
+    (or `to`) so the other operations can edit it. An archive is first unpacked into Data/Models/Sectors/<name>.
+    Its own models can never be saved into the set: export it again with export_external_sector, then wipe_sectors
+    on that slot in the same batch (a batch that still uses them writes nothing)."""
+    path = _data_relative_path(source)
+    try:
+        number = ctx.doc.import_external_sector(path, None if to is None else ctx.sector(to, defined=False))
+    except RuntimeError as exc:
+        raise core.McpToolError(str(exc)) from exc
+    return {"sector": number, "own_models": sorted(ctx.doc.external_own)}
+
+
 # --- model and building rows -----------------------------------------------------------------
 
 

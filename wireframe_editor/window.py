@@ -759,9 +759,6 @@ class WireframeEditorWindow(QMainWindow):
 
         file_menu.addAction(self.import_action)
         file_menu.addAction(self.save_action)
-        self.save_entity_action = QAction("Save Entity Layout", self)
-        self.save_entity_action.triggered.connect(self.save_current_file)
-        file_menu.addAction(self.save_entity_action)
         file_menu.addAction(self.save_as_action)
 
         _close_action, self.exit_action = install_standard_file_menu_tail(
@@ -1640,8 +1637,6 @@ class WireframeEditorWindow(QMainWindow):
             self.save_action.setEnabled(can_overwrite)
         if self.save_as_action:
             self.save_as_action.setEnabled(can_export)
-        if hasattr(self, "save_entity_action"):
-            self.save_entity_action.setEnabled(self._game_object is not None and can_overwrite)
         self._update_status_value()
 
     def _update_status_value(self) -> None:

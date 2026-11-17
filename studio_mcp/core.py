@@ -372,11 +372,11 @@ def export_model(source: Source, out_dir: str, base_name: str, skeleton_stem: st
 
 
 def clone_loose_model(source: Source, out_dir: str, base_name: str, skeleton_stem: str) -> dict:
-    """Clone one loose BASE and all of its resolved loose dependencies into a new folder.
+    """Clone a loose BASE, keeping installed SET.BAS dependencies as references.
 
     Replacing a same-length skeleton reference keeps the original BASE chunks intact. This operation
-    deliberately refuses multi-object families and resources available only in SET.BAS: copying an
-    incomplete family without saying so would make an apparently valid restoration unsafe to install.
+    refuses multi-object families and missing resources. Embedded resources stay in SET.BAS;
+    the existing resolver supplies them when the clone is reloaded.
     """
     if source.set_object is not None:
         raise McpToolError("Use studio_export_model for a Set.BAS object; this tool clones a loose BASE")
@@ -408,10 +408,14 @@ def clone_loose_model(source: Source, out_dir: str, base_name: str, skeleton_ste
 
     files = {f"{skeleton_stem}.sklt": Path(obj.skeleton_ref.path).read_bytes()}
     dependency_sources = {f"{skeleton_stem}.sklt": str(obj.skeleton_ref.path)}
+    set_dependencies = []
     for refs in (family.texture_refs, family.animation_refs):
         for logical, ref in refs.items():
             if ref.path is None:
-                raise McpToolError(f"Dependency {logical} is missing or only in SET.BAS; export it first")
+                if ref.found and ref.source == "SET.BAS":
+                    set_dependencies.append(logical)
+                    continue
+                raise McpToolError(f"Dependency {logical} is missing")
             name = Path(logical.replace("\\", "/")).name
             if not name or name in (".", ".."):
                 raise McpToolError(f"Invalid dependency name: {logical}")
@@ -445,13 +449,16 @@ def clone_loose_model(source: Source, out_dir: str, base_name: str, skeleton_ste
             raise McpToolError("Cloned model differs from the original geometry or materials")
         for refs in (cloned.texture_refs, cloned.animation_refs):
             for logical, ref in refs.items():
+                if logical in set_dependencies and ref.found and ref.source == "SET.BAS":
+                    continue
                 if ref.path is None or Path(ref.path).resolve().parent != staging.resolve():
                     raise McpToolError(f"Cloned dependency did not resolve inside the new folder: {logical}")
         validation = validate(clone_source)
         os.replace(staging, target_dir)
     base_file = target_dir / final_name
     return {"base_file": str(base_file), "skeleton_file": str(target_dir / f"{skeleton_stem}.sklt"),
-            "copied_dependencies": sorted(files), "dependency_sources": dependency_sources, "validation": validation,
+            "copied_dependencies": sorted(files), "set_dependencies": sorted(set_dependencies),
+            "dependency_sources": dependency_sources, "validation": validation,
             "use_in_cfg": "Data/" + base_file.relative_to(data_root()).as_posix() if _is_under(base_file, data_root()) else str(base_file)}
 
 

@@ -208,7 +208,7 @@ class WireframeEditorUiTests(unittest.TestCase):
             if not action.isSeparator()
         ]
         self.assertEqual(
-            labels, ["New", "Import", "Overwrite", "Save Entity Layout", "Export", "Exit"])
+            labels, ["New", "Import", "Overwrite", "Export", "Exit"])
         self.assertIs(window.overwrite_action, window.save_action)
         self.assertIs(window.export_action, window.save_as_action)
         self.assertFalse(hasattr(window, "export_as_action"))

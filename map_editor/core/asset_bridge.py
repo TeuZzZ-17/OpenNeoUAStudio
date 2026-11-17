@@ -32,6 +32,18 @@ class SetAssets:
         self._loose: dict[str, FamilyObject | None] = {}
         self._loose_index: dict[str, Path] | None = None
         self._loose_families = {}
+        # Folders of external sectors open in the Sector Editor: searched before the set.
+        self.external_roots: list[Path] = []
+
+    def add_external_root(self, folder: Path) -> None:
+        folder = Path(folder).resolve()
+        if folder not in self.external_roots:
+            self.external_roots.append(folder)
+            self._loose_index = None
+            self._loose.clear()
+
+    def is_external(self, path: Path | None) -> bool:
+        return path is not None and any(Path(path).resolve().is_relative_to(root) for root in self.external_roots)
 
     def _find_setbas(self) -> Path | None:
         objects = bootstrap.find_ci(self.set_dir, "objects")
@@ -70,7 +82,7 @@ class SetAssets:
             index: dict[str, Path] = {}
             install = bootstrap.installation()
             models = install.folder("models") if install is not None else bootstrap.game_data_dir() / "Models"
-            roots = [self.set_dir, bootstrap.find_ci(models, "Base") or models / "Base"]
+            roots = [*self.external_roots, self.set_dir, bootstrap.find_ci(models, "Base") or models / "Base"]
             for root in roots:
                 if not root.is_dir():
                     continue
@@ -86,7 +98,7 @@ class SetAssets:
             path = self._index_loose().get(key)
             # Positional VPs belong to the set. Unreferenced Models/Base files
             # can share a name with another visual state, such as Genesis.
-            if path is None or not path.is_relative_to(self.set_dir):
+            if path is None or not (path.is_relative_to(self.set_dir) or self.is_external(path)):
                 return self._by_name.get(key)
         if key not in self._loose:
             found = None

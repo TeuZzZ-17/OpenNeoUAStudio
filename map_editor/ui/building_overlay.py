@@ -109,7 +109,7 @@ class BuildingOverlay(QObject):
 
     def _draw_building(self, painter, doc, lib, terrain, camera, col, row, definition, now):
         try:
-            mesh = lib.mesh(definition.sec_type)
+            mesh = lib.definition_mesh(definition)
             top = float(mesh.bounds[1]) if mesh.faces else -500.0
         except Exception:
             top = -500.0

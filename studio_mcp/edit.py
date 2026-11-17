@@ -952,7 +952,10 @@ def op_set_uvs(ctx, select=None, mode: str = "planar", rect=None, texels_per_uni
     done, skipped = [], 0
     for position, pid in enumerate(ids):
         block_index, _ = table[pid]
-        if lm.block_class(block_index) != "amesh.class" or lm.blocks[block_index].uses_atts_only_mapping:
+        block = lm.blocks[block_index]
+        static_area = (lm.block_class(block_index) == "area.class" and block.texture is not None
+                       and block.texture.kind == "ilbm")
+        if (lm.block_class(block_index) != "amesh.class" and not static_area) or block.uses_atts_only_mapping:
             skipped += 1
             continue
         per_poly = dict(spec)
@@ -963,7 +966,7 @@ def op_set_uvs(ctx, select=None, mode: str = "planar", rect=None, texels_per_uni
         lm.set_uvs(pid, group, table)
         done.append(pid)
     if skipped:
-        ctx.notes.append(f"{skipped} polygon(s) skipped: animated, area or untextured material")
+        ctx.notes.append(f"{skipped} polygon(s) skipped: animated or untextured material")
     return {"updated": len(done), "polygons": done}
 
 

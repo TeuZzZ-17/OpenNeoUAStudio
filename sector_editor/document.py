@@ -18,6 +18,10 @@ from map_editor.core.set_sdf_parser import (
     parse_set_sdf_text, serialize_set_sdf,
 )
 from studio.exchange.portable import commit_verified_files
+from studio.formats.sector_file import (
+    SECTORS_FOLDER, SectorFile, SectorModel, SectorPiece, find_sector_file, format_sector,
+    read_sector, resolve_data_path, unique_name,
+)
 
 SET_FOLDERS = ("HI", "Objects", "Palette", "Remap", "Scripts")
 SECTOR_LIMIT = 256
@@ -101,6 +105,12 @@ class SetDocument:
                     except ValueError:
                         pass
         self.saved = deepcopy(sdf)
+        # Rows created by "Import external sector". Unused ones are given back before a save;
+        # rows whose BASE or collision lives in the sector's own folder (external_own) can be
+        # edited and exported again, but never saved into this set.
+        self.external_models: set[int] = set()
+        self.external_buildings: set[int] = set()
+        self.external_own: set[int] = set()
         self.embedded_names = None
         self.assets = None
         self._asset_check = None
@@ -629,6 +639,214 @@ class SetDocument:
             return imported
         return self.change("Import sector definitions", apply)
 
+    # --- external sectors (.sector folders, see studio/formats/sector_file.py) ----------------
+
+    @staticmethod
+    def sectors_folder() -> Path:
+        data = bootstrap.game_data_dir()
+        return bootstrap.find_ci(data, "/".join(SECTORS_FOLDER)) or data.joinpath(*SECTORS_FOLDER)
+
+    def _load_assets(self):
+        if self.assets is None:
+            from map_editor.core.asset_bridge import SetAssets
+            self.assets = SetAssets(self.number, set_dir=self.folder).load()
+        return self.assets
+
+    def _setbas_names(self):
+        archive = self._load_assets().archive
+        return {Path(r.resource_name.replace("\\", "/")).name.casefold() for r in archive.resources} \
+            if archive else set()
+
+    def _sector_model_source(self, model, files):
+        """``(visual, collision)`` for one model row; own files are queued in ``files``.
+
+        Copyright rule: anything that exists in SET.BAS is written as a name only and the
+        engine takes it from the SET of the map. Only our own loose files are copied.
+        """
+        from studio.assets.family import load_asset_family
+        assets = self._load_assets()
+        in_setbas = self._setbas_names()
+        key = assets._key(model.base)
+        loose = assets._index_loose().get(key)
+        visual = model.base
+        if loose is not None and assets._by_name.get(key) is None:
+            visual = Path(model.base.replace("\\", "/")).stem + ".BASE"
+            files[visual] = loose
+            family = load_asset_family(loose, [loose.parent, self.folder], {}, assets.archive)
+            for dependency in family.dependencies:
+                path = dependency.resolved_path
+                if (path is not None and Path(path).is_file() and dependency.resolution_source != "SET.BAS"
+                        and Path(dependency.raw_ref.replace("\\", "/")).name.casefold() not in in_setbas):
+                    files.setdefault(Path(path).name, Path(path))
+        collision = model.sklt
+        skeleton = self._loose_skeleton(model.sklt)
+        if skeleton is not None and Path(model.sklt.replace("\\", "/")).name.casefold() not in in_setbas:
+            collision = skeleton.name
+            files.setdefault(collision, skeleton)
+        return visual, collision
+
+    def external_sector(self, number):
+        """Build the SectorFile of a sector plus the own files it needs ({file name: source})."""
+        if number not in self.sdf.sectors:
+            raise ValueError(f"Sector {number} is not defined.")
+        sector = self.sdf.sectors[number]
+        if sector.ground < 0 or sector.symbol < 0:
+            raise ValueError("Choose the connection family and map symbol first.")
+        files, models, pieces = {}, {}, {}
+        used_models, used_pieces = set(), set()
+        result = SectorFile(ground=sector.ground, map_symbol=sector.symbol)
+
+        def model_name(mid):
+            if mid not in models:
+                row = self.sdf.models[mid]
+                visual, collision = self._sector_model_source(row, files)
+                models[mid] = unique_name(row.base, used_models)
+                result.models.append(SectorModel(
+                    models[mid], visual, collision, row.numbers[3], row.numbers[1], row.numbers[2],
+                    tuple(tuple(e) for e in row.effects)))
+            return models[mid]
+
+        for bid in sector.subsects:
+            if bid not in pieces:
+                row = self.sdf.buildings[bid]
+                states = tuple(model_name(row.state(s)) for s in range(4))
+                pieces[bid] = unique_name(f"piece{len(pieces) + 1}", used_pieces)
+                result.pieces.append(SectorPiece(pieces[bid], states[:1] if len(set(states)) == 1 else states,
+                                                 row.destructible == 1))
+        result.cells = tuple(pieces[bid] for bid in sector.subsects)
+        return result, files
+
+    def export_external_sector(self, number, target, *, name=None):
+        """Write a sector as an external sector folder, or as a .onua archive of that folder."""
+        from studio.exchange.onua_archive import ONUA_SUFFIX, write_sector_onua
+        target = Path(target).resolve()
+        archive = target.suffix.casefold() == ONUA_SUFFIX
+        name = name or (target.stem if archive else target.name)
+        if not re.fullmatch(r"[A-Za-z0-9_\-]{1,40}", name):
+            raise ValueError("Sector names use letters, digits, '_' and '-' (max 40).")
+        if not archive and target.exists() and any(target.iterdir()):
+            raise FileExistsError(f"The destination folder is not empty: {target}")
+        sector, files = self.external_sector(number)
+        text = format_sector(sector, f"{name}: sector {number} of Set{self.number}")
+        with tempfile.TemporaryDirectory(prefix="sector-export-") as directory:
+            stage = Path(directory) / name
+            stage.mkdir()
+            (stage / f"{name}.sector").write_text(text, encoding="utf-8")
+            for file_name, source in files.items():
+                shutil.copy2(source, stage / file_name)
+            read_sector(stage / f"{name}.sector")
+            if archive:
+                write_sector_onua(stage, target)
+                return target
+            commit_verified_files([(path, target / path.relative_to(stage))
+                                   for path in sorted(stage.rglob("*")) if path.is_file()],
+                                  replace_existing=False)
+        return target / f"{name}.sector"
+
+    def _external_model_row(self, model, folder, visproto):
+        """Model row for one .sector model, resolved like the engine; returns (row, own_files)."""
+        assets = self._load_assets()
+        visual = model.visual
+        base, sklt, numbers, effects, own = None, "", [0, 0, 0, 0], (), False
+        if visual.isdigit():
+            index = int(visual)
+            if index >= len(visproto):
+                raise ValueError(f"model '{model.name}': VP {visual} does not exist in this set.")
+            base = visproto[index]
+        elif visual.casefold().endswith((".base", ".3ds")):
+            if visual.casefold().startswith("data/"):
+                path = resolve_data_path(bootstrap.game_data_dir(), visual)
+            else:
+                path = bootstrap.find_ci(folder, visual.replace("\\", "/")) or folder / visual
+            if path.is_file():
+                if path.suffix.casefold() == ".3ds":
+                    raise ValueError(f"model '{model.name}': 3DS visuals are not editable in the Sector Editor.")
+                assets.add_external_root(path.parent)
+                base, own = path.name, True
+        if not own:
+            # Not beside the file: the SET model with the same name (its row gives the defaults).
+            stem = Path((base or visual).replace("\\", "/")).stem.casefold()
+            source = next((m for m in self.sdf.models
+                           if Path(m.base.replace("\\", "/")).stem.casefold() == stem), None)
+            if source is not None:
+                base = source.base
+                sklt, numbers, effects = source.sklt, list(source.numbers), source.effects
+            elif assets.base_object(base or visual, set_only=True) is not None:
+                base = base or visual
+            else:
+                raise ValueError(f"model '{model.name}': {visual} found neither beside the file nor in this set.")
+        if model.collision:
+            sklt = model.collision
+            if any(bootstrap.find_ci(folder, p) for p in (sklt, Path(sklt).name)):
+                own = True
+        if not sklt:
+            raise ValueError(f"model '{model.name}' needs collision.")
+        for index, value in ((3, model.collision_mode), (1, model.map_symbol), (2, model.shield)):
+            if value is not None:
+                numbers[index] = value
+        if model.explosions is not None:
+            effects = model.explosions
+        row = SdfBuildingModel(0, base, sklt, tuple(numbers), tuple(tuple(e) for e in effects),
+                               f"external {model.name}")
+        return row, own
+
+    def import_external_sector(self, source, target=None):
+        """Open a .sector file, a sector folder or a sector .onua archive into a sector slot.
+
+        An archive is unpacked into Data/Models/Sectors/<name> first. Returns the slot used.
+        """
+        from studio.exchange.onua_archive import ONUA_SUFFIX, import_sector_onua
+        source = Path(source)
+        if source.suffix.casefold() == ONUA_SUFFIX:
+            path = import_sector_onua(source, self.sectors_folder() / source.stem)
+        else:
+            path = find_sector_file(source) if source.is_dir() else source
+        sector = read_sector(path)
+        folder = path.parent.resolve()
+        self._load_assets().add_external_root(folder)
+        self._asset_check = None
+        visproto_path = bootstrap.find_ci(self.folder, "Scripts/VISPROTO.LST")
+        lines = decode_sdf(visproto_path.read_bytes()).splitlines() if visproto_path else []
+        visproto = [line.split(";", 1)[0].split()[0] for line in lines if line.split(";", 1)[0].split()]
+        target = self.free_sector() if target is None else int(target)
+        if target is None or not 0 <= target < SECTOR_LIMIT:
+            raise ValueError("No free sector slot (1-247).")
+
+        subset, own = SetSdf(), []
+        for index, model in enumerate(sector.models):
+            row, is_own = self._external_model_row(model, folder, visproto)
+            subset.models.append(replace(row, id=index))
+            own.append(is_own)
+        names = {m.name.casefold(): i for i, m in enumerate(sector.models)}
+        for index, piece in enumerate(sector.pieces):
+            subset.buildings.append(SdfBuilding(index, *(names[piece.state(s).casefold()] for s in range(4)),
+                                                1 if piece.destructible else 0, f"external {piece.name}"))
+        pieces = {p.name.casefold(): i for i, p in enumerate(sector.pieces)}
+        subset.sectors[0] = SdfSector(0, 1 if sector.single else 0, sector.ground, sector.map_symbol,
+                                      tuple(pieces[c.casefold()] for c in sector.cells), path.stem)
+        issues = table_issues(subset)
+        if issues:
+            raise ValueError("\n".join(issues[:20]))
+
+        def identity(model):
+            return (model.base.casefold(), model.sklt.casefold(), model.numbers, model.effects)
+
+        def created(before, after):
+            return {i for i in range(len(after)) if i >= len(before) or after[i] != before[i]}
+
+        def apply():
+            models, buildings = list(self.sdf.models), list(self.sdf.buildings)
+            building_map = self._merge_buildings(subset, set(range(len(subset.buildings))))
+            self.sdf.sectors[target] = replace(subset.sectors[0], number=target,
+                subsects=tuple(building_map[b] for b in subset.sectors[0].subsects))
+            ids = {identity(m): m.id for m in self.sdf.models}
+            self.external_own |= {ids[identity(m)] for m, is_own in zip(subset.models, own) if is_own}
+            self.external_models |= created(models, self.sdf.models)
+            self.external_buildings |= created(buildings, self.sdf.buildings)
+            self.validate_resources()
+            return target
+        return self.change("Import external sector", apply)
+
     def encoded(self):
         issues = table_issues(self.sdf)
         if issues:
@@ -692,22 +910,30 @@ class SetDocument:
         for model in self.sdf.models:
             if self.assets.base_object(model.base, set_only=True) is None:
                 issues.append(f"Model {model.id}: BASE {model.base} is missing from this set.")
-            logical = Path(model.sklt.replace("\\", "/"))
-            # Direct rsrc reads use the legacy three-letter extension. For
-            # Set1-Set7 the engine first searches canonical and legacy Loose
-            # paths, where the original .sklt spelling is also accepted.
-            legacy = logical.with_suffix(".skl") if logical.suffix.casefold() == ".sklt" else logical
-            candidates = [legacy.as_posix()]
-            if 1 <= self.number <= 7:
-                for part in (logical.name, legacy.name):
-                    candidates.extend((f"Loose/SKLT/{part}", f"Loose/Skeleton/{part}"))
-            loose = next((path for relative in candidates
-                          if (path := bootstrap.find_ci(self.folder, relative)) is not None and path.is_file()), None)
             embedded = self.assets.archive.find(model.sklt, "sklt.class") if self.assets.archive else []
-            if loose is None and not embedded:
+            if self._loose_skeleton(model.sklt) is None and not embedded:
                 issues.append(f"Model {model.id}: collision {model.sklt} is missing from this set.")
         self._asset_check = (key, issues)
         return list(issues)
+
+    def _loose_skeleton(self, name):
+        """Loose collision file for ``name``: external sector folders first, then the set."""
+        logical = Path(name.replace("\\", "/"))
+        for root in (self.assets.external_roots if self.assets else ()):
+            for relative in (logical.as_posix(), logical.name):
+                path = bootstrap.find_ci(root, relative)
+                if path is not None and path.is_file():
+                    return path
+        # Direct rsrc reads use the legacy three-letter extension. For
+        # Set1-Set7 the engine first searches canonical and legacy Loose
+        # paths, where the original .sklt spelling is also accepted.
+        legacy = logical.with_suffix(".skl") if logical.suffix.casefold() == ".sklt" else logical
+        candidates = [legacy.as_posix()]
+        if 1 <= self.number <= 7:
+            for part in (logical.name, legacy.name):
+                candidates.extend((f"Loose/SKLT/{part}", f"Loose/Skeleton/{part}"))
+        return next((path for relative in candidates
+                     if (path := bootstrap.find_ci(self.folder, relative)) is not None and path.is_file()), None)
 
     def validate_resources(self):
         issues = self.resource_issues()
@@ -749,8 +975,48 @@ class SetDocument:
             generated[target] = export_base_object_bytes(self.assets.archive.data, model.base_object)
         return generated
 
+    def _drop_external_rows(self):
+        """Give back the rows of imported external sectors before writing the set.
+
+        A sector that still uses the sector's own files stops the save: export it instead.
+        """
+        if not self.external_models and not self.external_buildings:
+            return
+        buildings = self.sdf.buildings
+        own = {bid for bid in range(len(buildings))
+               if any(buildings[bid].state(s) in self.external_own for s in range(4))}
+        blocked = sorted(n for n, sector in self.sdf.sectors.items() if own & set(sector.subsects))
+        if blocked:
+            raise ValueError(
+                f"Sector(s) {', '.join(map(str, blocked))} use models of an external sector. "
+                "Export them with Sector > Export external sector, then clear or wipe them before saving the set.")
+        used = {bid for sector in self.sdf.sectors.values() for bid in sector.subsects}
+        drop_buildings = {bid for bid in self.external_buildings if bid < len(buildings) and bid not in used}
+        kept = [row for bid, row in enumerate(buildings) if bid not in drop_buildings]
+        drop_models = {mid for mid in self.external_models
+                       if not any(row.state(s) == mid for row in kept for s in range(4))}
+        for table, rows, saved in ((buildings, drop_buildings, self.saved.buildings),
+                                   (self.sdf.models, drop_models, self.saved.models)):
+            for index in sorted(rows, reverse=True):
+                if index >= len(table):      # already removed (undo)
+                    continue
+                if index < len(saved):
+                    table[index] = saved[index]
+                elif index == len(table) - 1:
+                    table.pop()
+                else:
+                    raise ValueError("Rows added after an external sector import stop the save: "
+                                     "undo them or reopen the set.")
+        self.external_models.clear()
+        self.external_buildings.clear()
+        self.external_own.clear()
+        # Older undo steps still hold the imported rows; they must not come back untracked.
+        self._undo.clear()
+        self._redo.clear()
+
     def output_files(self):
         """One output plan shared by Save, set copies, new sets and ZIP packages."""
+        self._drop_external_rows()
         data = self.encoded()
         self.validate_resources()
         overrides = self.override_bytes()

@@ -8,6 +8,10 @@ the BASE, its skeletons (SKLT), textures (ILBM), animations (ANM) and
 Writing packs a validated package folder. Reading never trusts the archive: member names are
 checked, the files are unpacked into a temporary folder, the whole package is validated again
 (hashes, dependencies, indexed rendering) and only then copied to the chosen destination.
+
+A sector archive holds one external sector folder instead: its ``.sector`` file at the root plus
+the model files it needs (see studio/formats/sector_file.py). Resources taken from the SET are
+never inside it.
 """
 
 from __future__ import annotations
@@ -20,6 +24,7 @@ import tempfile
 import zipfile
 
 from studio.assets.family import validate_family_package
+from studio.formats.sector_file import SECTOR_SUFFIX, SectorFileError, find_sector_file, read_sector
 from studio.exchange.portable import (
     AssetFamilyPackageError,
     MANIFEST_NAME,
@@ -69,7 +74,7 @@ def write_onua(package_root, target, *, validation=None) -> dict:
     return validation.manifest
 
 
-def _safe_members(archive: zipfile.ZipFile) -> list[zipfile.ZipInfo]:
+def _safe_members(archive: zipfile.ZipFile, *, sector: bool = False) -> list[zipfile.ZipInfo]:
     """Every member must be a plain relative file; no links, no escapes, no duplicates."""
     seen, members = set(), []
     for info in archive.infolist():
@@ -84,7 +89,11 @@ def _safe_members(archive: zipfile.ZipFile) -> list[zipfile.ZipInfo]:
             raise AssetFamilyPackageError(f"Duplicate member in ONUA archive: {name}")
         seen.add(name.casefold())
         members.append(info)
-    if MANIFEST_NAME.casefold() not in seen:
+    if sector:
+        if sum(1 for n in seen if "/" not in n and n.endswith(SECTOR_SUFFIX)) != 1:
+            raise AssetFamilyPackageError(
+                f"Not a sector archive: exactly one {SECTOR_SUFFIX} file is needed at the root")
+    elif MANIFEST_NAME.casefold() not in seen:
         raise AssetFamilyPackageError(
             f"Not an OpenNeoUA archive: {MANIFEST_NAME} is missing")
     return members
@@ -119,3 +128,71 @@ def import_onua(source, output_root) -> Path:
     except (zipfile.BadZipFile, OSError) as exc:
         raise AssetFamilyPackageError(f"Cannot read ONUA archive: {exc}") from exc
     return output_root / entry
+
+
+# ----------------------------------------------------------------------------
+# Sector archives: one external sector folder (.sector + its own model files)
+# ----------------------------------------------------------------------------
+
+def is_sector_archive(source) -> bool:
+    try:
+        with zipfile.ZipFile(source) as archive:
+            return any("/" not in n and n.casefold().endswith(SECTOR_SUFFIX) for n in archive.namelist())
+    except (zipfile.BadZipFile, OSError):
+        return False
+
+
+def write_sector_onua(folder, target) -> list[str]:
+    """Pack a validated external sector folder into ``target`` (.onua)."""
+
+    folder, target = Path(folder), Path(target)
+    try:
+        read_sector(find_sector_file(folder))
+    except (SectorFileError, OSError) as exc:
+        raise AssetFamilyPackageError(f"Invalid sector folder: {exc}") from exc
+    names = sorted(p.relative_to(folder).as_posix() for p in folder.rglob("*") if p.is_file())
+    target.parent.mkdir(parents=True, exist_ok=True)
+    with tempfile.NamedTemporaryFile(dir=target.parent, suffix=".tmp", delete=False) as handle:
+        temporary = Path(handle.name)
+    try:
+        with zipfile.ZipFile(temporary, "w") as archive:
+            for name in names:
+                info = zipfile.ZipInfo(name, date_time=_FIXED_DATE)
+                info.compress_type = zipfile.ZIP_DEFLATED
+                info.create_system = 3
+                info.external_attr = 0o100644 << 16
+                archive.writestr(info, (folder / name).read_bytes())
+        with zipfile.ZipFile(temporary) as archive:
+            if archive.testzip() is not None or sorted(archive.namelist()) != names:
+                raise AssetFamilyPackageError("ONUA archive readback failed")
+        os.replace(temporary, target)
+    finally:
+        temporary.unlink(missing_ok=True)
+    return names
+
+
+def import_sector_onua(source, output_root) -> Path:
+    """Unpack and validate a sector archive into the empty folder ``output_root``.
+
+    Returns the path of the ``.sector`` file. Nothing is written unless the sector file is valid.
+    """
+
+    output_root = Path(output_root)
+    if output_root.exists() and any(output_root.iterdir()):
+        raise AssetFamilyPackageError(f"Destination folder is not empty: {output_root}")
+    try:
+        with zipfile.ZipFile(source) as archive,                 tempfile.TemporaryDirectory(prefix="OpenNeoUAStudio_sector_") as temp:
+            staging = Path(temp)
+            for info in _safe_members(archive, sector=True):
+                destination = staging / info.filename
+                destination.parent.mkdir(parents=True, exist_ok=True)
+                destination.write_bytes(archive.read(info))
+            sector_path = find_sector_file(staging)
+            read_sector(sector_path)
+            output_root.mkdir(parents=True, exist_ok=True)
+            shutil.copytree(staging, output_root, dirs_exist_ok=True)
+    except (zipfile.BadZipFile, OSError) as exc:
+        raise AssetFamilyPackageError(f"Cannot read ONUA archive: {exc}") from exc
+    except SectorFileError as exc:
+        raise AssetFamilyPackageError(f"Invalid sector archive: {exc}") from exc
+    return output_root / sector_path.name

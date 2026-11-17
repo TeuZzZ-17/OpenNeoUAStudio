@@ -39,7 +39,8 @@ class BuildingDef:
     id: int
     name: str = ""
     model: str = ""
-    sec_type: int = 0
+    sec_type: int = 0          # SET sector (the fallback when sector_file is set)
+    sector_file: str = ""      # OpenNeoUA external .sector (Data/... path)
     power: int = 0
     energy: int = 0
     production_cost: int = 0
@@ -116,6 +117,13 @@ def _number(raw: str, default: int = 0) -> int:
         return default
 
 
+def _sector_fields(raw: str) -> dict:
+    """sec_type = <SET sector> or <Data/....sector>[|<SET sector>]; invalid values keep 0 like the engine."""
+    from studio.formats.sector_file import sector_reference
+    sector_file, fallback = sector_reference(raw)
+    return {"sec_type": fallback, "sector_file": sector_file}
+
+
 def parse_building_text(text: str, source: str = "", result=None) -> dict[int, BuildingDef]:
     result = {} if result is None else result
     for match in _BEGIN.finditer(text):
@@ -190,7 +198,7 @@ def parse_building_text(text: str, source: str = "", result=None) -> dict[int, B
             id=bid,
             name=values.get("name", f"Building {bid}"),
             model=values.get("model", ""),
-            sec_type=_number(values.get("sec_type", "0")),
+            **_sector_fields(values.get("sec_type", "0")),
             power=_number(values.get("power", "0")),
             energy=_number(values.get("energy", "0")),
             production_cost=_number(values.get("production_cost", "0")),
@@ -206,6 +214,8 @@ def parse_building_text(text: str, source: str = "", result=None) -> dict[int, B
             for key in ('name', 'model', 'sec_type', 'power', 'energy', 'production_cost', 'building_time', 'type_icon'):
                 if key not in values:
                     setattr(definition, key, getattr(previous, key))
+            if 'sec_type' not in values:    # one key sets both the sector file and its fallback
+                definition.sector_file = previous.sector_file
             if not guns:
                 definition.guns = previous.guns
             definition.enabled_factions = set(previous.enabled_factions)

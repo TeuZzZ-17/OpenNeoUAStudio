@@ -121,11 +121,35 @@ def _base_choice(assets, label, base_name):
     return None
 
 
+def _external_sector_choices(assets, sector_file):
+    """Models of an external .sector: a BASE beside the file, else the SET model with that name."""
+    from map_editor import bootstrap
+    from studio.formats.sector_file import SectorFileError, read_sector, resolve_data_path
+    try:
+        path = resolve_data_path(bootstrap.game_data_dir(), sector_file)
+        sector = read_sector(path)
+    except (OSError, SectorFileError):
+        return []
+    choices = []
+    for model in sector.models:
+        local = bootstrap.find_ci(path.parent, model.visual.replace("\\", "/"))             if model.visual.casefold().endswith(".base") else None
+        choice = VisualChoice(f"Sector model {model.name}", local) if local is not None and local.is_file()             else _base_choice(assets, f"Sector model {model.name}", model.visual)
+        if choice is not None:
+            choices.append(choice)
+    return choices
+
+
 def visual_choices(obj, number):
     assets = set_assets(number)
     choices = []
     if obj.kind == "building":
-        sector = assets.sdf.sectors.get(int(obj.number("sec_type")))
+        from studio.formats.sector_file import sector_reference
+        sector_file, sector_type = sector_reference(obj.values.get("sec_type", "0"))
+        if sector_file:
+            choices = _external_sector_choices(assets, sector_file)
+            if choices:
+                return choices
+        sector = assets.sdf.sectors.get(sector_type)
         if sector is None:
             return []
         for slot, building_id in enumerate(sector.subsects):

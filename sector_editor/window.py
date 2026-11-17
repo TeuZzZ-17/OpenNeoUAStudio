@@ -326,6 +326,11 @@ class SectorEditorWindow(QMainWindow):
             ("import_sector", "Import sector definition", None, self.import_definitions),
             ("export_sector", "Export sector definition", None, self.export_definition),
         ))
+        sector.addSeparator()
+        self._add_actions(sector, (
+            ("import_external", "Import external sector", None, self.import_external_sector),
+            ("export_external", "Export external sector", None, self.export_external_sector),
+        ))
 
         view = self.menuBar().addMenu("View")
         view.addAction("Reset View", self.view.reset_camera)
@@ -727,7 +732,7 @@ class SectorEditorWindow(QMainWindow):
 
     def _update_sector_actions(self):
         defined = bool(self.document and self._selected_sector_numbers())
-        for key in ("copy_sector", "cut_sector", "clear_sector", "wipe_sector", "export_sector"):
+        for key in ("copy_sector", "cut_sector", "clear_sector", "wipe_sector", "export_sector", "export_external"):
             self.actions[key].setEnabled(defined)
         self.actions["import_sector"].setEnabled(self.document is not None)
         if self.document is not None:
@@ -1062,6 +1067,51 @@ class SectorEditorWindow(QMainWindow):
                 self.statusBar().showMessage(f"Exported {len(numbers)} definition(s) to {path}", 6000)
             except (OSError, ValueError) as exc:
                 QMessageBox.warning(self, "Cannot export definitions", str(exc))
+
+    def import_external_sector(self):
+        """Open an external sector (.sector folder or .onua archive) for editing in a free slot."""
+        if self.document is None or not self._commit_forms():
+            return
+        path, _ = QFileDialog.getOpenFileName(
+            self, "Import external sector", str(self.document.sectors_folder()),
+            "External sectors (*.sector *.onua)")
+        if not path:
+            return
+        free = [n for n in self._selected_slots() if n not in self.document.sdf.sectors]
+
+        def apply():
+            try:
+                self.current_sector = self.document.import_external_sector(path, free[0] if free else None)
+            except RuntimeError as exc:      # unsafe or invalid .onua archive
+                raise ValueError(str(exc)) from exc
+            self.statusBar().showMessage(
+                f"External sector opened in slot {self.current_sector:03d}. "
+                "Use Sector > Export external sector to write it back.", 8000)
+        self._run_edit(apply, reset=True)
+
+    def export_external_sector(self):
+        """Write the current sector as an external sector folder or .onua archive."""
+        if self.document is None or not self._commit_forms():
+            return
+        numbers = self._selected_sector_numbers()
+        if not numbers:
+            return
+        number = numbers[0]
+        folder_filter, archive_filter = "Sector folder (*)", "OpenNeoUA archive (*.onua)"
+        path, chosen = QFileDialog.getSaveFileName(
+            self, "Export external sector (SET resources stay in the SET)",
+            str(self.document.sectors_folder() / f"Sector{number:03d}"),
+            f"{folder_filter};;{archive_filter}")
+        if not path:
+            return
+        target = Path(path)
+        if chosen == archive_filter and target.suffix.casefold() != ".onua":
+            target = target.with_suffix(".onua")
+        try:
+            written = self.document.export_external_sector(number, target)
+            self.statusBar().showMessage(f"Exported sector {number:03d} to {written}", 8000)
+        except (OSError, ValueError, RuntimeError) as exc:
+            QMessageBox.warning(self, "Cannot export external sector", str(exc))
 
     def _sector_image(self, number, width):
         self.view.show_sector(self.library, number, state=self.state.currentIndex(), reset=True)

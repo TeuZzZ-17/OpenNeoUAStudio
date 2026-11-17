@@ -473,7 +473,8 @@ class _ScriptFilesMixin:
         self._new_gun_point_scheme = "sbact"
         self._capture_loaded_gun_points()
         self._building_had_mounts = bool(mounts)
-        sector_type = int(obj.number("sec_type"))
+        from studio.formats.sector_file import sector_reference
+        sector_file, sector_type = sector_reference(obj.values.get("sec_type", "0"))
         self._capture_tab_reset_baseline()
         self._selected = self._selected_fire_point = self._selected_gun_point = -1
         self._selected_spheres.clear()
@@ -505,8 +506,9 @@ class _ScriptFilesMixin:
         self.game_object_browser.select_object(obj)
         library = self._gun_mesh_library() if model is not None else None
         if library is not None:
+            mesh = library.external_mesh(sector_file) if sector_file else None
             self.viewport.set_building_structure(
-                library, library.mesh(sector_type).faces)
+                library, (mesh if mesh is not None and mesh.faces else library.mesh(sector_type)).faces)
             self.viewport._fit_view_to_model(self.viewport.size())
             self.viewport.capture_reset_view()
         self._sync_close_archive_action()

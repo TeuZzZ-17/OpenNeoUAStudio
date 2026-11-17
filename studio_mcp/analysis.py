@@ -76,6 +76,10 @@ def analyze(source) -> dict:
             "by_corner_count": {str(n): sum(1 for r in polygons if len(r) == n) for n in sorted({len(r) for r in polygons})}}
     if len(points) > LIMIT_POINTS or len(polygons) > LIMIT_POLYGONS:
         problems.append("point/polygon count above the engine's file limits (65536 points / 32768 polygons)")
+    # The native skeleton stores exactly GFX_MAX_VERTEX (12) indices per face.
+    oversized = [pid for pid, ring in enumerate(polygons) if len(ring) > 12]
+    if oversized:
+        problems.append(f"polygons exceed the engine's 12 vertices per face: {oversized[:12]} (triangulate them)")
     if mapping.unmapped:
         problems.append(f"polygons without material: {mapping.unmapped[:12]}")
     if mapping.duplicates:

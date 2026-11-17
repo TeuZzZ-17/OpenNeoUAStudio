@@ -120,6 +120,22 @@ class ParticleDependencyTests(unittest.TestCase):
             [stage.source_objt_bytes for stage in self.block.particle_stages])
         self.assertEqual(self.block.particle_attributes.birth_rate, 10)
 
+    def test_edit_emitter_vectors_are_written_and_read_back(self):
+        family = AssetFamily()
+        owner = FamilyObject(base_object=self.asset.root, owner_path="root")
+        clone = copy_particle_emitter(family, owner, family, self.block, 17)
+        changed = replace(clone.particle_attributes, accel_start=(0.0, 5.0, 0.0),
+                          accel_end=(0.0, 7.0, 0.0), magnify_start=(0.0, -2.0, 0.0),
+                          magnify_end=(0.0, -2.0, 0.0), start_speed=520)
+        edited = update_particle_emitter(clone, changed)
+        wrapped = _form(b"MC2 ", _form(
+            b"OBJT", _chunk(b"CLID", b"base.class\0") + _form(
+                b"BASE", _chunk(b"STRC", bytes(62))
+                + _form(b"ADES", edited.source_objt_bytes))))
+        readback = parse_base_bytes(wrapped, "edited.base").root.ades[0]
+        self.assertEqual(readback.particle_attributes, changed)
+        self.assertEqual(readback.particle_attributes.magnify_start, (0.0, -2.0, 0.0))
+
     def test_nested_resources_are_loaded_and_reported_as_real_dependencies(self):
         family = AssetFamily()
         resolver = AssetResolver([])
