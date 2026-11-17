@@ -141,25 +141,52 @@ def _event(spec, start=0.0, end=None):
     return fx.SoundEvent(start, end, spec, "hit", 0, "test")
 
 
-def test_global_fades_follow_the_engine():
-    spec = fx.SoundSpec(shake=fx.ShakeFx(slot=1, mag0=1.0, mag1=1.0, time=1000))
+def test_event_fades_follow_the_engine():
+    spec = fx.SoundSpec(shake=fx.ShakeFx(slot=1, mag0=1.0, mag1=1.0, time=1000,
+                                         fade=(100, 200)))
     sound = _event(spec)
     shake = spec.shake
-    assert fx._shake_strength(sound, shake, 50, (0, 0)) == 1.0
-    assert fx._shake_strength(sound, shake, 50, (100, 200)) == pytest.approx(0.5)
-    assert fx._shake_strength(sound, shake, 500, (100, 200)) == pytest.approx(1.0)
-    assert fx._shake_strength(sound, shake, 900, (100, 200)) == pytest.approx(0.5)
+    assert fx._shake_strength(sound, shake, 50) == pytest.approx(0.5)
+    assert fx._shake_strength(sound, shake, 500) == pytest.approx(1.0)
+    assert fx._shake_strength(sound, shake, 900) == pytest.approx(0.5)
     # A loop has no end: only the fade-in applies.
     looping = _event(spec, 0.0, 5000.0)
-    assert fx._shake_strength(looping, shake, 50, (100, 200)) == pytest.approx(0.5)
-    assert fx._shake_strength(looping, shake, 4900, (100, 200)) == pytest.approx(1.0)
-    flash = fx.SoundSpec(palette=fx.ScreenFx(slot=1, mag0=1.0, mag1=1.0, time=1000))
-    assert fx._screen_fx_strength(_event(flash), flash.palette, 50, (100, 200)) == pytest.approx(0.5)
+    assert fx._shake_strength(looping, shake, 50) == pytest.approx(0.5)
+    assert fx._shake_strength(looping, shake, 4900) == pytest.approx(1.0)
+    # No fade key: the strength is untouched (vanilla).
+    plain = fx.ShakeFx(slot=1, mag0=1.0, mag1=1.0, time=1000)
+    assert fx._shake_strength(_event(fx.SoundSpec(shake=plain)), plain, 50) == 1.0
+    flash = fx.SoundSpec(palette=fx.ScreenFx(slot=1, mag0=1.0, mag1=1.0, time=1000,
+                                             fade=(100, 200)))
+    assert fx._screen_fx_strength(_event(flash), flash.palette, 50) == pytest.approx(0.5)
 
 
-def test_the_global_fades_apply_to_the_preview():
+def test_fade_keys_are_read_like_the_engine():
+    assert fx.parse_fade_inout("150|300") == (150, 300)
+    assert fx.parse_fade_inout("0|300") == (0, 300)
+    assert fx.parse_fade_inout("150") == (0, 0)
+    assert fx.parse_fade_inout("-5|100") == (0, 100)
+    assert fx.parse_fade_inout("") == (0, 0)
+    assert fx.parse_fade_inout(None) == (0, 0)
+    specs = fx.sound_specs(
+        {"snd_hit_sample": "a.wav", "snd_hit_fade_inout": "150|300",
+         "pal_hit_slot": "1", "pal_hit_fade_inout": "10|20",
+         "shk_hit_slot": "1", "shk_hit_fade_inout": "30|40",
+         "shk_launch_player_slot": "4", "shk_launch_player_fade_inout": "50|60"},
+        ("hit", "launch_player"))
+    assert specs["hit"].fade == (150, 300)
+    assert specs["hit"].palette.fade == (10, 20)
+    assert specs["hit"].shake.fade == (30, 40)
+    assert specs["launch_player"].shake.fade == (50, 60)
+
+
+def test_the_event_fades_apply_to_the_preview():
     plain = _simulation()
-    faded = _simulation(settings=fx.EffectSettings(shake_fade=(250, 0), palette_fade=(250, 0)))
+    text = WEAPON.replace("    pal_hit_mag1 = 0\n",
+                          "    pal_hit_mag1 = 0\n    pal_hit_fade_inout = 250|0\n")
+    text = text.replace("    shk_hit_mag1 = 0.5\n",
+                        "    shk_hit_mag1 = 0.5\n    shk_hit_fade_inout = 250|0\n")
+    faded = _simulation(_document(text))
     at = IMPACT_MS + 10
     plain_pal = plain.palette_effects_at(at)[0][1]
     assert faded.palette_effects_at(at)[0][1] < plain_pal * 0.2
@@ -182,21 +209,13 @@ def test_palette_limits_of_the_game_settings():
 
 
 def test_ini_settings_are_read_like_the_engine():
-    assert fx.parse_global_fade("150|300") == (150, 300)
-    assert fx.parse_global_fade("0|300") == (0, 300)
-    assert fx.parse_global_fade("150") == (0, 0)
-    assert fx.parse_global_fade("150|x") == (150, 0)
-    assert fx.parse_global_fade("-5|100") == (0, 100)
-    assert fx.parse_global_fade("1,5|100") == (0, 100)
-    assert fx.parse_global_fade("") == (0, 0)
     assert fx.parse_effect_settings("") == fx.EffectSettings()
     settings = fx.parse_effect_settings(
         "game.global_shk_fade_inout = 150|300 ; shake\n"
         "game.global_pal_fade_inout = 100|200\n"
         "gfx.color_effects = 0\naudio.num_palfx = 20\naudio.volume = 64\n")
     assert settings == fx.EffectSettings(
-        shake_fade=(150, 300), palette_fade=(100, 200), color_effects=0,
-        num_palfx=8, volume=64)
+        color_effects=0, num_palfx=8, volume=64)
 
 
 # -- editing ------------------------------------------------------------------------------

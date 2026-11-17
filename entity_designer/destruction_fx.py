@@ -307,6 +307,8 @@ class ScreenFx:
     mag0: float = 0.0
     mag1: float = 0.0
     time: int = 0
+    # pal_<event>_fade_inout = in|out (ms): fade of the strength, 0 = none.
+    fade: tuple[int, int] = (0, 0)
 
 
 @dataclass(frozen=True)
@@ -325,6 +327,8 @@ class ShakeFx:
     mag1: float = 0.0
     time: int = 1000
     pos: tuple[float, float, float] = (0.2, 0.2, 0.2)
+    # shk_<event>_fade_inout = in|out (ms): fade of the strength, 0 = none.
+    fade: tuple[int, int] = (0, 0)
 
 
 @dataclass(frozen=True)
@@ -341,6 +345,21 @@ class SoundSpec:
     pitch: tuple[int, int] = (0, 0)
     palette: ScreenFx | None = None
     shake: ShakeFx | None = None
+    # snd_<event>_fade_inout = in|out (ms): fade of the sample volume. The
+    # preview keeps and writes the key but plays the sample at full volume.
+    fade: tuple[int, int] = (0, 0)
+
+
+def parse_fade_inout(value: str | None) -> tuple[int, int]:
+    """``<snd|pal|shk>_<event>_fade_inout = in|out`` in ms, like the engine.
+
+    A wrong shape means no fade; a negative part becomes 0.
+    """
+
+    parts = split_tuple(value, 2)
+    if parts is None:
+        return (0, 0)
+    return (max(0, script_int(parts[0])), max(0, script_int(parts[1])))
 
 
 def _palette_fx(values: dict[str, str], event: str) -> ScreenFx | None:
@@ -350,7 +369,8 @@ def _palette_fx(values: dict[str, str], event: str) -> ScreenFx | None:
     return ScreenFx(
         slot=slot, mag0=_stof(values.get(f"pal_{event}_mag0", "0")),
         mag1=_stof(values.get(f"pal_{event}_mag1", "0")),
-        time=script_int(values.get(f"pal_{event}_time")))
+        time=script_int(values.get(f"pal_{event}_time")),
+        fade=parse_fade_inout(values.get(f"pal_{event}_fade_inout")))
 
 
 def _shake_fx(values: dict[str, str], event: str) -> ShakeFx | None:
@@ -365,7 +385,8 @@ def _shake_fx(values: dict[str, str], event: str) -> ShakeFx | None:
         return ShakeFx(
             slot=slot, time=time,
             mag0=mag0 if math.isfinite(mag0) and mag0 >= 0 else 0.0,
-            mag1=mag1 if math.isfinite(mag1) and mag1 >= 0 else 0.0)
+            mag1=mag1 if math.isfinite(mag1) and mag1 >= 0 else 0.0,
+            fade=parse_fade_inout(values.get(f"shk_{event}_fade_inout")))
     if slot == 0:
         return None
     return ShakeFx(
@@ -373,7 +394,8 @@ def _shake_fx(values: dict[str, str], event: str) -> ShakeFx | None:
         mag1=_stof(values.get(f"shk_{event}_mag1", "0")),
         time=script_int(values.get(f"shk_{event}_time"), 1000),
         pos=tuple(_stof(values.get(f"shk_{event}_{axis}", "0.2"))
-                  for axis in "xyz"))
+                  for axis in "xyz"),
+        fade=parse_fade_inout(values.get(f"shk_{event}_fade_inout")))
 
 
 def sound_specs(values: dict[str, str], events) -> dict[str, SoundSpec]:
@@ -389,7 +411,8 @@ def sound_specs(values: dict[str, str], events) -> dict[str, SoundSpec]:
         pitch = parse_int_range(values.get(f"snd_{event}_pitch", "")) or (0, 0)
         specs[event] = SoundSpec(
             sample=sample, volume=script_int(values.get(f"snd_{event}_volume")),
-            pitch=pitch, palette=palette, shake=shake)
+            pitch=pitch, palette=palette, shake=shake,
+            fade=parse_fade_inout(values.get(f"snd_{event}_fade_inout")))
     return specs
 
 
@@ -405,31 +428,12 @@ MAX_PALETTE_EFFECTS = 8
 class EffectSettings:
     """Game-wide OpenNeoUA.ini values that shape sounds, palette flashes and shakes."""
 
-    # game.global_shk_fade_inout / game.global_pal_fade_inout: (in, out) ms.
-    shake_fade: tuple[int, int] = (0, 0)
-    palette_fade: tuple[int, int] = (0, 0)
     # gfx.color_effects: 0 switches every palette flash off.
     color_effects: int = 1
     # audio.num_palfx: how many palette flashes play at once (0..8, 0 = none).
     num_palfx: int = 4
     # audio.volume: master volume of the samples (0..127).
     volume: int = 127
-
-
-def parse_global_fade(value: str) -> tuple[int, int]:
-    """``game.global_*_fade_inout = in|out`` in ms; anything malformed is 0|0."""
-
-    parts = split_tuple(value, 2)
-    if parts is None:
-        return (0, 0)
-
-    def milliseconds(text: str) -> int:
-        number = _full_float(text) if "," not in text else None
-        if number is None or number <= 0:
-            return 0
-        return int(min(round(number), 2147483647))
-
-    return (milliseconds(parts[0]), milliseconds(parts[1]))
 
 
 def parse_effect_settings(text: str) -> EffectSettings:
@@ -447,8 +451,6 @@ def parse_effect_settings(text: str) -> EffectSettings:
         return default if parsed is None else max(low, min(parsed, high))
 
     return EffectSettings(
-        shake_fade=parse_global_fade(values.get("game.global_shk_fade_inout", "")),
-        palette_fade=parse_global_fade(values.get("game.global_pal_fade_inout", "")),
         color_effects=integer("gfx.color_effects", 1, 0, 99),
         num_palfx=integer("audio.num_palfx", 4, 0, 8),
         volume=integer("audio.volume", 127, 0, 127))
@@ -634,9 +636,10 @@ def parse_scale_fx(value: str) -> ScaleFx | None:
 # group of one kind and event is a row of the effects list.
 KEY_GROUP_KINDS = {"snd": "sound", "pal": "palette", "shk": "shake"}
 KEY_GROUP_FIELDS = {
-    "sound": ("sample", "volume", "pitch", "radius", "ext"),
-    "palette": ("slot", "mag0", "mag1", "time", "radius"),
-    "shake": ("slot", "mag0", "mag1", "time", "radius", "mute", "x", "y", "z"),
+    "sound": ("sample", "volume", "pitch", "radius", "fade_inout", "ext"),
+    "palette": ("slot", "mag0", "mag1", "time", "radius", "fade_inout"),
+    "shake": ("slot", "mag0", "mag1", "time", "radius", "mute", "x", "y", "z",
+              "fade_inout"),
 }
 
 
@@ -2911,7 +2914,7 @@ class PreviewSimulation:
             fx = sound.spec.palette
             if fx is None:
                 continue
-            strength = _screen_fx_strength(sound, fx, time_ms, settings.palette_fade)
+            strength = _screen_fx_strength(sound, fx, time_ms)
             if strength is not None:
                 palettes.append((fx.slot, strength))
         # The engine keeps only the audio.num_palfx strongest flashes.
@@ -2952,7 +2955,7 @@ class PreviewSimulation:
             fx = sound.spec.shake
             if fx is None:
                 continue
-            strength = _shake_strength(sound, fx, time_ms, self.settings.shake_fade)
+            strength = _shake_strength(sound, fx, time_ms)
             if strength is not None:
                 active.append((strength, fx))
         if not active:
@@ -4087,9 +4090,9 @@ def _plasma_scale(total_ms: float, age_ms: float) -> float:
     return math.sqrt(max(0.0, total_ms - age_ms) / max(total_ms, 1.0)) * PLASMA_SCALE
 
 
-def _global_fade_factor(sound: SoundEvent, duration: float, time_ms: float,
-                        fade: tuple[int, int]) -> float:
-    """game.global_*_fade_inout: SFX_EffectTemporalFactor of the engine.
+def _fade_factor(sound: SoundEvent, duration: float, time_ms: float,
+                 fade: tuple[int, int]) -> float:
+    """pal_/shk_<event>_fade_inout: SFX_EffectTemporalFactor of the engine.
 
     A one-shot fades over the length of its package; a loop has no end, so only
     its fade-in applies.
@@ -4102,8 +4105,7 @@ def _global_fade_factor(sound: SoundEvent, duration: float, time_ms: float,
         float(fade[0]), float(fade[1]))
 
 
-def _screen_fx_strength(sound: SoundEvent, fx: ScreenFx, time_ms: float,
-                        fade: tuple[int, int] = (0, 0)):
+def _screen_fx_strength(sound: SoundEvent, fx: ScreenFx, time_ms: float):
     """Strength of a palette package at ``time_ms``, None when over."""
 
     age = time_ms - sound.start
@@ -4117,11 +4119,10 @@ def _screen_fx_strength(sound: SoundEvent, fx: ScreenFx, time_ms: float,
         strength = fx.mag0 + (fx.mag1 - fx.mag0) * age / fx.time
     if strength is None:
         return None
-    return strength * _global_fade_factor(sound, fx.time, time_ms, fade)
+    return strength * _fade_factor(sound, fx.time, time_ms, fx.fade)
 
 
-def _shake_strength(sound: SoundEvent, fx: ShakeFx, time_ms: float,
-                    fade: tuple[int, int] = (0, 0)):
+def _shake_strength(sound: SoundEvent, fx: ShakeFx, time_ms: float):
     """Strength of a shake package at ``time_ms``, None when over."""
 
     age = time_ms - sound.start
@@ -4135,7 +4136,7 @@ def _shake_strength(sound: SoundEvent, fx: ShakeFx, time_ms: float,
         strength = fx.mag0 + (fx.mag1 - fx.mag0) * age / fx.time
     if strength is None:
         return None
-    return strength * _global_fade_factor(sound, fx.time, time_ms, fade)
+    return strength * _fade_factor(sound, fx.time, time_ms, fx.fade)
 
 
 def _decoration_pose(payload, time_ms: float):
