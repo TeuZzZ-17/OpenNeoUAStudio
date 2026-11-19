@@ -30,6 +30,7 @@ from PySide6.QtWidgets import (
 )
 
 from entity_designer.script_model import LEGACY, OPENNEOUA
+from studio.ui.sorting import SortableTreeItem, enable_tree_sort
 
 # Exact Legacy red plus the existing OpenNeoUA compound green.
 TYPE_COLORS = {
@@ -117,6 +118,7 @@ class GeometryPartSelectionWidget(QWidget):
         self.tree = QTreeWidget()
         from studio.ui.widgets import use_standard_list_style
         use_standard_list_style(self.tree)
+        enable_tree_sort(self.tree)
         self.tree.setHeaderLabels(["Geometry / component", "Triangles", "Topology"])
         self.tree.header().setSectionResizeMode(
             0, QHeaderView.ResizeMode.Stretch)
@@ -303,12 +305,12 @@ class GeometryPartSelectionWidget(QWidget):
                 item = by_key.get(key)
                 if item is None:
                     if self._shape_root is None:
-                        self._shape_root = QTreeWidgetItem(self.tree)
+                        self._shape_root = SortableTreeItem(self.tree)
                         self._shape_root.setText(0, "Collision shape parts")
                         self._shape_root.setFlags(
                             self._shape_root.flags() | Qt.ItemFlag.ItemIsUserCheckable
                             | Qt.ItemFlag.ItemIsAutoTristate)
-                    item = QTreeWidgetItem(self._shape_root)
+                    item = SortableTreeItem(self._shape_root)
                     group_count = key.partition("#planar-group:")[2].partition(":")[0]
                     if group_count.isdigit():
                         item.setText(
@@ -333,7 +335,7 @@ class GeometryPartSelectionWidget(QWidget):
                     continue
                 # Several convex parts: each one can be switched on its own.
                 for number, (index, hull) in enumerate(entries, 1):
-                    child = QTreeWidgetItem(item)
+                    child = SortableTreeItem(item)
                     child.setText(0, f"Convex part {number}")
                     child.setText(1, str(len(hull.faces)))
                     child.setData(0, _SHAPE_HULL_ROLE, index)
@@ -391,7 +393,7 @@ class GeometryPartSelectionWidget(QWidget):
                     continue
                 objects.append(obj)
                 parent_item = by_path.get(owner.rpartition("/")[0])
-                item = QTreeWidgetItem(parent_item or self.tree)
+                item = SortableTreeItem(parent_item or self.tree)
                 item.setText(0, obj.display_name or owner)
                 item.setText(
                     1, str(len(self._triangles_by_owner.get(owner, ()))))
@@ -418,7 +420,7 @@ class GeometryPartSelectionWidget(QWidget):
                 parent = owner_item
                 if len(parts) > 1:
                     # One connected piece split where it folds inwards.
-                    parent = QTreeWidgetItem(owner_item)
+                    parent = SortableTreeItem(owner_item)
                     parent.setText(0, f"Component {index}")
                     parent.setText(
                         1, str(sum(len(part.triangles) for part in parts)))
@@ -434,7 +436,7 @@ class GeometryPartSelectionWidget(QWidget):
                         -len(part.triangles), part.component_id))
                 for number, component in enumerate(parts, 1):
                     key = _geometry_component_key(component)
-                    child = QTreeWidgetItem(parent)
+                    child = SortableTreeItem(parent)
                     child.setText(0, f"Component {index}" if parent is owner_item
                                   else f"Part {number}")
                     child.setText(1, str(len(component.triangles)))

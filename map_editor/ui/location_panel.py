@@ -17,6 +17,7 @@ from .. import bootstrap
 from ..core.locations import (DEFAULT_LOCATION_COLOR, LOCATION_COLORS, new_location,
                                validate_location, contains_point, location_color, notice_opacity)
 from .settings_lock import SettingsLockButton
+from studio.ui.sorting import IndexedListWidget, SortableListItem, add_list_sort
 
 LOCATION_COLOR_ROLE = int(Qt.ItemDataRole.UserRole)
 LOCATION_DRAFT_ROLE = LOCATION_COLOR_ROLE + 1
@@ -148,9 +149,9 @@ class LocationPanel(QWidget):
         self.loading = False
         self.value = new_location(1)
         layout = QVBoxLayout(self)
-        self.list = QListWidget()
+        self.list = IndexedListWidget()
         self.list.setItemDelegate(LocationListDelegate(self.list))
-        layout.addWidget(self.list, 1)
+        add_list_sort(layout, self.list, label="Location", stretch=1)
         self.lock = SettingsLockButton()
         row = QHBoxLayout()
         for text, action in (('New', 'new'), ('Delete', 'delete'), ('Find', 'find')):
@@ -204,7 +205,7 @@ class LocationPanel(QWidget):
         self.audio.setVolume(.35)
         self.player = QMediaPlayer(self)
         self.player.setAudioOutput(self.audio)
-        self.list.currentRowChanged.connect(self.select)
+        self.list.sourceRowChanged.connect(self.select)
         self.set_value(self.value)
 
     def values(self):
@@ -235,7 +236,7 @@ class LocationPanel(QWidget):
         self.change()
 
     def _add_location_item(self, value, draft=False):
-        item = QListWidgetItem(value['name'] or 'New location')
+        item = SortableListItem(value['name'] or 'New location')
         color = location_color(value)
         item.setData(LOCATION_COLOR_ROLE, color)
         item.setData(LOCATION_DRAFT_ROLE, draft)

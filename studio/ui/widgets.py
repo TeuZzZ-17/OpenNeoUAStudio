@@ -48,6 +48,7 @@ from PySide6.QtWidgets import (
     QVBoxLayout,
     QWidget,
 )
+from studio.ui.sorting import SortableListItem, SortableListWidget, add_list_sort
 
 # ----------------------------------------------------------------------------
 # Dirty-resource text shared by the entity catalog and archive browser.
@@ -657,7 +658,7 @@ class TexturePickerDialog(QDialog):
         self.search.textChanged.connect(self._filter_items)
         layout.addWidget(self.search)
 
-        self.list = QListWidget()
+        self.list = SortableListWidget()
         use_standard_list_style(self.list)
         self.list.setViewMode(QListView.ViewMode.IconMode)
         self.list.setResizeMode(QListView.ResizeMode.Adjust)
@@ -667,7 +668,7 @@ class TexturePickerDialog(QDialog):
         self.list.setWordWrap(True)
         self.list.setSelectionMode(
             QAbstractItemView.SelectionMode.SingleSelection)
-        layout.addWidget(self.list, 1)
+        add_list_sort(layout, self.list, label="Texture", stretch=1)
         self.preview = QLabel()
         configure_stable_image_preview(self.preview, 180)
         self.preview.setVisible(frame_loader is not None)
@@ -677,7 +678,7 @@ class TexturePickerDialog(QDialog):
         placeholder.fill(QColor(42, 44, 50))
         current_item = None
         for name in names:
-            item = QListWidgetItem(QIcon(placeholder), name)
+            item = SortableListItem(QIcon(placeholder), name)
             item.setData(Qt.ItemDataRole.UserRole, name)
             item.setTextAlignment(Qt.AlignmentFlag.AlignHCenter)
             self.list.addItem(item)

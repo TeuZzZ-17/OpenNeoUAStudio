@@ -48,6 +48,7 @@ from studio.ui.widgets import loading_resources
 from studio_mcp.core import McpToolError
 from studio_mcp.loose import LooseModel
 from studio_mcp.state_sync import apply_plan, build_plan, SyncOptions, texture_files
+from studio.ui.sorting import SortableTreeItem, enable_tree_sort
 
 # A folder neighbour counts as the same model from this share of identical faces.
 SIMILAR_SHARE = 0.6
@@ -129,6 +130,7 @@ class StateSyncDialog(QDialog):
         column.setContentsMargins(0, 0, 6, 0)
         self.states = QTreeWidget()
         self.states.setColumnCount(4)
+        enable_tree_sort(self.states)
         self.states.setHeaderLabels(["State", "Match", "Changes", "Found in"])
         self.states.setRootIsDecorated(False)
         self.states.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
@@ -266,7 +268,7 @@ class StateSyncDialog(QDialog):
         if slot.plan.match_share < least_share:
             return None
         self.slots.append(slot)
-        item = QTreeWidgetItem([candidate.state or candidate.label,
+        item = SortableTreeItem([candidate.state or candidate.label,
                                 f"{slot.plan.match_share:.0%}", "",
                                 ", ".join(candidate.found_by)])
         item.setData(0, _SLOT_ROLE, slot)

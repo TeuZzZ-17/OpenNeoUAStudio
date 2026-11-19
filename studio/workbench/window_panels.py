@@ -33,6 +33,7 @@ from studio.workbench.common import (
     WINDOW_TITLE,
     _display_path,
 )
+from studio.ui.sorting import SortableTreeItem
 
 
 class _FamilyPanelsMixin:
@@ -178,7 +179,7 @@ class _FamilyPanelsMixin:
 
     def _tree_item(self, label: str, status: str, node_data,
                    source: str = "") -> QTreeWidgetItem:
-        item = QTreeWidgetItem([label, status, source])
+        item = SortableTreeItem([label, status, source])
         if node_data and node_data[0] == "group":
             # Pure category rows remain clickable for expand/collapse but are
             # not selectable, avoiding the accent stripe over their arrow.
@@ -883,7 +884,7 @@ class _FamilyPanelsMixin:
             return
 
         def add_chunk(chunk, parent):
-            item = QTreeWidgetItem(
+            item = SortableTreeItem(
                 [chunk.display_name, str(chunk.size), f"0x{chunk.offset:X}"]
             )
             if parent is None:

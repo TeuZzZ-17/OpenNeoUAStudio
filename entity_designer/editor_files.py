@@ -69,6 +69,7 @@ from entity_designer.editor_common import (
     _MODEL_NAME_ROLE,
     _vp_ids_per_model,
 )
+from studio.ui.sorting import SortableTreeItem
 
 
 class _ScriptFilesMixin:
@@ -490,7 +491,7 @@ class _ScriptFilesMixin:
         with QSignalBlocker(self.model_tree):
             self.model_tree.clear()
             if model is not None:
-                item = QTreeWidgetItem([model.display_name, "—"])
+                item = SortableTreeItem([model.display_name, "—"])
                 item.setData(0, Qt.ItemDataRole.UserRole, model.owner_path)
                 item.setData(0, _MODEL_NAME_ROLE, model.display_name)
                 self.model_tree.addTopLevelItem(item)

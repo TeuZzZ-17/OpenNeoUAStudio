@@ -125,6 +125,7 @@ from studio.workbench.window_geometry import _GeometryEditMixin
 from studio.workbench.window_model_io import _ModelFilesMixin
 from studio.workbench.window_uv import _UvTexturesMixin
 from studio.workbench.window_panels import _FamilyPanelsMixin
+from studio.ui.sorting import IndexedListWidget, SortableListWidget, SortableTreeItem, add_list_sort, enable_tree_sort, sorted_list_panel
 
 
 # Show Diagnostic Panel opens at this height (the user can drag it up to the maximum).
@@ -294,6 +295,7 @@ class AssemblyWindow(
         use_standard_list_style(self.asset_tree, selected_color=True)
         self.asset_tree.setSelectionMode(
             QAbstractItemView.SelectionMode.ExtendedSelection)
+        enable_tree_sort(self.asset_tree)
         self.asset_tree.setHeaderLabels(["Asset", "Status", "Source / Path"])
         self.asset_tree.setItemDelegate(_ProblemRowDelegate(self.asset_tree))
         self.asset_tree.setUniformRowHeights(True)
@@ -333,7 +335,7 @@ class AssemblyWindow(
         self.tree_search = QLineEdit()
         self.tree_search.setPlaceholderText("Filter objects/textures")
         self.tree_search.textChanged.connect(self._filter_asset_tree)
-        self.texture_list = QListWidget()
+        self.texture_list = SortableListWidget()
         use_standard_list_style(self.texture_list)
         # The generic grey hover reads as "texture not loaded": this list uses the
         # theme's row hover color instead (rule in studio.qss).
@@ -358,6 +360,7 @@ class AssemblyWindow(
         self.texture_list.itemDoubleClicked.connect(
             self._preview_visual_texture_item)
         self.setbas_tree = _BasResourceTree()
+        enable_tree_sort(self.setbas_tree)
         self.setbas_tree.setHeaderLabels(["Resource", "Payload", "VP"])
         from studio.ui.widgets import use_resource_delegate
         use_resource_delegate(self.setbas_tree)
@@ -408,9 +411,9 @@ class AssemblyWindow(
         self.fx_combo.setToolTip(
             "Choose an ANM element to select it and edit its vertices.")
         self.fx_combo.currentIndexChanged.connect(self._on_fx_selected)
-        self.blocks_list = QListWidget()
+        self.blocks_list = IndexedListWidget()
         use_standard_list_style(self.blocks_list)
-        self.blocks_list.currentRowChanged.connect(self._on_block_selected)
+        self.blocks_list.sourceRowChanged.connect(self._on_block_selected)
         self.material_copy_button = QPushButton("Copy Material")
         self.material_copy_button.clicked.connect(self._copy_material_block)
         self.material_paste_button = QPushButton("Paste Material")
@@ -422,10 +425,11 @@ class AssemblyWindow(
             self._delete_material_block)
         self.chunk_tree = QTreeWidget()
         use_standard_list_style(self.chunk_tree)
+        enable_tree_sort(self.chunk_tree)
         self.chunk_tree.setHeaderLabels(["Chunk", "Size", "Offset"])
-        self.warning_list = QListWidget()
-        self.checks_list = QListWidget()
-        self.log_list = QListWidget()
+        self.warning_list = SortableListWidget()
+        self.checks_list = SortableListWidget()
+        self.log_list = SortableListWidget()
         for view in (self.warning_list, self.checks_list, self.log_list):
             use_standard_list_style(view)
         for widget in (
@@ -1349,7 +1353,7 @@ class AssemblyWindow(
         textures_layout = QVBoxLayout(textures_panel)
         textures_layout.setContentsMargins(5, 5, 5, 5)
         textures_layout.setSpacing(4)
-        textures_layout.addWidget(self.texture_list, 1)
+        add_list_sort(textures_layout, self.texture_list, label="Texture", stretch=1)
         self.texture_export_button = QPushButton("Export Selected as PNG")
         self.texture_export_button.clicked.connect(self._export_texture_png)
         textures_layout.addWidget(self.texture_export_button)
@@ -1696,7 +1700,7 @@ class AssemblyWindow(
             QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Ignored)
         overview_layout.addWidget(self.poly_uv_label, 1)
         self.blocks_list.setMaximumHeight(145)
-        overview_layout.addWidget(self.blocks_list)
+        add_list_sort(overview_layout, self.blocks_list, label="Block")
         material_tools = _ResponsiveButtonGrid([
             self.material_copy_button,
             self.material_paste_button,
@@ -2028,9 +2032,9 @@ class AssemblyWindow(
         diagnostics_tabs.setMinimumHeight(0)
         diagnostics_tabs.setSizePolicy(QSizePolicy.Policy.Expanding,
                                        QSizePolicy.Policy.Ignored)
-        diagnostics_tabs.addTab(self.log_list, "Log")
-        diagnostics_tabs.addTab(self.warning_list, "Warnings")
-        diagnostics_tabs.addTab(self.checks_list, "Validation")
+        diagnostics_tabs.addTab(sorted_list_panel(self.log_list, "Message"), "Log")
+        diagnostics_tabs.addTab(sorted_list_panel(self.warning_list, "Warning"), "Warnings")
+        diagnostics_tabs.addTab(sorted_list_panel(self.checks_list, "Check"), "Validation")
         diagnostics_tabs.setCurrentIndex(0)
         PaletteTabStrip.install(diagnostics_tabs)
         for diagnostic_list in (self.log_list, self.warning_list,
@@ -2689,7 +2693,7 @@ class AssemblyWindow(
             if class_id.casefold() != "base.class"
         ] + ["other/unknown"]
         for class_id in class_ids:
-            item = QTreeWidgetItem([class_id, "", ""])
+            item = SortableTreeItem([class_id, "", ""])
             # Category rows are expand/collapse controls, not resources.  Keep
             # them out of the selection model so Qt does not draw the accent
             # focus stripe over the branch arrow.
@@ -2725,7 +2729,7 @@ class AssemblyWindow(
             if self._vp_embedded is not None \
                     and normalized not in embedded_names:
                 payload += " (missing)"
-            row = QTreeWidgetItem([
+            row = SortableTreeItem([
                 base_name, payload, self._vp_text_for_base(base_name)])
             for column in range(3):
                 row.setTextAlignment(
@@ -2739,7 +2743,7 @@ class AssemblyWindow(
         for resource in archive.resources:
             group = groups.get(resource.class_id,
                                groups.get("other/unknown"))
-            row = QTreeWidgetItem([
+            row = SortableTreeItem([
                 resource.resource_name,
                 resource.display_payload + (" (unsupported class)"
                                             if not resource.decodable

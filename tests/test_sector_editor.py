@@ -13,7 +13,7 @@ os.environ.setdefault("NME_RENDERER", "software")
 
 import pytest
 from PySide6.QtCore import Qt
-from PySide6.QtWidgets import QApplication
+from PySide6.QtWidgets import QApplication, QToolBar
 from map_editor import bootstrap
 from map_editor.core.set_sdf_parser import (
     SetSdf, SdfBuilding, SdfBuildingModel, SdfSector, serialize_set_sdf,
@@ -858,6 +858,21 @@ def test_current_view_export_and_reset_use_real_sector_geometry(real_window):
     assert not image.isNull() and image.width() == 160
     assert image.hasAlphaChannel()
     assert any(image.pixelColor(x, y).alpha() for y in range(image.height()) for x in range(image.width()))
+
+
+def test_toolbar_reset_view_button_resets_camera_not_frame_selection(real_window):
+    """Regression: the toolbar button must reset to home, not zoom to the selection."""
+    window = real_window
+    window.sectors.setCurrentRow(142)
+    home = window.view.camera.copy()
+    window.view.set_camera_angles(0, 90)
+    window.view.frame_selection()
+    assert window.view.camera.zoom != home.zoom
+    toolbar = next(tb for tb in window.findChildren(QToolBar) if tb.windowTitle() == "Set")
+    reset_action = next(a for a in toolbar.actions() if a.text() == "Reset View")
+    reset_action.trigger()
+    assert window.view.camera.center == home.center
+    assert window.view.camera.zoom == home.zoom
 
 
 def test_subcell_picker_uses_nearest_visible_geometry(tmp_path, monkeypatch):

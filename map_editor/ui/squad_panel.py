@@ -8,6 +8,7 @@ from ..core.actor_comments import default_squad_comment, is_custom, squad_commen
 from ..render.squad_scene import squad_xz
 from .settings_lock import SettingsLockButton
 from .preview_cards import PreviewList, set_card, faction_style, color_faction_items, DETAIL_ROLE, DRAFT_ROLE, form_vehicle, VehicleSearchRow
+from studio.ui.sorting import add_list_sort
 
 
 class WorldCoordinateSpinBox(QDoubleSpinBox):
@@ -116,7 +117,7 @@ class SquadPanel(QWidget):
         self.list.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
         self.list.itemSelectionChanged.connect(self._selected)
         self.list.viewport().installEventFilter(self)
-        layout.addWidget(self.list, 1)
+        add_list_sort(layout, self.list, label="Squad", stretch=1)
         row = QHBoxLayout()
         for text, slot in (("New", self._new),
                            ("Delete", lambda: self.removeRequested.emit(self.selected_indices())),

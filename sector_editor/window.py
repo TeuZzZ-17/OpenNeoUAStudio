@@ -43,6 +43,7 @@ from .textures import LOOSE_SETS, import_textures
 from .effects_editor import DestructionEffectsEditor
 from .playback_scene import sector_transition_steps
 from studio.ui.cursor_themes import studio_cursor
+from studio.ui.sorting import SortableListItem, add_list_sort
 
 STATES = ("Intact", "Damaged", "Heavily damaged", "Destroyed")
 COLLISION_MODES = ("Own collision skeleton", "Standard small cell", "Standard large cell")
@@ -373,7 +374,7 @@ class SectorEditorWindow(QMainWindow):
         self.view_preset.addItems(SECTOR_VIEWS)
         self.view_preset.activated.connect(self._change_view)
         toolbar.addWidget(self.view_preset)
-        toolbar.addAction("Reset View", self._reset_active_view)
+        toolbar.addAction("Reset View", self.view.reset_camera)
         # Animation playback, same controls as the Model Editor: animated textures and
         # particle emitters of the model in the selected cell (or the whole one-cell sector).
         from studio.rendering.playback import DEFAULT_ANIMATION_SPEED
@@ -435,7 +436,7 @@ class SectorEditorWindow(QMainWindow):
         self.sectors.carryCancelled.connect(self.cancel_sector_copy)
         self.sectors.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self.sectors.customContextMenuRequested.connect(self._sector_menu)
-        layout.addWidget(self.sectors, 1)
+        add_list_sort(layout, self.sectors, label="Sector", stretch=1)
         layout.addWidget(self.sectors.zoom_controls())
         row = QHBoxLayout()
         button("New", self.add_sector, row)
@@ -562,7 +563,7 @@ class SectorEditorWindow(QMainWindow):
         self.view.model_source = self.cell_grid.model_source = self.models
         self.models.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self.models.customContextMenuRequested.connect(self._model_menu)
-        layout.addWidget(self.models, 1)
+        add_list_sort(layout, self.models, label="Model", stretch=1)
         layout.addWidget(self.models.zoom_controls())
         self.apply_model_button = button("Apply model to selected cells", self.apply_model, layout)
         self.tabs.addTab(self.models_page, "Models")
@@ -1550,7 +1551,7 @@ class SectorEditorWindow(QMainWindow):
         self.sectors.clear()
         for number in range(256):
             sector = sdf.sectors.get(number)
-            item = QListWidgetItem()
+            item = SortableListItem()
             detail = (sector.comment or ("One large cell" if sector.single else "3 × 3 cells")) if sector else "Free slot · Double-click to create"
             if number >= 248:
                 detail += "\nMap border"
@@ -1574,7 +1575,7 @@ class SectorEditorWindow(QMainWindow):
             for combo in self.state_models:
                 combo.clear()
             for model, title in zip(sdf.models, model_titles):
-                item = QListWidgetItem()
+                item = SortableListItem()
                 set_card(item, f"{model.id:03d}  {model.base}", model.comment or "Set model",
                          (240, 153, 75), model.id)
                 item.setData(Qt.ItemDataRole.UserRole, model.id)

@@ -25,6 +25,7 @@ from studio.rendering.geometry import (
 from studio.rendering.particles import ParticleEmitter
 from studio.rendering.playback import PreviewClock
 from studio.ui.widgets import crop_uv_region, qimage_from_ilbm
+from studio.ui.sorting import SortableListItem, SortableListWidget, add_list_sort
 
 
 @dataclass(frozen=True)
@@ -255,7 +256,7 @@ class EffectCatalogDialog(QDialog):
         self.search = QLineEdit(placeholderText="Filter by model, effect or texture…")
         self.search.textChanged.connect(self._filter)
         layout.addWidget(self.search)
-        self.gallery = QListWidget()
+        self.gallery = SortableListWidget()
         self.gallery.setViewMode(QListView.ViewMode.IconMode)
         self.gallery.setMovement(QListView.Movement.Static)
         self.gallery.setResizeMode(QListView.ResizeMode.Adjust)
@@ -267,7 +268,7 @@ class EffectCatalogDialog(QDialog):
         self.gallery.setIconSize(QSize(128, 92))
         self.gallery.currentItemChanged.connect(self._selection_changed)
         self.gallery.itemDoubleClicked.connect(lambda _item: self.accept())
-        layout.addWidget(self.gallery, 1)
+        add_list_sort(layout, self.gallery, label="Effect", stretch=1)
         self.preview_info = QLabel()
         layout.addWidget(self.preview_info)
         buttons = QDialogButtonBox(
@@ -327,7 +328,7 @@ class EffectCatalogDialog(QDialog):
         for index, entry in enumerate(self._entries):
             if not all(word in entry.label.casefold() for word in words):
                 continue
-            item = QListWidgetItem(entry.label)
+            item = SortableListItem(entry.label)
             item.setToolTip(entry.label)
             item.setSizeHint(self.gallery.gridSize())
             item.setData(Qt.ItemDataRole.UserRole, index)

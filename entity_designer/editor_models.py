@@ -38,6 +38,7 @@ from entity_designer.editor_common import (
     _SCRIPT_REFERENCE_ROLE,
     _vp_ids_per_model,
 )
+from studio.ui.sorting import SortableTreeItem
 
 
 class _ModelBrowserMixin:
@@ -174,7 +175,7 @@ class _ModelBrowserMixin:
                     self._model_info_by_vp.setdefault(
                         vp_id, (obj.owner_path, obj.display_name))
             vp_text = ", ".join(map(str, vp_ids)) if vp_ids else "—"
-            item = QTreeWidgetItem([
+            item = SortableTreeItem([
                 obj.base_object.skeleton_name or obj.owner_path,
                 vp_text,
             ])
@@ -259,7 +260,7 @@ class _ModelBrowserMixin:
                 vp_text = (
                     str(reference.vp_normal)
                     if reference.vp_normal is not None else "—")
-                item = QTreeWidgetItem([
+                item = SortableTreeItem([
                     block.name or f"{block.kind} {block.object_id}",
                     vp_text,
                 ])

@@ -43,6 +43,7 @@ from entity_designer.editor_common import (
     _FIRE_POINT_INDEX_ROLE,
     _GUN_POINT_INDEX_ROLE,
 )
+from studio.ui.sorting import SortableTreeItem
 
 
 class _EditControlsMixin:
@@ -552,7 +553,7 @@ class _EditControlsMixin:
                     _radius_number(sphere.radius)
                     if sphere.category == LEGACY
                     else _number(sphere.radius))
-                item = QTreeWidgetItem([
+                item = SortableTreeItem([
                     TYPE_LABELS[sphere.category],
                     radius_text,
                     "Visible" if sphere.visible else "Hidden",
@@ -588,7 +589,7 @@ class _EditControlsMixin:
             self.fire_point_tree.clear()
             selected_item = None
             for index, point in enumerate(points):
-                item = QTreeWidgetItem([
+                item = SortableTreeItem([
                     f"F{index + 1}",
                     _number(point[0]), _number(point[1]), _number(point[2]),
                 ])
@@ -631,7 +632,7 @@ class _EditControlsMixin:
                         if limits is not None
                         else ["-", "-", "-"]
                     )
-                    item = QTreeWidgetItem([
+                    item = SortableTreeItem([
                         label, family_label, str(int(point.gun_type)),
                         *angle_values,
                         _number(point.x), _number(point.y), _number(point.z),

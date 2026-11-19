@@ -11,6 +11,7 @@ from .preview_cards import PreviewList, set_card, faction_style, DETAIL_ROLE, DR
 from .squad_panel import WorldCoordinateSpinBox, PositionControls
 from ..core.actor_comments import default_host_comment, host_comment, is_custom
 from ..render.squad_scene import squad_xz
+from studio.ui.sorting import add_list_sort
 
 
 ENERGY_PRESETS = (
@@ -90,8 +91,8 @@ class HostPanel(QWidget):
         self.list = PreviewList()
         self.list.preview_level = 1
         layout.addLayout(self.list.preview_controls())
-        layout.addWidget(self.list, 1)
-        self.list.currentRowChanged.connect(self._selected)
+        add_list_sort(layout, self.list, label="Host station", stretch=1)
+        self.list.sourceRowChanged.connect(self._selected)
         self.player = QPushButton('Use This Faction as Player')
         self.player.clicked.connect(lambda: self.playerRequested.emit(self.list.currentRow()))
         layout.addWidget(self.settings_lock.wrap(self.player))

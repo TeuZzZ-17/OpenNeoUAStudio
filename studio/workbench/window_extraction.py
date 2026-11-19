@@ -77,6 +77,7 @@ from studio.ui.widgets import (
 from studio.workbench.common import (
     _BAS_NAME_ROLE,
 )
+from studio.ui.sorting import SortableTreeItem, enable_tree_sort
 
 
 class _ExtractionMixin:
@@ -2339,6 +2340,7 @@ class _ExtractionMixin:
         tree = QTreeWidget()
         from studio.ui.widgets import use_standard_list_style
         use_standard_list_style(tree)
+        enable_tree_sort(tree)
         tree.setHeaderLabels(["Reference", "Native name", "Writer support"])
         tree.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         tree.setUniformRowHeights(True)
@@ -2351,14 +2353,14 @@ class _ExtractionMixin:
         tree.setColumnWidth(0, 165)
         tree.setColumnWidth(1, 285)
         base_name = self._base_entry_name(self._family, fam_obj, owner)
-        root = QTreeWidgetItem([f"BASE: {base_name}", "", "Entry point"])
+        root = SortableTreeItem([f"BASE: {base_name}", "", "Entry point"])
         tree.addTopLevelItem(root)
         editors: list[tuple[dict, QLineEdit, str]] = []
         for spec in specs:
             visible_support = (
                 f"Editable (max {spec['capacity'] - 1} bytes)"
                 if spec["editable"] else "Read-only")
-            row = QTreeWidgetItem([
+            row = SortableTreeItem([
                 spec["kind"], "" if spec["editable"] else spec["name"],
                 visible_support])
             for column in range(3):

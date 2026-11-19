@@ -3,6 +3,8 @@ from PySide6.QtCore import Signal, Qt
 from PySide6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QLabel, QTableWidget,
     QComboBox, QSpinBox, QPushButton, QHeaderView, QAbstractItemView)
 
+from studio.ui.sorting import enable_header_sort, sort_key
+
 
 class DestructionEffectsEditor(QWidget):
     textChanged = Signal()
@@ -21,6 +23,7 @@ class DestructionEffectsEditor(QWidget):
         layout.addWidget(hint)
         self.table = QTableWidget(0, 4)
         self.table.setHorizontalHeaderLabels(("Effect", "Side X", "Forward Z", "Height"))
+        enable_header_sort(self.table.horizontalHeader(), self._sort_rows)
         self.table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
         self.table.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
         self.table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
@@ -60,6 +63,18 @@ class DestructionEffectsEditor(QWidget):
         selected = self.table.currentRow() >= 0
         self.remove_button.setEnabled(selected)
         self.preview_button.setEnabled(selected)
+
+    def _sort_rows(self, column, direction):
+        def key(row):
+            widget = self.table.cellWidget(row, column)
+            return sort_key(widget.currentText()) if column == 0 else widget.value()
+
+        # Move the visual sections only. Logical rows keep the saved effect order.
+        rows = sorted(range(self.table.rowCount()), key=key,
+                      reverse=direction == Qt.SortOrder.DescendingOrder)
+        header = self.table.verticalHeader()
+        for position, row in enumerate(rows):
+            header.moveSection(header.visualIndex(row), position)
 
     def add_effect(self, effect=None):
         if effect is None:

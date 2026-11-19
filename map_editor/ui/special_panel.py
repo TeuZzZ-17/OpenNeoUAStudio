@@ -14,6 +14,7 @@ from .settings_lock import SettingsLockButton
 from .preview_cards import PreviewList, set_card, RESOURCE_ROLE
 from ..render.special_scene import SPECIAL_COLORS as COLORS
 from ..core.special_objects import SPECIAL_KINDS, special_store, special_slots, special_cell
+from studio.ui.sorting import IndexedListWidget, SortableListItem, add_list_sort
 
 
 class DurationSpinBox(QSpinBox):
@@ -148,7 +149,7 @@ class SpecialPanel(QWidget):
         self.list.setMinimumHeight(140)
         layout.addLayout(self.list.preview_controls())
         self.list.currentItemChanged.connect(self._selected)
-        layout.addWidget(self.list, 1)
+        add_list_sort(layout, self.list, label="Special item", stretch=1)
         self.count = QLabel()
         self.count.setAlignment(Qt.AlignmentFlag.AlignCenter)
         layout.addWidget(self.count)
@@ -245,11 +246,11 @@ class SpecialPanel(QWidget):
         group = QGroupBox('Key Sectors')
         self.keys_group = group
         layout = QVBoxLayout(group)
-        self.keys = QListWidget()
+        self.keys = IndexedListWidget()
         use_standard_list_style(self.keys)
         self.keys.setMaximumHeight(105)
-        self.keys.currentRowChanged.connect(self._key_selected)
-        layout.addWidget(self.keys)
+        self.keys.sourceRowChanged.connect(self._key_selected)
+        add_list_sort(layout, self.keys, label="Key sector")
         row = QHBoxLayout()
         for title, callback in (('Add on map', lambda: self.placementRequested.emit('key', -1)),
                                 ('Move', lambda: self.placementRequested.emit('key', self.keys.currentRow()) if self.keys.currentRow() >= 0 else None),
@@ -278,11 +279,11 @@ class SpecialPanel(QWidget):
     def _build_actions(self, form):
         group = QGroupBox('Effects on Capture')
         layout = QVBoxLayout(group)
-        self.actions = QListWidget()
+        self.actions = IndexedListWidget()
         use_standard_list_style(self.actions)
         self.actions.setMaximumHeight(110)
-        self.actions.currentRowChanged.connect(self._action_selected)
-        layout.addWidget(self.actions)
+        self.actions.sourceRowChanged.connect(self._action_selected)
+        add_list_sort(layout, self.actions, label="Action")
         self.effect_dialog = QDialog(self)
         self.effect_dialog.resize(400, 230)
         dialog_layout = QVBoxLayout(self.effect_dialog)
@@ -334,7 +335,7 @@ class SpecialPanel(QWidget):
             detail = f'Target levels {", ".join(map(str, value["targets"])) or "none"} · {len(value["keys"])} keys' if self.kind == 'gate' else (
                 f'{format_duration(value["countdown"])} · {len(value["keys"])} keys' if self.kind == 'item' else
                 f'Building {value["blg"]} · {len(value["actions"])} effects')
-            item = QListWidgetItem()
+            item = SortableListItem()
             building = value['closed_bp'] if self.kind == 'gate' else value['inactive_bp'] if self.kind == 'item' else value['blg']
             set_card(item, f'{title} {index} · {cell if cell else "Unplaced"}',
                      detail + (' · Hidden' if value.get('hidden') else ''), COLORS[self.kind], ('blg', building))

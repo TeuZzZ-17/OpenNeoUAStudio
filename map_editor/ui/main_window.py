@@ -65,6 +65,7 @@ from .. import bootstrap
 from studio.rendering.asset_viewport import VIEW_PRESET_ANGLES
 from studio.ui.cursor_themes import studio_cursor
 from ..render.camera import ISO_PITCH, ISO_YAW
+from studio.ui.sorting import SortableListItem, SortableListWidget, add_list_sort
 
 TOOLS = (("select", "Select"), ("sector", "Sector"), ("building", "Building"),
          ("owner", "Faction"), ("terrain", "Terrain"), ("squad", "Squad"))
@@ -357,7 +358,7 @@ class MainWindow(QMainWindow):
         self.map_issues_toggle.setToolTip('Check missing resources and building ownership. Click a row to find its sector.')
         sector_status_row.addWidget(self.map_issues_toggle)
         panel_layout.addLayout(sector_status_row)
-        self.map_issues_list = QListWidget()
+        self.map_issues_list = SortableListWidget()
         from studio.ui.widgets import use_standard_list_style
         use_standard_list_style(self.map_issues_list)
         self.map_issues_list.setMaximumHeight(140)
@@ -365,7 +366,7 @@ class MainWindow(QMainWindow):
         self.map_issues_list.hide()
         self.map_issues_toggle.toggled.connect(self._toggle_map_issues)
         self.map_issues_list.itemClicked.connect(self._find_map_issue)
-        panel_layout.addWidget(self.map_issues_list)
+        add_list_sort(panel_layout, self.map_issues_list, label="Issue")
         panel_layout.addWidget(tabs, 1)
         self.sector_list = self._make_list(True)
         self.sector_list.setItemDelegate(ThumbnailDelegate(self.sector_list))
@@ -395,7 +396,7 @@ class MainWindow(QMainWindow):
         self.sector_zoom_in.clicked.connect(lambda: self._sector_zoom_step(1))
         zoom_row.addWidget(self.sector_zoom_in)
         layout.addLayout(zoom_row)
-        layout.addWidget(self.sector_list)
+        add_list_sort(layout, self.sector_list, label="Sector")
         tabs.addTab(page, "Sectors")
         self._layout_sector_icons()
 
@@ -425,7 +426,7 @@ class MainWindow(QMainWindow):
         self.building_zoom_in.setFixedWidth(32)
         self.building_zoom_in.setEnabled(False)
         buildings_layout.addLayout(building_zoom_row)
-        self.building_list = QListWidget()
+        self.building_list = SortableListWidget()
         self.building_settings_lock.bind_palette(self.building_list)
         from studio.ui.widgets import use_standard_list_style
         use_standard_list_style(self.building_list)
@@ -441,11 +442,11 @@ class MainWindow(QMainWindow):
         self.building_list.currentItemChanged.connect(self._building_selected)
         self.building_list.itemClicked.connect(self._building_selected)
         self.building_filter.textChanged.connect(lambda t: self._filter(self.building_list, t))
-        buildings_layout.addWidget(self.building_list)
+        add_list_sort(buildings_layout, self.building_list, label="Building")
         tabs.addTab(buildings_page, "Buildings")
         self._layout_building_rows()
 
-        self.owner_list = QListWidget()
+        self.owner_list = SortableListWidget()
         use_standard_list_style(self.owner_list)
         self.owner_list.setItemDelegate(PaletteCardDelegate(self.owner_list))
         font = self.owner_list.font()
@@ -454,7 +455,7 @@ class MainWindow(QMainWindow):
         self.owner_list.setIconSize(QSize(36, 36))
         self.owner_list.setSpacing(5)
         for owner, name in FACTIONS.items():
-            item = QListWidgetItem(f"{owner} {name}")
+            item = SortableListItem(f"{owner} {name}")
             item.setData(Qt.ItemDataRole.UserRole, owner)
             item.setSizeHint(QSize(0, 54))
             self.owner_list.addItem(item)
@@ -467,7 +468,7 @@ class MainWindow(QMainWindow):
         self.owner_settings_lock = SettingsLockButton()
         self.owner_settings_lock.bind_palette(self.owner_list)
         owner_layout.addWidget(self.owner_settings_lock)
-        owner_layout.addWidget(self.owner_list)
+        add_list_sort(owner_layout, self.owner_list, label="Owner")
         tabs.addTab(owner_page, "Factions")
 
         terrain = QWidget()
@@ -596,7 +597,7 @@ class MainWindow(QMainWindow):
             special.placementRequested.connect(lambda mode, index, k=kind: self._place_special(k, mode, index))
             special.focusRequested.connect(self._focus_special)
             if kind != 'gem':
-                special.keys.currentRowChanged.connect(lambda _i, k=kind: self._special_selected(k, self.special_panels[k].slot))
+                special.keys.sourceRowChanged.connect(lambda _i, k=kind: self._special_selected(k, self.special_panels[k].slot))
         self.script_tab_index = tabs.addTab(self.script_page, "Script")
         self.level_tab_index = tabs.addTab(self.level_scroll, "Level Info")
         self.location_panel = LocationPanel()
@@ -627,7 +628,7 @@ class MainWindow(QMainWindow):
 
     @staticmethod
     def _make_list(icons: bool) -> QListWidget:
-        widget = QListWidget()
+        widget = SortableListWidget()
         from studio.ui.widgets import use_standard_list_style
         use_standard_list_style(widget)
         if icons:
@@ -1086,7 +1087,7 @@ class MainWindow(QMainWindow):
         self.map_issues_list.clear()
         for issue in issues:
             col, row = issue.cell
-            item = QListWidgetItem(f'{issue.severity.upper()} · ({col}, {row}) · {issue.message}')
+            item = SortableListItem(f'{issue.severity.upper()} · ({col}, {row}) · {issue.message}')
             item.setToolTip(item.text())
             item.setData(Qt.ItemDataRole.UserRole, issue.cell)
             item.setForeground(QColor({'error': '#ff8787', 'warning': '#f0c36b', 'info': '#aab8c8'}[issue.severity]))
@@ -2687,7 +2688,7 @@ class MainWindow(QMainWindow):
         self._icon_queue.clear()
         self._icon_items.clear()
         for typ, sector in sorted(lib.assets.sdf.sectors.items()):
-            item = QListWidgetItem(f"{typ:02x} {sector.comment}")
+            item = SortableListItem(f"{typ:02x} {sector.comment}")
             item.setData(Qt.ItemDataRole.UserRole, typ)
             item.setTextAlignment(Qt.AlignmentFlag.AlignHCenter | Qt.AlignmentFlag.AlignVCenter)
             self.sector_list.addItem(item)
@@ -2854,7 +2855,7 @@ class MainWindow(QMainWindow):
             if not self.show_special_buildings.isChecked() and is_special_building(definition):
                 continue
             title = f"{bid:02d} {definition.name}"
-            item = QListWidgetItem()
+            item = SortableListItem()
             item.setData(Qt.ItemDataRole.UserRole, bid)
             preview = QLabel()
             size = BUILDING_PREVIEW_PIXELS[self._bicon_level]

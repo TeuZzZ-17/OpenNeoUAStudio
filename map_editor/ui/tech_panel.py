@@ -7,6 +7,7 @@ from ..core.ldf_model import FACTIONS
 from ..core.building_defs import is_special_building
 from .preview_cards import PreviewList, set_card
 from .settings_lock import SettingsLockButton
+from studio.ui.sorting import SortableTreeItem, add_list_sort, enable_tree_sort
 
 # Vehicle classes a host station never builds as units: gun turrets and host stations.
 NON_BUILDABLE_CLASSES = ('gun', 'robo')
@@ -87,6 +88,7 @@ class TechPanel(QWidget):
         self.summary = QTreeWidget()
         from studio.ui.widgets import use_standard_list_style
         use_standard_list_style(self.summary)
+        enable_tree_sort(self.summary)
         self.summary.setHeaderLabels(['ID', 'Name'])
         self.summary.setRootIsDecorated(False)
         self.summary.setItemsExpandable(False)
@@ -100,7 +102,7 @@ class TechPanel(QWidget):
         self.list.preview_level = 1
         self.settings_lock.bind_palette(self.list)
         layout.addLayout(self.list.preview_controls())
-        layout.addWidget(self.list, 1)
+        add_list_sort(layout, self.list, label="Upgrade", stretch=1)
         self.faction.currentIndexChanged.connect(self.rebuild)
         self.kind.currentIndexChanged.connect(self.rebuild)
         self.search.textChanged.connect(self._filter)
@@ -163,7 +165,7 @@ class TechPanel(QWidget):
             definition = definitions.get(key)
             name = ((definition.name if definition else '') or
                     self.doc.custom_tech_names.get(key) or f'Unknown ID {key}')
-            row = QTreeWidgetItem([str(key), str(name)])
+            row = SortableTreeItem([str(key), str(name)])
             row.setData(0, Qt.ItemDataRole.UserRole, key)
             self.summary.addTopLevelItem(row)
         # Existing permissions stay visible even if a mod definition is missing.

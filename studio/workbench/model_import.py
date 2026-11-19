@@ -43,6 +43,7 @@ from studio.formats.setbas import (
     SetBasError,
 )
 from studio.ui.widgets import STATUS_COLORS, loading_resources
+from studio.ui.sorting import SortableTreeItem, enable_tree_sort
 
 _REQUIREMENT_ROLE = Qt.ItemDataRole.UserRole + 71
 
@@ -225,6 +226,7 @@ class ModelImportDialog(QDialog):
 
         self.tree = QTreeWidget()
         self.tree.setColumnCount(5)
+        enable_tree_sort(self.tree)
         self.tree.setHeaderLabels(
             ["Component", "Resource", "Status", "Source", "Path"])
         self.tree.setRootIsDecorated(False)
@@ -418,7 +420,7 @@ class ModelImportDialog(QDialog):
         for probe in self._probes:
             requirement = probe.requirement
             source, path_text = self._source_text(probe)
-            item = QTreeWidgetItem([
+            item = SortableTreeItem([
                 _KIND_LABELS.get(requirement.kind, requirement.kind),
                 requirement.logical_name,
                 _STATUS_LABELS.get(probe.status, probe.status),

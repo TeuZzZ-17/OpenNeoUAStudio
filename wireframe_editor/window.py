@@ -59,6 +59,7 @@ from studio.formats.sklt import (
     save_sklt_with_poo2_pol2_structure,
     save_sklt_with_poo2_points,
 )
+from studio.ui.sorting import SortableListWidget, add_list_sort
 APP_TITLE = "OpenNeoUA Studio - Wireframe Editor"
 
 # Wireframe keys of a definition and their short names, in display order.
@@ -120,8 +121,8 @@ class ComponentPicker(QDialog):
         self.search = QLineEdit(self)
         self.search.setPlaceholderText("Search entity or file")
         layout.addWidget(self.search)
-        self.items = QListWidget(self)
-        layout.addWidget(self.items, 1)
+        self.items = SortableListWidget(self)
+        add_list_sort(layout, self.items, label="Model", stretch=1)
         self.preview = QLabel("Select a wireframe to preview", self)
         self.preview.setMinimumHeight(190)
         self.preview.setAlignment(Qt.AlignmentFlag.AlignCenter)
@@ -537,7 +538,7 @@ class WireframeEditorWindow(QMainWindow):
         self.sensors_value = QLabel("0")
         self.outline_lines_value = QLabel("0")
         self.selection_value = QLabel("No selection")
-        self.selected_elements_list = QListWidget()
+        self.selected_elements_list = SortableListWidget()
         self.status_value = QLabel("Ready to import a file")
 
         self.new_action: QAction | None = None
@@ -687,7 +688,7 @@ class WireframeEditorWindow(QMainWindow):
         self.selected_elements_list.setSelectionMode(
             QAbstractItemView.SelectionMode.NoSelection
         )
-        selected_elements_layout.addWidget(self.selected_elements_list)
+        add_list_sort(selected_elements_layout, self.selected_elements_list, label="Element")
         selected_elements_box.setSizePolicy(
             QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding
         )

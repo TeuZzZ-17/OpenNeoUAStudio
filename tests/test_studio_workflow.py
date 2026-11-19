@@ -4,7 +4,8 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 import pytest
-from PySide6.QtCore import QPoint
+from PySide6.QtCore import QPoint, Qt
+from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication, QLabel, QTreeWidget
 from map_editor import bootstrap
 from map_editor.core.game_installation import GameInstallation
@@ -96,7 +97,8 @@ def test_entity_list_displays_and_searches_weapon_relationships(app):
     browser.close()
 
 
-def test_game_resources_sort_numerically_and_preserve_selection_and_filter(app):
+@pytest.mark.parametrize('state_column', [False, True])
+def test_game_resources_sort_numerically_and_preserve_selection_and_filter(app, state_column):
     from studio.ui.browsers import GameObjectBrowser, GAME_OBJECT_ROLE
     from studio.assets.catalog import GameObject
     browser = GameObjectBrowser()
@@ -112,10 +114,44 @@ def test_game_resources_sort_numerically_and_preserve_selection_and_filter(app):
     def objects():
         return [browser.tree.topLevelItem(i).data(0, GAME_OBJECT_ROLE)
                 for i in range(browser.tree.topLevelItemCount())]
-    assert objects() == [a, c, b]
-    browser.sort_combo.setCurrentIndex(browser.sort_combo.findData('id'))
+    if state_column:
+        browser.enable_state_column()
+    browser.resize(600, 400)
+    browser.show()
+    app.processEvents()
+    header = browser.tree.header()
+
+    def click_column(column):
+        x = header.sectionViewportPosition(column) + header.sectionSize(column) // 2
+        QTest.mouseClick(header.viewport(), Qt.MouseButton.LeftButton,
+                         pos=QPoint(x, header.height() // 2))
+
+    id_column = 3 if state_column else 2
+    type_column = id_column - 1
+    assert browser.sort_combo.currentData() == 'id'
+    assert header.sortIndicatorSection() == id_column
+    assert objects() == [c, b, a]
+    click_column(id_column)
+    assert objects() == [a, b, c]
+    assert header.sortIndicatorOrder() == Qt.SortOrder.DescendingOrder
+    if state_column:
+        click_column(1)
+        assert header.sortIndicatorSection() == id_column
+        assert objects() == [a, b, c]
+    click_column(id_column)
     assert objects() == [c, b, a]
     browser.search.setText('Alpha')
+    click_column(0)
+    assert browser.sort_combo.currentData() == 'name'
+    assert objects() == [a, c, b]
+    click_column(0)
+    assert objects() == [b, c, a]
+    click_column(type_column)
+    assert browser.sort_combo.currentData() == 'type'
+    assert objects() == [b, a, c]
+    click_column(type_column)
+    assert objects() == [c, a, b]
+    browser.sort_combo.setCurrentIndex(browser.sort_combo.findData('name'))
     browser.sort_combo.setCurrentIndex(browser.sort_combo.findData('type'))
     assert objects() == [b, a, c]
     assert browser.tree.currentItem().data(0, GAME_OBJECT_ROLE) is a

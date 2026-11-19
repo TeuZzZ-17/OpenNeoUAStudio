@@ -58,7 +58,7 @@ class PaletteCardDelegate(QStyledItemDelegate):
                               index.data(COLOR_ROLE) or QColor(240, 153, 75),
                               bool(option.state & QStyle.StateFlag.State_Selected),
                               bool(option.state & QStyle.StateFlag.State_MouseOver))
-        if self.parent().itemWidget(self.parent().item(index.row())) is None:
+        if self.parent().itemWidget(self.parent().itemFromIndex(index)) is None:
             content = type(option)(option)
             content.rect = option.rect.adjusted(10, 5, -10, -5)
             if option.state & QStyle.StateFlag.State_Selected:

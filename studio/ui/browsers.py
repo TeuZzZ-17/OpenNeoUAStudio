@@ -288,6 +288,9 @@ class GameFileBrowser(QWidget):
         self.tree = QTreeWidget()
         self.tree.setHeaderLabels(["Browse"])
         configure_resource_tree(self.tree)
+        from studio.ui.sorting import enable_header_sort
+        self._file_sort_direction = None
+        enable_header_sort(self.tree.header(), self._sort_files)
         layout.addWidget(self.tree, 1)
         self.search.textChanged.connect(self._filter)
         self.tree.currentItemChanged.connect(self._selected)
@@ -346,6 +349,10 @@ class GameFileBrowser(QWidget):
             item = self.tree.topLevelItem(index)
             mark_resource_modified(item, Path(item.data(0, Qt.ItemDataRole.UserRole)) in modified)
 
+    def _sort_files(self, _column, direction):
+        self._file_sort_direction = direction
+        self.set_pinned(self._pinned)
+
     def _apply_pins(self):
         from studio.ui.style import theme_list_color
         labels = {path: label for path, label in self._pinned}
@@ -391,6 +398,10 @@ class GameFileBrowser(QWidget):
                 pinned.append(item)
         order = {path: index for index, (path, _label) in enumerate(self._pinned)}
         pinned.sort(key=lambda item: order[Path(item.data(0, Qt.ItemDataRole.UserRole))])
+        if self._file_sort_direction is not None:
+            from studio.ui.sorting import sort_key
+            others.sort(key=lambda item: sort_key(item.text(0)),
+                        reverse=self._file_sort_direction == Qt.SortOrder.DescendingOrder)
         self.tree.addTopLevelItems(pinned + others)
 
     def _filter(self, text):
@@ -444,6 +455,7 @@ def _entity_weapon_links(objects):
 class GameObjectBrowser(QWidget):
     selected = Signal(object)
     setChanged = Signal(int)
+    _sort_columns = ("name", "type", "id")
 
     def __init__(self, parent=None, tree=None, kinds=None):
         super().__init__(parent)
@@ -453,6 +465,7 @@ class GameObjectBrowser(QWidget):
         self._related_names = {}
         self._state_column = False
         self._visual_states = {}
+        self._sort_descending = False
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
         controls = QHBoxLayout()
@@ -473,11 +486,17 @@ class GameObjectBrowser(QWidget):
         self.sort_combo.addItem("Sort by name", "name")
         self.sort_combo.addItem("Sort by ID", "id")
         self.sort_combo.addItem("Sort by type", "type")
+        self.sort_combo.setCurrentIndex(self.sort_combo.findData("id"))
         layout.addWidget(self.sort_combo)
         layout.addWidget(self.search)
         self.tree = tree if tree is not None else QTreeWidget()
         self.tree.setHeaderLabels(["Game object", "Type", "ID"])
         configure_resource_tree(self.tree)
+        header = self.tree.header()
+        header.setSectionsClickable(True)
+        header.setSortIndicatorShown(True)
+        header.sectionClicked.connect(self._sort_header_clicked)
+        self._update_sort_indicator()
         layout.addWidget(self.tree, 1)
         self.source_label = QLabel("Source: —")
         layout.addWidget(self.source_label)
@@ -604,7 +623,7 @@ class GameObjectBrowser(QWidget):
     def fill(self, selected=None):
         with QSignalBlocker(self.tree):
             self.tree.clear()
-            for obj in sorted(self.objects, key=self._sort_key):
+            for obj in sorted(self.objects, key=self._sort_key, reverse=self._sort_descending):
                 names = self._related_names.get((obj.kind, obj.object_id), ())
                 display = f"{obj.name} ({', '.join(names)})" if names else obj.name
                 texts = [display, obj.kind.title(), str(obj.object_id)]
@@ -622,11 +641,35 @@ class GameObjectBrowser(QWidget):
         self.filter()
 
     def _sort_changed(self):
+        self._sort_descending = False
+        self._sort_items()
+
+    def _header_sort_columns(self):
+        return ("name", None, "type", "id") if self._state_column else self._sort_columns
+
+    def _sort_header_clicked(self, column):
+        order = self._header_sort_columns()[column]
+        if order is None:
+            self._update_sort_indicator()
+            return
+        self._sort_descending = order == self.sort_combo.currentData() and not self._sort_descending
+        with QSignalBlocker(self.sort_combo):
+            self.sort_combo.setCurrentIndex(self.sort_combo.findData(order))
+        self._sort_items()
+
+    def _update_sort_indicator(self):
+        column = self._header_sort_columns().index(self.sort_combo.currentData())
+        direction = Qt.SortOrder.DescendingOrder if self._sort_descending else Qt.SortOrder.AscendingOrder
+        self.tree.header().setSortIndicator(column, direction)
+
+    def _sort_items(self):
+        self._update_sort_indicator()
         with QSignalBlocker(self.tree):
             selected = self.tree.currentItem()
             items = [self.tree.takeTopLevelItem(0)
                      for _ in range(self.tree.topLevelItemCount())]
-            items.sort(key=lambda item: self._sort_key(item.data(0, GAME_OBJECT_ROLE)))
+            items.sort(key=lambda item: self._sort_key(item.data(0, GAME_OBJECT_ROLE)),
+                       reverse=self._sort_descending)
             self.tree.addTopLevelItems(items)
             self.tree.setCurrentItem(selected)
         self.filter()
@@ -669,6 +712,7 @@ class GameObjectBrowser(QWidget):
         self._state_column = True
         self.tree.setHeaderLabels(["Game object", "State", "Type", "ID"])
         configure_resource_tree(self.tree)
+        self._update_sort_indicator()
         for index in range(self.tree.topLevelItemCount()):
             item = self.tree.topLevelItem(index)
             obj = item.data(0, GAME_OBJECT_ROLE)

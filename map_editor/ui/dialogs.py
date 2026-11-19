@@ -26,6 +26,7 @@ from ..core.resource_catalog import ResourceCatalog, preview_image, sky_key
 from studio.ui.shell import ResourcesDialog as GameInstallationDialog  # noqa: F401 - used by map_editor.editor, replaced by tests
 from studio.ui.shell import COMPAT_STYLES, OPENNEOUA
 from .thumbnail_delegate import PLACEHOLDER_ROLE, ThumbnailDelegate
+from studio.ui.sorting import SortableListItem, SortableListWidget, add_list_sort
 
 MIN_SIZE, MAX_SIZE = 5, 255
 
@@ -261,7 +262,7 @@ class LevelInfoPanel(QWidget):
         sky_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         sky_label.setMinimumHeight(30)
         layout.addWidget(sky_label)
-        self.sky_list = QListWidget()
+        self.sky_list = SortableListWidget()
         from studio.ui.widgets import use_standard_list_style
         use_standard_list_style(self.sky_list)
         self.sky_list.setViewMode(QListWidget.ViewMode.IconMode)
@@ -279,7 +280,7 @@ class LevelInfoPanel(QWidget):
         self._failed_skies = set()
         current_name = sky_key(self.sky_value)
         for name, source in self.catalog.skies.items():
-            item = QListWidgetItem(source.name)
+            item = SortableListItem(source.name)
             item.setData(Qt.ItemDataRole.UserRole, name)
             self.sky_list.addItem(item)
             self.sky_items[name] = item
@@ -289,7 +290,7 @@ class LevelInfoPanel(QWidget):
         # The grid depends on the list's own width, which changes when the
         # scroll bar appears or the panel is laid out after loading a map.
         self.sky_list.installEventFilter(self)
-        layout.addWidget(self.sky_list)
+        add_list_sort(layout, self.sky_list, label="Sky")
         self.custom_sky_button = QPushButton("Custom sky")
         self.custom_sky_button.setToolTip("Pick a sky archive (.bas) or complete sky file (.base) inside the game's Data folder")
         self.custom_sky_button.clicked.connect(self._choose_custom_sky)
@@ -622,7 +623,7 @@ class LevelInfoPanel(QWidget):
             return
         item = self.sky_items.get(name)
         if item is None:
-            item = QListWidgetItem(self.catalog.skies[name].name)
+            item = SortableListItem(self.catalog.skies[name].name)
             item.setData(Qt.ItemDataRole.UserRole, name)
             self.sky_list.insertItem(sorted(self.catalog.skies).index(name), item)
             self.sky_items[name] = item

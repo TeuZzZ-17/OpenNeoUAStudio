@@ -29,6 +29,7 @@ from entity_designer import fx_compat, fx_visuals
 from entity_designer.fx_authoring import FxTextSession, effect_text
 from studio.ui.shell import COMPAT_STYLES, OPENNEOUA
 from studio.ui.widgets import use_standard_list_style
+from studio.ui.sorting import SortableListItem, SortableListWidget, add_list_sort
 
 SPEEDS = (0.1, 0.25, 0.5, 1.0, 2.0, 4.0)
 STATUS_GLYPHS = {
@@ -224,7 +225,7 @@ class FxTimeline(QWidget):
 
 
 
-class FxEffectsList(QListWidget):
+class FxEffectsList(SortableListWidget):
     """Select rows normally; paint visibility only from their checkboxes."""
 
     visibilityEdited = Signal()
@@ -358,7 +359,7 @@ class FxEffectsView(QWidget):
         self.list.itemChanged.connect(self._item_toggled)
         self.list.currentRowChanged.connect(self._row_selected)
         self.list.itemSelectionChanged.connect(self._row_selected)
-        layout.addWidget(self.list, 1)
+        add_list_sort(layout, self.list, label="Effect", stretch=1)
         buttons = QGridLayout()
         self.actions = []
         definitions = (
@@ -453,7 +454,7 @@ class FxEffectsView(QWidget):
                 if level is not None:
                     color = COMPAT_STYLES[level].color
                 glyph, meaning = STATUS_GLYPHS.get(_issues_status(issues), ("", ""))
-                row = QListWidgetItem(title + (" · Warning" if glyph else "") + "\n" + detail)
+                row = SortableListItem(title + (" · Warning" if glyph else "") + "\n" + detail)
                 row.setFlags(row.flags() | Qt.ItemFlag.ItemIsUserCheckable)
                 row.setCheckState(Qt.CheckState.Unchecked if index in panel.hidden_items
                                   else Qt.CheckState.Checked)
@@ -522,7 +523,7 @@ class FxEffectsView(QWidget):
                 tip = ("ground_decal_id: decal profile (-1 = none). "
                        "ground_decal_size: manual diameter, a number or min~max."
                        + (f"\nProfiles found: {profiles}." if profiles else ""))
-            row = QListWidgetItem(text)
+            row = SortableListItem(text)
             row.setFlags(row.flags() | Qt.ItemFlag.ItemIsUserCheckable)
             row.setCheckState(Qt.CheckState.Unchecked if index in panel.hidden_items
                               else Qt.CheckState.Checked)
@@ -551,7 +552,7 @@ class FxEffectsView(QWidget):
         if not children:
             return
         names = ", ".join(str(child.weapon_id) for child in children)
-        row = QListWidgetItem(f"Cluster craters\nWeapon {names}")
+        row = SortableListItem(f"Cluster craters\nWeapon {names}")
         row.setFlags(row.flags() | Qt.ItemFlag.ItemIsUserCheckable)
         row.setCheckState(Qt.CheckState.Unchecked if CHILD_CRATER_INDEX in self.panel.hidden_items
                           else Qt.CheckState.Checked)
