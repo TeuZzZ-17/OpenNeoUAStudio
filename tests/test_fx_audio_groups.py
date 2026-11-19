@@ -82,6 +82,20 @@ def test_row_summaries_and_issues():
                fx.key_group_issues(typo, fx.CONTEXT_WEAPON))
 
 
+def test_spawn_state_packages_are_vehicle_loops():
+    text = ("new_vehicle 1\n    snd_spawn_sample = x.wav\n    pal_spawn_slot = 3\n"
+            "    shk_spawn_slot = 1\n    shk_spawn_x = 0.3\n    spawn_vehicle = 5\nend\n")
+    sound, palette, shake = _document(text).items
+    assert [(item.kind, item.event) for item in (sound, palette, shake)] == [
+        ("sound", "spawn"), ("palette", "spawn"), ("shake", "spawn")]
+    assert fx.key_group_of("spawn_vehicle") is None
+    for item in (sound, palette, shake):
+        assert not fx.key_group_issues(item, fx.CONTEXT_VEHICLE)
+    assert any(issue.severity == fx.SEVERITY_FATAL
+               for issue in fx.key_group_issues(sound, fx.CONTEXT_WEAPON))
+    assert "spawn" in fx.LOOPING_VEHICLE_SOUNDS
+
+
 # -- the preview --------------------------------------------------------------------------
 
 def test_shake_package_is_read_with_the_engine_defaults():

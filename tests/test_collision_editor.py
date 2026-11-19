@@ -689,7 +689,7 @@ class CollisionEditorTests(unittest.TestCase):
         self.assertEqual(window.toolbar_undo_button.text(), "< Undo")
         self.assertEqual(window.toolbar_redo_button.text(), "Redo >")
 
-    def test_40_legacy_radius_stays_whole_compound_radius_keeps_precision(self):
+    def test_40_legacy_radius_stays_whole_compound_radius_uses_two_decimals(self):
         project = CollisionProject(
             name="Rounded", source_model="rounded.sklt",
             legacy=CollisionSphere(LEGACY, radius=89.1251),
@@ -698,17 +698,17 @@ class CollisionEditorTests(unittest.TestCase):
             ])
         output = export_collision_text(project)
         self.assertIn("radius = 89", output)
-        self.assertIn("coll_radius = 78.379051", output)
+        self.assertIn("coll_radius = 78.38\n", output)
         self.assertNotIn("89.1251", output)
-        self.assertNotIn("78.3790510", output)
+        self.assertNotIn("78.379051", output)
         window = self._window()
         window.project = project
         window._selected = 1
         window._sync_all()
         self.assertEqual(window.sphere_tree.topLevelItem(0).text(1), "89")
-        self.assertEqual(window.sphere_tree.topLevelItem(1).text(1), "78.379")
-        self.assertEqual(window.radius_spin.decimals(), 1)
-        self.assertAlmostEqual(window.radius_spin.value(), 78.4, places=1)
+        self.assertEqual(window.sphere_tree.topLevelItem(1).text(1), "78.38")
+        self.assertEqual(window.radius_spin.decimals(), 2)
+        self.assertEqual(window.radius_spin.value(), 78.38)
         self.assertEqual(project.compound[0].radius, 78.379051)
         window.radius_spin.setValue(78.1)
         self.assertEqual(project.compound[0].radius, 78.1)
@@ -721,8 +721,8 @@ class CollisionEditorTests(unittest.TestCase):
                 OPENNEOUA, 1.23456, -0.0004, -2.34567, 78.379051)])
         data = script_module.collision_data_lines(project)
         self.assertIn("radius = 89", data)
-        self.assertIn("coll_xyz = 1.23456|-0.0004|-2.34567", data)
-        self.assertIn("coll_radius = 78.379051", data)
+        self.assertIn("coll_xyz = 1.23|0|-2.35", data)
+        self.assertIn("coll_radius = 78.38", data)
         script = "new_vehicle 7\n" + "\n".join(data) + "\nend\n"
         block = find_script_blocks(script)[0]
         legacy, compound, warnings = import_collision_block(
@@ -732,7 +732,7 @@ class CollisionEditorTests(unittest.TestCase):
         self.assertEqual(
             (compound[0].x, compound[0].y, compound[0].z,
              compound[0].radius),
-            (1.23456, -0.0004, -2.34567, 78.379051),
+            (1.23, 0.0, -2.35, 78.38),
         )
 
     def test_41_delete_all_collisions_is_undoable_and_not_in_edit_menu(self):
@@ -1746,7 +1746,7 @@ class CollisionEditorTests(unittest.TestCase):
                 window.model_scale_x_spin, window.model_scale_y_spin,
                 window.model_scale_z_spin):
             self.assertGreaterEqual(spin.minimumWidth(), 92)
-            self.assertEqual(spin.decimals(), 3)
+            self.assertEqual(spin.decimals(), 2)
         window.model_scale_x_spin.setValue(1.2)
         self.assertNotIn("00", window.model_scale_x_spin.text())
         self.assertIs(window.model_preview_scale_box, toolbar)
@@ -2041,9 +2041,9 @@ class CollisionEditorTests(unittest.TestCase):
             action.text() for action in window.project_summary_menu.actions()]
         self.assertIn("Ground alignment: Overeof 12.5", labels)
 
-    def test_82_overeof_spin_uses_one_visible_decimal(self):
+    def test_82_overeof_spin_uses_two_visible_decimals(self):
         window = self._window()
-        self.assertEqual(window.overeof_spin.decimals(), 1)
+        self.assertEqual(window.overeof_spin.decimals(), 2)
         window.overeof_check.setChecked(True)
         window.overeof_spin.setValue(20.0)
         self.assertNotIn("0000", window.overeof_spin.text())
@@ -3045,7 +3045,7 @@ class CollisionEditorTests(unittest.TestCase):
         self.assertTrue(window.radius_title.isHidden())
         self.assertIs(window.radius_slider.parentWidget(), window.spheres_box)
         self.assertIs(window.radius_spin.parentWidget(), window.spheres_box)
-        self.assertEqual(window.radius_spin.decimals(), 1)
+        self.assertEqual(window.radius_spin.decimals(), 2)
         self.assertGreaterEqual(
             window.radius_spin.width(),
             window.radius_spin.sizeHint().width())
@@ -3069,7 +3069,7 @@ class CollisionEditorTests(unittest.TestCase):
             window.sphere_tree.horizontalScrollBar().maximum(), 0)
 
         spin = window.radius_spin
-        self.assertEqual(spin.decimals(), 1)
+        self.assertEqual(spin.decimals(), 2)
         spin.setValue(spin.maximum())
         self.app.processEvents()
         self.assertGreaterEqual(

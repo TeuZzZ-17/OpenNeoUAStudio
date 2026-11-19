@@ -22,7 +22,7 @@ Layout of a file (ScriptParser syntax, ``;`` starts a comment)::
         collision_mode = 0             ; 0 own skeleton, 1 simple, 2 complex
         map_symbol = 12                ; 0-255
         shield = 60                    ; 0-100
-        explosion = 49|0|0|100         ; repeatable VP|x|y|z (SET.SDF effect group), or none
+        explosion = 49|0|0|100         ; repeatable ID|x|z|height (SET.SDF effect group), or none
         map_icon = map/ok.png          ; optional cell icon, 1 file or zoom 2|3|4
     end
 
@@ -256,8 +256,8 @@ def parse_sector_text(text: str, path: Path | None = None) -> SectorFile:
                 if value.casefold() != "none":
                     parts = value.split("|")
                     if len(parts) != 4:
-                        raise SectorFileError(f"{where}: explosion needs VP|x|y|z.")
-                    effects.append((_int(parts[0], 0, 255, where),
+                        raise SectorFileError(f"{where}: explosion needs ID|x|z|height.")
+                    effects.append((_int(parts[0], 0, 65535, where),
                                     *(_int(p, -100000, 100000, where) for p in parts[1:])))
                 current.explosions = tuple(effects)
             else:

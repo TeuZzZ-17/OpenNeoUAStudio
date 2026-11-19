@@ -197,7 +197,9 @@ def _effects(value):
         return None
     groups = tuple(tuple(int(v) for v in group) for group in value)
     if any(len(g) != 4 for g in groups):
-        raise core.McpToolError("effects are groups of four integers: [explosion VP, x, z, height]")
+        raise core.McpToolError("effects are groups of four integers: [effect ID, x, z, height]")
+    if any(not 0 <= group[0] <= 65535 for group in groups):
+        raise core.McpToolError("effect IDs must fit 0–65535")
     return groups
 
 

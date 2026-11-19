@@ -202,6 +202,13 @@ def _ensure_texture(lm, name: str) -> str:
             return key
     loose = next((p for p in sorted(lm.base_path.parent.rglob("*"))
                   if p.is_file() and p.name.casefold() == name.casefold()), None)
+    if loose is None and lm.set_hint:
+        # The engine also reads repainted/new set textures from Sets/SetN/Loose/ILBM before SET.BAS.
+        from studio_mcp.sets import set_folder      # local import: sets imports this module's siblings
+        folder = set_folder(lm.set_hint, must_exist=False) / "Loose" / "ILBM"
+        if folder.is_dir():
+            loose = next((p for p in sorted(folder.iterdir())
+                          if p.is_file() and p.name.casefold() == name.casefold()), None)
     if loose is not None:
         lm.family.textures[loose.name] = parse_ilbm_file(loose)
         return loose.name

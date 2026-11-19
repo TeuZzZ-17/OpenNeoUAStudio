@@ -18,7 +18,7 @@ from studio.assets.visproto import normalize_base_name, reconstruct_embedded_vps
 # (formerly game_object_catalog.py)
 # ----------------------------------------------------------------------------
 
-_HEADER = re.compile(r"(new|modify)_(vehicle|weapon|building)\s+(\d+)\b", re.I)
+_HEADER = re.compile(r"(new|modify)_(vehicle|weapon|building|bruch)\s+(\d+)\b", re.I)
 
 
 @dataclass
@@ -82,6 +82,13 @@ def load_game_objects(installation):
                 name, value = code.split("=", 1)
                 active.values[name.strip().casefold()] = value.strip().strip('"')
     return sorted(objects.values(), key=lambda obj: (obj.name.casefold(), obj.kind, obj.object_id))
+
+
+def effect_objects_by_id(objects):
+    """Resolve Bruch first; old mods may still define an effect as a vehicle."""
+    effects = {obj.object_id: obj for obj in objects if obj.kind == "vehicle"}
+    effects.update({obj.object_id: obj for obj in objects if obj.kind == "bruch"})
+    return effects
 
 
 # ----------------------------------------------------------------------------
@@ -167,7 +174,9 @@ def visual_choices(obj, number):
     # Keep the engine's external 3DS -> BASE -> positional VP precedence.
     from entity_designer.script_model import _resolve_data_asset_path
     vp_table = None
-    for state in ("normal", "fire", "wait", "dead", "megadeth", "genesis"):
+    for state in ("normal", "fire", "wait", "dead", "megadeth", "genesis", "spawn"):
+        if state == "spawn" and obj.kind != "vehicle":
+            continue
         choice = None
         for prefix in ("3ds", "base"):
             value = obj.values.get(f"{prefix}_{state}", "")
@@ -186,7 +195,7 @@ def visual_choices(obj, number):
                 vp_id = int(obj.values[f"vp_{state}"], 0)
             except ValueError:
                 continue
-            if 0 <= vp_id < len(vp_table.entries):
+            if (1 if state == "spawn" else 0) <= vp_id < len(vp_table.entries):
                 choice = _base_choice(assets, f"{state.title()} — VP {vp_id}", vp_table.entries[vp_id].base_name)
         if choice is not None:
             choices.append(choice)

@@ -44,12 +44,12 @@ class DestructionEffectsEditor(QWidget):
         self._selection_changed()
 
     def load_catalog(self):
-        from studio.assets.catalog import load_game_objects
+        from studio.assets.catalog import effect_objects_by_id, load_game_objects
         from .transition_fx import _ScriptsOnly
         from map_editor import bootstrap
         install = bootstrap.installation() or _ScriptsOnly()
         self._catalog = {obj.object_id: obj.name.replace("_", " ")
-                         for obj in load_game_objects(install) if obj.kind == "vehicle"}
+                         for obj in effect_objects_by_id(load_game_objects(install)).values()}
 
     def _changed(self):
         if not self._loading:

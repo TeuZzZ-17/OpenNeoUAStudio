@@ -1195,6 +1195,22 @@ def test_artillery_barrage_falls_from_its_arc_height_at_the_shell_speed():
     assert simulation.tracks[0].end == pytest.approx(3000 / 1.8)
 
 
+def test_artillery_transfer_fade_previews_fade_in_on_descent():
+    script = (
+        "new_weapon 118\nmodel = artillery_shell\nartillery_shell_mode = vertical_barrage\n"
+        "artillery_shell_arc_height = 3000\nartillery_shell_speed = 1800\n"
+        "artillery_shell_transfer_fade_inout = 900|1200\nvp_normal = 60\nend\n")
+    shell = fx.weapon_def_from_text(118, script)
+    assert shell.unit.artillery_transfer_fade == (900, 1200)
+    simulation = _weapon_simulation(shell.unit)
+    for elapsed, expected_alpha in ((0, 0.0), (450, 0.5), (900, 1.0), (1200, 1.0)):
+        projectile = next(item for item in simulation.items_at(elapsed) if item.kind == "unit")
+        assert projectile.alpha == pytest.approx(expected_alpha)
+    for unsupported in (script.replace("900|1200", "900|bad"),
+                        script.replace("vertical_barrage", "ballistic")):
+        assert fx.weapon_def_from_text(118, unsupported).unit.artillery_transfer_fade == (0, 0)
+
+
 def test_palette_and_shake_packages_run_for_their_time():
     values = {
         "pal_launch_slot": "8", "pal_launch_mag0": "1", "pal_launch_mag1": "0",

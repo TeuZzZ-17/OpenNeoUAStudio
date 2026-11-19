@@ -179,9 +179,8 @@ class _TabBaselineMixin:
                 int(round(project.briefing_size))
                 if project.briefing_size_enabled else None,
                 bool(project.briefing_xyz_enabled),
-                # briefing_xyz is written with ``:g`` (6 digits): compare at that precision.
-                float(f"{project.briefing_x:g}"), float(f"{project.briefing_y:g}"),
-                float(f"{project.briefing_z:g}"),
+                authored_number(project.briefing_x), authored_number(project.briefing_y),
+                authored_number(project.briefing_z),
             )
         if group == _SCRIPT_TAB_COCKPIT:
             if not project.cockpit_camera_enabled:
@@ -198,7 +197,7 @@ class _TabBaselineMixin:
                 tuple(None if area.size(shape) is None else tuple(
                     authored_number(value) for value in area.size(shape))
                     for shape in SHAPE_KEYS),
-                authored_number(area.dead_zone),
+                float(_number(area.dead_zone, 0)),
                 authored_number(area.max_inclination),
             )
         if group == _SCRIPT_TAB_ICON:

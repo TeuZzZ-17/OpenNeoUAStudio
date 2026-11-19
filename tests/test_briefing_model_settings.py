@@ -109,7 +109,7 @@ def test_briefing_preview_advances_its_own_animation(monkeypatch):
         editor.close()
 
 
-def test_briefing_xyz_written_with_six_digits_is_not_reported_as_unsaved():
+def test_briefing_xyz_written_with_two_decimals_is_not_reported_as_unsaved():
     from entity_designer.editor import CollisionEditorWindow
     from entity_designer.script_model import _SCRIPT_TAB_BRIEFING
 
@@ -117,6 +117,6 @@ def test_briefing_xyz_written_with_six_digits_is_not_reported_as_unsaved():
     project = CollisionProject(target_category=VEHICLE, briefing_xyz_enabled=True,
                                briefing_y=-5.347505628802473)
     reloaded = CollisionProject(target_category=VEHICLE, briefing_xyz_enabled=True,
-                                briefing_y=float(f"{project.briefing_y:g}"))
+                                briefing_y=-5.35)
     state = CollisionEditorWindow._script_tab_state
     assert state(project, _SCRIPT_TAB_BRIEFING) == state(reloaded, _SCRIPT_TAB_BRIEFING)

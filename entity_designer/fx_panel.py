@@ -1653,13 +1653,15 @@ class DestructionFxPanel(QWidget):
         if unit.weapon:
             # Cluster children bring their own models and effects.
             vps |= fx.weapon_vps(unit, self.document, self.weapons, None,
-                                 self.debuffs)
+                                 self.debuffs, self.catalog)
         for item in self.document.items:
             if isinstance(item, fx.FxBlock):
                 spec = fx.interpret_block(item, self.context)
                 vps.update(visual.vp for visual in spec.visuals if visual.vp > 0)
                 vps.update(vp for vp in spec.vp_models if vp > 0)
                 vps.update(vp for vp in spec.vp_impacts if vp > 0)
+                if spec.bruch_id:
+                    vps.update(self._legacy_vps(spec.bruch_id, 0))
             elif isinstance(item, fx.DestFxLine):
                 dest = item.parsed
                 if dest is not None:
@@ -1673,8 +1675,11 @@ class DestructionFxPanel(QWidget):
         vps = {vp for vp in (vehicle.vp_dead, vehicle.vp_megadeth) if vp > 0}
         if vehicle.scale_fx is not None:
             vps.update(vehicle.scale_fx.vps)
-        for effect in vehicle.chain_fx:
+        for effect in (*vehicle.chain_fx, *vehicle.bruch_effects):
             vps.update(visual.vp for visual in effect.visuals if visual.vp > 0)
+            vps.update(vp for vp in (*effect.vp_models, *effect.vp_impacts) if vp > 0)
+            if effect.bruch_id:
+                vps.update(self._legacy_vps(effect.bruch_id, depth + 1))
         for child in vehicle.dest_fx:
             vps.update(self._legacy_vps(child.vehicle_id, depth + 1))
         return vps

@@ -1,7 +1,7 @@
 """Build the Sulgogar terrain textures from the player's OWN installed Set.BAS files.
 
 Nothing from the original game is shipped: the textures are made here, on the player's machine, from
-`Data/Sets/Set3` only (the flesh atlas FBAGGER and the ground textures of the night set),
+`Data/Sets/Set3` only (the Sulgogar flesh atlas FBAGGER and the ground textures of the night set),
 then written to `Data/Sets/Set3/Loose/ILBM` where the game reads them. Run it again after changing the recipe.
 
 Usage:  python tools/build_sulg_terrain_textures.py [--data "<game Data folder>"]
@@ -69,10 +69,12 @@ def main():
         print("wrote", loose / target.name)
 
     # ---- station flesh and ground atlas -------------------------------------------------------------------
-    # Same flesh region of the night set's own FBAGGER that the Sulgogar structures are mapped on, with no tint:
-    # infected ground and buildings share one pale, moonlit colour, like the Mykonian infected sectors.
+    # Identical to the Sulgogar Queen / Slime Lord in the night set: the same flesh region of the Set3 FBAGGER,
+    # pre-darkened by the Queen's mean polygon light (shade 122 -> 1 - 122/256 = 0.524), so ground and buildings
+    # (shade ~0) look like one piece with her hull.
     flesh = rgb("set3:FBAGGER.ILBM").crop((100, 6, 250, 96)).resize((128, 128))
-    tile = flesh
+    pixels = np.asarray(flesh).astype(float) * 0.524
+    tile = Image.fromarray(np.clip(pixels, 0, 255).astype("uint8"))
     for axis in range(2):                       # blend opposite edges so the tile repeats without a seam
         values = np.asarray(tile).astype(float).copy()
         for k in range(8):

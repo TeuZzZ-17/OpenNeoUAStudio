@@ -24,7 +24,7 @@ from entity_designer import crater_preview
 # (state, label) in the order the list shows them.
 STATES = (
     ("normal", "Normal"), ("fire", "Fire"), ("wait", "Wait"),
-    ("dead", "Dead"), ("megadeth", "Megadeth"), ("genesis", "Genesis"),
+    ("dead", "Dead"), ("megadeth", "Megadeth"), ("genesis", "Genesis"), ("spawn", "Spawn"),
 )
 # VP is a number, BASE and 3DS are Data/... paths.
 KINDS = (("vp", "VP"), ("base", "BASE"), ("3ds", "3DS"))
@@ -213,6 +213,9 @@ def save_values(origins, updates: dict[str, str], snapshots=None, expected=None)
             expected[0].split("_", 1)[-1], expected[1]):
         raise ValueError("The source points to a different definition. Reload before saving.")
     clean = {key: normalize_value(key, value) for key, value in updates.items()}
+    if block.kind.split("_", 1)[-1] != "vehicle" and any(
+            clean.get(key) for key in state_keys("spawn")):
+        raise ValueError("Spawn model states are only supported for vehicles.")
     patched = patch_values(text, block, clean)
     if patched == text:
         return path
@@ -278,7 +281,7 @@ def parse_model_text(text: str) -> dict[str, str]:
         if not separator or key not in keys:
             raise ValueError(
                 f"Line {number}: only vp_, base_ and 3ds_ keys of the model states "
-                f"(normal, fire, wait, dead, megadeth, genesis) can be written here.")
+                f"(normal, fire, wait, dead, megadeth, genesis, spawn) can be written here.")
         updates[key] = normalize_value(key, value)
     return updates
 

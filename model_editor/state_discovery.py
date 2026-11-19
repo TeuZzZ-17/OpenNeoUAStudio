@@ -19,7 +19,7 @@ import re
 
 from studio.assets.visproto import normalize_base_name
 
-STATE_WORDS = ("normal", "fire", "wait", "dead", "megadeth", "genesis", "create")
+STATE_WORDS = ("normal", "fire", "wait", "dead", "megadeth", "genesis", "create", "spawn")
 _STATE_TOKEN = re.compile(r"(?<![a-z0-9])(" + "|".join(STATE_WORDS) + r")(?![a-z0-9])", re.I)
 # A folder search must stay near the model: one game holds thousands of BASE files.
 MAX_NEARBY_MODELS = 24

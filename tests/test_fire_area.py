@@ -217,6 +217,17 @@ def test_tab_is_only_for_weapons_and_drag_nudge_undo_work():
         assert window.project.fire_area.box_forward == (100.0, 80.0, 1200.0)
         assert window._changed_script_tabs() == set()
 
+        # Dragging can produce fractions even where the UI uses whole units.
+        from entity_designer.script_model import fire_area_data_lines
+        window._fire_area_drag_started("dead_zone")
+        window._fire_area_dragged("dead_zone", 109.748675)
+        shown = window.fire_area_panel.dead_zone_spin.value()
+        assert shown == 110
+        lines = fire_area_data_lines(window.project)
+        assert f"ai_fire_trigger_dead_zone = {int(shown)}" in lines
+        assert window.fire_area_panel.output.text().splitlines() == lines
+        window.undo()
+
         # Gizmo nudge moves the selected grip along its own axis.
         window._fire_area_handle_picked("width")
         window._fire_area_nudge((1, 0, 0), 10.0)

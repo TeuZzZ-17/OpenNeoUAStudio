@@ -12,6 +12,8 @@ import re
 import sys
 
 
+from studio.formats.script_numbers import format_number as _number
+
 from entity_designer.fire_area import (
     FIRE_AREA_KEYS,
     MAX_INCLINATION_KEY,
@@ -246,12 +248,6 @@ _GENERIC_PARAM_RE = re.compile(
 )
 
 
-def _number(value: float) -> str:
-    if math.isfinite(value) and abs(value - round(value)) < 1e-9:
-        return str(int(round(value)))
-    return f"{value:.6f}".rstrip("0").rstrip(".")
-
-
 def _float_tuple(raw: str, count: int, key: str) -> tuple[float, ...]:
     """Read an OpenNeoUA compact ``a|b|c`` value holding exactly *count* numbers."""
 
@@ -359,17 +355,6 @@ def _collision_shape_export_filename(project: "CollisionProject") -> str:
     }:
         candidate += "_"
     return f"{candidate}.collision"
-
-
-def _sphere_number(value: float) -> str:
-    """Compact compound-sphere number with at most three decimals."""
-
-    if not math.isfinite(value):
-        return str(value)
-    rounded = round(value, 3)
-    if rounded == 0.0:
-        rounded = 0.0
-    return f"{rounded:.3f}".rstrip("0").rstrip(".")
 
 
 def _radius_number(value: float) -> str:
@@ -1349,7 +1334,7 @@ def briefing_size_data_lines(project: CollisionProject) -> list[str]:
 def briefing_xyz_data_lines(project: CollisionProject) -> list[str]:
     if project.target_category == WEAPON or not project.briefing_xyz_enabled:
         return []
-    return [f"briefing_xyz = {project.briefing_x:g}|{project.briefing_y:g}|{project.briefing_z:g}"]
+    return [f"briefing_xyz = {_tuple_text(project.briefing_x, project.briefing_y, project.briefing_z)}"]
 
 
 def import_cockpit_camera_block(
@@ -1440,10 +1425,12 @@ def fire_area_data_lines(project: "CollisionProject") -> list[str]:
         f"{SHAPE_KEYS[shape]} = {_tuple_text(*area.size(shape))}"
         for shape in SHAPE_KEYS if area.size(shape) is not None
     ]
-    if area.max_inclination > 0.0:
-        lines.append(f"{MAX_INCLINATION_KEY} = {_number(area.max_inclination)}")
-    if area.dead_zone > 0.0:
-        lines.append(f"{DEAD_ZONE_KEY} = {_number(area.dead_zone)}")
+    inclination = _number(area.max_inclination)
+    if area.max_inclination > 0.0 and inclination != "0":
+        lines.append(f"{MAX_INCLINATION_KEY} = {inclination}")
+    dead_zone = _number(area.dead_zone, 0)
+    if area.dead_zone > 0.0 and dead_zone != "0":
+        lines.append(f"{DEAD_ZONE_KEY} = {dead_zone}")
     return lines
 
 

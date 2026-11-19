@@ -22,7 +22,6 @@ from entity_designer.script_model import (
     _num_weapons_text,
     _number,
     _radius_number,
-    _sphere_number,
     CollisionSphere,
     effective_runtime_radius,
     fire_point_positions,
@@ -552,14 +551,14 @@ class _EditControlsMixin:
                 radius_text = (
                     _radius_number(sphere.radius)
                     if sphere.category == LEGACY
-                    else _sphere_number(sphere.radius))
+                    else _number(sphere.radius))
                 item = QTreeWidgetItem([
                     TYPE_LABELS[sphere.category],
                     radius_text,
                     "Visible" if sphere.visible else "Hidden",
-                    _sphere_number(sphere.x),
-                    _sphere_number(sphere.y),
-                    _sphere_number(sphere.z),
+                    _number(sphere.x),
+                    _number(sphere.y),
+                    _number(sphere.z),
                     index_text,
                 ])
                 item.setData(0, _SPHERE_INDEX_ROLE, flat_index)

@@ -13,6 +13,7 @@ import re
 import tempfile
 from dataclasses import dataclass, field
 from studio.exchange.portable import backup_existing_file
+from studio.formats.script_numbers import format_number as _ldf_position
 from .ambient_sound import ambient_sound_value
 from .host_ai_presets import HOST_AI_PRESETS, CUSTOM_AI_PRESETS
 
@@ -953,12 +954,6 @@ def load_ldf(path) -> LdfDocument:
     doc = loads_ldf(text, encoding)
     doc._disk_versions = {os.path.normcase(os.path.abspath(path)): payload}
     return doc
-
-
-def _ldf_position(value) -> str:
-    """Keep five decimal places at most, without float tails or negative zero."""
-    text = f'{value:.5f}'.rstrip('0').rstrip('.')
-    return '0' if text == '-0' else text
 
 
 def dumps_ldf(doc: LdfDocument, defs: dict | None = None) -> str:

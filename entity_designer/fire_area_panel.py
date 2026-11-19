@@ -39,7 +39,7 @@ _DEFAULT_STEP = 10
 _MAX_STEP = 100
 
 
-def _spin(low: float, high: float, step: float, decimals: int = 3) -> CompactScaleSpinBox:
+def _spin(low: float, high: float, step: float, decimals: int = 2) -> CompactScaleSpinBox:
     spin = CompactScaleSpinBox()
     spin.setRange(low, high)
     spin.setDecimals(decimals)
@@ -127,7 +127,7 @@ class FireAreaPanel(QGroupBox):
         self.dead_zone_slider = self._add_slider(grid, 5, self.dead_zone_spin, "dead_zone")
 
         grid.addWidget(QLabel("Max tilt down"), 6, 0)
-        self.inclination_spin = _spin(0.0, fa.MAX_INCLINATION_LIMIT - 0.1, 1.0, 1)
+        self.inclination_spin = _spin(0.0, fa.MAX_INCLINATION_LIMIT - 0.01, 1.0)
         self.inclination_spin.setToolTip(
             "ai_fire_trigger_forward_max_inclination: furthest a forward volume "
             "tilts down toward a ground target, in degrees (the translucent volume "

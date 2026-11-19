@@ -9,6 +9,8 @@ the engine ignores the whole area and the AI keeps its vanilla fire control.
 
 from __future__ import annotations
 
+from studio.formats.script_numbers import format_number
+
 import math
 from dataclasses import dataclass, replace
 
@@ -348,14 +350,14 @@ def volume_handles(shape: str, size, dead_zone: float,
     max_x = x_span[1]
     if is_cone(shape):
         grips = [
-            ("angle_x", f"{size[0]:g}°", (max_x + half_w * depth, 0.0, depth), axes[0]),
-            ("angle_y", f"{size[1]:g}°", (0.0, cone_y * depth, depth), axes[1]),
+            ("angle_x", f"{format_number(size[0])}°", (max_x + half_w * depth, 0.0, depth), axes[0]),
+            ("angle_y", f"{format_number(size[1])}°", (0.0, cone_y * depth, depth), axes[1]),
         ]
     else:
         height_index = _size_index(shape, "height")
         grips = [
-            ("width", f"{size[0]:g}", (max_x + half_w, 0.0, depth), axes[0]),
-            ("height", f"{size[height_index]:g}", (0.0, half_s, depth), axes[1]),
+            ("width", format_number(size[0]), (max_x + half_w, 0.0, depth), axes[0]),
+            ("height", format_number(size[height_index]), (0.0, half_s, depth), axes[1]),
         ]
     for key, label, along, axis in tuple(grips):
         opposite = ((x_span[0] - half_w * depth if is_cone(shape)
@@ -364,8 +366,8 @@ def volume_handles(shape: str, size, dead_zone: float,
         grips.append((key + "_opposite", label, opposite,
                       tuple(-component for component in axis)))
     depth_index = 1 if shape == BOX_BELOW else 2
-    grips.append(("depth", f"{size[depth_index]:g}", (0.0, 0.0, depth), axes[2]))
-    grips.append(("dead_zone", f"{near:g}", (0.0, 0.0, near), axes[2]))
+    grips.append(("depth", format_number(size[depth_index]), (0.0, 0.0, depth), axes[2]))
+    grips.append(("dead_zone", format_number(near, 0), (0.0, 0.0, near), axes[2]))
     return [AreaHandle(key, label, _point(origin, axes, along), axis)
             for key, label, along, axis in grips]
 

@@ -690,5 +690,5 @@ class GameObjectBrowser(QWidget):
     def default_visual_state(obj):
         if obj.kind == 'building':
             return 'Intact'
-        return next((state.title() for state in ('normal', 'fire', 'wait', 'dead', 'megadeth', 'genesis')
+        return next((state.title() for state in ('normal', 'fire', 'wait', 'dead', 'megadeth', 'genesis', 'spawn')
                      if any(f'{prefix}_{state}' in obj.values for prefix in ('vp', 'base', '3ds'))), '—')

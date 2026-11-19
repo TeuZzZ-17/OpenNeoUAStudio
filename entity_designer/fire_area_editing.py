@@ -230,17 +230,11 @@ class FireAreaEditingMixin:
             warnings.append(
                 f"{fa.SHAPE_LABELS[shape]} is not used by this weapon class: "
                 "the engine ignores it.")
-        lines = fire_area_data_lines(project) if weapon else []
-        preview_lines = []
-        for line in lines:
-            key, separator, value = line.partition(" = ")
-            if key == "ai_fire_trigger_dead_zone" and separator:
-                line = f"{key} = {round(float(value))}"
-            preview_lines.append(line)
+        lines = (fire_area_data_lines(project) if weapon else
+                 ["; Fire Area is available only for weapons"])
         self.fire_area_panel.set_state(
             area, shape, available=weapon, height=self._fire_area_height,
-            lines=preview_lines or (
-                [] if weapon else ["; Fire Area is available only for weapons"]),
+            lines=lines,
             note=self._fire_area_note() if weapon else
             "Select a weapon: ai_fire_trigger_* belong to weapon definitions.",
             warning=" ".join(warnings),

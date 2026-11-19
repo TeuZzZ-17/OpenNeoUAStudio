@@ -652,7 +652,7 @@ class CollisionEditorWindow(
             toolbar.addWidget(QLabel(f" {axis} "))
             spin = CompactScaleSpinBox()
             spin.setRange(0.0, 1000.0)
-            spin.setDecimals(3)
+            spin.setDecimals(2)
             spin.setSingleStep(0.1)
             spin.setValue(1.0)
             spin.setKeyboardTracking(False)
@@ -910,7 +910,7 @@ class CollisionEditorWindow(
         # Overeof is authored as a practical placement value. One visible
         # decimal keeps useful half/tenth-unit precision without presenting
         # noisy values such as 20,0000 in the compact properties panel.
-        self.overeof_spin.setDecimals(1)
+        self.overeof_spin.setDecimals(2)
         self.overeof_spin.setSingleStep(1.0)
         self.overeof_spin.setKeyboardTracking(True)
         self.overeof_spin.setMinimumWidth(105)
@@ -1215,7 +1215,7 @@ class CollisionEditorWindow(
         radius_layout.addWidget(self.radius_slider, 1)
         self.radius_spin = self._coordinate_spin()
         self.radius_spin.setMinimum(1.0)
-        self.radius_spin.setDecimals(1)
+        self.radius_spin.setDecimals(2)
         self.radius_spin.setSingleStep(1.0)
         self.radius_spin.setKeyboardTracking(True)
         self.radius_spin.valueChanged.connect(
@@ -1273,7 +1273,7 @@ class CollisionEditorWindow(
             fire_grid.addWidget(QLabel(axis), 0, column)
             spin = CompactScaleSpinBox()
             spin.setRange(-1_000_000.0, 1_000_000.0)
-            spin.setDecimals(3)
+            spin.setDecimals(2)
             spin.setSingleStep(1.0)
             spin.setKeyboardTracking(True)
             spin.setMinimumWidth(72)
@@ -1439,7 +1439,7 @@ class CollisionEditorWindow(
             gun_fields_grid.addWidget(QLabel(axis), 0, label_column)
             spin = CompactScaleSpinBox()
             spin.setRange(-1_000_000.0, 1_000_000.0)
-            spin.setDecimals(3)
+            spin.setDecimals(2)
             spin.setSingleStep(1.0)
             spin.setKeyboardTracking(True)
             spin.setMinimumWidth(82)
@@ -1708,7 +1708,7 @@ class CollisionEditorWindow(
             cockpit_grid.addWidget(QLabel(axis), 0, column)
             spin = CompactScaleSpinBox()
             spin.setRange(-1_000_000.0, 1_000_000.0)
-            spin.setDecimals(3)
+            spin.setDecimals(2)
             spin.setSingleStep(1.0)
             spin.setKeyboardTracking(True)
             spin.setMinimumWidth(88)
@@ -1922,9 +1922,9 @@ class CollisionEditorWindow(
 
     @staticmethod
     def _coordinate_spin() -> QDoubleSpinBox:
-        spin = QDoubleSpinBox()
+        spin = CompactScaleSpinBox()
         spin.setRange(-1000000.0, 1000000.0)
-        spin.setDecimals(4)
+        spin.setDecimals(2)
         spin.setSingleStep(1.0)
         return spin
 
@@ -2483,7 +2483,7 @@ class CollisionEditorWindow(
         self.gun_dir_y_label.setVisible(building_mode)
         self.gun_dir_spins["y"].setVisible(building_mode)
         for spin in self.gun_dir_spins.values():
-            spin.setDecimals(3 if building_mode else 0)
+            spin.setDecimals(2 if building_mode else 0)
             spin.setSingleStep(0.1 if building_mode else 1.0)
         if gun is None:
             self.gun_family_value.setText("No point selected")
@@ -2680,7 +2680,7 @@ class CollisionEditorWindow(
                 self.index_value.setText(index_text)
             self.radius_spin.setDecimals(0 if any(
                 candidate.category == LEGACY
-                for _index, candidate in selected_sphere_entries) else 1)
+                for _index, candidate in selected_sphere_entries) else 2)
             self.radius_spin.setValue(sphere.radius)
             self.radius_slider.setValue(
                 self._radius_to_slider(sphere.radius))

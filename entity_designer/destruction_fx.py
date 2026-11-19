@@ -19,6 +19,7 @@ no Qt dependency: the tab and the viewport only consume its plain data.
 
 from __future__ import annotations
 
+from studio.formats.script_numbers import format_number as _script_number
 from studio.rendering.particles import (
     EmitterSpec, ParticleSprite, _emit_particles, _rotate_vector,
 )
@@ -35,6 +36,7 @@ CONTEXT_WEAPON = "weapon"
 
 MODE_VISUAL = "visual"
 MODE_PHYSICAL = "physical"
+MODE_BRUCH = "bruch"
 # Ground decals are not a begin_fx mode: they come from the reusable
 # ``new_decal`` profiles that vehicles/weapons link with ground_decal_id.
 MODE_DECAL = "ground_decal"
@@ -270,9 +272,7 @@ def parse_tint(text: str) -> tuple[int, int, int, int] | None:
 def format_number(value: float) -> str:
     if not math.isfinite(value):
         return "0"
-    if abs(value - round(value)) < 1e-9:
-        return str(int(round(value)))
-    return f"{value:.4f}".rstrip("0").rstrip(".")
+    return _script_number(value)
 
 
 def format_range(low: float, high: float) -> str:
@@ -285,14 +285,14 @@ def format_range(low: float, high: float) -> str:
 
 VEHICLE_SOUND_EVENTS = (
     "normal", "fire", "wait", "genesis", "explode", "crashland", "crashvhcl",
-    "goingdown", "cockpit", "beamin", "beamout", "build", "airexplode")
+    "goingdown", "cockpit", "beamin", "beamout", "build", "airexplode", "spawn")
 # launch_player only has a shake package (shk_launch_player_*): the view shake
 # of the player's own launches.
 WEAPON_SOUND_EVENTS = ("normal", "launch", "hit", "launch_player")
 PHYSICAL_SOUND_EVENTS = ("normal", "goingdown", "explode")
 # Sounds that keep playing while their state lasts (TVhclProto::IsLoopingSnd).
 LOOPING_VEHICLE_SOUNDS = frozenset({
-    "normal", "fire", "wait", "genesis", "goingdown", "cockpit"})
+    "normal", "fire", "wait", "genesis", "goingdown", "cockpit", "spawn"})
 
 
 @dataclass(frozen=True)
@@ -846,6 +846,8 @@ class FxSpec:
     launch_min: tuple[float, float, float] = (0.0, 0.0, 0.0)
     launch_max: tuple[float, float, float] = (0.0, 0.0, 0.0)
     physical_vehicle: int = 0
+    bruch_id: int = 0
+    has_launch: bool = False
     vp_models: tuple[int, ...] = ()
     vp_impacts: tuple[int, ...] = ()
     mass: float = 0.0
@@ -1027,6 +1029,8 @@ def interpret_block(block: FxBlock, context: str) -> FxSpec:
     visuals: list[VisualRef] = []
     visual_tint = None
     physical_vehicle = 0
+    bruch_id = 0
+    has_bruch_key = has_explicit_mode = has_launch = False
     has_physical_vehicle_key = has_inline = has_offset = False
     invalid_inline = False
     vp_models: list[int] = []
@@ -1051,6 +1055,7 @@ def interpret_block(block: FxBlock, context: str) -> FxSpec:
         if bad_mode:
             continue
         if key == "mode":
+            has_explicit_mode = True
             if value.casefold() in MODES:
                 mode = value.casefold()
             else:
@@ -1098,6 +1103,7 @@ def interpret_block(block: FxBlock, context: str) -> FxSpec:
             else:
                 count = (min(parsed[0], MAX_COUNT), min(parsed[1], MAX_COUNT))
         elif key in ("offset_xyz", "launch_xyz"):
+            has_launch |= key == "launch_xyz"
             if key == "offset_xyz":
                 has_offset = True
                 target_min, target_max = offset_min, offset_max
@@ -1212,6 +1218,10 @@ def interpret_block(block: FxBlock, context: str) -> FxSpec:
         elif key.startswith(_SOUND_PREFIXES):
             has_inline = True
             sound_values[key] = value
+        elif key == "bruch_id":
+            has_bruch_key = True
+            parsed, used = _stol(value)
+            bruch_id = parsed if used == len(value) and 0 < parsed <= 65535 else 0
         elif key == "physical_vehicle":
             has_physical_vehicle_key = True
             physical_vehicle = _stol(value)[0]
@@ -1244,6 +1254,17 @@ def interpret_block(block: FxBlock, context: str) -> FxSpec:
         return build(False, **common)
     if not has_end_size:
         end_size = 0.0
+
+    if has_bruch_key:
+        mode = MODE_BRUCH
+        emission_keys = {"trigger", "bruch_id", "count", "offset_xyz",
+                         "launch_xyz", "random_rotation", "end"}
+        valid = (not has_explicit_mode and bruch_id > 0
+                 and all(key in emission_keys for _, key, _ in block.rows()))
+        if not valid:
+            issue(SEVERITY_IGNORED, "Bruch references need a valid bruch_id and emission fields only.")
+        return build(valid, bruch_id=bruch_id, has_launch=has_launch,
+                     launch_min=tuple(launch_min), launch_max=tuple(launch_max), **common)
 
     if mode == MODE_VISUAL:
         if duration <= 0 or not visuals:
@@ -1502,6 +1523,7 @@ class LegacyFxVehicle:
     scale_fx_text: str = ""
     dest_fx: tuple[DestFx, ...] = ()
     chain_fx: tuple[FxSpec, ...] = ()
+    bruch_effects: tuple[FxSpec, ...] = ()
     source: str = ""
     sounds: dict = field(default_factory=dict)
 
@@ -1553,6 +1575,37 @@ def legacy_vehicle_from_values(vehicle_id: int, values: dict[str, str],
     )
 
 
+def _bruch_parts(block: FxBlock) -> tuple[FxSpec, ...]:
+    rows = [(key, value) for _, key, value in block.rows() if key != "end"]
+    values = dict(rows)
+    physical_keys = {"vp_impact", "scale", "impact_energy", "impact_energy_radius",
+                     "lifetime", "follow_carcass", "mass", "airconst", "force",
+                     "maxrot", "radius"}
+    effects = []
+    if _stol(values.get("duration", ""))[0] > 0:
+        lines = ["begin_fx", "mode = visual", "trigger = destroyed"]
+        for key, value in rows:
+            if key == "vp_model":
+                frames = parse_int_list(value, allow_zero=True)
+                if frames:
+                    lines.extend(f"vp_model = {vp}" for vp in frames)
+            elif (key not in physical_keys
+                  and not key.startswith(_SOUND_PREFIXES)):
+                lines.append(f"{key} = {value}")
+        spec = interpret_block(FxBlock(lines + ["end"]), CONTEXT_VEHICLE)
+        if spec.active:
+            effects.append(spec)
+    if any(key in physical_keys or key.startswith(_SOUND_PREFIXES) for key in values):
+        lines = ["begin_fx", "mode = physical", "trigger = destroyed"]
+        lines.extend(f"{key} = {value}" for key, value in rows
+                     if key in physical_keys or key in {"vp_model", "3ds_model", "base_model", "tint"}
+                     or key.startswith(_SOUND_PREFIXES))
+        spec = interpret_block(FxBlock(lines + ["end"]), CONTEXT_VEHICLE)
+        if spec.active:
+            effects.append(spec)
+    return tuple(effects)
+
+
 def legacy_vehicle_from_text(vehicle_id: int, text: str,
                              source: str = "") -> LegacyFxVehicle:
     """Read the top-level fields of one ``new_vehicle`` body text."""
@@ -1560,13 +1613,14 @@ def legacy_vehicle_from_text(vehicle_id: int, text: str,
     values: dict[str, str] = {}
     dests: list[str] = []
     chain_fx: list[FxSpec] = []
+    bruch_effects = ()
     lines = text.splitlines()
     depth = 0
     index = 0
     while index < len(lines):
         line = lines[index]
         token = _scope_token(line)
-        if depth == 0 and token == "begin_fx":
+        if depth == 0 and token in ("begin_fx", "begin_effect"):
             block_lines = [line]
             block_depth = 1
             index += 1
@@ -1579,9 +1633,13 @@ def legacy_vehicle_from_text(vehicle_id: int, text: str,
                 elif nested_token == "end":
                     block_depth -= 1
                 index += 1
-            spec = interpret_block(FxBlock(block_lines), CONTEXT_VEHICLE)
-            if spec.active:
-                chain_fx.append(spec)
+            block = FxBlock(block_lines)
+            if token == "begin_effect":
+                bruch_effects = _bruch_parts(block)
+            else:
+                spec = interpret_block(block, CONTEXT_VEHICLE)
+                if spec.active:
+                    chain_fx.append(spec)
             continue
         if token == "begin" or token.startswith("begin_"):
             depth += 1
@@ -1603,8 +1661,8 @@ def legacy_vehicle_from_text(vehicle_id: int, text: str,
         elif key:
             values[key] = value
         index += 1
-    return replace(legacy_vehicle_from_values(vehicle_id, values, dests, source),
-                   chain_fx=tuple(chain_fx))
+    vehicle = legacy_vehicle_from_values(vehicle_id, values, dests, source)
+    return replace(vehicle, chain_fx=tuple(chain_fx), bruch_effects=bruch_effects)
 
 
 # -- preview simulation -------------------------------------------------------
@@ -2034,6 +2092,17 @@ def _blast_radius(value: str | None) -> float:
 def unit_look(values: dict[str, str], *, weapon: bool) -> dict:
     """UnitPhases keyword values read from the top-level keys of a definition."""
 
+    vertical_barrage = (weapon and values.get("model", "").casefold() == "artillery_shell"
+                        and values.get("artillery_shell_mode", "").casefold() == "vertical_barrage")
+    transfer_fade = (0, 0)
+    if vertical_barrage:
+        parts = split_tuple(values.get("artillery_shell_transfer_fade_inout"), 2)
+        if parts is not None:
+            parsed = [_stol(part) for part in parts]
+            if all(used == len(part) and 0 <= value <= 32767
+                   for (value, used), part in zip(parsed, parts)):
+                transfer_fade = parsed[0][0], parsed[1][0]
+
     return {
         "tint": parse_tint(values["tint"]) if "tint" in values else None,
         "spin": _spin_strength(values, ""),
@@ -2061,9 +2130,8 @@ def unit_look(values: dict[str, str], *, weapon: bool) -> dict:
                               if weapon else ""),
         # artillery_shell vertical_barrage: rounds fall from arc_height.
         "fixed_speed": (_stof(values.get("artillery_shell_speed", "0"))
-                        if weapon and values.get("model", "").casefold() == "artillery_shell"
-                        and values.get("artillery_shell_mode", "").casefold() == "vertical_barrage"
-                        else 0.0),
+                        if vertical_barrage else 0.0),
+        "artillery_transfer_fade": transfer_fade,
         "altitude": (min(3000.0, _stof(values.get("artillery_shell_arc_height", "0")))
                      if weapon and values.get("model", "").casefold() == "artillery_shell"
                      else 0.0),
@@ -2183,6 +2251,7 @@ class _Flight:
     motion: MotionSpec | None = None
     speed: float = 0.0               # units per second, for the motion tilt
     frozen_at: float | None = None   # the visual motion stops at impact
+    fade_in: int = 0
 
     def pose(self, time_ms: float):
         """(position, rotation) with the chaos motion applied."""
@@ -2421,7 +2490,8 @@ def cluster_chain(unit: "UnitPhases", weapons: dict) -> list[WeaponDef]:
 
 
 def weapon_vps(unit: "UnitPhases", document: "FxDocument", weapons: dict,
-               seen: set | None = None, debuffs: dict | None = None) -> set[int]:
+               seen: set | None = None, debuffs: dict | None = None,
+               catalog: dict[int, LegacyFxVehicle] | None = None) -> set[int]:
     """Every VP a weapon (and the weapons its cluster spawns) can show."""
 
     debuffs = debuffs or {}
@@ -2436,6 +2506,13 @@ def weapon_vps(unit: "UnitPhases", document: "FxDocument", weapons: dict,
             vps.update(visual.vp for visual in spec.visuals if visual.vp > 0)
             vps.update(vp for vp in spec.vp_models if vp > 0)
             vps.update(vp for vp in spec.vp_impacts if vp > 0)
+            effect = catalog.get(spec.bruch_id) if catalog and spec.bruch_id else None
+            if effect:
+                if effect.scale_fx:
+                    vps.update(effect.scale_fx.vps)
+                for part in effect.bruch_effects:
+                    vps.update(model.vp for model in part.visuals if model.vp > 0)
+                    vps.update(vp for vp in (*part.vp_models, *part.vp_impacts) if vp > 0)
     for debuff_id in (resolved_debuff_id(unit.debuff_id, unit.debuff_name, debuffs),
                       unit.delay_debuff_id,
                       resolved_debuff_id(unit.blast_debuff_id, unit.blast_debuff_name, debuffs)):
@@ -2449,7 +2526,7 @@ def weapon_vps(unit: "UnitPhases", document: "FxDocument", weapons: dict,
         child = weapons.get(cluster.weapon_id)
         if child is not None and cluster.weapon_id not in seen:
             seen.add(cluster.weapon_id)
-            vps |= weapon_vps(child.unit, child.document, weapons, seen, debuffs)
+            vps |= weapon_vps(child.unit, child.document, weapons, seen, debuffs, catalog)
     return vps
 
 
@@ -2502,6 +2579,7 @@ class UnitPhases:
     debuff_name: str = ""
     blast_debuff_name: str = ""
     fixed_speed: float = 0.0
+    artillery_transfer_fade: tuple[int, int] = (0, 0)
     start_speed: float = 0.0
     # snd_* packages of the definition, by event name.
     sounds: dict = field(default_factory=dict)
@@ -2815,6 +2893,8 @@ class PreviewSimulation:
                     continue
                 if spec.mode == MODE_VISUAL:
                     self._build_visual(source, spec, rng, start, origin, prefix)
+                elif spec.mode == MODE_BRUCH:
+                    self._build_bruch(source, spec, rng, start, origin, prefix)
                 else:
                     self._build_physical(source, spec, rng, start, origin, prefix)
             elif isinstance(item, DestFxLine):
@@ -2874,12 +2954,12 @@ class PreviewSimulation:
                     label: str, heading: Matrix3 = IDENTITY,
                     main: bool = False, *, motion: MotionSpec | None = None,
                     speed: float = 0.0, frozen_at: float | None = None,
-                    unit: "UnitPhases | None" = None) -> None:
+                    unit: "UnitPhases | None" = None, fade_in: int = 0) -> None:
         """Each state gets scale and tint; main states also get rotation and spin."""
 
         if ref.vp <= 0 and not _external_paths(ref):
             return
-        flight = _Flight(path, heading, motion, speed, frozen_at)
+        flight = _Flight(path, heading, motion, speed, frozen_at, fade_in)
         self._events.append((-1, "unit", start, end,
                              (ref, flight, label, main, unit or self.unit)))
 
@@ -3235,7 +3315,7 @@ class PreviewSimulation:
         else:
             self._unit_event(unit.normal, start, stop, path, "normal", look,
                              main=True, motion=unit.motion, speed=speed,
-                             unit=unit)
+                             unit=unit, fade_in=unit.artillery_transfer_fade[0])
         self._build_event("launch", start, launch, "Launch · ", definition=definition)
         self._add_sound(unit.sounds, "launch", start, label=who, salt=definition.salt)
         if root:
@@ -3560,6 +3640,22 @@ class PreviewSimulation:
             start + spec.duration, float(spec.fade_in), float(spec.fade_out),
             marks))
 
+    def _build_bruch(self, source, spec, rng, start, origin, prefix) -> None:
+        profile = self.catalog.get(spec.bruch_id)
+        if profile and profile.bruch_effects:
+            for part in profile.bruch_effects:
+                effect = replace(part, count=spec.count, offset_min=spec.offset_min,
+                                 offset_max=spec.offset_max, launch_min=spec.launch_min,
+                                 launch_max=spec.launch_max,
+                                 random_rotation=spec.random_rotation)
+                if part.mode == MODE_VISUAL:
+                    self._build_visual(source, effect, rng, start, origin, prefix)
+                else:
+                    self._build_physical(source, effect, rng, start, origin, prefix)
+        else:
+            fallback = replace(spec, physical_vehicle=spec.bruch_id)
+            self._build_physical(source, fallback, rng, start, origin, prefix)
+
     def _build_physical(self, source, spec, rng, start, origin, prefix) -> None:
         count = _randint(rng, *spec.count)
         if spec.physical_vehicle > 0:
@@ -3569,9 +3665,11 @@ class PreviewSimulation:
                     _uniform(rng, low, high)
                     for low, high in zip(spec.offset_min, spec.offset_max))
                 dest = DestFx("death", spec.physical_vehicle, *offset)
+                launch = tuple(_uniform(rng, low, high)
+                               for low, high in zip(spec.launch_min, spec.launch_max)) if spec.has_launch else None
                 self._build_legacy(source, dest, origin, rng, start, 0,
                                    random_rotation=spec.random_rotation,
-                                   prefix=prefix)
+                                   prefix=prefix, launch=launch)
             return
         end_max = start
         for _ in range(count):
@@ -3601,7 +3699,9 @@ class PreviewSimulation:
                 event_spec = replace(spec, maxrot=0.0)
             else:
                 # Inline fragments keep their authored air resistance.
-                fall = _Fall(list(origin), launch, spec.mass, spec.airconst)
+                position = [base + _uniform(rng, low, high)
+                            for base, low, high in zip(origin, spec.offset_min, spec.offset_max)]
+                fall = _Fall(position, launch, spec.mass, spec.airconst)
                 path = self._record_path(fall, lifetime, max(spec.radius, 0.0))
             land_ms, final = start + path[-1][0], path[-1][1]
             self._events.append((source, MODE_PHYSICAL, start, land_ms,
@@ -3709,12 +3809,20 @@ class PreviewSimulation:
 
     def _build_legacy(self, source, dest, origin, rng, start, depth, *,
                       random_rotation: bool = False,
-                      radius: float | None = None, prefix: str = "") -> None:
+                      radius: float | None = None, prefix: str = "",
+                      launch: tuple[float, ...] | None = None) -> None:
         vehicle = self.catalog.get(dest.vehicle_id)
         if vehicle is None:
             self.notes.append(
                 f"dest_fx vehicle {dest.vehicle_id} is not in the loaded "
                 "game catalog.")
+            return
+        if vehicle.bruch_effects:
+            velocity = (dest.x, dest.y, dest.z) if launch is None else launch
+            emission = FxSpec(MODE_BRUCH, "", True, (), random_rotation=random_rotation,
+                              launch_min=velocity, launch_max=velocity, has_launch=True,
+                              bruch_id=dest.vehicle_id)
+            self._build_bruch(source, emission, rng, start, origin, prefix)
             return
         radius = self.unit_radius if radius is None else radius
         offset = (dest.x, dest.y, dest.z)
@@ -3753,7 +3861,7 @@ class PreviewSimulation:
             self.notes.append(
                 "dest_fx accel adds the unit's flight speed; the preview "
                 "unit is static.")
-        fall = _Fall(position, list(offset), vehicle.mass, 0.0)
+        fall = _Fall(position, list(offset if launch is None else launch), vehicle.mass, 0.0)
         path = self._record_path(fall, LEGACY_DEAD_LIFETIME_MS,
                                  max(vehicle.radius, 0.0))
         land_ms = start + path[-1][0]
@@ -3851,7 +3959,7 @@ class PreviewSimulation:
                 tint = owner.tint
                 items.append(PreviewItem(
                     -1, "unit", ref.vp, position,
-                    rotation, (1.0, 1.0, 1.0), 1.0,
+                    rotation, (1.0, 1.0, 1.0), temporal_envelope(age, end - start, flight.fade_in, 0),
                     None if tint in (None, WHITE) else tint,
                     f"{label} · {ref.label}", _external_paths(ref)))
             elif kind == "plasma":
@@ -3970,8 +4078,10 @@ class PreviewSimulation:
         for source, spec in self._specs.items():
             if self.enabled is not None and source not in self.enabled:
                 continue
-            if (spec.active and spec.mode == MODE_VISUAL
-                    and spec.offset_min != spec.offset_max):
+            profile = self.catalog.get(spec.bruch_id)
+            has_visual = spec.mode == MODE_VISUAL or (
+                profile and any(part.mode == MODE_VISUAL for part in profile.bruch_effects))
+            if spec.active and has_visual and spec.offset_min != spec.offset_max:
                 low = tuple(o + v for o, v in zip(self.origin, spec.offset_min))
                 high = tuple(o + v for o, v in zip(self.origin, spec.offset_max))
                 boxes.append((source, low, high))
@@ -4305,6 +4415,9 @@ def block_summary(block: FxBlock, context: str) -> str:
     """Summarize authored model IDs and file names alongside effect settings."""
 
     spec = interpret_block(block, context)
+    if spec.bruch_id:
+        label = f"Bruch {spec.bruch_id}"
+        return label if spec.count == (1, 1) else f"{label} · ×{format_range(*spec.count)}"
     mode = (block.value("mode") or MODE_VISUAL).casefold()
     parts = [mode.replace("_", " ").title()]
     rows = block.rows()

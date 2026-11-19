@@ -27,14 +27,14 @@ class _ScriptsOnly:
 @lru_cache(maxsize=1)
 def _catalog_cache(scripts_key: str):
     from entity_designer import destruction_fx as fx
-    from studio.assets.catalog import load_game_objects
+    from studio.assets.catalog import effect_objects_by_id, load_game_objects
     install = bootstrap.installation() or _ScriptsOnly()
     return {obj.object_id: fx.legacy_vehicle_from_text(obj.object_id, obj.effective_text, str(obj.source))
-            for obj in load_game_objects(install) if obj.kind == "vehicle"}
+            for obj in effect_objects_by_id(load_game_objects(install)).values()}
 
 
 def fx_vehicle_catalog():
-    """Every vehicle of the game scripts as a dest_fx FX vehicle (read once)."""
+    """Bruch definitions and legacy vehicle fallbacks used by sector effects."""
     install = bootstrap.installation() or _ScriptsOnly()
     return _catalog_cache(str(install.folder("scripts")))
 
@@ -66,7 +66,8 @@ def transition_simulation(steps, catalog=None):
             direction = (origin[0], -150.0, origin[2])
             length = math.sqrt(sum(v * v for v in direction))
             vehicle = catalog.get(int(effect[0]))
-            speed = 3750.0 / ((vehicle.mass if vehicle else 1.0) + 50.0)
+            speed = (30.0 if vehicle and vehicle.bruch_effects else
+                     3750.0 / ((vehicle.mass if vehicle else 1.0) + 50.0))
             velocity = [v / length * speed for v in direction]
             dest = fx.DestFx("death", int(effect[0]), *velocity)
             simulation._build_legacy(-1, dest, origin, rng, 0.0, 0, radius=0.0)

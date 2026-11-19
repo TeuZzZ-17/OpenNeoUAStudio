@@ -89,10 +89,10 @@ class _FxPreviewMixin:
         catalog: dict[int, fx.LegacyFxVehicle] = {}
         if objects is None:
             objects = getattr(self.game_object_browser, "objects", None) or []
-        for obj in objects:
-            if obj.kind == "vehicle":
-                catalog[obj.object_id] = fx.legacy_vehicle_from_text(
-                    obj.object_id, obj.effective_text, str(obj.source))
+        from studio.assets.catalog import effect_objects_by_id
+        for obj in effect_objects_by_id(objects).values():
+            catalog[obj.object_id] = fx.legacy_vehicle_from_text(
+                obj.object_id, obj.effective_text, str(obj.source))
         lines = text.splitlines()
         for block in find_script_blocks(text):
             if block.kind == "new_vehicle" and block.complete                     and block.object_id not in catalog:

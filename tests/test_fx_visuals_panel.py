@@ -184,7 +184,7 @@ def test_one_model_row_leads_the_effects_list(app, tmp_path):
 def test_unchecking_the_model_row_hides_every_model_state(app, tmp_path):
     panel, _path = _panel(app, tmp_path)
     _rows(panel)[visuals.MODEL_INDEX].setCheckState(Qt.CheckState.Unchecked)
-    assert panel.hidden_states == {"normal", "fire", "wait", "dead", "megadeth", "genesis"}
+    assert panel.hidden_states == {"normal", "fire", "wait", "dead", "megadeth", "genesis", "spawn"}
     panel.show_all()
     assert panel.hidden_states == set()
     panel.hide_all()
@@ -209,6 +209,25 @@ def test_the_model_row_opens_one_editor_with_every_state_and_saves_it(app, tmp_p
     assert "vp_fire = 33" in text and "3ds_fire = Data/Models/3ds/f.3ds" in text
     assert "vp_genesis = 7" in text and "base_dead" not in text  # a removed line leaves the script
     assert saved == [True]
+
+
+def test_spawn_model_sources_save_on_vehicles_only(tmp_path):
+    path = tmp_path / "Vehicles.cfg"
+    script = "new_vehicle 186\n    vp_normal = 20\nend\n"
+    path.write_text(script, encoding="utf-8")
+    block = find_script_blocks(script)[0]
+    sources = [(path, block.start_line, block.end_line)]
+    updates = {
+        "vp_spawn": "42",
+        "base_spawn": "Data/Models/Base/SPAWN.BASE",
+        "3ds_spawn": "Data/Models/3ds/SPAWN.3ds",
+    }
+    visuals.save_values(sources, updates)
+    assert all(visuals.read_effective_values(sources)[key] == value for key, value in updates.items())
+
+    path.write_text(script.replace("new_vehicle", "new_weapon"), encoding="utf-8")
+    with pytest.raises(ValueError, match="only supported for vehicles"):
+        visuals.save_values(sources, updates)
 
 
 def test_a_wrong_model_text_is_refused_and_the_file_stays(app, tmp_path):

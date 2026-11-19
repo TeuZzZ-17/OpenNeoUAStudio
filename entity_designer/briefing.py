@@ -7,6 +7,7 @@ from contextlib import ExitStack
 from pathlib import Path
 from functools import lru_cache
 
+from .script_model import briefing_xyz_data_lines
 from studio.rendering.playback import DEFAULT_ANIMATION_SPEED
 
 from PySide6.QtCore import QRectF, QSize, Qt, QSignalBlocker, QTimer
@@ -404,9 +405,8 @@ class BriefingControls(QWidget):
 
     def _update_position_text(self):
         project = self.editor.project
-        self.output_xyz.setText(
-            f"briefing_xyz = {project.briefing_x:g}|{project.briefing_y:g}|{project.briefing_z:g}"
-            if project.briefing_xyz_enabled else "Classic model position.")
+        lines = briefing_xyz_data_lines(project)
+        self.output_xyz.setText(lines[0] if lines else "Classic model position.")
 
     def _xyz_value(self, axis, value):
         if self.editor._syncing:

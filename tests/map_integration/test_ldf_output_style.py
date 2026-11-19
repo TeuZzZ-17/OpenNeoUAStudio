@@ -17,7 +17,7 @@ def test_coordinates_are_short_and_stable_without_changing_the_open_document():
     original_x = host['pos_x']
     text = dumps_ldf(doc)
     assert 'pos_x = 9049.7' in text and 'pos_z = -13800.3' in text
-    assert 'pos_x = 4201.12346' in text and 'pos_z = -4202.98765' in text
+    assert 'pos_x = 4201.12' in text and 'pos_z = -4202.99' in text
     assert 'pos_y = 0\n' in text
     assert host['pos_x'] == original_x
     assert 'vehicle = 33 ;' not in text
