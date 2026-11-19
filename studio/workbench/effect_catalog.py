@@ -19,6 +19,7 @@ from PySide6.QtWidgets import (
 
 from studio.assets.family import load_asset_family
 from studio.formats.setbas import read_setbas
+from studio.rendering.asset_viewport_common import _image_from_effect_png
 from studio.rendering.geometry import (
     GeometryClipboardError, build_fx_element_clipboard, detect_fx_elements,
 )
@@ -109,24 +110,35 @@ class FrameSequence:
 _preview_atlases = local()
 
 
-def _preview_atlas(family, name):
+def _preview_atlas(family, name, additive=False):
     bitmap = _resource(family.textures, name)
-    if bitmap is None:
+    override = (family.effect_override_paths.get(name.lower())
+                if additive else None) if bitmap is not None else None
+    if bitmap is None and override is None:
         return None
     cache = getattr(_preview_atlases, "images", None)
     if cache is None:
         cache = _preview_atlases.images = OrderedDict()
-    key = id(bitmap), id(family.external_palette)
+    key = (id(bitmap), id(family.external_palette), str(override) or "", additive)
     if key not in cache:
-        cache[key] = (bitmap, family.external_palette,
-                      qimage_from_ilbm(bitmap, family.external_palette))
+        # Additive (flat-tracy) sprites are drawn with normal alpha blending
+        # here (QPainter has no additive compositing that stays bounded when
+        # many particles overlap in one preview frame - it saturates to an
+        # opaque black square instead of staying transparent). "luma" keeps
+        # the preview a safe, always-transparent approximation of the
+        # engine's glow instead.
+        image = (_image_from_effect_png(override) if override is not None
+                 else qimage_from_ilbm(
+                     bitmap, family.external_palette,
+                     "luma" if additive else "chroma"))
+        cache[key] = (bitmap, family.external_palette, image)
     cache.move_to_end(key)
     if len(cache) > 24:
         cache.popitem(last=False)
     return cache[key][2]
 
 
-def _texture_sequence(family, texture, groups=()):
+def _texture_sequence(family, texture, groups=(), additive=False):
     if texture is None:
         return FrameSequence([], ())
     animation = _resource(family.animations, texture.name) \
@@ -143,7 +155,10 @@ def _texture_sequence(family, texture, groups=()):
     frames = []
     crops = {}
     for name, uvs, duration in samples:
-        image = _preview_atlas(family, name)
+        # Additive (flat-tracy) sprites use the same HI/ALPHA effect PNG
+        # override the real viewport renders, instead of the raw indexed
+        # palette image, so the preview matches what the engine draws.
+        image = _preview_atlas(family, name, additive)
         if image is not None and uvs:
             key = name, tuple(tuple(tuple(point) for point in group) for group in uvs)
             if key not in crops:
@@ -161,20 +176,27 @@ def effect_preview(entry, kind):
                                        entry.value.atts_indices):
         block = entry.owner.base_object.ades[block_index]
         groups = [block.olpl[atts_index]] if atts_index < len(block.olpl) else []
-        sequence = _texture_sequence(entry.family, block.texture, groups)
+        sequence = _texture_sequence(
+            entry.family, block.texture, groups, block.tracy_mode == "flat")
         if sequence.images:
             return sequence
     return FrameSequence([], ())
 
 
 def emitter_stage_preview(family, stage):
-    return _texture_sequence(family, stage.texture, stage.olpl)
+    return _texture_sequence(
+        family, stage.texture, stage.olpl, stage.tracy_mode == "flat")
 
 
 def emitter_preview(family, block, *, sample_limit=6000):
     """Render a looping sample of the same particle simulation as the viewport."""
     if block.particle_attributes is None or not block.particle_stages:
         return FrameSequence([], ())
+    # Flat-tracy stages decode with "luma" alpha (see _preview_atlas), which
+    # already approximates the engine's additive glow while staying
+    # transparent, so plain alpha-blended drawing below is enough; true
+    # additive compositing (CompositionMode_Plus) saturates to an opaque
+    # black square once enough particles overlap in one preview frame.
     stages = [emitter_stage_preview(family, stage)
               for stage in block.particle_stages[:8]]
     emitter = ParticleEmitter(

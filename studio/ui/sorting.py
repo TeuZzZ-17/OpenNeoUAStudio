@@ -106,8 +106,16 @@ class IndexedListWidget(SortableListWidget):
         return super().takeItem(super().row(item)) if item is not None else None
 
 
-def add_list_sort(layout, widget, *, label="Name", stretch=0):
-    """Add a clickable sort label above a one-column list or icon gallery."""
+def add_list_sort(layout, widget, *, label="Name", stretch=0,
+                  button_layout=None, add_widget=True):
+    """Add a clickable sort label above a one-column list or icon gallery.
+
+    ``button_layout``, when given, receives the sort button instead of
+    ``layout`` (e.g. to put it on the same row as a search field). Pass
+    ``add_widget=False`` to skip adding ``widget`` to ``layout`` here and
+    place it yourself afterwards. Returns the sort button.
+    """
+    button_layout = layout if button_layout is None else button_layout
     button = QToolButton(widget)
     button.setText(label)
     button.setToolTip("Sort ascending or descending")
@@ -132,8 +140,10 @@ def add_list_sort(layout, widget, *, label="Name", stretch=0):
     button.clicked.connect(toggle)
     widget.model().rowsInserted.connect(lambda *_: timer.start(0) if direction is not None else None)
     widget.model().dataChanged.connect(lambda *_: timer.start(0) if direction is not None else None)
-    layout.addWidget(button, 0, Qt.AlignmentFlag.AlignLeft)
-    layout.addWidget(widget, stretch)
+    button_layout.addWidget(button, 0, Qt.AlignmentFlag.AlignLeft)
+    if add_widget:
+        layout.addWidget(widget, stretch)
+    return button
 
 
 def sorted_list_panel(widget, label):

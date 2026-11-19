@@ -1040,6 +1040,7 @@ class AssemblyWindow(
         edit_menu.addAction(self.rename_fx_action)
         for attr, label, handler in (
                 ("add_emitter_action", "Add Emitter", self._add_emitter),
+                ("replace_emitter_action", "Replace Emitter", self._replace_emitter),
                 ("copy_emitter_action", "Copy Emitter", self._copy_emitter),
                 ("cut_emitter_action", "Cut Emitter", self._cut_emitter),
                 ("edit_emitter_action", "Edit Emitter Settings", self._edit_emitter_settings),
@@ -1561,6 +1562,7 @@ class AssemblyWindow(
         emitter_buttons = []
         for action, label in (
                 (self.add_emitter_action, "Add Emitter"),
+                (self.replace_emitter_action, "Replace Emitter"),
                 (self.delete_emitter_action, "Delete Emitter"),
                 (self.edit_emitter_action, "Settings")):
             button = QPushButton(label)

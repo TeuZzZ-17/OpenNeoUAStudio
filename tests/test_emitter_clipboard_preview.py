@@ -8,7 +8,7 @@ import pytest
 from PySide6.QtCore import QPoint, QPointF, QRectF, Qt
 from PySide6.QtGui import QColor, QImage
 from PySide6.QtTest import QTest
-from PySide6.QtWidgets import QApplication, QWidget
+from PySide6.QtWidgets import QApplication, QDialog, QWidget
 
 from studio.workbench.effect_catalog import FrameSequence
 from studio.workbench.window_emitters import _EmitterAnchorPick, _EmittersMixin
@@ -48,6 +48,68 @@ def test_copy_and_cut_immediately_start_animated_placement(monkeypatch, cut):
     assert window._pick_emitter_anchor.call_count == 1
     assert window._pick_emitter_anchor.call_args.kwargs["preview"] is preview
     assert window._pick_emitter_anchor.call_args.kwargs["cut_block"] is (block if cut else None)
+
+
+def test_replace_emitter_swaps_block_keeping_anchor(monkeypatch):
+    block = SimpleNamespace(ade_point_id=7)
+    owner = SimpleNamespace(base_object=SimpleNamespace(ades=[block]))
+    family = object()
+    new_block = SimpleNamespace()
+    new_family = object()
+    new_owner = SimpleNamespace(base_object=SimpleNamespace(ades=[new_block]))
+    replaced = SimpleNamespace()
+    entry = SimpleNamespace(family=new_family, owner=new_owner, value=0, label="x")
+
+    class Dialog:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def exec(self):
+            return QDialog.DialogCode.Accepted
+
+        def selected_entry(self):
+            return entry
+
+    monkeypatch.setattr("studio.workbench.window_emitters.EffectCatalogDialog", Dialog)
+    monkeypatch.setattr(
+        "studio.workbench.window_emitters.scan_catalog", lambda *a, **k: [])
+    copy_mock = Mock(return_value=replaced)
+    monkeypatch.setattr(
+        "studio.workbench.window_emitters.copy_particle_emitter", copy_mock)
+
+    class Window(_EmittersMixin):
+        _family = family
+        _workbench_obj = owner
+        _selected_emitter = lambda self: (0, block)
+        _material_structure_reason = lambda self: None
+        _catalog_source = lambda self, *a, **k: None
+        _notify = lambda *args: None
+        viewport = SimpleNamespace(animation_speed=1.0)
+        _edit_emitter_blocks = Mock(return_value=True)
+
+    window = Window()
+    window._replace_emitter()
+
+    assert window._edit_emitter_blocks.call_count == 1
+    label, operation = window._edit_emitter_blocks.call_args.args
+    assert label == "Replace emitter"
+    assert operation() == 0
+    assert owner.base_object.ades[0] is replaced
+    copy_mock.assert_called_once_with(new_family, new_owner, family, new_block, 7)
+
+
+def test_replace_emitter_does_nothing_without_a_selection(monkeypatch):
+    dialog_calls = []
+    monkeypatch.setattr(
+        "studio.workbench.window_emitters.EffectCatalogDialog",
+        lambda *a, **k: dialog_calls.append(1))
+
+    class Window(_EmittersMixin):
+        _selected_emitter = lambda self: None
+        _material_structure_reason = lambda self: None
+
+    Window()._replace_emitter()
+    assert dialog_calls == []
 
 
 def test_cut_preview_clears_its_marker_on_cancel(app):

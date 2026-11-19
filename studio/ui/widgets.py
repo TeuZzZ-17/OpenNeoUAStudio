@@ -38,6 +38,7 @@ from PySide6.QtWidgets import (
     QListView,
     QListWidget,
     QListWidgetItem,
+    QMessageBox,
     QPushButton,
     QScrollArea,
     QSizePolicy,
@@ -562,14 +563,15 @@ def checker_thumbnail(image: QImage, size: int = 96) -> QPixmap:
     return pix
 
 
-def qimage_from_ilbm(image, palette_override=None) -> QImage | None:
+def qimage_from_ilbm(image, palette_override=None,
+                     alpha_mode: str = "chroma") -> QImage | None:
     """Convert a decoded ILBM/VBMP image to a Qt preview image."""
 
     if image is None:
         return None
     rgba = image.to_rgba_bytes(
         palette_override=palette_override,
-        alpha_mode="chroma",
+        alpha_mode=alpha_mode,
     )
     if rgba is None:
         return None
@@ -639,7 +641,8 @@ class TexturePickerDialog(QDialog):
 
     def __init__(self, names: list[str], current: str, thumbnail_loader,
                  parent=None, *, frame_loader=None,
-                 playback_speed=DEFAULT_ANIMATION_SPEED) -> None:
+                 playback_speed=DEFAULT_ANIMATION_SPEED,
+                 external_loader=None) -> None:
         super().__init__(parent)
         self.setWindowTitle("Choose Texture")
         self.resize(720, 520)
@@ -647,16 +650,13 @@ class TexturePickerDialog(QDialog):
         self._pending_items: list[QListWidgetItem] = []
         self._frame_loader = frame_loader
         self._playback_speed = playback_speed
+        self._external_loader = external_loader
         self._frames = []
         self._frame_index = 0
         self._preview_timer = QTimer(self)
         self._preview_timer.timeout.connect(self._advance_frame)
 
         layout = QVBoxLayout(self)
-        self.search = QLineEdit()
-        self.search.setPlaceholderText("Filter textures")
-        self.search.textChanged.connect(self._filter_items)
-        layout.addWidget(self.search)
 
         self.list = SortableListWidget()
         use_standard_list_style(self.list)
@@ -668,7 +668,24 @@ class TexturePickerDialog(QDialog):
         self.list.setWordWrap(True)
         self.list.setSelectionMode(
             QAbstractItemView.SelectionMode.SingleSelection)
-        add_list_sort(layout, self.list, label="Texture", stretch=1)
+
+        search_row = QHBoxLayout()
+        add_list_sort(layout, self.list, label="Texture", stretch=1,
+                      button_layout=search_row, add_widget=False)
+        self.search = QLineEdit()
+        self.search.setPlaceholderText("Filter textures")
+        self.search.textChanged.connect(self._filter_items)
+        search_row.addWidget(self.search, 1)
+        if external_loader is not None:
+            import_button = QPushButton("Import External Texture…")
+            import_button.setToolTip(
+                "Load a PNG or ILBM file from outside the set. A PNG must "
+                "use only colors already in the texture's palette.")
+            import_button.clicked.connect(self._import_external_texture)
+            search_row.addWidget(import_button)
+        layout.addLayout(search_row)
+        layout.addWidget(self.list, 1)
+
         self.preview = QLabel()
         configure_stable_image_preview(self.preview, 180)
         self.preview.setVisible(frame_loader is not None)
@@ -758,6 +775,39 @@ class TexturePickerDialog(QDialog):
         item = self.list.currentItem()
         return (item.data(Qt.ItemDataRole.UserRole)
                 if item is not None else None)
+
+    def _import_external_texture(self) -> None:
+        if self._external_loader is None:
+            return
+        path, _ = QFileDialog.getOpenFileName(
+            self, "Import External Texture", "",
+            "Textures (*.png *.ilbm *.ILBM);;PNG (*.png);;"
+            "ILBM (*.ilbm *.ILBM);;All files (*)")
+        if not path:
+            return
+        try:
+            name = self._external_loader(path)
+        except Exception as exc:
+            QMessageBox.warning(self, "Import failed", str(exc))
+            return
+        if not name:
+            return
+        existing = self.list.findItems(name, Qt.MatchFlag.MatchExactly)
+        if existing:
+            item = existing[0]
+        else:
+            item = SortableListItem(QIcon(QPixmap(96, 96)), name)
+            item.setData(Qt.ItemDataRole.UserRole, name)
+            item.setTextAlignment(Qt.AlignmentFlag.AlignHCenter)
+            self.list.addItem(item)
+        self.list.setCurrentItem(item)
+        self.list.scrollToItem(item)
+        try:
+            image = self._thumbnail_loader(name)
+        except Exception:
+            image = None
+        if image is not None and not image.isNull():
+            item.setIcon(QIcon(checker_thumbnail(image, 96)))
 
 
 # ----------------------------------------------------------------------------

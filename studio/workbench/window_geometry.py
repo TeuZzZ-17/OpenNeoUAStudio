@@ -1858,6 +1858,7 @@ class _GeometryEditMixin:
         if self.load_texture_button.isEnabled():
             menu.addAction("Replace Texture", self._load_model_texture)
         if active_emitter is not None:
+            menu.addAction(self.replace_emitter_action)
             menu.addAction(self.copy_emitter_action)
             menu.addAction(self.cut_emitter_action)
             menu.addAction(self.edit_emitter_action)

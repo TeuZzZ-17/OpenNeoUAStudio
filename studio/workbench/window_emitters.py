@@ -335,6 +335,7 @@ class _EmittersMixin:
         selection = self._selected_emitter()
         can_edit = can_add and selection is not None
         self.add_emitter_action.setEnabled(can_add)
+        self.replace_emitter_action.setEnabled(can_edit)
         self.delete_emitter_action.setEnabled(can_edit)
         can_copy = can_edit and bool(selection[1].source_objt_bytes)
         self.copy_emitter_action.setEnabled(can_copy)
@@ -345,7 +346,7 @@ class _EmittersMixin:
 
     def _show_emitter_context_menu(self, position):
         menu = QMenu(self)
-        for action in (self.add_emitter_action,
+        for action in (self.add_emitter_action, self.replace_emitter_action,
                        self.copy_emitter_action, self.cut_emitter_action,
                        self.edit_emitter_action, self.delete_emitter_action):
             menu.addAction(action)
@@ -408,6 +409,39 @@ class _EmittersMixin:
             obj.base_object.ades.append(copied)
             return len(obj.base_object.ades) - 1
         self._edit_emitter_blocks(label, operation)
+
+    def _replace_emitter(self):
+        """Swap the selected emitter's definition, keeping its anchor point."""
+
+        selection = self._selected_emitter()
+        if selection is None or self._material_structure_reason():
+            return
+        index, block = selection
+        anchor = block.ade_point_id
+        owner = self._workbench_obj
+        family = self._family
+        dialog = EffectCatalogDialog(
+            scan_catalog(self._family, "emitter", [owner]), self, kind="emitter",
+            playback_speed=lambda: self.viewport.animation_speed,
+            active_source=lambda: self._catalog_source("emitter"),
+            external_source=lambda: self._catalog_source("emitter", external=True))
+        if dialog.exec() != QDialog.DialogCode.Accepted \
+                or owner is not self._workbench_obj or family is not self._family:
+            return
+        entry = dialog.selected_entry()
+        if entry is None:
+            return
+        if not any(item is block for item in owner.base_object.ades):
+            self._notify("The selected emitter no longer exists.", 6000)
+            return
+        new_block = entry.owner.base_object.ades[entry.value]
+        source_family, source_owner = entry.family, entry.owner
+
+        def operation():
+            owner.base_object.ades[index] = copy_particle_emitter(
+                source_family, source_owner, family, new_block, anchor)
+            return index
+        self._edit_emitter_blocks("Replace emitter", operation)
 
     def _copy_emitter(self, cut=False):
         selection = self._selected_emitter()

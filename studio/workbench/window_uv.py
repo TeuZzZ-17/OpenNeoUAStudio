@@ -28,6 +28,11 @@ from studio.assets.mapping import (
     rewrite_block_texture_template,
 )
 from studio.formats.setbas import decode_texture
+from studio.formats.images import (
+    load_png_matching_palette,
+    parse_ilbm_file,
+    TextureConvertError,
+)
 from studio.formats.animation import (
     AnmParseError,
     edit_anm_phase,
@@ -1480,13 +1485,123 @@ class _UvTexturesMixin:
             if name not in cache:
                 cache[name] = self._binding_preview_frames(name, binding_kind)
             return cache[name]
+        external_loader = (
+            lambda path: self._import_external_texture_file(
+                path, current, binding_kind))
         dialog = TexturePickerDialog(
             names, current, lambda name: frames(name)[0][0] if frames(name) else None,
-            self, frame_loader=frames, playback_speed=self.viewport.animation_speed)
+            self, frame_loader=frames, playback_speed=self.viewport.animation_speed,
+            external_loader=external_loader)
         if dialog.exec() != QDialog.DialogCode.Accepted:
             self._notify("Texture selection cancelled.", 3000)
             return None
         return dialog.selected_name()
+
+    def _unique_texture_name(self, base: str) -> str:
+        """A family.textures key not already used, case-insensitively."""
+
+        family = self._family
+        used = {key.lower() for key in family.textures} if family else set()
+        if base.lower() not in used:
+            return base
+        stem, _, suffix = base.rpartition(".")
+        stem, suffix = (stem, suffix) if stem else (base, "")
+        index = 2
+        while True:
+            candidate = f"{stem}_{index}.{suffix}" if suffix else f"{stem}_{index}"
+            if candidate.lower() not in used:
+                return candidate
+            index += 1
+
+    def _unique_animation_name(self, base: str) -> str:
+        """A family.animations key not already used, case-insensitively."""
+
+        family = self._family
+        used = {key.lower() for key in family.animations} if family else set()
+        if base.lower() not in used:
+            return base
+        stem, _, suffix = base.rpartition(".")
+        stem, suffix = (stem, suffix) if stem else (base, "")
+        index = 2
+        while True:
+            candidate = f"{stem}_{index}.{suffix}" if suffix else f"{stem}_{index}"
+            if candidate.lower() not in used:
+                return candidate
+            index += 1
+
+    def _import_external_texture_file(
+            self, path: str, current: str, binding_kind: str = "ilbm") -> str:
+        """Load a PNG or ILBM from outside the set for Replace Texture.
+
+        An ILBM keeps its own embedded palette. A PNG must use only colors
+        already in the replaced texture's palette (or the family's shared
+        external palette) - the shared SET palette is never altered. For a
+        bmpanim binding the picture replaces the single-frame animation's
+        bitmap; a multi-bitmap animation cannot be targeted this way.
+        """
+
+        family = self._family
+        if family is None:
+            raise TextureConvertError("no model family is loaded")
+        source = Path(path)
+
+        reference_palette = None
+        if binding_kind == "bmpanim":
+            found = self._animation_for_name(current)
+            if found is None:
+                raise TextureConvertError(
+                    f"animation {current} is not loaded")
+            anim_name, anim = found
+            distinct = {name.casefold() for name in anim.bitmap_names}
+            if len(distinct) != 1:
+                raise TextureConvertError(
+                    f"{anim_name} has {len(distinct)} different frame "
+                    "images; only a single-image animation can be "
+                    "replaced with an external texture")
+            loaded_bitmap = self._ensure_model_texture_loaded(
+                anim.bitmap_names[0], show_error=False)
+            reference_palette = (
+                (family.textures[loaded_bitmap].palette if loaded_bitmap
+                 else None) or family.external_palette)
+        else:
+            loaded_current = self._ensure_model_texture_loaded(
+                current, show_error=False)
+            current_image = (family.textures.get(loaded_current)
+                             if loaded_current else None)
+            reference_palette = (
+                (current_image.palette if current_image else None)
+                or family.external_palette)
+
+        if source.suffix.lower() in (".ilbm",):
+            image = parse_ilbm_file(source)
+            if image.palette is None:
+                raise TextureConvertError(
+                    f"{source.name} has no CMAP palette")
+        elif source.suffix.lower() == ".png":
+            if not reference_palette:
+                raise TextureConvertError(
+                    "no palette available to match the PNG against "
+                    "(replace a decoded texture, or load a SET with a "
+                    "palette, first)")
+            image = load_png_matching_palette(source, reference_palette)
+        else:
+            raise TextureConvertError(
+                f"unsupported file type: {source.suffix or source.name}")
+
+        texture_name = self._unique_texture_name(source.stem.upper() + ".ILBM")
+        family.textures[texture_name] = image
+
+        if binding_kind != "bmpanim":
+            return texture_name
+
+        new_anim = copy.deepcopy(anim)
+        new_anim.bitmap_names = [texture_name] * len(anim.bitmap_names)
+        new_anim.source_name = str(source)
+        new_anim.new_file = True
+        new_anim_name = self._unique_animation_name(
+            source.stem.upper() + ".ANM")
+        family.animations[new_anim_name] = new_anim
+        return new_anim_name
 
     def _choose_texture_binding_group(self, groups):
         if len(groups) == 1:

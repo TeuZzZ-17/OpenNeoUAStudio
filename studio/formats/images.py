@@ -1085,6 +1085,32 @@ def convert_png_to_ilbm(png_path: str | Path, template_path: str | Path,
                          warning)
 
 
+def load_png_matching_palette(png_path: str | Path,
+                              palette: Palette) -> IlbmImage:
+    """Decode an external PNG in-memory, requiring an exact palette match.
+
+    Used by "Replace Texture" to import a PNG without touching the shared
+    SET palette: every pixel must already be one of ``palette``'s colors.
+    Unlike ``convert_png_to_ilbm`` this does not need a template file or a
+    matching width/height (UVs are normalised 0..255, so the imported
+    texture's own size is fine), and nothing is written to disk.
+    """
+
+    QImage = _require_qimage()
+    png_path = Path(png_path)
+    qimage = QImage(str(png_path))
+    if qimage.isNull():
+        raise TextureConvertError(f"could not read PNG: {png_path}")
+    indices, needed_nearest = _qimage_to_indices(qimage, palette)
+    if needed_nearest:
+        raise TextureConvertError(
+            f"{png_path.name} uses colors outside the existing palette; "
+            "only an exact palette match can be imported")
+    return IlbmImage(source_name=str(png_path), kind="ILBM",
+                     width=qimage.width(), height=qimage.height(),
+                     palette=list(palette), pixels=indices)
+
+
 # -- CLI ---------------------------------------------------------------------------
 
 
