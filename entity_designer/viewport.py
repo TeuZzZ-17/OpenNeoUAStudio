@@ -50,6 +50,7 @@ from studio.rendering.asset_viewport import (
     PickShape,
 )
 from studio.rendering.gizmo import ModelSpaceGizmo
+from studio.rendering.indexed import IndexedSurface, MissingIndexedTextureError
 from studio.ui.cursor_themes import studio_cursor
 
 class CollisionMoveGizmo(ModelSpaceGizmo):
@@ -284,6 +285,8 @@ class CollisionViewport(FxPreviewViewportMixin, AssetViewport):
         self._gun_point_selected = -1
         self._gun_points_visible = True
         self._building_structure = (None, ())
+        self._building_missing_surface = None
+        self._building_missing_textures = set()
         self._mounted_flak_visible = False
         self._mounted_flak_key = (None, ())
         self._mounted_flak_faces = []
@@ -516,7 +519,14 @@ class CollisionViewport(FxPreviewViewportMixin, AssetViewport):
                 adapter, face, material, frame_index)
         else:
             library, original = source
-            surface = library.surface_for(original)
+            try:
+                surface = library.surface_for(original)
+            except MissingIndexedTextureError as exc:
+                if self._building_missing_surface is None:
+                    raise
+                self._building_missing_textures.add(exc.name)
+                surface = replace(self._building_missing_surface,
+                                  shade_value=min(180, original.shade))
         if (self._cockpit_preview_active
                 and surface.kind == "texture"
                 and surface.map_mode != "depth"):
@@ -1949,8 +1959,36 @@ class CollisionViewport(FxPreviewViewportMixin, AssetViewport):
         if self._building_structure[0] is library and self._building_structure[1] is faces:
             return
         self._building_structure = (library, faces)
+        self._building_missing_textures.clear()
+        if library is not None:
+            palette = library.tables.palette
+            gray = min(range(1, len(palette)), key=lambda i: sum(
+                (component - 128) ** 2 for component in palette[i]))
+            self._building_missing_surface = IndexedSurface(
+                "Missing texture", "solid", None, 0, 0, gray, "gradient", 0, "none", "depth")
+        else:
+            self._building_missing_surface = None
         self._invalidate_indexed_view_cache()
         self.update()
+
+    @property
+    def has_model(self) -> bool:
+        return (super().has_model or bool(self._building_structure[1])
+                or bool(self._mounted_flak_visible and self._mounted_flak_faces))
+
+    @property
+    def building_texture_warning(self) -> str:
+        if not self._building_missing_textures:
+            return ""
+        return "Missing textures: " + ", ".join(sorted(self._building_missing_textures))
+
+    def _preview_diagnostics(self):
+        diagnostics = list(super()._preview_diagnostics())
+        diagnostics.extend(
+            f"{name}: texture unavailable; showing the untextured surface."
+            for name in sorted(self._building_missing_textures)
+            if not any(issue.startswith(f"{name}:") for issue in diagnostics))
+        return diagnostics
 
     def set_mounted_flak_visible(self, visible: bool) -> None:
         if self._mounted_flak_visible != visible:
@@ -1967,6 +2005,7 @@ class CollisionViewport(FxPreviewViewportMixin, AssetViewport):
 
         self._mounted_flak_key = (library, mounts)
         self._mounted_flak_faces = []
+        self._building_missing_textures.clear()
         for vehicle, position, direction in mounts:
             if vehicle <= 0:
                 continue
@@ -1991,18 +2030,20 @@ class CollisionViewport(FxPreviewViewportMixin, AssetViewport):
         self._invalidate_indexed_view_cache()
         self.update()
 
-    def _render_scene(self, *args, **kwargs):
-        from dataclasses import replace
+    def _render_scene(self, painter, target, *args, **kwargs):
         from studio.rendering.asset_viewport import ViewMaterial
 
         structure_library, structure = self._building_structure
         gun_library, _mounts = self._mounted_flak_key
         guns = self._mounted_flak_faces if self._mounted_flak_visible else ()
         if not structure and not guns:
-            return super()._render_scene(*args, **kwargs)
+            return super()._render_scene(painter, target, *args, **kwargs)
         body, materials = self._faces, self._materials
+        adapter = self._indexed_adapter
         self._faces = [] if structure else list(body)
         self._materials = [*materials, ViewMaterial("Mounted model")]
+        if structure_library is not None or adapter is None:
+            self._indexed_adapter = (structure_library or gun_library).adapter
         try:
             for library, faces in ((structure_library, structure), (gun_library, guns)):
                 for original, x, z in faces:
@@ -2013,9 +2054,10 @@ class CollisionViewport(FxPreviewViewportMixin, AssetViewport):
                     )
                     self._mounted_render_sources[id(face)] = (library, original)
                     self._faces.append(face)
-            return super()._render_scene(*args, **kwargs)
+            super()._render_scene(painter, target, *args, **kwargs)
         finally:
             self._faces, self._materials = body, materials
+            self._indexed_adapter = adapter
             self._mounted_render_sources.clear()
 
     def _paint_viewport(self, painter: QPainter) -> None:

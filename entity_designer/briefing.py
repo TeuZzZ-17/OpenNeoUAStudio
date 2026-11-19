@@ -230,7 +230,7 @@ class BriefingPreview(AcceleratedWidget):
         self.renderer.set_building_structure(*structure)
         # The briefing uses script-local positions without the ground preview offset.
         mounts = ()
-        if self.editor.family is not None and project.gun_points_enabled:
+        if (building or self.editor.family is not None) and project.gun_points_enabled:
             mounts = tuple((point.gun_type, point.position, point.direction)
                            for point in project.gun_points)
         self.editor._set_mounted_flak_preview(self.renderer, mounts)
@@ -248,6 +248,7 @@ class BriefingPreview(AcceleratedWidget):
         self.update()
 
     def _paint_viewport(self, painter):
+        self.error = ""
         painter.fillRect(self.rect(), QColor("#171c20"))
         aspect = self.editor.briefing_tab.aspect.currentData()
         width = min(self.width(), self.height() * aspect)
@@ -262,7 +263,7 @@ class BriefingPreview(AcceleratedWidget):
                 size = QSize(max(1, int(min(width, 960))), max(1, int(min(width, 960) / aspect)))
                 image = self.renderer.render_snapshot(size, None)
                 painter.drawImage(target, image)
-                self.error = ""
+                self.error = self.renderer.building_texture_warning
             except RuntimeError as exc:
                 self.error = str(exc)
         if self.background.isNull() or self.error:
@@ -284,7 +285,7 @@ class BriefingControls(QWidget):
         size_layout.setContentsMargins(6, 4, 6, 4)
         size_layout.setSpacing(4)
         layout.addWidget(size_group)
-        label = QLabel("A larger size makes the vehicle larger in briefing and debriefing.")
+        label = QLabel("A larger size enlarges the model in briefing and debriefing.")
         label.setWordWrap(True)
         size_layout.addWidget(label)
         self.enabled = QCheckBox("Include briefing_size")
@@ -387,8 +388,9 @@ class BriefingControls(QWidget):
         project = self.editor.project
         with QSignalBlocker(self.enabled), QSignalBlocker(self.value), QSignalBlocker(self.slider):
             self.enabled.setChecked(project.briefing_size_enabled)
-            size = round(project.briefing_size) or radius_to_briefing_size(
-                project.legacy.radius if project.legacy else 25.0)
+            default_size = (100 if project.target_category == "building" else
+                            radius_to_briefing_size(project.legacy.radius if project.legacy else 25.0))
+            size = round(project.briefing_size) or default_size
             self.value.setValue(size)
             self.slider.setValue(briefing_size_to_slider(size))
         with ExitStack() as blockers:
@@ -399,7 +401,11 @@ class BriefingControls(QWidget):
             for axis, value in (("x", project.briefing_x), ("y", project.briefing_y), ("z", project.briefing_z)):
                 self.xyz_values[axis].setValue(value)
         self.setEnabled(project.target_category != "weapon")
-        size_text = f"briefing_size = {round(project.briefing_size)}" if project.briefing_size_enabled else "Uses the vehicle's radius."
+        if project.briefing_size_enabled:
+            size_text = f"briefing_size = {round(project.briefing_size)}"
+        else:
+            size_text = ("Classic building size." if project.target_category == "building"
+                         else "Uses the vehicle's radius.")
         self.output.setText(size_text)
         self._update_position_text()
 

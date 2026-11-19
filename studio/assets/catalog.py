@@ -3,7 +3,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from functools import lru_cache
 from pathlib import Path
 import re
@@ -128,21 +128,65 @@ def _base_choice(assets, label, base_name):
     return None
 
 
+def _sector_visual_choice(assets, folder, visual, label):
+    """Resolve a sector cell through its exact file, positional VP or SET model."""
+    from studio.formats.sector_file import resolve_sector_file
+
+    if visual.casefold().endswith((".base", ".3ds")):
+        path = resolve_sector_file(folder, visual)
+        if path.is_file():
+            return VisualChoice(label, path)
+    try:
+        vp = int(visual, 0)
+    except ValueError:
+        key = Path(visual.replace("\\", "/")).stem.casefold()
+        base = next((row.base for row in assets.sdf.models
+                     if Path(row.base.replace("\\", "/")).stem.casefold() == key), "")
+    else:
+        names = assets.visual_proto_names
+        base = names[vp] if 0 <= vp < len(names) else ""
+    if not base:
+        return None
+    obj = assets.base_object(base, set_only=True)
+    if obj is None:
+        return None
+    family = assets._loose_families.get(assets._key(base))
+    if family is not None and obj is family.root_object:
+        return VisualChoice(label, family.base_path)
+    return VisualChoice(label, assets.setbas_path, base)
+
+
+def external_sector_visuals(assets, path, sector):
+    """Resolve every declared visual before using an external sector."""
+    from studio.formats.sector_file import SectorFileError
+
+    choices = {}
+    for model in sector.models:
+        try:
+            choice = _sector_visual_choice(assets, path.parent, model.visual, model.name)
+        except SectorFileError:
+            choice = None
+        choices[model.name.casefold()] = choice
+    return choices
+
+
 def _external_sector_choices(assets, sector_file):
-    """Models of an external .sector: a BASE beside the file, else the SET model with that name."""
-    from map_editor import bootstrap
     from studio.formats.sector_file import SectorFileError, read_sector, resolve_data_path
+
     try:
         path = resolve_data_path(bootstrap.game_data_dir(), sector_file)
         sector = read_sector(path)
     except (OSError, SectorFileError):
         return []
+    models = external_sector_visuals(assets, path, sector)
+    if any(model is None for model in models.values()):
+        return []
     choices = []
-    for model in sector.models:
-        local = bootstrap.find_ci(path.parent, model.visual.replace("\\", "/"))             if model.visual.casefold().endswith(".base") else None
-        choice = VisualChoice(f"Sector model {model.name}", local) if local is not None and local.is_file()             else _base_choice(assets, f"Sector model {model.name}", model.visual)
-        if choice is not None:
-            choices.append(choice)
+    for slot, cell in enumerate(sector.cells, 1):
+        piece = sector.piece(cell)
+        for state, label in enumerate(("Intact", "Damaged", "Heavy", "Flat")):
+            choice = models[piece.state(state).casefold()]
+            choices.append(replace(choice, label=f"Sector slot {slot} — {label}"))
     return choices
 
 

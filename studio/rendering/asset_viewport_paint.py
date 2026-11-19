@@ -560,9 +560,10 @@ class _PaintingMixin:
                 or self._model_nudge_before is not None):
             self._draw_precision_guides(painter, target, camera)
 
-        if not clean and self._mode == "textured" and self._diagnostics \
-                and self._show_diag_overlay:
-            self._draw_diagnostics_overlay(painter)
+        if not clean and self._mode == "textured" and self._show_diag_overlay:
+            diagnostics = self._preview_diagnostics()
+            if diagnostics:
+                self._draw_diagnostics_overlay(painter, diagnostics)
 
         if not clean and not self._snapshot_active \
                 and self._edit_session is not None \
@@ -1102,13 +1103,16 @@ class _PaintingMixin:
                 int(target.height())) == (0, 0, self.width(), self.height()):
             self._mode_label_rect = QRect(x, y, width, height)
 
-    def _draw_diagnostics_overlay(self, painter: QPainter) -> None:
+    def _preview_diagnostics(self):
+        return self._diagnostics
+
+    def _draw_diagnostics_overlay(self, painter: QPainter, diagnostics) -> None:
         # Compact badge: first two issues only; the full list lives in the
         # bottom Warnings panel (View menu can hide this overlay entirely).
-        lines = [f"Preview issues ({len(self._diagnostics)}):"]
-        lines.extend(f"- {d[:80]}" for d in self._diagnostics[:2])
-        if len(self._diagnostics) > 2:
-            lines.append(f"... +{len(self._diagnostics) - 2} more "
+        lines = [f"Preview issues ({len(diagnostics)}):"]
+        lines.extend(f"- {d[:80]}" for d in diagnostics[:2])
+        if len(diagnostics) > 2:
+            lines.append(f"... +{len(diagnostics) - 2} more "
                          "(see Warnings)")
         metrics = painter.fontMetrics()
         width = max(metrics.horizontalAdvance(line) for line in lines) + 16

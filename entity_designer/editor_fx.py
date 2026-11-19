@@ -18,6 +18,7 @@ from entity_designer.script_model import (
     _load_3ds_family,
     _resolve_data_asset_path,
     _resolve_patch_target_block,
+    BUILDING,
     CollisionScriptError,
     effective_runtime_radius,
     find_script_blocks,
@@ -456,6 +457,8 @@ class _FxPreviewMixin:
             self._fx_reloading = False
 
     def _reload_fx_from_file(self) -> None:
+        if self.project.target_category == BUILDING:
+            return
         if (self._active_script_path is None or self._active_script_id is None
                 or self._active_model_reference is None):
             self.statusBar().showMessage(
@@ -624,7 +627,7 @@ class _FxPreviewMixin:
         if watched:
             self._fx_watcher.removePaths(watched)
         self._fx_watch_signatures = {}
-        if self._active_script_path is None:
+        if self._active_script_path is None or self._active_model_reference is None:
             self._fx_reload_timer.stop()
             self._fx_poll_timer.stop()
             return

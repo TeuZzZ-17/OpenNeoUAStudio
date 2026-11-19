@@ -105,6 +105,50 @@ class FormatTests(unittest.TestCase):
         self.assertIsNotNone(parse_sector_text(text).model("core"))
 
 
+def test_sector_visual_choices_follow_cell_states_and_exact_paths(tmp_path, monkeypatch):
+    from types import SimpleNamespace
+
+    from map_editor import bootstrap
+    from studio.assets import catalog
+
+    folder = tmp_path / "Models" / "Sectors" / "Post"
+    folder.mkdir(parents=True)
+    ground = folder / "ground" / "post.BASE"
+    intact = tmp_path / "Models" / "Shared" / "post.BASE"
+    for path in (ground, intact):
+        path.parent.mkdir()
+        path.touch()
+    sector_file = folder / "post.sector"
+    sector_file.write_text(SAMPLE.replace("ST_EMPTY.base", "GROUND/post.base")
+                           .replace("Kyt_Flak_Normal.BASE", "data/models/shared/POST.base")
+                           .replace("core|core|core|ground", "core|vp|named|ground")
+                           + "begin_model vp\nvisual = 0\nend\n"
+                             "begin_model named\nvisual = elsewhere/ARCHIVE.BASE\nend\n",
+                           encoding="utf-8")
+    archive = tmp_path / "Set.BAS"
+    set_model = SimpleNamespace(base="Archive.BASE")
+    sdf = SimpleNamespace(models=[set_model], sectors={}, buildings=[])
+    assets = SimpleNamespace(
+        sdf=sdf, setbas_path=archive, visual_proto_names=("VP.BASE",),
+        _key=str.casefold, _loose_families={},
+        base_object=lambda name, *, set_only: object() if set_only else None,
+    )
+    monkeypatch.setenv("NME_GAME_DATA", str(tmp_path))
+    monkeypatch.setattr(bootstrap, "_installation", None)
+    monkeypatch.setattr(catalog, "set_assets", lambda number: assets)
+    building = catalog.GameObject("building", 1, tmp_path / "Buildings.cfg",
+                                  {"sec_type": "Data/Models/Sectors/Post/post.sector|52"})
+
+    choices = {choice.label: choice for choice in catalog.visual_choices(building, 1)}
+    assert choices["Sector slot 1 — Intact"].path == ground
+    assert choices["Sector slot 5 — Intact"].path == intact
+    assert choices["Sector slot 5 — Damaged"].base_name == "VP.BASE"
+    assert choices["Sector slot 5 — Heavy"].base_name == "Archive.BASE"
+    assert choices["Sector slot 5 — Flat"].path == ground
+    intact.unlink()
+    assert catalog.visual_choices(building, 1) == []
+
+
 @unittest.skipUnless(HAVE_DATA, "game data with Set3 and Scripts not found")
 class SectorEditorTests(unittest.TestCase):
     @classmethod

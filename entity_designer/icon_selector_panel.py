@@ -1,4 +1,4 @@
-"""Icon Selector tab: pick a vehicle's type_icon from the H_FINDER font page.
+"""Icon Selector tab: pick an entity's type_icon from the H_FINDER font page.
 
 The page is shown in place of the 3D viewport. Arrows, WASD or a click move the
 selection; the Symbol field and Random choose the TYPE_NS.FON key written to
@@ -352,7 +352,7 @@ class IconSelectorControls(QWidget):
         self.view.set_atlas(self.atlas, image)
 
     def _vehicle(self) -> bool:
-        """True when a vehicle with a loaded model can receive an icon.
+        """True when the selected entity can receive an icon.
 
         Without a model the project cannot be exported, so a click on the page
         only browses it: it must not mark the project as modified.
@@ -374,7 +374,7 @@ class IconSelectorControls(QWidget):
 
     def sync(self) -> None:
         project = self.editor.project
-        state = (project.type_icon, project.type_icon_cell, project.target_category)
+        state = (id(project), project.type_icon, project.type_icon_cell, project.target_category)
         if state != self._seen_state:
             # Undo, reset or a new definition replace any half-made choice.
             self._seen_state = state
@@ -384,7 +384,7 @@ class IconSelectorControls(QWidget):
             return
         self._load()
         vehicle = self._vehicle()
-        # The page can always be browsed; only a vehicle receives an icon.
+        # The page can always be browsed, even without an editable entity.
         self.symbol_edit.setEnabled(vehicle)
         self.random_button.setEnabled(vehicle)
         cell = self._selected_cell()
@@ -414,7 +414,7 @@ class IconSelectorControls(QWidget):
         if self.atlas is None:
             return "error", "TYPE_NS.FON or its font page was not found in Data/Fonts."
         if not self._vehicle():
-            return "info", "Open a vehicle to give it an icon."
+            return "info", "Open a vehicle or building to give it an icon."
         if not project.type_icon:
             return "", ""
         if self.atlas.owner(project.type_icon) is None:
@@ -462,7 +462,7 @@ class IconSelectorControls(QWidget):
         self.editor._push_undo()
         project.type_icon = code
         project.type_icon_cell = new_cell
-        self._seen_state = (code, new_cell, project.target_category)
+        self._seen_state = (id(project), code, new_cell, project.target_category)
         self.editor._set_modified()
         self.editor._sync_all()
 

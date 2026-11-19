@@ -315,6 +315,7 @@ class _ScriptFilesMixin:
 
     def _clear_script_link(self) -> None:
         self._active_script_path = None
+        self._fx_update_watcher()
         self._building_had_mounts = False
         self.viewport.set_building_structure(None, ())
         self._fx_set_cache = None
@@ -448,7 +449,7 @@ class _ScriptFilesMixin:
         if choice is not None and choice.base_name:
             model = assets.base_object(choice.base_name)
             family = assets.family
-        elif choice is not None:
+        elif choice is not None and choice.path.suffix.casefold() != ".3ds":
             family = self._load_family(choice.path, setbas=assets.setbas_path)
             model = family.root_object
         if not self.fx_panel.confirm_text_changes():
@@ -500,6 +501,7 @@ class _ScriptFilesMixin:
             self._current_owner = self._viewport_owner = None
             self._normal_state_owner = self._current_owner_base_bounds = None
             self.viewport.clear()
+            self.viewport.set_cockpit_preview_active(False)
             self._fill_model_state_combo()
             self._refresh_collision_geometry_widget()
             self._sync_animation_controls()
@@ -507,18 +509,21 @@ class _ScriptFilesMixin:
             self._show_model_item(item)
         self._set_model_browser_enabled(False)
         self.game_object_browser.select_object(obj)
-        library = self._gun_mesh_library() if model is not None else None
+        library = self._gun_mesh_library()
+        mesh = None
         if library is not None:
-            mesh = library.external_mesh(sector_file) if sector_file else None
-            self.viewport.set_building_structure(
-                library, (mesh if mesh is not None and mesh.faces else library.mesh(sector_type)).faces)
-            self.viewport._fit_view_to_model(self.viewport.size())
-            self.viewport.capture_reset_view()
+            mesh = library.sector_mesh(sector_file, sector_type)
+            self.viewport.set_building_structure(library, mesh.faces)
         self._sync_close_archive_action()
         self.game_object_browser.set_source(path)
         self._set_modified(False)
         self._sync_all()
-        if model is None:
+        if mesh is not None and mesh.faces:
+            self.viewport._fit_view_to_model(self.viewport.size())
+            self.viewport.capture_reset_view()
+            self._sync_gizmo_camera()
+            self._update_reset_view_controls()
+        elif model is None:
             self.statusBar().showMessage(f"{obj.name}: no intact model in this set.", 7000)
         return True
 

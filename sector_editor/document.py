@@ -20,7 +20,7 @@ from map_editor.core.set_sdf_parser import (
 from studio.exchange.portable import commit_verified_files
 from studio.formats.sector_file import (
     MODEL_ICON_ZOOMS, SECTOR_ICON_ZOOMS, SECTORS_FOLDER, SectorFile, SectorModel, SectorPiece,
-    find_sector_file, format_sector, read_sector, resolve_data_path, resolve_sector_file, unique_name,
+    find_sector_file, format_sector, read_sector, resolve_sector_file, unique_name,
 )
 
 SET_FOLDERS = ("HI", "Objects", "Palette", "Remap", "Scripts")
@@ -837,10 +837,7 @@ class SetDocument:
                 raise ValueError(f"model '{model.name}': VP {visual} does not exist in this set.")
             base = visproto[index]
         elif visual.casefold().endswith((".base", ".3ds")):
-            if visual.casefold().startswith("data/"):
-                path = resolve_data_path(bootstrap.game_data_dir(), visual)
-            else:
-                path = bootstrap.find_ci(folder, visual.replace("\\", "/")) or folder / visual
+            path = resolve_sector_file(folder, visual)
             if path.is_file():
                 if path.suffix.casefold() == ".3ds":
                     raise ValueError(f"model '{model.name}': 3DS visuals are not editable in the Sector Editor.")

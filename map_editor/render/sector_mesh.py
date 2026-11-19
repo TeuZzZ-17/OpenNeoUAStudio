@@ -74,12 +74,7 @@ class SectorMeshLibrary:
         self.vehicles = load_vehicle_files(scripts)
         self.scripts = scripts
         self._external_surfaces = {}
-        from studio.assets.visproto import parse_visproto
-        directory = bootstrap.find_ci(assets.set_dir, 'scripts')
-        path = bootstrap.find_ci(directory, 'visproto.lst') if directory else None
-        self._vp_names = ([entry.base_name for entry in parse_visproto(path).entries]
-                          if path else [obj.base_object.name for obj in
-                                        assets.family.root_object.kids[0].kids])
+        self._vp_names = assets.visual_proto_names
         self._gun_meshes = {}
         self._host_meshes = {}
         self._vehicle_meshes = {}
@@ -342,8 +337,8 @@ class SectorMeshLibrary:
         return faces
 
     def external_mesh(self, sector_file: str, state: int = STATE_INTACT) -> SectorMesh:
-        """Faces of an external .sector (Data/... path), resolved like the engine:
-        a BASE beside the file first, otherwise the SET model with the same name."""
+        """Compose the requested damage state from exact files and active SET models."""
+        from studio.assets.catalog import external_sector_visuals
         from studio.formats.sector_file import SectorFileError, read_sector, resolve_data_path
         from ..core.sector_resolver import ResolvedSub
         key = (sector_file.casefold(), state)
@@ -357,26 +352,48 @@ class SectorMeshLibrary:
         except (OSError, SectorFileError):
             mesh.missing.append(sector_file)
             return mesh
-        self.assets.add_external_root(path.parent)
+        models = external_sector_visuals(self.assets, path, sector)
+        mesh.missing.extend(model.visual for model in sector.models
+                            if models[model.name.casefold()] is None)
+        if mesh.missing:
+            return mesh
+        visuals = {}
         for index, cell in enumerate(sector.cells):
-            visual = sector.model(sector.piece(cell).state(state)).visual
-            local = bootstrap.find_ci(path.parent, visual.replace("\\", "/"))                 if visual.casefold().endswith(".base") else None
-            name = local.name if local is not None else visual
-            faces = self._base_faces(name)
+            model = sector.model(sector.piece(cell).state(state))
+            choice = models[model.name.casefold()]
+            if choice not in visuals:
+                try:
+                    visuals[choice] = self._sector_visual_faces(choice)
+                except (OSError, ValueError, RuntimeError, struct.error):
+                    visuals[choice] = None
+            faces = visuals[choice]
             if faces is None:
-                mesh.missing.append(name)
+                if model.visual not in mesh.missing:
+                    mesh.missing.append(model.visual)
                 continue
             ox, oz = ResolvedSub(4 if sector.single else index, -1, -1, None, None).offset
             mesh.faces.extend((face, ox, oz) for face in faces)
         return mesh
 
+    def _sector_visual_faces(self, choice):
+        if choice.base_name:
+            return self._base_faces(choice.base_name, set_only=True)
+        if choice.path.suffix.casefold() == ".3ds":
+            return list(self._three_ds_faces(choice.path)) or None
+        from studio.assets.family import load_asset_family
+        family = load_asset_family(choice.path, [self.assets.set_dir], setbas=self.assets.archive)
+        return self._family_faces(family.root_object, family)
+
+    def sector_mesh(self, sector_file, fallback, state=STATE_INTACT):
+        if sector_file:
+            mesh = self.external_mesh(sector_file, state)
+            if mesh.faces and not mesh.missing:
+                return mesh
+        return self.mesh(fallback, state)
+
     def definition_mesh(self, definition) -> SectorMesh:
         """Sector of a building definition: its external .sector, else its SET sector."""
-        if getattr(definition, "sector_file", ""):
-            mesh = self.external_mesh(definition.sector_file)
-            if mesh.faces:
-                return mesh
-        return self.mesh(definition.sec_type)
+        return self.sector_mesh(getattr(definition, "sector_file", ""), definition.sec_type)
 
     def building_preview(self, building_id):
         definition = self.buildings.get(building_id)

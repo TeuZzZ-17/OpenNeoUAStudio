@@ -910,6 +910,12 @@ class UnsupportedIndexedMaterialError(IndexedFamilyAdapterError):
     pass
 
 
+class MissingIndexedTextureError(UnsupportedIndexedMaterialError):
+    def __init__(self, name: str):
+        self.name = name
+        super().__init__(f"raw indexed texture {name!r} is unavailable")
+
+
 class IndexedSourceError(IndexedFamilyAdapterError):
     pass
 
@@ -1262,8 +1268,7 @@ class IndexedFamilyAdapter:
             if image is _AMBIGUOUS_TEXTURE:
                 image = None
         if image is None or getattr(image, "pixels", None) is None:
-            raise UnsupportedIndexedMaterialError(
-                f"raw indexed texture {name!r} is unavailable")
+            raise MissingIndexedTextureError(name)
         return image
 
     def resolve_surface(self, face, material, frame_index: int = 0) -> IndexedSurface:

@@ -4,6 +4,7 @@ uses (loose files first, then SET.BAS).
 
 from __future__ import annotations
 
+from functools import cached_property
 from pathlib import Path
 
 from .. import bootstrap
@@ -114,3 +115,17 @@ class SetAssets:
 
     def has_base(self, base_name: str) -> bool:
         return self.base_object(base_name) is not None
+
+    @cached_property
+    def visual_proto_names(self) -> tuple[str, ...]:
+        from entity_designer.script_model import CollisionScriptError, runtime_vp_table
+
+        if self.setbas_path is None:
+            return ()
+        try:
+            table, _, _ = runtime_vp_table(self.setbas_path, None)
+        except CollisionScriptError:
+            root = self.family.root_object
+            objects = root.kids[0].kids if root is not None and root.kids else ()
+            return tuple(obj.base_object.name for obj in objects)
+        return tuple(entry.base_name for entry in table.entries)
