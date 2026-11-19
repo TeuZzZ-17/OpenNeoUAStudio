@@ -1063,20 +1063,22 @@ class AssemblyWindow(
         self.edit_rotate_action.triggered.connect(
             self._rotate_selected_geometry)
         edit_menu.addAction(self.edit_rotate_action)
-        self.edit_center_action = QAction("Center Model at Origin", self)
+        self.edit_center_action = QAction("Set Origin to Model Center", self)
         self.edit_center_action.setStatusTip(
-            "Center the whole model: move every part together so the center "
-            "of the model's bounding box sits at the origin (0, 0, 0). "
-            "Undo restores it.")
-        self.edit_center_action.triggered.connect(self._center_model_at_origin)
+            "Set the origin: move every part together so the model's "
+            "bounding-box center sits at the origin (0, 0, 0). Undo "
+            "restores it.")
+        self.edit_center_action.triggered.connect(
+            self._set_origin_to_model_center)
         edit_menu.addAction(self.edit_center_action)
         self.edit_center_selection_action = QAction(
-            "Center Selection at Origin", self)
+            "Set Selection as Origin", self)
         self.edit_center_selection_action.setStatusTip(
-            "Move only the selected element so the center of the selection "
-            "sits at the origin (0, 0, 0). Undo restores it.")
+            "Rigidly move the whole model so the center of the selection "
+            "becomes the new origin (0, 0, 0). Shape is unchanged. Undo "
+            "restores it.")
         self.edit_center_selection_action.triggered.connect(
-            self._center_selection_at_origin)
+            self._set_selection_as_origin)
         edit_menu.addAction(self.edit_center_selection_action)
 
         view_menu = self.menuBar().addMenu("&View")
@@ -1462,20 +1464,20 @@ class AssemblyWindow(
         # Under Mirror Select / Auto Align: centering buttons, then Move / Rotate / Scale.
         center_row = QHBoxLayout()
         center_row.setSpacing(3)
-        self.center_origin_button = QPushButton("Center Model at Origin")
+        self.center_origin_button = QPushButton("Set Origin to Model Center")
         self.center_origin_button.setEnabled(False)
         self.center_origin_button.setToolTip(
-            "Center the whole model: move every part together so the center "
-            "of the model's bounding box sits at the origin (0, 0, 0). "
-            "Undo restores it.")
+            "Set the origin: move every part together so the model's "
+            "bounding-box center sits at the origin (0, 0, 0). Undo "
+            "restores it.")
         self.center_origin_button.clicked.connect(
             self.edit_center_action.trigger)
-        self.center_selection_button = QPushButton("Center Selection at Origin")
+        self.center_selection_button = QPushButton("Set Selection as Origin")
         self.center_selection_button.setEnabled(False)
         self.center_selection_button.setToolTip(
-            "Move only the selected element to the origin (0, 0, 0): the "
-            "center of the selection lands on 0, the rest of the model stays "
-            "where it is. Undo restores it.")
+            "Rigidly move the whole model so the center of the selection "
+            "becomes the new origin (0, 0, 0). Shape is unchanged. Undo "
+            "restores it.")
         self.center_selection_button.clicked.connect(
             self.edit_center_selection_action.trigger)
         center_row.addWidget(self.center_origin_button)

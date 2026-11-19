@@ -71,7 +71,7 @@ class CenterAtOriginTests(unittest.TestCase):
         finally:
             window.close()
 
-    def test_selection_goes_to_the_origin_and_the_rest_stays(self):
+    def test_selection_becomes_the_origin_and_the_model_moves_rigidly(self):
         window, _obj, model = _prepare_window()
         try:
             model.points[:] = [(x + 10.0, y - 4.0, z + 2.5)
@@ -88,9 +88,11 @@ class CenterAtOriginTests(unittest.TestCase):
             for axis in range(3):
                 values = [model.points[i][axis] for i in selected]
                 self.assertAlmostEqual((min(values) + max(values)) / 2.0, 0.0)
-            for index in range(len(original)):
-                if index not in selected:
-                    self.assertEqual(model.points[index], original[index])
+            # Same offset on every vertex, selected or not: the shape is untouched.
+            offsets = {
+                tuple(round(a - b, 6) for a, b in zip(new, old))
+                for new, old in zip(model.points, original)}
+            self.assertEqual(len(offsets), 1)
             self.assertEqual(len(window._edit_undo_stack), 1)
             window._undo_edit()
             self.assertEqual(model.points, original)

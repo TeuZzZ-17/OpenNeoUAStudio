@@ -29,12 +29,14 @@ from studio.rendering.asset_viewport_common import (
     PASTE_GHOST_OPACITY,
     ANIMATED_VERTEX_COLOR,
     MODEL_EDIT_SELECTION_RED,
+    ORIGIN_MARKER_SCALE,
     ViewMaterial,
     ViewFace,
     _RenderPayload,
     PickShape,
     _apply,
 )
+from studio.ui.style import theme_accent_color
 
 
 def animated_vertices(session) -> set[int]:
@@ -850,6 +852,28 @@ class _PaintingMixin:
                     painter.drawRect(QRectF(
                         point.x() - radius, point.y() - radius,
                         radius * 2.0, radius * 2.0))
+
+        # OpenNeoUA: permanent, purely visual marker for the model's local
+        # origin (0, 0, 0) -- where the game anchors the unit regardless of
+        # mesh shape (world position, faction marker, cockpit 000). The exact
+        # vanilla faction arrow shape (Wireless/TRIANGLE.SKL, points_xz in
+        # 0.001 model units: apex (0,-1300), base (+-1000, 700)), tinted with
+        # the active theme's accent color instead of a faction color. Not
+        # interactive: use "Set Origin to Model Center" / "Set Selection as
+        # Origin" to move the origin.
+        origin_world = _apply(session.matrix, (0.0, 0.0, 0.0), session.position)
+        origin_point = self._project(
+            self._camera_vertex(origin_world, camera), target, camera)
+        k = ORIGIN_MARKER_SCALE
+        triangle = QPolygonF([
+            QPointF(origin_point.x(), origin_point.y() + 1300 * k),
+            QPointF(origin_point.x() - 1000 * k, origin_point.y() - 700 * k),
+            QPointF(origin_point.x() + 1000 * k, origin_point.y() - 700 * k),
+        ])
+        accent = theme_accent_color()
+        painter.setBrush(Qt.BrushStyle.NoBrush)
+        painter.setPen(QPen(accent, 1.4))
+        painter.drawPolygon(triangle)
 
         pivot = session.selection_pivot()
         if pivot is not None:

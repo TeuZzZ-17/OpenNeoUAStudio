@@ -1466,11 +1466,12 @@ class _EditModeMixin:
     def center_edit_model_at_origin(self, selection_only: bool = False) -> bool:
         """Move the edited skeleton so a bounding-box center is (0,0,0).
 
-        Default: the whole model, every vertex gets the same offset, so shape,
-        polygon indices and ANM mapping stay identical. Only vertices used by a
-        polygon define the bounds: leftovers of deleted parts must not shift
-        the center. ``selection_only``: only the selected vertices move, so
-        the center of the selection lands on the origin.
+        Every vertex always gets the same offset, so shape, polygon indices
+        and ANM mapping stay identical (a rigid translation, never a
+        deformation). Default: only vertices used by a polygon define the
+        bounds, so leftovers of deleted parts must not shift the center.
+        ``selection_only``: the bounds come from the selected vertices
+        instead, so the selection becomes the model's new origin.
         """
 
         session = self._edit_session
@@ -1495,11 +1496,9 @@ class _EditModeMixin:
         if all(abs(value) < 1e-6 for value in offset):
             return False
         before = [tuple(point) for point in points]
-        moved = used if selection_only else range(len(before))
         points[:] = [
             (x + offset[0], y + offset[1], z + offset[2])
-            if index in moved else (x, y, z)
-            for index, (x, y, z) in enumerate(before)
+            for x, y, z in before
         ]
         session.dirty = True
         self._refresh_edit_faces()

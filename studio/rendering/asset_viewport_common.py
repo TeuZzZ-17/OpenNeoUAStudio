@@ -71,6 +71,10 @@ MODEL_EDIT_SELECTION_RED = QColor(255, 32, 48)
 # Edit-mode vertices of animated (ANM) segments.
 ANIMATED_VERTEX_COLOR = QColor(255, 214, 40)
 
+# Pixels per Wireless/TRIANGLE.SKL model unit (0.001 model-unit steps) for the
+# origin marker, tuned so it reads as a small, constant-size HUD icon.
+ORIGIN_MARKER_SCALE = 0.008
+
 
 
 @dataclass

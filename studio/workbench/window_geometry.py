@@ -1607,8 +1607,8 @@ class _GeometryEditMixin:
         self._notify(
             f"Cut {descriptor}. The copy is ready for Paste.", 8000)
 
-    def _center_model_at_origin(self) -> None:
-        if not self._require_editing("Center Model at Origin"):
+    def _set_origin_to_model_center(self) -> None:
+        if not self._require_editing("Set Origin to Model Center"):
             return
         if self.viewport.paste_preview_active:
             self._notify(
@@ -1618,33 +1618,33 @@ class _GeometryEditMixin:
         owner = self.viewport.edit_owner
         fam_obj = self._owner_to_obj.get(owner) if owner else None
         if not self.viewport.center_edit_model_at_origin():
-            self._notify("The model is already centered at the origin.", 4500)
+            self._notify("The model's origin is already at its center.", 4500)
             return
         children = bool(fam_obj is not None and fam_obj.kids)
         self._notify(
-            "Model centered at the origin. Undo restores it."
+            "Origin set to the model's center. Undo restores it."
             + (" Child BASE objects keep their own offset." if children
                else ""), 7000)
 
-    def _center_selection_at_origin(self) -> None:
-        """Send only the selected element to the origin (0, 0, 0)."""
+    def _set_selection_as_origin(self) -> None:
+        """Rigidly shift the whole model so the selection becomes (0, 0, 0)."""
 
-        if not self._require_editing("Center Selection at Origin"):
+        if not self._require_editing("Set Selection as Origin"):
             return
         if self.viewport.paste_preview_active:
             self._notify(
-                "Center refused: finish or cancel the active placement first.",
-                7000)
+                "Set Origin refused: finish or cancel the active placement "
+                "first.", 7000)
             return
         session = self.viewport.edit_session
         if session is None or not session.selection:
-            self._notify("Center Selection: select an element first.", 5000)
+            self._notify("Set Origin: select an element first.", 5000)
             return
         if not self.viewport.center_edit_model_at_origin(selection_only=True):
-            self._notify("The selection is already centered at the origin.", 4500)
+            self._notify("The selection is already the origin.", 4500)
             return
         self._notify(
-            "Selection centered at the origin. Undo restores it.", 7000)
+            "Selection set as the model's origin. Undo restores it.", 7000)
 
     def _move_selected_geometry(self) -> None:
         if not self._require_editing("Move"):
@@ -1871,6 +1871,9 @@ class _GeometryEditMixin:
             rotate = menu.addAction(
                 "Rotate", self._rotate_selected_geometry)
             rotate.setEnabled(editing and self._family is not None)
+            menu.addSeparator()
+            menu.addAction(self.edit_center_action)
+            menu.addAction(self.edit_center_selection_action)
         menu.addSeparator()
         reset_camera = menu.addAction(
             "Reset Camera", self._reset_view_and_gizmo)

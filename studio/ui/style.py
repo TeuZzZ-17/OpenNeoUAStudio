@@ -76,6 +76,13 @@ def theme_list_color(name: str, fallback: str = "#808080") -> QColor:
     return QColor(colors.get(name, fallback))
 
 
+def theme_accent_color(fallback: str = "#f1c66d") -> QColor:
+    """The active theme's ``tone.Accent`` color."""
+    app = QApplication.instance()
+    value = app.property("studioAccentColor") if app is not None else None
+    return QColor(value or fallback)
+
+
 def apply_studio_style(theme: str | None = None, *, persist: bool = False) -> None:
     """Apply one theme to every open editor without changing document state."""
     app = QApplication.instance()
@@ -100,6 +107,7 @@ def apply_studio_style(theme: str | None = None, *, persist: bool = False) -> No
         else:
             palette.setColor(role, QColor(color))
     colors["Accent"] = data["tone"]["Accent"]
+    app.setProperty("studioAccentColor", colors["Accent"])
     disabled, menu_background = QColor(colors["Disabled.Text"]), QColor(colors["Window"])
     colors["MenuDisabled"] = QColor.fromRgbF(
         *(0.7 * getattr(disabled, channel)() + 0.3 * getattr(menu_background, channel)()

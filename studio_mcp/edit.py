@@ -273,7 +273,7 @@ def op_symmetrize(ctx, axis="x", source: str = "positive", tolerance: float = 0.
 @op("center_at_origin")
 def op_center_at_origin(ctx, axes: str = "xyz"):
     """Move the whole model so the center of its bounding box is at the origin (only points used by polygons
-    count, like the editor's Center Model at Origin). axes limits it, e.g. 'xz' keeps the height."""
+    count, like the editor's Set Origin to Model Center). axes limits it, e.g. 'xz' keeps the height."""
     lm = ctx.lm
     used = sorted({i for ring in lm.polygons for i in ring}) or list(range(len(lm.points)))
     if not used:
