@@ -746,10 +746,13 @@ class VehicleModelReference:
     base_normal: str = ""
     three_ds_normal: str = ""
     collision_shape_path: str = ""
+    gun_role: str = ""
 
     @property
     def label(self) -> str:
         suffix = f" — {self.block.name}" if self.block.name else ""
+        if self.gun_role == "spawner":
+            suffix += " (Spawner)"
         wait = (
             f", vp_wait {self.vp_wait}"
             if self.vp_wait is not None else "")
@@ -926,8 +929,11 @@ def script_model_references(text: str) -> list[VehicleModelReference]:
             "3ds_normal": "",
             "collision_shape": "",
         }
+        gun_role = ""
         for _line, key, raw, _indent in _generic_parameter_rows(lines, block):
-            if key in visual_paths:
+            if key == "gun_type" and block.kind == "new_vehicle":
+                gun_role = raw.casefold()
+            elif key in visual_paths:
                 visual_paths[key] = raw
             elif key in tuples:
                 try:
@@ -991,6 +997,7 @@ def script_model_references(text: str) -> list[VehicleModelReference]:
             base_normal=visual_paths["base_normal"],
             three_ds_normal=visual_paths["3ds_normal"],
             collision_shape_path=shape_path,
+            gun_role=gun_role,
         ))
     return references
 
