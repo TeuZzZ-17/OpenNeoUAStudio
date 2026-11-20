@@ -155,6 +155,23 @@ class GeometryPasteIntegrationTests(unittest.TestCase):
                          (6, 2))
         self.assertEqual(len(self.block.olpl), 2)
 
+    def test_add_emitter_attaches_to_single_selected_vertex(self):
+        self.window.viewport.select_edit_vertices([1])
+        menu = self.window._create_viewport_context_menu()
+        add = next(action for action in menu.actions() if action.text() == "Add Emitter")
+        self.assertTrue(add.isEnabled())
+        entry = SimpleNamespace(family=self.family, owner=self.obj, value=0)
+        with patch("studio.workbench.window_emitters.scan_catalog"), \
+             patch("studio.workbench.window_emitters.EffectCatalogDialog") as dialog, \
+             patch.object(self.window, "_insert_emitter") as insert, \
+             patch.object(self.window, "_pick_emitter_anchor") as pick:
+            from PySide6.QtWidgets import QDialog
+            dialog.return_value.exec.return_value = QDialog.DialogCode.Accepted
+            dialog.return_value.selected_entry.return_value = entry
+            add.trigger()
+            insert.assert_called_once_with(self.family, self.obj, self.block, 1, "Add emitter")
+            pick.assert_not_called()
+
     def test_add_texture_stages_quad_and_resource_until_confirmation(self):
         from studio.assets.mapping import save_model_base_copy
         from studio.formats.images import IlbmImage

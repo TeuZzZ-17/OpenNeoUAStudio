@@ -381,10 +381,20 @@ class _EmittersMixin:
         self._notify(label, 4500)
         return True
 
+    def _selected_emitter_anchor(self):
+        session = self.viewport.edit_session
+        if (session is None or session.modal_active or self._workbench_obj is None
+                or self.viewport.edit_owner != self._workbench_obj.owner_path
+                or len(session.selection) != 1):
+            return None
+        index = next(iter(session.selection))
+        return index if 0 <= index < len(session.model.points) else None
+
     def _add_emitter(self):
         if self._material_structure_reason():
             return
         owner = self._workbench_obj
+        anchor = self._selected_emitter_anchor()
         dialog = EffectCatalogDialog(
             scan_catalog(self._family, "emitter", [owner]), self, kind="emitter",
             playback_speed=lambda: self.viewport.animation_speed,
@@ -396,6 +406,9 @@ class _EmittersMixin:
         if entry is None:
             return
         block = entry.owner.base_object.ades[entry.value]
+        if anchor is not None and anchor < len(owner.skeleton.points):
+            self._insert_emitter(entry.family, entry.owner, block, anchor, "Add emitter")
+            return
         self._pick_emitter_anchor(lambda anchor: self._insert_emitter(
             entry.family, entry.owner, block, anchor, "Add emitter"),
             preview=emitter_preview(entry.family, block, sample_limit=48))

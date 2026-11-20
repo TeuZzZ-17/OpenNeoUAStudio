@@ -1890,9 +1890,12 @@ class _GeometryEditMixin:
             delete_geometry.setEnabled(self.can_delete_geometry())
         if active_emitter is None or active_fx is not None:
             menu.addSeparator()
-        for add_action in (self.add_fx_action, self.add_emitter_action):
+        for add_action, allowed in (
+            (self.add_fx_action, not has_selection),
+            (self.add_emitter_action, not has_selection or self._selected_emitter_anchor() is not None),
+        ):
             action = menu.addAction(add_action.text(), add_action.trigger)
-            action.setEnabled(add_action.isEnabled() and not has_selection)
+            action.setEnabled(add_action.isEnabled() and allowed)
         add_texture = menu.addAction(
             "Add Texture", lambda: self._add_textured_face(position))
         add_texture.setEnabled(can_edit_selection and not has_selection
