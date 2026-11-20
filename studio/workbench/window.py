@@ -26,6 +26,7 @@ from PySide6.QtWidgets import (
     QComboBox,
     QDialog,
     QDoubleSpinBox,
+    QGraphicsDropShadowEffect,
     # Tests patch this module attribute to drive the file dialogs used by the
     # mixins (the Qt class is shared, so the patch reaches them too).
     QFileDialog,  # noqa: F401
@@ -275,7 +276,8 @@ class AssemblyWindow(
         self.viewport.emitterPicked.connect(self._on_emitter_picked)
         self.viewport.editModeChanged.connect(self._on_edit_mode_toggled)
         self.viewport.editSelectionChanged.connect(
-            lambda _count: self._sync_edit_action_states())
+            lambda _count: (self._sync_edit_action_states(),
+                            self._refresh_shade_readout()))
         self.viewport.editSelectionDetailsChanged.connect(
             self._on_edit_selection_details_changed)
         self.viewport.geometryEdited.connect(self._on_geometry_edited)
@@ -436,6 +438,32 @@ class AssemblyWindow(
         self.material_delete_button = QPushButton("Delete Material")
         self.material_delete_button.clicked.connect(
             self._delete_material_block)
+        self.shade_spin = QSpinBox()
+        self.shade_spin.setRange(0, 250)
+        self.shade_spin.setSpecialValueText("Auto")
+        self.shade_spin.setValue(0)
+        self.shade_spin.setKeyboardTracking(False)
+        self.shade_spin.setToolTip(
+            "Real Urban Assault shade (0 = full light, 250 = darkest). "
+            "Shows the average for multiple polygons, or 'Auto' while Auto Shade is on.")
+        self.shade_spin.valueChanged.connect(self._on_shade_spin_changed)
+        self.shade_auto_button = QPushButton("Auto Shade")
+        self.shade_auto_button.setCheckable(True)
+        self.shade_auto_button.setChecked(False)
+        self.shade_auto_button.setToolTip(
+            "Helper: switching it on (glowing) locks the slider and shades "
+            "the selected polygons (all when none is selected) from the "
+            "direction they face, like the original models (level 0). Off, which "
+            "is the normal state: the slider and number show the level the "
+            "selection really has, and you set it by hand, live. "
+            "Flames, smoke and animated polygons are left alone.")
+        self._shade_glow = QGraphicsDropShadowEffect(self.shade_auto_button)
+        self._shade_glow.setOffset(0, 0)
+        self.shade_auto_button.setGraphicsEffect(self._shade_glow)
+        self.shade_auto_button.toggled.connect(self._on_shade_auto_toggled)
+        self._shade_baseline: dict[int, int] = {}
+        self._shade_slider_last = 0
+        self._style_shade_auto_button()
         self.chunk_tree = QTreeWidget()
         use_standard_list_style(self.chunk_tree)
         enable_tree_sort(self.chunk_tree)
@@ -1524,6 +1552,40 @@ class AssemblyWindow(
         center_row.addWidget(self.center_selection_button)
         model_layout.addWidget(origin_box)
 
+        shade_box = QGroupBox("Shade")
+        shade_layout = QVBoxLayout(shade_box)
+        shade_layout.setContentsMargins(5, 4, 5, 5)
+        shade_layout.setSpacing(4)
+        slider_row = QHBoxLayout()
+        slider_row.setSpacing(6)
+        self.shade_spin.setMinimumWidth(72)
+        self.shade_spin.setMaximumWidth(86)
+        slider_row.addWidget(self.shade_spin)
+        slider_row.addWidget(QLabel("Lighter"))
+        self.shade_slider = QSlider(Qt.Orientation.Horizontal)
+        self.shade_slider.setRange(0, 250)
+        self.shade_slider.setValue(0)
+        self.shade_slider.setMinimumWidth(80)
+        self.shade_slider.setToolTip(
+            "Real Urban Assault shade (0 = full light, 250 = darkest). "
+            "Drag to lighten (left) or darken (right) all selected polygons "
+            "together (all polygons when none is selected), keeping their "
+            "relative shading.")
+        self.shade_slider.valueChanged.connect(self._on_shade_slider_moved)
+        self.shade_slider.sliderPressed.connect(self._on_shade_slider_pressed)
+        self.shade_slider.sliderReleased.connect(self._on_shade_slider_released)
+        slider_row.addWidget(self.shade_slider, 1)
+        slider_row.addWidget(QLabel("Darker"))
+        self.shade_sep_label = QLabel("|")
+        slider_row.addWidget(self.shade_sep_label)
+        self.shade_range_label = QLabel("Range: -")
+        self.shade_range_label.setToolTip(
+            "Real Urban Assault shade range (min-max) and average across "
+            "the targeted polygons (0-250).")
+        slider_row.addWidget(self.shade_range_label)
+        shade_layout.addLayout(slider_row)
+        shade_layout.addWidget(self.shade_auto_button)
+
         fx_box = QGroupBox("ANM")
         fx_layout = QVBoxLayout(fx_box)
         fx_layout.setContentsMargins(5, 4, 5, 5)
@@ -1599,6 +1661,7 @@ class AssemblyWindow(
         # Emitters sit above the ANM box.
         model_layout.addWidget(emitter_box)
         model_layout.addWidget(fx_box)
+        model_layout.addWidget(shade_box)
 
         uv_box = QGroupBox("ANM, Emitters and Textures · Preview and Editor")
         uv_layout = QVBoxLayout(uv_box)

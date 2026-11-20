@@ -13,6 +13,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+from studio.assets.shade import SHADE_BASE, SHADE_FRONT, SHADE_VERTICAL, auto_shade_value
 from studio_mcp import core, meshmath, uvs as uvtools
 from studio_mcp.edit import _need, _reference_for, _uv_spec, op
 from studio_mcp.edit_materials import op_add_material_block, op_set_texture
@@ -21,9 +22,7 @@ SWATCH_FILE = Path(__file__).with_name("swatches.json")
 _SWATCHES: dict | None = None
 _DONORS: dict | None = None
 
-# Medians of the original Set1 vehicles (ATTS shade, 0 = full light, higher = darker):
-# top 5, front 30, sides 50, back 70, belly 95.  shade = base + vertical * ny - front * nz.
-SHADE_BASE, SHADE_VERTICAL, SHADE_FRONT = 50.0, 45.0, 20.0
+# Medians of the original Set1 vehicles live in studio.assets.shade (shared with the Model Editor panel).
 
 
 def swatches() -> dict:
@@ -343,11 +342,11 @@ def op_auto_shade(ctx, select=None, base: float = SHADE_BASE, vertical: float = 
         if block is None or lm.block_class(table[pid][0]) != "amesh.class" or not block.textured                 or block.tracy_mode != "none":          # flames, smoke and tendrils keep their own values
             skipped += 1
             continue
-        normal = meshmath.outward_normal(lm.polygon_points(pid))
-        if normal is None:
+        value = auto_shade_value(lm.polygon_points(pid), base=base, vertical=vertical, front=front,
+                                 offset=offset)
+        if value is None:
             skipped += 1
             continue
-        value = int(round(min(max(base + vertical * normal[1] - front * normal[2] + offset, 0), 250)))
         entry = lm.blocks[table[pid][0]].atts[table[pid][1]]
         lm.move_polygon_to_block(pid, table[pid][0], atts=(entry.color_val, value, entry.tracy_val, entry.pad),
                                  table=table)

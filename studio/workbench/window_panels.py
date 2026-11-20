@@ -62,6 +62,14 @@ class _FamilyPanelsMixin:
             editing and supported
             and (block.class_id or "").lower() == "amesh.class")
         self.material_delete_button.setEnabled(editing and supported)
+        has_model = editing and self._workbench_obj is not None
+        self.shade_auto_button.setEnabled(has_model)
+        self.shade_spin.setEnabled(
+            has_model and not self.shade_auto_button.isChecked())
+        if not self.shade_slider.isSliderDown():
+            self._refresh_shade_readout()
+        self.shade_slider.setEnabled(
+            has_model and not self.shade_auto_button.isChecked())
 
     # -- family -> panels --------------------------------------------------------
 

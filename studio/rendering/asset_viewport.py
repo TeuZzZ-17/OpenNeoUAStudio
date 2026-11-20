@@ -480,6 +480,21 @@ class AssetViewport(
                 pick_polygons=edit_state["pick_polygons"])
         self.update()
 
+    def update_face_shades(self, owner: str, shades: dict[int, int]) -> None:
+        """Fast in-place shade update for live slider preview (no family reload)."""
+
+        if not shades:
+            return
+        changed = False
+        for face in self._faces:
+            if face.owner == owner:
+                new_shade = shades.get(face.poly_id)
+                if new_shade is not None and face.shade != new_shade:
+                    face.shade = new_shade
+                    changed = True
+        if changed:
+            self.update()
+
 
     def set_selected_owner(self, owner: str | None) -> None:
         self._selected_owner = owner

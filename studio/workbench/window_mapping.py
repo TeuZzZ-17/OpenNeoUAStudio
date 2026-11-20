@@ -18,6 +18,7 @@ from PySide6.QtWidgets import (
 )
 
 from studio.assets.catalog import classify_texture_assignment
+from studio.assets.shade import SHADE_MAX, apply_polygon_shade, shadable_entries, shade_offset
 from studio.assets.family import (
     AssetFamily,
 )
@@ -390,6 +391,203 @@ class _PolygonMappingMixin:
             f"Deleted material block #{block_index}; {mapped} polygon(s) "
             "are now unmapped. Undo is available.", 9000)
 
+    def _shade_target_polygons(self) -> list[int] | None:
+        """Selected polygons (including full-vertex selections), or None (= all) when nothing is selected."""
+
+        selected = set(self._selected_polys)
+        if not selected:
+            session = getattr(self.viewport, "edit_session", None)
+            model = getattr(self._workbench_obj, "skeleton", None)
+            if session is not None and session.selection and model is not None:
+                verts = session.selection
+                selected = {
+                    pid for pid, poly in enumerate(model.polygons)
+                    if poly and all(v in verts for v in poly)
+                }
+        if not selected and self._selected_poly is not None:
+            selected = {self._selected_poly}
+        return sorted(selected) if selected else None
+
+    def _run_polygon_shade(self, label: str, **options) -> None:
+        if not self._require_editing(label):
+            return
+        if self._workbench_obj is None or self._workbench_obj.skeleton is None:
+            self._notify(f"{label}: no editable model is loaded.", 5000)
+            return
+        targets = self._shade_target_polygons()
+        if targets is None and options.get("value") is not None:
+            self._notify(f"{label}: select the polygons to shade first.", 5000)
+            return
+        try:
+            result = self._apply_material_structure(
+                label.lower(),
+                lambda: apply_polygon_shade(
+                    self._workbench_obj, targets, **options))
+        except (MappingEditError, ValueError) as exc:
+            QMessageBox.warning(self, f"Cannot {label.lower()}", str(exc))
+            return
+        if not result["shaded"]:
+            self._notify(
+                f"{label}: no plain textured polygon in the selection "
+                "(flames, smoke and animated polygons keep their own shade).",
+                7000)
+            return
+        low, high = result["range"]
+        self._notify(
+            f"{label}: {result['shaded']} polygon(s) shaded "
+            f"({low}..{high}), {result['skipped']} skipped. Undo is available.",
+            8000)
+
+    def _auto_shade_polygons(self) -> None:
+        self._run_polygon_shade("Auto Shade")
+
+    # -- Shade group: Auto Shade toggle, live slider, numeric readout ---------
+
+    def _style_shade_auto_button(self) -> None:
+        """Glowing border while Auto Shade is on, like "Show current wireframe"."""
+
+        from PySide6.QtGui import QColor, QPalette
+        from PySide6.QtWidgets import QApplication
+        from entity_designer.wireframe_panel import CURRENT_BUTTON_ACCENTS
+
+        app = QApplication.instance()
+        if app is None:
+            return
+        theme = str(app.property("studioThemeMode") or "dark")
+        border, glow = CURRENT_BUTTON_ACCENTS.get(
+            theme, CURRENT_BUTTON_ACCENTS["dark"])
+        background = app.palette().color(QPalette.ColorRole.Highlight).name()
+        self.shade_auto_button.setStyleSheet(
+            "QPushButton:checked {"
+            f" background-color: {background}; color: #ffffff;"
+            f" border: 2px solid {border}; padding: 2px 6px;"
+            "}")
+        self._shade_glow_color = QColor(glow)
+        self._update_shade_glow()
+
+    def _update_shade_glow(self) -> None:
+        from PySide6.QtGui import QColor
+
+        active = self.shade_auto_button.isChecked()
+        self._shade_glow.setBlurRadius(18 if active else 0)
+        glow = QColor(getattr(self, "_shade_glow_color", QColor(94, 203, 255, 190)))
+        glow.setAlpha(glow.alpha() if active else 0)
+        self._shade_glow.setColor(glow)
+
+    def _on_shade_auto_toggled(self, on: bool) -> None:
+        self._update_shade_glow()
+        self._update_material_buttons()
+        if on:
+            self._auto_shade_polygons()
+
+    def _shade_current_values(self) -> dict[int, int]:
+        if self._workbench_obj is None or self._workbench_obj.skeleton is None:
+            return {}
+        return {pid: entry.shade_val for pid, entry in shadable_entries(
+            self._workbench_obj, self._shade_target_polygons())}
+
+    @staticmethod
+    def _format_shade_range(values: list[int], *, auto: bool = False) -> str:
+        prefix = "Auto | " if auto else ""
+        if not values:
+            return "Auto" if auto else "Range: -"
+        low, high = min(values), max(values)
+        avg = int(round(sum(values) / len(values)))
+        if low == high:
+            return f"{prefix}Shade: {low}"
+        return f"{prefix}Range: {low}-{high} | Avg: {avg}"
+
+    def _set_shade_spin(self, value: int, *, auto: bool = False) -> None:
+        self.shade_spin.blockSignals(True)
+        if auto:
+            self.shade_spin.setMinimum(-1)
+            self.shade_spin.setValue(-1)
+        else:
+            self.shade_spin.setMinimum(0)
+            self.shade_spin.setValue(min(max(value, 0), SHADE_MAX))
+        self.shade_spin.blockSignals(False)
+
+    def _refresh_shade_readout(self) -> None:
+        """Slider, spinbox and range show the real UA shade (0..250), or 'Auto' while Auto Shade is on."""
+
+        values = list(self._shade_current_values().values())
+        avg = int(round(sum(values) / len(values))) if values else 0
+        auto_on = self.shade_auto_button.isChecked()
+        self.shade_slider.blockSignals(True)
+        self.shade_slider.setValue(avg)
+        self.shade_slider.blockSignals(False)
+        self._shade_slider_last = avg
+        self._set_shade_spin(avg, auto=auto_on)
+        self.shade_range_label.setText(
+            self._format_shade_range(values, auto=auto_on))
+
+    def _reset_shade_auto(self) -> None:
+        """A new selection starts in manual mode: Auto Shade is only a one-shot helper."""
+
+        if self.shade_auto_button.isChecked():
+            self.shade_auto_button.blockSignals(True)
+            self.shade_auto_button.setChecked(False)
+            self.shade_auto_button.blockSignals(False)
+            self._update_shade_glow()
+        self._update_material_buttons()
+
+    def _on_shade_spin_changed(self, value: int) -> None:
+        if value < 0:
+            return
+        self.shade_slider.setValue(value)     # the slider handler applies it
+
+    def _shade_apply_live(self, delta: int) -> None:
+        """Preview baseline + delta on the model without recording undo yet."""
+
+        entries = dict(shadable_entries(
+            self._workbench_obj, self._shade_baseline))
+        shades: dict[int, int] = {}
+        for pid, base in self._shade_baseline.items():
+            val = min(max(base + delta, 0), SHADE_MAX)
+            entries[pid].shade_val = val
+            shades[pid] = val
+        owner = getattr(self._workbench_obj, "owner_path", None) or self._selected_owner
+        self.viewport.update_face_shades(owner, shades)
+        self.shade_range_label.setText(
+            self._format_shade_range(list(shades.values()), auto=False))
+
+    def _on_shade_slider_pressed(self) -> None:
+        if not self._require_editing("Shade"):
+            return
+        self._shade_baseline = self._shade_current_values()
+        self._shade_origin = self.shade_slider.value()
+
+    def _on_shade_slider_moved(self, value: int) -> None:
+        self._set_shade_spin(value, auto=False)
+        if not self._shade_baseline_active():
+            # Keyboard, spinbox or mouse wheel: one step, committed at once.
+            delta = value - self._shade_slider_last
+            self._shade_slider_last = value
+            if delta:
+                self._run_polygon_shade(
+                    "Darken" if delta > 0 else "Lighten", delta=delta)
+            return
+        self._shade_slider_last = value
+        self._shade_apply_live(value - self._shade_origin)
+
+    def _shade_baseline_active(self) -> bool:
+        return self.shade_slider.isSliderDown()
+
+    def _on_shade_slider_released(self) -> None:
+        """Record the drag as one undo step, then leave the slider where it is."""
+
+        delta = self.shade_slider.value() - self._shade_origin
+        baseline = self._shade_baseline
+        self._shade_baseline = {}
+        if not baseline:
+            return
+        entries = dict(shadable_entries(self._workbench_obj, baseline))
+        for pid, base in baseline.items():
+            entries[pid].shade_val = base          # undo the preview, then commit properly
+        if delta:
+            self._run_polygon_shade(
+                "Darken" if delta > 0 else "Lighten", delta=delta)
+
     def _on_polygon_structure_picked(
             self, owner: str, poly_id: int, block_index: int) -> None:
         self._picked_structure = (owner, poly_id, block_index)
@@ -458,7 +656,7 @@ class _PolygonMappingMixin:
         self.fx_combo.blockSignals(False)
         if self._mapping_index is not None:
             self._fill_polygon_inspector(self._selected_poly)
-        self._update_material_buttons()
+        self._reset_shade_auto()
         if element is not None and not additive and not mirror_active:
             if self._editing_allowed() \
                     and element.shared_state == "shared":
