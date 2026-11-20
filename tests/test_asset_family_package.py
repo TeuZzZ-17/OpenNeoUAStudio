@@ -31,7 +31,7 @@ def _form(form_type: bytes, children: bytes) -> bytes:
     return _chunk(b"FORM", form_type + children)
 
 
-def _base_bytes() -> bytes:
+def _base_bytes(texture_name: bytes = b"Texture:STATIC.ILB") -> bytes:
     atts = struct.pack(">hBBBB", 0, 1, 2, 3, 0)
     olpl = struct.pack(">hBBBBBB", 3, 0, 0, 255, 0, 0, 255)
     texture = _form(
@@ -39,7 +39,7 @@ def _base_bytes() -> bytes:
         _chunk(b"CLID", b"ilbm.class\0")
         + _form(
             b"CIBO",
-            _chunk(b"NAM2", b"Texture:STATIC.ILB\0")
+            _chunk(b"NAM2", texture_name + b"\0")
             + _chunk(b"OTL2", bytes((0, 0, 255, 0, 0, 255)))))
     area = _form(
         b"AREA",
@@ -145,6 +145,51 @@ def _make_package(root: Path):
         PackageEntry(
             "Texture:STATIC.ILB", "ilbm.class", "fixture",
             "Texture/STATIC.ILB", "ADES texture"),
+        PackageEntry(
+            "SET palette", "palette.class", "fixture",
+            "PALETTE/STANDARD.PAL", "Retail indexed palette"),
+        PackageEntry(
+            "SHADERMP", "shadermap.class", "fixture",
+            "REMAP/SHADERMP.ILB", "Retail shade lookup"),
+        PackageEntry(
+            "TRACYRMP", "tracymap.class", "fixture",
+            "REMAP/TRACYRMP.ILB", "Retail transparency lookup"),
+    ]
+    write_package_manifest(root, base, family, entries)
+    return family
+
+
+def _make_package_with_ilbm_texture(root: Path):
+    """Like _make_package, but the texture is a real .ILBM reference: the
+    only extension the engine-order resolver (and its active-set lookup)
+    actually applies to (see family._applies_external_texture_order)."""
+
+    (root / "Skeleton").mkdir(parents=True)
+    (root / "PALETTE").mkdir(parents=True)
+    (root / "REMAP").mkdir(parents=True)
+    base = root / "TEST.BASE"
+    base.write_bytes(_base_bytes(b"HUBI.ILBM"))
+    model = create_minimal_sklt_model()
+    save_sklt_with_poo2_pol2_structure(
+        model,
+        [(0.0, 0.0, 0.0), (1.0, 0.0, 0.0),
+         (0.0, 1.0, 0.0)],
+        [[0, 1, 2]], root / "Skeleton" / "TEST.SKLT")
+    (root / "HUBI.ILBM").write_bytes(_vbmp(1, 1, b"\x08"))
+    (root / "PALETTE" / "STANDARD.PAL").write_bytes(_palette_bytes())
+    (root / "REMAP" / "SHADERMP.ILB").write_bytes(_shader_bytes())
+    (root / "REMAP" / "TRACYRMP.ILB").write_bytes(_tracy_bytes())
+    family = load_asset_family(base, isolated_root=root)
+    entries = [
+        PackageEntry(
+            "TEST.BASE", "base.class", "fixture", "TEST.BASE",
+            "entry point"),
+        PackageEntry(
+            "Skeleton:TEST.SKLT", "sklt.class", "fixture",
+            "Skeleton/TEST.SKLT", "OBJT sklt.class NAME"),
+        PackageEntry(
+            "HUBI.ILBM", "ilbm.class", "fixture",
+            "HUBI.ILBM", "ADES texture"),
         PackageEntry(
             "SET palette", "palette.class", "fixture",
             "PALETTE/STANDARD.PAL", "Retail indexed palette"),
@@ -266,6 +311,39 @@ class CompleteAssetFamilyPackageTests(unittest.TestCase):
                     [])
                 self.assertEqual(
                     (source / "TEST.BASE").read_bytes(), source_bytes)
+            finally:
+                window.close()
+
+    def test_window_export_places_textures_under_active_set_folder(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            parent = Path(tmp)
+            source = parent / "source"
+            source.mkdir()
+            family = _make_package_with_ilbm_texture(source)
+            family.active_set_number = 3
+            output = parent / "exported"
+            window = AssemblyWindow()
+            try:
+                window._set_family(family)
+                with patch.object(window, "_notify"), \
+                        patch("studio.workbench.window.QMessageBox.critical") as critical:
+                    exported = window._write_model_files(
+                        "root", family, family.root_object,
+                        output / "Skeleton" / "TEST.SKLT",
+                        output / "TEST.BASE", ask_replace=False)
+                self.assertTrue(exported, critical.call_args_list)
+                critical.assert_not_called()
+                texture_files = list(
+                    (output / "Textures" / "Set3").glob("*.ILBM"))
+                self.assertEqual(len(texture_files), 1)
+                self.assertFalse((output / "HUBI.ILBM").exists())
+                committed = load_asset_family(
+                    output / "TEST.BASE", isolated_root=output,
+                    active_set=3)
+                self.assertEqual(
+                    [dep.status for dep in committed.dependencies
+                     if dep.status in ("missing", "ambiguous", "failed_load")],
+                    [])
             finally:
                 window.close()
 

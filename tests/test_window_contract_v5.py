@@ -179,7 +179,7 @@ class WindowContractV5Tests(unittest.TestCase):
             self.assertFalse(hasattr(window, "setbas_preview_button"))
             self.assertEqual(
                 window.setbas_runtime_loose_button.text(),
-                "Export Runtime Loose SET")
+                "Extract Loose Set")
             self.assertEqual(
                 window.export_runtime_loose_action.text(),
                 "Extract Entire Current Set")
@@ -225,7 +225,9 @@ class WindowContractV5Tests(unittest.TestCase):
                 "Export Model")
             self.assertEqual(
                 window.setbas_onua_button.text(),
-                "Export Whole Model as Archive (.ONUA)")
+                "Export Model as Archive (.ONUA)")
+            self.assertEqual(
+                window.setbas_export_model_button.text(), "Export Model")
             self.assertEqual(window.material_copy_button.text(),
                              "Copy Material")
             self.assertEqual(window.material_paste_button.text(),
@@ -451,6 +453,18 @@ class WindowContractV5Tests(unittest.TestCase):
             self.assertEqual(
                 window._bundle_texture_relative_path(
                     "Textures/HUBI.ILBM"), Path("HUBI.ILBM"))
+            # With a known active set, textures go under Textures/Set<N>/ so
+            # the exported model matches the loader's own search order.
+            set3_family = SimpleNamespace(
+                setbas_path=Path("C:/Game/Sets/Set3/Objects/Set.BAS"))
+            self.assertEqual(
+                window._bundle_texture_relative_path(
+                    "HUBI.ILBM", set3_family),
+                Path("Textures") / "Set3" / "HUBI.ILBM")
+            # FX1/FX2/FX3 are set-independent: always flat.
+            self.assertEqual(
+                window._bundle_texture_relative_path(
+                    "FX2.ILBM", set3_family), Path("FX2.ILBM"))
         finally:
             window.close()
 
@@ -519,7 +533,7 @@ class WindowContractV5Tests(unittest.TestCase):
         finally:
             window.close()
 
-    def test_setbas_animation_single_click_routes_to_preview(self):
+    def test_setbas_animation_activation_routes_to_preview(self):
         window = AssemblyWindow()
         try:
             resource = SimpleNamespace(
@@ -532,7 +546,7 @@ class WindowContractV5Tests(unittest.TestCase):
             item.setData(0, Qt.ItemDataRole.UserRole, 0)
             with patch.object(
                     window, "_preview_setbas_animation") as preview:
-                window._on_setbas_item_selected(item)
+                window._preview_setbas_item_on_activation(item)
             preview.assert_called_once_with(resource)
         finally:
             window.close()
@@ -606,7 +620,7 @@ class WindowContractV5Tests(unittest.TestCase):
                     if not candidate.isSeparator()]
             copied.assert_called_once_with(
                 "Objects/MODEL.BASE", "BASE name copied successfully.")
-            self.assertIn("Export Whole Model as Archive (.ONUA)", labels)
+            self.assertIn("Export Model as Archive (.ONUA)", labels)
             self.assertIn("Show Dependencies", labels)
             self.assertIn("Edit BASE Dependencies", labels)
         finally:
@@ -665,7 +679,9 @@ class WindowContractV5Tests(unittest.TestCase):
         finally:
             window.close()
 
-    def test_setbas_left_click_selects_and_previews_every_supported_type(self):
+    def test_setbas_left_click_selects_without_previewing(self):
+        # A single click only selects: many rows are plain graphic files, so
+        # previewing needs a double-click or the context menu's "Preview".
         window = AssemblyWindow()
         try:
             kinds = (
@@ -707,11 +723,19 @@ class WindowContractV5Tests(unittest.TestCase):
                         position)
                     QApplication.processEvents()
                     self.assertIs(window.setbas_tree.currentItem(), item)
-                    preview.assert_called_with(item)
+                preview.assert_not_called()
+
+                QTest.mouseDClick(
+                    window.setbas_tree.viewport(),
+                    Qt.MouseButton.LeftButton,
+                    Qt.KeyboardModifier.NoModifier,
+                    window.setbas_tree.visualItemRect(items[-1]).center())
+                QApplication.processEvents()
+                preview.assert_called_once_with(items[-1])
         finally:
             window.close()
 
-    def test_setbas_arrow_navigation_refreshes_supported_preview(self):
+    def test_setbas_arrow_navigation_selects_without_previewing(self):
         window = AssemblyWindow()
         try:
             resources = [
@@ -742,7 +766,7 @@ class WindowContractV5Tests(unittest.TestCase):
                 QTest.keyClick(window.setbas_tree, Qt.Key.Key_Down)
                 QApplication.processEvents()
             self.assertIs(window.setbas_tree.currentItem(), second)
-            preview.assert_called_once_with(second)
+            preview.assert_not_called()
         finally:
             window.close()
 

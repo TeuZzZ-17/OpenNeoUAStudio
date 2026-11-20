@@ -17,7 +17,6 @@ from studio.assets.family import AssetFamily, FamilyObject
 from studio.exchange.portable import ResolvedFile, set_backup_enabled
 from studio.assets.dependencies import AssetDependency
 from studio.assets.mapping import (
-    MappingEditError,
     TextureNameEdit,
     apply_texture_name_edits_to_bytes,
 )
@@ -172,7 +171,7 @@ class AssetDependenciesWorkflowTests(unittest.TestCase):
         finally:
             dispose_window(window)
 
-    def test_base_dependency_specs_save_revert_and_writer_limits(self):
+    def test_base_dependency_specs_save_revert_and_name_growth(self):
         set_backup_enabled(True)
         self.addCleanup(set_backup_enabled, False)
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -213,12 +212,19 @@ class AssetDependenciesWorkflowTests(unittest.TestCase):
                 self.assertEqual(editor.text(), original)
                 dialog.close()
 
+                # A name longer than the original NAM2 allocation grows the
+                # chunk (and reflows parent FORM sizes) instead of being
+                # rejected: a modder must be able to overwrite freely.
                 original_bytes = _fx_base_bytes("FX1")
-                with self.assertRaises(MappingEditError):
-                    apply_texture_name_edits_to_bytes(
-                        original_bytes,
-                        [TextureNameEdit(
-                            "root", 0, "TOO_LONG.ILBM", "texture")])
+                grown = apply_texture_name_edits_to_bytes(
+                    original_bytes,
+                    [TextureNameEdit(
+                        "root", 0, "MUCH_LONGER_NAME.ILBM", "texture")])
+                self.assertGreater(len(grown), len(original_bytes))
+                grown_parsed = parse_base_bytes(grown).root
+                self.assertEqual(
+                    grown_parsed.ades[0].texture.name,
+                    "MUCH_LONGER_NAME.ILBM")
             finally:
                 dispose_window(window)
 
@@ -450,17 +456,21 @@ class AssetDependenciesWorkflowTests(unittest.TestCase):
         setbas_start = source.index("    def _show_setbas_context_menu")
         setbas_end = source.index("    def _asset_item_path", setbas_start)
         self.assertIn(
-            '"Export Asset Family"', source[setbas_start:setbas_end])
+            '"Export Model"', source[setbas_start:setbas_end])
         asset_start = source.index("    def _show_asset_context_menu")
         asset_end = source.index("    def _selected_texture_names", asset_start)
         self.assertIn(
-            '"Export Asset Family"', source[asset_start:asset_end])
+            '"Export Model"', source[asset_start:asset_end])
         self.assertIn(
-            '"Export Whole Model as Archive (.ONUA)"', source[asset_start:asset_end])
+            '"Export Model as Archive (.ONUA)"', source[asset_start:asset_end])
         texture_start = source.index("    def _show_texture_context_menu")
         texture_end = source.index("    def _build_toolbar", texture_start)
-        self.assertIn(
+        # The Asset Textures tab menu drops this in favor of a direct
+        # Export Selected as PNG/ILBM pair; it stays on the other two.
+        self.assertNotIn(
             '"Export Asset Family"', source[texture_start:texture_end])
+        self.assertIn(
+            '"Export Selected as ILBM"', source[texture_start:texture_end])
 
     def test_asset_textures_suppresses_expected_missing_cmap_noise(self):
         source = module_source("studio/workbench/window.py")

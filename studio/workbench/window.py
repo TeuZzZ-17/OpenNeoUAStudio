@@ -119,6 +119,13 @@ from studio.workbench.common import (  # re-exported for existing callers
     _reveal_in_file_manager as _reveal_in_file_manager,
     AddFxElementDialog as AddFxElementDialog,
 )
+_BAS_CLASS_LABELS = {
+    "base.class": "BASE",
+    "bmpanim.class": "ANM",
+    "ilbm.class": "ILBM",
+    "sklt.class": "SKLT",
+}
+
 from studio.workbench.window_extraction import _ExtractionMixin
 from studio.workbench.window_fx import _FxElementsMixin
 from studio.workbench.window_mapping import _PolygonMappingMixin
@@ -382,8 +389,10 @@ class AssemblyWindow(
         self.setbas_tree.setUniformRowHeights(True)
         self.setbas_tree.itemDoubleClicked.connect(
             self._on_setbas_item_double_clicked)
-        self.setbas_tree.currentItemChanged.connect(
-            self._on_setbas_item_selected)
+        # A single click only selects (updates VP info / button state, via
+        # itemSelectionChanged below); previewing needs a double-click or
+        # the context menu's "Preview", since many rows are plain graphic
+        # files and a single click should not force-open them.
         self.setbas_tree.installEventFilter(self)
         self.setbas_tree.itemSelectionChanged.connect(
             self._sync_vp_controls)
@@ -560,6 +569,8 @@ class AssemblyWindow(
         menu = QMenu(self.setbas_tree)
         self._setbas_context_item = item
         resources = self._setbas_selected_resources()
+        base_names = self._selected_setbas_base_names()
+        extract_total = len(resources) + len(base_names)
         kind = item.data(0, _BAS_KIND_ROLE) if item is not None else None
         preview = menu.addAction(
             "Preview", lambda: self._preview_setbas_resource(item))
@@ -573,26 +584,32 @@ class AssemblyWindow(
         playback.setEnabled(self._setbas_item_has_animation(item))
         menu.addSeparator()
         extract = menu.addAction(
-            f"Extract selected ({len(resources)})" if len(resources) > 1
-            else "Extract Selected")
-        extract.setEnabled(bool(resources))
+            f"Extract File ({extract_total})" if extract_total > 1
+            else "Extract File")
+        extract.setEnabled(extract_total > 0)
         extract.triggered.connect(self._extract_setbas_selected)
-        menu.addAction("Extract Archive",
-                       self._extract_setbas_archive).setEnabled(
-                           self._setbas is not None)
         menu.addAction(
-            "Export Runtime Loose SET",
+            "Extract Loose Set",
             self._export_runtime_loose_set).setEnabled(
                 self._setbas is not None)
-        export_family = menu.addAction(
-            "Export Asset Family",
-            lambda: self._export_setbas_resource_family(item))
-        export_family.setEnabled(kind in (
-            "base", "sklt.class", "ilbm.class", "bmpanim.class"))
-        export_onua = menu.addAction(
-            "Export Whole Model as Archive (.ONUA)",
-            lambda: self._export_setbas_base_onua(item))
-        export_onua.setEnabled(kind == "base" and item is not None)
+        if len(base_names) > 1:
+            export_family = menu.addAction(f"Export Model ({len(base_names)})")
+            export_family.triggered.connect(
+                lambda: self._export_setbas_base_names_model(base_names))
+            export_onua = menu.addAction(
+                f"Export Model as Archive (.ONUA) ({len(base_names)})")
+            export_onua.triggered.connect(
+                lambda: self._export_setbas_base_names_onua(base_names))
+        else:
+            export_family = menu.addAction(
+                "Export Model",
+                lambda: self._export_setbas_resource_family(item))
+            export_family.setEnabled(kind in (
+                "base", "sklt.class", "ilbm.class", "bmpanim.class"))
+            export_onua = menu.addAction(
+                "Export Model as Archive (.ONUA)",
+                lambda: self._export_setbas_base_onua(item))
+            export_onua.setEnabled(kind == "base" and item is not None)
         self._add_model_generator_context_actions(menu, item)
         if kind == "base" and item is not None:
             base_name = (
@@ -620,7 +637,7 @@ class AssemblyWindow(
         menu.addSeparator()
         menu.addAction("Select All Resources", self.setbas_tree.selectAll)
         if self._last_output_directory is not None:
-            menu.addAction("Open Last Output Folder",
+            menu.addAction("Open File Location",
                            self._open_last_output_folder)
         try:
             menu.exec(self.setbas_tree.viewport().mapToGlobal(position))
@@ -720,6 +737,11 @@ class AssemblyWindow(
                 export.setEnabled(self._visual_texture_available(payload))
                 export.triggered.connect(
                     lambda: self._export_family_textures_png([payload]))
+                export_ilbm = menu.addAction("Export Texture as ILBM")
+                export_ilbm.setEnabled(
+                    self._visual_texture_available(payload))
+                export_ilbm.triggered.connect(
+                    lambda: self._export_family_textures_ilbm([payload]))
             elif kind == "animation":
                 if self.play_button.isChecked():
                     pause = menu.addAction("Pause")
@@ -759,7 +781,7 @@ class AssemblyWindow(
                             name, selected))
         data = item.data(0, Qt.ItemDataRole.UserRole)
         owner = self._tree_owner_for_item(item)
-        export_family = menu.addAction("Export Asset Family")
+        export_family = menu.addAction("Export Model")
         export_family.setEnabled(bool(owner or (data and data[0] in (
             "skeleton", "texture", "animation"))))
 
@@ -773,7 +795,7 @@ class AssemblyWindow(
             self._save_model_as()
 
         export_family.triggered.connect(export_current_family)
-        export_onua = menu.addAction("Export Whole Model as Archive (.ONUA)")
+        export_onua = menu.addAction("Export Model as Archive (.ONUA)")
         export_onua.setEnabled(bool(data and data[0] == "base"))
 
         def export_current_onua() -> None:
@@ -787,7 +809,7 @@ class AssemblyWindow(
         export_onua.triggered.connect(export_current_onua)
         path = self._asset_item_path(item)
         if path is not None:
-            menu.addAction("Reveal Source File",
+            menu.addAction("Browse Source File",
                            lambda: self._reveal_asset_item(item))
         menu.addSeparator()
         menu.addAction("Copy Info", lambda: self._copy_text(
@@ -818,21 +840,17 @@ class AssemblyWindow(
         export.setEnabled(bool(names))
         export.triggered.connect(
             lambda: self._export_family_textures_png(names))
-        export_family = menu.addAction("Export Asset Family")
-        export_family.setEnabled(len(names) == 1 and self._family is not None)
-
-        def export_texture_family() -> None:
-            if len(names) != 1:
-                return
-            self._last_component_selection = ("texture", str(names[0]))
-            self._save_model_as()
-
-        export_family.triggered.connect(export_texture_family)
+        export_ilbm = menu.addAction(
+            f"Export selected as ILBM ({len(names)})" if len(names) > 1
+            else "Export Selected as ILBM")
+        export_ilbm.setEnabled(bool(names))
+        export_ilbm.triggered.connect(
+            lambda: self._export_family_textures_ilbm(names))
         if len(names) == 1 and self._family is not None:
             ref = self._family.texture_refs.get(names[0])
             if ref and ref.path:
                 menu.addAction(
-                    "Reveal Source File",
+                    "Browse Source File",
                     lambda: _reveal_in_file_manager(ref.path))
         if names:
             menu.addSeparator()
@@ -1139,14 +1157,14 @@ class AssemblyWindow(
         setbas_tools_menu.addAction(open_output)
 
         conversion_menu = tools_menu.addMenu("Texture Conversion")
-        conv_to_png = QAction("ILBM/VBMP to PNG", self)
+        conv_to_png = QAction("ILBM/VBMP > PNG", self)
         conv_to_png.triggered.connect(self._convert_ilbm_to_png_dialog)
         conversion_menu.addAction(conv_to_png)
-        conv_vbmp_to_ilbm = QAction("VBMP to Standalone ILBM", self)
+        conv_vbmp_to_ilbm = QAction("VBMP > ILBM", self)
         conv_vbmp_to_ilbm.triggered.connect(
             self._convert_vbmp_to_ilbm_dialog)
         conversion_menu.addAction(conv_vbmp_to_ilbm)
-        conv_to_ilbm = QAction("PNG to ILBM (matching templates)", self)
+        conv_to_ilbm = QAction("PNG > ILBM", self)
         conv_to_ilbm.triggered.connect(self._convert_png_to_ilbm_dialog)
         conversion_menu.addAction(conv_to_ilbm)
 
@@ -1308,43 +1326,43 @@ class AssemblyWindow(
 
         setbas_buttons = QGridLayout()
         setbas_buttons.setHorizontalSpacing(4)
-        self.setbas_runtime_loose_button = QPushButton(
-            "Export Runtime Loose SET")
-        self.setbas_runtime_loose_button.clicked.connect(
-            self._export_runtime_loose_set)
-        self.setbas_runtime_loose_button.setEnabled(False)
-        setbas_buttons.addWidget(self.setbas_runtime_loose_button, 0, 0)
-        self.setbas_extract_button = QPushButton("Extract Selected")
+        self.setbas_extract_button = QPushButton("Extract File")
+        self.setbas_extract_button.setToolTip(
+            "Extract just the selected resource(s) as-is (BASE included); "
+            "does not gather a model's other resources.")
         self.setbas_extract_button.clicked.connect(
             self._extract_setbas_selected)
         self.setbas_extract_button.setEnabled(False)
-        setbas_buttons.addWidget(self.setbas_extract_button, 0, 1)
-        self.setbas_extract_all_button = QPushButton("Extract Archive")
-        self.setbas_extract_all_button.clicked.connect(
-            self._extract_setbas_archive)
-        self.setbas_extract_all_button.setEnabled(False)
-        setbas_buttons.addWidget(self.setbas_extract_all_button, 1, 0)
-        self.setbas_open_output_button = QPushButton("Open Output Folder")
-        self.setbas_open_output_button.clicked.connect(
-            self._open_last_output_folder)
-        self.setbas_open_output_button.setEnabled(False)
-        setbas_buttons.addWidget(self.setbas_open_output_button, 1, 1)
+        setbas_buttons.addWidget(self.setbas_extract_button, 0, 0)
+        self.setbas_runtime_loose_button = QPushButton("Extract Loose Set")
+        self.setbas_runtime_loose_button.clicked.connect(
+            self._export_runtime_loose_set)
+        self.setbas_runtime_loose_button.setEnabled(False)
+        setbas_buttons.addWidget(self.setbas_runtime_loose_button, 0, 1)
+        self.setbas_export_model_button = QPushButton("Export Model")
+        self.setbas_export_model_button.setToolTip(
+            "Export the selected BASE and all its resources as a loose, "
+            "unpacked model (not a single .ONUA archive).")
+        self.setbas_export_model_button.setEnabled(False)
+        self.setbas_export_model_button.clicked.connect(
+            self._export_selected_setbas_model)
+        setbas_buttons.addWidget(self.setbas_export_model_button, 1, 0)
         self.setbas_onua_button = QPushButton(
-            "Export Whole Model as Archive (.ONUA)")
+            "Export Model as Archive (.ONUA)")
         self.setbas_onua_button.setToolTip(
             "Pack the selected BASE and all its resources (skeletons, textures, "
             "animations) into one .ONUA archive.")
         self.setbas_onua_button.setEnabled(False)
         self.setbas_onua_button.clicked.connect(
             self._export_selected_setbas_base_onua)
-        setbas_buttons.addWidget(self.setbas_onua_button, 2, 0, 1, 2)
+        setbas_buttons.addWidget(self.setbas_onua_button, 1, 1)
         self.setbas_edit_dependencies_button = QPushButton(
             "Edit BASE Dependencies")
         self.setbas_edit_dependencies_button.setEnabled(False)
         self.setbas_edit_dependencies_button.clicked.connect(
             self._edit_selected_setbas_base_dependencies)
         setbas_buttons.addWidget(
-            self.setbas_edit_dependencies_button, 3, 0, 1, 2)
+            self.setbas_edit_dependencies_button, 2, 0, 1, 2)
         setbas_layout.addLayout(setbas_buttons)
 
         # Asset family browser moved to the right so the 3D viewport gets the
@@ -1360,7 +1378,7 @@ class AssemblyWindow(
         textures_layout = QVBoxLayout(textures_panel)
         textures_layout.setContentsMargins(5, 5, 5, 5)
         textures_layout.setSpacing(4)
-        add_list_sort(textures_layout, self.texture_list, label="Texture", stretch=1)
+        textures_layout.addWidget(self.texture_list, 1)
         self.texture_export_button = QPushButton("Export Selected as PNG")
         self.texture_export_button.clicked.connect(self._export_texture_png)
         textures_layout.addWidget(self.texture_export_button)
@@ -2141,9 +2159,14 @@ class AssemblyWindow(
         if path.is_file():
             path = path.parent
         self._last_output_directory = path
-        button = getattr(self, "setbas_open_output_button", None)
-        if button is not None:
-            button.setEnabled(path.is_dir())
+        if path.is_dir() and QMessageBox.question(
+                self, "Export complete",
+                f"Export finished:\n{path}\n\nOpen the output folder?",
+                QMessageBox.StandardButton.Yes
+                | QMessageBox.StandardButton.No,
+                QMessageBox.StandardButton.Yes
+        ) == QMessageBox.StandardButton.Yes:
+            self._open_last_output_folder()
 
     def _open_last_output_folder(self) -> None:
         folder = self._last_output_directory
@@ -2442,7 +2465,6 @@ class AssemblyWindow(
         self.vp_selected_base_label.setText("-")
         self.vp_current_label.setText("-")
         self.setbas_extract_button.setEnabled(False)
-        self.setbas_extract_all_button.setEnabled(False)
         self.setbas_runtime_loose_button.setEnabled(False)
         self.setbas_onua_button.setEnabled(False)
         self.setbas_edit_dependencies_button.setEnabled(False)
@@ -2665,14 +2687,30 @@ class AssemblyWindow(
             else:
                 self.vp_current_label.setText(
                     "multiple embedded VP parents")
-        resource_index = (
-            item.data(0, Qt.ItemDataRole.UserRole)
-            if item is not None else None)
-        self.setbas_extract_button.setEnabled(resource_index is not None)
         base_selected = self._setbas is not None and kind == "base"
+        extract_total = (len(self._setbas_selected_resources())
+                         + len(self._selected_setbas_base_names())
+                         if self._setbas is not None else 0)
+        base_names = (self._selected_setbas_base_names()
+                      if self._setbas is not None else [])
+        self.setbas_extract_button.setText(
+            f"Extract File ({extract_total})" if extract_total > 1
+            else "Extract File")
+        self.setbas_extract_button.setEnabled(extract_total > 0)
         onua_button = getattr(self, "setbas_onua_button", None)
         if onua_button is not None:
-            onua_button.setEnabled(base_selected)
+            onua_button.setText(
+                f"Export Model as Archive (.ONUA) ({len(base_names)})"
+                if len(base_names) > 1
+                else "Export Model as Archive (.ONUA)")
+            onua_button.setEnabled(bool(base_names))
+        export_model_button = getattr(
+            self, "setbas_export_model_button", None)
+        if export_model_button is not None:
+            export_model_button.setText(
+                f"Export Model ({len(base_names)})"
+                if len(base_names) > 1 else "Export Model")
+            export_model_button.setEnabled(bool(base_names))
         edit_dependencies = getattr(
             self, "setbas_edit_dependencies_button", None)
         if edit_dependencies is not None:
@@ -2720,12 +2758,14 @@ class AssemblyWindow(
             if class_id.casefold() != "base.class"
         ] + ["other/unknown"]
         for class_id in class_ids:
-            item = SortableTreeItem([class_id, "", ""])
+            item = SortableTreeItem([_BAS_CLASS_LABELS.get(
+                class_id.casefold(), class_id), "", ""])
             # Category rows are expand/collapse controls, not resources.  Keep
             # them out of the selection model so Qt does not draw the accent
             # focus stripe over the branch arrow.
             item.setFlags(item.flags() & ~Qt.ItemFlag.ItemIsSelectable)
             item.setData(0, _BAS_KIND_ROLE, "group")
+            item.setData(0, _BAS_NAME_ROLE, class_id)
             groups[class_id] = item
             self.setbas_tree.addTopLevelItem(item)
 
@@ -2805,7 +2845,6 @@ class AssemblyWindow(
                 index = self.setbas_tree.indexOfTopLevelItem(item)
                 self.setbas_tree.takeTopLevelItem(index)
         self.setbas_tree.collapseAll()
-        self.setbas_extract_all_button.setEnabled(True)
         self.setbas_runtime_loose_button.setEnabled(True)
         self.export_runtime_loose_action.setEnabled(True)
         self._sync_vp_controls()
@@ -2913,8 +2952,8 @@ class AssemblyWindow(
         self.statusBar().showMessage(
             f"Previewing {animation_name} on {owner}", 8000)
 
-    def _on_setbas_item_selected(self, current, _previous=None) -> None:
-        """Preview every supported BAS row selected by mouse or keyboard."""
+    def _preview_setbas_item_on_activation(self, current) -> None:
+        """Preview a supported BAS row on double-click or explicit Preview."""
 
         if current is None or self._setbas is None \
                 or self._setbas_preview_active:
@@ -2936,9 +2975,8 @@ class AssemblyWindow(
         kind = item.data(0, _BAS_KIND_ROLE)
         index = item.data(0, Qt.ItemDataRole.UserRole)
         if kind == "base" or index is not None:
-            if self.setbas_tree.currentItem() is item:
-                return
             self.setbas_tree.setCurrentItem(item)
+            self._preview_setbas_item_on_activation(item)
             return
         # Class/group rows keep QTreeWidget's normal expand/collapse.
         self._sync_vp_controls()
@@ -2947,7 +2985,8 @@ class AssemblyWindow(
         """Open the BASE group and preview its first complete model."""
         for group_index in range(self.setbas_tree.topLevelItemCount()):
             group = self.setbas_tree.topLevelItem(group_index)
-            if group.text(0).casefold() == "base.class" and group.childCount():
+            group_class = group.data(0, _BAS_NAME_ROLE) or group.text(0)
+            if str(group_class).casefold() == "base.class" and group.childCount():
                 group.setExpanded(True)
                 item = group.child(0)
                 self.setbas_tree.setCurrentItem(item)
@@ -3173,21 +3212,97 @@ class AssemblyWindow(
         if not base_name:
             self._notify("The selected BASE has no usable name.", 6000)
             return
-        target = self._activate_setbas_base(base_name)
-        if target is None:
+        self._export_setbas_base_names_onua([base_name])
+
+    def _export_setbas_base_names_onua(self, base_names: list[str]) -> None:
+        """Pack one or more selected BASE names, each with its resources,
+        into its own .ONUA archive."""
+
+        if len(base_names) == 1:
+            target = self._activate_setbas_base(base_names[0])
+            if target is None:
+                return
+            self._selected_owner = target.owner_path
+            self._export_onua_archive()
             return
-        self._selected_owner = target.owner_path
-        self._export_onua_archive()
+
+        import re
+        import tempfile
+        from studio.exchange.onua_archive import ONUA_SUFFIX, write_onua
+        from studio.exchange.portable import AssetFamilyPackageError
+
+        output = QFileDialog.getExistingDirectory(
+            self, f"Choose destination folder for {len(base_names)} "
+            "archive(s)", str(self._last_directory))
+        if not output:
+            self._notify("Archive export cancelled.", 3000)
+            return
+        output_root = Path(output)
+        reserved: set[str] = set()
+        exported = 0
+        errors: list[str] = []
+        for base_name in base_names:
+            target = self._activate_setbas_base(base_name)
+            if target is None:
+                errors.append(f"{base_name}: could not be resolved")
+                continue
+            family = self._family
+            stem = re.sub(
+                r'[^A-Za-z0-9_.-]', "_", target.base_object.name or "MODEL")
+            stem = Path(stem).stem or "MODEL"
+            archive_target = self._available_output_path(
+                output_root / f"{stem}{ONUA_SUFFIX}", reserved)
+            reserved.add(str(archive_target).casefold())
+            try:
+                relative = self._bundle_skeleton_relative_path(target)
+                with tempfile.TemporaryDirectory(
+                        prefix="OpenNeoUAStudio_onua_") as temp:
+                    root = Path(temp)
+                    ok = self._write_model_files(
+                        target.owner_path, family, target, root / relative,
+                        root / f"{stem}.BASE", ask_replace=False,
+                        staged_consumer=lambda staged, validation,
+                        dest=archive_target: write_onua(
+                            staged, dest, validation=validation))
+            except (AssetFamilyPackageError, OSError, ValueError) as exc:
+                errors.append(f"{base_name}: {exc}")
+                continue
+            if ok:
+                exported += 1
+            else:
+                errors.append(f"{base_name}: export failed")
+        self._last_directory = output_root
+        self._remember_output_folder(output_root)
+        message = f"{exported}/{len(base_names)} archive(s) exported"
+        if errors:
+            message += f", {len(errors)} error(s)"
+            QMessageBox.warning(
+                self, "Archive export completed with errors",
+                message + "\n\n" + "\n".join(errors[:12]))
+        else:
+            self.statusBar().showMessage(message, 10000)
 
     def _export_selected_setbas_base_onua(self) -> None:
-        """Button entry point for exporting the selected BAS BASE."""
+        """Button/menu entry point: export every selected BASE as a .ONUA archive."""
 
-        item = self.setbas_tree.currentItem()
-        if item is None or item.data(0, _BAS_KIND_ROLE) != "base":
+        base_names = self._selected_setbas_base_names()
+        if not base_names:
             self._notify(
-                "Select a BASE entry before exporting an archive.", 6000)
+                "Select one or more BASE entries before exporting an "
+                "archive.", 6000)
             return
-        self._export_setbas_base_onua(item)
+        self._export_setbas_base_names_onua(base_names)
+
+    def _export_selected_setbas_model(self) -> None:
+        """Button/menu entry point: export every selected BASE as a loose model."""
+
+        base_names = self._selected_setbas_base_names()
+        if not base_names:
+            self._notify(
+                "Select one or more BASE entries before exporting a model.",
+                6000)
+            return
+        self._export_setbas_base_names_model(base_names)
 
     def _edit_selected_setbas_base_dependencies(self) -> None:
         """Open the same BASE dependency editor used by the context menu."""
@@ -3213,6 +3328,65 @@ class AssemblyWindow(
         self._last_component_selection = None
         self._selected_owner = target.owner_path
         self._save_model_as()
+
+    def _export_setbas_base_names_model(self, base_names: list[str]) -> None:
+        """Export one or more selected BASE names, each as its own loose,
+        unpacked model (BASE, skeleton, textures, animations)."""
+
+        if len(base_names) == 1:
+            self._export_setbas_base_family(base_names[0])
+            return
+
+        import re
+
+        output = QFileDialog.getExistingDirectory(
+            self, f"Choose destination folder for {len(base_names)} "
+            "model(s)", str(self._last_directory))
+        if not output:
+            self._notify("Asset-family export cancelled.", 3000)
+            return
+        output_root = Path(output)
+        reserved: set[str] = set()
+        exported = 0
+        errors: list[str] = []
+        for base_name in base_names:
+            target = self._activate_setbas_base(base_name)
+            if target is None:
+                errors.append(f"{base_name}: could not be resolved")
+                continue
+            owner = target.owner_path
+            context = self._model_save_context(owner)
+            if context is None:
+                errors.append(f"{base_name}: no model/BASE data to export")
+                continue
+            owner, family, fam_obj, _model, _tree = context
+            skeleton_relative = self._bundle_skeleton_relative_path(fam_obj)
+            base_label = fam_obj.base_object.name or skeleton_relative.stem
+            base_stem = re.sub(
+                r'[^A-Za-z0-9_.-]', "_", base_label) or "MODEL"
+            if Path(base_stem).suffix.casefold() == ".base":
+                base_stem = Path(base_stem).stem or "MODEL"
+            base_target = self._available_output_path(
+                output_root / f"{base_stem}.BASE", reserved)
+            reserved.add(str(base_target).casefold())
+            skeleton_target = output_root / skeleton_relative
+            if self._write_model_files(
+                    owner, family, fam_obj, skeleton_target, base_target,
+                    ask_replace=False):
+                self._bundle_targets[owner] = (skeleton_target, base_target)
+                exported += 1
+            else:
+                errors.append(f"{base_name}: export failed")
+        self._last_directory = output_root
+        self._remember_output_folder(output_root)
+        message = f"{exported}/{len(base_names)} model(s) exported"
+        if errors:
+            message += f", {len(errors)} error(s)"
+            QMessageBox.warning(
+                self, "Export completed with errors",
+                message + "\n\n" + "\n".join(errors[:12]))
+        else:
+            self.statusBar().showMessage(message, 10000)
 
     def _export_setbas_resource_family(self, item) -> None:
         """Export the proven BASE owner of one BAS resource."""

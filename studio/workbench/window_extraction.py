@@ -75,6 +75,7 @@ from studio.ui.widgets import (
     qimage_from_ilbm as _qimage_from_ilbm,
 )
 from studio.workbench.common import (
+    _BAS_KIND_ROLE,
     _BAS_NAME_ROLE,
 )
 from studio.ui.sorting import SortableTreeItem, enable_tree_sort
@@ -85,24 +86,65 @@ class _ExtractionMixin:
 
     # -- extraction / conversion (BASet capability merge) -------------------------
 
-    def _setbas_selected_resources(self) -> list:
-        if self._setbas is None:
-            return []
-        resources = []
-        seen: set[int] = set()
+    def _selected_setbas_items(self) -> list:
+        """Rows currently targeted by a SET.BAS panel button or context menu."""
+
         context_item = self._setbas_context_item
         items = self.setbas_tree.selectedItems()
         if context_item is not None and not context_item.isSelected():
             items = [context_item]
         if not items and self.setbas_tree.currentItem() is not None:
             items = [self.setbas_tree.currentItem()]
-        for item in items:
+        return items
+
+    def _setbas_selected_resources(self) -> list:
+        """Raw EMRS resources among the selected rows (BASE rows excluded:
+        they have no single EMRS index of their own, see
+        ``_selected_setbas_base_names``)."""
+
+        if self._setbas is None:
+            return []
+        resources = []
+        seen: set[int] = set()
+        for item in self._selected_setbas_items():
             index = item.data(0, Qt.ItemDataRole.UserRole)
             if index is None or index in seen:
                 continue
             seen.add(index)
             resources.append(self._setbas.resources[index])
         return resources
+
+    def _selected_setbas_base_names(self) -> list[str]:
+        """Distinct BASE names among the selected rows, in selection order."""
+
+        names: list[str] = []
+        seen: set[str] = set()
+        for item in self._selected_setbas_items():
+            if item.data(0, _BAS_KIND_ROLE) != "base":
+                continue
+            name = str(
+                item.data(0, _BAS_NAME_ROLE) or item.text(0) or "").strip()
+            key = normalize_base_name(name)
+            if not name or key in seen:
+                continue
+            seen.add(key)
+            names.append(name)
+        return names
+
+    def _extract_setbas_base_bytes(self, base_name: str) -> bytes:
+        """Raw standalone bytes of one embedded BASE object, no dependencies.
+
+        Reuses the same resolver and ``export_base_object_bytes`` already
+        proven by the BASE Dependencies "Save As" flow.
+        """
+
+        family, target, _source_offset = self._resolve_setbas_base(base_name)
+        tree = getattr(getattr(family, "base_asset", None), "tree", None) \
+            if family is not None else None
+        if target is None or tree is None:
+            raise MappingEditError(
+                f"{base_name}: its embedded BASE object could not be resolved")
+        return export_base_object_bytes(tree.data, target.base_object)
 
     @staticmethod
     def _available_output_path(path: Path,
@@ -150,63 +192,94 @@ class _ExtractionMixin:
         return f"extracted {resource.resource_name} -> {target}"
 
     def _extract_setbas_selected(self) -> None:
+        # Extracts only the raw file(s) of the selected row(s), BASE entries
+        # included; it never gathers the rest of a model's resources (that is
+        # "Export Model").
         resources = self._setbas_selected_resources()
-        if not resources:
+        base_names = self._selected_setbas_base_names()
+        total = len(resources) + len(base_names)
+        if total == 0:
             QMessageBox.information(
                 self, "No resource selected",
-                "Select one or more embedded resources in the SET.BAS tree "
-                "first. Ctrl and Shift selection are supported.")
+                "Select one or more embedded resources, or a BASE entry, "
+                "in the SET.BAS tree first. Ctrl and Shift selection are "
+                "supported.")
             return
 
         from studio.assets.setbas_export import flattened_resource_name
 
-        targets: list[tuple[object, Path]] = []
-        if len(resources) == 1:
-            resource = resources[0]
-            name = flattened_resource_name(resource.resource_name)
-            if resource.class_id.lower() == "ilbm.class":
-                name = Path(name).with_suffix(".ILBM").name
-                caption = (f"Extract and convert {resource.resource_name} "
-                           "to ILBM")
-                file_filter = "ILBM texture (*.ILBM *.ilbm);;All files (*)"
-            else:
-                caption = f"Extract {resource.resource_name}"
-                file_filter = "All files (*)"
-            suggested = Path(self._last_directory) / name
-            path, _ = QFileDialog.getSaveFileName(
-                self, caption, str(suggested), file_filter)
-            if not path:
-                return
-            targets.append((resource, Path(path)))
-        else:
-            out_dir = QFileDialog.getExistingDirectory(
-                self, f"Output folder for {len(resources)} resources",
-                str(self._last_directory))
-            if not out_dir:
-                return
-            root = Path(out_dir)
-            reserved: set[str] = set()
-            for resource in resources:
+        # "resources" dump as-is via _extract_one_setbas_resource; a BASE
+        # name has no raw EMRS resource of its own, so it is resolved and
+        # written as a standalone .BASE instead (see
+        # _extract_setbas_base_bytes).
+        if total == 1:
+            if resources:
+                resource = resources[0]
                 name = flattened_resource_name(resource.resource_name)
                 if resource.class_id.lower() == "ilbm.class":
                     name = Path(name).with_suffix(".ILBM").name
-                candidate = root / name
-                suffix_index = 0
-                while (candidate.exists()
-                       or str(candidate).lower() in reserved):
-                    suffix_index += 1
-                    candidate = (root /
-                                 f"{Path(name).stem}__dup{suffix_index:03d}"
-                                 f"{Path(name).suffix}")
-                reserved.add(str(candidate).lower())
-                targets.append((resource, candidate))
+                    caption = (f"Extract and convert {resource.resource_name} "
+                               "to ILBM")
+                    file_filter = "ILBM texture (*.ILBM *.ilbm);;All files (*)"
+                else:
+                    caption = f"Extract {resource.resource_name}"
+                    file_filter = "All files (*)"
+                suggested = Path(self._last_directory) / name
+                path, _ = QFileDialog.getSaveFileName(
+                    self, caption, str(suggested), file_filter)
+                if not path:
+                    return
+                try:
+                    note = self._extract_one_setbas_resource(
+                        resource, Path(path))
+                except Exception as exc:
+                    QMessageBox.critical(
+                        self, "Extraction failed", str(exc))
+                    return
+                self._log(note)
+            else:
+                base_name = base_names[0]
+                suggested = Path(self._last_directory) / Path(base_name).name
+                if suggested.suffix.casefold() != ".base":
+                    suggested = suggested.with_suffix(".BASE")
+                path, _ = QFileDialog.getSaveFileName(
+                    self, f"Extract {base_name}", str(suggested),
+                    "BASE model (*.BASE *.base);;All files (*)")
+                if not path:
+                    return
+                try:
+                    Path(path).write_bytes(
+                        self._extract_setbas_base_bytes(base_name))
+                except (MappingEditError, OSError) as exc:
+                    QMessageBox.critical(
+                        self, "Extraction failed", str(exc))
+                    return
+                self._log(f"extracted {base_name} -> {path}")
+            output_folder = Path(path).parent
+            self._last_directory = output_folder
+            self._remember_output_folder(output_folder)
+            self.statusBar().showMessage(
+                f"Extracted 1 resource -> {path}", 8000)
+            return
 
+        out_dir = QFileDialog.getExistingDirectory(
+            self, f"Output folder for {total} resource(s)",
+            str(self._last_directory))
+        if not out_dir:
+            return
+        root = Path(out_dir)
+        reserved: set[str] = set()
         converted = 0
         raw = 0
         errors: list[str] = []
-        for resource, target in targets:
+        for resource in resources:
+            name = flattened_resource_name(resource.resource_name)
+            if resource.class_id.lower() == "ilbm.class":
+                name = Path(name).with_suffix(".ILBM").name
+            candidate = self._available_output_path(root / name, reserved)
+            reserved.add(str(candidate).casefold())
             try:
-                note = self._extract_one_setbas_resource(resource, target)
+                note = self._extract_one_setbas_resource(resource, candidate)
             except Exception as exc:
                 errors.append(f"{resource.resource_name}: {exc}")
                 self._log(f"extract FAILED: {resource.resource_name}: {exc}")
@@ -216,10 +289,24 @@ class _ExtractionMixin:
             else:
                 raw += 1
             self._log(note)
+        for base_name in base_names:
+            name = Path(base_name).name
+            if Path(name).suffix.casefold() != ".base":
+                name = Path(name).with_suffix(".BASE").name
+            candidate = self._available_output_path(root / name, reserved)
+            reserved.add(str(candidate).casefold())
+            try:
+                candidate.write_bytes(
+                    self._extract_setbas_base_bytes(base_name))
+            except (MappingEditError, OSError) as exc:
+                errors.append(f"{base_name}: {exc}")
+                self._log(f"extract FAILED: {base_name}: {exc}")
+                continue
+            raw += 1
+            self._log(f"extracted {base_name} -> {candidate}")
 
-        output_folder = targets[0][1].parent
-        self._last_directory = output_folder
-        self._remember_output_folder(output_folder)
+        self._last_directory = root
+        self._remember_output_folder(root)
         message = (f"Selected extraction complete: {raw} raw resource(s), "
                    f"{converted} texture(s) converted to ILBM")
         if errors:
@@ -476,6 +563,78 @@ class _ExtractionMixin:
         self._last_directory = output_folder
         self._remember_output_folder(output_folder)
         message = f"{written} PNG texture(s) written to {output_folder}"
+        if errors:
+            QMessageBox.warning(
+                self, "Export completed with errors",
+                message + "\n\n" + "\n".join(errors[:12]))
+        self.statusBar().showMessage(message, 8000)
+
+    def _export_family_textures_ilbm(self, names: list[str]) -> None:
+        if self._family is None:
+            self.statusBar().showMessage("Load an asset family first.")
+            return
+        valid = []
+        for name in names:
+            loaded_name = self._ensure_model_texture_loaded(name)
+            image = (self._family.textures.get(loaded_name)
+                     if loaded_name is not None else None)
+            valid.append((name, image))
+        valid = [(name, image) for name, image in valid
+                 if image is not None and image.has_body]
+        if not valid:
+            self.statusBar().showMessage(
+                "Select one or more decoded textures first.")
+            return
+        from studio.formats.images import TextureConvertError, write_image_as_ilbm
+
+        targets: list[tuple[str, object, Path]] = []
+        if len(valid) == 1:
+            name, image = valid[0]
+            safe = Path(name.replace("\\", "/")).name
+            suggested = (Path(self._last_directory)
+                         / (Path(safe).stem + ".ILBM"))
+            path, _ = QFileDialog.getSaveFileName(
+                self, f"Export {name} as standalone ILBM", str(suggested),
+                "ILBM texture (*.ILBM *.ilbm)")
+            if not path:
+                return
+            targets.append((name, image, Path(path)))
+        else:
+            directory = QFileDialog.getExistingDirectory(
+                self, f"Output folder for {len(valid)} ILBM textures",
+                str(self._last_directory))
+            if not directory:
+                return
+            root = Path(directory)
+            reserved: set[str] = set()
+            for name, image in valid:
+                safe = Path(name.replace("\\", "/")).stem + ".ILBM"
+                target = self._available_output_path(root / safe, reserved)
+                reserved.add(str(target).casefold())
+                targets.append((name, image, target))
+
+        errors = []
+        written = 0
+        for name, image, target in targets:
+            try:
+                write_image_as_ilbm(
+                    image, target,
+                    self._family.external_palette
+                    if image.palette is None else None,
+                    source=name)
+            except (TextureConvertError, OSError) as exc:
+                errors.append(f"{name}: {exc}")
+                continue
+            written += 1
+            self._log(f"texture exported: {name} -> {target}")
+        if not written:
+            QMessageBox.critical(self, "Export failed",
+                                 "\n".join(errors[:12]))
+            return
+        output_folder = targets[0][2].parent
+        self._last_directory = output_folder
+        self._remember_output_folder(output_folder)
+        message = f"{written} ILBM texture(s) written to {output_folder}"
         if errors:
             QMessageBox.warning(
                 self, "Export completed with errors",
@@ -2225,14 +2384,22 @@ class _ExtractionMixin:
             label = "Animation" if texture.kind == "bmpanim" else "Texture"
             if slot == "tracy_texture":
                 label += " (TRACY)"
+            growable = texture.kind == "ilbm"
+            if supported:
+                reason = (
+                    f"writable c-string, grows past {texture.name_capacity - 1} "
+                    "bytes if needed" if growable else
+                    f"writable c-string, max {texture.name_capacity - 1} bytes")
+            else:
+                reason = (
+                    "read-only: nested/unsupported reference has no "
+                    "verified writer")
             specs.append({
                 "kind": label,
                 "name": texture.name,
                 "editable": supported,
-                "reason": (
-                    f"writable c-string, max {texture.name_capacity - 1} bytes"
-                    if supported else
-                    "read-only: nested/unsupported reference has no verified writer"),
+                "growable": growable,
+                "reason": reason,
                 "block_index": block_index,
                 "binding_slot": slot,
                 "capacity": texture.name_capacity,
@@ -2327,7 +2494,8 @@ class _ExtractionMixin:
         archive_source = self._family_entry_is_setbas_archive()
         dialog = QDialog(self)
         dialog.setWindowTitle("Edit BASE Dependencies")
-        dialog.resize(900, 500)
+        dialog.resize(1150, 560)
+        dialog.setMinimumSize(950, 420)
         layout = QVBoxLayout(dialog)
         info = QLabel(
             "Edit the native BASE references supported by the verified writer. "
@@ -2343,23 +2511,28 @@ class _ExtractionMixin:
         enable_tree_sort(tree)
         tree.setHeaderLabels(["Reference", "Native name", "Writer support"])
         tree.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
-        tree.setUniformRowHeights(True)
+        # Not uniform: rows holding an embedded QLineEdit need a taller row
+        # than plain text rows, otherwise the editor clips its own text.
+        tree.setUniformRowHeights(False)
         header = tree.header()
         header.setSectionsMovable(False)
         header.setStretchLastSection(True)
         header.setSectionResizeMode(0, QHeaderView.ResizeMode.Interactive)
         header.setSectionResizeMode(1, QHeaderView.ResizeMode.Interactive)
         header.setSectionResizeMode(2, QHeaderView.ResizeMode.Stretch)
-        tree.setColumnWidth(0, 165)
-        tree.setColumnWidth(1, 285)
+        tree.setColumnWidth(0, 180)
+        tree.setColumnWidth(1, 480)
         base_name = self._base_entry_name(self._family, fam_obj, owner)
         root = SortableTreeItem([f"BASE: {base_name}", "", "Entry point"])
         tree.addTopLevelItem(root)
         editors: list[tuple[dict, QLineEdit, str]] = []
         for spec in specs:
-            visible_support = (
-                f"Editable (max {spec['capacity'] - 1} bytes)"
-                if spec["editable"] else "Read-only")
+            if not spec["editable"]:
+                visible_support = "Read-only"
+            elif spec.get("growable"):
+                visible_support = "Editable (grows as needed)"
+            else:
+                visible_support = f"Editable (max {spec['capacity'] - 1} bytes)"
             row = SortableTreeItem([
                 spec["kind"], "" if spec["editable"] else spec["name"],
                 visible_support])
@@ -2368,8 +2541,13 @@ class _ExtractionMixin:
             root.addChild(row)
             if spec["editable"]:
                 edit = QLineEdit(spec["name"])
-                edit.setMaxLength(spec["capacity"] - 1)
+                edit.setMinimumWidth(440)
+                edit.setFixedHeight(34)
                 edit.setToolTip(spec["reason"])
+                # An explicit, generous row height: QLineEdit.sizeHint() can
+                # be measured before the theme's padding is polished in,
+                # which is what was clipping the glyph tops here before.
+                row.setSizeHint(1, QSize(edit.minimumWidth(), 38))
                 tree.setItemWidget(row, 1, edit)
                 editors.append((spec, edit, spec["name"]))
             else:

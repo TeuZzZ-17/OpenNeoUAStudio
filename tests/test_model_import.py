@@ -314,6 +314,34 @@ class ModelImportTests(unittest.TestCase):
             finally:
                 dialog.deleteLater()
 
+    def test_change_set_button_switches_the_studio_set_too(self):
+        from types import SimpleNamespace
+        from unittest.mock import patch
+        from PySide6.QtWidgets import QWidget
+
+        with tempfile.TemporaryDirectory() as tmp:
+            base, _path, archive = self._fixture(Path(tmp))
+            set3 = Path(tmp) / "Set3" / "Objects"
+            set3.mkdir(parents=True)
+            set3_bas = set3 / "SET.BAS"
+            set3_bas.write_bytes(_setbas_bytes())
+            install = SimpleNamespace(
+                set_directories=lambda: {3: Path(tmp) / "Set3"},
+                custom_sets={})
+            parent = QWidget()
+            dialog = ModelImportDialog(
+                parent, initial_base=base, initial_archive=archive)
+            try:
+                with patch("studio.workbench.model_import.bootstrap."
+                           "installation", return_value=install), \
+                        patch("studio.ui.shell.change_game_set") as change:
+                    dialog._load_set_by_number(3)
+                change.assert_called_once_with(parent, 3)
+                self.assertEqual(dialog._active_archive_set_number(), 3)
+            finally:
+                dialog.deleteLater()
+                parent.deleteLater()
+
     def test_model_resources_reopens_the_active_archive_and_manual_choice(self):
         from unittest.mock import patch
         from PySide6.QtWidgets import QDialog

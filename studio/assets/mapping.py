@@ -1594,22 +1594,26 @@ def _texture_name_span(data: bytes, block, edit: TextureNameEdit):
         raise MappingEditError("texture names must use Latin-1 characters") from exc
     if not encoded or b"\0" in encoded:
         raise MappingEditError("texture name must be a non-empty c-string")
-    if len(encoded) + 1 > capacity:
+    overflow = len(encoded) + 1 > capacity
+    if overflow and texture.kind != "ilbm":
+        # bmpanim names live inside a shared STRC payload (header fields plus
+        # the name), not their own chunk, so growing one is not implemented;
+        # only static ilbm.class names can be reflowed below.
         raise MappingEditError(
             f"texture name {edit.name!r} needs {len(encoded) + 1} bytes, "
             f"but the original name allocation has {capacity}; choose a "
             f"name of at most {capacity - 1} bytes")
-    return offset, capacity, encoded
+    return offset, capacity, encoded, overflow
 
 
 def apply_texture_name_edits_to_bytes(
         data: bytes, edits: list[TextureNameEdit]) -> bytes:
     asset = parse_base_bytes(data, "<texture-name-edit>")
-    if asset.root is None:
+    if asset.root is None or asset.tree is None:
         raise MappingEditError("not a parseable BASE file")
     objects = _walk_with_owner_paths(asset.root)
-    output = bytearray(data)
     seen: set[tuple[str, int, str]] = set()
+    spans: list[tuple[int, int, bytes, bool]] = []
     for edit in edits:
         if edit.key() in seen:
             raise MappingEditError(f"duplicate texture edit for {edit.key()}")
@@ -1618,17 +1622,39 @@ def apply_texture_name_edits_to_bytes(
         if obj is None or not (0 <= edit.block_index < len(obj.ades)):
             raise MappingEditError(
                 f"{edit.owner_path}: block #{edit.block_index} not found")
-        offset, capacity, encoded = _texture_name_span(
-            data, obj.ades[edit.block_index], edit)
-        output[offset:offset + capacity] = (
-            encoded + b"\0" + bytes(capacity - len(encoded) - 1))
+        spans.append(
+            _texture_name_span(data, obj.ades[edit.block_index], edit))
+
+    patched = bytearray(data)
+    for offset, capacity, encoded, overflow in spans:
+        if not overflow:
+            patched[offset:offset + capacity] = (
+                encoded + b"\0" + bytes(capacity - len(encoded) - 1))
+    if not any(overflow for *_rest, overflow in spans):
+        return bytes(patched)
+
+    # At least one new name no longer fits its original NAM2 allocation.
+    # Reflow that chunk (and every parent FORM size) instead of rejecting
+    # the edit: the same chunk-growth mechanism already used for structural
+    # polygon edits (see rewrite_model_base_structure/_rebuild_iff_chunk).
+    patched = bytes(patched)
+    replacements = {
+        offset - 8: encoded + b"\0"
+        for offset, _capacity, encoded, overflow in spans if overflow
+    }
+    output = bytearray()
+    cursor = 0
+    for root in asset.tree.roots:
+        output.extend(patched[cursor:root.offset])
+        output.extend(_rebuild_iff_chunk(patched, root, replacements))
+        cursor = root.offset + 8 + root.size + (root.size & 1)
+    output.extend(patched[cursor:])
     return bytes(output)
 
 
 def verify_texture_name_edits(original: bytes, edited: bytes,
                               edits: list[TextureNameEdit]) -> list[str]:
-    if len(original) != len(edited):
-        raise MappingEditError("texture edit changed the BASE file size")
+    same_size = len(original) == len(edited)
     before = parse_base_bytes(original, "<texture-original>")
     after = parse_base_bytes(edited, "<texture-edited>")
     if before.root is None or after.root is None:
@@ -1664,19 +1690,25 @@ def verify_texture_name_edits(original: bytes, edited: bytes,
                         f"{owner} block #{block_index} {binding_slot}: "
                         "texture edit did not re-parse")
                 else:
-                    offset, capacity, _encoded = _texture_name_span(
+                    offset, capacity, _encoded, _overflow = _texture_name_span(
                         original, block_before, edit)
                     allowed.update(range(offset, offset + capacity))
                     notes.append(
                         f"{owner} block #{block_index} {binding_slot}: "
                         f"{before_name} -> {after_name}")
-    changed = {index for index, pair in enumerate(zip(original, edited))
-               if pair[0] != pair[1]}
-    unexpected = changed - allowed
-    if unexpected:
-        raise MappingEditError(
-            f"unexpected byte changed at 0x{min(unexpected):X}")
-    notes.append("BASE size and chunk structure unchanged")
+    if same_size:
+        changed = {index for index, pair in enumerate(zip(original, edited))
+                   if pair[0] != pair[1]}
+        unexpected = changed - allowed
+        if unexpected:
+            raise MappingEditError(
+                f"unexpected byte changed at 0x{min(unexpected):X}")
+        notes.append("BASE size and chunk structure unchanged")
+    else:
+        # A grown texture name reflows chunk sizes, so positions shift and a
+        # byte-for-byte diff no longer applies; the per-object/per-texture
+        # checks above already prove nothing else changed.
+        notes.append("BASE grew to fit a longer texture name; chunk sizes reflowed")
     return notes
 
 

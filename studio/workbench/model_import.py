@@ -7,11 +7,12 @@ SET.BAS archive, so the user sees what is ready before importing.
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 from pathlib import Path
 
-from PySide6.QtCore import Qt
-from PySide6.QtGui import QColor, QPen
+from PySide6.QtCore import QUrl, Qt
+from PySide6.QtGui import QActionGroup, QColor, QDesktopServices, QPen
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QDialog,
@@ -35,11 +36,12 @@ from PySide6.QtWidgets import (
     QVBoxLayout,
 )
 
+from map_editor import bootstrap
 from studio.assets.family import (
     FamilyRequirementProbe,
     probe_family_requirements,
 )
-from studio.exchange.portable import normalize_logical_name
+from studio.exchange.portable import find_existing_path, normalize_logical_name
 from studio.formats.setbas import (
     read_setbas,
     SetBasArchive,
@@ -50,6 +52,20 @@ from studio.ui.sorting import SortableTreeItem, enable_tree_sort
 from studio.ui.style import theme_accent_color
 
 _REQUIREMENT_ROLE = Qt.ItemDataRole.UserRole + 71
+
+_SET_NAME = re.compile(r"set(\d+)", re.I)
+
+
+def _set_number_in_path(path: Path | None) -> int | None:
+    """Number N of the first ``SetN`` folder in *path*, if any."""
+
+    if path is None:
+        return None
+    for part in Path(path).parts:
+        match = _SET_NAME.fullmatch(part)
+        if match:
+            return int(match[1])
+    return None
 
 _KIND_LABELS = {
     "skeleton": "Skeleton",
@@ -138,8 +154,8 @@ class ModelImportDialog(QDialog):
     ) -> None:
         super().__init__(parent)
         self.setWindowTitle("Model Resources / Import Model")
-        self.resize(980, 640)
-        self.setMinimumSize(760, 480)
+        self.resize(1300, 780)
+        self.setMinimumSize(1000, 600)
         self._base_path: Path | None = None
         self._base_error = ""
         self._archive = initial_archive
@@ -229,13 +245,16 @@ class ModelImportDialog(QDialog):
         self.base_edit.setPlaceholderText("Select a .BASE / .BAS entry point")
         self.base_button = QPushButton("Browse")
         self.base_button.clicked.connect(self._browse_base)
+        self.base_clear_button = QPushButton("Clear")
+        self.base_clear_button.clicked.connect(self._clear_base)
         self.base_state = QLabel("—")
         self.base_state.setObjectName("importState")
         self.base_state.setAlignment(Qt.AlignmentFlag.AlignCenter)
         grid.addWidget(QLabel("Model BASE"), 0, 0)
         grid.addWidget(self.base_edit, 0, 1)
         grid.addWidget(self.base_button, 0, 2)
-        grid.addWidget(self.base_state, 0, 3)
+        grid.addWidget(self.base_clear_button, 0, 3)
+        grid.addWidget(self.base_state, 0, 4)
 
         self.archive_edit = QLineEdit()
         self.archive_edit.setReadOnly(True)
@@ -245,17 +264,20 @@ class ModelImportDialog(QDialog):
         self.archive_button.clicked.connect(self._browse_archive)
         self.archive_clear_button = QPushButton("Clear")
         self.archive_clear_button.clicked.connect(self._clear_archive)
+        self.change_set_button = QPushButton("Change set")
+        self.change_set_button.clicked.connect(self._open_change_set_menu)
         grid.addWidget(QLabel("SET.BAS resources"), 1, 0)
         grid.addWidget(self.archive_edit, 1, 1)
         grid.addWidget(self.archive_button, 1, 2)
         grid.addWidget(self.archive_clear_button, 1, 3)
+        grid.addWidget(self.change_set_button, 1, 4)
 
         self.archive_summary = QLabel(
             "No SET.BAS archive selected. If external resources are missing, "
             "select a SET.BAS archive above to load them automatically.")
         self.archive_summary.setObjectName("importNote")
         self.archive_summary.setWordWrap(True)
-        grid.addWidget(self.archive_summary, 2, 1, 1, 3)
+        grid.addWidget(self.archive_summary, 2, 1, 1, 4)
         layout.addWidget(sources)
 
         self.tree = _ImportResourceTree()
@@ -280,13 +302,16 @@ class ModelImportDialog(QDialog):
         header.setSectionResizeMode(2, QHeaderView.ResizeMode.Interactive)
         header.setSectionResizeMode(3, QHeaderView.ResizeMode.Interactive)
         header.setSectionResizeMode(4, QHeaderView.ResizeMode.Stretch)
-        self.tree.setColumnWidth(0, 100)
-        self.tree.setColumnWidth(1, 250)
-        self.tree.setColumnWidth(2, 145)
-        self.tree.setColumnWidth(3, 135)
+        self.tree.setColumnWidth(0, 105)
+        self.tree.setColumnWidth(1, 260)
+        self.tree.setColumnWidth(2, 150)
+        self.tree.setColumnWidth(3, 280)
         self.tree.itemSelectionChanged.connect(self._sync_buttons)
         self.tree.itemDoubleClicked.connect(
             lambda _item, _column: self._choose_source())
+        self.tree.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self.tree.customContextMenuRequested.connect(
+            self._show_tree_context_menu)
         self.empty_label = QLabel("Select a model BASE to inspect its resources.")
         self.empty_label.setObjectName("importEmpty")
         self.empty_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
@@ -349,6 +374,15 @@ class ModelImportDialog(QDialog):
             return
         self.set_base_path(path)
 
+    def _clear_base(self) -> None:
+        self._base_path = None
+        self._base_error = ""
+        self.base_edit.clear()
+        self.base_edit.setToolTip("")
+        self._choices.clear()
+        self._search_roots.clear()
+        self._reprobe()
+
     def _browse_archive(self) -> None:
         path, _ = QFileDialog.getOpenFileName(
             self, "Select a SET.BAS resource archive", "",
@@ -370,6 +404,58 @@ class ModelImportDialog(QDialog):
 
     def _clear_archive(self) -> None:
         self.set_archive(None)
+
+    def _active_archive_set_number(self) -> int | None:
+        return _set_number_in_path(self._archive.path) if self._archive else None
+
+    def _open_change_set_menu(self) -> None:
+        install = bootstrap.installation()
+        if install is None:
+            QMessageBox.information(
+                self, "Change set",
+                "Choose the game folders first (Resources > Game Folders).")
+            return
+        directories = install.set_directories()
+        current = self._active_archive_set_number()
+        menu = QMenu(self)
+        group = QActionGroup(menu)
+        group.setExclusive(True)
+        for number in sorted(directories):
+            label = f"Set {number}" + (
+                " (custom)" if number in install.custom_sets else "")
+            action = menu.addAction(label)
+            action.setCheckable(True)
+            action.setChecked(number == current)
+            group.addAction(action)
+            action.triggered.connect(
+                lambda _checked=False, target=number: self._load_set_by_number(target))
+        if not directories:
+            menu.addAction("No sets found").setEnabled(False)
+        menu.addSeparator()
+        menu.addAction("Browse…", self._browse_archive)
+        menu.exec(
+            self.change_set_button.mapToGlobal(
+                self.change_set_button.rect().bottomLeft()))
+
+    def _load_set_by_number(self, number: int) -> None:
+        install = bootstrap.installation()
+        if install is None:
+            return
+        folder = install.set_directories().get(number)
+        if folder is None:
+            return
+        path = find_existing_path(folder, "Objects", "Set.BAS")
+        if path is None or not path.is_file():
+            QMessageBox.warning(
+                self, "Change set",
+                f"Set {number} has no Objects/SET.BAS archive.")
+            return
+        self._load_archive(path)
+        # Studio's own active set follows the choice made here.
+        if self._active_archive_set_number() == number:
+            from studio.ui.shell import change_game_set
+            if self.parent() is not None:
+                change_game_set(self.parent(), number)
 
     def _update_archive_summary(self) -> None:
         archive = self._archive
@@ -465,6 +551,7 @@ class ModelImportDialog(QDialog):
             ])
             item.setData(0, _REQUIREMENT_ROLE, probe)
             item.setToolTip(2, probe.detail)
+            item.setToolTip(3, probe.detail)
             item.setToolTip(4, path_text)
             self._decorate(item, probe)
             self.tree.addTopLevelItem(item)
@@ -487,7 +574,18 @@ class ModelImportDialog(QDialog):
         if missing and self._archive is None:
             text += " — Select a SET.BAS archive above to load missing resources."
         if fallback:
-            text += f" · {fallback} fallback — Outside the active set. Colors may differ."
+            active_set = self._active_archive_set_number()
+            found_sets = sorted({
+                number for probe in self._probes if probe.status == "fallback"
+                and (number := _set_number_in_path(probe.path)) is not None})
+            if found_sets and active_set and found_sets != [active_set]:
+                sets_text = ", ".join(f"Set {n}" for n in found_sets)
+                text += (
+                    f" · {fallback} fallback — not found in Set {active_set}, "
+                    f"loaded from {sets_text} instead. Colors may differ. "
+                    f"Use \"Change set\" above to load the matching set.")
+            else:
+                text += f" · {fallback} fallback — Outside the active set. Colors may differ."
         if missing or ambiguous:
             key = "ambiguous" if ambiguous else "missing"
             self.summary.setStyleSheet(
@@ -509,10 +607,17 @@ class ModelImportDialog(QDialog):
             self.base_state.setStyleSheet(
                 f"color: {STATUS_COLORS[status].name()}; font-weight: 600;")
 
-    @staticmethod
-    def _source_text(probe: FamilyRequirementProbe) -> tuple[str, str]:
+    def _source_text(self, probe: FamilyRequirementProbe) -> tuple[str, str]:
         if probe.status == "fallback":
-            return "Model folder fallback", str(probe.path or "")
+            found_set = _set_number_in_path(probe.path)
+            active_set = self._active_archive_set_number()
+            if found_set and active_set and found_set != active_set:
+                label = f"Fallback: Set {found_set} texture (editing Set {active_set})"
+            elif found_set:
+                label = f"Fallback: Set {found_set} texture"
+            else:
+                label = "Model folder fallback"
+            return label, str(probe.path or "")
         if probe.status == "loaded":
             return "Current session", ""
         if probe.status == "loose":
@@ -565,6 +670,21 @@ class ModelImportDialog(QDialog):
             self.tree if self.tree.topLevelItemCount() else self.empty_label)
         has_selection = bool(self.tree.selectedItems())
         self.source_button.setEnabled(has_selection)
+
+    def _show_tree_context_menu(self, pos) -> None:
+        item = self.tree.itemAt(pos)
+        if item is None:
+            return
+        probe = item.data(0, _REQUIREMENT_ROLE)
+        if probe is None:
+            return
+        menu = QMenu(self)
+        browse = menu.addAction("Browse…")
+        browse.setEnabled(probe.path is not None and Path(probe.path).exists())
+        action = menu.exec(self.tree.viewport().mapToGlobal(pos))
+        if action is browse:
+            QDesktopServices.openUrl(
+                QUrl.fromLocalFile(str(Path(probe.path).parent)))
 
     def _choose_source(self) -> None:
         probes = self._selected_probes()

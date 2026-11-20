@@ -111,6 +111,10 @@ class AssetFamily:
     # optional embedded resource provider (read-only SET.BAS archive)
     setbas_archive: SetBasArchive | None = None
     setbas_path: Path | None = None
+    # Explicit active-set number for isolated reloads with no SET.BAS of
+    # their own to derive it from (see _active_set_number and the package
+    # export/validation round-trip in window_model_io.py).
+    active_set_number: int | None = None
     # logical name (lower) -> True when the user forced the SET.BAS source
     setbas_overrides: dict[str, bool] = field(default_factory=dict)
     external_palette: Palette | None = None
@@ -294,6 +298,8 @@ def _resolve_with_setbas(family: AssetFamily, resolver: AssetResolver,
 def _active_set_number(family: AssetFamily) -> int | None:
     """Number N of the SetN folder that holds the attached SET.BAS."""
 
+    if getattr(family, "active_set_number", None) is not None:
+        return family.active_set_number
     if family.setbas_path is None:
         return None
     folder = next((p.name for p in Path(family.setbas_path).parents
@@ -385,11 +391,15 @@ def _set1_texture(family: AssetFamily, name: str):
     return (archive, matches[0]) if len(matches) == 1 else None
 
 
+# Set-independent effect textures: never resolved per active set.
+SET_INDEPENDENT_TEXTURES = ("fx1.ilbm", "fx2.ilbm", "fx3.ilbm")
+
+
 def _applies_external_texture_order(family: AssetFamily, name: str, manual: ResolvedFile) -> bool:
     return (manual.source != "manual" and family.base_path is not None
             and not _is_setbas_family(family) and not _wants_setbas(family, name)
             and Path(normalize_logical_name(name)).suffix.casefold() == ".ilbm"
-            and name.casefold() not in ("fx1.ilbm", "fx2.ilbm", "fx3.ilbm"))
+            and name.casefold() not in SET_INDEPENDENT_TEXTURES)
 
 
 def _load_external_texture(family: AssetFamily, resolver: AssetResolver, name: str) -> None:
@@ -1066,7 +1076,8 @@ def load_asset_family(base_path: str | Path,
                       extra_roots: list[str | Path] | None = None,
                       overrides: dict[str, Path | str] | None = None,
                       setbas: SetBasArchive | str | Path | None = None,
-                      *, isolated_root: str | Path | None = None
+                      *, isolated_root: str | Path | None = None,
+                      active_set: int | None = None,
                       ) -> AssetFamily:
     """Mode A: open a .base file and assemble the referenced family.
 
@@ -1074,13 +1085,16 @@ def load_asset_family(base_path: str | Path,
     paths chosen by the user, or to "setbas:<name>" to force the embedded
     SET.BAS resource; they win over directory search.  ``setbas`` attaches a
     read-only SET.BAS archive as fallback resource provider (loose files
-    still win, matching the engine's precedence).  Session-only: nothing is
-    written to disk.
+    still win, matching the engine's precedence).  ``active_set`` names the
+    Textures/Set<N>/ folder to search when there is no ``setbas`` of its own
+    to derive that number from (an isolated package reload, see
+    AssetFamily.active_set_number).  Session-only: nothing is written to disk.
     """
 
     family = AssetFamily()
     path = Path(base_path)
     family.base_path = path
+    family.active_set_number = active_set
 
     if isolated_root is not None:
         family.allow_texture_fallback = False
@@ -1707,6 +1721,10 @@ def write_package_manifest(
         "source_name": source_name or (
             str(source_family.base_path) if source_family.base_path else ""),
         "entry_base": entry.as_posix(),
+        # The Set<N> number textures were placed under (Textures/Set<N>/),
+        # so a later isolated reload (validation, re-import) can find them
+        # again without external context; null when none was active.
+        "active_set": _active_set_number(source_family),
         "semantic_sha256": semantic_sha256(snapshot),
         "semantic_snapshot": snapshot,
         "entries": normalized_entries,
@@ -1744,11 +1762,30 @@ def _load_manifest(root: Path, manifest_relative: str | Path) -> dict:
     return manifest
 
 
+def read_package_active_set(package_root: str | Path) -> int | None:
+    """Active-set number a Complete Asset Family package recorded at export,
+    read straight from its own manifest (see write_package_manifest);
+    ``None`` if the manifest is missing, unreadable, or recorded none."""
+
+    try:
+        manifest = _load_manifest(Path(package_root), MANIFEST_NAME)
+    except (AssetFamilyPackageError, OSError, ValueError):
+        return None
+    value = manifest.get("active_set")
+    return value if isinstance(value, int) else None
+
+
 def validate_family_package(
         root: str | Path, *,
-        manifest_relative: str | Path = MANIFEST_NAME
+        manifest_relative: str | Path = MANIFEST_NAME,
+        active_set: int | None = None,
         ) -> PackageValidation:
-    """Validate hashes, layout, isolated dependency resolution and semantics."""
+    """Validate hashes, layout, isolated dependency resolution and semantics.
+
+    ``active_set`` must be the same number the package was exported with, so
+    a Textures/Set<N>/ layout resolves identically on this isolated reload;
+    left out, it defaults to the number the manifest itself recorded.
+    """
 
     package_root = Path(root).resolve()
     relative_manifest = Path(manifest_relative)
@@ -1758,6 +1795,10 @@ def validate_family_package(
     try:
         manifest = _load_manifest(package_root, relative_manifest)
         result.manifest = manifest
+        if active_set is None:
+            recorded_active_set = manifest.get("active_set")
+            if isinstance(recorded_active_set, int):
+                active_set = recorded_active_set
         entry_text = manifest.get("entry_base")
         if not isinstance(entry_text, str) or not entry_text:
             raise AssetFamilyPackageError("manifest entry_base is missing")
@@ -1818,7 +1859,7 @@ def validate_family_package(
 
         DirectoryIndex.clear_cache()
         family = load_asset_family(
-            entry_base, isolated_root=package_root)
+            entry_base, isolated_root=package_root, active_set=active_set)
         result.family = family
         if family.root_object is None:
             result.errors.append("entry BASE failed to parse")

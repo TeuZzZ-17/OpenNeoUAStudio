@@ -18,6 +18,8 @@ from PySide6.QtWidgets import (
 )
 
 from studio.assets.family import (
+    _active_set_number,
+    SET_INDEPENDENT_TEXTURES,
     AssetFamily,
     load_asset_family,
     PackageEntry,
@@ -91,11 +93,25 @@ class _ModelFilesMixin:
         return _ModelFilesMixin._flat_asset_family_path(relative)
 
     @staticmethod
-    def _bundle_texture_relative_path(name: str) -> Path:
+    def _bundle_texture_relative_path(
+            name: str, family: AssetFamily | None = None,
+            active_set_number: int | None = None) -> Path:
+        """Textures/Set<N>/ of the active set, matching the loader's own
+        search order (see family._external_texture_files); flat at the
+        package root when no active set is known."""
+
         relative = package_relative_path(
             name, default_name="TEXTURE.ILBM",
             extensions=(".ILBM", ".ILB", ".LBM", ".IFF", ".VBMP"))
-        return _ModelFilesMixin._flat_asset_family_path(relative)
+        flat = _ModelFilesMixin._flat_asset_family_path(relative)
+        if flat.name.casefold() in SET_INDEPENDENT_TEXTURES:
+            return flat
+        number = (active_set_number if active_set_number is not None
+                  else (_active_set_number(family)
+                        if family is not None else None))
+        if number is None:
+            return flat
+        return Path("Textures") / f"Set{number}" / flat.name
 
     @staticmethod
     def _matching_ref(mapping: dict, logical_name: str):
@@ -388,7 +404,8 @@ class _ModelFilesMixin:
 
     def _import_onua_archive(self) -> None:
         """Unpack a .ONUA archive into a folder and open its model."""
-        from studio.assets.family import load_asset_family
+        from studio.assets.family import (
+            load_asset_family, read_package_active_set)
         from studio.exchange.onua_archive import FILE_FILTER, import_onua
 
         source, _ = QFileDialog.getOpenFileName(
@@ -404,7 +421,9 @@ class _ModelFilesMixin:
             return
         try:
             base_path = import_onua(source, target)
-            family = load_asset_family(base_path, isolated_root=Path(target))
+            family = load_asset_family(
+                base_path, isolated_root=Path(target),
+                active_set=read_package_active_set(target))
         except (AssetFamilyPackageError, OSError, ValueError) as exc:
             QMessageBox.critical(self, "Archive import failed", str(exc))
             return
@@ -626,6 +645,10 @@ class _ModelFilesMixin:
         origin_delta = self._pending_origin_deltas.get(owner) if inplace else None
         package_root = base_target.parent.resolve()
         manifest_target = package_root / ASSET_FAMILY_MANIFEST
+        # Textures export into Textures/Set<N>/ of this same number; the
+        # isolated reload below must be told it explicitly, since it has no
+        # SET.BAS of its own to derive it from.
+        active_set_number = _active_set_number(family)
 
         # Scope dependencies to the selected BASE object and its KIDS.  A
         # SET.BAS session can contain hundreds of unrelated resources; an
@@ -723,7 +746,8 @@ class _ModelFilesMixin:
                     "family would be incomplete.")
                 return False
             try:
-                relative = self._bundle_texture_relative_path(canonical)
+                relative = self._bundle_texture_relative_path(
+                    canonical, family, active_set_number)
             except AssetFamilyPackageError as exc:
                 QMessageBox.critical(
                     self, "Export failed - current files unchanged",
@@ -1015,7 +1039,8 @@ class _ModelFilesMixin:
                     source_name=str(family.base_path or family.setbas_path
                                     or base_target.name),
                 )
-                package_validation = validate_family_package(temp_root)
+                package_validation = validate_family_package(
+                    temp_root, active_set=active_set_number)
                 if not package_validation.valid:
                     raise AssetFamilyPackageError(
                         "Asset Family validation failed:\n"
@@ -1074,7 +1099,8 @@ class _ModelFilesMixin:
                     # mode so validation stays strict without exporting it.
                     DirectoryIndex.clear_cache()
                     committed = load_asset_family(
-                        base_target, isolated_root=package_root)
+                        base_target, isolated_root=package_root,
+                        active_set=active_set_number)
                     if committed.root_object is None:
                         raise AssetFamilyPackageError(
                             "committed Asset Family entry BASE failed to parse")
