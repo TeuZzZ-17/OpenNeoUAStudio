@@ -101,6 +101,15 @@ class StateSyncDialog(QDialog):
         if self.source_family is None or self.source_obj is None \
                 or self.source_obj.skeleton is None:
             raise ValueError("Open a model first.")
+        # Origin changes are saved separately with the model. Compare other
+        # edits in the original reference frame while the origin is pending.
+        offset = getattr(window, "_pending_origin_deltas", {}).get(self.source_obj.owner_path)
+        if offset is not None:
+            self.source_obj = copy.copy(self.source_obj)
+            self.source_obj.skeleton = copy.copy(self.source_obj.skeleton)
+            self.source_obj.skeleton.points = [
+                tuple(a - b for a, b in zip(point, offset))
+                for point in self.source_obj.skeleton.points]
         self.setWindowTitle("Apply Changes to Other States")
         self.resize(1120, 700)
         self.slots = []

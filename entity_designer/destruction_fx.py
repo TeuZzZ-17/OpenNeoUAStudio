@@ -2128,11 +2128,12 @@ def unit_look(values: dict[str, str], *, weapon: bool) -> dict:
                             if weapon else 0),
         "blast_debuff_name": (debuff_link(values.get("blast_debuff_id"), 0)[1]
                               if weapon else ""),
-        # artillery_shell vertical_barrage: rounds fall from arc_height.
+        # Vertical barrage rounds fall from the configured vertical height.
         "fixed_speed": (_stof(values.get("artillery_shell_speed", "0"))
                         if vertical_barrage else 0.0),
         "artillery_transfer_fade": transfer_fade,
-        "altitude": (min(3000.0, _stof(values.get("artillery_shell_arc_height", "0")))
+        "altitude": (min(3000.0, _stof(values.get("artillery_shell_vertical_height", "2500")
+                                            if vertical_barrage else values.get("artillery_shell_arc_height", "0")))
                      if weapon and values.get("model", "").casefold() == "artillery_shell"
                      else 0.0),
         "start_speed": max(0.0, _stof(values.get("start_speed", "0"))),

@@ -279,6 +279,7 @@ _STATUS_DARK_MODE = {
     "manual (SET.BAS)": QColor(110, 170, 255),
     "setbas": QColor(120, 210, 210),
     "ambiguous": QColor(255, 190, 70),
+    "fallback": QColor(255, 153, 71),
     "missing": QColor(240, 90, 90),
     "decode failed": QColor(200, 90, 200),
 }
@@ -288,6 +289,7 @@ _STATUS_LIGHT_MODE = {
     "manual (SET.BAS)": QColor(24, 84, 190),
     "setbas": QColor(0, 116, 124),
     "ambiguous": QColor(160, 94, 0),
+    "fallback": QColor(171, 75, 14),
     "missing": QColor(190, 34, 34),
     "decode failed": QColor(140, 36, 150),
 }

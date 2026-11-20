@@ -11,7 +11,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from PySide6.QtCore import Qt
-from PySide6.QtGui import QColor
+from PySide6.QtGui import QColor, QPen
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QDialog,
@@ -27,6 +27,9 @@ from PySide6.QtWidgets import (
     QMessageBox,
     QPushButton,
     QStackedWidget,
+    QStyle,
+    QStyledItemDelegate,
+    QStyleOptionViewItem,
     QTreeWidget,
     QTreeWidgetItem,
     QVBoxLayout,
@@ -44,6 +47,7 @@ from studio.formats.setbas import (
 )
 from studio.ui.widgets import STATUS_COLORS, loading_resources
 from studio.ui.sorting import SortableTreeItem, enable_tree_sort
+from studio.ui.style import theme_accent_color
 
 _REQUIREMENT_ROLE = Qt.ItemDataRole.UserRole + 71
 
@@ -77,9 +81,32 @@ _STATUS_LABELS = {
     "loose": "Ready (loose)",
     "manual": "Ready (chosen)",
     "setbas": "Ready (SET.BAS)",
+    "fallback": "Loaded (fallback)",
+    "loaded": "Loaded (session)",
     "ambiguous": "Ambiguous",
     "missing": "Missing",
 }
+
+
+class _ImportResourceDelegate(QStyledItemDelegate):
+    def paint(self, painter, option, index):
+        visible = QStyleOptionViewItem(option)
+        visible.state &= ~(QStyle.StateFlag.State_Selected
+                           | QStyle.StateFlag.State_HasFocus
+                           | QStyle.StateFlag.State_MouseOver)
+        super().paint(painter, visible, index)
+
+class _ImportResourceTree(QTreeWidget):
+    def drawRow(self, painter, option, index):
+        super().drawRow(painter, option, index)
+        if self.selectionModel().isRowSelected(index.row(), index.parent()):
+            rect = option.rect.adjusted(2, 2, -3, -3)
+            rect.setRight(min(rect.right(), self.viewport().width() - 3))
+            painter.save()
+            painter.setPen(QPen(theme_accent_color(), 2))
+            painter.drawRect(rect)
+            painter.restore()
+
 
 
 @dataclass(frozen=True)
@@ -107,9 +134,10 @@ class ModelImportDialog(QDialog):
             initial_base: str | Path | None = None,
             initial_archive: SetBasArchive | None = None,
             extra_roots: list[str | Path] | None = None,
+            loaded_family=None,
     ) -> None:
         super().__init__(parent)
-        self.setWindowTitle("Import Model")
+        self.setWindowTitle("Model Resources / Import Model")
         self.resize(980, 640)
         self.setMinimumSize(760, 480)
         self._base_path: Path | None = None
@@ -129,11 +157,11 @@ class ModelImportDialog(QDialog):
             self.archive_edit.setToolTip(str(initial_archive.path))
             self._update_archive_summary()
         if initial_base is not None:
-            self.set_base_path(initial_base)
+            self.set_base_path(initial_base, loaded_family=loaded_family)
 
     # -- public ---------------------------------------------------------------
 
-    def set_base_path(self, path: str | Path) -> bool:
+    def set_base_path(self, path: str | Path, *, loaded_family=None) -> bool:
         """Parse *path* and rebuild the resource table."""
 
         base = Path(path)
@@ -141,8 +169,14 @@ class ModelImportDialog(QDialog):
         self.base_edit.setText(str(base))
         self.base_edit.setToolTip(str(base))
         self._choices.clear()
+        if loaded_family is not None:
+            self._choices.update({
+                self._choice_key(name): ("setbas" if str(value).casefold().startswith("setbas:")
+                                         else Path(value))
+                for name, value in loaded_family.overrides.items()
+            })
         self._search_roots.clear()
-        return self._reprobe()
+        return self._reprobe(loaded_family=loaded_family)
 
     def set_archive(self, archive: SetBasArchive | None) -> None:
         if archive is not self._archive:
@@ -224,7 +258,8 @@ class ModelImportDialog(QDialog):
         grid.addWidget(self.archive_summary, 2, 1, 1, 3)
         layout.addWidget(sources)
 
-        self.tree = QTreeWidget()
+        self.tree = _ImportResourceTree()
+        self.tree.setItemDelegate(_ImportResourceDelegate(self.tree))
         self.tree.setColumnCount(5)
         enable_tree_sort(self.tree)
         self.tree.setHeaderLabels(
@@ -247,7 +282,7 @@ class ModelImportDialog(QDialog):
         header.setSectionResizeMode(4, QHeaderView.ResizeMode.Stretch)
         self.tree.setColumnWidth(0, 100)
         self.tree.setColumnWidth(1, 250)
-        self.tree.setColumnWidth(2, 120)
+        self.tree.setColumnWidth(2, 145)
         self.tree.setColumnWidth(3, 135)
         self.tree.itemSelectionChanged.connect(self._sync_buttons)
         self.tree.itemDoubleClicked.connect(
@@ -366,7 +401,7 @@ class ModelImportDialog(QDialog):
     def _choice_key(name: str) -> str:
         return normalize_logical_name(name).casefold()
 
-    def _reprobe(self) -> bool:
+    def _reprobe(self, *, loaded_family=None) -> bool:
         if self._base_path is None:
             self._probes = []
             self._base_error = ""
@@ -378,6 +413,7 @@ class ModelImportDialog(QDialog):
                 self._all_search_roots(),
                 self._override_map(),
                 self._archive,
+                loaded_family=loaded_family,
             )
         except Exception as exc:  # parse errors must stay inside the dialog
             self._probes = []
@@ -443,16 +479,21 @@ class ModelImportDialog(QDialog):
             1 for probe in self._probes if probe.status == "ambiguous")
         from_setbas = sum(
             1 for probe in self._probes if probe.status == "setbas")
+        fallback = sum(probe.status == "fallback" for probe in self._probes)
         text = (
             f"{ready}/{total} resources ready"
             f" · {from_setbas} from SET.BAS"
             f" · {missing} missing · {ambiguous} ambiguous")
         if missing and self._archive is None:
             text += " — Select a SET.BAS archive above to load missing resources."
+        if fallback:
+            text += f" · {fallback} fallback — Outside the active set. Colors may differ."
         if missing or ambiguous:
             key = "ambiguous" if ambiguous else "missing"
             self.summary.setStyleSheet(
                 f"color: {STATUS_COLORS[key].name()};")
+        elif fallback:
+            self.summary.setStyleSheet(f"color: {STATUS_COLORS['fallback'].name()};")
         else:
             self.summary.setStyleSheet(
                 f"color: {STATUS_COLORS['found'].name()};")
@@ -470,6 +511,10 @@ class ModelImportDialog(QDialog):
 
     @staticmethod
     def _source_text(probe: FamilyRequirementProbe) -> tuple[str, str]:
+        if probe.status == "fallback":
+            return "Model folder fallback", str(probe.path or "")
+        if probe.status == "loaded":
+            return "Current session", ""
         if probe.status == "loose":
             return "Loose file", str(probe.path or "")
         if probe.status == "manual":
@@ -493,6 +538,8 @@ class ModelImportDialog(QDialog):
             "loose": "found",
             "manual": "found",
             "setbas": "found",
+            "fallback": "fallback",
+            "loaded": "found",
             "ambiguous": "ambiguous",
             "missing": "missing",
         }.get(probe.status, "missing")

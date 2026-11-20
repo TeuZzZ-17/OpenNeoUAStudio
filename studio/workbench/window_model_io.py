@@ -57,7 +57,10 @@ from studio.formats.sklt import (
 from studio.rendering.indexed import IndexedFamilyAdapter
 from studio.rendering.geometry import (
     build_topology_states,
+    invert_3x3,
+    mat_apply,
 )
+from studio.rendering.asset_viewport_common import _rotation_matrix
 
 
 class _ModelFilesMixin:
@@ -199,7 +202,7 @@ class _ModelFilesMixin:
                 setattr(current, name, copy.deepcopy(getattr(saved, name)))
 
     @staticmethod
-    def _write_verified_sklt(model, output_path: str | Path):
+    def _write_verified_sklt(model, output_path: str | Path, *, sensor_offset=None):
         """Write a SKLT copy and verify its geometry round-trip."""
 
         original = parse_sklt_bytes(
@@ -210,11 +213,14 @@ class _ModelFilesMixin:
         )
         if structural:
             save_sklt_with_poo2_pol2_structure(
-                model, model.points, model.polygons, output_path)
+                model, model.points, model.polygons, output_path, sensor_offset=sensor_offset)
         else:
-            save_sklt_with_poo2_points(model, model.points, output_path)
+            save_sklt_with_poo2_points(model, model.points, output_path, sensor_offset=sensor_offset)
         verified = parse_sklt_file(output_path)
-        expected_sensors = sen2_points_for_poo2(model, model.points)
+        expected_sensors = (sen2_points_for_poo2(model, model.points)
+                            if sensor_offset is None else [
+                                tuple(a + b for a, b in zip(point, sensor_offset))
+                                for point in model.sensors])
         matches = (
             len(verified.points) == len(model.points)
             and verified.polygons == model.polygons
@@ -236,6 +242,50 @@ class _ModelFilesMixin:
             raise MappingEditError(
                 "exported SKLT failed coordinate round-trip verification")
         return verified
+
+    def _stage_state_origins(self, family, fam_obj, base_target, skeleton_target,
+                             offset, temp_root, existing_pairs):
+        from map_editor import bootstrap
+        from model_editor.state_discovery import discover_states, origin_state_paths
+
+        def matrix(obj):
+            transform = obj.base_object.transform
+            return _rotation_matrix(
+                transform.euler if transform else (0, 0, 0),
+                transform.scale if transform else (1.0, 1.0, 1.0))
+
+        set_number = getattr(getattr(self, "entity_browser", None), "set_number", None) or 1
+        declared = discover_states(family, fam_obj, bootstrap.installation(), set_number)
+        root, states = origin_state_paths(
+            base_target, (item.path for item in declared if item.writable))
+        world_delta = mat_apply(matrix(fam_obj), offset)
+        scheduled = {skeleton_target.resolve(): offset}
+        occupied = {destination.resolve() for _, destination in existing_pairs}
+        pairs = []
+        for path in states:
+            sibling = load_asset_family(path, setbas=family.setbas_archive)
+            obj = sibling.root_object
+            ref = getattr(obj, "skeleton_ref", None)
+            target = Path(ref.path).resolve() if ref is not None and ref.path else None
+            inverse = invert_3x3(matrix(obj)) if obj is not None else None
+            if (target is None or not target.is_relative_to(root) or not target.is_file()
+                    or inverse is None or obj.skeleton is None):
+                raise MappingEditError(f"Cannot safely update the origin of {path.name}.")
+            delta = mat_apply(inverse, world_delta)
+            if target in scheduled:
+                if any(abs(a - b) > 1e-5 for a, b in zip(delta, scheduled[target])):
+                    raise MappingEditError(f"Shared skeleton has conflicting origins: {target}")
+                continue
+            if target in occupied:
+                raise MappingEditError(f"State skeleton is also an edited BASE dependency: {target}")
+            model = obj.skeleton
+            model.points[:] = [
+                tuple(a + b for a, b in zip(point, delta)) for point in model.points]
+            staged = temp_root / "state_origins" / str(len(pairs)) / target.name
+            self._write_verified_sklt(model, staged, sensor_offset=delta)
+            pairs.append((staged, target))
+            scheduled[target] = delta
+        return pairs
 
     def _owners_for_component(self, kind: str, name: str) -> list[str]:
         family = self._family
@@ -479,6 +529,7 @@ class _ModelFilesMixin:
                         f"{backup if backup and backup.exists() else '-'}")
                     return
                 self._geom_dirty.pop(owner, None)
+                self._pending_origin_deltas.pop(owner, None)
                 self._geom_original.pop(owner, None)
                 self._topology_original.pop(owner, None)
                 details = f" Backup: {backup.name}." if backup else ""
@@ -512,6 +563,8 @@ class _ModelFilesMixin:
                 self, "Overwrite BASE",
                 f"Overwrite the model opened from disk?\n\n{base_target}\n"
                 f"{skeleton_target}"
+                + ("\n\nThe origin change will also be saved to matching model states."
+                   if owner in self._pending_origin_deltas and fam_obj is family.root_object else "")
                 + "".join(f"\n{base_target.parent / name}" for name in animation_files)
                 + ("\n\nA .bak copy of each existing file is created first."
                    if backup_enabled() else ""),
@@ -570,6 +623,7 @@ class _ModelFilesMixin:
         tree = family.base_asset.tree
         source_archive_digest = hashlib.sha256(tree.data).digest()
         base_source = Path(family.base_path) if family.base_path else None
+        origin_delta = self._pending_origin_deltas.get(owner) if inplace else None
         package_root = base_target.parent.resolve()
         manifest_target = package_root / ASSET_FAMILY_MANIFEST
 
@@ -800,7 +854,14 @@ class _ModelFilesMixin:
                         source) in enumerate(skeleton_exports):
                     temp_skeleton = staged_path(target)
                     temp_skeleton.parent.mkdir(parents=True, exist_ok=True)
-                    self._write_verified_sklt(current_model, temp_skeleton)
+                    sensor_offset = origin_delta if current_model is model else None
+                    if inplace and target.is_file():
+                        baseline = parse_sklt_file(target)
+                        baseline.points = current_model.points
+                        baseline.polygons = current_model.polygons
+                        current_model = baseline
+                    self._write_verified_sklt(
+                        current_model, temp_skeleton, sensor_offset=sensor_offset)
                     temp_skeletons.append((temp_skeleton, target))
                     package_entries.append(PackageEntry(
                         logical_reference=(
@@ -993,6 +1054,7 @@ class _ModelFilesMixin:
                     *temp_skeletons,
                     (temp_base, base_target),
                 ]
+                origin_pairs = []
                 if not inplace:
                     commit_pairs += [
                         *temp_animations, *temp_textures, *temp_profiles]
@@ -1000,6 +1062,11 @@ class _ModelFilesMixin:
                     # Overwrite also writes the ANM files this session created or changed,
                     # beside the overwritten BASE, or the model would lose its animations.
                     commit_pairs += changed_animation_pairs
+                    if origin_delta is not None and fam_obj is family.root_object:
+                        origin_pairs = self._stage_state_origins(
+                            family, fam_obj, base_target, skeleton_target,
+                            origin_delta, temp_root, commit_pairs)
+                        commit_pairs.extend(origin_pairs)
 
                 def verify_destination_package() -> None:
                     # The JSON manifest is a staging/verification aid, not a
@@ -1041,6 +1108,10 @@ class _ModelFilesMixin:
                             != len(model.points)):
                         raise AssetFamilyPackageError(
                             "overwritten skeleton does not match the edited one")
+                    for staged, destination in origin_pairs:
+                        if destination.read_bytes() != staged.read_bytes():
+                            raise AssetFamilyPackageError(
+                                f"Saved state skeleton failed verification: {destination}")
 
                 if inplace and backup_enabled():
                     for _temp_file, final_file in commit_pairs:
@@ -1088,6 +1159,8 @@ class _ModelFilesMixin:
                 animation.new_file = False
 
         self._geom_dirty.pop(owner, None)
+        if inplace:
+            self._pending_origin_deltas.pop(owner, None)
         self._geom_original[owner] = list(model.points)
         if owner in self._topology_original:
             current = self._capture_topology_state(owner)

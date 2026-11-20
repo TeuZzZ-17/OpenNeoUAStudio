@@ -272,6 +272,66 @@ def _smoke_family(tmp_path, *, with_mesh):
     return family
 
 
+def test_origin_commands_keep_particle_effect_on_selected_emitter(app, tmp_path):
+    from studio.workbench.window import AssemblyWindow
+
+    family = _smoke_family(tmp_path, with_mesh=True)
+    obj = family.root_object
+    emitter = obj.base_object.ades[0]
+    emitter.ade_point_id = 2
+    obj.base_object.ades.append(replace(emitter, ade_point_id=1))
+    window = AssemblyWindow()
+    try:
+        window._family = family
+        window._owner_to_obj = {"root": obj}
+        window._selected_owner = "root"
+        window._workbench_obj = obj
+        viewport = window.viewport
+        viewport.load_family(family, primary_owner="root")
+        window.edit_toggle_action.setChecked(True)
+        assert viewport.enter_edit_mode("root")
+        window._refresh_emitters()
+        menu = window._create_viewport_context_menu()
+        actions = {action.text(): action for action in menu.actions()}
+        actions["Select All Emitters"].trigger()
+        assert viewport.edit_session.selection == {1, 2}
+        menu = window._create_viewport_context_menu()
+        actions = {action.text(): action for action in menu.actions()}
+        actions["Deselect All Emitters"].trigger()
+        assert not viewport.edit_session.selection
+        window._select_emitter_block(0)
+        assert window._selected_emitter() is not None
+        assert viewport.edit_session.selection == {2}
+        menu = window._create_viewport_context_menu()
+        assert window.edit_center_action in menu.actions()
+        assert window.edit_center_selection_action in menu.actions()
+        assert window.edit_center_action.isEnabled()
+        assert window.edit_center_selection_action.isEnabled()
+
+        viewport.seek_animation(150)
+
+        def particle_positions():
+            return [viewport._camera_vertex(face.billboard_center)
+                    for face in viewport._faces if face.billboard_center is not None]
+
+        before = particle_positions()
+        assert before
+        for action, point in (
+                (window.edit_center_selection_action.trigger, (0.0, 0.0, 0.0)),
+                (window._undo_edit, (0.0, 100.0, 0.0)),
+                (window._redo_edit, (0.0, 0.0, 0.0))):
+            action()
+            assert obj.skeleton.points[2] == point
+            assert [emitter.origin for emitter in viewport._particle_emitters] == [
+                obj.skeleton.points[2], obj.skeleton.points[1]]
+            after = particle_positions()
+            assert len(after) == len(before)
+            for actual, expected in zip(after, before):
+                assert actual == pytest.approx(expected)
+    finally:
+        window.close()
+
+
 def test_smoke_does_not_move_or_resize_the_model_it_comes_from(app, tmp_path):
     """A wreck with a tall smoke column keeps its own framing, bounds and ground."""
     viewport = AssetViewport()

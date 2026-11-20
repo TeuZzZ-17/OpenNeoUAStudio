@@ -222,7 +222,7 @@ class WindowContractV5Tests(unittest.TestCase):
             self.assertEqual(window.vp_current_label.text(), "-")
             self.assertEqual(
                 window.model_save_as_button.text(),
-                "Export Asset Family")
+                "Export Model")
             self.assertEqual(
                 window.setbas_onua_button.text(),
                 "Export Whole Model as Archive (.ONUA)")

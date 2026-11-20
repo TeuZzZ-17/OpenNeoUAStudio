@@ -225,6 +225,8 @@ class SectorEditorWindow(QMainWindow):
         self.document = None
         self.assets = self.library = None
         self.current_sector = None
+        self._sector_origins = {}
+        self._sector_write_snapshots = {}
         self.selected_cells = {4}
         self._syncing = False
         self._copied_positions = ()
@@ -292,9 +294,14 @@ class SectorEditorWindow(QMainWindow):
         ))
         file.addSeparator()
         self._add_actions(file, (
-            ("import_sector", "Import Sector File", None, self.import_sector),
-            ("export_sector", "Export Sector File", None, self.export_sector),
+            ("import_sector", "Import Sector", None, self.import_sector),
+            ("overwrite_sector", "Overwrite Sector", None, self.overwrite_sector),
+            ("export_sector", "Export Sector", None, self.export_sector),
         ))
+        self.actions["overwrite_sector"].setEnabled(False)
+        self.actions["overwrite_sector"].setToolTip(
+            "Write the current sector back to the external sector (folder or .onua) it was imported from "
+            "or last exported to")
         self.actions["import_sector"].setToolTip(
             "External sector (.sector folder or .onua archive), or native SET.SDF definitions (.sdf)")
         self.actions["export_sector"].setToolTip(
@@ -639,7 +646,7 @@ class SectorEditorWindow(QMainWindow):
         layout.addLayout(row)
         self.auto_icons = QCheckBox("Generate missing icons on export")
         self.auto_icons.setChecked(True)
-        self.auto_icons.setToolTip("File > Export Sector File draws the icons that this sector's own models still lack")
+        self.auto_icons.setToolTip("File > Export Sector draws the icons that this sector's own models still lack")
         layout.addWidget(self.auto_icons)
         layout.addStretch()
         self.icons_page = scroll_page(icons)
@@ -831,6 +838,7 @@ class SectorEditorWindow(QMainWindow):
     # --- strategic-map icons (external sectors only) -----------------------------------------
 
     def _refresh_map_icons(self):
+        self._update_overwrite_sector_action()
         if self.document is not None and hasattr(self, "map_icon_preview"):
             self.map_icon_preview.show_sector(self.document, self.current_sector, self.state.currentIndex())
 
@@ -911,7 +919,7 @@ class SectorEditorWindow(QMainWindow):
         if number not in self.document.sdf.sectors:
             menu.addAction("Create sector here", self.add_sector)
             menu.addSeparator()
-        for key in ("import_sector", "export_sector", None, "wipe_sector", "clear_sector", None,
+        for key in ("import_sector", "overwrite_sector", "export_sector", None, "wipe_sector", "clear_sector", None,
                     "copy_sector", "cut_sector"):
             if key is None:
                 menu.addSeparator()
@@ -983,11 +991,27 @@ class SectorEditorWindow(QMainWindow):
         defined = bool(self.document and self._selected_sector_numbers())
         for key in ("copy_sector", "cut_sector", "clear_sector", "wipe_sector", "export_sector"):
             self.actions[key].setEnabled(defined)
+        self._update_overwrite_sector_action()
         self.actions["import_sector"].setEnabled(self.document is not None)
         if self.document is not None:
             count = len(self.sectors.selectedItems())
             if count > 1 and not self._syncing:
                 self.statusBar().showMessage(f"{count} sector slots selected · Sector tools and the connection family apply to all of them.", 5000)
+
+    def _sector_has_changes(self, *, include_pending=True):
+        number = self.current_sector
+        if self.document is None or number not in self.document.sdf.sectors:
+            return False
+        baseline = self._sector_write_snapshots.get(number)
+        if baseline is None:
+            baseline = self.document.sector_snapshot(number, saved=True)
+        comment = self.description.text() if include_pending and self._pending_sector_fields() else None
+        return (self.document.sector_snapshot(number, comment=comment) != baseline
+                or (include_pending and self._pending_model()
+                    and number in self.document.sectors_using_model(self._editing_model_id)))
+
+    def _update_overwrite_sector_action(self):
+        self.actions["overwrite_sector"].setEnabled(self._sector_has_changes())
 
     def _browse_tab_changed(self, index):
         self.cancel_preview()
@@ -1286,7 +1310,7 @@ class SectorEditorWindow(QMainWindow):
         if self.document is None or not self._commit_forms():
             return
         path, _ = QFileDialog.getOpenFileName(
-            self, "Import Sector File", str(self.document.sectors_folder()),
+            self, "Import Sector", str(self.document.sectors_folder()),
             "Sectors (*.sector *.onua *.sdf *.SDF);;External sectors (*.sector *.onua);;"
             "Native SET.SDF definitions (*.sdf *.SDF)")
         if not path:
@@ -1301,16 +1325,53 @@ class SectorEditorWindow(QMainWindow):
                 self.current_sector = self.document.import_external_sector(path, free[0] if free else None)
             except RuntimeError as exc:      # unsafe or invalid .onua archive
                 raise ValueError(str(exc)) from exc
+            self._remember_sector_origin(self.current_sector, Path(path))
             self.statusBar().showMessage(
                 f"External sector opened in slot {self.current_sector:03d}. "
-                "Use File > Export Sector File to write it back.", 8000)
+                "Use File > Overwrite Sector to write it back.", 8000)
         self._run_edit(apply, reset=True)
+
+    def _remember_sector_origin(self, number, source):
+        """Remember the external sector (folder + name, or .onua) a slot came from / went to."""
+        source = Path(source)
+        if source.suffix.casefold() == ".onua":
+            origin = (source, source.stem)
+        elif source.is_dir():
+            origin = (source, source.name)
+        else:                                   # a .sector file: its folder takes the file's name
+            origin = (source.parent, source.stem)
+        self._sector_origins[number] = origin
+        self._sector_write_snapshots[number] = deepcopy(self.document.sector_snapshot(number))
+        self._update_overwrite_sector_action()
+
+    def overwrite_sector(self):
+        """File > Overwrite Sector: write the current sector back to where it was imported/exported."""
+        if not self._sector_has_changes() or not self._commit_forms():
+            return
+        if not self._sector_has_changes(include_pending=False):
+            return
+        number = self.current_sector
+        origin = self._sector_origins.get(number)
+        if origin is None or not (origin[0].exists() or origin[0].parent.exists()):
+            self.statusBar().showMessage(
+                f"Sector {number:03d} has no known external sector: choose where to export it.", 6000)
+            self.export_sector(current_only=True)
+            return
+        target, name = origin
+        try:
+            written = self.document.export_external_sector(
+                number, target, name=name, generate_icons=self._generate_icons_on_export(), overwrite=True)
+            self._sector_write_snapshots[number] = deepcopy(self.document.sector_snapshot(number))
+            self._update_overwrite_sector_action()
+            self.statusBar().showMessage(f"Sector {number:03d} overwritten in {written}", 8000)
+        except (OSError, ValueError, RuntimeError) as exc:
+            QMessageBox.warning(self, "Cannot overwrite sector", str(exc))
 
     def _import_definitions(self, path):
         targets = self._selected_slots()
         defined = [n for n in targets if n in self.document.sdf.sectors]
         if defined:
-            choice = QMessageBox.question(self, "Import Sector File",
+            choice = QMessageBox.question(self, "Import Sector",
                 f"Replace the {len(defined)} selected defined sector(s) with the imported definitions? "
                 "Extra definitions go into free slots.")
             if choice != QMessageBox.StandardButton.Yes:
@@ -1321,11 +1382,11 @@ class SectorEditorWindow(QMainWindow):
             self.statusBar().showMessage(f"Imported {len(numbers)} sector(s) from slot {numbers[0]:03d}.", 6000)
         self._run_edit(apply, reset=True)
 
-    def export_sector(self):
+    def export_sector(self, *, current_only=False):
         """File > Export Sector: external folder / .onua (current sector) or native .sdf (selection)."""
         if self.document is None or not self._commit_forms():
             return
-        numbers = self._selected_sector_numbers()
+        numbers = [self.current_sector] if current_only else self._selected_sector_numbers()
         if not numbers:
             return
         number = numbers[0]
@@ -1333,7 +1394,7 @@ class SectorEditorWindow(QMainWindow):
         folder_filter, archive_filter = "External sector (*.sector)", "OpenNeoUA archive (*.onua)"
         sdf_filter = "Native SET.SDF definitions (*.sdf)"
         path, chosen = QFileDialog.getSaveFileName(
-            self, "Export Sector File (SET resources stay in the SET)",
+            self, "Export Sector (SET resources stay in the SET)",
             str(self.document.sectors_folder() / f"Sector{number:03d}.sector"),
             f"{folder_filter};;{archive_filter};;{sdf_filter}")
         if not path:
@@ -1353,6 +1414,7 @@ class SectorEditorWindow(QMainWindow):
                 target = target.with_suffix(".onua")
             written = self.document.export_external_sector(
                 number, target, generate_icons=self._generate_icons_on_export())
+            self._remember_sector_origin(number, target)
             self.statusBar().showMessage(f"Exported sector {number:03d} to {written}", 8000)
         except (OSError, ValueError, RuntimeError) as exc:
             QMessageBox.warning(self, "Cannot export sector", str(exc))
@@ -1500,6 +1562,8 @@ class SectorEditorWindow(QMainWindow):
                     raise ValueError("Objects/SET.BAS is required to preview this set.")
                 library = SectorMeshLibrary(assets, set_only=True)
             self.document, self.assets, self.library = document, assets, library
+            self._sector_origins.clear()
+            self._sector_write_snapshots.clear()
             self.effects.load_catalog()
             self._sync_set_combo()
             document.assets = assets
@@ -1903,6 +1967,7 @@ class SectorEditorWindow(QMainWindow):
             return
         pending = self._pending_model()
         self.update_model_button.setEnabled(pending)
+        self._update_overwrite_sector_action()
         dirty = self.document.dirty or pending or self._pending_sector_fields()
         self.setWindowTitle(f"{'* ' if dirty else ''}Set {self.document.number} · {self.document.folder}"
                             " - OpenNeoUA Studio - Sector Editor")

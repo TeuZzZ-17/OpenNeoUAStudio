@@ -33,16 +33,16 @@ from studio_mcp.state_sync import (
 @pytest.fixture
 def flak(tmp_path):
     data = Path(os.environ.get("NME_GAME_DATA", ""))
-    original = data / "Models/Base/New/Kyt_Flak_01"
+    original = data / "Models/Base/New/Ghorkov/Kyt_Flak"
     if not original.is_dir():
         pytest.skip("Flak reference assets are not installed")
-    shutil.copytree(original, tmp_path / "Kyt_Flak_01")
-    return tmp_path / "Kyt_Flak_01"
+    shutil.copytree(original, tmp_path / "Kyt_Flak")
+    return tmp_path / "Kyt_Flak"
 
 
 def load(folder, state):
     DirectoryIndex.clear_cache()
-    family = load_asset_family(folder / f"Kyt_Flak_{state}" / f"Kyt_Flak_{state}.BASE")
+    family = load_asset_family(folder / f"Kyt_Flak_{state}.BASE")
     return family, family.root_object
 
 
@@ -64,7 +64,7 @@ def test_state_names_are_recognised():
 
 
 def test_the_folder_finds_the_other_state_without_any_script(flak):
-    found = states_by_name(flak / "Kyt_Flak_Fire" / "Kyt_Flak_Fire.BASE")
+    found = states_by_name(flak / "Kyt_Flak_Fire.BASE")
     assert [candidate.label for candidate in found] == ["Normal"]
     assert found[0].writable
 
@@ -87,7 +87,7 @@ def test_archive_objects_match_the_script_names_with_or_without_the_base_suffix(
 
 
 def test_a_model_without_state_names_still_finds_its_neighbours(flak):
-    found = nearby_models(flak / "Kyt_Flak_Fire" / "Kyt_Flak_Fire.BASE", set())
+    found = nearby_models(flak / "Kyt_Flak_Fire.BASE", set())
     assert [path.name for path in found] == ["Kyt_Flak_Normal.BASE"]
 
 
@@ -228,7 +228,7 @@ def test_the_dialog_previews_in_memory_and_writes_only_ticked_states(flak):
     face = static_faces(fire)[link.source]
     block = fire.base_object.ades[face.block_index]
     block.olpl[face.atts_index] = [(9 + k, 9 + 2 * k) for k in range(len(face.corners))]
-    normal_path = flak / "Kyt_Flak_Normal" / "Kyt_Flak_Normal.BASE"
+    normal_path = flak / "Kyt_Flak_Normal.BASE"
     disk_before = normal_path.read_bytes()
 
     window = QMainWindow()
@@ -238,12 +238,20 @@ def test_the_dialog_previews_in_memory_and_writes_only_ticked_states(flak):
     window._workbench_obj = fire
     window._extra_roots = []
     window._setbas = None
+    before = list(fire.skeleton.points)
+    offset = (10.0, -4.0, 2.0)
+    fire.skeleton.points[:] = [
+        tuple(a + b for a, b in zip(point, offset)) for point in before]
+    window._pending_origin_deltas = {fire.owner_path: offset}
+    normal_before = list(load(flak, "Normal")[1].skeleton.points)
     with patch("model_editor.state_sync_dialog.discover_states",
-               lambda *a: states_by_name(flak / "Kyt_Flak_Fire" / "Kyt_Flak_Fire.BASE")):
+               lambda *a: states_by_name(flak / "Kyt_Flak_Fire.BASE")):
         dialog = StateSyncDialog(window)
     assert dialog.states.topLevelItemCount() == 1
     item = dialog.states.topLevelItem(0)
     assert item.text(2) == "1 textures"
+    assert not hasattr(dialog, "origin_check")
+    assert dialog._current_slot().fam_obj.skeleton.points == normal_before
     assert not dialog.apply_button.isEnabled()
     assert normal_path.read_bytes() == disk_before, "a preview must not write"
 
@@ -251,16 +259,72 @@ def test_the_dialog_previews_in_memory_and_writes_only_ticked_states(flak):
     assert dialog.apply_button.isEnabled()
     dialog._apply()
     assert normal_path.read_bytes() != disk_before
+    normal_after = load(flak, "Normal")[1].skeleton.points
+    assert normal_after == normal_before
     dialog.preview.clear()
     dialog.close()
+
+
+def test_overwrite_propagates_origin_into_nested_states(flak, monkeypatch):
+    from PySide6.QtWidgets import QApplication, QMessageBox
+    from model_editor.window import ModelEditorWindow
+    from studio.formats.setbas import read_setbas
+    from studio.formats.sklt import parse_sklt_file
+
+    app = QApplication.instance() or QApplication([])
+    source = flak / "Kyt_Flak_Fire.BASE"
+    nested = flak / "Variants" / "Level" / "Normal"
+    nested.mkdir(parents=True)
+    target = nested / "Kyt_Flak_Normal.BASE"
+    (flak / target.name).rename(target)
+    sklt = nested / "KYTFLKN1.sklt"
+    (flak / sklt.name).rename(sklt)
+    before = parse_sklt_file(sklt)
+    base_before = target.read_bytes()
+    window = ModelEditorWindow()
+    try:
+        archive = Path(os.environ["NME_GAME_DATA"]) / "Sets/Set1/Objects/Set.BAS"
+        window._setbas = read_setbas(archive)
+        window.open_base(source, confirm_discard=False)
+        window.edit_toggle_action.setChecked(True)
+        assert window.viewport.enter_edit_mode("root")
+        session = window.viewport.edit_session
+        index = next(i for i, p in enumerate(session.model.points) if any(p))
+        old_point = tuple(session.model.points[index])
+        window.viewport.select_edit_vertices([index])
+        assert window.viewport.center_edit_model_at_origin(selection_only=True)
+        assert parse_sklt_file(sklt).points == before.points
+        window._undo_edit()
+        assert not window._pending_origin_deltas
+        window._redo_edit()
+        assert window._pending_origin_deltas["root"] == tuple(-v for v in old_point)
+        monkeypatch.setattr(QMessageBox, "question", lambda *args: QMessageBox.StandardButton.Yes)
+        monkeypatch.setattr(QMessageBox, "critical", lambda *args: pytest.fail(args[2]))
+        window._overwrite_model()
+        after = parse_sklt_file(sklt)
+        assert target.read_bytes() == base_before
+        assert after.polygons == before.polygons
+        for actual, old in zip(after.points + after.sensors, before.points + before.sensors):
+            assert actual == pytest.approx(tuple(a - b for a, b in zip(old, old_point)), abs=1e-5)
+        assert not window._pending_origin_deltas
+        window._overwrite_model()
+        assert parse_sklt_file(sklt).points == after.points
+        window._undo_edit()
+        window._overwrite_model()
+        restored = parse_sklt_file(sklt)
+        for actual, old in zip(restored.points + restored.sensors, before.points + before.sensors):
+            assert actual == pytest.approx(old, abs=1e-5)
+    finally:
+        window._geom_dirty.clear()
+        window.close()
 
 
 def test_the_mcp_copies_from_another_state(flak, monkeypatch):
     monkeypatch.setenv("ONUA_MCP_WRITE_ROOTS", str(flak))
     from studio_mcp import edit
 
-    fire = flak / "Kyt_Flak_Fire" / "Kyt_Flak_Fire.BASE"
-    normal = flak / "Kyt_Flak_Normal" / "Kyt_Flak_Normal.BASE"
+    fire = flak / "Kyt_Flak_Fire.BASE"
+    normal = flak / "Kyt_Flak_Normal.BASE"
     before = normal.read_bytes()
     result = edit.run(str(normal), [{"op": "copy_from_state", "source": str(fire)}], "test")
     assert result["results"][0]["match"] > 0.5

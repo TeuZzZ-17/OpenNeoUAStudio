@@ -521,8 +521,23 @@ class _AxisHandlesMixin:
         self._faces.extend(self._particle_faces_at(self._anim_clock_ms))
         self._invalidate_indexed_view_cache()
 
+    def _sync_particle_anchors(self, owner, blocks, world_points) -> None:
+        """Update cached particle origins after a committed skeleton edit."""
+
+        changed = False
+        for emitter in self._particle_emitters:
+            if emitter.owner != owner or not 0 <= emitter.block_index < len(blocks):
+                continue
+            anchor = blocks[emitter.block_index].ade_point_id
+            if 0 <= anchor < len(world_points) and emitter.origin != world_points[anchor]:
+                emitter.origin = world_points[anchor]
+                changed = True
+        if changed:
+            self._refresh_particle_faces()
+            self._build_particle_bounds()
+
     def _build_particle_bounds(self) -> None:
-        """Measure one full effect burst and the ground, so both stay fixed.
+        """Measure the envelope of one full effect burst.
 
         The envelope is kept apart from ``_owner_bounds``: those are the
         bounds of the model itself and also drive selection framing,
@@ -547,10 +562,13 @@ class _AxisHandlesMixin:
                         max(old[4], y + radius), max(old[5], z + radius))
         self._particle_bounds_points = points
         self._particle_owner_bounds = owner_bounds
+
+    def _set_ground_from_geometry(self) -> None:
         # UA +Y points down, so the largest Y is the lowest point. Every VP
         # stands on the same ground: the bottom of its model. Only an effect
         # without any surface (an explosion) stands on its lowest particle.
-        low = [point[1] for point in (self._static_points() or points)]
+        points = self._static_points() or self._particle_bounds_points
+        low = [point[1] for point in points]
         self._ground_y = max(low) if low else None
 
     def _static_points(self):

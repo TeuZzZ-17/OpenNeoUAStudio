@@ -433,20 +433,20 @@ def _data_relative_path(value) -> Path:
 
 @set_op("export_external_sector")
 def op_export_external_sector(ctx, sector=None, name=None, archive: bool = False, map_icons: bool = True):
-    """Write a sector as an external sector folder: Data/Models/Sectors/<name>/<name>.sector plus our own model
+    """Write a sector as an external sector folder: Data/Models/Sector/<name>/<name>.sector plus our own model
     files. Models and skeletons that exist in SET.BAS are written by name only (the game takes them from the SET of
-    the map). archive=true also writes Data/Models/Sectors/<name>.onua. The folder must be new. Written at once,
+    the map). archive=true also writes Data/Models/Sector/<name>.onua. The folder must be new. Written at once,
     outside the set (no set undo). A building uses it with sec_type = <sector_file>|<fallback SET sector>.
     map_icons=true draws the strategic-map icons of our own models (every zoom) into map/; set models keep their
     vanilla map symbol."""
     number = ctx.sector(sector)
     if not name or not NAME_TOKEN.fullmatch(str(name)):
         raise core.McpToolError("give name: letters, digits, '_' or '-' (max 32)")
-    folder = core.under_data("Models/Sectors") / name
+    folder = core.under_data("Models/Sector") / name
     core.ensure_writable(folder / f"{name}.sector")
     try:
         ctx.doc.export_external_sector(number, folder, generate_icons=bool(map_icons))
-        result = {"sector_file": f"Data/Models/Sectors/{name}/{name}.sector",
+        result = {"sector_file": f"Data/Models/Sector/{name}/{name}.sector",
                   "files": sorted(p.name for p in folder.iterdir() if p.is_file())}
         if archive:
             target = folder.parent / f"{name}.onua"
@@ -461,7 +461,7 @@ def op_export_external_sector(ctx, sector=None, name=None, archive: bool = False
 @set_op("import_external_sector")
 def op_import_external_sector(ctx, source=None, to=None):
     """Open an external sector (its .sector file, its folder, or a .onua archive; Data/... path) into a free slot
-    (or `to`) so the other operations can edit it. An archive is first unpacked into Data/Models/Sectors/<name>.
+    (or `to`) so the other operations can edit it. An archive is first unpacked into Data/Models/Sector/<name>.
     Its own models can never be saved into the set: export it again with export_external_sector, then wipe_sectors
     on that slot in the same batch (a batch that still uses them writes nothing)."""
     path = _data_relative_path(source)

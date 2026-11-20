@@ -48,6 +48,41 @@ def document(tmp_path):
     return doc
 
 
+def test_overwrite_sector_tracks_current_sector_and_success(document, tmp_path):
+    from sector_editor import SectorEditorWindow
+
+    app = QApplication.instance() or QApplication([])
+    with patch.object(SectorEditorWindow, "reload_game_resources"), \
+         patch.object(bootstrap, "game_data_dir", return_value=tmp_path):
+        window = SectorEditorWindow()
+    action = window.actions["overwrite_sector"]
+    assert not action.isEnabled()
+    window.document = document
+    window.current_sector = 9
+    window._remember_sector_origin(9, tmp_path / "single.onua")
+    document.assign_building(5, {4}, 1)
+    window._update_overwrite_sector_action()
+    assert not action.isEnabled()
+
+    window._sector_fields_number = 9
+    window._description_snapshot = document.sdf.sectors[9].comment
+    window.description.setText("Edited sector")
+    assert action.isEnabled()
+
+    # A lower-numbered sector may also be selected. Overwrite uses the current row.
+    with patch.object(window, "_selected_sector_numbers", return_value=[5, 9]), \
+         patch.object(window, "_refresh"), \
+         patch.object(document, "export_external_sector", return_value=tmp_path / "single.onua") as write:
+        action.trigger()
+        assert write.call_args.args[0] == 9
+        assert write.call_args.kwargs["overwrite"]
+    assert not action.isEnabled()
+    assert "Sector 009 overwritten" in window.statusBar().currentMessage()
+    assert "#ff7474" in window.statusBar().styleSheet()
+    window.deleteLater()
+    app.processEvents()
+
+
 def test_lossless_existing_rows_and_notes(document):
     assert document.encoded() == document.source
     original = document.source.splitlines()[1]
@@ -810,7 +845,7 @@ def test_change_set_menu_restores_selection_when_open_is_cancelled(real_window):
     install = GameInstallation.suggest(bootstrap.game_data_dir())
     with patch("map_editor.bootstrap.installation", return_value=install):
         install_workspace_shell(window, "sector_editor")
-        assert window.studio_set_menu.title() == "Change Set"
+        assert window.studio_set_menu.title().startswith("Change Set")
         with patch.object(window, "open_set", return_value=False) as opened:
             change_game_set(window, 2)
         opened.assert_called_once_with(bootstrap.set_dir(2))

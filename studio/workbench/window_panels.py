@@ -138,6 +138,7 @@ class _FamilyPanelsMixin:
         self._tab_edit_selection = {}
         self._fx_preview_cache.clear()
         self._edit_undo_stack.clear()
+        self._pending_origin_deltas.clear()
         self._edit_redo_stack.clear()
         self._uv_history_before = None
         self._selected_poly = None

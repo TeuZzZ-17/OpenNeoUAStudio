@@ -52,7 +52,7 @@ def test_resource_selection_is_required_and_shell_is_shared(tmp_path):
         warning.assert_called_once()
     window = QMainWindow()
     install_workspace_shell(window, "wireframe_editor")
-    titles = [action.text() for action in window.menuBar().actions()]
+    titles = [action.text().split(" (")[0] for action in window.menuBar().actions()]
     assert titles == ["Resources", "File Backup", "Theme", "Change Editor", "Vanilla Compatibility Checker"]
     assert window.menuBar().cornerWidget() is None
     tool_titles = [action.text() for action in window.studio_change_menu.actions()]

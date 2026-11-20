@@ -155,6 +155,46 @@ class GeometryPasteIntegrationTests(unittest.TestCase):
                          (6, 2))
         self.assertEqual(len(self.block.olpl), 2)
 
+    def test_add_texture_stages_quad_and_resource_until_confirmation(self):
+        from studio.assets.mapping import save_model_base_copy
+        from studio.formats.images import IlbmImage
+
+        def choose_texture(*args):
+            self.family.textures["NEW.ILBM"] = IlbmImage(
+                width=2, height=1, pixels=bytes([1, 2]))
+            return "NEW.ILBM"
+
+        selected = {a.text(): a for a in self.window._create_viewport_context_menu().actions()}
+        self.assertFalse(selected["Add Texture"].isEnabled())
+        self.assertFalse(selected["Add ANM"].isEnabled())
+        self.assertFalse(selected["Add Emitter"].isEnabled())
+        self.assertIn("Replace Texture", selected)
+        self.window._clear_model_selection()
+
+        with patch.object(self.window, "_choose_model_texture", side_effect=choose_texture):
+            self.window._add_textured_face()
+        self.assertTrue(self.window.viewport.paste_preview_active)
+        self.assertNotIn("NEW.ILBM", self.family.textures)
+        self.assertEqual(len(self.model.polygons), 1)
+        self.window._confirm_paste_geometry()
+        self.assertEqual(len(self.model.polygons), 2)
+        area = self.obj.base_object.ades[-1]
+        self.assertEqual((area.ade_poly_id, area.texture.name), (1, "NEW.ILBM"))
+        self.assertIn("NEW.ILBM", self.family.textures)
+        self.window._undo_edit()
+        self.assertEqual(len(self.model.polygons), 1)
+        self.assertNotIn("NEW.ILBM", self.family.textures)
+        self.window._redo_edit()
+        self.assertEqual(len(self.model.polygons), 2)
+        self.assertIn("NEW.ILBM", self.family.textures)
+        source = _base_bytes()
+        blocks = self.window._bundle_topology_states(source, self.obj)
+        target = Path(self.temp.name) / "WITH-TEXTURE.BASE"
+        save_model_base_copy(source, [], [], target, structural_blocks=blocks)
+        exported = parse_base_bytes(target.read_bytes()).root.ades[-1]
+        self.assertEqual(exported.texture.name, "NEW.ILBM")
+        self.assertEqual(exported.texture.outline_uvs, list(area.texture.outline_uvs))
+
     def test_post_append_failure_rolls_back_without_undo_ghost(self):
         clipboard = self.window._geometry_clipboard
         position = self.window.viewport._project(

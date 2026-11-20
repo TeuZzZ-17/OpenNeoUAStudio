@@ -302,7 +302,7 @@ class FxAuthoringTests(unittest.TestCase):
                 self.assertEqual(obj.base_object.ades[0].texture.name, 'FX1.ILBM')
                 menu = window._create_viewport_context_menu()
                 labels = [a.text() for a in menu.actions()]
-                self.assertIn('Clone ANM Element', labels)
+                self.assertIn('Clone ANM', labels)
                 self.assertIn('Rename ANM', labels)
                 self.assertNotIn('Copy FX Element', labels)
                 self.assertNotIn('Replace FX Element', labels)

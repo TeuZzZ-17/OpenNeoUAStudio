@@ -80,7 +80,7 @@ class ModelEditorWindow(EntityListMixin, SetBasMixin, AssemblyWindow):
                 self.map_editor_action):
             action.setVisible(False)
 
-        self.generate_genesis_action = QAction("Generate Genesis", self)
+        self.generate_genesis_action = QAction("Generate Model Genesis", self)
         self.generate_genesis_action.triggered.connect(self._generate_genesis_action)
         # Generating a Genesis edits the model, so it lives in the Edit menu.
         self.edit_menu.addSeparator()
@@ -94,7 +94,7 @@ class ModelEditorWindow(EntityListMixin, SetBasMixin, AssemblyWindow):
             "Copy the changes made to this model onto its other states "
             "(Normal, Fire, Dead, Genesis...). You choose which states to write.")
         self.apply_states_button.clicked.connect(self._apply_to_other_states)
-        self.generate_genesis_button = QPushButton("Generate Genesis from this model")
+        self.generate_genesis_button = QPushButton("Generate Model Genesis")
         self.generate_genesis_button.setToolTip(
             "Turn the current model into its animated Genesis (spawn-in) version. "
             "Undo restores it.")
@@ -105,6 +105,10 @@ class ModelEditorWindow(EntityListMixin, SetBasMixin, AssemblyWindow):
         while row.count():
             row.takeAt(0)
         self.poly_id_box.setTitle("Quick Actions")
+        panel_layout = self.poly_id_box.parentWidget().layout()
+        panel_layout.removeWidget(self.poly_id_box)
+        panel_layout.insertWidget(panel_layout.indexOf(self.transform_box) + 1,
+                                  self.poly_id_box)
         stack = QVBoxLayout()
         stack.addWidget(self.apply_states_button)
         stack.addWidget(self.generate_genesis_button)
@@ -229,7 +233,7 @@ class ModelEditorWindow(EntityListMixin, SetBasMixin, AssemblyWindow):
         """The model selected in the Bas Manager while that tab is shown, else None.
 
         The Bas Manager works on a model that is not yet in Edit Mode; its context
-        menu loads it first. Edit > Generate Genesis does the same for the selection.
+        menu loads it first. Edit > Generate Model Genesis does the same for the selection.
         """
 
         if (self._setbas is None
@@ -260,14 +264,14 @@ class ModelEditorWindow(EntityListMixin, SetBasMixin, AssemblyWindow):
         enabled = not reason and obj is not None and bool(obj.skeleton.polygons)
         self.generate_genesis_action.setEnabled(enabled)
         self.generate_genesis_button.setEnabled(enabled)
-        tip = ("Transform the current model into a Genesis. Undo restores it."
-               if enabled else "Generate Genesis: " + (reason or "load a model first"))
+        tip = ("Generate Genesis on the whole model. Undo restores it."
+               if enabled else "Generate Model Genesis: " + (reason or "load a model first"))
         self.generate_genesis_action.setToolTip(tip)
 
     def _add_model_generator_context_actions(self, menu, item) -> None:
         kind = item.data(0, _BAS_KIND_ROLE) if item is not None else None
         menu.addSeparator()
-        action = menu.addAction("Generate Genesis")
+        action = menu.addAction("Generate Model Genesis")
         action.setEnabled(kind in ("base", "sklt.class"))
         action.triggered.connect(
             lambda _checked=False: self._generate_from_setbas_item(item))
@@ -327,18 +331,18 @@ class ModelEditorWindow(EntityListMixin, SetBasMixin, AssemblyWindow):
             self._generate_genesis()
 
     def _generate_genesis(self) -> None:
-        if not self._require_editing("Generate Genesis"):
+        if not self._require_editing("Generate Model Genesis"):
             return
         if self._family is None or self._family.base_asset is None:
-            self._notify("Generate Genesis requires a complete BASE asset family.", 6000)
+            self._notify("Generate Model Genesis requires a complete BASE asset family.", 6000)
             return
         from .genesis_generator import generate_genesis
         try:
             self._apply_material_structure(
-                "Generate Genesis",
+                "Generate Model Genesis",
                 lambda: generate_genesis(self._family, self._workbench_obj))
         except Exception as exc:
-            QMessageBox.warning(self, "Generate Genesis failed", str(exc))
+            QMessageBox.warning(self, "Generate Model Genesis failed", str(exc))
             return
         self._notify("Genesis generated. Undo restores the original model; "
                      "Export Asset Family saves the result.", 7000)

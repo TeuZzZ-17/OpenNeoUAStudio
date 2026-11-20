@@ -7,7 +7,10 @@ import math
 
 from studio.formats.animation import parse_anm_bytes
 from studio.assets.animated_polygons import build_vanm
-from studio.assets.mapping import MappingEditError, _wrap_ades_objt, rewrite_block_texture_template
+from studio.assets.mapping import (
+    MappingEditError, _wrap_ades_objt,
+    rewrite_block_texture_template,
+)
 from studio.formats.base_format import AttsEntry, parse_base_bytes
 from studio.formats.images import parse_ilbm_bytes
 from . import genesis_reference as reference
@@ -51,7 +54,7 @@ def _animation_signature(animation):
 
 
 def generate_genesis(family, obj):
-    """Replace the selected model's materials without changing its geometry."""
+    """Convert all model surfaces without changing polygon IDs."""
     model = obj.skeleton
     if model is None or not model.polygons:
         raise MappingEditError("Load a model with polygon surfaces first.")
@@ -117,6 +120,8 @@ def generate_genesis(family, obj):
         blocks.append(block)
     if not blocks:
         raise MappingEditError("This model contains no polygon surfaces.")
+    blocks.extend(block for block in obj.base_object.ades
+                  if (block.class_id or "").casefold() not in ("amesh.class", "area.class"))
     # FX2 belongs to the active SET palette. Prefer that SET's existing atlas.
     if not any(name.casefold() == "fx2.ilbm" for name in family.textures):
         from studio.assets.family import _load_texture, SETBAS_OVERRIDE_PREFIX
@@ -141,8 +146,4 @@ def generate_genesis(family, obj):
                                    + "; ".join(staged.warnings))
     family.animations.clear()
     family.animations.update(animations)
-    # Only surface materials are converted. Other typed ADE objects retain
-    # their existing emitters and references to the unchanged skeleton.
-    blocks.extend(copy.deepcopy(block) for block in obj.base_object.ades
-                  if block.class_id.casefold() not in ("amesh.class", "area.class"))
     obj.base_object.ades[:] = blocks

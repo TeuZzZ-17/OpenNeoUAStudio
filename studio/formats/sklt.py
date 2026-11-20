@@ -370,7 +370,7 @@ def save_sklt_with_otl2_points(
 
 def save_sklt_with_poo2_points(
     model: SkltModel, points: list[Point3D], output_path: str | Path,
-    *, update_sensors: bool = True,
+    *, update_sensors: bool = True, sensor_offset: Point3D | None = None,
 ) -> Path | None:
     """Update POO2, retaining the existing affine SEN2 update by default.
 
@@ -395,8 +395,8 @@ def save_sklt_with_poo2_points(
             raise SkltParseError("POO2 coordinates must be finite float values.")
         struct.pack_into(">fff", edited, payload_offset + index * 12, x, y, z)
 
-    if update_sensors and model.sen2_payload_offset is not None and model.sen2_payload_size > 0:
-        sensors = sen2_points_for_poo2(model, points)
+    if (update_sensors or sensor_offset is not None) and model.sen2_payload_offset is not None and model.sen2_payload_size > 0:
+        sensors = _sensors_for_save(model, points, sensor_offset)
         if len(sensors) * 12 != model.sen2_payload_size:
             raise SkltParseError(
                 "SEN2 point count changed; refusing to save because the chunk "
@@ -423,11 +423,18 @@ def save_sklt_with_poo2_points(
     return None
 
 
+def _sensors_for_save(model, points, offset):
+    if offset is None:
+        return sen2_points_for_poo2(model, points)
+    return [tuple(a + b for a, b in zip(point, offset)) for point in model.sensors]
+
+
 def save_sklt_with_poo2_pol2_structure(
     model: SkltModel,
     points: list[Point3D],
     polygons: list[Polygon],
     output_path: str | Path,
+    *, sensor_offset: Point3D | None = None,
 ) -> Path | None:
     """Save a structurally changed POO2/POL2 model.
 
@@ -447,7 +454,7 @@ def save_sklt_with_poo2_pol2_structure(
     }
     if model.sen2_payload_offset is not None and model.sen2_payload_size > 0:
         replacements[b"SEN2"] = _encode_poo2(
-            sen2_points_for_poo2(model, points))
+            _sensors_for_save(model, points, sensor_offset))
     edited = _rewrite_first_chunk_payloads(model.original_data, replacements)
 
     destination = Path(output_path)

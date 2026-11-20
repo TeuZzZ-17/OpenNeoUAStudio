@@ -477,9 +477,9 @@ class AreaFxStructuralTests(unittest.TestCase):
                 self.assertEqual(window._delete_geometry_reason(), "")
                 menu = window._create_viewport_context_menu()
                 labels = [action.text() for action in menu.actions()]
-                self.assertIn("Clone ANM Element", labels)
+                self.assertIn("Clone ANM", labels)
                 self.assertIn("Move", labels)
-                self.assertIn("Delete ANM Element", labels)
+                self.assertIn("Delete ANM", labels)
                 self.assertIn("Add ANM", labels)
             finally:
                 dispose_window(window)

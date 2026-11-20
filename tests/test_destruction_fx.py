@@ -1184,11 +1184,12 @@ def test_laser_burn_decal_frequency_is_read_with_the_engine_limits():
     assert frequency("") == 0
 
 
-def test_artillery_barrage_falls_from_its_arc_height_at_the_shell_speed():
+def test_artillery_barrage_falls_from_its_vertical_height_at_the_shell_speed():
     shell = fx.weapon_def_from_text(118, (
         "new_weapon 118\n    model = artillery_shell\n"
         "    artillery_shell_mode = vertical_barrage\n"
-        "    artillery_shell_arc_height = 3300\n    artillery_shell_speed = 1800\n"
+        "    artillery_shell_arc_height = 700\n"
+        "    artillery_shell_vertical_height = 3300\n    artillery_shell_speed = 1800\n"
         "    vp_normal = 60\nend\n"))
     assert shell.unit.altitude == 3000 and shell.unit.fixed_speed == 1800
     simulation = _weapon_simulation(shell.unit)
@@ -1198,7 +1199,7 @@ def test_artillery_barrage_falls_from_its_arc_height_at_the_shell_speed():
 def test_artillery_transfer_fade_previews_fade_in_on_descent():
     script = (
         "new_weapon 118\nmodel = artillery_shell\nartillery_shell_mode = vertical_barrage\n"
-        "artillery_shell_arc_height = 3000\nartillery_shell_speed = 1800\n"
+        "artillery_shell_vertical_height = 3000\nartillery_shell_speed = 1800\n"
         "artillery_shell_transfer_fade_inout = 900|1200\nvp_normal = 60\nend\n")
     shell = fx.weapon_def_from_text(118, script)
     assert shell.unit.artillery_transfer_fade == (900, 1200)

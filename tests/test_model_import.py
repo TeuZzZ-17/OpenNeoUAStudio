@@ -261,6 +261,42 @@ class ModelImportTests(unittest.TestCase):
             [probe.status for probe in probes],
             ["missing", "missing", "missing"])
 
+    def test_other_set_texture_is_a_last_resort_and_can_be_overridden(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            base, _, archive = self._fixture(root)
+            first = root / "Textures" / "Set2" / "MTL.ILBM"
+            second = root / "Textures" / "Set3" / "mtl.ilbm"
+            first.parent.mkdir(parents=True)
+            second.parent.mkdir()
+            first.write_bytes(b"invalid bitmap")
+            second.write_bytes(_vbmp())
+            DirectoryIndex.clear_cache()
+
+            dialog = ModelImportDialog(initial_base=base)
+            try:
+                row = dialog.tree.topLevelItem(1)
+                self.assertEqual(row.text(2), "Loaded (fallback)")
+                self.assertEqual(row.text(4), str(second))
+                self.assertIn("Outside the active set", dialog.summary.text())
+                row.setSelected(True)
+                self.assertTrue(dialog.source_button.isEnabled())
+                self.assertFalse(dialog.selection().overrides)
+            finally:
+                dialog.deleteLater()
+
+            family = load_asset_family(base)
+            self.assertEqual(family.texture_refs["MTL.ILBM"].path, second)
+            self.assertIn("MTL.ILBM", family.textures)
+            # Shared order: the subfolders (any set) come before the active SET.BAS.
+            with_archive = load_asset_family(base, setbas=archive)
+            self.assertEqual(with_archive.texture_refs["MTL.ILBM"].status, "fallback")
+            self.assertEqual(with_archive.texture_refs["MTL.ILBM"].path, second)
+            first.write_bytes(_vbmp())
+            chosen = load_asset_family(base, overrides={"MTL.ILBM": first})
+            self.assertEqual(chosen.texture_refs["MTL.ILBM"].path, first)
+            self.assertEqual(chosen.texture_refs["MTL.ILBM"].status, "manual")
+
     def test_dialog_shows_setbas_rows_and_keeps_the_archive(self):
         with tempfile.TemporaryDirectory() as tmp:
             base, _path, archive = self._fixture(Path(tmp))
@@ -277,6 +313,42 @@ class ModelImportTests(unittest.TestCase):
                 self.assertEqual(selection.overrides, {})
             finally:
                 dialog.deleteLater()
+
+    def test_model_resources_reopens_the_active_archive_and_manual_choice(self):
+        from unittest.mock import patch
+        from PySide6.QtWidgets import QDialog
+        from studio.workbench.window import AssemblyWindow
+        from studio.ui.shell import install_workspace_shell
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            base, _, archive = self._fixture(root)
+            chosen = root / "CHOSEN.ILBM"
+            chosen.write_bytes(_vbmp())
+            family = load_asset_family(base, overrides={"MTL.ILBM": chosen}, setbas=archive)
+            window = AssemblyWindow()
+            try:
+                window._family = family
+                install_workspace_shell(window, "model")
+                menu = next(a.menu() for a in window.menuBar().actions()
+                            if a.text() == "Resources")
+                menu.aboutToShow.emit()
+                action = next(a for a in menu.actions() if a.text() == "Model Resources")
+                self.assertTrue(action.isEnabled())
+
+                def inspect(dialog):
+                    self.assertEqual(dialog.windowTitle(), "Model Resources / Import Model")
+                    self.assertEqual(dialog.tree.topLevelItem(1).text(2), "Ready (chosen)")
+                    self.assertEqual(dialog.tree.topLevelItem(1).text(4), str(chosen))
+                    self.assertEqual(dialog.selection().overrides, {"mtl.ilbm": str(chosen)})
+                    self.assertIs(dialog.selection().archive, archive)
+                    return QDialog.DialogCode.Rejected
+
+                with patch.object(ModelImportDialog, "exec", inspect):
+                    action.trigger()
+                self.assertIs(window._family, family)
+            finally:
+                window.close()
 
     def test_dialog_manual_choice_becomes_an_override(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -303,8 +375,8 @@ class ModelImportTests(unittest.TestCase):
             base, _path, archive = self._fixture(root)
             (root / "Skeleton").mkdir()
             (root / "Skeleton" / "HERO.SKLT").write_bytes(_sklt())
-            # Two same-named loose textures in the same priority root make the
-            # reference ambiguous; the archive has a unique match for it.
+            # Two same-named loose textures in the model subfolders: the first one in
+            # alphabetical order is used (fallback); the archive has a unique match too.
             (root / "a").mkdir()
             (root / "a" / "MTL.ILBM").write_bytes(_vbmp())
             (root / "b").mkdir()
@@ -315,7 +387,7 @@ class ModelImportTests(unittest.TestCase):
                 self.assertEqual(
                     [dialog.tree.topLevelItem(index).text(2)
                      for index in range(3)],
-                    ["Ready (loose)", "Ambiguous", "Ready (SET.BAS)"])
+                    ["Ready (loose)", "Loaded (fallback)", "Ready (SET.BAS)"])
                 dialog._choices["mtl.ilbm"] = "setbas"
                 dialog._reprobe()
                 self.assertEqual(

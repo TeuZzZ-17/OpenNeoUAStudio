@@ -27,7 +27,7 @@ from studio.formats.animation import parse_anm_file, VanmData
 from studio.formats.base_format import (
     AmeshBlock, AttsEntry, BaseAsset, BaseObject, TextureRef, parse_base_file,
 )
-from studio.formats.images import IlbmImage, Palette, parse_ilbm_file, parse_pal_file
+from studio.formats.images import IffReadError, IlbmImage, Palette, parse_ilbm_file, parse_pal_file
 from studio.formats.setbas import (
     decode_animation,
     decode_skeleton,
@@ -97,6 +97,7 @@ class AssetFamily:
     root_object: FamilyObject | None = None
     textures: dict[str, IlbmImage] = field(default_factory=dict)
     texture_refs: dict[str, ResolvedFile] = field(default_factory=dict)
+    allow_texture_fallback: bool = True
     animations: dict[str, VanmData] = field(default_factory=dict)
     animation_refs: dict[str, ResolvedFile] = field(default_factory=dict)
     # logical texture name -> set of tracy modes of the blocks using it
@@ -290,20 +291,186 @@ def _resolve_with_setbas(family: AssetFamily, resolver: AssetResolver,
     return ref
 
 
+def _active_set_number(family: AssetFamily) -> int | None:
+    """Number N of the SetN folder that holds the attached SET.BAS."""
+
+    if family.setbas_path is None:
+        return None
+    folder = next((p.name for p in Path(family.setbas_path).parents
+                   if p.name.casefold().startswith("set") and p.name[3:].isdigit()), None)
+    return int(folder[3:]) if folder else None
+
+
+def _set_number_in(path: Path, root: Path) -> int | None:
+    """Number of the first SetN folder between ``root`` and the file, if any."""
+
+    try:
+        parts = path.resolve().relative_to(root.resolve()).parts[:-1]
+    except ValueError:
+        return None
+    for part in parts:
+        if part.casefold().startswith("set") and part[3:].isdigit():
+            return int(part[3:])
+    return None
+
+
+def _external_texture_files(family: AssetFamily, name: str) -> Iterable[ResolvedFile]:
+    """Loose-file steps of the texture order shared with the engine (IFFile::ResolveExternalTexture).
+
+    1 Textures/Set<N>/ of the active set, 2 the BASE folder (then its Textures/),
+    3 any subfolder (same-set folder first, then alphabetical), 4 Models/Sector/Set<N>/Textures.
+    """
+
+    logical = normalize_logical_name(name)
+    filename = logical.rsplit("/", 1)[-1]
+    root = Path(family.base_path).parent
+    number = _active_set_number(family)
+
+    if number:
+        variant = find_existing_path(root, "Textures", f"Set{number}", filename)
+        if variant is not None and variant.is_file():
+            yield ResolvedFile(name, path=variant, status="found", source="loose", source_root=root,
+                               resolution_rule="model texture for the active set")
+
+    taken: set[Path] = set()
+    for parts in (tuple(logical.split("/")), (filename,), ("Textures", filename)):
+        path = find_existing_path(root, *parts)
+        if path is not None and path.is_file():
+            taken.add(path.resolve())
+            yield ResolvedFile(name, path=path, status="found", source="loose", source_root=root,
+                               resolution_rule="texture in the model folder")
+
+    if family.allow_texture_fallback:
+        resolved_root = root.resolve()
+        found = [p for p in DirectoryIndex.get(resolved_root).find_name(filename)
+                 if p.resolve().is_relative_to(resolved_root) and p.resolve() not in taken]
+        found.sort(key=lambda p: (number is None or _set_number_in(p, root) != number,
+                                  p.as_posix().casefold(), p.as_posix()))
+        for path in found:
+            note = "Outside the active set's texture search. Colors may differ."
+            if len(found) > 1:
+                note += f" {len(found)} files with this name in the model subfolders; this one was chosen."
+            yield ResolvedFile(name, path=path, status="fallback", source="loose", source_root=resolved_root,
+                               candidates=list(found), resolution_rule=note)
+
+    data = (next((p for p in Path(family.setbas_path).parents if p.name.casefold() == "data"), None)
+            if family.setbas_path is not None else None)
+    if data is not None and number and 1 <= number <= 7:
+        shared = find_existing_path(data, "Models", "Sector", f"Set{number}", "Textures", filename)
+        if shared is not None and shared.is_file():
+            yield ResolvedFile(name, path=shared, status="found", source="loose", source_root=shared.parent,
+                               resolution_rule="shared external texture for the active set")
+
+
+_FALLBACK_ARCHIVES: dict[str, SetBasArchive] = {}
+
+
+def _set1_texture(family: AssetFamily, name: str):
+    """Last resort: the texture inside the SET.BAS of Set1, as ``(archive, resource)``."""
+
+    number = _active_set_number(family)
+    if not family.allow_texture_fallback or not number or number == 1:
+        return None
+    sets_folder = Path(family.setbas_path).parents[2]
+    path = find_existing_path(sets_folder, "Set1", "Objects", "Set.BAS")
+    if path is None or not path.is_file():
+        return None
+    try:
+        archive = _FALLBACK_ARCHIVES.get(str(path))
+        if archive is None:
+            archive = _FALLBACK_ARCHIVES[str(path)] = read_setbas(path)
+    except (SetBasError, OSError, ValueError):
+        return None
+    matches = archive.find(name, "ilbm.class")
+    return (archive, matches[0]) if len(matches) == 1 else None
+
+
+def _applies_external_texture_order(family: AssetFamily, name: str, manual: ResolvedFile) -> bool:
+    return (manual.source != "manual" and family.base_path is not None
+            and not _is_setbas_family(family) and not _wants_setbas(family, name)
+            and Path(normalize_logical_name(name)).suffix.casefold() == ".ilbm"
+            and name.casefold() not in ("fx1.ilbm", "fx2.ilbm", "fx3.ilbm"))
+
+
+def _load_external_texture(family: AssetFamily, resolver: AssetResolver, name: str) -> None:
+    """Texture of a loose BASE: the one order shared with the engine, see _external_texture_files.
+
+    After the loose files: a PNG beside the BASE, the active SET.BAS, then the Set1 SET.BAS.
+    """
+
+    for candidate in _external_texture_files(family, name):
+        try:
+            img = parse_ilbm_file(candidate.path)
+            if not img.has_body:
+                raise ValueError("no image pixels")
+        except Exception as exc:
+            family.warnings.append(f"Texture {name} ({candidate.resolution_rule}) failed to decode: {exc}")
+            continue
+        family.texture_refs[name] = candidate
+        family.textures[name] = img
+        if candidate.status == "fallback":
+            family.warnings.append(f"Texture {name}: {candidate.resolution_rule} ({candidate.path})")
+        family.warnings.extend(f"{name}: {w}" for w in img.warnings)
+        return
+
+    root = Path(family.base_path).parent.resolve()
+    png = resolver.resolve(name.rsplit(".", 1)[0] + ".PNG", "texture")
+    if (png.path is not None and png.status in ("found", "manual")
+            and png.path.resolve().is_relative_to(root)):
+        png.logical_name = name
+        png.resolution_rule = "PNG fallback: no ILBM beside the BASE (engine order)"
+        family.texture_refs[name] = png
+        try:
+            family.textures[name] = parse_ilbm_file(png.path)
+        except Exception as exc:  # defensive: never crash the family load
+            family.load_errors[name] = str(exc)
+            family.warnings.append(f"Texture {name} failed to decode: {exc}")
+        return
+
+    embedded = _setbas_find(family, name, "ilbm.class")
+    if embedded is not None:
+        ref = ResolvedFile(logical_name=name, status="setbas", source="SET.BAS",
+                           resolution_rule="named texture in the active SET.BAS")
+        ref.embedded_available = True
+        ref.embedded_candidates = [f"{family.setbas_archive.path.name}:{embedded.resource_name}"]
+        family.texture_refs[name] = ref
+        try:
+            img = decode_texture(family.setbas_archive, embedded)
+            family.textures[name] = img
+            family.warnings.extend(f"{name}: {w}" for w in img.warnings)
+        except Exception as exc:
+            family.warnings.append(f"Texture {name} (SET.BAS embedded) failed to decode: {exc}")
+        return
+
+    last = _set1_texture(family, name)
+    if last is not None:
+        archive, resource = last
+        note = "Set1 SET.BAS (last resort). Colors may differ."
+        ref = ResolvedFile(logical_name=name, status="fallback", source="SET.BAS", resolution_rule=note)
+        family.texture_refs[name] = ref
+        try:
+            family.textures[name] = decode_texture(archive, resource)
+            family.warnings.append(f"Texture {name}: {note}")
+        except Exception as exc:
+            family.warnings.append(f"Texture {name} (Set1 SET.BAS) failed to decode: {exc}")
+        return
+
+    family.texture_refs[name] = ResolvedFile(logical_name=name, status="missing",
+                                             resolution_rule="not found in the texture search")
+    where = ("in the search roots or the SET.BAS archive"
+             if family.setbas_archive is not None else "in the search roots")
+    family.warnings.append(f"Texture not found {where}: {name}")
+
+
 def _load_texture(family: AssetFamily, resolver: AssetResolver, name: str) -> None:
     if not name or name in family.texture_refs:
         return
+    manual = resolver.resolve(name, "texture")
+    if _applies_external_texture_order(family, name, manual):
+        _load_external_texture(family, resolver, name)
+        return
+
     ref = _resolve_with_setbas(family, resolver, name, "texture", "ilbm.class")
-    # Engine order for an external BASE: ILBM beside the BASE, then a PNG with the same
-    # name, then SET.BAS. The FX1/FX2/FX3 names are remapped by the engine and skip this.
-    if (ref.path is None and ref.status in ("missing", "setbas")
-            and not _is_setbas_family(family)
-            and name.casefold() not in ("fx1.ilbm", "fx2.ilbm", "fx3.ilbm")):
-        png = resolver.resolve(name.rsplit(".", 1)[0] + ".PNG", "texture")
-        if png.path is not None and png.status in ("found", "manual"):
-            png.logical_name = name
-            png.resolution_rule = "PNG fallback: no ILBM beside the BASE (engine order)"
-            ref = png
     family.texture_refs[name] = ref
 
     if ref.status in ("setbas", "manual (SET.BAS)"):
@@ -916,6 +1083,7 @@ def load_asset_family(base_path: str | Path,
     family.base_path = path
 
     if isolated_root is not None:
+        family.allow_texture_fallback = False
         isolated = Path(isolated_root).resolve()
         resolved_path = path.resolve()
         try:
@@ -1131,7 +1299,7 @@ class FamilyRequirementProbe:
 
     @property
     def resolved(self) -> bool:
-        return self.status in ("loose", "manual", "setbas")
+        return self.status in ("loose", "manual", "setbas", "fallback", "loaded")
 
 
 def probe_family_requirements(
@@ -1139,8 +1307,9 @@ def probe_family_requirements(
         extra_roots: list[str | Path] | None = None,
         overrides: dict[str, Path | str] | None = None,
         setbas: SetBasArchive | str | Path | None = None,
+        *, loaded_family: AssetFamily | None = None,
 ) -> tuple[BaseAsset, list[FamilyRequirementProbe]]:
-    """Resolve a BASE's references without decoding textures or skeletons.
+    """Resolve a BASE's references without decoding skeletons.
 
     The guided import dialog uses this to show, per resource, whether the
     model will take it from a loose file (or a manual choice) or from the
@@ -1155,7 +1324,9 @@ def probe_family_requirements(
         roots.append(extra)
     _attach_setbas(family, setbas, roots)
 
-    base_asset = parse_base_file(path)
+    base_asset = (loaded_family.base_asset if loaded_family is not None else None)
+    if base_asset is None:
+        base_asset = parse_base_file(path)
     # Mirror load_asset_family: a BASE with embedded EMRS records is its own
     # resource provider, so its rows must not look missing.
     if family.setbas_archive is None and base_asset.root is not None \
@@ -1173,19 +1344,40 @@ def probe_family_requirements(
     requirements = collect_family_requirements(base_asset)
     seen = {(item.kind, normalize_logical_name(item.logical_name).casefold())
             for item in requirements}
+    loaded_refs = {}
+    if loaded_family is not None:
+        loaded_refs = {
+            "texture": loaded_family.texture_refs,
+            "animation": loaded_family.animation_refs,
+            "skeleton": {obj.base_object.skeleton_name: obj.skeleton_ref
+                         for obj in loaded_family.all_objects() if obj.skeleton_ref is not None},
+        }
     # VANM frame bitmaps are indirect dependencies, absent from the BASE.
     # Expand them from the selected animation source, just as the loader does.
     for requirement in requirements:
-        ref = _resolve_with_setbas(
-            family, resolver, requirement.logical_name,
-            requirement.kind, requirement.class_id)
+        name = requirement.logical_name
+        ref = loaded_refs.get(requirement.kind, {}).get(name)
+        if ref is None and loaded_family is not None:
+            resources = (loaded_family.textures if requirement.kind == "texture" else
+                         loaded_family.animations if requirement.kind == "animation" else {})
+            if name in resources:
+                ref = ResolvedFile(name, status="loaded", resolution_rule="Loaded in this session")
+        if ref is None:
+            if requirement.kind == "texture":
+                _load_texture(family, resolver, name)
+                ref = family.texture_refs[name]
+            else:
+                ref = _resolve_with_setbas(
+                    family, resolver, name, requirement.kind, requirement.class_id)
         embedded_matches = _setbas_matches(
             family, requirement.logical_name, requirement.class_id)
         embedded_names = tuple(
             (f"{family.setbas_path.name}:{resource.resource_name}"
              if family.setbas_path is not None else resource.resource_name)
             for resource in embedded_matches)
-        if ref.status in ("setbas", "manual (SET.BAS)"):
+        if ref.status in ("fallback", "loaded"):
+            status = ref.status
+        elif ref.status in ("setbas", "manual (SET.BAS)"):
             status = "setbas"
         elif ref.path is not None:
             status = "manual" if ref.status == "manual" else "loose"
@@ -1194,12 +1386,14 @@ def probe_family_requirements(
         else:
             status = "missing"
         detail = ref.resolution_rule or ref.status
-        if requirement.kind == "animation" and status in ("setbas", "loose", "manual"):
+        if requirement.kind == "animation" and status in ("setbas", "loose", "manual", "loaded"):
             try:
-                if status == "setbas":
+                animation = (loaded_family.animations.get(name)
+                             if loaded_family is not None else None)
+                if animation is None and status == "setbas":
                     animation = decode_animation(family.setbas_archive,
                                                  embedded_matches[0])
-                else:
+                elif animation is None:
                     animation = parse_anm_file(ref.path)
                 for name in animation.bitmap_names:
                     key = ("texture", normalize_logical_name(name).casefold())

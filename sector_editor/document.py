@@ -105,7 +105,7 @@ class SetDocument:
                     except ValueError:
                         pass
         self.saved = deepcopy(sdf)
-        # Rows created by File > Import Sector File. Unused ones are given back before a save;
+        # Rows created by File > Import Sector. Unused ones are given back before a save;
         # rows whose BASE or collision lives in the sector's own folder (external_own) can be
         # edited and exported again, but never saved into this set.
         self.external_models: set[int] = set()
@@ -139,6 +139,22 @@ class SetDocument:
     @property
     def dirty(self):
         return self.sdf != self.saved
+
+    def sector_snapshot(self, number, *, saved=False, comment=None):
+        """Compare a sector and the table rows and icons it uses."""
+        sdf = self.saved if saved else self.sdf
+        sector = sdf.sectors.get(number)
+        if sector is None:
+            return None
+        if comment is not None:
+            sector = replace(sector, comment=comment)
+        buildings = [sdf.buildings[i] for i in sorted(set(sector.subsects))
+                     if 0 <= i < len(sdf.buildings)]
+        model_ids = {building.state(state) for building in buildings for state in range(4)}
+        models = [sdf.models[i] for i in sorted(model_ids) if 0 <= i < len(sdf.models)]
+        icons = {} if saved else self.map_icons
+        return (sector, buildings, models, icons.get(("sector", number), ()),
+                tuple(icons.get(("model", model.id), ()) for model in models))
 
     def change(self, label, operation):
         """Record one complete table edit; failed edits leave the document intact."""
@@ -793,10 +809,11 @@ class SetDocument:
             names.append(name)
         return tuple(names)
 
-    def export_external_sector(self, number, target, *, name=None, generate_icons=False):
+    def export_external_sector(self, number, target, *, name=None, generate_icons=False, overwrite=False):
         """Write a sector as an external sector folder, or as a .onua archive of that folder.
 
         ``generate_icons`` first draws the missing map icons of the sector's own models.
+        ``overwrite`` replaces the files of an existing, non-empty folder (File > Overwrite Sector).
         """
         from studio.exchange.onua_archive import ONUA_SUFFIX, write_sector_onua
         target = Path(target).resolve()
@@ -804,7 +821,7 @@ class SetDocument:
         name = name or (target.stem if archive else target.name)
         if not re.fullmatch(r"[A-Za-z0-9_\-]{1,40}", name):
             raise ValueError("Sector names use letters, digits, '_' and '-' (max 40).")
-        if not archive and target.exists() and any(target.iterdir()):
+        if not archive and not overwrite and target.exists() and any(target.iterdir()):
             raise FileExistsError(f"The destination folder is not empty: {target}")
         if generate_icons:
             self.generate_map_icons(number)
@@ -823,7 +840,7 @@ class SetDocument:
                 return target
             commit_verified_files([(path, target / path.relative_to(stage))
                                    for path in sorted(stage.rglob("*")) if path.is_file()],
-                                  replace_existing=False)
+                                  replace_existing=overwrite)
         return target / f"{name}.sector"
 
     def _external_model_row(self, model, folder, visproto):
@@ -873,7 +890,7 @@ class SetDocument:
     def import_external_sector(self, source, target=None):
         """Open a .sector file, a sector folder or a sector .onua archive into a sector slot.
 
-        An archive is unpacked into Data/Models/Sectors/<name> first. Returns the slot used.
+        An archive is unpacked into Data/Models/Sector/<name> first. Returns the slot used.
         """
         from studio.exchange.onua_archive import ONUA_SUFFIX, import_sector_onua
         source = Path(source)
@@ -1080,7 +1097,7 @@ class SetDocument:
         if blocked:
             raise ValueError(
                 f"Sector(s) {', '.join(map(str, blocked))} use models of an external sector. "
-                "Export them with File > Export Sector File, then clear or wipe them before saving the set.")
+                "Export them with File > Export Sector, then clear or wipe them before saving the set.")
         used = {bid for sector in self.sdf.sectors.values() for bid in sector.subsects}
         drop_buildings = {bid for bid in self.external_buildings if bid < len(buildings) and bid not in used}
         kept = [row for bid, row in enumerate(buildings) if bid not in drop_buildings]

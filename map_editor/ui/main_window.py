@@ -267,7 +267,7 @@ class MainWindow(QMainWindow):
         delete_action.setShortcut("Delete")
         delete_action.triggered.connect(self._delete_active_selection)
         self.addAction(delete_action)
-        act(map_menu, "Change Set", self.map_set)
+        self.change_set_action = act(map_menu, "Change Set", self.map_set)
         act(map_menu, "Resize", self.map_resize)
         self.reset_action = act(map_menu, "Clear Map", self.map_reset)
         self.reset_level_action = act(map_menu, "Restore Level", self.level_reset)
@@ -3146,6 +3146,9 @@ class MainWindow(QMainWindow):
         name = os.path.abspath(self.path) if self.path else "Untitled.LDF"
         set_number = self.doc.set_number if self.doc else "—"
         self.setWindowTitle(f"{'*' if self.dirty else ''}{name} · Set {set_number} - OpenNeoUA Studio · Map Editor")
+        action = getattr(self, "change_set_action", None)
+        if action is not None:      # always show the loaded set next to Change Set
+            action.setText("Change Set" if not self.doc else f"Change Set (Active set: {set_number})")
         self.undo_action.setEnabled(self.history.can_undo or self._script_pending or self._live_pending)
         self.redo_action.setEnabled(self.history.can_redo)
         self.save_action.setEnabled(bool(self.path))

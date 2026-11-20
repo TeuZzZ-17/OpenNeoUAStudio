@@ -70,6 +70,7 @@ class GeometryClipboard:
     pivot: Point3D
     original_to_local: tuple[tuple[int, int], ...]
     polygons: tuple[GeometryClipboardPolygon, ...]
+    materials: tuple[MaterialBlockClipboard, ...] = ()
 
 
 @dataclass(frozen=True)

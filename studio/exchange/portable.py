@@ -541,6 +541,13 @@ class AssetResolver:
         has_subpath = len(parts) > 1
         names = _alias_names(file_name, kind)
 
+        def is_set_variant(path: Path) -> bool:
+            parts = path.parts
+            return kind == "texture" and any(
+                folder.casefold() == "textures" and set_name.casefold().startswith("set")
+                and set_name[3:].isdigit()
+                for folder, set_name in zip(parts[:-2], parts[1:-1]))
+
         # Priority 1: exact relative path as written in the .base
         # ("Skeleton/BP_FLAK1.sklt"), tried against every root.  Applies only
         # to references that actually carry a directory component; a bare
@@ -552,12 +559,12 @@ class AssetResolver:
                 for name in names:
                     candidate = root.joinpath(*parts[:-1], name)
                     result.searched.append(str(candidate.parent))
-                    if candidate.is_file():
+                    if candidate.is_file() and not is_set_variant(candidate):
                         exact_matches.append((candidate, root))
                     relative_name = "/".join((*parts[:-1], name))
                     exact_matches.extend(
                         (match, root)
-                        for match in index.find_relative(relative_name))
+                        for match in index.find_relative(relative_name) if not is_set_variant(match))
                 # Exported standalone families often flatten Skeleton/X.sklt
                 # beside the BASE. Keep that local file ahead of a same-named
                 # exact path in a later set root, so editing the family cannot
@@ -565,7 +572,7 @@ class AssetResolver:
                 if self.prefer_earliest_root and not exact_matches:
                     for name in names:
                         exact_matches.extend((match, root) for match in index.find_name(name)
-                                             if match.parent == root)
+                                             if match.parent == root and not is_set_variant(match))
                 if exact_matches:
                     # Package/base-local paths have explicit precedence over
                     # later SET roots.  Do not merge a lower-priority root
@@ -609,7 +616,7 @@ class AssetResolver:
                 root_matches: list[Path] = []
                 for name in names:
                     for hit in index.find_name(name):
-                        if hit not in root_matches:
+                        if hit not in root_matches and not is_set_variant(hit):
                             root_matches.append(hit)
                 if not root_matches:
                     continue
@@ -658,7 +665,7 @@ class AssetResolver:
             result.searched.append(f"<index {root} ({index.file_count} files)>")
             for name in names:
                 for hit in index.find_name(name):
-                    if hit not in matches:
+                    if hit not in matches and not is_set_variant(hit):
                         matches.append(hit)
 
         matches = _rank_candidates(matches, file_name, kind, self.roots)

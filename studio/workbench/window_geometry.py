@@ -27,6 +27,7 @@ from studio.assets.mapping import (
     export_base_object_bytes,
     MappingEditError,
     MappingIndex,
+    transfer_material_resources,
 )
 from studio.formats.animation import AnmParseError, export_anm_bytes
 from studio.formats.sklt import (
@@ -54,6 +55,7 @@ from studio.rendering.geometry import (
     unsafe_fx_geometry_polys,
     validate_fx_element_clipboard,
 )
+from studio.workbench.effect_catalog import emitter_blocks
 
 
 class _GeometryEditMixin:
@@ -557,7 +559,8 @@ class _GeometryEditMixin:
             self._notify(
                 f"{operation.title()} {descriptor} could not start.", 9000)
             return False
-        action = "Copied" if operation == "copy" else "Moving"
+        action = ("Moving" if operation == "move" else
+                  "Placing" if getattr(clipboard, "materials", ()) else "Copied")
         self._notify(
             f"{action} {descriptor}. Move the transparent preview; "
             "LMB/Enter confirms, RMB/Esc cancels.", 12000)
@@ -1255,6 +1258,8 @@ class _GeometryEditMixin:
                     fam_obj, clipboard, delta,
                     self._family.animations if self._family else {})
             else:
+                for material in clipboard.materials:
+                    transfer_material_resources(self._family, material)
                 result = append_geometry_clipboard(
                     model, fam_obj.base_object.ades, clipboard, delta)
 
@@ -1296,7 +1301,7 @@ class _GeometryEditMixin:
                 raise GeometryClipboardError(
                     "the committed topology could not be verified")
             self._record_edit_command({
-                "kind": "material_topology" if isinstance(clipboard, ImportedFxClipboard) else "topology",
+                "kind": "material_topology" if getattr(clipboard, "materials", ()) else "topology",
                 "owner": owner,
                 "before": before,
                 "after": after,
@@ -1325,7 +1330,7 @@ class _GeometryEditMixin:
                 ),
                 10000)
         except Exception as exc:
-            if isinstance(clipboard, ImportedFxClipboard) and 'resources_before' in locals():
+            if getattr(clipboard, "materials", ()) and 'resources_before' in locals():
                 self._restore_family_resource_state(self._family, resources_before)
             try:
                 rolled_back = self._restore_topology_state(owner, before)
@@ -1627,7 +1632,7 @@ class _GeometryEditMixin:
                else ""), 7000)
 
     def _set_selection_as_origin(self) -> None:
-        """Rigidly shift the whole model so the selection becomes (0, 0, 0)."""
+        """Set the selection as local zero while keeping its view position."""
 
         if not self._require_editing("Set Selection as Origin"):
             return
@@ -1789,6 +1794,24 @@ class _GeometryEditMixin:
         self._cancel_live_scale()
         self._cancel_live_rotate()
 
+    def _select_viewport_emitter_anchors(self, anchors, select: bool) -> None:
+        session = self.viewport.edit_session
+        if session is None or session.modal_active or self.viewport.paste_preview_active:
+            return
+        vertices = anchors if select else session.selection - anchors
+        if select:
+            self._clear_model_selection()
+        else:
+            self._clear_emitter_selection()
+            self._selected_polys.intersection_update(
+                index for index in self._selected_polys
+                if 0 <= index < len(session.model.polygons)
+                and set(session.model.polygons[index]).issubset(vertices))
+            self._mirror_select_source_polys.intersection_update(self._selected_polys)
+        self.viewport.select_edit_vertices(sorted(vertices), include_protected=True)
+        if select and len(vertices) == 1:
+            self._select_emitter_from_vertex(vertices)
+
     def _create_viewport_context_menu(self, position=None) -> QMenu:
         menu = QMenu(self.viewport)
         session = self.viewport.edit_session
@@ -1816,6 +1839,22 @@ class _GeometryEditMixin:
         select_none.setEnabled(active)
         menu.addAction(self.select_all_fx_action)
         menu.addAction(self.deselect_all_fx_action)
+        anchors = {
+            block.ade_point_id for _, block in emitter_blocks(self._workbench_obj)
+            if active and self.viewport.edit_owner == self._workbench_obj.owner_path
+            and 0 <= block.ade_point_id < len(session.model.points)
+        }
+        select_emitters = menu.addAction(
+            "Select All Emitters",
+            lambda: self._select_viewport_emitter_anchors(anchors, True))
+        deselect_emitters = menu.addAction(
+            "Deselect All Emitters",
+            lambda: self._select_viewport_emitter_anchors(anchors, False))
+        can_edit_selection = (editing and active and not session.modal_active
+                              and not self.viewport.paste_preview_active)
+        select_emitters.setEnabled(can_edit_selection and bool(anchors))
+        deselect_emitters.setEnabled(
+            can_edit_selection and bool(anchors & session.selection))
         active_emitter = self._selected_emitter()
         deselect = menu.addAction(
             "Deselect",
@@ -1841,9 +1880,7 @@ class _GeometryEditMixin:
         if active_fx is not None:
             active_fx_elements = self._active_fx_elements()
             delete_geometry = menu.addAction(
-                "Delete ANM Elements"
-                if len(active_fx_elements) > 1 else
-                "Delete ANM Element",
+                "Delete ANM",
                 self._delete_geometry
                 if len(active_fx_elements) > 1 else
                 self._delete_selected_fx_element)
@@ -1851,12 +1888,27 @@ class _GeometryEditMixin:
         elif active_emitter is None:
             delete_geometry = menu.addAction("Delete", self._delete_geometry)
             delete_geometry.setEnabled(self.can_delete_geometry())
-        menu.addAction(self.add_fx_action)
-        menu.addAction(self.add_emitter_action)
+        if active_emitter is None or active_fx is not None:
+            menu.addSeparator()
+        for add_action in (self.add_fx_action, self.add_emitter_action):
+            action = menu.addAction(add_action.text(), add_action.trigger)
+            action.setEnabled(add_action.isEnabled() and not has_selection)
+        add_texture = menu.addAction(
+            "Add Texture", lambda: self._add_textured_face(position))
+        add_texture.setEnabled(can_edit_selection and not has_selection
+                               and not self._geometry_writer_reason(
+                                   self.viewport.edit_owner, self._workbench_obj))
         if active_fx is not None:
             menu.addAction(self.rename_fx_action)
-        if self.load_texture_button.isEnabled():
-            menu.addAction("Replace Texture", self._load_model_texture)
+        if editing and self._mapping_index is not None:
+            classification = classify_texture_assignment(
+                self._mapping_index, self._resolved_geometry_polys())
+            kinds = {group.binding_kind for group in classification.groups}
+            if kinds:
+                label = ("Replace ANM" if kinds == {"bmpanim"} else
+                         "Replace Texture" if kinds == {"ilbm"} else
+                         "Replace Texture / ANM")
+                menu.addAction(label, self._load_model_texture)
         if active_emitter is not None:
             menu.addAction(self.replace_emitter_action)
             menu.addAction(self.copy_emitter_action)
@@ -1864,6 +1916,7 @@ class _GeometryEditMixin:
             menu.addAction(self.edit_emitter_action)
             menu.addAction(self.delete_emitter_action)
         else:
+            menu.addSeparator()
             menu.addAction(self.edit_move_action)
             scale = menu.addAction(
                 "Scale", self._scale_selected_geometry)
@@ -1871,9 +1924,9 @@ class _GeometryEditMixin:
             rotate = menu.addAction(
                 "Rotate", self._rotate_selected_geometry)
             rotate.setEnabled(editing and self._family is not None)
-            menu.addSeparator()
-            menu.addAction(self.edit_center_action)
-            menu.addAction(self.edit_center_selection_action)
+        menu.addSeparator()
+        menu.addAction(self.edit_center_action)
+        menu.addAction(self.edit_center_selection_action)
         menu.addSeparator()
         reset_camera = menu.addAction(
             "Reset Camera", self._reset_view_and_gizmo)
@@ -1886,12 +1939,13 @@ class _GeometryEditMixin:
         if self.viewport.paste_preview_active:
             self.viewport.cancel_paste_preview()
             return
-        if self.viewport.edit_session is not None:
+        session = self.viewport.edit_session
+        if session is not None:
             index = self.viewport._nearest_edit_vertex(position)
-            if index is not None and self._workbench_obj is not None and any(
-                    (block.class_id or '').lower() == 'particle.class'
-                    and block.ade_point_id == index
-                    for block in self._workbench_obj.base_object.ades):
+            if (index is not None
+                    and (index not in session.selection or len(session.selection) == 1)
+                    and any(block.ade_point_id == index
+                            for _, block in emitter_blocks(self._workbench_obj))):
                 self._select_emitter_from_vertex((index,))
                 self._sync_emitter_actions()
         menu = self._create_viewport_context_menu(position)
@@ -2239,14 +2293,30 @@ class _GeometryEditMixin:
         self._sync_uv_add_vertex_button()
 
     def _on_geometry_command_committed(self, owner: str, before,
-                                       after) -> None:
+                                       after, origin_offset=None) -> None:
         self._record_edit_command({
             "kind": "geometry",
             "owner": owner,
             "before": [tuple(point) for point in before],
             "after": [tuple(point) for point in after],
-            "label": "geometry edit",
+            "label": "Set Origin" if origin_offset is not None
+                     else "geometry edit",
+            "origin_offset": origin_offset,
+            "origin_delta": (tuple(b - a for a, b in zip(before[0], after[0]))
+                             if origin_offset is not None else None),
         })
+
+    def _track_origin_delta(self, command, direction=1):
+        delta = command.get("origin_delta")
+        if delta is None:
+            return
+        owner = command["owner"]
+        previous = self._pending_origin_deltas.get(owner, (0.0, 0.0, 0.0))
+        total = tuple(a + direction * b for a, b in zip(previous, delta))
+        if any(abs(value) > 1e-6 for value in total):
+            self._pending_origin_deltas[owner] = total
+        else:
+            self._pending_origin_deltas.pop(owner, None)
 
     def _record_edit_command(self, command: dict) -> None:
         if self._history_replaying or (
@@ -2254,6 +2324,7 @@ class _GeometryEditMixin:
                 and command.get("resource_before") == command.get("resource_after")):
             return
         self._edit_undo_stack.append(command)
+        self._track_origin_delta(command)
         del self._edit_undo_stack[:-100]
         self._edit_redo_stack.clear()
         self._sync_edit_action_states()
@@ -2504,6 +2575,11 @@ class _GeometryEditMixin:
         try:
             if kind == "geometry":
                 applied = self._apply_geometry_history(command["owner"], target)
+                offset = command.get("origin_offset")
+                if (applied and offset is not None
+                        and self.viewport.edit_owner == command["owner"]):
+                    self.viewport.shift_origin_view(
+                        offset if redo else tuple(-value for value in offset))
             elif kind == "topology":
                 applied = self._apply_topology_history(
                     command["owner"], target)
@@ -2540,6 +2616,7 @@ class _GeometryEditMixin:
             self._history_replaying = False
         if not applied:
             return False
+        self._track_origin_delta(command, 1 if redo else -1)
         if kind in ("uv", "uv_multi") and self._selected_emitter() is not None:
             self._refresh_selected_uvs()
         self._fill_polygon_inspector(self._selected_poly)

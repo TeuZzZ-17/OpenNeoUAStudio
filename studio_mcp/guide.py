@@ -197,12 +197,12 @@ Explicit four states:  {"op":"place_states","sector":40,"cells":[1],"states":["S
 Take sectors from another set: {"op":"import_sectors","from_set":"set1","sectors":[5,6]}  (models must exist here)
 
 EXTERNAL SECTORS (OpenNeoUA: a building's sec_type can name a .sector file instead of a set sector)
-A sector folder Data/Models/Sectors/<Name>/ holds <Name>.sector (cells, pieces = the four damage states, models)
+A sector folder Data/Models/Sector/<Name>/ holds <Name>.sector (cells, pieces = the four damage states, models)
 and only OUR files (BASE, skeletons, textures). Anything missing there comes from the SET of the map being played,
 so models of SET.BAS are written by name only - never copied (copyright rule). Buildings.cfg:
-  sec_type = Data/Models/Sectors/<Name>/<Name>.sector|50   (50 = SET sector used if the file cannot load)
+  sec_type = Data/Models/Sector/<Name>/<Name>.sector|50   (50 = SET sector used if the file cannot load)
 Export a sector:  {"op":"export_external_sector","sector":40,"name":"Sulg_Power","archive":true}
-Edit one:         [{"op":"import_external_sector","source":"Data/Models/Sectors/Sulg_Power","save_as":"s"},
+Edit one:         [{"op":"import_external_sector","source":"Data/Models/Sector/Sulg_Power","save_as":"s"},
                    ... edits on {"named":"s"} ...,
                    {"op":"export_external_sector","sector":{"named":"s"},"name":"Sulg_Power_V2"},
                    {"op":"wipe_sectors","sectors":[{"named":"s"}]}]   (its own models never enter the set)

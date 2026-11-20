@@ -24,9 +24,14 @@ from studio.assets.animated_polygons import (
 )
 from studio.assets.catalog import build_texture_catalog, classify_texture_assignment
 from studio.assets.mapping import (
+    build_material_block_clipboard,
+    create_textured_area,
     MappingEditError,
     rewrite_block_texture_template,
 )
+from studio.formats.base_format import BaseObject
+from studio.formats.sklt import SkltModel
+from studio.rendering.geometry import GeometryClipboard, GeometryClipboardPolygon
 from studio.formats.setbas import decode_texture
 from studio.formats.images import (
     load_png_matching_palette,
@@ -1350,6 +1355,8 @@ class _UvTexturesMixin:
             "kind": "model_state", "owner": owner,
             "before": before_state, "after": after_state,
             "label": "model reset",
+            "origin_delta": tuple(-value for value in
+                                  self._pending_origin_deltas.get(owner, (0.0, 0.0, 0.0))),
         })
         self.statusBar().showMessage("Model reset to its original state.", 5000)
 
@@ -1401,7 +1408,9 @@ class _UvTexturesMixin:
             return None
         cache_key = (id(archive), str(name).casefold())
         if cache_key in self._texture_preview_cache:
-            return self._texture_preview_cache[cache_key]
+            cached = self._texture_preview_cache[cache_key]
+            if cached is None or cached in family.textures:
+                return cached
         resources = archive.find(name, "ilbm.class")
         resource = next((item for item in resources if item.decodable), None)
         if resource is None:
@@ -1750,6 +1759,57 @@ class _UvTexturesMixin:
             self._notify(
                 f"Load Texture failed and was rolled back: {exc}.", 9000)
             return False
+
+    def _add_textured_face(self, position=None) -> None:
+        """Place a textured quad using the existing geometry preview and undo."""
+        session, owner, obj = self._geometry_context()
+        if (not self._editing_allowed() or session is None or obj is None
+                or session.selection or self._selected_polys
+                or self.viewport.paste_preview_active or session.modal_active):
+            return
+        reason = self._geometry_writer_reason(owner, obj)
+        if reason:
+            self._notify(f"Add Texture refused: {reason}.", 7000)
+            return
+        family = self._family
+        model = session.model
+        resources = self._capture_family_resource_state(family)
+        try:
+            chosen = self._choose_model_texture(self._available_model_textures(), "")
+            if not chosen:
+                return
+            name = self._ensure_model_texture_loaded(chosen)
+            if name is None:
+                raise MappingEditError(f"{chosen} could not be decoded")
+            image = family.textures[name]
+            extent = max((max(axis) - min(axis) for axis in zip(*model.points)),
+                         default=0.0)
+            half = 0.05 * max(10.0, extent)
+            scale = max(image.width, image.height, 1)
+            x = half * image.width / scale
+            y = half * image.height / scale
+            points = ((-x, -y, 0.0), (-x, y, 0.0),
+                      (x, y, 0.0), (x, -y, 0.0))
+            uvs = ((0, 0), (0, 255), (255, 255), (255, 0))
+            indices = (0, 1, 2, 3)
+            block = create_textured_area(name, uvs)
+            source = copy.copy(obj)
+            source.base_object = BaseObject(ades=[block])
+            source.skeleton = SkltModel(points=list(points), polygons=[list(indices)])
+            material = build_material_block_clipboard(family, source, 0)
+            polygon = GeometryClipboardPolygon(
+                -1, indices, 0, block.color_val, block.shade_val,
+                block.tracy_val, 0, uvs, False, "area.class", block)
+            clipboard = GeometryClipboard(
+                owner, id(model), model.source_name, points, points,
+                (0.0, 0.0, 0.0), (), (polygon,), (material,))
+        except (MappingEditError, ValueError) as exc:
+            self._notify(f"Add Texture refused: {exc}.", 7000)
+            return
+        finally:
+            self._restore_family_resource_state(family, resources)
+        self._start_geometry_placement(
+            "copy", clipboard, name, position=position, store_copy=True)
 
     def _load_model_texture(self) -> None:
         if not self._require_editing("Load Texture"):

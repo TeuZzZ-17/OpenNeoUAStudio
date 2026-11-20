@@ -21,13 +21,26 @@ class CenterAtOriginTests(unittest.TestCase):
     def setUpClass(cls):
         cls.app = QApplication.instance() or QApplication([])
 
-    def test_whole_model_moves_rigidly_and_undo_restores_it(self):
+    def test_model_center_becomes_origin_without_moving_the_view(self):
         window, _obj, model = _prepare_window()
         try:
             # Shape sits away from the origin, as a weapon cut out of a unit.
             model.points[:] = [(x + 10.0, y - 4.0, z + 2.5)
                                for x, y, z in model.points]
             original = list(model.points)
+            viewport = window.viewport
+            viewport.resize(800, 600)
+            screen_before = viewport._edit_screen_points()
+            old_origin = viewport.edit_session.position
+            marker_before = viewport._camera_vertex(old_origin)
+            center_before = viewport._camera_vertex(_bounds_center(model))
+
+            def assert_view(marker):
+                self.assertEqual(viewport._camera_vertex(old_origin), marker)
+                for old, new in zip(screen_before, viewport._edit_screen_points()):
+                    self.assertAlmostEqual(old.x(), new.x())
+                    self.assertAlmostEqual(old.y(), new.y())
+
             window._sync_edit_action_states()
             self.assertTrue(window.edit_center_action.isEnabled())
             self.assertTrue(window.center_origin_button.isEnabled())
@@ -42,9 +55,13 @@ class CenterAtOriginTests(unittest.TestCase):
                 for new, old in zip(model.points, original)}
             self.assertEqual(len(offsets), 1)
             self.assertEqual(len(window._edit_undo_stack), 1)
+            assert_view(center_before)
 
             window._undo_edit()
             self.assertEqual(model.points, original)
+            assert_view(marker_before)
+            window._redo_edit()
+            assert_view(center_before)
         finally:
             window.close()
 
@@ -99,17 +116,53 @@ class CenterAtOriginTests(unittest.TestCase):
         finally:
             window.close()
 
-    def test_buttons_sit_under_mirror_select_in_this_order(self):
+    def test_selection_origin_moves_the_marker_without_moving_the_view(self):
+        window, _obj, model = _prepare_window()
+        try:
+            viewport = window.viewport
+            viewport.resize(800, 600)
+            selected = next(i for i, p in enumerate(model.points) if any(p))
+            viewport.select_edit_vertices([selected])
+            original = list(model.points)
+            before = viewport._edit_screen_points()
+            origin = viewport.edit_session.position
+            marker_before = viewport._project(viewport._camera_vertex(origin))
+            self.assertNotEqual(marker_before, before[selected])
+
+            def assert_view(marker_position):
+                for old, new in zip(before, viewport._edit_screen_points()):
+                    self.assertAlmostEqual(old.x(), new.x())
+                    self.assertAlmostEqual(old.y(), new.y())
+                marker = viewport._project(viewport._camera_vertex(origin))
+                self.assertAlmostEqual(marker.x(), marker_position.x())
+                self.assertAlmostEqual(marker.y(), marker_position.y())
+
+            window.edit_center_selection_action.trigger()
+            self.assertEqual(model.points[selected], (0.0, 0.0, 0.0))
+            assert_view(before[selected])
+            window._undo_edit()
+            self.assertEqual(model.points, original)
+            assert_view(marker_before)
+            window._redo_edit()
+            self.assertEqual(model.points[selected], (0.0, 0.0, 0.0))
+            assert_view(before[selected])
+        finally:
+            window.close()
+
+    def test_origin_buttons_share_a_group_below_transform(self):
         from PySide6.QtCore import QPoint
+        from PySide6.QtWidgets import QGroupBox
         window, _obj, _model = _prepare_window()
         try:
             window.show()
             self.app.processEvents()
-            top = lambda widget: widget.mapTo(window.transform_box, QPoint(0, 0)).y()
-            self.assertLess(top(window.mirror_select_check), top(window.center_origin_button))
+            origin = window.center_origin_button.parentWidget()
+            self.assertIsInstance(origin, QGroupBox)
+            self.assertEqual(origin.title(), "Origin")
+            self.assertIs(window.center_selection_button.parentWidget(), origin)
+            top = lambda widget: widget.mapTo(window, QPoint(0, 0)).y()
             self.assertEqual(top(window.center_origin_button), top(window.center_selection_button))
-            self.assertLess(top(window.center_origin_button), top(window.transform_mode_buttons["move"]))
-            self.assertLess(top(window.model_gizmo), top(window.mirror_select_check))
+            self.assertLess(top(window.transform_mode_buttons["move"]), top(origin))
         finally:
             window.close()
 
@@ -122,7 +175,8 @@ class CenterAtOriginTests(unittest.TestCase):
             self.app.processEvents()
             boxes = {box.title(): box for box in window.findChildren(QGroupBox)}
             top = lambda box: box.mapTo(window, QPoint(0, 0)).y()
-            self.assertLess(top(boxes["Transform"]), top(boxes["Emitters"]))
+            self.assertLess(top(boxes["Transform"]), top(boxes["Origin"]))
+            self.assertLess(top(boxes["Origin"]), top(boxes["Emitters"]))
             self.assertLess(top(boxes["Emitters"]), top(boxes["ANM"]))
         finally:
             window.close()

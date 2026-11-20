@@ -483,7 +483,25 @@ def install_set_menu(window, menu_bar):
     menu = menu_bar.addMenu("Change Set")
     menu.aboutToShow.connect(lambda: _fill_menu(window, menu))
     window.studio_set_menu = menu
+    # The menu title always shows the loaded set. The set can change from several places
+    # (this menu, Browse, Open Set, the entity list), so a light timer keeps the title in sync.
+    timer = QTimer(menu)
+    timer.setInterval(300)
+    timer.timeout.connect(lambda: refresh_set_menu_title(window))
+    timer.start()
+    refresh_set_menu_title(window)
     return menu
+
+
+def refresh_set_menu_title(window):
+    """Title "Change Set (Active set: N)" of the Change Set menu."""
+
+    menu = getattr(window, "studio_set_menu", None)
+    combo = set_combo_of(window)
+    number = combo.currentData() if combo is not None else None
+    title = "Change Set" if number is None else f"Change Set (Active set: {number})"
+    if menu is not None and menu.title() != title:
+        menu.setTitle(title)
 
 
 def _fill_menu(window, menu):
@@ -566,6 +584,11 @@ def install_workspace_shell(window, key):
     menu_bar = window.menuBar()
     resources = menu_bar.addMenu("Resources")
     resources.addAction("Game Folders", lambda: _edit_resources(window))
+    if hasattr(window, "open_model_resources"):
+        model_resources = resources.addAction("Model Resources", window.open_model_resources)
+        model_resources.setEnabled(False)
+        resources.aboutToShow.connect(
+            lambda: model_resources.setEnabled(window._external_model_path() is not None))
     from studio.ui.style import install_backup_menu, install_theme_menu
     install_backup_menu(window)
     install_theme_menu(window)

@@ -8,6 +8,64 @@ import pytest
 from studio_mcp import core, edit
 
 
+def test_model_texture_follows_the_shared_order_set_folder_model_folder_subfolders_archive(tmp_path):
+    from studio.assets.family import AssetFamily, _load_texture
+    from studio.exchange.portable import AssetResolver
+    from studio.formats.setbas import read_setbas
+    from studio_mcp.textures import ilbm_bytes
+
+    try:
+        set3 = Path(core._set_info("set3")["set_bas"])
+    except core.McpToolError:
+        pytest.skip("Set 3 is not installed")
+    archive = read_setbas(set3)
+    texture = next(r.resource_name for r in archive.resources
+                   if r.class_id == "ilbm.class" and r.decodable
+                   and r.resource_name.casefold().endswith(".ilbm")
+                   and len(archive.find(r.resource_name, "ilbm.class")) == 1)
+    name = texture.replace("\\", "/").rsplit("/", 1)[-1]
+    textures = tmp_path / "Textures"
+    (textures / "Set1").mkdir(parents=True)
+    variant_dir = textures / "Set3"
+    variant_dir.mkdir()
+    palette = [(i, i, i) for i in range(256)]
+    (textures / name).write_bytes(ilbm_bytes(bytes([10] * 16), 16, 1, palette))
+    (textures / "Set1" / name).write_bytes(ilbm_bytes(bytes([20] * 16), 16, 1, palette))
+    (variant_dir / name).write_bytes(ilbm_bytes(bytes([30] * 16), 16, 1, palette))
+
+    def load(name, *, with_archive=True):
+        family = AssetFamily(base_path=tmp_path / "Tank_Normal.BASE", setbas_path=set3,
+                             setbas_archive=archive if with_archive else None)
+        _load_texture(family, AssetResolver([tmp_path], prefer_earliest_root=True), name)
+        return family
+
+    result = load(texture)
+    assert result.texture_refs[texture].path == variant_dir / name
+    assert result.textures[texture].pixels == bytes([30] * 16)
+
+    # A broken variant is skipped: the default file of the model folder is next.
+    (variant_dir / name).write_bytes(b"broken variant")
+    result = load(texture)
+    assert result.texture_refs[texture].path == textures / name
+    assert result.textures[texture].pixels == bytes([10] * 16)
+
+    (variant_dir / name).unlink()
+    assert load(texture).texture_refs[texture].path == textures / name
+    assert load(texture, with_archive=False).textures[texture].pixels == bytes([10] * 16)
+
+    # Without the model-folder default, any subfolder (even another set) is used before the archive.
+    (textures / name).unlink()
+    result = load(texture)
+    assert result.texture_refs[texture].status == "fallback"
+    assert result.textures[texture].pixels == bytes([20] * 16)
+
+    # Only when no model file exists is the active SET.BAS used.
+    (textures / "Set1" / name).unlink()
+    assert load(texture).texture_refs[texture].status == "setbas"
+    assert load(texture).textures[texture].has_body
+    assert load("NOT_IN_SET.ILBM").texture_refs["NOT_IN_SET.ILBM"].status == "missing"
+
+
 def _reference_source():
     explicit = os.environ.get('ONUA_TEST_ALPHA_MODEL')
     if explicit:

@@ -88,7 +88,46 @@ def _search_root(base_path: Path) -> Path:
     (Kyt_Flak_01/Kyt_Flak_Fire/Kyt_Flak_Fire.BASE), so that one is searched.
     """
     folder = base_path.parent
+    if folder.name.casefold() in STATE_WORDS:
+        return folder.parent
     return folder.parent if folder.name.casefold() == base_path.stem.casefold() else folder
+
+
+def origin_state_paths(base_path: Path, declared=()) -> tuple[Path, list[Path]]:
+    """Find named siblings and declared states inside the model directory."""
+    source = base_path.resolve()
+    root = _search_root(source)
+    key = family_key(source.stem)
+    if key is None:
+        key = family_key(source.parent.name)
+    if key is not None:
+        family_name = " ".join(key.replace("*", "").split())
+        for folder in source.parents:
+            if " ".join(folder.name.casefold().replace("_", " ").split()) == family_name:
+                root = folder
+                break
+    declared = {path.resolve() for path in declared}
+    source_state = state_word(source.stem) or state_word(source.parent.name)
+    state_folders = source.parent.name.casefold() in STATE_WORDS
+    found = set()
+    for path in root.rglob("*"):
+        if path.suffix.casefold() not in (".base", ".bas") or not path.is_file():
+            continue
+        target = path.resolve()
+        if target == source or not target.is_relative_to(root) or target.name.casefold() == "set.bas":
+            continue
+        target_state = state_word(path.stem) or state_word(path.parent.name)
+        if source_state and source_state == target_state and target not in declared:
+            continue
+        names = (path.stem, path.parent.name)
+        if target in declared or (key is not None and any(family_key(name) == key for name in names)):
+            found.add(target)
+        elif (state_folders and path.parent.parent == root
+              and path.parent.name.casefold() in STATE_WORDS
+              and (path.stem.casefold() == source.stem.casefold()
+                   or len(_model_files(path.parent, 0)) == 1)):
+            found.add(target)
+    return root, sorted(found, key=lambda path: path.as_posix().casefold())
 
 
 def states_by_name(base_path: Path) -> list[StateCandidate]:

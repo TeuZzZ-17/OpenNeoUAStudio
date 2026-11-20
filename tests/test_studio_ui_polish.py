@@ -346,7 +346,7 @@ def test_checker_is_between_resources_and_change_editor(app, key):
     window._tab_compatibility = {page: ('mixed', 'Vanilla and OpenNeoUA features')}
     try:
         install_workspace_shell(window, key)
-        actions = [action.text() for action in window.menuBar().actions()]
+        actions = [action.text().split(' (')[0] for action in window.menuBar().actions()]
         # Change Set belongs to the three set-based tools only.
         with_set = key in ('model_editor', 'snapshot_studio', 'entity_designer')
         assert actions == ['Resources', 'File Backup', 'Theme',

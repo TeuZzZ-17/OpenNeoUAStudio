@@ -142,7 +142,7 @@ def test_context_actions_only_allow_model_resources_and_share_current_commands(a
             menu = QMenu()
             window._add_model_generator_context_actions(menu, item)
             actions = [a for a in menu.actions() if not a.isSeparator()]
-            assert [a.text() for a in actions] == ["Generate Genesis"]
+            assert [a.text() for a in actions] == ["Generate Model Genesis"]
             assert all(a.isEnabled() == enabled for a in actions)
             if enabled:
                 with patch.object(window, "_generate_from_setbas_item") as handler:
@@ -251,6 +251,9 @@ def test_real_family_genesis_undo_redo_and_export_roundtrip(app):
         points = copy.deepcopy(obj.skeleton.points)
         assert window.generate_genesis_action in window.edit_menu.actions()
         assert window.generate_genesis_action not in window.file_menu.actions()
+        window._on_polygon_picked(0)
+        window._create_viewport_context_menu()
+        assert window.generate_genesis_action.isEnabled()
         window.generate_genesis_action.trigger()
         assert window.play_button.isEnabled()   # the Genesis animation can be played at once
         assert len(window._edit_undo_stack) == 1

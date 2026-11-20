@@ -7,7 +7,7 @@ import pytest
 from PySide6.QtWidgets import QApplication
 
 DATA = Path(os.environ.get("NME_GAME_DATA", ""))
-BOMB = DATA / "Models/Base/New/Taerkasten/Mnosjetz_Bomb/Mnosjetz_Bomb_Normal_Wait/VP_MNOBOMB_NORMAL.BASE"
+BOMB = DATA / "Models/Base/New/Taerkasten/Mnosjetz_Bomb/Mnosjetz_Bomb_Normal_Wait.BASE"
 
 pytestmark = pytest.mark.skipif(
     not (BOMB.is_file() and (DATA / "Sets/Set1").is_dir()),

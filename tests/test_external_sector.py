@@ -27,7 +27,7 @@ try:
 except core.McpToolError:
     HAVE_DATA = False
 
-OWN_MODEL = "Models/Base/New/Ghorkov/Kyt_Flak/Kyt_Flak_Normal"
+OWN_MODEL = "Models/Base/New/Ghorkov/Kyt_Flak"
 
 SAMPLE = """; sample
 begin_sector
@@ -57,8 +57,8 @@ end
 class FormatTests(unittest.TestCase):
     def test_sec_type_values(self):
         self.assertEqual(parse_sec_type("50"), ("", 50))
-        self.assertEqual(parse_sec_type("Data/Models/Sectors/A/A.sector|50"), ("Data/Models/Sectors/A/A.sector", 50))
-        self.assertEqual(parse_sec_type("data/Models/Sectors/A/A.sector"), ("Data/Models/Sectors/A/A.sector", 0))
+        self.assertEqual(parse_sec_type("Data/Models/Sector/A/A.sector|50"), ("Data/Models/Sector/A/A.sector", 50))
+        self.assertEqual(parse_sec_type("data/Models/Sector/A/A.sector"), ("Data/Models/Sector/A/A.sector", 0))
         for bad in ("Models/A.sector", "Data/../A.sector", "Data/A.txt", "300"):
             with self.assertRaises(SectorFileError):
                 parse_sec_type(bad)
@@ -111,7 +111,7 @@ def test_sector_visual_choices_follow_cell_states_and_exact_paths(tmp_path, monk
     from map_editor import bootstrap
     from studio.assets import catalog
 
-    folder = tmp_path / "Models" / "Sectors" / "Post"
+    folder = tmp_path / "Models" / "Sector" / "Post"
     folder.mkdir(parents=True)
     ground = folder / "ground" / "post.BASE"
     intact = tmp_path / "Models" / "Shared" / "post.BASE"
@@ -137,7 +137,7 @@ def test_sector_visual_choices_follow_cell_states_and_exact_paths(tmp_path, monk
     monkeypatch.setattr(bootstrap, "_installation", None)
     monkeypatch.setattr(catalog, "set_assets", lambda number: assets)
     building = catalog.GameObject("building", 1, tmp_path / "Buildings.cfg",
-                                  {"sec_type": "Data/Models/Sectors/Post/post.sector|52"})
+                                  {"sec_type": "Data/Models/Sector/Post/post.sector|52"})
 
     choices = {choice.label: choice for choice in catalog.visual_choices(building, 1)}
     assert choices["Sector slot 1 — Intact"].path == ground
@@ -158,7 +158,7 @@ class SectorEditorTests(unittest.TestCase):
         cls.data = cls.root / "Data"
         for part in ("Sets/Set3", "Scripts"):
             shutil.copytree(REAL_DATA / part, cls.data / part)
-        (cls.data / "Models" / "Sectors").mkdir(parents=True)
+        (cls.data / "Models" / "Sector").mkdir(parents=True)
         os.environ["ONUA_DATA"] = os.environ["NME_GAME_DATA"] = str(cls.data)
         from studio_mcp import sets
         sets._prepare()
@@ -177,7 +177,7 @@ class SectorEditorTests(unittest.TestCase):
         return SetDocument.open(self.data / "Sets" / "Set3")
 
     def own_sector(self, name):
-        folder = self.data / "Models" / "Sectors" / name
+        folder = self.data / "Models" / "Sector" / name
         folder.mkdir()
         for file in ("Kyt_Flak_Normal.BASE", "KYTFLKN1.sklt"):
             shutil.copy2(REAL_DATA / OWN_MODEL / file, folder / file)
@@ -186,7 +186,7 @@ class SectorEditorTests(unittest.TestCase):
 
     def test_vanilla_sector_exports_names_only(self):
         doc = self.doc()
-        target = self.data / "Models" / "Sectors" / "City5"
+        target = self.data / "Models" / "Sector" / "City5"
         path = doc.export_external_sector(5, target)
         self.assertEqual([p.name for p in target.iterdir()], ["City5.sector"])
         sector = read_sector(path)
@@ -220,7 +220,7 @@ class SectorEditorTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             doc.save()
 
-        copy = self.data / "Models" / "Sectors" / "Flak_Post_Copy"
+        copy = self.data / "Models" / "Sector" / "Flak_Post_Copy"
         doc.export_external_sector(slot, copy)
         names = {p.name.casefold() for p in copy.iterdir()}
         self.assertTrue({"flak_post_copy.sector", "kyt_flak_normal.base", "kytflkn1.sklt"} <= names)
@@ -255,7 +255,7 @@ class SectorEditorTests(unittest.TestCase):
         for zoom, size in enumerate((4, 8, 12, 24, 48)):
             image = map_zoom_image(doc, slot, 0, zoom)
             self.assertEqual((image.width(), image.height()), (size, size))
-        target = self.data / "Models" / "Sectors" / "Icon_Post_Out"
+        target = self.data / "Models" / "Sector" / "Icon_Post_Out"
         doc.export_external_sector(slot, target)
         exported = read_sector(target / "Icon_Post_Out.sector")
         self.assertEqual(len(exported.map_icon), 2)
@@ -272,7 +272,7 @@ class SectorEditorTests(unittest.TestCase):
         self.own_sector("Mcp_Post")
         sdf = sets.open_document("set3").sdf.path
         before = sdf.read_bytes()
-        steps = [{"op": "import_external_sector", "source": "Data/Models/Sectors/Mcp_Post", "save_as": "s"},
+        steps = [{"op": "import_external_sector", "source": "Data/Models/Sector/Mcp_Post", "save_as": "s"},
                  {"op": "shift_state", "sector": {"named": "s"}, "cells": [0], "state": 3}]
         with self.assertRaises(core.McpToolError):        # own models still used: nothing is written
             sets.run("set3", steps)
@@ -280,8 +280,8 @@ class SectorEditorTests(unittest.TestCase):
         result = sets.run("set3", steps + [
             {"op": "export_external_sector", "sector": {"named": "s"}, "name": "Mcp_Post_V2", "archive": True},
             {"op": "wipe_sectors", "sectors": [{"named": "s"}]}])
-        self.assertEqual(result["results"][2]["sector_file"], "Data/Models/Sectors/Mcp_Post_V2/Mcp_Post_V2.sector")
-        self.assertTrue((self.data / "Models" / "Sectors" / "Mcp_Post_V2.onua").is_file())
+        self.assertEqual(result["results"][2]["sector_file"], "Data/Models/Sector/Mcp_Post_V2/Mcp_Post_V2.sector")
+        self.assertTrue((self.data / "Models" / "Sector" / "Mcp_Post_V2.onua").is_file())
         self.assertEqual(sdf.read_bytes(), before)
         sets.undo("set3")
         self.assertEqual(sdf.read_bytes(), before)

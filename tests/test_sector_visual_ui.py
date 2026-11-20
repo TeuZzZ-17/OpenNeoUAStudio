@@ -284,7 +284,7 @@ def test_sector_context_menu_preserves_group_when_clicked_member_is_not_current(
     window._sector_menu(window.sectors.visualItemRect(item).center())
     assert window.current_sector == 141
     assert window._selected_sector_numbers() == [141, 142]
-    assert seen == ["Import Sector File", "Export Sector File",
+    assert seen == ["Import Sector", "Overwrite Sector", "Export Sector",
                     "Wipe sector", "Clear sector", "Copy sector", "Cut sector"]
 
 

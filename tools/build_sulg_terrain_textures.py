@@ -2,12 +2,12 @@
 
 Nothing from the original game is shipped: the textures are made here, on the player's machine, from
 `Data/Sets/Set3` only (the Sulgogar flesh atlas FBAGGER and the ground textures of the night set),
-then written to `Data/Sets/Set3/Loose/ILBM` where the game reads them. Run it again after changing the recipe.
+then written to `Data/Models/Sector/Set3/Textures` for local use outside Git.
 
 Usage:  python tools/build_sulg_terrain_textures.py [--data "<game Data folder>"]
 
 Writes (all in the palette of Set3):
-  SGSKIN SGTORN SGASH1   station flesh: intact, torn, ash
+  SGSKIN SGTORN          station flesh: intact, torn
   SGGRND                 infected ground atlas (flesh blended into Set3 BODEN5 at the edges)
   SGCORE                 animated green core (drawn here, no original pixels)
   SGT<a><b><H|V>         ground strips between infected ground (family 5) and the families 0-5 of the set
@@ -35,8 +35,6 @@ sys.path.insert(0, str(ROOT))
 def _args():
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--data", default=os.environ.get("ONUA_DATA", ""), help="game Data folder (default: ONUA_DATA)")
-    parser.add_argument("--keep-in-models", action="store_true",
-                        help="also keep a copy beside the models (Data/Models/Base/New/Sulgogar/Sulg_Power_Station/Textures)")
     return parser.parse_args()
 
 
@@ -49,9 +47,7 @@ def main():
     os.environ["NME_GAME_DATA"] = str(data)
     from studio_mcp import core, textures      # imported after the data folder is known
 
-    work = Path(data) / "Models/Base/New/Sulgogar/Sulg_Power_Station/Textures"   # Studio may only write under Models
-    loose = data / "Sets/Set3/Loose/ILBM"
-    loose.mkdir(parents=True, exist_ok=True)
+    work = data / "Models/Sector/Set3/Textures"
     scratch = Path(tempfile.mkdtemp(prefix="sulg_tex_"))
 
     def rgb(spec, set_name="set3"):
@@ -63,10 +59,7 @@ def main():
         picture.save(png)
         target = work / (name + ".ILBM")
         textures.make(str(target), [], source=str(png), set_name="set3", overwrite=target.exists())
-        shutil.copy2(target, loose / target.name)
-        if not args.keep_in_models:
-            target.unlink()
-        print("wrote", loose / target.name)
+        print("wrote", target)
 
     # ---- station flesh and ground atlas -------------------------------------------------------------------
     # Identical to the Sulgogar Queen / Slime Lord in the night set: the same flesh region of the Set3 FBAGGER,
@@ -109,7 +102,6 @@ def main():
     base_skin = np.asarray(skin).astype(float)
     burnt = base_skin * np.array([.62, .52, .48])
     save("SGTORN", Image.fromarray(np.clip(base_skin * (1 - amount) + burnt * amount, 0, 255).astype("uint8")))
-    save("SGASH1", Image.blend(skin, Image.new("RGB", (256, 256), (15, 14, 9)), .62))
 
     original = rgb("set3:BODEN5.ILBM")
     atlas = original.copy()
@@ -221,7 +213,7 @@ def main():
                 if 5 in (a, b):
                     (skeleton_dir / f"G{a}{b}{suffix}.sklt").write_bytes(payload)
     shutil.rmtree(scratch, ignore_errors=True)
-    print("done: textures are in", loose, "and strip skeletons in", skeleton_dir)
+    print("done: textures are in", work, "and strip skeletons in", skeleton_dir)
 
 
 if __name__ == "__main__":

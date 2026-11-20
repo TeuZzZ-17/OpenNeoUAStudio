@@ -4,6 +4,7 @@ G / R / S transforms."""
 from __future__ import annotations
 
 import bisect
+from dataclasses import replace
 import math
 
 from PySide6.QtCore import QPoint, QPointF, QRectF, Qt
@@ -581,6 +582,8 @@ class _EditModeMixin:
         material_index: dict[str, int] = {}
         result: dict[int, int] = {}
         for material in materials:
+            if material.source_family_identity == id(family):
+                material = replace(material, source_family_identity=id(scratch))
             try:
                 transfer_material_resources(scratch, material)
             except MappingEditError as exc:
@@ -1105,7 +1108,7 @@ class _EditModeMixin:
         session.select_all()
         return bool(session.selection)
 
-    def select_edit_vertices(self, indices) -> None:
+    def select_edit_vertices(self, indices, *, include_protected=False) -> None:
         """Select only the given POO2 indices in the active Edit Mode."""
 
         session = self._edit_session
@@ -1114,7 +1117,7 @@ class _EditModeMixin:
             return
         requested = [
             index for index in indices
-            if index not in self._edit_read_only_vertices
+            if include_protected or index not in self._edit_read_only_vertices
         ]
         try:
             session.set_selection(requested)
@@ -1502,9 +1505,25 @@ class _EditModeMixin:
         ]
         session.dirty = True
         self._refresh_edit_faces()
-        self._emit_geometry_command(before)
-        self.update()
+        world_offset = mat_apply(session.matrix, offset)
+        self.shift_origin_view(world_offset)
+        owner = self._edit_owner or ""
+        self.geometryEdited.emit(owner)
+        self.originCommandCommitted.emit(
+            owner, before, list(points), world_offset)
         return True
+
+    def shift_origin_view(self, world_offset) -> None:
+        """Move the view with rebased coordinates to keep the model in place."""
+
+        self._center = tuple(a + b for a, b in zip(self._center, world_offset))
+        home = self._home_camera_state
+        if home is not None:
+            home["center"] = tuple(
+                a + b for a, b in zip(home["center"], world_offset))
+        if self._ground_y is not None:
+            self._ground_y += world_offset[1]
+        self.update()
 
     def _emit_geometry_command(self, before) -> None:
         owner = self._edit_owner or ""
@@ -1533,6 +1552,9 @@ class _EditModeMixin:
             zs = [p[2] for p in world]
             self._owner_bounds[self._edit_owner] = (
                 min(xs), min(ys), min(zs), max(xs), max(ys), max(zs))
+        if not session.modal_active:
+            self._sync_particle_anchors(
+                self._edit_owner, session.fam_obj.base_object.ades, world)
         self._invalidate_indexed_view_cache()
 
     def _edit_screen_points(self, target: QRectF | None = None,

@@ -89,6 +89,7 @@ class AssetViewport(
     editSelectionDetailsChanged = Signal(object, str)
     geometryEdited = Signal(str)    # owner_path whose vertices changed
     geometryCommandCommitted = Signal(str, object, object)
+    originCommandCommitted = Signal(str, object, object, object)
     undoRequested = Signal()
     redoRequested = Signal()
     editHint = Signal(str)          # live hint text for the active tool
@@ -379,6 +380,7 @@ class AssetViewport(
 
         self._refresh_particle_faces()
         self._build_particle_bounds()
+        self._set_ground_from_geometry()
         points = self._framing_points()
         if preserved_camera is None:
             if points:

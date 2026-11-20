@@ -943,6 +943,22 @@ def _wrap_ades_objt(objt: bytes) -> bytes:
     return form(b"MC2 ", root_objt)
 
 
+def create_textured_area(texture_name: str, uvs) -> AmeshBlock:
+    """Create a native single-polygon AREA with a static bitmap binding."""
+    from studio.formats.images import iff_chunk
+
+    name = texture_name.encode("latin-1") + b"\0"
+    tex = iff_chunk(b"FORM", b"OBJT" + iff_chunk(b"CLID", b"ilbm.class\0")
+                    + iff_chunk(b"FORM", b"CIBO" + iff_chunk(b"NAM2", name)
+                                + iff_chunk(b"OTL2", bytes(v for uv in uvs for v in uv))))
+    ade = iff_chunk(b"FORM", b"ADE " + iff_chunk(
+        b"STRC", struct.pack(">hbbhhh", 1, 0, 0, 0, 0, 0)))
+    area = iff_chunk(b"FORM", b"AREA" + ade + iff_chunk(
+        b"STRC", struct.pack(">hHHBBBB", 1, 0, 0x0A, 0, 255, 0, 0)) + tex)
+    objt = iff_chunk(b"FORM", b"OBJT" + iff_chunk(b"CLID", b"area.class\0") + area)
+    return parse_base_bytes(_wrap_ades_objt(objt), "<Add Texture>").root.ades[0]
+
+
 def _rewrite_structural_objt(state: StructuralBlockState) -> bytes:
     template = state.template_objt
     if template is None:

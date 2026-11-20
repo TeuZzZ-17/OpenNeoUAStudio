@@ -1,6 +1,6 @@
 """OpenNeoUA external sector files (``.sector``): one complete sector in its own folder.
 
-A building points at it with ``sec_type = Data/Models/Sectors/<Name>/<Name>.sector`` (optionally
+A building points at it with ``sec_type = Data/Models/Sector/<Name>/<Name>.sector`` (optionally
 ``|<SET sector>`` as fallback). The engine reader is ``game/yw_external_sector.cpp``; this module
 follows the same rules so Studio never writes a file the game would reject.
 
@@ -37,7 +37,7 @@ from pathlib import Path, PurePosixPath
 import re
 
 SECTOR_SUFFIX = ".sector"
-SECTORS_FOLDER = ("Models", "Sectors")    # inside the game Data folder
+SECTORS_FOLDER = ("Models", "Sector")    # inside the game Data folder
 STATE_COUNT = 4
 SECTOR_ICON_ZOOMS = 2      # map zoom 0 and 1: one icon per sector
 MODEL_ICON_ZOOMS = 3       # map zoom 2, 3 and 4: one icon per building cell

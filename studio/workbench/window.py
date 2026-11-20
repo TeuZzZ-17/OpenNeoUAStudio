@@ -54,6 +54,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from studio.exchange.portable import same_path
 from studio.assets.dependencies import DependencyProfile
 from studio.formats.animation import FRAME_MAX_MS, FRAME_MIN_MS
 from studio.assets.family import (
@@ -222,6 +223,7 @@ class AssemblyWindow(
         self._geometry_writer_capability_cache: dict[tuple, str] = {}
         self._topology_original: dict[str, dict] = {}
         self._edit_undo_stack: list[dict] = []
+        self._pending_origin_deltas: dict[str, tuple[float, float, float]] = {}
         self._edit_redo_stack: list[dict] = []
         self._history_replaying = False
         self._uv_history_before: dict[
@@ -271,6 +273,8 @@ class AssemblyWindow(
             self._on_edit_selection_details_changed)
         self.viewport.geometryEdited.connect(self._on_geometry_edited)
         self.viewport.geometryCommandCommitted.connect(
+            self._on_geometry_command_committed)
+        self.viewport.originCommandCommitted.connect(
             self._on_geometry_command_committed)
         self.viewport.pastePreviewConfirmRequested.connect(
             self._confirm_paste_geometry)
@@ -1032,7 +1036,7 @@ class AssemblyWindow(
             "Add an ANM from this model or another model.")
         self.add_fx_action.triggered.connect(self._add_fx_element)
         edit_menu.addAction(self.add_fx_action)
-        self.clone_fx_action = QAction("Clone ANM Element", self)
+        self.clone_fx_action = QAction("Clone ANM", self)
         self.clone_fx_action.triggered.connect(self._copy_geometry)
         edit_menu.addAction(self.clone_fx_action)
         self.rename_fx_action = QAction("Rename ANM", self)
@@ -1065,18 +1069,18 @@ class AssemblyWindow(
         edit_menu.addAction(self.edit_rotate_action)
         self.edit_center_action = QAction("Set Origin to Model Center", self)
         self.edit_center_action.setStatusTip(
-            "Set the origin: move every part together so the model's "
-            "bounding-box center sits at the origin (0, 0, 0). Undo "
-            "restores it.")
+            "Set the model's bounding-box center as its origin (0, 0, 0) "
+            "while keeping the model in place in the view. Undo restores "
+            "the previous origin.")
         self.edit_center_action.triggered.connect(
             self._set_origin_to_model_center)
         edit_menu.addAction(self.edit_center_action)
         self.edit_center_selection_action = QAction(
             "Set Selection as Origin", self)
         self.edit_center_selection_action.setStatusTip(
-            "Rigidly move the whole model so the center of the selection "
-            "becomes the new origin (0, 0, 0). Shape is unchanged. Undo "
-            "restores it.")
+            "Set the center of the selection as the model's origin "
+            "(0, 0, 0) while keeping the model in place in the view. "
+            "Undo restores the previous origin.")
         self.edit_center_selection_action.triggered.connect(
             self._set_selection_as_origin)
         edit_menu.addAction(self.edit_center_selection_action)
@@ -1461,28 +1465,6 @@ class AssemblyWindow(
         for column in range(3):
             transform_options.setColumnStretch(column, 1)
         gizmo_layout.addLayout(transform_options)
-        # Under Mirror Select / Auto Align: centering buttons, then Move / Rotate / Scale.
-        center_row = QHBoxLayout()
-        center_row.setSpacing(3)
-        self.center_origin_button = QPushButton("Set Origin to Model Center")
-        self.center_origin_button.setEnabled(False)
-        self.center_origin_button.setToolTip(
-            "Set the origin: move every part together so the model's "
-            "bounding-box center sits at the origin (0, 0, 0). Undo "
-            "restores it.")
-        self.center_origin_button.clicked.connect(
-            self.edit_center_action.trigger)
-        self.center_selection_button = QPushButton("Set Selection as Origin")
-        self.center_selection_button.setEnabled(False)
-        self.center_selection_button.setToolTip(
-            "Rigidly move the whole model so the center of the selection "
-            "becomes the new origin (0, 0, 0). Shape is unchanged. Undo "
-            "restores it.")
-        self.center_selection_button.clicked.connect(
-            self.edit_center_selection_action.trigger)
-        center_row.addWidget(self.center_origin_button)
-        center_row.addWidget(self.center_selection_button)
-        gizmo_layout.addLayout(center_row)
         mode_row = QHBoxLayout()
         mode_row.setSpacing(3)
         self.transform_mode_buttons = {}
@@ -1501,6 +1483,28 @@ class AssemblyWindow(
         self.viewport.set_direct_transform("move", 0.50)
         self._apply_transform_mode_colors()
         model_layout.addWidget(gizmo_box)
+
+        origin_box = QGroupBox("Origin")
+        center_row = QHBoxLayout(origin_box)
+        center_row.setContentsMargins(5, 4, 5, 5)
+        center_row.setSpacing(3)
+        self.center_origin_button = QPushButton("Set Origin to Model Center")
+        self.center_origin_button.setEnabled(False)
+        self.center_origin_button.setToolTip(
+            self.edit_center_action.statusTip())
+        self.center_origin_button.clicked.connect(
+            self.edit_center_action.trigger)
+        self.center_selection_button = QPushButton("Set Selection as Origin")
+        self.center_selection_button.setEnabled(False)
+        self.center_selection_button.setToolTip(
+            "Set the center of the selection as the model's origin "
+            "(0, 0, 0) while keeping the model in place in the view. "
+            "Undo restores the previous origin.")
+        self.center_selection_button.clicked.connect(
+            self.edit_center_selection_action.trigger)
+        center_row.addWidget(self.center_origin_button)
+        center_row.addWidget(self.center_selection_button)
+        model_layout.addWidget(origin_box)
 
         fx_box = QGroupBox("ANM")
         fx_layout = QVBoxLayout(fx_box)
@@ -1620,7 +1624,7 @@ class AssemblyWindow(
         phase_row.setSpacing(4)
         phase_row.addWidget(self.uv_phase_combo, 1)
         phase_row.addWidget(QLabel("Speed"))
-        phase_row.addWidget(self.uv_speed_spin, 1)
+        phase_row.addWidget(self.uv_speed_spin)
         uv_layout.addLayout(phase_row)
         self.uv_add_phase_button = QPushButton("Add UV Phase")
         self.uv_add_phase_button.setToolTip(
@@ -1648,7 +1652,7 @@ class AssemblyWindow(
             "dragging to bypass snapping temporarily.")
         self.uv_auto_align_check.toggled.connect(
             self.uv_editor.set_auto_align_enabled)
-        uv_layout.addWidget(self.uv_auto_align_check)
+        phase_row.addWidget(self.uv_auto_align_check)
         self.uv_add_vertex_button = QPushButton("Add Vertex")
         self.uv_add_vertex_button.setEnabled(False)
         self.uv_add_vertex_button.clicked.connect(self._add_uv_vertex)
@@ -1674,7 +1678,7 @@ class AssemblyWindow(
         self.model_save_button.clicked.connect(self._overwrite_model)
         save_buttons.addWidget(self.model_save_button, 1)
         self.model_save_as_button = QPushButton(
-            "Export Asset Family")
+            "Export Model")
         self.model_save_as_button.setEnabled(False)
         self.model_save_as_button.setToolTip(
             "Export a portable BASE package with SKLT, ILBM, VANM, SET "
@@ -2264,22 +2268,32 @@ class AssemblyWindow(
         install = bootstrap.installation()
         return install.root if install is not None else self._last_directory
 
-    def open_family_dialog(self) -> None:
+    def _external_model_path(self) -> Path | None:
+        path = self._family.base_path if self._family is not None else None
+        if path is not None and Path(path).name.casefold() != "set.bas":
+            return Path(path)
+        return None
+
+    def open_model_resources(self) -> None:
+        if self._external_model_path() is not None:
+            self.open_family_dialog(show_loaded=True)
+
+    def open_family_dialog(self, *, show_loaded: bool = False) -> None:
         """Import a complete model: BASE plus its skeleton, textures and animations."""
 
         from studio.workbench.model_import import ModelImportDialog
 
-        initial_base = None
-        if self._family is not None and self._family.base_path is not None:
-            candidate = Path(self._family.base_path)
-            # A SET.BAS entry point is an archive, not a standalone model BASE.
-            if candidate.name.casefold() != "set.bas":
-                initial_base = candidate
+        initial_base = self._external_model_path()
+        loaded = self._family if show_loaded and initial_base is not None else None
+        archive = loaded.setbas_archive if loaded is not None else self._setbas
+        if loaded is not None and archive is not None and archive.path == initial_base:
+            archive = None
         dialog = ModelImportDialog(
             self,
             initial_base=initial_base,
-            initial_archive=self._setbas,
+            initial_archive=archive,
             extra_roots=self._extra_roots,
+            loaded_family=loaded,
         )
         if dialog.exec() != QDialog.DialogCode.Accepted:
             return
@@ -2404,6 +2418,7 @@ class AssemblyWindow(
         self._picked_structure = None
         self._geometry_writer_capability_cache.clear()
         self._edit_undo_stack.clear()
+        self._pending_origin_deltas.clear()
         self._edit_redo_stack.clear()
         self._uv_history_before = None
         self._fx_elements.clear()
@@ -2455,6 +2470,7 @@ class AssemblyWindow(
             return
         if not self._confirm_discard_geometry():
             return
+        previous_archive = self._setbas
         self._texture_preview_cache.clear()
         self._setbas = archive
         self._setbas_preview_cache = None
@@ -2476,13 +2492,20 @@ class AssemblyWindow(
             f"SET.BAS provider loaded: {archive.path} "
             f"({len(archive.resources)} resources)"
         )
-        if self._family and self._family.base_path:
+        # A loose model stays open when the set changes. A model that is a resource of the
+        # previous SET.BAS belongs to that set, so the new set shows its own first model.
+        keeps_model = bool(self._family and self._family.base_path)
+        if keeps_model and previous_archive is not None:
+            keeps_model = not same_path(Path(self._family.base_path), Path(previous_archive.path))
+        if keeps_model:
             # Re-resolve the current family with the archive as fallback.
             self.open_base(self._family.base_path, confirm_discard=False)
             # The archive is the file the user just opened, so keep its path
             # visible after the internal family refresh.
             self._set_document_title(archive.path)
-        self._preview_first_setbas_base()
+        else:
+            # Changing set must not replace the model being edited.
+            self._preview_first_setbas_base()
         synchronize = getattr(self, '_sync_imported_set', None)
         if synchronize is not None:
             synchronize(archive.path)
