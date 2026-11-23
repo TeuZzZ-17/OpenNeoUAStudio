@@ -1890,6 +1890,10 @@ class CollisionEditorWindow(
                 and watched is self.gun_point_tree.viewport()
                 and event.type() == QEvent.Type.Resize):
             self._layout_gun_point_columns(event.size().width())
+        elif (event.type() == QEvent.Type.Resize
+                and watched is getattr(self.properties_tabs, "_palette_strip", None)):
+            # Palette rows changed: the capped Cockpit View height must follow.
+            QTimer.singleShot(0, self._fit_cockpit_tab_height)
         return super().eventFilter(watched, event)
 
     def _layout_gun_point_columns(self, available_width: int) -> None:

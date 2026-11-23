@@ -1194,11 +1194,23 @@ class _SpheresMixin:
         on_cockpit = tabs.currentIndex() == self.cockpit_tab_index
         if on_cockpit and not slot.isVisible():
             return  # Not laid out yet: the sizes below would be meaningless.
+        if strip is not None and not getattr(self, "_cockpit_strip_watched", False):
+            # The strip grows or shrinks by rows when the column width changes: refit then too.
+            self._cockpit_strip_watched = True
+            strip.installEventFilter(self)
         if on_cockpit:
-            # Everything around the page (button strip, spacing, frame) plus the page rows.
-            chrome = slot.height() - self.cockpit_tab.height()
+            # Sum the parts instead of subtracting from the current slot height: once the
+            # slot was capped too low (strip got an extra row), that difference stays too low.
+            frame = tabs.height() - self.cockpit_tab.height()
+            if strip is not None:
+                chrome = strip.height() + slot.layout().spacing() + frame
+            else:
+                chrome = frame
             wanted = chrome + self.cockpit_tab_layout.sizeHint().height()
         slot.setMaximumHeight(wanted if on_cockpit else _NO_HEIGHT_LIMIT)
+        # Also a floor: in a short window the outer pane scrolls instead of squeezing the
+        # slot, which would overlap the last palette rows (0 = back to the layout's own minimum).
+        slot.setMinimumHeight(wanted if on_cockpit else 0)
         self._properties_layout.setStretch(self._properties_tail_index, int(on_cockpit))
 
     def _sync_move_strength_context(self):

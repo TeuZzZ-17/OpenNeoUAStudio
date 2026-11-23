@@ -3259,6 +3259,22 @@ class CollisionEditorTests(unittest.TestCase):
         self.assertEqual(after, before)
         self.assertTrue(window.toolbar_view_preset_combo.isEnabled())
 
+    def test_117b_cockpit_tab_height_keeps_every_palette_row_visible(self):
+        window = self._window()
+        window.show()
+        window.properties_tabs.setCurrentIndex(window.cockpit_tab_index)
+        strip = window.properties_tabs._palette_strip
+        # Narrow column: fewer palette columns, so more rows than the first fit.
+        for width in (1600, 1100, 900):
+            window.resize(width, 800)
+            for _ in range(4):
+                QApplication.processEvents()
+            slot = strip.container
+            needed = (strip.height() + slot.layout().spacing()
+                      + window.cockpit_tab_layout.sizeHint().height())
+            self.assertGreaterEqual(slot.maximumHeight(), needed)
+            self.assertGreaterEqual(slot.height(), needed)
+
     def test_118_cockpit_gizmo_moves_xyz_and_auto_enables_output(self):
         window = self._window()
         window.properties_tabs.setCurrentIndex(window.cockpit_tab_index)
