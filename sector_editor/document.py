@@ -27,7 +27,35 @@ SET_FOLDERS = ("HI", "Objects", "Palette", "Remap", "Scripts")
 SECTOR_LIMIT = 256
 MODEL_LIMIT = 4096
 BUILDING_LIMIT = 4096
-# Field value meaning "choose it for me" (connection family, map symbol).
+def sector_texture_sets(source: str | Path) -> set[int]:
+    """Return set numbers (1..N) having dedicated ``Textures/SetN/`` assets in an external sector."""
+    from studio.exchange.onua_archive import ONUA_SUFFIX
+    path = Path(source)
+    found: set[int] = set()
+    if path.suffix.casefold() == ONUA_SUFFIX and path.is_file():
+        try:
+            with ZipFile(path) as archive:
+                for name in archive.namelist():
+                    parts = [p for p in name.replace("\\", "/").split("/") if p]
+                    for idx, part in enumerate(parts[:-1]):
+                        if part.casefold() == "textures":
+                            m = re.fullmatch(r"set(\d+)", parts[idx + 1], re.IGNORECASE)
+                            if m and not name.endswith("/"):
+                                found.add(int(m[1]))
+        except OSError:
+            return set()
+        return found
+    folder = path if path.is_dir() else path.parent
+    textures_dir = bootstrap.find_ci(folder, "Textures")
+    if textures_dir is None or not textures_dir.is_dir():
+        return found
+    for child in textures_dir.iterdir():
+        if not child.is_dir():
+            continue
+        match = re.fullmatch(r"set(\d+)", child.name, re.IGNORECASE)
+        if match and any(item.is_file() for item in child.iterdir()):
+            found.add(int(match[1]))
+    return found
 AUTO = -1
 
 
@@ -111,6 +139,7 @@ class SetDocument:
         self.external_models: set[int] = set()
         self.external_buildings: set[int] = set()
         self.external_own: set[int] = set()
+        self.external_sector_slots: set[int] = set()
         # Map icons of external sectors (map_icon): ("model", id) / ("sector", number) ->
         # files, 1 for every zoom or one per zoom. Kept for editing and export only;
         # they never enter SET.SDF (the vanilla map_symbol stays there).
@@ -197,6 +226,18 @@ class SetDocument:
                     lambda: self.sdf.sectors.__setitem__(number, sector))
         return number
 
+    def sector_model_ids(self, number: int) -> set[int]:
+        """Return every model ID used across all 4 damage states of ``number``."""
+        sector = self.sdf.sectors.get(number)
+        if sector is None:
+            return set()
+        models: set[int] = set()
+        for bid in sector.subsects:
+            if 0 <= bid < len(self.sdf.buildings):
+                building = self.sdf.buildings[bid]
+                models.update(building.state(state) for state in range(4))
+        return {mid for mid in models if 0 <= mid < len(self.sdf.models)}
+
     def _existing_sectors(self, numbers):
         try:
             selected = tuple(dict.fromkeys(numbers))
@@ -209,7 +250,11 @@ class SetDocument:
     def wipe_sectors(self, numbers):
         """Remove whole definitions; their slots become free."""
         selected = self._existing_sectors(numbers)
-        self.change("Wipe sector", lambda: [self.sdf.sectors.pop(n) for n in selected])
+        def apply():
+            for n in selected:
+                self.sdf.sectors.pop(n)
+                self.external_sector_slots.discard(n)
+        self.change("Wipe sector", apply)
 
     def clear_sectors(self, numbers):
         """Keep each definition and layout, but put building 0 in every cell."""
@@ -690,15 +735,50 @@ class SetDocument:
         key = assets._key(model.base)
         loose = assets._index_loose().get(key)
         visual = model.base
+        def _queue_texture_variants(tex_path: Path, files_dict: dict) -> None:
+            variants_found = False
+            textures_dir = bootstrap.find_ci(loose.parent, "Textures")
+            if textures_dir is not None and textures_dir.is_dir():
+                for sub in sorted(textures_dir.iterdir(), key=lambda p: p.name.casefold()):
+                    if not sub.is_dir():
+                        continue
+                    match = re.fullmatch(r"set(\d+)", sub.name, re.IGNORECASE)
+                    if not match:
+                        continue
+                    candidate = bootstrap.find_ci(sub, tex_path.name)
+                    if candidate is not None and candidate.is_file():
+                        files_dict.setdefault(f"Textures/Set{int(match[1])}/{candidate.name}", candidate)
+                        variants_found = True
+            if not variants_found:
+                # Default newly exported custom textures to Textures/Set<N>/ of the active set.
+                set_match = re.fullmatch(r"set(\d+)", tex_path.parent.name, re.IGNORECASE)
+                if set_match and tex_path.parent.parent.name.casefold() == "textures":
+                    rel = f"Textures/Set{int(set_match[1])}/{tex_path.name}"
+                elif 1 <= self.number <= 7:
+                    rel = f"Textures/Set{self.number}/{tex_path.name}"
+                else:
+                    rel = f"Textures/{tex_path.name}"
+                files_dict.setdefault(rel, tex_path)
+
         if loose is not None and assets._by_name.get(key) is None:
             visual = Path(model.base.replace("\\", "/")).stem + ".BASE"
             files[visual] = loose
             family = load_asset_family(loose, [loose.parent, self.folder], {}, assets.archive)
+            set_folder_resolved = self.folder.resolve()
             for dependency in family.dependencies:
                 path = dependency.resolved_path
-                if (path is not None and Path(path).is_file() and dependency.resolution_source != "SET.BAS"
-                        and Path(dependency.raw_ref.replace("\\", "/")).name.casefold() not in in_setbas):
-                    files.setdefault(Path(path).name, Path(path))
+                if path is None or not Path(path).is_file() or dependency.resolution_source == "SET.BAS":
+                    continue
+                dep_path = Path(path)
+                # Never bundle SET palette/remap tables or any file living inside the SET directory itself.
+                if (dep_path.resolve().is_relative_to(set_folder_resolved)
+                        or dep_path.name.casefold() in ("standard.pal", "shadermp.ilb", "tracyrmp.ilb")):
+                    continue
+                if Path(dependency.raw_ref.replace("\\", "/")).name.casefold() not in in_setbas:
+                    if dep_path.suffix.casefold() in (".ilbm", ".ilb", ".iff"):
+                        _queue_texture_variants(dep_path, files)
+                    else:
+                        files.setdefault(dep_path.name, dep_path)
         collision = model.sklt
         skeleton = self._loose_skeleton(model.sklt)
         if skeleton is not None and Path(model.sklt.replace("\\", "/")).name.casefold() not in in_setbas:
@@ -771,11 +851,16 @@ class SetDocument:
         if number not in self.sdf.sectors:
             raise ValueError(f"Sector {number} is not defined.")
         sector = self.sdf.sectors[number]
-        if sector.ground < 0 or sector.symbol < 0:
-            raise ValueError("Choose the connection family and map symbol first.")
+        ground, symbol = sector.ground, sector.symbol
+        if ground < 0 or symbol < 0:
+            auto_ground, auto_symbol = self.suggest_fields(number)
+            if ground < 0:
+                ground = auto_ground if 0 <= auto_ground <= 5 else 0
+            if symbol < 0:
+                symbol = auto_symbol if 0 <= auto_symbol <= 255 else 0
         files, models, pieces = {}, {}, {}
         used_models, used_pieces = set(), set()
-        result = SectorFile(ground=sector.ground, map_symbol=sector.symbol)
+        result = SectorFile(ground=ground, map_symbol=symbol)
 
         def model_name(mid):
             if mid not in models:
@@ -800,11 +885,11 @@ class SetDocument:
         return result, files
 
     def _export_icons(self, key, stem, files):
-        """Queue the icon files of ``key`` as map/<stem>[_<n>].<ext>; returns the map_icon value."""
+        """Queue the icon files of ``key`` as Map_Icons/<stem>[_<n>].<ext>; returns the map_icon value."""
         icons = self.map_icons.get(key, ())
         names = []
         for index, path in enumerate(icons):
-            name = f"map/{stem}{'' if len(icons) == 1 else '_' + str(index)}{path.suffix.lower()}"
+            name = f"Map_Icons/{stem}{'' if len(icons) == 1 else '_' + str(index)}{path.suffix.lower()}"
             files[name] = path
             names.append(name)
         return tuple(names)
@@ -944,6 +1029,7 @@ class SetDocument:
             self.external_own |= {ids[identity(m)] for m, is_own in zip(subset.models, own) if is_own}
             self.external_models |= created(models, self.sdf.models)
             self.external_buildings |= created(buildings, self.sdf.buildings)
+            self.external_sector_slots.add(target)
             for model in sector.models:
                 files = icon_files(model.map_icon)
                 if files:

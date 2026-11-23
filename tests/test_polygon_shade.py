@@ -75,9 +75,9 @@ class PolygonShadeTests(unittest.TestCase):
                 self.assertTrue(window.shade_slider.isEnabled())
                 self.assertTrue(window.shade_spin.isEnabled())
                 apply_polygon_shade(obj, [0], value=120)
-                window.shade_auto_button.setChecked(True)      # shades by direction, level 0
+                window.shade_auto_button.setChecked(True)      # shades by direction
                 self.assertEqual(_plain_shade(obj), 70)
-                self.assertEqual(window.shade_spin.value(), 0)
+                self.assertEqual(window.shade_spin.text(), "Auto")
                 self.assertFalse(window.shade_slider.isEnabled())
                 self.assertFalse(window.shade_spin.isEnabled())
                 window._on_polygon_picked(0)                   # a new selection is manual again
@@ -94,20 +94,21 @@ class PolygonShadeTests(unittest.TestCase):
             obj = family.root_object
             window = self._window(family)
             try:
-                apply_polygon_shade(obj, [0], value=70)       # the automatic shade of this triangle
+                # Slider and number show the real UA shade (0..250) of the selection.
+                apply_polygon_shade(obj, [0], value=70)
                 window._refresh_shade_readout()
-                self.assertEqual(window.shade_spin.value(), 0)
-                window.shade_slider.setValue(30)
+                self.assertEqual(window.shade_spin.value(), 70)
+                window.shade_slider.setValue(100)
                 self.assertEqual(_plain_shade(obj), 100)
-                self.assertEqual(window.shade_spin.value(), 30)
-                self.assertEqual(window.shade_slider.value(), 30)
-                window.shade_slider.setValue(-20)
+                self.assertEqual(window.shade_spin.value(), 100)
+                self.assertEqual(window.shade_slider.value(), 100)
+                window.shade_slider.setValue(50)
                 self.assertEqual(_plain_shade(obj), 50)
-                self.assertEqual(window.shade_spin.value(), -20)
-                window.shade_spin.setValue(18)                # the number drives the slider
-                self.assertEqual(window.shade_slider.value(), 18)
+                self.assertEqual(window.shade_spin.value(), 50)
+                window.shade_spin.setValue(88)                # the number drives the slider
+                self.assertEqual(window.shade_slider.value(), 88)
                 self.assertEqual(_plain_shade(obj), 88)
-                window.shade_spin.setValue(100)
+                window.shade_spin.setValue(170)
                 self.assertEqual(_plain_shade(obj), 170)
                 window._undo_edit()
                 self.assertEqual(_plain_shade(obj), 88)
@@ -130,8 +131,9 @@ class PolygonShadeTests(unittest.TestCase):
             obj = family.root_object
             window = self._window(family)
             try:
-                window.shade_slider.setValue(-37)         # manual mode: applied
-                self.assertEqual(window.shade_spin.value(), -37)
+                window._refresh_shade_readout()
+                window.shade_slider.setValue(33)          # manual mode: applied
+                self.assertEqual(window.shade_spin.value(), 33)
                 output = parent / "exported"
                 with patch.object(window, "_notify"),                         patch("studio.workbench.window.QMessageBox.critical"):
                     self.assertTrue(window._write_model_files(

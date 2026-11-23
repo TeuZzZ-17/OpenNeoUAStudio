@@ -6,8 +6,9 @@ from functools import lru_cache
 from pathlib import Path
 
 import numpy as np
-from PySide6.QtCore import QSize, Qt
+from PySide6.QtCore import QRectF, QSize, Qt
 from PySide6.QtGui import QImage, QPainter, QPixmap
+from PySide6.QtSvg import QSvgRenderer
 from PySide6.QtWidgets import QFrame, QHBoxLayout, QLabel, QVBoxLayout, QWidget
 
 from map_editor import bootstrap
@@ -53,11 +54,11 @@ class GroundPreview(QWidget):
     def __init__(self, parent=None):
         super().__init__(parent)
         self.preview = _image_label(QSize(80, 44), self)
-        self.label = QLabel("Connection to family 0", self)
-        self.detail = QLabel("BASE surface unchanged", self)
+        self.label = QLabel("Border transition to family 0", self)
+        self.detail = QLabel("Slurp edge terrain · BASE surface unchanged", self)
         self.label.setToolTip(
-            "This is only the native transition filler. Each cell's BASE "
-            "continues to provide its ground surface.")
+            "Terrain family (0–5) used to generate transition edges (slurps) between neighboring sectors. "
+            "Each cell's BASE continues to provide its own ground surface.")
         caption = QWidget(self)
         caption_layout = QVBoxLayout(caption)
         caption_layout.setContentsMargins(0, 0, 0, 0)
@@ -158,35 +159,84 @@ def _map_symbol_image(symbol: int) -> QImage | None:
     return image
 
 
+MAP_ZOOM_TITLES = ("Zoom 1", "Zoom 2", "Zoom 3", "Zoom 4", "Zoom 5")
+
+
 class SymbolPreview(QWidget):
-    """Show the real strategic-map cell glyph at both native tile sizes."""
+    """Show the strategic-map glyph across all 5 zoom levels (custom Map icons or vanilla tiles)."""
 
     def __init__(self, parent=None):
         super().__init__(parent)
-        self.preview = _image_label(QSize(68, 32), self)
-        self.label = QLabel("Map symbol · 4px / 8px", self)
+        self.previews: list[QLabel] = []
+        root = QVBoxLayout(self)
+        root.setContentsMargins(0, 0, 0, 0)
+        root.setSpacing(4)
+        self.label = QLabel("Map symbols · Zoom 1–5", self)
         self.label.setToolTip(
-            "Native map glyph, enlarged from the game's 4 px and 8 px tiles.")
-        layout = QHBoxLayout(self)
-        layout.setContentsMargins(0, 0, 0, 0)
-        layout.setSpacing(8)
-        layout.addWidget(self.preview)
-        layout.addWidget(self.label, 1)
+            "Strategic-map look at all 5 zoom levels (custom Map icons if present, otherwise vanilla glyphs).")
+        root.addWidget(self.label)
+        strip = QHBoxLayout()
+        strip.setContentsMargins(0, 0, 0, 0)
+        strip.setSpacing(4)
+        for zoom, title in enumerate(MAP_ZOOM_TITLES):
+            col = QVBoxLayout()
+            col.setContentsMargins(0, 0, 0, 0)
+            col.setSpacing(2)
+            tile = _image_label(QSize(44, 44), self)
+            tile.setToolTip(f"{title}: " + ("whole sector (4/8 px)" if zoom < 2 else "cell grid (4/8/16 px)"))
+            caption = QLabel(f"Z{zoom + 1}", self)
+            caption.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            col.addWidget(tile, 0, Qt.AlignmentFlag.AlignCenter)
+            col.addWidget(caption)
+            strip.addLayout(col)
+            self.previews.append(tile)
+        strip.addStretch(1)
+        root.addLayout(strip)
+        # Keep `.preview` pointing to the first tile for callers/tests inspecting it.
+        self.preview = self.previews[0]
 
     def set_symbol(self, library, symbol: int) -> None:
+        del library
         if type(symbol) is not int or not 0 <= symbol <= 255:
-            _show_preview(self.preview, None)
+            for tile in self.previews:
+                _show_preview(tile, None)
             return
-        try:
-            image = _map_symbol_image(symbol)
-        except (OSError, RuntimeError, TypeError, ValueError):
-            image = None
-        _show_preview(self.preview, image, nearest=True)
+        self.label.setText("Map symbol · 4px / 8px (vanilla)")
+        for zoom, tile in enumerate(self.previews):
+            try:
+                if zoom < 2:
+                    size = 4 << zoom
+                    image = _font_tile(f"sec{size}", size, symbol)
+                else:
+                    image = None
+            except (OSError, RuntimeError, TypeError, ValueError):
+                image = None
+            _show_preview(tile, image if image is not None and not image.isNull() else None, nearest=True)
+
+    def set_sector(self, document, number: int, state: int) -> None:
+        sector = document.sdf.sectors.get(number) if document is not None else None
+        if sector is None:
+            for tile in self.previews:
+                _show_preview(tile, None)
+            return
+        has_custom = ("sector", number) in document.map_icons or any(
+            ("model", document.sdf.buildings[bid].state(state)) in document.map_icons
+            for bid in sector.subsects
+            if 0 <= bid < len(document.sdf.buildings)
+        )
+        self.label.setText(
+            "Map symbols · Zoom 1–5 (custom icons)" if has_custom
+            else "Map symbols · Zoom 1–5 (vanilla glyphs)"
+        )
+        for zoom, tile in enumerate(self.previews):
+            try:
+                image = map_zoom_image(document, number, state, zoom)
+            except (IndexError, OSError, RuntimeError, ValueError):
+                image = None
+            _show_preview(tile, image, nearest=True)
 
 
 # --- strategic-map icons of a sector at the five map zoom levels ----------------------------
-
-MAP_ZOOM_TITLES = ("Zoom 1", "Zoom 2", "Zoom 3", "Zoom 4", "Zoom 5")
 
 
 def _font_tile(stem: str, tile_size: int, symbol: int) -> QImage:
@@ -202,7 +252,17 @@ def _icon_image(files, zoom_index: int, size: int) -> QImage:
     """One of the authored/generated icon files (1 for every zoom, or one per zoom)."""
     if not files:
         return QImage()
-    path = files[0 if len(files) == 1 else min(zoom_index, len(files) - 1)]
+    path = Path(files[0 if len(files) == 1 else min(zoom_index, len(files) - 1)])
+    if path.suffix.casefold() == ".svg":
+        renderer = QSvgRenderer(str(path))
+        if renderer.isValid():
+            image = QImage(size, size, QImage.Format.Format_ARGB32_Premultiplied)
+            image.fill(Qt.GlobalColor.transparent)
+            painter = QPainter(image)
+            painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+            renderer.render(painter, QRectF(0, 0, size, size))
+            painter.end()
+            return image
     image = QImage(str(path))
     if image.isNull():
         return image

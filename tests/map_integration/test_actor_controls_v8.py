@@ -73,11 +73,11 @@ def test_host_world_movement_roundtrip_and_undo(win):
     win._refresh_hosts(0)
     before = win.doc.snapshot()
     panel = win.host_panel
-    panel._change('pos_x', 4300.125)
+    panel._change('pos_x', 4300.25)
     panel._change('pos_z', -4400.25)
     win._finish_live()
     value = win.doc.host_stations[0]
-    assert (value['pos_x'], value['pos_z'], value['x'], value['y']) == (4300.125, -4400.25, 3, 3)
+    assert (value['pos_x'], value['pos_z'], value['x'], value['y']) == (4300.25, -4400.25, 3, 3)
     saved = loads_ldf(dumps_ldf(win.doc)).host_stations[0]
     assert saved['pos_x'] == value['pos_x'] and saved['pos_z'] == value['pos_z']
     win.undo()

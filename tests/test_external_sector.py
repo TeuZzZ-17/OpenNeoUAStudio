@@ -71,6 +71,12 @@ class FormatTests(unittest.TestCase):
         self.assertIsNone(sector.model("ground").shield)
         again = parse_sector_text(format_sector(sector))
         self.assertEqual((again.cells, again.pieces, again.models), (sector.cells, sector.pieces, sector.models))
+        self.assertIn("begin_effects", format_sector(sector))
+        effects_text = SAMPLE.replace(
+            "    explosion = 49|0|0|100\n",
+            "    begin_effects\n        explosion = 49|0|0|100\n    end\n",
+        )
+        self.assertEqual(parse_sector_text(effects_text).model("core").explosions, ((49, 0, 0, 100),))
 
     def test_engine_rejections(self):
         broken = {
@@ -261,6 +267,7 @@ class SectorEditorTests(unittest.TestCase):
         self.assertEqual(len(exported.map_icon), 2)
         icons = [m.map_icon for m in exported.models if m.map_icon]
         self.assertEqual([len(i) for i in icons], [3])
+        self.assertTrue(all(f.startswith("Map_Icons/") and f.endswith(".svg") for f in (*exported.map_icon, *icons[0])))
         self.assertTrue(all((target / f).is_file() for f in (*exported.map_icon, *icons[0])))
         again = self.doc()
         slot = again.import_external_sector(target)
@@ -285,6 +292,27 @@ class SectorEditorTests(unittest.TestCase):
         self.assertEqual(sdf.read_bytes(), before)
         sets.undo("set3")
         self.assertEqual(sdf.read_bytes(), before)
+
+    def test_texture_sets_detection_and_auto_ground_export(self):
+        from sector_editor.document import AUTO, sector_texture_sets
+        folder = self.data / "Models" / "Sector" / "Tex_Set_Check"
+        folder.mkdir()
+        (folder / "Textures" / "Set3").mkdir(parents=True)
+        (folder / "Textures" / "Set3" / "SAMPLE.ILBM").write_bytes(b"FORM")
+        (folder / "Tex_Set_Check.sector").write_text(SAMPLE, encoding="utf-8")
+        self.assertEqual(sector_texture_sets(folder / "Tex_Set_Check.sector"), {3})
+        (folder / "Textures" / "Set4").mkdir(parents=True)
+        (folder / "Textures" / "Set4" / "SAMPLE.ILBM").write_bytes(b"FORM")
+        self.assertEqual(sector_texture_sets(folder), {3, 4})
+
+        doc = self.doc()
+        doc.set_sector_fields([5], ground=AUTO)
+        self.assertGreaterEqual(doc.sdf.sectors[5].ground, 0)
+        doc.sdf.sectors[5] = doc.sdf.sectors[5].__class__(
+            5, doc.sdf.sectors[5].kind, AUTO, doc.sdf.sectors[5].symbol,
+            doc.sdf.sectors[5].subsects, doc.sdf.sectors[5].comment)
+        sec_file, _ = doc.external_sector(5)
+        self.assertGreaterEqual(sec_file.ground, 0)
 
 
 if __name__ == "__main__":

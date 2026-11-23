@@ -34,6 +34,7 @@ def test_positional_vp_ignores_external_name_collision_but_keeps_set_override(tm
     assets._loose = {}
     assets._loose_index = None
     assets._loose_families = {}
+    assets.external_roots = []
     # Resolve the generic BASE first to exercise cache isolation as well.
     assert assets.base_object('VP_KUFO') is (override if loose_set else external)
     assert assets.base_object('VP_KUFO', set_only=True) is (override if loose_set else normal)

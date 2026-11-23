@@ -110,7 +110,10 @@ def test_location_drawing_fields_close_undo_and_cancel(win):
 
 def test_location_lock_stays_after_find(win):
     from PySide6.QtWidgets import QPushButton
-    row = win.location_panel.layout().itemAt(1).layout()
+    # The button row is the one holding the lock (the sort bar sits above the list).
+    layout = win.location_panel.layout()
+    row = next(item.layout() for item in map(layout.itemAt, range(layout.count()))
+               if item.layout() is not None and item.layout().indexOf(win.location_panel.lock) >= 0)
     buttons = [row.itemAt(index).widget() for index in range(row.count())]
     assert buttons[-2].text() == 'Find'
     assert buttons[-1] is win.location_panel.lock

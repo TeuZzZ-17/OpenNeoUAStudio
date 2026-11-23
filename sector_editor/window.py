@@ -34,7 +34,8 @@ from studio.ui.widgets import (
     configure_operation_status_bar, install_standard_file_menu_tail,
     loading_resources, use_standard_list_style, ViewportWidthScrollArea,
 )
-from .document import AUTO, SetDocument, SET_FOLDERS, table_issues, MODEL_LIMIT, BUILDING_LIMIT
+from .document import AUTO, SetDocument, SET_FOLDERS, sector_texture_sets, table_issues, MODEL_LIMIT, BUILDING_LIMIT
+from studio.rendering.gpu import add_renderer_badge
 from .viewport import SectorViewport, covers_sector
 from .interactions import ModelList, SectorList
 from .visual_aids import GroundPreview, MapIconPreview, SymbolPreview
@@ -289,14 +290,14 @@ class SectorEditorWindow(QMainWindow):
         self._add_actions(file, (
             ("new", "New Set", QKeySequence.StandardKey.New, self.new_set),
             ("open", "Import Set", QKeySequence.StandardKey.Open, self.choose_set),
-            ("save", "Overwrite Set", QKeySequence.StandardKey.Save, self.save),
             ("export", "Export Set", QKeySequence.StandardKey.SaveAs, self.export_set),
+            ("save", "Overwrite Set", QKeySequence.StandardKey.Save, self.save),
         ))
         file.addSeparator()
         self._add_actions(file, (
             ("import_sector", "Import Sector", None, self.import_sector),
-            ("overwrite_sector", "Overwrite Sector", None, self.overwrite_sector),
             ("export_sector", "Export Sector", None, self.export_sector),
+            ("overwrite_sector", "Overwrite Sector", None, self.overwrite_sector),
         ))
         self.actions["overwrite_sector"].setEnabled(False)
         self.actions["overwrite_sector"].setToolTip(
@@ -366,6 +367,8 @@ class SectorEditorWindow(QMainWindow):
         self.validation_status.linkActivated.connect(self.show_validation)
         self.statusBar().addPermanentWidget(self.validation_status)
         self.validation_status.hide()
+        self.renderer_badge = add_renderer_badge(self, self.view)
+        self.renderer_badge.add_viewport(self.cell_grid)
 
         toolbar = self.addToolBar("Set")
         toolbar.setMovable(False)
@@ -464,7 +467,7 @@ class SectorEditorWindow(QMainWindow):
         layout.addLayout(row)
         self.view = SectorViewport()
         self._connect_cell_view(self.view)
-        self.view.backendChanged.connect(lambda name: self.statusBar().showMessage(name, 5000))
+        self.view.backendChanged.connect(lambda name: (self.statusBar().showMessage(name, 5000), self._update_preview_status()))
         layout.addWidget(self.view, 1)
         self.play_view = None          # Entity Designer viewport (FX pass), created on the first Play
         self._play_state = 0           # damage state shown by Play (transitions start from it)
@@ -499,9 +502,17 @@ class SectorEditorWindow(QMainWindow):
         self.ground = QSpinBox()
         self.ground.setRange(AUTO, 5)
         self.ground.setSpecialValueText("Automatic")
-        self.ground.setToolTip("Filler family between neighboring sectors (0–5). Automatic copies it from the most similar sector.")
+        self.ground.setToolTip("Terrain family (0–5) used to generate border transition strips to neighboring sectors. Automatic copies it from the most similar sector.")
         self.ground.valueChanged.connect(self._sector_fields_changed)
-        form.addRow("Connection family", self.ground)
+        self.ground_auto_button = QPushButton("Auto")
+        self.ground_auto_button.setToolTip("Pick the connection family automatically from similar sectors.")
+        self.ground_auto_button.clicked.connect(lambda: self.ground.setValue(AUTO))
+        ground_row = QHBoxLayout()
+        ground_row.setContentsMargins(0, 0, 0, 0)
+        ground_row.setSpacing(6)
+        ground_row.addWidget(self.ground, 1)
+        ground_row.addWidget(self.ground_auto_button)
+        form.addRow("Connection family", ground_row)
         self.ground_preview = GroundPreview()
         form.addRow(self.ground_preview)
         self.symbol = QSpinBox()
@@ -552,6 +563,10 @@ class SectorEditorWindow(QMainWindow):
         self.model_target = QLabel()
         self.model_target.setWordWrap(True)
         layout.addWidget(self.model_target)
+        self.models_scope_label = QLabel()
+        self.models_scope_label.setWordWrap(True)
+        self.models_scope_label.hide()
+        layout.addWidget(self.models_scope_label)
         self.model_search = QLineEdit()
         self.model_search.setPlaceholderText("Search set models…")
         self.model_search.textChanged.connect(self._filter_models)
@@ -607,17 +622,7 @@ class SectorEditorWindow(QMainWindow):
         self.model_comment = QLineEdit()
         form.addRow("Description", self.model_comment)
         layout.addLayout(form)
-        effect_hint = QLabel("Destruction effects")
-        effect_hint.setWordWrap(True)
-        layout.addWidget(effect_hint)
-        self.effects = DestructionEffectsEditor()
-        self.effects.previewRequested.connect(self._preview_selected_effect)
-        layout.addWidget(self.effects)
         self.update_model_button = button("Apply changes", self.update_model, layout)
-        for control, signal in ((self.base, "currentTextChanged"), (self.sklt, "currentTextChanged"),
-                                (self.model_comment, "textChanged"), (self.effects, "textChanged"),
-                                (self.collision_mode, "currentIndexChanged"), (self.shield, "valueChanged")):
-            getattr(control, signal).connect(self._model_form_changed)
         row = QHBoxLayout()
         button("New model", self.add_model, row)
         button("Duplicate model", lambda: self.add_model(duplicate=True), row)
@@ -625,6 +630,23 @@ class SectorEditorWindow(QMainWindow):
         layout.addStretch()
         self.definitions_page = scroll_page(definitions)
         self.tabs.addTab(self.definitions_page, "Definitions")
+
+        effects_tab = QWidget()
+        effects_layout = QVBoxLayout(effects_tab)
+        self.effects_model_label = QLabel("No model selected")
+        self.effects_model_label.setWordWrap(True)
+        effects_layout.addWidget(self.effects_model_label)
+        self.effects = DestructionEffectsEditor()
+        self.effects.previewRequested.connect(self._preview_selected_effect)
+        effects_layout.addWidget(self.effects, 1)
+        self.effects_apply_button = button("Apply changes", self.update_model, effects_layout)
+        self.effects_page = scroll_page(effects_tab)
+        self.tabs.addTab(self.effects_page, "Destruction effects")
+
+        for control, signal in ((self.base, "currentTextChanged"), (self.sklt, "currentTextChanged"),
+                                (self.model_comment, "textChanged"), (self.effects, "textChanged"),
+                                (self.collision_mode, "currentIndexChanged"), (self.shield, "valueChanged")):
+            getattr(control, signal).connect(self._model_form_changed)
 
         icons = QWidget()
         layout = QVBoxLayout(icons)
@@ -724,11 +746,12 @@ class SectorEditorWindow(QMainWindow):
         self._follow_selected_model()
 
     def _follow_selected_model(self):
-        """Definitions show the model of the selected cell in the current damage state.
+        """Definitions and Destruction effects follow the model of the selected cell.
 
         Unapplied edits in the form keep the current model (switching would ask to discard them).
         """
-        if self.tabs.currentWidget() is not getattr(self, "definitions_page", None):
+        if self.tabs.currentWidget() not in (getattr(self, "definitions_page", None),
+                                             getattr(self, "effects_page", None)):
             return
         models = self._selected_cell_models()
         if not models or self._syncing or self._pending_model():
@@ -841,6 +864,8 @@ class SectorEditorWindow(QMainWindow):
         self._update_overwrite_sector_action()
         if self.document is not None and hasattr(self, "map_icon_preview"):
             self.map_icon_preview.show_sector(self.document, self.current_sector, self.state.currentIndex())
+        if self.document is not None and hasattr(self, "symbol_preview"):
+            self.symbol_preview.set_sector(self.document, self.current_sector, self.state.currentIndex())
 
     def _selected_cell_models(self):
         sector = self.document.sdf.sectors.get(self.current_sector) if self.document else None
@@ -919,7 +944,7 @@ class SectorEditorWindow(QMainWindow):
         if number not in self.document.sdf.sectors:
             menu.addAction("Create sector here", self.add_sector)
             menu.addSeparator()
-        for key in ("import_sector", "overwrite_sector", "export_sector", None, "wipe_sector", "clear_sector", None,
+        for key in ("import_sector", "export_sector", "overwrite_sector", None, "wipe_sector", "clear_sector", None,
                     "copy_sector", "cut_sector"):
             if key is None:
                 menu.addSeparator()
@@ -1318,6 +1343,16 @@ class SectorEditorWindow(QMainWindow):
         if Path(path).suffix.casefold() == ".sdf":
             self._import_definitions(path)
             return
+        self._import_external_sector_path(Path(path))
+
+    def _import_external_sector_path(self, path: Path):
+        tex_sets = sector_texture_sets(path)
+        if len(tex_sets) == 1:
+            target_set = next(iter(tex_sets))
+            if self.document is None or target_set != self.document.number:
+                if self.sets.findData(target_set) >= 0:
+                    if not self.open_set(bootstrap.set_dir(target_set)):
+                        return
         free = [n for n in self._selected_slots() if n not in self.document.sdf.sectors]
 
         def apply():
@@ -1683,9 +1718,24 @@ class SectorEditorWindow(QMainWindow):
 
     def _filter_models(self):
         query = self.model_search.text().casefold()
+        allowed = None
+        if self.document is not None and self.current_sector in self.document.external_sector_slots:
+            allowed = self.document.sector_model_ids(self.current_sector)
+        if hasattr(self, "models_scope_label"):
+            if allowed is not None:
+                self.models_scope_label.setText(
+                    f"Showing the damage-state models of imported sector {self.current_sector:03d} only."
+                )
+                self.models_scope_label.show()
+            else:
+                self.models_scope_label.hide()
         for row in range(self.models.count()):
             item = self.models.item(row)
-            item.setHidden(query not in f"{item.text()} {item.data(DETAIL_ROLE) or ''}".casefold())
+            mid = item.data(Qt.ItemDataRole.UserRole)
+            hidden = (allowed is not None and mid not in allowed) or (
+                query not in f"{item.text()} {item.data(DETAIL_ROLE) or ''}".casefold()
+            )
+            item.setHidden(hidden)
         if hasattr(self, "preview_timer"):
             self.preview_timer.start()
 
@@ -1737,6 +1787,7 @@ class SectorEditorWindow(QMainWindow):
         self.sectors.blockSignals(False)
         self.selected_cells = {4}
         self._selection_anchor = 4
+        self._filter_models()
         self._load_sector_fields()
         self._update_sector_actions()
         self._preview(reset=True)
@@ -1752,7 +1803,7 @@ class SectorEditorWindow(QMainWindow):
         layout = "One large cell" if sector and sector.single else "3 × 3 cells"
         self.sector_title.setText(f"Sector {self.current_sector:03d} [{self.current_sector:02X}] · {layout}"
                                   if sector else f"Slot {self.current_sector:03d} is free")
-        for field in (self.layout_mode, self.ground, self.symbol, self.description):
+        for field in (self.layout_mode, self.ground, self.ground_auto_button, self.symbol, self.description):
             field.setEnabled(sector is not None)
         if sector:
             self.layout_mode.setCurrentIndex(int(sector.single))
@@ -1796,7 +1847,7 @@ class SectorEditorWindow(QMainWindow):
         self._update_cell_actions()
         if self.library is not None and sector:
             self.ground_preview.set_ground(self.library, sector.ground)
-            self.symbol_preview.set_symbol(self.library, sector.symbol)
+            self.symbol_preview.set_sector(self.document, self.current_sector, self.state.currentIndex())
         self._update_ghost()
 
     def _update_cell_actions(self):
@@ -1942,6 +1993,8 @@ class SectorEditorWindow(QMainWindow):
         self.collision_mode.setCurrentIndex(max(0, min(2, model.numbers[3])))
         self.model_comment.setText(model.comment)
         self.effects.setPlainText("\n".join(" ".join(map(str, group)) for group in model.effects))
+        if hasattr(self, "effects_model_label"):
+            self.effects_model_label.setText(f"Editing model {mid:03d} · {model.base}")
         self._update_model_usage()
         self.models.blockSignals(True)
         self.models.setCurrentRow(mid)
@@ -1967,6 +2020,8 @@ class SectorEditorWindow(QMainWindow):
             return
         pending = self._pending_model()
         self.update_model_button.setEnabled(pending)
+        if hasattr(self, "effects_apply_button"):
+            self.effects_apply_button.setEnabled(pending)
         self._update_overwrite_sector_action()
         dirty = self.document.dirty or pending or self._pending_sector_fields()
         self.setWindowTitle(f"{'* ' if dirty else ''}Set {self.document.number} · {self.document.folder}"
@@ -2059,9 +2114,7 @@ class SectorEditorWindow(QMainWindow):
             self.view.show_sector(self.library, self.current_sector or 0,
                                   state=self.state.currentIndex(), model=mid, reset=reset)
             mesh = self.view.lib.mesh(self.current_sector or 0)
-            messages = mesh.missing + (mesh.resolved.warnings if mesh.resolved else [])
-            self.preview_status.setText("Missing: " + ", ".join(messages) if messages else
-                                        f"{len(mesh.faces)} faces | {self.view.renderer_name} | WASD: browse | Enter: apply | Drag selected: move | Drag background: select | Right click: tools")
+            self._update_preview_status(mesh)
             if self._placement is not None:
                 target = self._placement.get("target")
                 self._placement_hover = None
@@ -2071,6 +2124,17 @@ class SectorEditorWindow(QMainWindow):
             self._reload_play()
         except (ValueError, OSError, RuntimeError, IndexError) as exc:
             self.preview_status.setText(f"Preview unavailable: {exc}")
+
+    def _update_preview_status(self, mesh=None):
+        if self.library is None or self.view.lib is None:
+            return
+        try:
+            mesh = mesh or self.view.lib.mesh(self.current_sector or 0)
+        except (ValueError, OSError, RuntimeError, IndexError):
+            return
+        messages = mesh.missing + (mesh.resolved.warnings if mesh.resolved else [])
+        self.preview_status.setText("Missing: " + ", ".join(messages) if messages else
+                                    f"{len(mesh.faces)} faces | {self.view.renderer_name} | WASD: browse | Enter: apply | Drag selected: move | Drag background: select | Right click: tools")
 
     def _run_edit(self, callback, *, reset=False):
         if self.document is None:

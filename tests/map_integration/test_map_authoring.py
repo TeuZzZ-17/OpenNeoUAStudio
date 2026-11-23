@@ -199,16 +199,16 @@ def test_squad_live_edit_preserves_exact_coordinates_and_roundtrips_ldf(win):
     panel = win.squad_panel
     panel.count.setValue(7)
     panel._change('pos_x', 4567.75)
-    panel._change('pos_z', -4389.125)
+    panel._change('pos_z', -4389.25)
     panel.hidden.setChecked(True)
     panel.useable.setChecked(False)
     win._finish_live()
 
     squad = win.doc.squads[0]
     assert squad['num'] == 7 and squad['hidden'] and not squad['useable']
-    assert squad['pos_x'] == 4567.75 and squad['pos_z'] == -4389.125
+    assert squad['pos_x'] == 4567.75 and squad['pos_z'] == -4389.25
     output = dumps_ldf(win.doc)
-    assert 'pos_x = 4567.75' in output and 'pos_z = -4389.125' in output
+    assert 'pos_x = 4567.75' in output and 'pos_z = -4389.25' in output
     assert loads_ldf(output).squads[0] == squad
     assert win.palette_tabs.currentIndex() == win.squad_tab_index
 

@@ -20,11 +20,34 @@ class PlaybackMesh:
         if center is None:
             return face
         cy, sy, cp, sp = self.camera._trig()
-        right, up = (cy, 0, sy), (sp * sy, -cp, -sp * cy)
+        # IsoCamera.to_screen negates camera X, so (-cy, 0, -sy) points screen-right.
+        # Clockwise screen order (-1,+1 -> +1,+1 -> +1,-1 -> -1,-1) matches upright UVs and passes CPU/GPU culling.
+        right, up = (-cy, 0, -sy), (sp * sy, -cp, -sp * cy)
         radius = abs(face.vertices[0][0] - center[0])
         vertices = [tuple(center[i] + radius * (x * right[i] + y * up[i]) for i in range(3))
-                    for x, y in ((-1, -1), (-1, 1), (1, 1), (1, -1))]
+                    for x, y in ((-1, 1), (1, 1), (1, -1), (-1, -1))]
         return replace(face, vertices=vertices)
+
+    def has_dynamic_content(self, typ, state=0):
+        """True if the displayed sector has animated textures, emitters or transition effects."""
+        if self.effects:
+            return True
+        original = self.library.mesh(typ, state)
+        if any(getattr(face, "animated", False) for face, _, _ in original.faces):
+            return True
+        loader = self.library._loader
+        if not loader._particle_emitters:
+            return False
+        placements = {(face.owner, ox, oz, id(self.library._material_adapters.get(face.material,
+                                                                               self.library.adapter)))
+                      for face, ox, oz in original.faces}
+        for emitter in loader._particle_emitters:
+            adapters = {id(self.library._material_adapters.get(material, self.library.adapter))
+                        for material, _, _ in emitter.stages}
+            if any(adapter in adapters and (owner == emitter.owner or emitter.owner.startswith(owner + "/"))
+                   for owner, _ox, _oz, adapter in placements):
+                return True
+        return False
 
     def mesh(self, typ, state=0):
         original = self.library.mesh(typ, state)

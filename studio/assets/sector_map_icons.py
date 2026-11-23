@@ -2,29 +2,45 @@
 
 The game map has five zoom levels: zoom 0 and 1 show one symbol per sector (4 and 8 px), zoom 2, 3
 and 4 one symbol per building cell (4, 8 and 16 px; a one-large-cell model covers 3 x 3 cells and
-changes with its damage state). The icons are drawn from the model geometry seen from above, in the
-tones of the vanilla map tiles, with a transparent background so the map below stays visible.
+changes with its damage state). The icons are generated as lightweight SVGs from the model
+geometry seen from above, in the tones of the vanilla map tiles, with a transparent background so
+the engine's SVG loader (StatusIconLoad / IMG_LoadSizedSVG_RW) renders them crisply at each zoom.
 
 Only our own models get generated icons; SET models keep their original map symbol.
-Plain Python + numpy + Pillow, no Qt, so the Sector Editor and the MCP share it.
+Plain Python, no Qt, so the Sector Editor and the MCP share it.
 """
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from pathlib import Path
 
 import numpy as np
-from PIL import Image, ImageDraw, ImageFilter
 
 SECTOR_ICON_SIZES = (4, 8)          # map zoom 0, 1: pixels per sector
 CELL_ICON_SIZES = (4, 8, 16)        # map zoom 2, 3, 4: pixels per building cell
 CELL = 300.0                        # world size of one building cell
 GROUND_HEIGHT = 6.0                 # faces lower than this are ground: left transparent
-SUPERSAMPLE = 8
+VIEWBOX_SIZE = 64.0
 
 # Tones measured in the vanilla LEGO map tiles (dark to light), and the outline colour.
-TONES = ((39, 70, 95), (79, 144, 175), (120, 190, 215))
-OUTLINE = (165, 232, 255)
+TONES = ("#27465f", "#4f90af", "#78bed7")
+OUTLINE = "#a5e8ff"
+
+
+@dataclass(frozen=True)
+class SvgIcon:
+    """Crisp resolution-independent SVG icon sized for one strategic-map zoom."""
+
+    width: int
+    height: int
+    svg: str
+    has_shapes: bool = True
+
+    def save(self, path: str | Path) -> Path:
+        target = Path(path)
+        target.write_text(self.svg, encoding="utf-8")
+        return target
 
 
 def model_shapes(family_object) -> list[tuple[float, list[tuple[float, float]]]]:
@@ -75,55 +91,48 @@ def _area(ring) -> float:
     return 0.5 * abs(sum(a[0] * b[1] - b[0] * a[1] for a, b in zip(ring, ring[1:] + ring[:1])))
 
 
-def render_icon(shapes, extent: float, size: int, offset=(0.0, 0.0)) -> Image.Image:
-    """Top view of ``shapes`` inside a square of half-width ``extent`` world units, ``size`` px.
+def render_icon(shapes, extent: float, size: int, offset=(0.0, 0.0)) -> SvgIcon:
+    """Top-view SVG of ``shapes`` inside a square of half-width ``extent`` world units, ``size`` px.
 
     Ground faces are left transparent; higher faces get lighter tones and every face a light
     outline, the look of the vanilla map tiles.
     """
-    canvas = max(1, size) * SUPERSAMPLE
-    scale = canvas / (2.0 * extent)
+    px = max(1, int(size))
+    scale = VIEWBOX_SIZE / (2.0 * extent)
     tall = sorted((s for s in shapes if s[0] >= GROUND_HEIGHT), key=lambda shape: shape[0])
-    rgb = Image.new("RGB", (canvas, canvas))
-    mask = Image.new("L", (canvas, canvas))
-    lines = Image.new("L", (canvas, canvas))
+    # Tune stroke weight for the target pixel size so tiny zoom icons stay clear without bloating large zooms.
+    stroke_width = max(1.6, min(6.0, VIEWBOX_SIZE * 0.75 / px))
+    elements = []
     if tall:
         top = max(h for h, _ in tall)
-        draw_rgb, draw_mask, draw_lines = ImageDraw.Draw(rgb), ImageDraw.Draw(mask), ImageDraw.Draw(lines)
-        width = max(1, SUPERSAMPLE // 2)
         for height, ring in tall:
-            pixels = [((x + offset[0] + extent) * scale, (extent - (z + offset[1])) * scale) for x, z in ring]
+            pts = " ".join(
+                f"{(x + offset[0] + extent) * scale:.2f},{(extent - (z + offset[1])) * scale:.2f}"
+                for x, z in ring
+            )
             tone = TONES[min(len(TONES) - 1, int(len(TONES) * height / (top + 1e-6)))]
-            draw_rgb.polygon(pixels, fill=tone)
-            draw_mask.polygon(pixels, fill=255)
-            draw_lines.line(pixels + pixels[:1], fill=255, width=width)
-        # Tiny parts (masts, turrets) are widened to about one target pixel so they stay visible.
-        grow = SUPERSAMPLE // 4 * 2 + 1
-        mask = mask.filter(ImageFilter.MaxFilter(grow))
-        rgb = rgb.filter(ImageFilter.MaxFilter(grow))
-    pixels = np.asarray(rgb).copy()
-    pixels[(np.asarray(lines) > 0) & (np.asarray(mask) > 0)] = OUTLINE
-    image = Image.fromarray(np.dstack([pixels, np.asarray(mask)]).astype(np.uint8), "RGBA")
-    # Premultiplied reduction: transparent black around buildings must not darken their edges.
-    small = image.convert("RGBa").resize((size, size), Image.Resampling.BOX).convert("RGBA")
-    # Crisp pixel art: alpha on/off, colours snapped to the map tones.
-    data = np.asarray(small).copy()
-    data[..., 3] = np.where(data[..., 3] >= 80, 255, 0)
-    palette = np.array((*TONES, OUTLINE), dtype=np.int32)
-    colours = data[..., :3].astype(np.int32)
-    nearest = ((colours[..., None, :] - palette[None, None, :, :]) ** 2).sum(-1).argmin(-1)
-    data[..., :3] = palette[nearest]
-    data[data[..., 3] == 0, :3] = 0
-    return Image.fromarray(data, "RGBA")
+            elements.append(
+                f'  <polygon points="{pts}" fill="{tone}" stroke="{OUTLINE}" '
+                f'stroke-width="{stroke_width:.2f}" stroke-linejoin="round"/>'
+            )
+    body = "\n".join(elements)
+    svg = (
+        f'<svg xmlns="http://www.w3.org/2000/svg" width="{px}" height="{px}" '
+        f'viewBox="0 0 {int(VIEWBOX_SIZE)} {int(VIEWBOX_SIZE)}">\n'
+        f"{body}\n" if body else
+        f'<svg xmlns="http://www.w3.org/2000/svg" width="{px}" height="{px}" '
+        f'viewBox="0 0 {int(VIEWBOX_SIZE)} {int(VIEWBOX_SIZE)}">\n'
+    ) + "</svg>\n"
+    return SvgIcon(width=px, height=px, svg=svg, has_shapes=bool(tall))
 
 
-def model_icons(shapes, *, single: bool = False) -> list[Image.Image]:
+def model_icons(shapes, *, single: bool = False) -> list[SvgIcon]:
     """Icons for map zoom 2, 3 and 4. A one-large-cell model covers 3 x 3 cells."""
     cells = 3 if single else 1
     return [render_icon(shapes, CELL * cells / 2.0, size * cells) for size in CELL_ICON_SIZES]
 
 
-def sector_icons(cells, *, single: bool = False) -> list[Image.Image]:
+def sector_icons(cells, *, single: bool = False) -> list[SvgIcon]:
     """Icons for map zoom 0 and 1 from the shapes of each cell (None = nothing drawn).
 
     ``cells``: 9 shape lists in SET.SDF order (far row first), or 1 for a one-large-cell sector.
@@ -140,16 +149,21 @@ def sector_icons(cells, *, single: bool = False) -> list[Image.Image]:
 
 
 def is_empty(images) -> bool:
-    return all(not np.asarray(image)[..., 3].any() for image in images)
+    def _empty_item(item) -> bool:
+        if isinstance(item, SvgIcon):
+            return not item.has_shapes
+        return not np.asarray(item)[..., 3].any()
+    return all(_empty_item(image) for image in images)
 
 
 def save_icons(images, folder: Path, stem: str) -> list[Path]:
-    """Write one PNG per zoom as ``<stem>_<size>.png``; returns the paths."""
+    """Write one SVG per zoom as ``<stem>_<size>.svg``; returns the paths."""
     folder = Path(folder)
     folder.mkdir(parents=True, exist_ok=True)
     paths = []
     for image in images:
-        path = folder / f"{stem}_{image.width}.png"
+        ext = ".svg" if isinstance(image, SvgIcon) else ".png"
+        path = folder / f"{stem}_{image.width}{ext}"
         image.save(path)
         paths.append(path)
     return paths

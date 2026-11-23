@@ -4,7 +4,7 @@ import re
 import copy
 from PySide6.QtCore import Qt, Signal
 from PySide6.QtGui import QValidator, QIcon
-from PySide6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QFormLayout, QLineEdit,
+from PySide6.QtWidgets import (QWidget, QSizePolicy, QVBoxLayout, QHBoxLayout, QFormLayout, QLineEdit,
                               QListWidget, QListWidgetItem, QPushButton, QSpinBox,
                               QComboBox, QCheckBox, QLabel, QGroupBox, QDialog, QDialogButtonBox)
 
@@ -221,6 +221,10 @@ class SpecialPanel(QWidget):
             specs = [('blg', 'Building ID', 0, 255), ('type', 'Type', 0, 2147483647)]
         self.preset.activated.connect(self._preset)
         form.addRow('Model Preset', self.preset)
+        # A themed combo is taller than its label: let the label fill the row so its
+        # (vertically centred) text sits beside the combo, not above its middle.
+        form.labelForField(self.preset).setSizePolicy(
+            QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Expanding)
         for field, title, low, high in specs:
             spin = (DurationSpinBox() if kind == 'item' and field == 'countdown'
                     else ItemTypeBox() if kind == 'item' and field == 'type'

@@ -121,10 +121,10 @@ def test_placed_host_cannot_overwrite_another_host_draft(win):
 
 def test_imported_host_world_coordinates_are_preserved_until_moved(win):
     doc = LdfDocument(mw=9, mh=9)
-    doc.host_stations = [dict(host(), pos_x=4200.125, pos_z=-4300.75, pos_y=-700.5)]
+    doc.host_stations = [dict(host(), pos_x=4200.25, pos_z=-4300.75, pos_y=-700.5)]
     saved = dumps_ldf(doc)
     loaded = loads_ldf(saved)
-    assert loaded.host_stations[0]['pos_x'] == 4200.125
+    assert loaded.host_stations[0]['pos_x'] == 4200.25
     assert loaded.host_stations[0]['pos_z'] == -4300.75
     assert loaded.host_stations[0]['pos_y'] == -700.5
     assert dumps_ldf(loaded) == saved
@@ -134,7 +134,7 @@ def test_imported_host_world_coordinates_are_preserved_until_moved(win):
     win._begin_actor_drag('host', (3, 3))
     win._move_actor_drag((5, 5))
     win._finish_actor_drag()
-    assert win.doc.host_stations[0]['pos_x'] == 6600.125
+    assert win.doc.host_stations[0]['pos_x'] == 6600.25
 
 
 def test_host_draft_placement_cancel_move_delete_and_history(win):

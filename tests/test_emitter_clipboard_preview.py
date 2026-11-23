@@ -174,14 +174,15 @@ def test_cut_hides_only_marker_without_another_emitter(shared, hover):
     session = SimpleNamespace(
         fam_obj=SimpleNamespace(base_object=SimpleNamespace(ades=blocks)),
         model=SimpleNamespace(polygons=[]),
-        selection=set(), selection_pivot=lambda: None)
+        selection=set(), selection_pivot=lambda: None, position=(0.0, 0.0, 0.0))
     viewport = SimpleNamespace(
         _edit_session=session, _edit_screen_points=lambda *args: [QPointF(20, 20)],
         _available_edit_vertices=lambda screen: {0}, _modal_op=None,
         _edit_read_only_vertices=set(), _edit_visible_vertices={0},
         _direct_transform_mode="move", _active_edit_vertex=None,
         _draw_gizmo_handles=Mock(), _emitter_anchor_hover=hover,
-        _emitter_cut_block=block, _box_rect=None, _draw_mode_label=Mock())
+        _emitter_cut_block=block, _box_rect=None, _draw_mode_label=Mock(),
+        _draw_origin_marker=Mock())
     painter = Mock()
     _PaintingMixin._draw_edit_overlay(viewport, painter, QRectF(0, 0, 50, 50), {})
     assert painter.drawEllipse.call_count == int(shared)

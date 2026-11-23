@@ -512,6 +512,17 @@ class FxEffectsView(QWidget):
                        "where the weapon hits it (a vehicle: under its wreck), and dent roofs and walls; crater_rim is the "
                        "raised border in % of the depth (default 20). The depth never goes "
                        "past half the radius. Both radius and depth are needed.")
+            elif index == fx_visuals.DEATH_INDEX:
+                try:
+                    values = fx_visuals.parse_death_text(source)
+                except ValueError:
+                    values = fx_visuals.parse_death_text(session.originals[index])
+                level = fx_compat.death_level(values)
+                text = "Death behavior\n" + fx_visuals.death_summary(values)
+                tip = ("disable_genesis: 1 removes the Genesis plasma on both creation and "
+                       "death; at_death removes only the death plasma. air_dead: 1 skips the "
+                       "falling wreck and plays DEATH2 in place, in mid-air (Flyer and UFO "
+                       "classes only). Vehicle only; 0, absent or invalid = vanilla.")
             else:
                 try:
                     values = fx_visuals.parse_decal_text(source)
@@ -876,8 +887,13 @@ class DestructionFxPanel(QWidget):
         self.pal_button = button("Palette", "Switch off the palette flashes (pal_*)", True)
         self.damage_button = button(
             "Damage", "Hide the damage sphere and numbers of the weapon", True)
+        # The shared PlaybackButton is a wide accented text button; this narrow bar keeps a
+        # plain play icon like its neighbours (no theme role, no fixed width).
+        self.play_button.setProperty("studioRole", None)
+        self.play_button.setMaximumWidth(16777215)  # QWIDGETSIZE_MAX
         for widget, symbol in (
                 (self.restart_button, QStyle.StandardPixmap.SP_MediaSkipBackward),
+                (self.play_button, QStyle.StandardPixmap.SP_MediaPlay),
                 (self.stop_button, QStyle.StandardPixmap.SP_MediaStop),
                 (self.loop_button, QStyle.StandardPixmap.SP_BrowserReload),
                 (self.mute_button, QStyle.StandardPixmap.SP_MediaVolume)):
@@ -1093,6 +1109,8 @@ class DestructionFxPanel(QWidget):
             return "Ground decal"
         if index == fx_visuals.CRATER_INDEX:
             return "Crater"
+        if index == fx_visuals.DEATH_INDEX:
+            return "Death behavior"
         return f"Effect {index + 1}"
 
     def edit_source(self, index) -> str:
@@ -1308,6 +1326,8 @@ class DestructionFxPanel(QWidget):
         self._linked_states.difference_update(states)
         if fx_visuals.DECAL_INDEX in states:
             self.unit = replace(self.unit, ground_decal_id=-1, decal_size=(0.0, 0.0))
+        if fx_visuals.DEATH_INDEX in states:
+            self.unit = replace(self.unit, air_dead=False, disable_genesis="")
         if fx_visuals.CRATER_INDEX in states:
             self.unit = replace(self.unit, crater=None)
         identity = self.state_session.identity
@@ -1514,6 +1534,10 @@ class DestructionFxPanel(QWidget):
         if playing and self.code_drawer is not None and self.code_drawer.timer.isActive():
             self.code_drawer.timer.stop()
             self.code_drawer._apply()
+        # PlaybackButton's own slot has just set its text label: show the icon instead.
+        self.play_button.setText("")
+        self.play_button.setIcon(self._transport_icon(
+            QStyle.StandardPixmap.SP_MediaPause if playing else QStyle.StandardPixmap.SP_MediaPlay))
         self.play_button.setToolTip("Pause destruction preview" if playing else "Play destruction preview")
         if playing:
             if self.time_ms >= self._length():

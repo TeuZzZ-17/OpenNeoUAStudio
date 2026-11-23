@@ -166,6 +166,8 @@ class SectorViewport(GpuMapViewport):
         self.animation_time_ms = time_ms
         if self.lib is None or self.top_down:
             return
+        if hasattr(self.lib, "has_dynamic_content") and not self.lib.has_dynamic_content(self._number, self._state):
+            return
         self.lib.time_ms = time_ms
         self.lib.camera = self.camera
         self.world_scene._templates.clear()

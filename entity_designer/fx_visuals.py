@@ -37,6 +37,10 @@ DECAL_KEYS = (DECAL_ID_KEY, DECAL_KEY)
 # Largest decal diameter the engine accepts.
 DECAL_SIZE_MAX = 12000.0
 
+DISABLE_GENESIS_KEY = "disable_genesis"
+AIR_DEAD_KEY = "air_dead"
+DEATH_KEYS = (DISABLE_GENESIS_KEY, AIR_DEAD_KEY)
+
 
 def state_keys(state: str) -> tuple[str, str, str]:
     return tuple(f"{kind}_{state}" for kind, _label in KINDS)
@@ -52,7 +56,7 @@ CRATER_KEYS = crater_preview.KEYS
 def managed_keys() -> set[str]:
     """Every key the list rows read and write."""
 
-    return all_keys() | set(DECAL_KEYS) | set(CRATER_KEYS)
+    return all_keys() | set(DECAL_KEYS) | set(CRATER_KEYS) | set(DEATH_KEYS)
 
 
 def block_for_origin(text: str, origin):
@@ -113,6 +117,20 @@ def normalize_value(key: str, raw: str) -> str:
     if key in CRATER_KEYS:
         crater_preview.parse_range(key, value)
         return value
+    if key == AIR_DEAD_KEY:
+        if value == "0":
+            return ""
+        if value == "1":
+            return "1"
+        raise ValueError(f"{key} must be 0 or 1 (0 or absent = vanilla).")
+    if key == DISABLE_GENESIS_KEY:
+        if value == "0":
+            return ""
+        if value == "1":
+            return "1"
+        if value.casefold() == "at_death":
+            return "at_death"
+        raise ValueError(f"{key} must be 1 or at_death (0 or absent = vanilla).")
     if key.startswith("vp_"):
         try:
             number = int(value, 0)
@@ -216,6 +234,8 @@ def save_values(origins, updates: dict[str, str], snapshots=None, expected=None)
     if block.kind.split("_", 1)[-1] != "vehicle" and any(
             clean.get(key) for key in state_keys("spawn")):
         raise ValueError("Spawn model states are only supported for vehicles.")
+    if block.kind.split("_", 1)[-1] != "vehicle" and any(clean.get(key) for key in DEATH_KEYS):
+        raise ValueError("disable_genesis and air_dead are only supported for vehicles.")
     patched = patch_values(text, block, clean)
     if patched == text:
         return path
@@ -234,12 +254,14 @@ def save_values(origins, updates: dict[str, str], snapshots=None, expected=None)
 
 # -- the "Model" row of the effects list ------------------------------------------------------
 
-# Virtual list indexes of the Model, Ground decal and Crater rows (-1 means "no effect").
+# Virtual list indexes of the Model, Ground decal, Crater and Death behavior rows
+# (-1 means "no effect"; -5 is CHILD_CRATER_INDEX, owned by fx_panel.py).
 MODEL_INDEX = -2
 DECAL_INDEX = -3
 CRATER_INDEX = -4
-STATE_INDEXES = (MODEL_INDEX, DECAL_INDEX, CRATER_INDEX)
-DELETABLE_KEYS = {DECAL_INDEX: DECAL_KEYS, CRATER_INDEX: CRATER_KEYS}
+DEATH_INDEX = -6
+STATE_INDEXES = (MODEL_INDEX, DECAL_INDEX, CRATER_INDEX, DEATH_INDEX)
+DELETABLE_KEYS = {DECAL_INDEX: DECAL_KEYS, CRATER_INDEX: CRATER_KEYS, DEATH_INDEX: DEATH_KEYS}
 
 
 def model_text(values: dict[str, str]) -> str:
@@ -345,12 +367,43 @@ def parse_crater_text(text: str) -> dict[str, str]:
     return updates
 
 
+def death_text(values: dict[str, str]) -> str:
+    return "\n".join(f"{key} = {values[key]}" for key in DEATH_KEYS if values.get(key))
+
+
+def death_summary(values: dict[str, str]) -> str:
+    parts = []
+    if values.get(DISABLE_GENESIS_KEY):
+        parts.append(f"No genesis ({values[DISABLE_GENESIS_KEY]})")
+    if values.get(AIR_DEAD_KEY):
+        parts.append("Air dead")
+    return " · ".join(parts) or "Not set"
+
+
+def parse_death_text(text: str) -> dict[str, str]:
+    """Check an edited Death behavior text; returns its keys ("" = not set)."""
+
+    updates = {key: "" for key in DEATH_KEYS}
+    for number, line in enumerate(text.splitlines(), 1):
+        code = re.split(r";|//|#", line, maxsplit=1)[0].strip()
+        if not code:
+            continue
+        key, separator, value = code.partition("=")
+        key = key.strip().lower()
+        if not separator or key not in DEATH_KEYS:
+            raise ValueError(
+                f"Line {number}: only {', '.join(DEATH_KEYS)} can be written here.")
+        updates[key] = normalize_value(key, value)
+    return updates
+
+
 # A state row registers its keys and parser together. Add uses this same
 # registry to route drafts without hard-coding each type in the editor.
 _ROW_HANDLERS = {
     MODEL_INDEX: (all_keys, parse_model_text),
     DECAL_INDEX: (lambda: DECAL_KEYS, parse_decal_text),
     CRATER_INDEX: (lambda: CRATER_KEYS, parse_crater_text),
+    DEATH_INDEX: (lambda: DEATH_KEYS, parse_death_text),
 }
 _PARSERS = {index: handler[1] for index, handler in _ROW_HANDLERS.items()}
 
@@ -434,7 +487,7 @@ class StateSession:
 
     def _texts(self) -> dict[int, str]:
         return {MODEL_INDEX: model_text(self.values), DECAL_INDEX: decal_text(self.values),
-                CRATER_INDEX: crater_text(self.values)}
+                CRATER_INDEX: crater_text(self.values), DEATH_INDEX: death_text(self.values)}
 
     def indexes(self) -> list[int]:
         return list(self.originals)

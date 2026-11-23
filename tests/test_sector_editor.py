@@ -738,12 +738,15 @@ def test_free_slot_controls_and_double_click_creates_a_sector(real_window):
 
 def test_panels_separate_cell_states_from_model_browser(real_window):
     window = real_window
-    assert [window.tabs.tabText(i) for i in range(window.tabs.count())] == ["Cells", "Models", "Definitions", "Map icons"]
+    assert [window.tabs.tabText(i) for i in range(window.tabs.count())] == ["Cells", "Models", "Definitions", "Destruction effects", "Map icons"]
     assert window.cells_page.isAncestorOf(window.state_models[0])
     assert window.models_page.isAncestorOf(window.models)
     assert window.definitions_page.isAncestorOf(window.model_combo)
+    assert window.effects_page.isAncestorOf(window.effects)
+    assert not window.definitions_page.isAncestorOf(window.effects)
     assert not window.definitions_page.isAncestorOf(window.state_models[0])
-    for page in (window.cells_page, window.definitions_page):
+    assert len(window.symbol_preview.previews) == 5
+    for page in (window.cells_page, window.definitions_page, window.effects_page):
         window.tabs.setCurrentWidget(page)
         QApplication.processEvents()
         assert page.horizontalScrollBar().maximum() == 0
@@ -982,3 +985,25 @@ def test_custom_textures_go_to_the_loose_folder_and_reload(real_window, tmp_path
     assert written == [(window.document.folder, [str(source)])]
     reload.assert_called_once()
     assert "Skipped 1" in report.call_args.args[2]
+
+
+def test_imported_external_sector_scopes_models_and_auto_selects_single_texture_set(real_window):
+    window = real_window
+    data = bootstrap.game_data_dir()
+    sulg_power = data / "Models" / "Sector" / "Sulg_Power" / "Sulg_Power.sector"
+    assert sulg_power.is_file()
+    window.open_set(bootstrap.set_dir(1))
+    assert window.document.number == 1
+    window._import_external_sector_path(sulg_power)
+    assert window.document.number == 3
+    visible_rows = [
+        window.models.item(i).text()
+        for i in range(window.models.count())
+        if not window.models.item(i).isHidden()
+    ]
+    assert visible_rows and all("Sulg_Power_Station" in text for text in visible_rows)
+    assert len(visible_rows) == 4
+    # Switching to a native set sector shows set models again.
+    window.sectors.setCurrentRow(0)
+    visible_after = sum(1 for i in range(window.models.count()) if not window.models.item(i).isHidden())
+    assert visible_after > 10

@@ -2151,6 +2151,9 @@ def unit_look(values: dict[str, str], *, weapon: bool) -> dict:
         # The unit's own size, written in its script; a bad value is ignored.
         "decal_size": _manual_decal_size(values.get("ground_decal_size", "0_0")),
         "crater": crater_preview.config_from_values(values),
+        "disable_genesis": ("" if weapon
+                            else values.get("disable_genesis", "").strip().casefold()),
+        "air_dead": (not weapon) and values.get("air_dead", "").strip() == "1",
     }
 
 
@@ -2601,6 +2604,10 @@ class UnitPhases:
     # Terrain crater (crater_radius / crater_depth / crater_rim), None = none.
     # A weapon digs it where it hits the ground, a vehicle where its wreck ends.
     crater: "crater_preview.CraterConfig | None" = None
+    # Vehicle only. "" / "1" / "at_death" (see disable_genesis parsing).
+    disable_genesis: str = ""
+    # Vehicle only, Flyer/UFO classes: skip the falling wreck, DEATH2 in place.
+    air_dead: bool = False
 
     @property
     def plasma_ms(self) -> float:
@@ -2610,7 +2617,10 @@ class UnitPhases:
 
     @property
     def skips_dead_phase(self) -> bool:
-        return not self.weapon and self.model.casefold() in ("tank", "car")
+        """Straight to DEATH2: the tank/car ground rule, or air_dead on a Flyer/UFO."""
+
+        return (not self.weapon and self.model.casefold() in ("tank", "car")) \
+            or (self.flies and self.air_dead)
 
     @property
     def flies(self) -> bool:
@@ -3190,7 +3200,12 @@ class PreviewSimulation:
         """DEATH2 of a vehicle: the genesis VP appears and shrinks away."""
 
         unit = self.unit
-        if unit.weapon or (unit.genesis.vp <= 0 and not _external_paths(unit.genesis)):
+        if unit.weapon:
+            return
+        if unit.disable_genesis in ("1", "at_death"):
+            self.notes.append(f"disable_genesis = {unit.disable_genesis}: no death plasma.")
+            return
+        if unit.genesis.vp <= 0 and not _external_paths(unit.genesis):
             return
         end = start + min(unit.plasma_ms, PLASMA_PREVIEW_MS)
         self._events.append((-1, "plasma", start, end,
@@ -3202,40 +3217,57 @@ class PreviewSimulation:
     def _build_vehicle_sequence(self) -> None:
         unit = self.unit
         death = max(SEQUENCE_PREROLL_MS, self._decoration_window())
-        altitude = max(0.0, unit.altitude) if not unit.skips_dead_phase else 0.0
+        # The ground rule (tank/car) dies at altitude 0; air_dead keeps the flyer's
+        # altitude, since DEATH2 plays in place, in mid-air.
+        grounded = not unit.weapon and unit.model.casefold() in ("tank", "car")
+        air_dead_flyer = unit.flies and unit.air_dead
+        altitude = 0.0 if grounded else max(0.0, unit.altitude)
         kill = (self.origin[0], self.origin[1] - altitude, self.origin[2])
         self._unit_event(unit.normal, 0.0, death, [(0.0, kill, False)],
                          "normal", main=True)
         self._build_decoration(death, _Flight([(0.0, kill, False)]))
         sounds = unit.sounds
         self._add_sound(sounds, "normal", 0.0, death, "unit")
-        if unit.skips_dead_phase:
-            # Tank/car: SetState(DEAD) becomes DEATH2 immediately.
+        if grounded:
+            # Tank/car (engine rule): SetState(DEAD) becomes DEATH2 immediately,
+            # with no falling wreck.
             land_ms, landed = death, kill
             self.notes.append(
                 f"model = {unit.model}: straight to megadeth, no dead model, "
                 "no air_destroyed and no dest_fx death (engine rule).")
         else:
-            # Dead wrecks fall without air resistance: CrashOrLand sets
-            # _airconst = 0 for non-inline dead vehicles.
-            fall = _Fall(list(kill), [0.0, 0.0, 0.0], 1.0, 0.0)
-            path = self._record_path(fall, LEGACY_DEAD_LIFETIME_MS,
-                                     max(unit.overeof, 0.0))
-            shifted = [(death + ms, position, flag)
-                       for ms, position, flag in path]
-            land_ms, landed = shifted[-1][0], shifted[-1][1]
-            self._wreck_path = shifted
+            if air_dead_flyer:
+                # air_dead only cuts the falling-wreck time short (CrashOrLand):
+                # SetState(DEAD) still fires air_destroyed/dest_fx death and the
+                # airexplode sound at the moment of death like any flying unit;
+                # DEATH2 just follows right away instead of after landing.
+                land_ms, landed = death, kill
+                self.notes.append(
+                    "air_dead = 1: DEATH2 plays right away in mid-air, no falling "
+                    "wreck. air_destroyed and dest_fx death still play at death, "
+                    "same as any flying unit.")
+            else:
+                # Dead wrecks fall without air resistance: CrashOrLand sets
+                # _airconst = 0 for non-inline dead vehicles.
+                fall = _Fall(list(kill), [0.0, 0.0, 0.0], 1.0, 0.0)
+                path = self._record_path(fall, LEGACY_DEAD_LIFETIME_MS,
+                                         max(unit.overeof, 0.0))
+                shifted = [(death + ms, position, flag)
+                           for ms, position, flag in path]
+                land_ms, landed = shifted[-1][0], shifted[-1][1]
+                self._wreck_path = shifted
             self._build_event("air_destroyed", death, kill, "Air · ")
             self._wreck_path = None
             self._build_event("death", death, kill, "Death · ")
             if unit.flies and altitude > 0:
                 self._add_sound(sounds, "airexplode", death, label="unit")
-            self._add_sound(sounds, "goingdown", death, land_ms, "unit")
-            self._add_sound(sounds, "crashland", land_ms, label="unit")
-            self._unit_event(unit.dead, death, land_ms, shifted, "dead")
-            if land_ms > death + 1.0:
-                self._tracks.append(PreviewTrack(
-                    -1, "Unit · wreck falls", death, land_ms, approximate=True))
+            if not air_dead_flyer:
+                self._add_sound(sounds, "goingdown", death, land_ms, "unit")
+                self._add_sound(sounds, "crashland", land_ms, label="unit")
+                self._unit_event(unit.dead, death, land_ms, shifted, "dead")
+                if land_ms > death + 1.0:
+                    self._tracks.append(PreviewTrack(
+                        -1, "Unit · wreck falls", death, land_ms, approximate=True))
         ground = (landed[0], self.origin[1], landed[2])
         self._build_event("destroyed", land_ms, ground, "Ground · ")
         self._build_event("megadeth", land_ms, ground, "Mega · ")

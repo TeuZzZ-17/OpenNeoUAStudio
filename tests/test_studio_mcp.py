@@ -384,9 +384,15 @@ class CoreTests(unittest.TestCase):
         bottom = [s for n, s in shades.values() if n[1] > 0.9]
         self.assertTrue(top and bottom and max(top) < min(bottom))
         from studio_mcp import server
+
+        def compare_dirs():
+            return {p.name for p in core.work_dir().iterdir() if p.name.startswith("compare_")}
+
+        # The work folder is shared: only a scene left by this render counts (older runs may have crashed).
+        before = compare_dirs()
         render = server.studio_render_model(base, views=["iso", "left"], compare_with="set1:201", compare_axis="z")
         self.assertIn("Same scale", render[0])
-        self.assertFalse(any(p.name.startswith("compare_") for p in core.work_dir().iterdir()))
+        self.assertEqual(compare_dirs() - before, set())
         unmapped = server.studio_render_model("set1:127", views=["iso"])   # vanilla model with one unmapped polygon
         self.assertIn("without material", unmapped[0])
 

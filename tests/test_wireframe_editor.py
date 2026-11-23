@@ -44,12 +44,20 @@ class WireframeEditorUiTests(unittest.TestCase):
         clipboard = self.app.clipboard()
         old_clipboard = clipboard.text()
         self.addCleanup(clipboard.setText, old_clipboard)
-        with patch.object(QMenu, "exec", autospec=True,
-                          side_effect=lambda menu, _pos: menu.actions()[0]) as execute:
+        # Patching QMenu.exec on the class does not reach the real call here (it then waits
+        # for a click forever): replace the menu class the window uses instead.
+        shown = []
+
+        class CapturingMenu(QMenu):
+            def exec(self, *_args):
+                shown.append(self)
+                return self.actions()[0]
+
+        with patch("wireframe_editor.window.QMenu", CapturingMenu):
             QTest.mouseClick(tree.viewport(), Qt.MouseButton.RightButton,
                              pos=tree.visualItemRect(clicked).center())
-        execute.assert_called_once()
-        self.assertEqual(execute.call_args.args[0].actions()[0].text(), "Copy Path")
+        self.assertEqual(len(shown), 1)
+        self.assertEqual(shown[0].actions()[0].text(), "Copy Path")
         self.assertEqual(clipboard.text(), r"Wireless\New\SECOND.SKL")
         self.assertEqual(window.statusBar().currentMessage(),
                          r"Path copied: Wireless\New\SECOND.SKL")

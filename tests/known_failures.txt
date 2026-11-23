@@ -1,0 +1,3 @@
+# Tests skipped by conftest.py because they are known to fail or hang for reasons unrelated to current work.
+# One pytest node id (or a file / class prefix) per line. Remove a line when the test is fixed.
+# 2026-11-23: every entry recorded that day was fixed; the list is empty.

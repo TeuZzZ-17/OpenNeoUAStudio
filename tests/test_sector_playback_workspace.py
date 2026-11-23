@@ -20,6 +20,10 @@ def test_effect_rows_preserve_file_axes_and_unknown_ids():
     assert editor.values() == [(51, 35, -87, 900), (87, 30, 30, 100)]
     editor.table.cellWidget(0, 3).setValue(700)
     assert editor.toPlainText().splitlines()[0] == "51 35 -87 700"
+    editor.table.selectRow(1)
+    assert editor.detail_coords[0].value() == 30
+    editor.detail_coords[0].setValue(45)
+    assert editor.values()[1][1] == 45
     editor.deleteLater()
 
 
@@ -125,3 +129,18 @@ def test_sector_texture_timeline_changes_real_frames(real_window):
         states.append((window.library._loader._anim_states.get(face.material),
                        tuple(window.view.lib.face_uvs(face))))
     assert len(set(states)) > 1
+
+
+def test_billboard_particle_quad_faces_camera_without_culling():
+    from studio.rendering.asset_viewport_common import ViewFace
+    from studio.rendering.indexed import retail_source_face_front_facing
+    from map_editor.render.camera import IsoCamera
+    from sector_editor.playback_mesh import PlaybackMesh
+
+    cam = IsoCamera()
+    pm = PlaybackMesh(SimpleNamespace(), cam)
+    center = (0.0, -500.0, 0.0)
+    face = ViewFace([(center[0] - 20.0, 0.0, 0.0)] * 4, [], 0, billboard_center=center)
+    quad = pm.billboard(face)
+    cam_verts = tuple(cam.to_camera(v) for v in quad.vertices)
+    assert retail_source_face_front_facing(cam_verts)

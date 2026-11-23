@@ -171,11 +171,16 @@ def test_rotation_keeps_ghost_in_shared_scene_and_replaces_original_target(real_
 
 def test_validation_is_a_report_not_a_persistent_tab_and_zip_label_is_clear(real_window):
     window = real_window
-    assert [window.tabs.tabText(i) for i in range(window.tabs.count())] == ["Cells", "Models", "Definitions", "Map icons"]
+    assert [window.tabs.tabText(i) for i in range(window.tabs.count())] == ["Cells", "Models", "Definitions", "Destruction effects", "Map icons"]
     assert window.issues.isHidden() and window.issues.toPlainText()
     assert window.validation_action.text().startswith("Validation Report")
     assert window.actions["save"].text() == "Overwrite Set"
     assert window.actions["export"].text() == "Export Set"
+    file_menu = next(a.menu() for a in window.menuBar().actions() if a.text() == "File")
+    texts = [a.text() for a in file_menu.actions() if not a.isSeparator()]
+    assert texts.index("Export Set") < texts.index("Overwrite Set")
+    assert texts.index("Export Sector") < texts.index("Overwrite Sector")
+    assert hasattr(window, "renderer_badge") and len(window.renderer_badge._viewports) == 2
     assert window.actions["undo"].text() == "< Undo" and window.actions["redo"].text() == "Redo >"
     assert "Bottom" not in [window.view_preset.itemText(i) for i in range(window.view_preset.count())]
     assert str(window.document.folder) in window.windowTitle()

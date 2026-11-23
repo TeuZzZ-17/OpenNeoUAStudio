@@ -58,8 +58,8 @@ def test_ground_preview_renders_native_family_connections(app, game_assets):
     widget = GroundPreview()
     for ground in range(6):
         widget.set_ground(library, ground)
-        assert widget.label.text() == "Connection to family 0"
-        assert widget.detail.text() == "BASE surface unchanged"
+        assert widget.label.text() == "Border transition to family 0"
+        assert widget.detail.text() == "Slurp edge terrain · BASE surface unchanged"
         pixmap = widget.preview.pixmap()
         assert pixmap is not None and not pixmap.isNull(), ground
         assert _visible_pixels(pixmap) > 0
@@ -79,14 +79,15 @@ def test_symbol_preview_uses_native_sec4_and_sec8_tiles(app, game_assets):
 
     widget = SymbolPreview()
     widget.set_symbol(None, 2)
-    assert widget.label.text() == "Map symbol · 4px / 8px"
-    pixmap = widget.preview.pixmap()
-    assert pixmap is not None and not pixmap.isNull()
-    assert pixmap.size().width() == 68 and pixmap.size().height() == 32
-    assert widget.preview.text() == ""
-    image = pixmap.toImage()
-    assert _visible_pixels(image.copy(0, 0, 32, 32)) > 0
-    assert _visible_pixels(image.copy(36, 0, 32, 32)) > 0
+    assert widget.label.text() == "Map symbol · 4px / 8px (vanilla)"
+    # Zoom 1 and 2 show the native sec4 / sec8 tiles; the cell-grid zooms need a sector.
+    for tile in widget.previews[:2]:
+        pixmap = tile.pixmap()
+        assert pixmap is not None and not pixmap.isNull()
+        assert pixmap.width() <= tile.width() and pixmap.height() <= tile.height()
+        assert tile.text() == ""
+        assert _visible_pixels(pixmap) > 0
+    assert all(tile.text() == "Preview unavailable" for tile in widget.previews[2:])
 
 
 def test_visual_aids_show_readable_fallback_for_invalid_values(app):

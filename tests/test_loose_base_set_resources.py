@@ -115,7 +115,8 @@ def test_gatling_tracer_is_available_for_collision_generation(window):
     with patch.object(QMessageBox, "question", return_value=QMessageBox.StandardButton.Yes), \
             patch.object(QMessageBox, "warning"):
         window.generate_collision_shape()
-        for _ in range(300):
+        # The bake runs in a separate process: allow 120 s, it is slower while other test workers run.
+        for _ in range(1200):
             if window._collision_bake_process is None:
                 break
             QTest.qWait(100)
@@ -181,7 +182,8 @@ def test_external_3ds_normal_can_be_used_as_collision_geometry(window, tmp_path)
     assert window.viewport._mode == "solid" and window.viewport._faces
     with patch.object(QMessageBox, "warning"):
         window.generate_collision_shape()
-        for _ in range(300):
+        # The bake runs in a separate process: allow 120 s, it is slower while other test workers run.
+        for _ in range(1200):
             if window._collision_bake_process is None:
                 break
             QTest.qWait(100)
@@ -397,7 +399,10 @@ def test_fire_area_loads_air_cube_external_normal_model(window):
                   if o.kind == "weapon" and o.object_id == 41)
     assert window._open_game_object(weapon)
     window.properties_tabs.setCurrentIndex(window.fire_area_tab_index)
-    window._fire_area_unit_chosen(149)
+    # Whichever Air Cube vehicle carries the weapon in the installed scripts.
+    unit = next(unit for unit in window._fire_area_units
+                if unit.external and unit.external[0].endswith("6P0_Air_Cube_Normal.BASE"))
+    window._fire_area_unit_chosen(unit.vehicle_id)
     window._push_fx_frame()
     item = next(item for item in window.viewport._fx_items
                 if item.label.startswith("firing unit ·"))

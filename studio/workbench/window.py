@@ -3054,6 +3054,8 @@ class AssemblyWindow(
                 item = group.child(0)
                 self.setbas_tree.setCurrentItem(item)
                 self.setbas_tree.scrollToItem(item)
+                # Selecting a row no longer previews it (a click only selects): open it here.
+                self._preview_setbas_item_on_activation(item)
                 return
 
     def eventFilter(self, watched, event) -> bool:  # noqa: N802

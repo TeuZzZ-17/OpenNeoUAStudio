@@ -155,6 +155,14 @@ def _setbas_matches(family: AssetFamily, name: str,
     return family.setbas_archive.find(name, class_id)
 
 
+def _warn_loose_wins(family: AssetFamily, name: str, path) -> None:
+    family.warnings.append(
+        f"{name}: exists both loose ({path}) and embedded in "
+        f"{family.setbas_archive.path.name}; loose wins (engine "
+        "precedence). Use Asset Dependencies to compare sources."
+    )
+
+
 def _setbas_find(family: AssetFamily, name: str, class_id: str):
     """The unique matching embedded resource, never an arbitrary first."""
 
@@ -268,11 +276,7 @@ def _resolve_with_setbas(family: AssetFamily, resolver: AssetResolver,
     if ref.path is not None:
         ref.source = "manual" if ref.status == "manual" else "loose"
         if embedded is not None and ref.status != "manual":
-            family.warnings.append(
-                f"{name}: exists both loose ({ref.path}) and embedded in "
-                f"{family.setbas_archive.path.name}; loose wins (engine "
-                "precedence). Use Asset Dependencies to compare sources."
-            )
+            _warn_loose_wins(family, name, ref.path)
     elif ref.status == "ambiguous" and not (
             embedded is not None and _is_setbas_family(family) and not any(
                 part.casefold() == "loose"
@@ -418,6 +422,14 @@ def _load_external_texture(family: AssetFamily, resolver: AssetResolver, name: s
             continue
         family.texture_refs[name] = candidate
         family.textures[name] = img
+        # A loose file hides a same-named SET.BAS texture: say so, and let Asset
+        # Dependencies offer the embedded copy for comparison.
+        embedded = _setbas_find(family, name, "ilbm.class")
+        if embedded is not None:
+            candidate.embedded_available = True
+            candidate.embedded_candidates = [
+                f"{family.setbas_archive.path.name}:{embedded.resource_name}"]
+            _warn_loose_wins(family, name, candidate.path)
         if candidate.status == "fallback":
             family.warnings.append(f"Texture {name}: {candidate.resolution_rule} ({candidate.path})")
         family.warnings.extend(f"{name}: {w}" for w in img.warnings)

@@ -72,3 +72,9 @@ def decal_level(values: dict[str, str]) -> str:
     """Ground decal settings are only supported by OpenNeoUA."""
 
     return OPENNEOUA
+
+
+def death_level(values: dict[str, str]) -> str:
+    """disable_genesis and air_dead are only supported by OpenNeoUA."""
+
+    return OPENNEOUA

@@ -10,7 +10,7 @@ Layout of a file (ScriptParser syntax, ``;`` starts a comment)::
         cells = G|G|G|G|CORE|G|G|G|G   ; 9 piece names (SET.SDF order) or 1 (one large cell)
         ground = 0                     ; connection family 0-5
         map_symbol = 3                 ; 0-255, default 0
-        map_icon = map/sector.png      ; optional PNG/SVG map icon, 1 file or zoom 0|1
+        map_icon = Map_Icons/sector.svg ; optional PNG/SVG map icon, 1 file or zoom 0|1
     end
     begin_piece CORE                   ; fills a cell
         states = ok|hit|heavy|flat     ; intact|damaged|heavy|destroyed, or 1 model for all
@@ -22,8 +22,10 @@ Layout of a file (ScriptParser syntax, ``;`` starts a comment)::
         collision_mode = 0             ; 0 own skeleton, 1 simple, 2 complex
         map_symbol = 12                ; 0-255
         shield = 60                    ; 0-100
-        explosion = 49|0|0|100         ; repeatable ID|x|z|height (SET.SDF effect group), or none
-        map_icon = map/ok.png          ; optional cell icon, 1 file or zoom 2|3|4
+        map_icon = Map_Icons/ok.svg    ; optional cell icon, 1 file or zoom 2|3|4
+        begin_effects
+            explosion = 49|0|0|100     ; repeatable ID|x|z|height (SET.SDF effect group), or none
+        end
     end
 
 Files are searched beside the ``.sector`` first; a missing BASE/3DS uses the SET model with the same
@@ -190,8 +192,9 @@ def parse_sector_text(text: str, path: Path | None = None) -> SectorFile:
     sector = SectorFile(path=Path(path) if path else None)
     seen_sector = False
     scope, current = None, None
+    in_effects = False
     ground = None
-    for number, raw in enumerate(text.lstrip("﻿").splitlines(), 1):
+    for number, raw in enumerate(text.lstrip("\ufeff").splitlines(), 1):
         key, value = _split_line(raw)
         if not key:
             continue
@@ -207,6 +210,21 @@ def parse_sector_text(text: str, path: Path | None = None) -> SectorFile:
                 current = SectorModel(value, "") if word == "begin_model" else SectorPiece(value, ())
                 pool.append(current)
                 scope = word[6:]
+            else:
+                raise SectorFileError(f"{where}: unknown keyword {key}.")
+            continue
+        if in_effects:
+            if word == "end":
+                in_effects = False
+            elif word == "explosion":
+                effects = list(current.explosions or ())
+                if value.casefold() != "none":
+                    parts = value.split("|")
+                    if len(parts) != 4:
+                        raise SectorFileError(f"{where}: explosion needs ID|x|z|height.")
+                    effects.append((_int(parts[0], 0, 65535, where),
+                                    *(_int(p, -100000, 100000, where) for p in parts[1:])))
+                current.explosions = tuple(effects)
             else:
                 raise SectorFileError(f"{where}: unknown keyword {key}.")
             continue
@@ -238,7 +256,11 @@ def parse_sector_text(text: str, path: Path | None = None) -> SectorFile:
             else:
                 raise SectorFileError(f"{where}: unknown keyword {key}.")
         else:
-            if word == "visual":
+            if word == "begin_effects":
+                in_effects = True
+                if current.explosions is None:
+                    current.explosions = ()
+            elif word == "visual":
                 current.visual = value
             elif word == "collision":
                 current.collision = value
@@ -262,7 +284,7 @@ def parse_sector_text(text: str, path: Path | None = None) -> SectorFile:
                 current.explosions = tuple(effects)
             else:
                 raise SectorFileError(f"{where}: unknown keyword {key}.")
-    if scope is not None:
+    if scope is not None or in_effects:
         raise SectorFileError("Unexpected end of file: a block is not closed with end.")
     if not seen_sector or not sector.cells:
         raise SectorFileError("begin_sector with cells is missing.")
@@ -355,11 +377,13 @@ def format_sector(sector: SectorFile, title: str = "") -> str:
             value = getattr(model, key)
             if value is not None:
                 lines.append(f"    {key} = {value}")
-        if model.explosions is not None:
-            lines += [f"    explosion = {'|'.join(map(str, fx))}" for fx in model.explosions] \
-                or ["    explosion = none"]
         if model.map_icon:
             lines.append(f"    map_icon = {'|'.join(model.map_icon)}")
+        if model.explosions is not None:
+            lines.append("    begin_effects")
+            lines += [f"        explosion = {'|'.join(map(str, fx))}" for fx in model.explosions] \
+                or ["        explosion = none"]
+            lines.append("    end")
         lines.append("end")
     return "\n".join(lines) + "\n"
 

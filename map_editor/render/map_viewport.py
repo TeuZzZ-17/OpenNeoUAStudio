@@ -364,6 +364,7 @@ class MapViewport(QWidget):
             return
         if self._render_key() != self._frame_key and self._job is None and not self._render_timer.isActive():
             self._render_timer.start()
+        cam = self.camera
         if self._frame is not None:
             if self._image is None:
                 self._image = self._frame.image()
@@ -385,11 +386,13 @@ class MapViewport(QWidget):
                     overlay.draw(painter, cam, self._display_terrain)
         overlay = getattr(self, 'cloud_overlay', None)
         if overlay is not None and self._frame is not None and not self.clear_view:
-            overlay.draw(painter, self.camera)
-        self.draw_interaction_overlay(painter)
-        if self._job is not None or self._render_timer.isActive():
-            painter.setPen(QColor(160, 170, 180))
-            painter.drawText(12, self.height() - 12, "Updating view")
+            overlay.draw(painter, cam)
+        saved_camera = self.camera
+        self.camera = cam
+        try:
+            self.draw_interaction_overlay(painter)
+        finally:
+            self.camera = saved_camera
 
     def _annotations(self):
         if self._annotation_base is None:
