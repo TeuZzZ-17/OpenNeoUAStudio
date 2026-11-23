@@ -188,15 +188,28 @@ class FireAreaEditingMixin:
         if unit is None:
             return []
         # The scene preview tries external models before the set VP fallback.
-        columns = [visual_transform_point(axis, unit.scale, unit.rotation)
-                   for axis in ((1.0, 0.0, 0.0), (0.0, 1.0, 0.0), (0.0, 0.0, 1.0))]
-        rotation = tuple(tuple(columns[column][row] for column in range(3))
+        axes = ((1.0, 0.0, 0.0), (0.0, 1.0, 0.0), (0.0, 0.0, 1.0))
+        if any(unit.spin):
+            # Engine order: rotation, then spin_xyz, then scale (same as the FX tab).
+            columns = [visual_transform_point(axis, (1.0, 1.0, 1.0), unit.rotation)
+                       for axis in axes]
+            turn = tuple(tuple(columns[column][row] for column in range(3))
                          for row in range(3))
+            scale = tuple(tuple(unit.scale[row] if row == col else 0.0
+                                for col in range(3)) for row in range(3))
+            panel = getattr(self, "fx_panel", None)
+            age = panel.time_ms if panel is not None else 0.0
+            rotation = fx._mat_mul(fx._mat_mul(turn, fx.spin_matrix(unit.spin, age)), scale)
+        else:
+            columns = [visual_transform_point(axis, unit.scale, unit.rotation)
+                       for axis in axes]
+            rotation = tuple(tuple(columns[column][row] for column in range(3))
+                             for row in range(3))
         # The matrix already holds the unit's own scale. The open project is the
         # weapon, so its scale_xyz must not be applied to the vehicle model.
         return [fx.PreviewItem(
             -1, "unit", unit.vp, self._fire_area_unit_position(), rotation,
-            (1.0, 1.0, 1.0), 1.0, None,
+            (1.0, 1.0, 1.0), 1.0, unit.tint,
             f"firing unit · {unit.label}", external=unit.external,
             vp_zero_valid=unit.vp_zero_valid)]
 

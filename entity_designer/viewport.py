@@ -308,6 +308,7 @@ class CollisionViewport(FxPreviewViewportMixin, AssetViewport):
         # (key, press position, screen pixels per world unit) while dragging a grip.
         self._fire_area_drag: tuple[str, QPointF, QPointF] | None = None
         self._cockpit_preview_active = False
+        self._cockpit_unit_hidden = False
         self._cockpit_offset = (0.0, 0.0, 0.0)
         # Cockpit preview always fills the editor viewport. The only aspect
         # control left is OpenNeoUA's logical runtime aspect, which drives the
@@ -363,6 +364,14 @@ class CollisionViewport(FxPreviewViewportMixin, AssetViewport):
             return
         self._cockpit_preview_active = active
         self.update()
+
+    def set_cockpit_unit_hidden(self, hidden: bool) -> None:
+        """Cockpit View with the camera offset disabled shows the view without the unit."""
+
+        hidden = bool(hidden)
+        if self._cockpit_unit_hidden != hidden:
+            self._cockpit_unit_hidden = hidden
+            self.update()
 
     def set_cockpit_camera_offset(
             self, x: float, y: float, z: float) -> None:
@@ -2066,7 +2075,13 @@ class CollisionViewport(FxPreviewViewportMixin, AssetViewport):
             target = self._cockpit_render_rect()
             painter.save()
             painter.setClipRect(target)
-            if self._collision_show_model:
+            if self._cockpit_unit_hidden:
+                # Cockpit disabled: the game has no cockpit view, so no unit is drawn.
+                painter.fillRect(target, QColor(24, 26, 32))
+                painter.setPen(QColor(130, 135, 145))
+                painter.drawText(
+                    target, Qt.AlignmentFlag.AlignCenter, "Cockpit disabled")
+            elif self._collision_show_model:
                 self._render_scene(
                     painter, target, QColor(24, 26, 32), clean=True,
                     camera=self._camera_state())

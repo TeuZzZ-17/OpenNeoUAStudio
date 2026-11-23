@@ -153,8 +153,38 @@ def locate_font(data_root: str | Path, font: str) -> tuple[Path | None, Path | N
     return path, find(directory, stem + '.PNG', page, stem + '.ILB', stem + '.ILBM')
 
 
-def append_glyph(path: str | Path, glyph: FontGlyph) -> None:
-    """Add one glyph line at the end of a .FON file, keeping its line endings."""
+OPENUA_SHEET = "H_FINDER_OpenNeoUA"
+
+
+def locate_openua_sheet(data_root: str | Path) -> tuple[Path | None, Path | None]:
+    """The OpenNeoUA unit-icon .FON (Data/Graphics/UnitIcons) and its page, or (None, None).
+
+    Its keys replace the same keys of TYPE_NS.FON, exactly as the engine loads it.
+    """
+
+    data = Path(data_root)
+    graphics = find_existing_path(data, 'Graphics')
+    if graphics is None and data.name.casefold() == 'data':
+        graphics = find_existing_path(data.parent, 'Graphics')
+    folder = find_existing_path(graphics, 'UnitIcons') if graphics else None
+    path = find_existing_path(folder, OPENUA_SHEET + '.FON') if folder else None
+    if path is None:
+        return None, None
+    try:
+        page = read_font(path).page
+    except (OSError, ValueError):
+        return path, None
+    stem = Path(page).stem
+    return path, (find_existing_path(folder, stem + '.PNG')
+                  or find_existing_path(folder, page))
+
+
+def append_glyph(path: str | Path, glyph: FontGlyph, *, raw_key: bool = True) -> None:
+    """Add one glyph line at the end of a .FON file, keeping its line endings.
+
+    ``raw_key`` writes a one-byte key as the raw byte (TYPE_NS.FON, read by vanilla);
+    otherwise the key is spelled with glyph_token (the OpenNeoUA sheet).
+    """
 
     path = Path(path)
     data = path.read_bytes()
@@ -165,8 +195,8 @@ def append_glyph(path: str | Path, glyph: FontGlyph) -> None:
     if glyph.note:
         line += f" ; {glyph.note}"
     backup_existing_file(path)
-    path.write_bytes(data + font_key_bytes(glyph.code)
-                     + line.encode('ascii', 'replace') + newline)
+    key = font_key_bytes(glyph.code) if raw_key else glyph_token(glyph.code).encode('ascii')
+    path.write_bytes(data + key + line.encode('ascii', 'replace') + newline)
 
 
 def font_key_bytes(code: int) -> bytes:

@@ -13,6 +13,9 @@ from dataclasses import dataclass
 
 from entity_designer.destruction_fx import (
     FLYING_MODELS,
+    WHITE,
+    _spin_strength,
+    _tint_value,
     script_int,
     split_tuple,
     top_level_values,
@@ -65,6 +68,9 @@ class FiringUnit:
     projectiles: int = 1
     external: tuple[str, ...] = ()
     vp_zero_valid: bool = False
+    # Look of the main model from the script: tint (None = neutral) and spin_xyz.
+    tint: tuple[int, int, int, int] | None = None
+    spin: tuple[float, float, float] = (0.0, 0.0, 0.0)
 
     @property
     def x_span(self) -> tuple[float, float]:
@@ -168,6 +174,7 @@ def unit_from_values(vehicle_id: int, values: dict[str, str],
         vp = 0
     mode = values.get("fire_x_mode", "").strip().casefold()
     mode = mode if mode in FIRE_X_MODES else "vanilla"
+    tint = _tint_value(values, "tint", WHITE)
     return FiringUnit(
         vehicle_id=vehicle_id,
         name=values.get("name", "").strip('"') or f"Vehicle {vehicle_id}",
@@ -184,6 +191,8 @@ def unit_from_values(vehicle_id: int, values: dict[str, str],
         projectiles=_projectiles(values.get(_COUNT_KEYS[key])),
         external=external,
         vp_zero_valid=vp_zero_valid,
+        tint=None if tint == WHITE else tint,
+        spin=_spin_strength(values, ""),
     )
 
 

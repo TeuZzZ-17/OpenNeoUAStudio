@@ -8,7 +8,9 @@ from PySide6.QtGui import QImage, QColor, QPainter, QPolygonF
 
 from .. import bootstrap
 from ..core.resource_catalog import preview_image
-from studio.formats.font_def import glyph_key as _glyph_key, locate_font, read_font
+from studio.formats.font_def import (
+    glyph_key as _glyph_key, locate_font, locate_openua_sheet, read_font,
+)
 
 
 MAP_BADGE_SIZE = 17.0 * 1.35
@@ -82,13 +84,22 @@ def _squad_symbol(accent=None):
 
 @lru_cache(maxsize=48)
 def _glyph(root, font, code, tight, grey, outlined):
-    path, image_path = locate_font(root, font)
-    if path is None or image_path is None:
-        return QImage()
-    definition = read_font(path)
-    entry = definition.glyph(code)
+    definition = entry = image_path = None
+    if font == 'TYPE_NS':
+        # OpenNeoUA icons (Graphics/UnitIcons) replace the same keys of TYPE_NS.
+        extra_path, extra_image = locate_openua_sheet(root)
+        if extra_path is not None and extra_image is not None:
+            extra = read_font(extra_path)
+            if extra.glyph(code) is not None:
+                definition, entry, image_path = extra, extra.glyph(code), extra_image
     if entry is None:
-        return QImage()
+        path, image_path = locate_font(root, font)
+        if path is None or image_path is None:
+            return QImage()
+        definition = read_font(path)
+        entry = definition.glyph(code)
+        if entry is None:
+            return QImage()
     image = preview_image(image_path).convertToFormat(QImage.Format.Format_RGBA8888)
     glyph = image.copy(entry.x, entry.y, entry.width, definition.height)
     rgba = np.frombuffer(glyph.bits(), np.uint8).reshape(glyph.height(), glyph.bytesPerLine())[:, :glyph.width()*4].reshape(glyph.height(), glyph.width(), 4)

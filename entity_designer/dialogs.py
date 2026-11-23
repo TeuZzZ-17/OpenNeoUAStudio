@@ -546,5 +546,6 @@ class ApplyScriptDialog(QDialog):
             raise ValueError(
                 "The script is not inside a game Data folder, so "
                 "TYPE_NS.FON cannot receive the new type_icon symbol.")
+        from entity_designer.icon_selector_panel import _image_size
         ensure_font_key(data_root, project.type_icon,
-                        project.type_icon_cell, project.name)
+                        project.type_icon_cell, project.name, _image_size)

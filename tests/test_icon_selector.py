@@ -336,3 +336,54 @@ def test_unsaved_prompt_ignores_model_only_changes(app):
     finally:
         window._modified = False
         window.close()
+
+
+EXTRA_FON = (b"H_FINDER_OpenNeoUA.PNG 16   ; OpenNeoUA\r\n"
+             b"U+0041  1  1 20   ; custom Tiger\r\n"
+             b"U+2206  22 1 20   ; custom Leopard\r\n")
+
+
+@pytest.fixture
+def data_extra(data):
+    folder = data / "Graphics" / "UnitIcons"
+    folder.mkdir(parents=True)
+    (folder / "H_FINDER_OpenNeoUA.PNG").write_bytes(b"")
+    (folder / "H_FINDER_OpenNeoUA.FON").write_bytes(EXTRA_FON)
+    return data
+
+
+def _size(path):
+    return (169, 86) if "OPENNEOUA" in Path(path).name.upper() else (316, 205)
+
+
+def test_openua_page_extends_the_grid_and_wins_over_type_ns(data_extra):
+    atlas = load_atlas(data_extra, _size)
+    assert (atlas.base_rows, atlas.extra_rows, atlas.extra_columns) == (12, 5, 8)
+    assert atlas.rows == 17 and atlas.in_extra((0, 12)) and not atlas.in_extra((0, 11))
+    assert atlas.has_cell((7, 16)) and not atlas.has_cell((8, 12)) and not atlas.has_cell((15, 0))
+    # 'A' now draws the OpenNeoUA cell (row 12), like the engine; its old cell has no key.
+    assert atlas.cell_of_key(65) == (0, 12)
+    assert atlas.keys_on((0, 0)) == []
+    assert [g.code for g in atlas.keys_on((1, 12))] == [0x2206]
+    # A vanilla key cannot be rebound to another cell from the selector.
+    assert atlas.check(66, (3, 13))[0] == TAKEN
+
+
+def test_new_symbol_goes_to_the_openua_page_only(data_extra):
+    fon = data_extra / "Fonts" / "HFonts" / "TYPE_NS.FON"
+    extra = data_extra / "Graphics" / "UnitIcons" / "H_FINDER_OpenNeoUA.FON"
+    before = fon.read_bytes()
+    with pytest.raises(ValueError, match="OpenNeoUA"):
+        ensure_font_key(data_extra, 0xe9, (3, 2), "x", _size)
+    assert ensure_font_key(data_extra, 0x173, (2, 13), "New Tank", _size)
+    assert fon.read_bytes() == before
+    text = extra.read_bytes()
+    assert text.startswith(EXTRA_FON) and text.endswith(b"U+0173  43  18 20 ; New Tank\r\n")
+    # The page-local y is stored (row 13 is local row 1: y 18), not the shifted one.
+    assert read_font(extra).glyph(0x173).y == 18
+    assert not ensure_font_key(data_extra, 0x173, (2, 13), "New Tank", _size)
+
+
+def test_without_openua_page_nothing_changes(data):
+    atlas = _atlas(data)
+    assert atlas.extra_path is None and not atlas.in_extra((0, 12)) and atlas.rows == 12

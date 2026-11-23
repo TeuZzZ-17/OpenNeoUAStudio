@@ -873,3 +873,17 @@ def test_laser_preview_converges_distinct_muzzles_on_one_aim_point():
         assert len({target for launch, target in shots}) == 1
     finally:
         _close(app, window)
+
+
+def test_firing_unit_keeps_its_tint_and_spin():
+    from entity_designer.fire_area_units import unit_from_values
+
+    values = {"vp_normal": "177", "weapon": "21", "tint": "255|50|50|255",
+              "spin_xyz": "0|0|3", "scale_xyz": "1|1|2", "name": "Red_Spore"}
+    unit = unit_from_values(188, values, 21)
+    assert unit.tint == (255, 50, 50, 255)
+    assert unit.spin == (0.0, 0.0, 3.0) and unit.scale == (1.0, 1.0, 2.0)
+    # No tint, or a neutral one, leaves the model untinted.
+    assert unit_from_values(1, {"vp_normal": "5", "weapon": "21"}, 21).tint is None
+    assert unit_from_values(1, {"vp_normal": "5", "weapon": "21",
+                                "tint": "255|255|255|255"}, 21).tint is None

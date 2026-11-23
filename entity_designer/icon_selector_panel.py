@@ -21,7 +21,7 @@ from PySide6.QtGui import (
 )
 from PySide6.QtWidgets import (
     QFileDialog, QGridLayout, QGroupBox, QHBoxLayout, QLabel, QLineEdit, QMessageBox,
-    QPushButton, QSizePolicy, QVBoxLayout, QWidget,
+    QComboBox, QPushButton, QSizePolicy, QVBoxLayout, QWidget,
 )
 
 from map_editor import bootstrap
@@ -67,6 +67,8 @@ def cell_icon(image: QImage, atlas: IconAtlas, cell) -> tuple[QImage, bool]:
     and whether the cell holds nothing else."""
 
     x, y = atlas.origin(cell)
+    if atlas.in_extra(cell):
+        y -= atlas.extra_shift  # ``image`` is the OpenNeoUA page itself
     icon = image.copy(x, y, atlas.cell_width, atlas.cell_height)
     empty = True
     for py in range(icon.height()):
@@ -80,7 +82,11 @@ def cell_icon(image: QImage, atlas: IconAtlas, cell) -> tuple[QImage, bool]:
 
 
 class IconAtlasView(QWidget):
-    """The font page enlarged, with the hovered and the selected cell."""
+    """One font page enlarged (original or OpenNeoUA), with the hovered and the selected cell.
+
+    Cells are grid cells of the shared atlas: the OpenNeoUA page starts at row
+    ``atlas.base_rows``.
+    """
 
     cellPicked = Signal(int, int)
 
@@ -88,6 +94,7 @@ class IconAtlasView(QWidget):
         super().__init__(parent)
         self.atlas: IconAtlas | None = None
         self.image = QImage()
+        self.page = "base"  # "base" = original H_FINDER, "extra" = OpenNeoUA page
         self.selected = None
         self.hovered = None
         self.keys: dict[tuple[int, int], str] = {}
@@ -102,8 +109,9 @@ class IconAtlasView(QWidget):
         self._pulse.setInterval(50)
         self._pulse.timeout.connect(self._tick)
 
-    def set_atlas(self, atlas: IconAtlas | None, image: QImage, message: str = "") -> None:
-        self.atlas, self.image, self.message = atlas, image, message
+    def set_atlas(self, atlas: IconAtlas | None, image: QImage, message: str = "",
+                  page: str = "base") -> None:
+        self.atlas, self.image, self.message, self.page = atlas, image, message, page
         self.keys = {}
         if atlas is not None:
             for glyph in atlas.font.glyphs:
@@ -111,6 +119,19 @@ class IconAtlasView(QWidget):
                 if cell is not None and cell not in self.keys:
                     self.keys[cell] = symbol_text(glyph.code)
         self.update()
+
+    def _page_box(self) -> tuple[int, int, int]:
+        """Columns, rows and first grid row of the page on show."""
+
+        if self.atlas is None:
+            return 0, 0, 0
+        if self.page == "extra":
+            return self.atlas.extra_columns, self.atlas.extra_rows, self.atlas.base_rows
+        return self.atlas.base_columns, self.atlas.base_rows, 0
+
+    def on_page(self, cell) -> bool:
+        columns, rows, first = self._page_box()
+        return cell is not None and 0 <= cell[0] < columns and first <= cell[1] < first + rows
 
     def set_selected(self, cell) -> None:
         if cell != self.selected:
@@ -144,7 +165,7 @@ class IconAtlasView(QWidget):
 
     def cell_rect(self, cell) -> QRect:
         scale, corner = self._layout()
-        x, y = self.atlas.origin(cell)
+        x, y = self.atlas.origin((cell[0], cell[1] - self._page_box()[2]))
         return QRect(corner.x() + x * scale, corner.y() + y * scale,
                      self.atlas.cell_width * scale, self.atlas.cell_height * scale)
 
@@ -158,8 +179,9 @@ class IconAtlasView(QWidget):
             return None
         column = x // (self.atlas.cell_width + 1)
         row = y // (self.atlas.cell_height + 1)
-        if column < self.atlas.columns and row < self.atlas.rows:
-            return column, row
+        columns, rows, first = self._page_box()
+        if column < columns and row < rows:
+            return column, row + first
         return None
 
     def paintEvent(self, _event) -> None:  # noqa: N802
@@ -180,6 +202,8 @@ class IconAtlasView(QWidget):
             font.setBold(True)
             painter.setFont(font)
             for cell, text in self.keys.items():
+                if not self.on_page(cell):
+                    continue
                 rect = self.cell_rect(cell).adjusted(0, 0, -2, 0)
                 painter.setPen(QColor(0, 0, 0, 150))
                 painter.drawText(rect.translated(1, 1), Qt.AlignmentFlag.AlignRight
@@ -190,13 +214,13 @@ class IconAtlasView(QWidget):
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
         # Dark and light rings stay visible on the yellow page and on the icons.
         painter.setBrush(Qt.BrushStyle.NoBrush)
-        if self.hovered is not None and self.hovered != self.selected:
+        if self.hovered is not None and self.hovered != self.selected and self.on_page(self.hovered):
             rect = QRectF(self.cell_rect(self.hovered)).adjusted(-1, -1, 1, 1)
             painter.setPen(QPen(QColor(0, 0, 0, 170), 3))
             painter.drawRoundedRect(rect, 3, 3)
             painter.setPen(QPen(QColor(255, 255, 255, 230), 1.5))
             painter.drawRoundedRect(rect, 3, 3)
-        if self.selected is not None:
+        if self.selected is not None and self.on_page(self.selected):
             accent = QColor(self.palette().color(QPalette.ColorRole.Highlight))
             rect = QRectF(self.cell_rect(self.selected)).adjusted(-3, -3, 3, 3)
             glow = 0.5 + 0.5 * math.sin(self._phase)
@@ -232,10 +256,11 @@ class IconAtlasView(QWidget):
                 Qt.KeyboardModifier.ControlModifier | Qt.KeyboardModifier.AltModifier):
             super().keyPressEvent(event)
             return
-        column, row = self.selected or (0, 0)
-        if self.selected is not None:
-            column = min(max(column + move[0], 0), self.atlas.columns - 1)
-            row = min(max(row + move[1], 0), self.atlas.rows - 1)
+        columns, rows, first = self._page_box()
+        column, row = self.selected if self.on_page(self.selected) else (0, first)
+        if self.on_page(self.selected):
+            column = min(max(column + move[0], 0), columns - 1)
+            row = min(max(row + move[1], first), first + rows - 1)
         self.cellPicked.emit(column, row)
 
 
@@ -248,6 +273,8 @@ class IconSelectorControls(QWidget):
         self.view = IconAtlasView()
         self.view.cellPicked.connect(self._cell_picked)
         self.atlas: IconAtlas | None = None
+        self._images: dict[str, QImage] = {}   # page images, "base" and "extra"
+        self._page = "base"
         # A cell picked while no valid symbol goes with it yet (or while no
         # vehicle is open): the project keeps its icon until the pair is complete.
         self._pending_cell = None
@@ -278,7 +305,17 @@ class IconSelectorControls(QWidget):
         self.keys_label.setToolTip("TYPE_NS.FON symbols that already draw this cell.")
         group_layout.addWidget(self.keys_label, 1, 1, 2, 2)
 
-        group_layout.addWidget(QLabel("Symbol"), 3, 0)
+        group_layout.addWidget(QLabel("Page"), 3, 0)
+        self.page_combo = QComboBox()
+        self.page_combo.addItem("Original", "base")
+        self.page_combo.addItem("OpenNeoUA", "extra")
+        self.page_combo.setToolTip(
+            "Original: the H_FINDER page of the game. OpenNeoUA: the page of new icons "
+            "(Graphics/UnitIcons); its keys replace the same keys of the original.")
+        self.page_combo.activated.connect(self._page_chosen)
+        group_layout.addWidget(self.page_combo, 3, 1, 1, 2)
+
+        group_layout.addWidget(QLabel("Symbol"), 4, 0)
         symbol_row = QHBoxLayout()
         self.symbol_edit = QLineEdit()
         self.symbol_edit.setPlaceholderText("A or U+00E9")
@@ -295,14 +332,14 @@ class IconSelectorControls(QWidget):
             "ASCII symbol while any is left.")
         self.random_button.clicked.connect(self._random_symbol)
         symbol_row.addWidget(self.random_button)
-        group_layout.addLayout(symbol_row, 3, 1, 1, 2)
+        group_layout.addLayout(symbol_row, 4, 1, 1, 2)
 
         self.status_label = QLabel()
         self.status_label.setWordWrap(True)
-        group_layout.addWidget(self.status_label, 4, 0, 1, 3)
+        group_layout.addWidget(self.status_label, 5, 0, 1, 3)
         self.output = QLabel()
         self.output.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
-        group_layout.addWidget(self.output, 5, 0, 1, 3)
+        group_layout.addWidget(self.output, 6, 0, 1, 3)
         group_layout.setColumnStretch(2, 1)
 
         # The font page file itself: open it, find it, convert PNG <-> ILBM.
@@ -348,8 +385,32 @@ class IconSelectorControls(QWidget):
 
     def _load(self) -> None:
         self.atlas = load_atlas(self._data_root(), _image_size)
-        image = page_image(self.atlas.image_path) if self.atlas else QImage()
-        self.view.set_atlas(self.atlas, image)
+        self._images = {}
+        if self.atlas is not None:
+            self._images["base"] = page_image(self.atlas.image_path)
+            if self.atlas.extra_path is not None:
+                self._images["extra"] = page_image(self.atlas.extra_path)
+        if self._page not in self._images:
+            self._page = "base"
+        self._show_page_on_view()
+
+    def _show_page_on_view(self) -> None:
+        self.view.set_atlas(self.atlas, self._images.get(self._page, QImage()), page=self._page)
+        self.page_combo.setEnabled("extra" in self._images)
+        with QSignalBlocker(self.page_combo):
+            self.page_combo.setCurrentIndex(1 if self._page == "extra" else 0)
+
+    def _page_of(self, cell) -> str:
+        return "extra" if self.atlas is not None and self.atlas.in_extra(cell) else "base"
+
+    def _page_chosen(self, _index: int) -> None:
+        page = self.page_combo.currentData()
+        if page == self._page or page not in self._images:
+            return
+        self._page = page
+        self._show_page_on_view()
+        self._sync_page_buttons()
+        self.view.setFocus(Qt.FocusReason.OtherFocusReason)
 
     def _vehicle(self) -> bool:
         """True when the selected entity can receive an icon.
@@ -379,6 +440,9 @@ class IconSelectorControls(QWidget):
             # Undo, reset or a new definition replace any half-made choice.
             self._seen_state = state
             self._pending_cell = None
+            follow = self._project_cell()
+            if follow is not None and self.atlas is not None:
+                self._page = self._page_of(follow)
         if not self.isVisible():
             # The page is read again when the tab is shown (activate).
             return
@@ -402,8 +466,11 @@ class IconSelectorControls(QWidget):
             if vehicle and project.type_icon else "type_icon not written.")
         self._sync_page_buttons()
 
-    @staticmethod
-    def _compatibility(code: int) -> tuple[str, str]:
+    def _compatibility(self, code: int) -> tuple[str, str]:
+        cell = self.atlas.cell_of_key(code) if self.atlas is not None else None
+        if cell is not None and self.atlas.in_extra(cell):
+            return "warn", ("OpenNeoUA page: vanilla does not read it and shows the "
+                            "original icon of this key, if any.")
         if vanilla_readable(code):
             return "ok", "Vanilla compatible."
         return "warn", ("OpenNeoUA only: vanilla reads only plain ASCII "
@@ -432,12 +499,17 @@ class IconSelectorControls(QWidget):
             self.keys_label.setText("")
             return
         x, y = self.atlas.origin(cell)
-        image, empty = cell_icon(self.view.image, self.atlas, cell)
+        local_row = cell[1] - (self.atlas.base_rows if self.atlas.in_extra(cell) else 0)
+        if self.atlas.in_extra(cell):
+            y -= self.atlas.extra_shift
+        image, empty = cell_icon(self._images[self._page_of(cell)], self.atlas, cell)
         self.preview.setPixmap(QPixmap.fromImage(image).scaled(
             self.atlas.cell_width * 4, self.atlas.cell_height * 4,
             Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.FastTransformation))
         self.cell_label.setText(
-            f"Cell {cell[0]}, {cell[1]}  ·  x {x}  y {y}" + ("  ·  empty" if empty else ""))
+            f"Cell {cell[0]}, {local_row}  ·  x {x}  y {y}"
+            + ("  ·  empty" if empty else "")
+            + ("  ·  OpenNeoUA page" if self.atlas.in_extra(cell) else ""))
         keys = self.atlas.keys_on(cell)
         self.keys_label.setText("\n".join(
             f"{symbol_text(glyph.code)}  {glyph.note}".rstrip() for glyph in keys)
@@ -487,7 +559,10 @@ class IconSelectorControls(QWidget):
             self._hold(cell, "error", f"{symbol_text(code)} is already used by "
                        f"{glyph.note or 'another icon'}.")
             return
-        if status == FREE and not new_key_allowed(code):
+        if status == FREE and self.atlas.extra_path is not None and not self.atlas.in_extra(cell):
+            self._hold(cell, "error", "New icons go to the OpenNeoUA page: choose it above.")
+            return
+        if status == FREE and not self.atlas.in_extra(cell) and not new_key_allowed(code):
             self._hold(cell, "error", (
                 f"{symbol_text(code)} is not a one-byte symbol: vanilla could not "
                 "read it from TYPE_NS.FON. Use a symbol up to U+00FF."))
@@ -495,7 +570,7 @@ class IconSelectorControls(QWidget):
         self._commit(code, cell)
 
     def _cell_picked(self, column: int, row: int) -> None:
-        if self.atlas is None:
+        if self.atlas is None or not self.atlas.has_cell((column, row)):
             return
         cell = (column, row)
         if not self._vehicle():
@@ -550,7 +625,11 @@ class IconSelectorControls(QWidget):
     # -- font page file ---------------------------------------------------------------
 
     def _page_path(self) -> Path | None:
-        return self.atlas.image_path if self.atlas is not None else None
+        if self.atlas is None:
+            return None
+        if self._page == "extra" and self.atlas.extra_path is not None:
+            return self.atlas.extra_path
+        return self.atlas.image_path
 
     def _convert_target(self) -> Path | None:
         """The other format of the page: the ILBM named by TYPE_NS.FON, or its PNG."""
@@ -573,6 +652,12 @@ class IconSelectorControls(QWidget):
             button.setEnabled(source is not None)
         self.page_label.setText(source.name if source else "No font page.")
         self.page_label.setToolTip(str(source) if source else "")
+        # The OpenNeoUA page exists only as a PNG: nothing to convert.
+        if self._page == "extra":
+            self.convert_button.setEnabled(False)
+            self.convert_button.setText("Convert")
+            self.convert_button.setToolTip("The OpenNeoUA page is a PNG only.")
+            return
         target = self._convert_target()
         if target is None:
             return

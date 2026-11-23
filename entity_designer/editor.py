@@ -2383,6 +2383,7 @@ class CollisionEditorWindow(
             self.project.cockpit_camera_offset_z)
         cockpit_active = self._is_cockpit_tab_active()
         self.viewport.set_cockpit_preview_active(cockpit_active)
+        self.viewport.set_cockpit_unit_hidden(not cockpit_enabled)
         if hasattr(self, "cockpit_runtime_aspect_combo"):
             self.viewport.set_cockpit_runtime_aspect(
                 self.cockpit_runtime_aspect_combo.currentData())
