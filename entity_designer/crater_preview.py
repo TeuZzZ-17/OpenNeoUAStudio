@@ -29,6 +29,7 @@ RIM_DEFAULT = 20.0
 
 # terraincrater_core.h
 REACH = 1.6
+SHADE_FULL_DEPTH = 20.0
 MAX_DEPTH_RATIO = 0.5
 
 
@@ -172,5 +173,8 @@ def shade(drop, slope_x, slope_z, deepest):
     lighting = (nx * -0.45 + ny * -0.80 + nz * 0.40) / length
     depth_shade = np.where(deepest > 0.0, 1.0 - 0.30 * np.maximum(0.0, drop) / np.maximum(deepest, 1e-9), 1.0)
     value = np.clip(lighting / 0.943 * depth_shade, 0.35, 1.25)
+    # Shallow craters darken in proportion to their depth (the light is on a coarse lattice).
+    strength = np.where(deepest > 0.0, np.minimum(1.0, deepest / SHADE_FULL_DEPTH), 1.0)
+    value = 1.0 + (value - 1.0) * strength
     untouched = (drop == 0.0) & (slope_x == 0.0) & (slope_z == 0.0)
     return np.where(untouched, 1.0, value)

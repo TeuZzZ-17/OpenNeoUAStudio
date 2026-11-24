@@ -18,8 +18,11 @@ from functools import lru_cache
 from pathlib import Path
 import random
 import re
+import shutil
 
+from studio.exchange.portable import backup_existing_file, find_existing_path
 from studio.formats.font_def import (
+    OPENUA_SHEET,
     FontDefinition,
     FontGlyph,
     append_glyph,
@@ -303,3 +306,80 @@ def ensure_font_key(data_root: str | Path, code: int, cell: tuple[int, int],
     clean = re.sub(r"[^\x20-\x7e]+", "", note).strip()
     append_glyph(fon, FontGlyph(code, x, y, probe.cell_width, clean))
     return True
+
+
+# -- OpenNeoUA datasheet (the page of new icons) -------------------------------------------
+
+_SHEET_NOTE = "OpenNeoUA unit icons. Keys here replace the same keys of TYPE_NS.FON."
+_EMPTY_SHEET_ROWS = 4
+
+
+def sheet_targets(data_root: str | Path) -> tuple[Path, Path]:
+    """Where the engine reads the datasheet: its .FON and PNG, even when they do not exist yet."""
+
+    data = Path(data_root)
+    graphics = find_existing_path(data, "Graphics")
+    if graphics is None and data.name.casefold() == "data":
+        graphics = find_existing_path(data.parent, "Graphics")
+    graphics = graphics or data / "Graphics"
+    folder = (find_existing_path(graphics, "UnitIcons") if graphics.is_dir() else None) \
+        or graphics / "UnitIcons"
+    exists = folder.is_dir()
+    return tuple(
+        (find_existing_path(folder, OPENUA_SHEET + suffix) if exists else None)
+        or folder / (OPENUA_SHEET + suffix)
+        for suffix in (".FON", ".PNG"))
+
+
+def sheet_grid_problem(atlas: IconAtlas, width: int, height: int) -> str:
+    """Empty when a page of this size fits the icon grid of the game, else why it does not."""
+
+    step_x, step_y = atlas.cell_width + 1, atlas.cell_height + 1
+    if width < step_x + 1 or height < step_y + 1 or (width - 1) % step_x or (height - 1) % step_y:
+        return (f"The page is {width}x{height} px: it must hold whole cells of "
+                f"{atlas.cell_width}x{atlas.cell_height} px with 1 px separators "
+                f"(width = {step_x} x columns + 1, height = {step_y} x rows + 1).")
+    return ""
+
+
+def empty_sheet_size(atlas: IconAtlas) -> tuple[int, int]:
+    """Size of a new empty datasheet: the columns of the original page, a few rows."""
+
+    columns = max(1, atlas.base_columns)
+    return (columns * (atlas.cell_width + 1) + 1,
+            _EMPTY_SHEET_ROWS * (atlas.cell_height + 1) + 1)
+
+
+def install_sheet(data_root: str | Path, atlas: IconAtlas, source: str | Path | None,
+                  draw_empty=None) -> Path:
+    """Put a datasheet where the engine reads it and return its PNG path.
+
+    ``source`` is a PNG that already fits the grid (checked by the caller); with
+    None, ``draw_empty(png, width, height)`` paints a new empty page. A .FON beside the
+    source comes along (its page name is fixed); without one the current .FON, and so
+    its keys, stays, or a new key-less one is written. Replaced files keep a .bak copy.
+    """
+
+    fon, png = sheet_targets(data_root)
+    png.parent.mkdir(parents=True, exist_ok=True)
+    source = Path(source) if source is not None else None
+    same = source is not None and png.exists() and source.resolve() == png.resolve()
+    if not same:
+        backup_existing_file(png)
+        if source is not None:
+            shutil.copyfile(source, png)
+        else:
+            draw_empty(png, *empty_sheet_size(atlas))
+    sibling = find_existing_path(source.parent, source.stem + ".FON") if source is not None \
+        else None
+    if sibling is not None and sibling.resolve() != fon.resolve():
+        text = sibling.read_bytes().splitlines(keepends=True)
+        comment = text[0].split(b";", 1)[1].rstrip(b"\r\n") if b";" in text[0] else b""
+        newline = b"\r\n" if b"\r\n" in text[0] else b"\n"
+        head = f"{png.name} {atlas.cell_height}".encode("ascii")
+        text[0] = head + (b"   ;" + comment if comment else b"") + newline
+        backup_existing_file(fon)
+        fon.write_bytes(b"".join(text))
+    elif not fon.exists():
+        fon.write_bytes(f"{png.name} {atlas.cell_height}   ; {_SHEET_NOTE}\r\n".encode("ascii"))
+    return png

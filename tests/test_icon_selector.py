@@ -109,6 +109,28 @@ def test_random_prefers_vanilla_readable_ascii(data):
     assert not new_key_allowed(0x173) and not new_key_allowed(ord(";"))
 
 
+def test_datasheet_install_checks_grid_and_keeps_keys(app, data, tmp_path):
+    from entity_designer.type_icons import install_sheet, sheet_grid_problem, sheet_targets
+
+    atlas = _atlas(data)
+    assert not sheet_grid_problem(atlas, 316, 205)
+    assert "whole cells" in sheet_grid_problem(atlas, 300, 205)
+    fon, png = sheet_targets(data)
+    assert png == data / "Graphics" / "UnitIcons" / "H_FINDER_OpenNeoUA.PNG"
+
+    def draw(path, width, height):
+        QImage(width, height, QImage.Format.Format_RGB32).save(str(path))
+
+    install_sheet(data, atlas, None, draw)                  # nothing there yet: empty page
+    assert png.exists() and fon.read_bytes().startswith(b"H_FINDER_OpenNeoUA.PNG 16")
+    fon.write_bytes(fon.read_bytes() + b"U+00E9 1 1 20\r\n")
+    mine = tmp_path / "Mine.PNG"
+    QImage(63, 34, QImage.Format.Format_RGB32).save(str(mine))
+    install_sheet(data, atlas, mine)                        # image only: the keys stay
+    assert b"U+00E9" in fon.read_bytes()
+    assert QImage(str(png)).width() == 63
+
+
 def test_png_page_converts_to_ilbm_and_back(app, tmp_path):
     from entity_designer.icon_selector_panel import convert_font_page
     from studio.formats.images import parse_ilbm_file
@@ -141,14 +163,21 @@ def test_convert_button_names_the_other_format(app, data, monkeypatch):
         controls = window.icon_tab
         controls._load()
         controls._sync_page_buttons()
-        assert controls.page_label.text() == "PAGE.PNG"          # PNG page -> offer ILBM
+        assert Path(controls.sheet_edit.text()).name == "PAGE.PNG"   # PNG page -> offer ILBM
         assert controls.convert_button.text() == "Convert to ILBM"
+        assert controls.sheet_browse.isHidden()                  # the original page is fixed
+        controls.page_combo.setCurrentIndex(1)                   # OpenNeoUA, no datasheet yet
+        controls._page_chosen(1)
+        assert not controls.sheet_browse.isHidden() and not controls.sheet_create.isHidden()
+        assert controls.sheet_edit.text().endswith("H_FINDER_OpenNeoUA.PNG")
+        controls.page_combo.setCurrentIndex(0)
+        controls._page_chosen(0)
         png = data / "Fonts" / "PAGE.PNG"
         png.unlink()
         (data / "Fonts" / "PAGE.ILBM").write_bytes(b"")
         controls._load()
         controls._sync_page_buttons()
-        assert controls.page_label.text() == "PAGE.ILBM"         # ILBM page -> offer PNG
+        assert Path(controls.sheet_edit.text()).name == "PAGE.ILBM"  # ILBM page -> offer PNG
         assert controls.convert_button.text() == "Convert to PNG"
     finally:
         window._modified = False
@@ -288,20 +317,24 @@ def test_icon_tab_picks_cells_and_blocks_taken_symbols(app, data, monkeypatch):
         controls._cell_picked(1, 0)                         # cell of 'B'
         assert window.project.type_icon == ord("B")
         assert window.project.type_icon_cell is None
-        controls._cell_picked(4, 4)                         # empty cell, no free symbol yet
-        assert window.project.type_icon == ord("B")
+        controls._cell_picked(4, 4)                         # empty cell: random free symbol at once
+        picked = window.project.type_icon
+        assert picked not in (0, ord("A"), ord("B")) and vanilla_readable(picked)
+        assert window.project.type_icon_cell == (4, 4)
         controls.symbol_edit.setText("A")
         controls._symbol_edited("A")                        # 'A' draws another cell
-        assert window.project.type_icon == ord("B")
+        assert window.project.type_icon == picked
         assert "TIGER" in controls.status_label.text()
         controls.symbol_edit.setText("U+0173")
         controls._symbol_edited("U+0173")                   # not one byte
-        assert window.project.type_icon == ord("B")
+        assert window.project.type_icon == picked
         assert "one-byte" in controls.status_label.text()
         controls._random_symbol()
         assert window.project.type_icon not in (0, ord("A"), ord("B"))
         assert vanilla_readable(window.project.type_icon)
         assert window.project.type_icon_cell == (4, 4)
+        window.undo()
+        assert window.project.type_icon == picked
         window.undo()
         assert window.project.type_icon == ord("B")
         # Switching to a weapon closes the icon page and disables its tab.

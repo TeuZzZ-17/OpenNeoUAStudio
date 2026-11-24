@@ -28,8 +28,8 @@ from map_editor import bootstrap
 from map_editor.core.resource_catalog import preview_image
 from entity_designer.script_model import WEAPON, _data_root_for_path
 from entity_designer.type_icons import (
-    FREE, TAKEN, IconAtlas, load_atlas, new_key_allowed, parse_symbol,
-    symbol_text, vanilla_readable,
+    FREE, TAKEN, IconAtlas, install_sheet, load_atlas, new_key_allowed, parse_symbol,
+    sheet_grid_problem, sheet_targets, symbol_text, vanilla_readable,
 )
 from studio.exchange.portable import backup_enabled, backup_existing_file, find_existing_path
 from studio.formats.font_def import glyph_token
@@ -347,9 +347,28 @@ class IconSelectorControls(QWidget):
         file_layout = QVBoxLayout(file_group)
         file_layout.setContentsMargins(6, 4, 6, 6)
         file_layout.setSpacing(5)
-        self.page_label = QLabel()
-        self.page_label.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
-        file_layout.addWidget(self.page_label)
+        # The datasheet of the page on show, attached by itself. The original H_FINDER is
+        # fixed; the OpenNeoUA one can be selected or created.
+        self.sheet_label = QLabel()
+        file_layout.addWidget(self.sheet_label)
+        sheet_row = QHBoxLayout()
+        sheet_row.setSpacing(5)
+        self.sheet_edit = QLineEdit()
+        self.sheet_edit.setReadOnly(True)
+        sheet_row.addWidget(self.sheet_edit, 1)
+        self.sheet_browse = QPushButton("Browse")
+        self.sheet_browse.clicked.connect(self._browse_sheet)
+        sheet_row.addWidget(self.sheet_browse)
+        self.sheet_create = QPushButton("Create")
+        self.sheet_create.setToolTip(
+            "Create an empty datasheet with the same grid as the original icons, saved in "
+            "the game folder and attached here.")
+        self.sheet_create.clicked.connect(self._create_sheet)
+        sheet_row.addWidget(self.sheet_create)
+        file_layout.addLayout(sheet_row)
+        self.sheet_hint = QLabel()
+        self.sheet_hint.setWordWrap(True)
+        file_layout.addWidget(self.sheet_hint)
         buttons = QGridLayout()
         buttons.setHorizontalSpacing(5)
         buttons.setVerticalSpacing(5)
@@ -390,13 +409,17 @@ class IconSelectorControls(QWidget):
             self._images["base"] = page_image(self.atlas.image_path)
             if self.atlas.extra_path is not None:
                 self._images["extra"] = page_image(self.atlas.extra_path)
-        if self._page not in self._images:
+        if self.atlas is None:
             self._page = "base"
         self._show_page_on_view()
 
     def _show_page_on_view(self) -> None:
-        self.view.set_atlas(self.atlas, self._images.get(self._page, QImage()), page=self._page)
-        self.page_combo.setEnabled("extra" in self._images)
+        # The OpenNeoUA page can be opened without a datasheet: Create or Select then add one.
+        message = ("No OpenNeoUA datasheet yet: use Create or Select below."
+                   if self._page == "extra" and "extra" not in self._images else "")
+        self.view.set_atlas(self.atlas, self._images.get(self._page, QImage()),
+                            message, page=self._page)
+        self.page_combo.setEnabled(self.atlas is not None)
         with QSignalBlocker(self.page_combo):
             self.page_combo.setCurrentIndex(1 if self._page == "extra" else 0)
 
@@ -405,7 +428,7 @@ class IconSelectorControls(QWidget):
 
     def _page_chosen(self, _index: int) -> None:
         page = self.page_combo.currentData()
-        if page == self._page or page not in self._images:
+        if page == self._page or self.atlas is None:
             return
         self._page = page
         self._show_page_on_view()
@@ -583,12 +606,23 @@ class IconSelectorControls(QWidget):
         elif keys:
             # 'I' is the debug unit: the Database hides it.
             code = next((key for key in keys if key != ord("I")), keys[0])
+        elif project.type_icon_cell == cell and project.type_icon:
+            # Clicking the cell that already holds the new symbol keeps it.
+            code = project.type_icon
         else:
-            typed = parse_symbol(self.symbol_edit.text())
-            code = typed if typed is not None and self.atlas.owner(typed) is None else None
+            # A cell without a symbol gets a random free one at once; Random or the
+            # Symbol field can change it afterwards.
+            code = self.atlas.random_free_key()
+            if code is None:
+                self._hold(cell, "error", "No free one-byte symbol is left.")
+                with QSignalBlocker(self.symbol_edit):
+                    self.symbol_edit.setText("")
+                return
         self._try(code, cell)
         with QSignalBlocker(self.symbol_edit):
-            self.symbol_edit.setText(symbol_text(code) if code else "")
+            # A refused symbol is not shown: the cell was only held, not committed.
+            self.symbol_edit.setText(
+                symbol_text(code) if code and self._pending_cell is None else "")
 
     def _symbol_edited(self, text: str) -> None:
         cell = self._selected_cell()
@@ -627,8 +661,8 @@ class IconSelectorControls(QWidget):
     def _page_path(self) -> Path | None:
         if self.atlas is None:
             return None
-        if self._page == "extra" and self.atlas.extra_path is not None:
-            return self.atlas.extra_path
+        if self._page == "extra":
+            return self.atlas.extra_path  # None while there is no datasheet
         return self.atlas.image_path
 
     def _convert_target(self) -> Path | None:
@@ -645,18 +679,111 @@ class IconSelectorControls(QWidget):
         name = source.stem + ".PNG"
         return find_existing_path(source.parent, name) or source.parent / name
 
+    def _sync_sheet_row(self) -> None:
+        """Show the datasheet of the page on show.
+
+        Original: the H_FINDER found in the game, fixed. OpenNeoUA: the file the engine
+        reads, which can be selected or created (or advice to do so when it is missing).
+        """
+
+        usable = self.atlas is not None
+        extra = usable and self._page == "extra"
+        found = usable and self.atlas.extra_path is not None
+        if not usable:
+            path = None
+        elif extra:
+            path = self.atlas.extra_path or sheet_targets(self._data_root())[1]
+        else:
+            path = self.atlas.image_path
+        self.sheet_label.setText("OpenNeoUA datasheet" if extra else "Default H_FINDER")
+        self.sheet_edit.setText(str(path) if path else "")
+        self.sheet_edit.setCursorPosition(0)
+        self.sheet_edit.setToolTip(str(path) if path else "")
+        self.sheet_edit.setPlaceholderText("No game folder.")
+        self.sheet_browse.setVisible(extra)
+        self.sheet_create.setVisible(extra)
+        self.sheet_browse.setText("Browse" if found else "Select")
+        self.sheet_browse.setToolTip(
+            "Pick a PNG with the same grid as the original icons. It is copied to the path "
+            "shown, the only file the game reads.")
+        if not usable:
+            hint = ""
+        elif not extra:
+            hint = "Original icons, found in the game: this page is fixed and cannot be changed."
+        elif found:
+            hint = ("Your own datasheet: Browse checks the grid of your sheet and copies it "
+                    "to this path, the only file the game reads. The original H_FINDER "
+                    "stays fixed.")
+        else:
+            hint = ("No datasheet found, so new symbols would go to TYPE_NS.FON. Create an "
+                    "empty sheet or select one with the same grid; it is copied to this path.")
+        self.sheet_hint.setText(hint)
+
+    def _browse_sheet(self) -> None:
+        if self.atlas is None:
+            return
+        start = self.atlas.extra_path or sheet_targets(self._data_root())[1]
+        name, _filter = QFileDialog.getOpenFileName(
+            self, "Select datasheet", str(start.parent if start.parent.is_dir() else Path.home()),
+            "PNG page (*.png)")
+        if name:
+            self._install_sheet(Path(name))
+
+    def _create_sheet(self) -> None:
+        self._install_sheet(None)
+
+    def _install_sheet(self, source) -> None:
+        root, atlas = self._data_root(), self.atlas
+        if root is None or atlas is None:
+            return
+        if source is not None:
+            image = page_image(source)
+            if image.isNull():
+                self._show_status("error", f"Cannot read {source.name}.")
+                return
+            problem = sheet_grid_problem(atlas, image.width(), image.height())
+            if problem:
+                self._show_status("error", problem)
+                return
+        fon, png = sheet_targets(root)
+        replaces = source is None or not (png.exists() and source.resolve() == png.resolve())
+        if replaces and png.exists() and QMessageBox.question(
+                self, "Datasheet", f"Replace {png.name}?"
+                + (" A .bak copy is kept." if backup_enabled() else "")) \
+                != QMessageBox.StandardButton.Yes:
+            return
+
+        def draw_empty(path, width, height):
+            # Same look as the original page: red separators, yellow cells.
+            sheet = QImage(width, height, QImage.Format.Format_ARGB32)
+            sheet.fill(QColor(255, 0, 0))
+            painter = QPainter(sheet)
+            for y in range(1, height - 1, atlas.cell_height + 1):
+                for x in range(1, width - 1, atlas.cell_width + 1):
+                    painter.fillRect(x, y, atlas.cell_width, atlas.cell_height,
+                                     QColor(*_YELLOW))
+            painter.end()
+            if not sheet.save(str(path), "PNG"):
+                raise OSError(f"cannot write {path}")
+
+        try:
+            installed = install_sheet(root, atlas, source, draw_empty)
+        except OSError as error:
+            self._show_status("error", f"Datasheet not written: {error}")
+            return
+        self._page = "extra"
+        self.sync()
+        self._show_status("ok", f"Datasheet ready: {installed.name}.")
+
     def _sync_page_buttons(self) -> None:
+        self._sync_sheet_row()
         source = self._page_path()
         for button in (self.open_button, self.open_with_button,
                        self.folder_button, self.convert_button):
             button.setEnabled(source is not None)
-        self.page_label.setText(source.name if source else "No font page.")
-        self.page_label.setToolTip(str(source) if source else "")
-        # The OpenNeoUA page exists only as a PNG: nothing to convert.
+        # The OpenNeoUA page exists only as a PNG: nothing to convert, so no button.
+        self.convert_button.setVisible(self._page != "extra")
         if self._page == "extra":
-            self.convert_button.setEnabled(False)
-            self.convert_button.setText("Convert")
-            self.convert_button.setToolTip("The OpenNeoUA page is a PNG only.")
             return
         target = self._convert_target()
         if target is None:
