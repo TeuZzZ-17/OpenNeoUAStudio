@@ -31,6 +31,8 @@ class WorldScene:
         self.lib = None
         self.materials = []
         self._material_keys = {}
+        self.tints = [(1.0, 1.0, 1.0, 1.0)]
+        self._tint_keys = {(255, 255, 255, 255): 0}
         self._templates = {}
         self._previews = {}
         self.cells = {}
@@ -53,6 +55,8 @@ class WorldScene:
         self.lib = lib
         self.materials.clear()
         self._material_keys.clear()
+        self.tints = [(1.0, 1.0, 1.0, 1.0)]
+        self._tint_keys = {(255, 255, 255, 255): 0}
         self._templates.clear()
         self._previews.clear()
         self.clear()
@@ -92,6 +96,17 @@ class WorldScene:
             self.materials.append(s)
         return index, s
 
+    def _tint_index(self, tint) -> int:
+        if tint is None or tint == (255, 255, 255, 255):
+            return 0
+        key = tuple(int(c) for c in tint)
+        index = self._tint_keys.get(key)
+        if index is None:
+            index = len(self.tints)
+            self._tint_keys[key] = index
+            self.tints.append(tuple(c / 255.0 for c in key))
+        return index
+
     def _template(self, key, mesh, ground_only=False, filler=False, structure_only=False):
         if key in self._templates:
             return self._templates[key]
@@ -106,10 +121,11 @@ class WorldScene:
                 continue
             index, surface = self._material(face)
             mode = {'none': 0, 'clear': 1, 'flat': 2}[surface.tracy_mode]
+            tint_idx = self._tint_index(getattr(face, 'tint', None))
             shade = surface.shade_value if surface.shade_mode != 'none' else -1
             # Optional preview codes style temporary faces without changing shared materials.
             attrs = (index if surface.kind == 'texture' else -1,
-                     surface.width, surface.height, shade, mode,
+                     surface.width, surface.height, shade, mode + tint_idx * 4,
                      surface.solid_index or 0,
                      getattr(self.lib, "preview_face_codes", {}).get(id(face), 1 if ground else -1))
             vertices = [(v[0] + ox, v[1], v[2] + oz, *u, *attrs, 0, 0, 0, 0)
@@ -142,11 +158,17 @@ class WorldScene:
         border = col in (0, doc.mw - 1) or row in (0, doc.mh - 1)
         # Third key item: 0 interior, 1 border with walls, 2 border ground only.
         # Plain 1 equals True, so the existing ('sector', typ, True) key keeps working.
+        building = special[1].building if special else self._number(doc.grids['blg'][row][col])
+        bdef = self.lib.buildings.get(building) if building else None
+        btint = bdef.tint if bdef is not None else (255, 255, 255, 255)
         ground_border = border and not self.border_walls
-        key = ('sector', typ, 2 if ground_border else int(border))
+        key = (('sector', typ, 2 if ground_border else int(border))
+               if btint == (255, 255, 255, 255)
+               else ('sector', typ, 2 if ground_border else int(border), btint))
         template = self._templates.get(key)
         if template is None:
-            template = self._template(key, self.lib.mesh(typ), ground_only=ground_border)
+            sector_mesh = self.lib.tinted_mesh(self.lib.mesh(typ), btint)
+            template = self._template(key, sector_mesh, ground_only=ground_border)
         x, _, z = terrain.cell_center(col, row)
         cell_ref = (row * doc.mw + col,) * 4
         parts = [(template, (x, 0, z), cell_ref, False)]
@@ -160,13 +182,19 @@ class WorldScene:
                 structure = self._template(key, self.lib.mesh(structure_typ),
                                            ground_only=border, structure_only=True)
             parts.append((structure, (x, 0, z), cell_ref, False))
-        building = special[1].building if special else self._number(doc.grids['blg'][row][col])
         if building:
             key = ('building', building, border)
             template = self._templates.get(key)
             if template is None:
                 template = self._template(key, self.lib.building_mesh(building), ground_only=border)
             parts.append((template, (x, 0, z), cell_ref, False))
+            dec_mesh = self.lib.building_decoration_mesh(building)
+            if dec_mesh.faces:
+                dec_key = ('building-dec', building, border)
+                dec_template = self._templates.get(dec_key)
+                if dec_template is None:
+                    dec_template = self._template(dec_key, dec_mesh, ground_only=border)
+                parts.append((dec_template, (x, 0, z), cell_ref, False))
         desc = self.lib.assets.sdf.sectors.get(typ)
         current_ground = desc.ground if desc else 0
         for vertical in (False, True):

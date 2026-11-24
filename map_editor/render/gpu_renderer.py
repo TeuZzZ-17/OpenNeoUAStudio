@@ -65,6 +65,7 @@ uniform usampler2DArray textures;
 uniform usampler2D shades;
 uniform usampler2D tracy;
 uniform usampler2D backdrop;
+uniform samplerBuffer tints;
 uniform ivec2 mapSize;
 uniform bool groundOnly;
 layout(location=0) out uint indexOut;
@@ -72,16 +73,21 @@ layout(location=0) out uint indexOut;
 layout(location=1) out int cellOut;
 layout(location=2) out vec4 edgesOut;
 #endif
+layout(location=3) out vec4 tintOut;
 void main(){
     if(groundOnly && mode.z<0.0) discard;
+    int rawMode=int(mode.x);
+    int tracyMode=rawMode&3;
+    int tintIdx=rawMode>>2;
     uint source=uint(mode.y);
     if(mat.x>=0.0){
         ivec2 size=ivec2(mat.yz);
         ivec2 p=clamp(ivec2(floor(textureUV/256.0*mat.yz)),ivec2(0),size-1);
         source=texelFetch(textures,ivec3(p,int(mat.x)),0).r;
-        if(mode.x==1.0 && source==0u) discard;
+        if(tracyMode==1 && source==0u) discard;
     }
     if(mat.w>=0.0) source=texelFetch(shades,ivec2(int(source),int(mat.w)),0).r;
+    tintOut=tintIdx>0 ? texelFetch(tints,tintIdx) : vec4(1.0);
     int code=int(mode.z);
     vec2 sector=vec2(world.x,-world.z)/1200.0;
     ivec2 cell=ivec2(floor(sector));
@@ -120,6 +126,7 @@ uniform sampler2D edgeMap;
 uniform usampler2D states;
 uniform sampler2D palette;
 uniform sampler2D sky;
+uniform sampler2D tintMap;
 uniform samplerBuffer unitStyles;
 uniform int unitCount;
 uniform vec3 ownerColors[8];
@@ -150,6 +157,9 @@ void main(){
         return;
     }
     color=texelFetch(palette,ivec2(int(index),0),0);
+    vec4 faceTint=texelFetch(tintMap,p,0);
+    if(faceTint.rgb!=vec3(1.0)) color.rgb=max(max(color.r,color.g),color.b)*faceTint.rgb;
+    color.a*=faceTint.a;
     if(showOverlays && abs(code)<=mapSize.x*mapSize.y && code!=0){
         int id=abs(code)-1;
         if(stateAt(ivec2(id%mapSize.x,id/mapSize.x)).a==2u){
@@ -308,15 +318,19 @@ class GpuRenderer:
         self.opaque_program, self.flat_program, self.screen_program = programs
         self.screen_vao = int(gl.glGenVertexArrays(1))
         self._locations = {}
-        self.textures = [int(x) for x in gl.glGenTextures(13)]
+        self.textures = [int(x) for x in gl.glGenTextures(15)]
         (self.atlas, self.shades, self.tracy, self.palette, self.sky,
-         self.states, self.indices, self.ids, self.edges, self.depth, self.backdrop, self.heights, self.unit_styles) = self.textures
+         self.states, self.indices, self.ids, self.edges, self.depth, self.backdrop, self.heights, self.unit_styles,
+         self.tint_map, self.tint_table) = self.textures
         self.fbo = int(gl.glGenFramebuffers(1))
         self.height_buffer = int(gl.glGenBuffers(1))
         self.unit_buffer = int(gl.glGenBuffers(1))
+        self.tint_buffer = int(gl.glGenBuffers(1))
         self._unit_key = None
+        self._tint_key = None
         self.unit_count = 0
         self.set_unit_styles([])
+        self.set_tints([(1.0, 1.0, 1.0, 1.0)])
         self.size = (0, 0)
         self.capacity = (0, 0)
         self.map_size = (1, 1)
@@ -414,6 +428,7 @@ class GpuRenderer:
             palette = np.full((1, 256, 4), 255, np.uint8)
             palette[0, :, :3] = tables.display_palette
             self._image(self.palette, palette, gl.GL_RGBA8, gl.GL_RGBA)
+        self.set_tints(getattr(scene, 'tints', [(1.0, 1.0, 1.0, 1.0)]))
         self._upload_materials(scene.materials)
         groups = getattr(scene, 'instances', {})
         for key in list(self.instance_buffers):
@@ -496,6 +511,7 @@ class GpuRenderer:
         attachments = ((self.indices, gl.GL_R8UI, gl.GL_RED_INTEGER, gl.GL_UNSIGNED_BYTE, gl.GL_COLOR_ATTACHMENT0),
                        (self.ids, gl.GL_R32I, gl.GL_RED_INTEGER, gl.GL_INT, gl.GL_COLOR_ATTACHMENT1),
                        (self.edges, gl.GL_RGBA16F, gl.GL_RGBA, gl.GL_FLOAT, gl.GL_COLOR_ATTACHMENT2),
+                       (self.tint_map, gl.GL_RGBA8, gl.GL_RGBA, gl.GL_UNSIGNED_BYTE, gl.GL_COLOR_ATTACHMENT3),
                        (self.depth, gl.GL_DEPTH_COMPONENT32F, gl.GL_DEPTH_COMPONENT, gl.GL_FLOAT, gl.GL_DEPTH_ATTACHMENT))
         for texture, internal, fmt, dtype, attachment in attachments:
             gl.glBindTexture(gl.GL_TEXTURE_2D, texture)
@@ -503,7 +519,7 @@ class GpuRenderer:
             gl.glTexParameteri(gl.GL_TEXTURE_2D, gl.GL_TEXTURE_MAG_FILTER, gl.GL_NEAREST)
             gl.glTexImage2D(gl.GL_TEXTURE_2D, 0, internal, width, height, 0, fmt, dtype, None)
             gl.glFramebufferTexture2D(gl.GL_FRAMEBUFFER, attachment, gl.GL_TEXTURE_2D, texture, 0)
-        gl.glDrawBuffers(3, [gl.GL_COLOR_ATTACHMENT0, gl.GL_COLOR_ATTACHMENT1, gl.GL_COLOR_ATTACHMENT2])
+        gl.glDrawBuffers(4, [gl.GL_COLOR_ATTACHMENT0, gl.GL_COLOR_ATTACHMENT1, gl.GL_COLOR_ATTACHMENT2, gl.GL_COLOR_ATTACHMENT3])
         if gl.glCheckFramebufferStatus(gl.GL_FRAMEBUFFER) != gl.GL_FRAMEBUFFER_COMPLETE:
             raise RuntimeError('Unable to create the indexed GPU framebuffer')
         gl.glBindTexture(gl.GL_TEXTURE_2D, self.backdrop)
@@ -520,9 +536,23 @@ class GpuRenderer:
                                       ('shades', self.shades, 1, gl.GL_TEXTURE_2D),
                                       ('tracy', self.tracy, 2, gl.GL_TEXTURE_2D),
                                       ('backdrop', self.backdrop, 3, gl.GL_TEXTURE_2D),
-                                      ('heights', self.heights, 4, gl.GL_TEXTURE_BUFFER)):
+                                      ('heights', self.heights, 4, gl.GL_TEXTURE_BUFFER),
+                                      ('tints', self.tint_table, 5, gl.GL_TEXTURE_BUFFER)):
             self._bind(tex, unit, target)
             gl.glUniform1i(self.uniform(program, name), unit)
+
+    def set_tints(self, tints):
+        data = np.asarray(tints, np.float32).reshape(-1, 4)
+        key = data.tobytes()
+        if key == self._tint_key:
+            return
+        self._tint_key = key
+        if not len(data):
+            data = np.ones((1, 4), np.float32)
+        gl.glBindBuffer(gl.GL_TEXTURE_BUFFER, self.tint_buffer)
+        gl.glBufferData(gl.GL_TEXTURE_BUFFER, data.nbytes, data, gl.GL_DYNAMIC_DRAW)
+        gl.glBindTexture(gl.GL_TEXTURE_BUFFER, self.tint_table)
+        gl.glTexBuffer(gl.GL_TEXTURE_BUFFER, gl.GL_RGBA32F, self.tint_buffer)
 
     def set_unit_styles(self, styles):
         data = np.asarray(styles,np.float32).reshape(-1,4)
@@ -602,7 +632,7 @@ class GpuRenderer:
                                     int(lo[i,0]), int(lo[i,1]), int(hi[i,0]), int(hi[i,1]))
                                    for i in visible)
         if transparent:
-            gl.glDrawBuffers(1, [gl.GL_COLOR_ATTACHMENT0])
+            gl.glDrawBuffers(4, [gl.GL_COLOR_ATTACHMENT0, gl.GL_NONE, gl.GL_NONE, gl.GL_COLOR_ATTACHMENT3])
             gl.glReadBuffer(gl.GL_COLOR_ATTACHMENT0)
             gl.glDepthMask(False)
             self._geometry_program(self.flat_program, matrix)
@@ -638,10 +668,11 @@ class GpuRenderer:
         gl.glDisable(gl.GL_BLEND); gl.glDisable(gl.GL_SCISSOR_TEST)
         gl.glDisable(gl.GL_STENCIL_TEST)
         gl.glDisable(gl.GL_FRAMEBUFFER_SRGB)
-        gl.glDrawBuffers(3, [gl.GL_COLOR_ATTACHMENT0, gl.GL_COLOR_ATTACHMENT1, gl.GL_COLOR_ATTACHMENT2])
+        gl.glDrawBuffers(4, [gl.GL_COLOR_ATTACHMENT0, gl.GL_COLOR_ATTACHMENT1, gl.GL_COLOR_ATTACHMENT2, gl.GL_COLOR_ATTACHMENT3])
         gl.glClearBufferuiv(gl.GL_COLOR, 0, np.zeros(4, np.uint32))
         gl.glClearBufferiv(gl.GL_COLOR, 1, np.zeros(4, np.int32))
         gl.glClearBufferfv(gl.GL_COLOR, 2, np.zeros(4, np.float32))
+        gl.glClearBufferfv(gl.GL_COLOR, 3, np.ones(4, np.float32))
         gl.glDepthMask(True)
         gl.glClearBufferfv(gl.GL_DEPTH, 0, np.ones(1, np.float32))
         gl.glEnable(gl.GL_DEPTH_TEST); gl.glDepthFunc(gl.GL_LEQUAL)
@@ -662,6 +693,8 @@ class GpuRenderer:
                                           ('palette', self.palette), ('sky', self.sky))):
             self._bind(tex, unit)
             gl.glUniform1i(self.uniform(program, name), unit)
+        self._bind(self.tint_map, 7)
+        gl.glUniform1i(self.uniform(program, 'tintMap'), 7)
         gl.glUniform2i(self.uniform(program, 'mapSize'), *self.map_size)
         self._bind(self.unit_styles,6,gl.GL_TEXTURE_BUFFER)
         gl.glUniform1i(self.uniform(program,'unitStyles'),6)
@@ -790,6 +823,7 @@ class GpuRenderer:
         gl.glDeleteFramebuffers(1, [self.fbo])
         gl.glDeleteBuffers(1, [self.height_buffer])
         gl.glDeleteBuffers(1, [self.unit_buffer])
+        gl.glDeleteBuffers(1, [self.tint_buffer])
         gl.glDeleteVertexArrays(1, [self.screen_vao])
         if self.owns_programs:
             for program in (self.opaque_program, self.flat_program, self.screen_program):

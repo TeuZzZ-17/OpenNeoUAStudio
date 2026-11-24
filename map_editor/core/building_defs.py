@@ -34,6 +34,20 @@ class GunMount:
     direction: tuple[float, float, float] = (0.0, 0.0, 1.0)
 
 
+WHITE_TINT: tuple[int, int, int, int] = (255, 255, 255, 255)
+
+
+@dataclass
+class DecorationVisual:
+    mode: str = ""
+    vp: int = 0
+    base: str = ""
+    three_ds: str = ""
+    scale: tuple[float, float, float] = (1.0, 1.0, 1.0)
+    tint: tuple[int, int, int, int] = WHITE_TINT
+    offset: tuple[float, float, float] = (0.0, 0.0, 0.0)
+
+
 @dataclass
 class BuildingDef:
     id: int
@@ -52,6 +66,8 @@ class BuildingDef:
     debug_note: str = ""
     guns: list[GunMount] = field(default_factory=list)
     enabled_factions: set = field(default_factory=set)
+    tint: tuple[int, int, int, int] = WHITE_TINT
+    decoration: DecorationVisual = field(default_factory=DecorationVisual)
 
     @property
     def is_radar(self) -> bool:
@@ -145,6 +161,7 @@ def parse_building_text(text: str, source: str = "", result=None) -> dict[int, B
                 lines.append(raw)
         body = '\n'.join(lines)
         values: dict[str, str] = {}
+        last_values: dict[str, str] = {}
         debug_note = ""
         for assign in _ASSIGN.finditer(body):
             key = assign.group(1).strip().lower()
@@ -154,7 +171,9 @@ def parse_building_text(text: str, source: str = "", result=None) -> dict[int, B
             if semi >= 0:
                 comment = raw[semi + 1:]
                 raw = raw[:semi]
-            values.setdefault(key, raw.strip())
+            cleaned = raw.strip()
+            values.setdefault(key, cleaned)
+            last_values[key] = cleaned
             if "debug" in comment.casefold():
                 debug_note += comment.strip() + " "
         guns: dict[int, dict] = {}
@@ -194,6 +213,27 @@ def parse_building_text(text: str, source: str = "", result=None) -> dict[int, B
                 vehicle, triplet("pos", old.pos),
                 triplet("dir", old.direction)))
         values.pop("_act", None)
+        from .vehicle_defs import _positive_scale, _script_int, _script_tuple, parse_tint
+
+        prev_dec = previous.decoration if previous is not None else DecorationVisual()
+        decoration = DecorationVisual(
+            mode=(last_values["decoration_fx_mode"].strip('"').strip().lower()
+                  if "decoration_fx_mode" in last_values else prev_dec.mode),
+            vp=(_script_int(last_values["decoration_fx_vp"], prev_dec.vp)
+                if "decoration_fx_vp" in last_values else prev_dec.vp),
+            base=(last_values["decoration_fx_base"].strip('"')
+                  if "decoration_fx_base" in last_values else prev_dec.base),
+            three_ds=(last_values["decoration_fx_3ds"].strip('"')
+                      if "decoration_fx_3ds" in last_values else prev_dec.three_ds),
+            scale=(_positive_scale(last_values["decoration_fx_scale_xyz"], prev_dec.scale)
+                   if "decoration_fx_scale_xyz" in last_values else prev_dec.scale),
+            tint=(parse_tint(last_values["decoration_fx_tint"])
+                  if "decoration_fx_tint" in last_values else prev_dec.tint),
+            offset=(_script_tuple(last_values["decoration_fx_offset_xyz"], prev_dec.offset)
+                    if "decoration_fx_offset_xyz" in last_values else prev_dec.offset),
+        )
+        tint = (parse_tint(last_values["tint"])
+                if "tint" in last_values else (previous.tint if previous is not None else WHITE_TINT))
         definition = BuildingDef(
             id=bid,
             name=values.get("name", f"Building {bid}"),
@@ -209,6 +249,8 @@ def parse_building_text(text: str, source: str = "", result=None) -> dict[int, B
             source=source,
             debug_note=debug_note.strip(),
             guns=mounts,
+            tint=tint,
+            decoration=decoration,
         )
         if previous is not None:
             for key in ('name', 'model', 'sec_type', 'power', 'energy', 'production_cost', 'building_time', 'type_icon'):

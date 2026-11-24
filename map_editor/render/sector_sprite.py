@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 from .camera import IsoCamera
 from .sector_mesh import SectorMesh, SectorMeshLibrary
@@ -86,7 +86,8 @@ def build_pieces(lib: SectorMeshLibrary, mesh: SectorMesh, cam: IsoCamera,
             source_face_id=id(face), polygon_id=face.poly_id, screen=screen,
             uvs=tuple(tuple(a) for a in poly.attributes),
             camera_vertices=tuple(tuple(v) for v in poly.vertices),
-            surface=surface, source_order=face_order, sort_depth=depth))
+            surface=surface, source_order=face_order, sort_depth=depth,
+            tint=getattr(face, 'tint', None)))
     return pieces
 
 
@@ -130,10 +131,50 @@ def sprite_input(lib: SectorMeshLibrary, mesh: SectorMesh, yaw: float,
     return width, height, origin, pieces
 
 
+def apply_colorize_rgba(rgba: np.ndarray, owner: np.ndarray, coverage: np.ndarray,
+                        tints: list[tuple[int, int, int, int]]) -> None:
+    """Apply the engine Colorize shader rule in-place on an RGBA buffer."""
+    for idx, (r, g, b, a) in enumerate(tints):
+        if idx == 0 or (r, g, b, a) == (255, 255, 255, 255):
+            continue
+        mask = (owner == idx) & coverage
+        if not np.any(mask):
+            continue
+        if (r, g, b) != (255, 255, 255):
+            intensity = rgba[mask, :3].max(axis=1).astype(np.float32)
+            rgba[mask, 0] = np.clip(intensity * (r / 255.0), 0, 255).astype(np.uint8)
+            rgba[mask, 1] = np.clip(intensity * (g / 255.0), 0, 255).astype(np.uint8)
+            rgba[mask, 2] = np.clip(intensity * (b / 255.0), 0, 255).astype(np.uint8)
+        if a != 255:
+            rgba[mask, 3] = np.round(rgba[mask, 3].astype(np.float32) * (a / 255.0)).astype(np.uint8)
+
+
 def rasterize_sprite(data, tables, ppu) -> Sprite | None:
     width, height, origin, pieces = data
     if not pieces:
         return None
+    has_tint = any(p.tint is not None and p.tint != (255, 255, 255, 255) for p in pieces)
+    if has_tint:
+        tints: list[tuple[int, int, int, int]] = [(255, 255, 255, 255)]
+        tint_keys = {(255, 255, 255, 255): 0}
+        remapped = []
+        for piece in pieces:
+            t = piece.tint if piece.tint is not None else (255, 255, 255, 255)
+            idx = tint_keys.get(t)
+            if idx is None:
+                idx = len(tints)
+                tint_keys[t] = idx
+                tints.append(t)
+            remapped.append(replace(piece, polygon_id=idx))
+        result = IndexedRasterizer.render(
+            width, height, remapped, tables, background_index=0,
+            collect_diagnostics=False, track_polygon_owner=True, track_flat_owner=True)
+        rgba = np.frombuffer(result.to_rgba(tables, transparent_background=True), dtype=np.uint8).reshape(
+            height, width, 4).copy()
+        apply_colorize_rgba(rgba, result.polygon_owner, result.coverage, tints)
+        image = QImage(rgba.data, width, height, width * 4,
+                       QImage.Format.Format_RGBA8888).copy()
+        return Sprite(image, origin, ppu)
     result = IndexedRasterizer.render(
         width, height, pieces, tables, background_index=0,
         collect_diagnostics=False, track_polygon_owner=False)

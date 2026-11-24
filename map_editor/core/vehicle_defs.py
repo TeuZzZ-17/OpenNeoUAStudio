@@ -2,12 +2,45 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+import math
 from pathlib import Path
 import re
 
-from .building_defs import GunMount, parse_building_time
+from .building_defs import DecorationVisual, GunMount, WHITE_TINT, parse_building_time
 
 ROBO_GUN_MAX_COUNT = 20
+
+
+def parse_tint(value: str) -> tuple[int, int, int, int]:
+    """Parse an engine R|G|B[|A] tint clamped to 0..255; invalid values keep WHITE_TINT."""
+    parts = value.strip().split()
+    if not parts:
+        return WHITE_TINT
+    pieces = parts[0].split('|')
+    if len(pieces) not in (3, 4):
+        return WHITE_TINT
+    comp = [255, 255, 255, 255]
+    for index, piece in enumerate(pieces):
+        if not re.fullmatch(r'[+-]?\d+', piece):
+            return WHITE_TINT
+        comp[index] = max(0, min(255, int(piece, 10)))
+    return (comp[0], comp[1], comp[2], comp[3])
+
+
+def _positive_scale(value: str, fallback: tuple[float, float, float]) -> tuple[float, float, float]:
+    """Match ParseVPScaleParam: 3 floats separated by '|', each finite and > 0 else 1.0."""
+    parts = value.strip().split()
+    pieces = parts[0].split('|') if parts else []
+    if len(pieces) != 3:
+        return fallback
+    result = []
+    for piece in pieces:
+        try:
+            num = float(piece)
+        except ValueError:
+            return fallback
+        result.append(num if math.isfinite(num) and num > 0.0 else 1.0)
+    return (result[0], result[1], result[2])
 
 
 def _script_int(value: str, default: int | None = 0) -> int | None:
@@ -68,6 +101,8 @@ class VehicleVisual:
     type_icon: str = ""
     scale: tuple[float, float, float] = (1.0, 1.0, 1.0)
     rotation: tuple[float, float, float] = (0.0, 0.0, 0.0)
+    tint: tuple[int, int, int, int] = WHITE_TINT
+    decoration: DecorationVisual = field(default_factory=DecorationVisual)
 
 
 def parse_vehicle_text(text: str, result=None):
@@ -106,9 +141,25 @@ def parse_vehicle_text(text: str, result=None):
                 elif key == '3ds_normal':
                     active.three_ds_normal = value.strip('"')
                 elif key == 'scale_xyz':
-                    active.scale = _script_tuple(value, active.scale)
+                    active.scale = _positive_scale(value, active.scale)
                 elif key == 'rotation_xyz':
                     active.rotation = _script_tuple(value, active.rotation)
+                elif key == 'tint':
+                    active.tint = parse_tint(value)
+                elif key == 'decoration_fx_mode':
+                    active.decoration.mode = value.strip('"').strip().lower()
+                elif key == 'decoration_fx_vp':
+                    active.decoration.vp = _script_int(value, active.decoration.vp)
+                elif key == 'decoration_fx_base':
+                    active.decoration.base = value.strip('"')
+                elif key == 'decoration_fx_3ds':
+                    active.decoration.three_ds = value.strip('"')
+                elif key == 'decoration_fx_scale_xyz':
+                    active.decoration.scale = _positive_scale(value, active.decoration.scale)
+                elif key == 'decoration_fx_tint':
+                    active.decoration.tint = parse_tint(value)
+                elif key == 'decoration_fx_offset_xyz':
+                    active.decoration.offset = _script_tuple(value, active.decoration.offset)
                 elif key == 'building_time':
                     active.building_time = parse_building_time(value)
                 elif key == 'energy':

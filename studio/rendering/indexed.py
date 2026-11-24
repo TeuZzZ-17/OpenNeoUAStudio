@@ -301,6 +301,7 @@ class IndexedPiece:
     fade_start: float = 0.0
     fade_length: float = 600.0
     vertex_distances: tuple[float, ...] = ()
+    tint: tuple[int, int, int, int] | None = None
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "screen", _points(self.screen, 2, "screen"))
@@ -413,6 +414,7 @@ class IndexedRasterizer:
                flat_tracy_destination_override: int | None = None, *,
                collect_diagnostics: bool = True,
                track_polygon_owner: bool = True,
+               track_flat_owner: bool = False,
                background_indices: bytes | None = None) -> IndexedRenderResult:
         if isinstance(width, bool) or isinstance(height, bool):
             raise TypeError("render dimensions must be integers")
@@ -521,6 +523,7 @@ class IndexedRasterizer:
                         piece, input_order, tri_screen, tri_uvs, tri_camera,
                         tri_distances,
                         shader, tracy, counters, forced, width, height,
+                        track_flat_owner,
                     )
                 else:
                     face_seen = (
@@ -532,6 +535,7 @@ class IndexedRasterizer:
                         tri_screen, tri_uvs, tri_camera, tri_distances,
                         tables, counters, forced,
                         width, height,
+                        track_flat_owner,
                     )
 
         if _np is not None:
@@ -577,7 +581,8 @@ class IndexedRasterizer:
                         piece: IndexedPiece, input_order: int,
                         screen, uvs, camera, distances, shader, tracy,
                         counters, forced,
-                        width: int, height: int) -> None:
+                        width: int, height: int,
+                        track_flat_owner: bool = False) -> None:
         left = max(0, math.floor(min(point[0] for point in screen)))
         right = min(width - 1, math.ceil(max(point[0] for point in screen)))
         top = max(0, math.floor(min(point[1] for point in screen)))
@@ -724,6 +729,8 @@ class IndexedRasterizer:
             counters["flat_tracy_changed_samples"] += int(_np.count_nonzero(changed))
             framebuffer_sub[mask] = output[mask]
             coverage_sub[changed] = True
+            if track_flat_owner and owner_sub is not None:
+                owner_sub[changed] = piece.polygon_id
             if flat_face_bit is not None:
                 seen_view[mask] |= flat_face_bit
             elif sparse_seen is not None:
@@ -747,7 +754,8 @@ class IndexedRasterizer:
                          piece: IndexedPiece, input_order: int,
                          screen, uvs, camera, distances, tables, counters,
                          forced,
-                         width: int, height: int) -> None:
+                         width: int, height: int,
+                         track_flat_owner: bool = False) -> None:
         left = max(0, math.floor(min(point[0] for point in screen)))
         right = min(width - 1, math.ceil(max(point[0] for point in screen)))
         top = max(0, math.floor(min(point[1] for point in screen)))
@@ -843,6 +851,8 @@ class IndexedRasterizer:
                     if output != background:
                         counters["flat_tracy_changed_samples"] += 1
                         IndexedRasterizer._set(coverage, y, x, True)
+                        if track_flat_owner and owner is not None:
+                            IndexedRasterizer._set(owner, y, x, piece.polygon_id)
                     IndexedRasterizer._set(framebuffer, y, x, output)
                     if face_seen is not None:
                         face_seen.add(pixel_key)

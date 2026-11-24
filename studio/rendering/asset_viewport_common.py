@@ -115,6 +115,7 @@ class ViewFace:
     block_index: int = -1           # structural ADES material identity
     billboard_center: tuple[float, float, float] | None = None
     emitter_block: int = -1
+    tint: tuple[int, int, int, int] | None = None
 
 
 @dataclass(frozen=True)

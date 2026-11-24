@@ -12,7 +12,7 @@ import numpy as np
 from ..core.asset_bridge import SetAssets
 from ..core.sector_resolver import (STATE_INTACT, ResolvedSector,
                                     SectorResolver)
-from ..core.vehicle_defs import load_vehicle_files
+from ..core.vehicle_defs import WHITE_TINT, load_vehicle_files
 from ..core.building_defs import load_building_files
 from .. import bootstrap
 
@@ -78,6 +78,7 @@ class SectorMeshLibrary:
         self._gun_meshes = {}
         self._host_meshes = {}
         self._vehicle_meshes = {}
+        self._building_decorations = {}
         self._collision_skeletons = {}
         self._material_adapters = {}
 
@@ -196,11 +197,40 @@ class SectorMeshLibrary:
         return mesh
 
     def actor_mesh(self, vehicle_id: int) -> SectorMesh:
-        """Return a vehicle body, composing mounted guns for Host Stations."""
+        """Return a vehicle body, composing mounted guns for Host Stations and unit_num_guns."""
         visual = self.vehicles.get(vehicle_id)
-        if visual is not None and visual.model.casefold() == 'robo':
+        if visual is not None and (visual.model.casefold() == 'robo' or visual.guns):
             return self.host_mesh(vehicle_id)
         return self.vehicle_mesh(vehicle_id)
+
+    def _resolve_visual_faces(self, vp: int, base_path: str, three_ds_path: str) -> tuple[list | None, str]:
+        """Resolve faces in engine priority order: 3DS -> BASE -> positional VP fallback."""
+        if three_ds_path:
+            path = self._visual_path(three_ds_path)
+            if path is not None:
+                try:
+                    faces = list(self._three_ds_faces(path))
+                    if faces:
+                        return faces, three_ds_path
+                except (OSError, ValueError, struct.error):
+                    pass
+        base = base_path
+        faces = None
+        if base:
+            path = self._visual_path(base)
+            if path is not None:
+                # Exact paths win over same-named files elsewhere in a set.
+                from studio.assets.family import load_asset_family
+                obj = load_asset_family(path, [self.assets.set_dir], {}, self.assets.archive)
+                faces = self._family_faces(obj.root_object, obj)
+        else:
+            base = (self._vp_names[vp] if 0 <= vp < len(self._vp_names) else '')
+            faces = self._base_faces(base, set_only=True) if base else None
+        if faces is None:
+            # The engine falls back to the positional VP when an external asset fails.
+            fallback = (self._vp_names[vp] if 0 <= vp < len(self._vp_names) else '')
+            faces = self._base_faces(fallback, set_only=True) if fallback else None
+        return faces, (base or f'VP {vp}')
 
     def vehicle_mesh(self, vehicle_id: int) -> SectorMesh:
         """Use the same visual and material loader for guns and squad members."""
@@ -209,40 +239,21 @@ class SectorMeshLibrary:
         mesh = SectorMesh(-1)
         visual = self.vehicles.get(vehicle_id)
         if visual is not None:
-            if visual.three_ds_normal:
-                path = self._visual_path(visual.three_ds_normal)
-                if path is not None:
-                    try:
-                        mesh.faces = [(face, 0, 0) for face in self._three_ds_faces(path)]
-                    except (OSError, ValueError, struct.error):
-                        mesh.faces = []
-                    if mesh.faces:
-                        self._vehicle_meshes[vehicle_id] = mesh
-                        return mesh
-            base = visual.base_normal
-            if base:
-                path = self._visual_path(base)
-                if path is not None:
-                    # Exact paths win over same-named files elsewhere in a set.
-                    from studio.assets.family import load_asset_family
-                    obj = load_asset_family(path, [self.assets.set_dir], {}, self.assets.archive)
-                    faces = self._family_faces(obj.root_object, obj)
-                else:
-                    faces = None
-            else:
-                base = (self._vp_names[visual.vp_normal]
-                        if 0 <= visual.vp_normal < len(self._vp_names) else '')
-                faces = self._base_faces(base, set_only=True) if base else None
+            faces, label = self._resolve_visual_faces(
+                visual.vp_normal, visual.base_normal, visual.three_ds_normal)
             if faces is None:
-                # The engine falls back to the positional VP when an external BASE fails.
-                fallback = (self._vp_names[visual.vp_normal]
-                            if 0 <= visual.vp_normal < len(self._vp_names) else '')
-                faces = self._base_faces(fallback, set_only=True) if fallback else None
-            if faces is None:
-                mesh.missing.append(base or f'VP {visual.vp_normal}')
+                mesh.missing.append(label)
             else:
-                for face in faces:
-                    mesh.faces.append((face, 0, 0))
+                transformed = _transform_faces(
+                    faces, scale=visual.scale, rotation=visual.rotation, tint=visual.tint)
+                mesh.faces.extend((face, 0, 0) for face in transformed)
+            dec = visual.decoration
+            if dec.mode == 'persistent' and dec.tint[3] > 0 and (dec.vp > 0 or dec.base or dec.three_ds):
+                dec_faces, _ = self._resolve_visual_faces(dec.vp, dec.base, dec.three_ds)
+                if dec_faces:
+                    transformed_dec = _transform_faces(
+                        dec_faces, scale=dec.scale, tint=dec.tint, offset=dec.offset)
+                    mesh.faces.extend((face, 0, 0) for face in transformed_dec)
         else:
             mesh.missing.append(f'vehicle {vehicle_id}')
         self._vehicle_meshes[vehicle_id] = mesh
@@ -254,6 +265,8 @@ class SectorMeshLibrary:
         self._vehicle_meshes.clear()
         self._gun_meshes.clear()
         self._host_meshes.clear()
+        if hasattr(self, '_building_decorations'):
+            self._building_decorations.clear()
         self._external_surfaces.clear()
 
     def _visual_path(self, value):
@@ -395,13 +408,47 @@ class SectorMeshLibrary:
         """Sector of a building definition: its external .sector, else its SET sector."""
         return self.sector_mesh(getattr(definition, "sector_file", ""), definition.sec_type)
 
+    @staticmethod
+    def tinted_mesh(mesh: SectorMesh, tint: tuple[int, int, int, int]) -> SectorMesh:
+        """Return a SectorMesh whose faces carry ``tint``, or empty when alpha is 0."""
+        if tint == WHITE_TINT:
+            return mesh
+        if tint[3] == 0:
+            return SectorMesh(mesh.typ, resolved=mesh.resolved, missing=list(mesh.missing))
+        return SectorMesh(
+            mesh.typ,
+            faces=[(replace(face, tint=tint), ox, oz) for face, ox, oz in mesh.faces],
+            resolved=mesh.resolved,
+            missing=list(mesh.missing),
+        )
+
+    def building_decoration_mesh(self, building_id: int) -> SectorMesh:
+        """Persistent decoration_fx mesh for a building, or an empty SectorMesh."""
+        cache = getattr(self, '_building_decorations', None)
+        if cache is not None and building_id in cache:
+            return cache[building_id]
+        mesh = SectorMesh(-1)
+        definition = self.buildings.get(building_id)
+        if definition is not None:
+            dec = definition.decoration
+            if dec.mode == 'persistent' and dec.tint[3] > 0 and (dec.vp > 0 or dec.base or dec.three_ds):
+                faces, _ = self._resolve_visual_faces(dec.vp, dec.base, dec.three_ds)
+                if faces:
+                    transformed = _transform_faces(
+                        faces, scale=dec.scale, tint=dec.tint, offset=dec.offset)
+                    mesh.faces.extend((face, 0, 0) for face in transformed)
+        if cache is not None:
+            cache[building_id] = mesh
+        return mesh
+
     def building_preview(self, building_id):
         definition = self.buildings.get(building_id)
         if definition is None:
             return SectorMesh(-1)
-        sector = self.definition_mesh(definition)
+        sector = self.tinted_mesh(self.definition_mesh(definition), definition.tint)
         guns = self.building_mesh(building_id)
-        return SectorMesh(definition.sec_type, faces=sector.faces + guns.faces,
+        dec = self.building_decoration_mesh(building_id)
+        return SectorMesh(definition.sec_type, faces=sector.faces + guns.faces + dec.faces,
                           missing=sector.missing + guns.missing)
 
     def filler_mesh(self, surface1: int, surface2: int, vertical: bool,
@@ -452,3 +499,47 @@ def gun_rotation(direction):
     else:
         y = np.array((0., 1., 0.))
     return np.column_stack((np.cross(y, z), y, z))
+
+
+def visual_rotation_matrix(degrees: tuple[float, float, float]) -> np.ndarray:
+    """Match engine Orientation(degrees) = RotateX * RotateY * RotateZ from matrix.h."""
+    rx, ry, rz = (math.radians(d) for d in degrees)
+    cx, sx = math.cos(rx), math.sin(rx)
+    cy, sy = math.cos(ry), math.sin(ry)
+    cz, sz = math.cos(rz), math.sin(rz)
+    rot_x = np.array(((1.0, 0.0, 0.0), (0.0, cx, sx), (0.0, -sx, cx)), dtype=float)
+    rot_y = np.array(((cy, 0.0, sy), (0.0, 1.0, 0.0), (-sy, 0.0, cy)), dtype=float)
+    rot_z = np.array(((cz, sz, 0.0), (-sz, cz, 0.0), (0.0, 0.0, 1.0)), dtype=float)
+    return rot_x @ rot_y @ rot_z
+
+
+def _transform_faces(faces, *, scale=(1.0, 1.0, 1.0), rotation=(0.0, 0.0, 0.0),
+                     tint=None, offset=(0.0, 0.0, 0.0)):
+    if tint is not None and tint == WHITE_TINT:
+        tint = None
+    if tint is not None and tint[3] == 0:
+        return []
+    has_scale = scale != (1.0, 1.0, 1.0)
+    has_rot = rotation != (0.0, 0.0, 0.0)
+    has_offset = offset != (0.0, 0.0, 0.0)
+    if not (has_scale or has_rot or has_offset or tint is not None):
+        return list(faces)
+    scale_vec = np.asarray(scale, dtype=float) if has_scale else None
+    rot = visual_rotation_matrix(rotation) if has_rot else None
+    off_vec = np.asarray(offset, dtype=float) if has_offset else None
+    result = []
+    for face in faces:
+        if has_scale or has_rot or has_offset:
+            pts = np.asarray(face.vertices, dtype=float)
+            if scale_vec is not None:
+                pts = pts * scale_vec
+            if rot is not None:
+                pts = pts @ rot.T
+            if off_vec is not None:
+                pts = pts + off_vec
+            verts = [tuple(float(c) for c in v) for v in pts]
+        else:
+            verts = face.vertices
+        new_tint = tint if tint is not None else getattr(face, 'tint', None)
+        result.append(replace(face, vertices=verts, tint=new_tint))
+    return result

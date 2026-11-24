@@ -24,6 +24,7 @@ from studio.rendering.indexed import (
 )
 
 from ..core.ldf_model import DEFAULT_HGT, SECTOR_SIZE
+from .sector_sprite import apply_colorize_rgba
 from .special_scene import special_cells, actor_code, key_building_sector
 from .terrain_mesh import HEIGHT_UNIT
 from .squad_scene import squad_members, host_members
@@ -192,7 +193,7 @@ def scene_polygons(lib, doc, terrain, cam, border_walls=True):
                         code = actor_code if actor_code is not None else special_code if special_code is not None and not ground else (r * doc.mw + c + 1) * (1 if ground else -1)
                     polygon = CameraPolygon(
                         camera, tuple(coordinates),
-                        (surface, code, source), order)
+                        (surface, code, source, getattr(face, 'tint', None)), order)
                     if cam.perspective:
                         polygon = clip_camera_polygon_near(polygon, minimum_distance=20*cam.k)
                     if polygon is not None:
@@ -208,16 +209,23 @@ def scene_polygons(lib, doc, terrain, cam, border_walls=True):
             border = col in (0, doc.mw - 1) or row in (0, doc.mh - 1)
             special = specials.get((col, row))
             code = actor_code(doc, special[0]) if special else None
-            append_mesh(meshes[types[row][col]], col, row, special_code=code,
+            building = buildings[row][col]
+            bdef = lib.buildings.get(building) if building else None
+            sector_mesh = (lib.tinted_mesh(meshes[types[row][col]], bdef.tint)
+                           if bdef is not None and bdef.tint != (255, 255, 255, 255)
+                           else meshes[types[row][col]])
+            append_mesh(sector_mesh, col, row, special_code=code,
                         ground_only=border and not border_walls)
             structure_typ = key_building_sector(special[1], lib) if special else None
             if structure_typ is not None and structure_typ != types[row][col]:
                 append_mesh(meshes[structure_typ], col, row,
                             structure_only=True, ground_only=border, special_code=code)
             # Conserva la visualizzazione dei blg già presenti nei documenti.
-            building = buildings[row][col]
             if building:
                 append_mesh(extras[building], col, row, ground_only=border, special_code=code)
+                dec_mesh = lib.building_decoration_mesh(building)
+                if dec_mesh.faces:
+                    append_mesh(dec_mesh, col, row, ground_only=border, special_code=code)
             for vertical in (False, True):
                 if (vertical and col == 0) or (not vertical and row == 0):
                     continue
@@ -239,21 +247,50 @@ def render_scene(polygons, cam, tables, fast=False, preview_codes=()):
                order_camera_polygons(polygons, eye=(0.0, 0.0, 4 if cam.perspective else 1e9)))
     pieces = []
     for poly in ordered:
-        surface, code, source = poly.payload
+        surface, code, source, tint = poly.payload
         pieces.append(IndexedPiece(
             source_face_id=source, polygon_id=code,
             screen=tuple(cam.to_screen(v) for v in poly.vertices),
             uvs=poly.attributes, camera_vertices=poly.vertices,
             surface=surface, source_order=poly.source_order,
-            sort_depth=-poly.mean_z()))
-    result = IndexedRasterizer.render(cam.width, cam.height, pieces, tables,
-                                      collect_diagnostics=False, track_polygon_owner=True)
-    rgba = np.frombuffer(result.to_rgba(tables), dtype=np.uint8).reshape(
-        cam.height, cam.width, 4).copy()
-    rgba[~result.coverage, 3] = 0
-    # Il raster condiviso usa -1 per lo sfondo; qui zero significa nessuna cella.
-    cells = result.polygon_owner.copy()
-    cells[~result.coverage] = 0
+            sort_depth=-poly.mean_z(), tint=tint))
+    has_tint = any(p.tint is not None and p.tint != (255, 255, 255, 255) for p in pieces)
+    if has_tint:
+        tints: list[tuple[int, int, int, int]] = [(255, 255, 255, 255)]
+        tint_keys = {(255, 255, 255, 255): 0}
+        code_lut = np.array([p.polygon_id for p in pieces], dtype=np.int32)
+        tint_idx_lut = np.zeros(len(pieces), dtype=np.int32)
+        remapped = []
+        for idx, piece in enumerate(pieces):
+            t = piece.tint if piece.tint is not None else (255, 255, 255, 255)
+            t_idx = tint_keys.get(t)
+            if t_idx is None:
+                t_idx = len(tints)
+                tint_keys[t] = t_idx
+                tints.append(t)
+            tint_idx_lut[idx] = t_idx
+            remapped.append(replace(piece, polygon_id=idx))
+        result = IndexedRasterizer.render(cam.width, cam.height, remapped, tables,
+                                          collect_diagnostics=False, track_polygon_owner=True,
+                                          track_flat_owner=True)
+        rgba = np.frombuffer(result.to_rgba(tables), dtype=np.uint8).reshape(
+            cam.height, cam.width, 4).copy()
+        rgba[~result.coverage, 3] = 0
+        valid = result.coverage & (result.polygon_owner >= 0)
+        cells = np.zeros_like(result.polygon_owner)
+        cells[valid] = code_lut[result.polygon_owner[valid]]
+        tint_owner = np.zeros_like(result.polygon_owner)
+        tint_owner[valid] = tint_idx_lut[result.polygon_owner[valid]]
+        apply_colorize_rgba(rgba, tint_owner, result.coverage, tints)
+    else:
+        result = IndexedRasterizer.render(cam.width, cam.height, pieces, tables,
+                                          collect_diagnostics=False, track_polygon_owner=True)
+        rgba = np.frombuffer(result.to_rgba(tables), dtype=np.uint8).reshape(
+            cam.height, cam.width, 4).copy()
+        rgba[~result.coverage, 3] = 0
+        # Il raster condiviso usa -1 per lo sfondo; qui zero significa nessuna cella.
+        cells = result.polygon_owner.copy()
+        cells[~result.coverage] = 0
     if preview_codes:
         mask = np.isin(cells, preview_codes)
         grey = rgba[mask, :3] @ np.array((.299, .587, .114))
