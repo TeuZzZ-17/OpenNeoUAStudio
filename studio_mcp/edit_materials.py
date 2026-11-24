@@ -293,6 +293,20 @@ def op_use_set_animation(ctx, old=None, new=None):
     return {"old": old, "new": target, "changed_blocks": changed}
 
 
+def loose_genesis_animations(lm, known=()) -> list[str]:
+    """Queue the .ANM files a generated Genesis needs and neither the SET nor ``known`` already holds.
+
+    The SET's own animations (GENES3-1, GENES4-1 ...) are found by the game itself: no loose copy."""
+    archive = getattr(lm.family, "setbas_archive", None) or core._setbas(lm.set_hint or "set1")[0]
+    created = []
+    for name, animation in lm.family.animations.items():
+        if name in known or name in lm.extra_files or archive.find(name, "bmpanim.class"):
+            continue
+        lm.extra_files[name] = export_anm_bytes(animation)
+        created.append(name)
+    return created
+
+
 @op("generate_genesis")
 @_guard_errors
 def op_generate_genesis(ctx):
@@ -302,14 +316,8 @@ def op_generate_genesis(ctx):
     from model_editor.genesis_generator import generate_genesis   # imported here: the package pulls in the Qt window
     lm = ctx.lm
     lm.require_topology_edit()
-    archive = getattr(lm.family, "setbas_archive", None) or core._setbas(lm.set_hint or "set1")[0]
     generate_genesis(lm.family, lm.fam_obj)
-    created = []
-    for name, animation in lm.family.animations.items():
-        # animations the set already holds (GENES3-1, GENES4-1 ...) are found by the game itself: no loose copy
-        if not archive.find(name, "bmpanim.class") and name not in lm.extra_files:
-            lm.extra_files[name] = export_anm_bytes(animation)
-            created.append(name)
+    created = loose_genesis_animations(lm)
     if created:
         ctx.notes.append(f"new animation file(s) written beside the BASE: {created}")
     return {"blocks": len(lm.blocks), "new_animations": created}

@@ -8,6 +8,7 @@ happen in memory: nothing reaches the disk before Apply.
 from __future__ import annotations
 
 import copy
+import dataclasses
 from pathlib import Path
 
 from PySide6.QtCore import Qt
@@ -72,22 +73,35 @@ class StateSlot:
 
     def _capture(self):
         model = self.fam_obj.skeleton
-        return copy.deepcopy((model.points, model.polygons, model.parsed_polygon_count,
-                              self.fam_obj.base_object.ades))
+        return (copy.deepcopy((model.points, model.polygons, model.parsed_polygon_count,
+                               self.fam_obj.base_object.ades)),
+                dict(self.family.animations))
 
     def reset(self):
         """Back to the state on disk, keeping the same objects the viewport knows."""
-        points, polygons, count, blocks = copy.deepcopy(self._pristine)
+        (points, polygons, count, blocks), animations = (
+            copy.deepcopy(self._pristine[0]), self._pristine[1])
         model = self.fam_obj.skeleton
         model.points[:] = points
         model.polygons[:] = polygons
         model.parsed_polygon_count = count
         self.fam_obj.base_object.ades[:] = blocks
+        # A rebuilt Genesis adds animations: the next preview or write starts from the same ones.
+        self.family.animations.clear()
+        self.family.animations.update(animations)
+
+    @property
+    def is_genesis(self):
+        return self.candidate.state == "Genesis"
+
+    def slot_options(self, options):
+        """Only a Genesis state is rebuilt whole; every other state keeps the pairing rules."""
+        return dataclasses.replace(options, rebuild_genesis=options.rebuild_genesis and self.is_genesis)
 
     def edited_model(self, source_family, source_obj, options, *, writable=False):
         self.reset()
         lm = LooseModel.from_family(self.family, self.fam_obj, writable=writable)
-        apply_plan(lm, self.plan, source_family, source_obj, options)
+        apply_plan(lm, self.plan, source_family, source_obj, self.slot_options(options))
         return lm
 
 
@@ -164,6 +178,7 @@ class StateSyncDialog(QDialog):
         self.added_check = QCheckBox()
         self.state_faces_check = QCheckBox()
         self.deleted_check = QCheckBox()
+        self.genesis_check = QCheckBox()
         self.textures_check.setToolTip("Texture, UV and shading of the faces both states have.")
         self.state_textures_check.setToolTip(
             "Faces whose look already differed from this state before the current edits.")
@@ -173,10 +188,14 @@ class StateSyncDialog(QDialog):
             "Faces saved in the open model that this state never had. They are often "
             "what makes the state different, so check the preview.")
         self.deleted_check.setToolTip("Faces deleted from the open model since it was last saved.")
+        self.genesis_check.setToolTip(
+            "Genesis states only. Their faces are all animated, so they cannot be paired with "
+            "this model. Instead the whole shape of this model is copied and every face gets "
+            "the Genesis material again. Emitters keep their place.")
         for check, checked in ((self.textures_check, True), (self.state_textures_check, False),
                                (self.shape_check, True),
                                (self.added_check, True), (self.state_faces_check, False),
-                               (self.deleted_check, True)):
+                               (self.deleted_check, True), (self.genesis_check, True)):
             check.setChecked(checked)
             check.toggled.connect(lambda *_: self._options_changed())
             options.addWidget(check)
@@ -316,7 +335,8 @@ class StateSyncDialog(QDialog):
                            shape=self.shape_check.isChecked(),
                            added_faces=self.added_check.isChecked(),
                            state_faces=self.state_faces_check.isChecked(),
-                           deleted_faces=self.deleted_check.isChecked())
+                           deleted_faces=self.deleted_check.isChecked(),
+                           rebuild_genesis=self.genesis_check.isChecked())
 
     def _current_slot(self):
         item = self.states.currentItem()
@@ -324,8 +344,9 @@ class StateSyncDialog(QDialog):
 
     def _refresh_row(self, item):
         slot = item.data(0, _SLOT_ROLE)
-        counts = slot.plan.counts(self.options())
-        parts = []
+        options = slot.slot_options(self.options())
+        counts = slot.plan.counts(options)
+        parts = ["Rebuilt as Genesis"] if options.rebuild_genesis else []
         if counts["textures"]:
             parts.append(f"{counts['textures']} textures")
         if counts["points"]:
@@ -338,7 +359,7 @@ class StateSyncDialog(QDialog):
             "Already the same" if slot.plan.links else "Different model"))
         problem = "" if slot.candidate.writable else "Inside SET.BAS: preview only"
         item.setToolTip(2, problem)
-        locked = not slot.candidate.writable or not slot.plan.has_work(self.options())
+        locked = not slot.candidate.writable or not slot.plan.has_work(options)
         self.states.blockSignals(True)
         if locked:
             item.setCheckState(0, Qt.CheckState.Unchecked)
@@ -358,6 +379,8 @@ class StateSyncDialog(QDialog):
         self.added_check.setText(f"Faces added here ({count('added_faces')})")
         self.state_faces_check.setText(f"Faces only this model has ({count('state_faces')})")
         self.deleted_check.setText(f"Faces deleted here ({count('deleted_faces')})")
+        genesis_states = sum(slot.is_genesis for slot in self.slots)
+        self.genesis_check.setText(f"Rebuild the shape of Genesis states ({genesis_states})")
 
     def _options_changed(self):
         for index in range(self.states.topLevelItemCount()):
@@ -412,7 +435,7 @@ class StateSyncDialog(QDialog):
             for slot in chosen:
                 lm = slot.edited_model(self.source_family, self.source_obj, options, writable=True)
                 lm.extra_files.update(texture_files(lm, slot.plan, self.source_family,
-                                                    self.source_obj, options))
+                                                    self.source_obj, slot.slot_options(options)))
                 lm._final_checks()
                 models.append((slot, lm))
             for slot, lm in models:

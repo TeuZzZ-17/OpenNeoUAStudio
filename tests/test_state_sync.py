@@ -330,3 +330,27 @@ def test_the_mcp_copies_from_another_state(flak, monkeypatch):
     assert result["results"][0]["match"] > 0.5
     assert result["results"][0]["textures"]
     assert normal.read_bytes() != before
+
+
+def test_a_genesis_takes_the_whole_shape_of_the_source_and_stays_a_genesis(tmp_path):
+    data = Path(os.environ.get("NME_GAME_DATA", ""))
+    original = data / "Models/Base/New/Ghorkov/Ghorkov_Radar"
+    if not original.is_dir():
+        pytest.skip("Radar reference assets are not installed")
+    folder = shutil.copytree(original, tmp_path / "Radar")
+    DirectoryIndex.clear_cache()
+    normal = load_asset_family(folder / "Ghorkov_Radar_Normal.BASE")
+    source = normal.root_object
+    source.skeleton.points[0] = (500.0, 0.0, 0.0)   # the person reshaped the model
+    genesis = load_asset_family(folder / "Ghorkov_Radar_Genesis.BASE")
+    lm = LooseModel.from_family(genesis, genesis.root_object, writable=True)
+    plan = build_plan(source, genesis.root_object, None)
+    assert plan.match_share == 0.0                     # nothing to pair: all faces are animated
+    apply_plan(lm, plan, normal, source, SyncOptions(rebuild_genesis=True))
+    lm.commit("test")
+    DirectoryIndex.clear_cache()
+    saved = load_asset_family(folder / "Ghorkov_Radar_Genesis.BASE").root_object
+    assert saved.skeleton.polygons == source.skeleton.polygons
+    assert saved.skeleton.points[0] == pytest.approx((500.0, 0.0, 0.0))
+    blocks = [b for b in saved.base_object.ades if (b.class_id or "").casefold() == "area.class"]
+    assert len(blocks) == len(source.skeleton.polygons)    # one Genesis face per polygon

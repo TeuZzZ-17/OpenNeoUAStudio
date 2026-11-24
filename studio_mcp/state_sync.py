@@ -51,6 +51,8 @@ class SyncOptions:
     added_faces: bool = True
     state_faces: bool = False
     deleted_faces: bool = True
+    # Genesis states only: take the whole shape of the source and draw it with the Genesis material.
+    rebuild_genesis: bool = False
 
 
 @dataclass
@@ -103,7 +105,7 @@ class SyncPlan:
                 "removed": len(self.deleted_faces) if options.deleted_faces else 0}
 
     def has_work(self, options: SyncOptions = SyncOptions()) -> bool:
-        return any(self.counts(options).values())
+        return options.rebuild_genesis or any(self.counts(options).values())
 
 
 def _position(point) -> tuple:
@@ -398,6 +400,8 @@ def _resolves(family, name: str) -> bool:
 def texture_files(lm, plan: SyncPlan, source_family, source_obj,
                   options: SyncOptions = SyncOptions()) -> dict[str, bytes]:
     """Loose textures to copy beside the destination, so it can show what it now uses."""
+    if options.rebuild_genesis:
+        return {}   # the Genesis material comes from the generator, not from the source's textures
     faces = []
     if options.textures:
         faces += [link.source for link in plan.material_changes]
@@ -432,9 +436,33 @@ def _add_face(lm, plan, source_family, source_obj, poly_id, point_of, cache) -> 
                       _atts_values(block.atts[face.atts_index]), block.olpl[face.atts_index])
 
 
+def rebuild_as_genesis(lm: LooseModel, source_obj) -> None:
+    """The destination takes the shape of the source and stays a Genesis.
+
+    A Genesis has no face the pairing above can use (all of them are animated), so its shape
+    follows the source whole: points and polygons are copied, then every polygon gets the
+    Genesis material again. Emitters keep their place.
+    """
+    from model_editor.genesis_generator import generate_genesis   # the package pulls in the Qt window
+    from studio_mcp.edit_materials import loose_genesis_animations
+    lm.require_topology_edit()
+    old_positions = [tuple(point) for point in lm.points]
+    known = set(lm.family.animations)
+    skeleton = source_obj.skeleton
+    lm.points[:] = [tuple(point) for point in skeleton.points]
+    lm.polygons[:] = [list(polygon) for polygon in skeleton.polygons]
+    lm.model.parsed_polygon_count = len(lm.polygons)
+    generate_genesis(lm.family, lm.fam_obj)
+    lm._retarget_emitters({}, old_positions)
+    loose_genesis_animations(lm, known)
+
+
 def apply_plan(lm: LooseModel, plan: SyncPlan, source_family, source_obj,
                options: SyncOptions = SyncOptions()) -> None:
     """Edit the destination in memory. ``lm.commit`` then writes it."""
+    if options.rebuild_genesis:
+        rebuild_as_genesis(lm, source_obj)
+        return
     filled = {index for index, block in enumerate(lm.blocks) if block.atts}
     cache: dict[int, int] = {}
 
