@@ -4,6 +4,7 @@ import ast
 import sys
 from pathlib import Path
 
+from PyInstaller.config import CONF
 from PyInstaller.utils.hooks import collect_dynamic_libs, copy_metadata
 
 # ctypes loads CoACD before Qt in the bake worker, so keep its OpenMP
@@ -105,6 +106,11 @@ if not stub.exists() or stub.read_text(encoding='utf-8') != stub_text:
     stub.write_text(stub_text, encoding='utf-8')
 
 
+# The library Analysis gets its own work folder: every Analysis rewrites
+# base_library.zip there, and the Studio one would invalidate the library cache.
+studio_workpath = CONF['workpath']
+CONF['workpath'] = str(Path(studio_workpath) / 'libs')
+Path(CONF['workpath']).mkdir(parents=True, exist_ok=True)
 libs = Analysis(
     [str(stub)],
     pathex=[],
@@ -119,6 +125,8 @@ libs = Analysis(
     optimize=0,
 )
 
+CONF['workpath'] = studio_workpath
+
 a = Analysis(
     ['main.py'],
     pathex=[],
@@ -128,7 +136,9 @@ a = Analysis(
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],
-    excludes=sorted(third_party_tops),
+    # '__main__' is listed because PyInstaller appends it to this list; without it
+    # the saved list never matches and the cache is thrown away every time.
+    excludes=sorted(third_party_tops) + ['__main__'],
     noarchive=False,
     optimize=0,
 )
