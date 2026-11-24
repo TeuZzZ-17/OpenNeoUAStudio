@@ -22,6 +22,7 @@ from PySide6.QtGui import (
     QPolygonF, QRadialGradient, QTransform,
 )
 
+from map_editor.core.three_ds import read_3ds
 from studio.exchange.portable import find_existing_path
 from entity_designer import crater_preview
 from studio.rendering.asset_viewport import AssetViewport, ViewFace, _apply, _rotation_matrix
@@ -619,6 +620,7 @@ class FxPreviewViewportMixin:
                     (face, [tuple(vertex) for vertex in face.vertices])
                     for face in helper._faces]
                 helper._fx_flat = str(family.base_path).casefold().endswith(".3ds")
+                helper._fx_source_path = family.base_path
             self._fx_external_cache[path] = helper
         return self._fx_external_cache[path]
 
@@ -1509,11 +1511,45 @@ class FxPreviewViewportMixin:
                 painter.drawPolygon(polygon)
             painter.restore()
 
-    def _draw_fx_smoke(self, painter, target, camera, puffs) -> None:
-        """Ground decal smoke: soft camera-facing discs, far to near.
+    def _fx_puff_sprite(self, path: str, rgb) -> tuple[QImage, float, float] | None:
+        """Texture of a puff's 3ds quad, tinted, and the quad's width and height as fractions
+        of its larger side.
 
-        Same falloff as the engine's disc mesh (opaque centre, transparent rim).
-        ``item.scale[0]`` is the puff diameter and ``item.alpha`` its opacity.
+        The engine scales the quad so its larger side is the puff size and multiplies its
+        texture by the tint, so a speck filling a third of the picture is a third of the size
+        on screen too. The 3DS family of the preview is geometry only, so the file is read here.
+        """
+
+        helper = self._fx_external_helper(path) if path else None
+        source = getattr(helper, "_fx_source_path", None)
+        if source is None:
+            return None
+        key = (str(source), tuple(rgb))
+        cache = self.__dict__.setdefault("_fx_puff_cache", {})
+        if key not in cache:
+            cache[key] = None
+            try:
+                meshes, materials = read_3ds(Path(source))
+                mesh = meshes[0]
+                label = mesh.materials.get(0) or next(iter(materials), "")
+                texture = find_existing_path(Path(source).parent, materials[label].texture)
+                image = QImage(str(texture)) if texture else QImage()
+                xs = [vertex[0] for vertex in mesh.vertices]
+                ys = [vertex[1] for vertex in mesh.vertices]
+                width, height = max(xs) - min(xs), max(ys) - min(ys)
+                unit = max(width, height)
+                if not image.isNull() and unit > 1e-9:
+                    cache[key] = (colorize_image(image, (*rgb, 255)),
+                                  width / unit, height / unit)
+            except (OSError, ValueError, IndexError, KeyError):
+                pass
+        return cache[key]
+
+    def _draw_fx_smoke(self, painter, target, camera, puffs) -> None:
+        """Ground decal smoke: camera-facing quads of the effect's 3ds, far to near.
+
+        ``item.scale[0]`` is the quad width and ``item.alpha`` its opacity. Without a loadable
+        3ds texture a soft disc of the same width stands in.
         """
 
         if not puffs:
@@ -1527,6 +1563,7 @@ class FxPreviewViewportMixin:
         drawn.sort(key=lambda entry: entry[0])
         painter.save()
         painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+        painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform, True)
         painter.setPen(Qt.PenStyle.NoPen)
         for _depth, item, center in drawn:
             middle = self._project(center, target, camera)
@@ -1542,6 +1579,15 @@ class FxPreviewViewportMixin:
                 _depth, hull=False)
             red, green, blue = item.tint[:3]
             opacity = max(0.0, min(1.0, item.alpha))
+            sprite = self._fx_puff_sprite(item.external[0] if item.external else "",
+                                          (red, green, blue))
+            if sprite is not None:
+                image, wide, high = sprite
+                painter.setOpacity(opacity)
+                painter.drawImage(QRectF(middle.x() - half * wide, middle.y() - half * high,
+                                         half * 2.0 * wide, half * 2.0 * high), image)
+                painter.setOpacity(1.0)
+                continue
             gradient = QRadialGradient(middle, half)
             for position, weight in ((0.0, 1.0), (0.4, 0.85), (0.7, 0.45), (1.0, 0.0)):
                 gradient.setColorAt(position, QColor(red, green, blue, int(round(255 * opacity * weight))))

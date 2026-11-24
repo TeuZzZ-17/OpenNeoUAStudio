@@ -255,7 +255,11 @@ class WireframePanel(QWidget):
         self._style_current_button()
         self._style_path_label()
 
-        self.view_preset_combo.currentTextChanged.connect(self.refresh)
+        self.view_preset_combo.currentTextChanged.connect(self._view_preset_changed)
+        # The user moving the 3D camera by hand leaves the fixed view (the live preview takes over).
+        manual_camera = getattr(self.viewport, "manualCameraChanged", None)
+        if manual_camera is not None:
+            manual_camera.connect(self._manual_camera_changed)
         self.effects_check.toggled.connect(self.refresh)
         self._preview_timer = QTimer(self)
         self._preview_timer.setSingleShot(True)
@@ -314,6 +318,28 @@ class WireframePanel(QWidget):
         placement = (getattr(self.viewport, "model_preview_scale", None),
                      getattr(self.viewport, "model_preview_rotation", None))
         return (id(faces), len(faces) if faces is not None else 0, placement, repr(camera()))
+
+    def _view_preset_changed(self, preset: str) -> None:
+        """Turn the 3D camera to the chosen view, then rebuild the preview from it."""
+
+        angles = VIEW_PRESET_ANGLES.get(preset)
+        move_camera = getattr(self.viewport, "apply_view_preset", None)
+        if angles is not None and move_camera is not None:
+            # The host's own View combo moves the camera and updates its gizmo and buttons.
+            host_combo = getattr(self.window(), "toolbar_view_preset_combo", None)
+            if host_combo is not None:
+                host_combo.setCurrentText(preset)
+            # Fallback when the host did not move it (no combo, or snapshot mode).
+            if (self.viewport._yaw, self.viewport._pitch) != tuple(angles):
+                move_camera(preset, self.viewport.size(), 100)
+        self.refresh()
+
+    def _manual_camera_changed(self) -> None:
+        """Orbit, pan or zoom by hand: the fixed view becomes Current View."""
+
+        if self.view_preset_combo.currentText() != "Current View":
+            with QSignalBlocker(self.view_preset_combo):
+                self.view_preset_combo.setCurrentText("Current View")
 
     def _live_tick(self) -> None:
         """Rebuild the preview once the camera or the model has changed and stopped moving."""

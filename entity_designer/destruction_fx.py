@@ -4109,7 +4109,8 @@ class PreviewSimulation:
                         tuple(base + offset for base, offset
                               in zip(position, puff.offset)),
                         IDENTITY, (puff.size,) * 3,
-                        min(1.0, puff.alpha * gain), (*rgb, 255), "smoke"))
+                        min(1.0, puff.alpha * gain), (*rgb, 255), "smoke",
+                        (smoke.mesh3ds,) if smoke.mesh3ds else ()))
         return items
 
     def offset_boxes(self) -> list[tuple[int, tuple, tuple]]:

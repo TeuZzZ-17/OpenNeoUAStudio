@@ -5,6 +5,7 @@ from unittest.mock import patch
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
+from PySide6.QtCore import QObject, QSize, Signal
 from PySide6.QtGui import QColor
 from PySide6.QtGui import QImage
 from PySide6.QtWidgets import QApplication, QMessageBox
@@ -77,6 +78,21 @@ class _Viewport:
             "availability_reason": "test renderer unavailable"
             if not self.available else "",
         }
+
+
+class _CameraViewport(_Viewport, QObject):
+    manualCameraChanged = Signal()
+
+    def __init__(self):
+        QObject.__init__(self)
+        _Viewport.__init__(self)
+        self._yaw, self._pitch = 0.0, 0.0
+
+    def size(self):
+        return QSize(400, 300)
+
+    def apply_view_preset(self, preset, _size, _zoom):
+        self._yaw, self._pitch = VIEW_PRESET_ANGLES[preset]
 
 
 class WireframePanelTests(unittest.TestCase):
@@ -325,6 +341,15 @@ class WireframePanelTests(unittest.TestCase):
             panel._live_tick()                                # settled: built once
             count += 1
             self.assertEqual(len(calls), count, name)
+
+    def test_a_fixed_view_turns_the_camera_and_moving_it_by_hand_goes_back_to_current_view(self):
+        viewport = _CameraViewport()
+        panel = self.make_panel(lambda vp, **kw: _Projection(), viewport)
+        preset = next(iter(VIEW_PRESET_ANGLES))
+        panel.view_preset_combo.setCurrentText(preset)
+        self.assertEqual((viewport._yaw, viewport._pitch), tuple(VIEW_PRESET_ANGLES[preset]))
+        viewport.manualCameraChanged.emit()
+        self.assertEqual(panel.view_preset_combo.currentText(), "Current View")
 
     def test_a_fixed_view_does_not_follow_the_camera_and_a_hidden_tab_does_not_work(self):
         viewport = _Viewport()
