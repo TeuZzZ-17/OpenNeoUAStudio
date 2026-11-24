@@ -38,8 +38,10 @@ DESIGN = """NEW DESIGNS IN THE URBAN ASSAULT LOOK (measured on the original Set1
      the surest way to the faction look. Animated parts (tracks, rotors, glows) travel with add_fx.
 3. Texture with faction swatches: studio_swatches() lists them with a picture; pass swatch='ghorkov.hull' to
    loft / create_primitive / add_polygons, or studio_paint later. Every face shows one whole panel (like the
-   originals). Use the faction's own atlas only: Resistance BAGGER/MTL, Ghorkov HUBI, Taerkasten FAERROBO + dark
-   HUBI armour, Mykonian AIR1TXT veins, Sulgogar FBAGGER flesh, Black Sect ROBONEU.
+   originals). Use the faction's own atlas only: Resistance BAGGER/MTL, Ghorkov HUBI (+ AIR1TXT for the pale
+   Gigant top/belly), Taerkasten FAERROBO + dark HUBI armour, Mykonian AIR1TXT veins, Sulgogar FBAGGER flesh,
+   Black Sect ROBONEU. Read the whole studio_swatches list and vary the patches per part (hull, glass, panels,
+   glow strips): hull + hull_dark alone look flat. Map the two triangles of one quad with one shared projection.
 4. Light: the engine has none, every face carries a baked shade. End with {"op":"auto_shade"} (top bright,
    sides mid, belly dark). Without it the model looks flat and wrong.
 5. Check scale and look: studio_render_model(model, views=[...], compare_with='set1:<similar unit>') puts the
