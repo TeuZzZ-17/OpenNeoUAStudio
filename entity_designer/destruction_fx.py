@@ -19,7 +19,7 @@ no Qt dependency: the tab and the viewport only consume its plain data.
 
 from __future__ import annotations
 
-from studio.formats.script_numbers import format_number as _script_number
+from studio.formats.script_numbers import format_number as _script_number, parse_bool
 from studio.rendering.particles import (
     EmitterSpec, ParticleSprite, _emit_particles, _rotate_vector,
 )
@@ -186,6 +186,14 @@ def _full_float(text: str) -> float | None:
     if used != len(text) or not text:
         return None
     return value if math.isfinite(value) else None
+
+
+def _disable_genesis_value(text: str) -> str:
+    """disable_genesis as the preview uses it: "1" (any true boolean form), "at_death" or ""."""
+    word = text.strip().casefold()
+    if word == "at_death":
+        return word
+    return "1" if parse_bool(word) is True else ""
 
 
 def _full_int(text: str) -> int | None:
@@ -1187,7 +1195,7 @@ def interpret_block(block: FxBlock, context: str) -> FxSpec:
             has_inline = True
         elif key == "follow_carcass":
             has_inline = True
-            follow_carcass = value == "1"
+            follow_carcass = parse_bool(value) is True
         elif key == "lifetime":
             has_inline = True
             parsed = parse_int_range(value)
@@ -1226,7 +1234,7 @@ def interpret_block(block: FxBlock, context: str) -> FxSpec:
             has_physical_vehicle_key = True
             physical_vehicle = _stol(value)[0]
         elif key == "random_rotation":
-            random_rotation = value == "1"
+            random_rotation = parse_bool(value) is True
         else:
             # Newer engines may add keys Studio does not know yet. The line
             # is kept verbatim and the preview continues without it.
@@ -1411,7 +1419,7 @@ def parse_decal_profile(profile_id: int, values: dict[str, str]) -> DecalProfile
 
     spec = FxSpec(
         mode=MODE_DECAL, trigger="", active=True, issues=tuple(issues),
-        random_rotation=values.get("random_rotation") == "1",
+        random_rotation=parse_bool(values.get("random_rotation", "")) is True,
         duration=duration, fade_in=fade_in, fade_out=fade_out,
         texture=values.get("texture", ""), stretch_x=stretch[0],
         stretch_z=stretch[1], decal_tint=tint, edge_fade=edge_fade,
@@ -2152,8 +2160,8 @@ def unit_look(values: dict[str, str], *, weapon: bool) -> dict:
         "decal_size": _manual_decal_size(values.get("ground_decal_size", "0_0")),
         "crater": crater_preview.config_from_values(values),
         "disable_genesis": ("" if weapon
-                            else values.get("disable_genesis", "").strip().casefold()),
-        "air_dead": (not weapon) and values.get("air_dead", "").strip() == "1",
+                            else _disable_genesis_value(values.get("disable_genesis", ""))),
+        "air_dead": (not weapon) and parse_bool(values.get("air_dead", "")) is True,
     }
 
 

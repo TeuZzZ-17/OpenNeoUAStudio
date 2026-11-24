@@ -1,7 +1,21 @@
-"""Compact decimal text for numeric game script parameters."""
+"""Compact decimal text for numeric script parameters and the engine's boolean words."""
 
 
 from decimal import Decimal, ROUND_HALF_UP, localcontext
+
+
+def parse_bool(text: str) -> bool | None:
+    """Read a yes/no value the way the engine does (StrParseBool): yes/true/on, no/false/off
+    or a whole number (non-zero = true). None when the text is none of these."""
+    word = text.strip().casefold()
+    if word in ("yes", "true", "on"):
+        return True
+    if word in ("no", "false", "off"):
+        return False
+    try:
+        return int(word, 0) != 0
+    except ValueError:
+        return None
 
 
 def format_number(value: float, decimals: int = 2) -> str:

@@ -19,6 +19,7 @@ from entity_designer.script_model import (
     read_script_file, validate_definition_source, write_script_file,
 )
 from studio.exchange.portable import commit_verified_files
+from studio.formats.script_numbers import parse_bool
 from entity_designer import crater_preview
 
 # (state, label) in the order the list shows them.
@@ -118,19 +119,18 @@ def normalize_value(key: str, raw: str) -> str:
         crater_preview.parse_range(key, value)
         return value
     if key == AIR_DEAD_KEY:
-        if value == "0":
-            return ""
-        if value == "1":
-            return "1"
-        raise ValueError(f"{key} must be 0 or 1 (0 or absent = vanilla).")
+        flag = parse_bool(value)
+        if flag is None:
+            raise ValueError(f"{key} must be 0 or 1 (0 or absent = vanilla).")
+        # The engine reads every boolean form; scripts are written in the vanilla 0/1 form.
+        return "1" if flag else ""
     if key == DISABLE_GENESIS_KEY:
-        if value == "0":
-            return ""
-        if value == "1":
-            return "1"
         if value.casefold() == "at_death":
             return "at_death"
-        raise ValueError(f"{key} must be 1 or at_death (0 or absent = vanilla).")
+        flag = parse_bool(value)
+        if flag is None:
+            raise ValueError(f"{key} must be 1 or at_death (0 or absent = vanilla).")
+        return "1" if flag else ""
     if key.startswith("vp_"):
         try:
             number = int(value, 0)

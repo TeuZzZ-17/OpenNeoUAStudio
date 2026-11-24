@@ -38,8 +38,11 @@ def test_values_are_checked():
     assert visuals.normalize_value("disable_genesis", "1") == "1"
     assert visuals.normalize_value("disable_genesis", "At_Death") == "at_death"
     assert visuals.normalize_value("disable_genesis", "0") == ""
-    for key, bad in (("air_dead", "2"), ("air_dead", "yes"),
-                      ("disable_genesis", "2"), ("disable_genesis", "later")):
+    # Every boolean form of the engine is accepted and written back as the script form 0/1.
+    assert visuals.normalize_value("air_dead", "yes") == "1"
+    assert visuals.normalize_value("air_dead", "off") == ""
+    assert visuals.normalize_value("disable_genesis", "true") == "1"
+    for key, bad in (("air_dead", "maybe"), ("disable_genesis", "later")):
         with pytest.raises(ValueError):
             visuals.normalize_value(key, bad)
 

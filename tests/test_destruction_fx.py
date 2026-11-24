@@ -196,8 +196,10 @@ def _fragment_and_wreck(value, time_ms):
     return fragment, wreck
 
 
-def test_follow_carcass_is_parsed_only_for_exact_one():
-    for value, expected in (("1", True), ("0", False), ("2", False), ("x", False)):
+def test_follow_carcass_reads_every_boolean_form():
+    # Same reader as the engine: 1/yes/true/on and any non-zero number are on, 0/no/off and junk are off.
+    for value, expected in (("1", True), ("yes", True), ("true", True), ("2", True),
+                            ("0", False), ("no", False), ("x", False)):
         spec = _spec("trigger = air_destroyed\nmode = physical\nvp_model = 3\n"
                      f"mass = 40\nradius = 10\nfollow_carcass = {value}")
         assert spec.active and spec.follow_carcass is expected
