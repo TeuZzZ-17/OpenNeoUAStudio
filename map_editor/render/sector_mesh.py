@@ -196,6 +196,44 @@ class SectorMeshLibrary:
         self._host_meshes[vehicle_id] = mesh
         return mesh
 
+    def vehicle_attachments(self, vehicle_id: int):
+        """Mounted guns/flak of one vehicle as placed faces for Snapshot Studio.
+
+        Same mount transform as host_mesh(); 3DS parts have no view material
+        and are skipped. Returns (AttachedFaces | None, skipped part count).
+        """
+        from studio.rendering.asset_viewport import AttachedFaces
+        definition = self.vehicles.get(vehicle_id)
+        mesh = self._mounted_faces(definition.guns if definition else ())
+        faces = [face for face, _ox, _oz in mesh.faces if face.mapped and face.material >= 0]
+        skipped = len(mesh.faces) - len(faces)
+        if not faces:
+            return None, skipped
+        ids = {face.material for face in faces}
+        return AttachedFaces(
+            [replace(face, primary=False) for face in faces],
+            {i: self._loader._materials[i] for i in ids},
+            {i: self._material_adapters.get(i, self.adapter) for i in ids}), skipped
+
+    def vehicle_for_model(self, path=None, base_name: str = ''):
+        """Id of the vehicle with mounts whose normal model is this file or SET.BAS BASE."""
+        from studio.assets.visproto import normalize_base_name
+        wanted = normalize_base_name(base_name) if base_name else ''
+        loose = self.assets._index_loose()
+        for vehicle_id, visual in self.vehicles.items():
+            if not any(gun.vehicle > 0 for gun in visual.guns):
+                continue
+            vp = (self._vp_names[visual.vp_normal]
+                  if 0 <= visual.vp_normal < len(self._vp_names) else '')
+            file = self._visual_path(visual.base_normal) if visual.base_normal else None
+            if file is None and vp:
+                file = loose.get(normalize_base_name(vp))
+            if path is not None and file is not None and Path(path).resolve() == file.resolve():
+                return vehicle_id
+            if wanted and file is None and vp and normalize_base_name(vp) == wanted:
+                return vehicle_id
+        return None
+
     def actor_mesh(self, vehicle_id: int) -> SectorMesh:
         """Return a vehicle body, composing mounted guns for Host Stations and unit_num_guns."""
         visual = self.vehicles.get(vehicle_id)

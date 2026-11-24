@@ -3,6 +3,8 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
+
 from studio.rendering.playback import DEFAULT_ANIMATION_SPEED
 
 
@@ -34,6 +36,7 @@ from studio.rendering.asset_viewport_common import (  # re-exported for existing
     MODEL_EDIT_SELECTION_RED as MODEL_EDIT_SELECTION_RED,
     ViewMaterial as ViewMaterial,
     ViewFace as ViewFace,
+    AttachedFaces as AttachedFaces,
     _RenderPayload as _RenderPayload,
     PickShape as PickShape,
     PastePreviewState as PastePreviewState,
@@ -108,6 +111,10 @@ class AssetViewport(
         self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
 
         self._faces: list[ViewFace] = []
+        # Mounted models of the shown unit (set by Snapshot Studio only);
+        # survives clear() so owner/scope reloads keep drawing them.
+        self._attachments: AttachedFaces | None = None
+        self._attachment_adapters: dict[int, object] = {}
         self._materials: list[ViewMaterial] = []
         self._block_material_ids: dict[tuple[str, int], int] = {}
         self._diagnostics: list[str] = []
@@ -275,6 +282,7 @@ class AssetViewport(
         self._particle_bounds_points = []
         self._particle_owner_bounds = {}
         self._ground_y = None
+        self._attachment_adapters = {}
         self._materials = []
         self._block_material_ids = {}
         self._diagnostics = []
@@ -378,6 +386,7 @@ class AssetViewport(
                               primary=fam_obj is primary_obj,
                               owner=owner, build_faces=visible)
 
+        self._load_attachments()
         self._refresh_particle_faces()
         self._build_particle_bounds()
         self._set_ground_from_geometry()
@@ -420,6 +429,23 @@ class AssetViewport(
         # clear() stopped the timer: playback stays on until the user presses Pause.
         if self._play_requested and self.has_animation:
             self.play_animation(True)
+
+    def set_attachments(self, attachments: AttachedFaces | None) -> None:
+        """Choose the mounted models drawn by the next load_family()."""
+        self._attachments = attachments
+
+    def _load_attachments(self) -> None:
+        attached = self._attachments
+        if attached is None:
+            return
+        remap: dict[int, int] = {}
+        for source_id, material in attached.materials.items():
+            remap[source_id] = len(self._materials)
+            self._materials.append(material)
+            self._attachment_adapters[remap[source_id]] = (
+                attached.adapters[source_id])
+        for face in attached.faces:
+            self._faces.append(replace(face, material=remap[face.material]))
 
     # -- object selection / isolation ---------------------------------------------
 

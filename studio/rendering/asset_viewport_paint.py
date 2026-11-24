@@ -776,6 +776,8 @@ class _PaintingMixin:
             material: ViewMaterial, frame_index: int):
         """Resolve one indexed surface for the active viewport semantics."""
 
+        # Mounted models keep the adapter that owns their texture.
+        adapter = self._attachment_adapters.get(face.material, adapter)
         return adapter.resolve_surface(face, material, frame_index)
 
     def _draw_origin_marker(self, painter, target, camera, origin_world) -> None:

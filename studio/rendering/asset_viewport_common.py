@@ -128,6 +128,19 @@ class _RenderPayload:
 
 
 @dataclass
+class AttachedFaces:
+    """Already-placed faces of mounted models (guns, flak) drawn with a unit.
+
+    Keyed by the source material id of each face: ``materials`` holds the
+    view material and ``adapters`` the indexed adapter that owns its texture.
+    """
+
+    faces: list[ViewFace]
+    materials: dict[int, ViewMaterial]
+    adapters: dict[int, object]
+
+
+@dataclass
 class PickShape:
     polygon: QPolygonF
     face: ViewFace

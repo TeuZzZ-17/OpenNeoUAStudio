@@ -145,7 +145,73 @@ class SnapshotStudioWindow(EntityListMixin, SetBasMixin, AssemblyWindow):
         """Same Entity List as the Model Editor; the set comes from Change Set."""
 
         panel = self._create_entity_list()
-        self._right_tabs.addTab(panel, 'Entity List')
+        # Entity List sits between Snapshot and BAS Manager.
+        self._right_tabs.insertTab(1, panel, 'Entity List')
+
+    # -- mounted models (guns, flak) drawn with the unit ----------------------
+
+    # Entity states that show the live unit with its guns on it.
+    _ATTACHMENT_STATES = ("normal", "fire", "wait")
+
+    def _attachment_library(self):
+        """Map Editor mesh library of the active set, built once per set."""
+
+        number = self._set_combo.currentData() or 1
+        cached_number, library = getattr(self, "_attach_library", (None, None))
+        if number != cached_number:
+            from map_editor.render.sector_mesh import SectorMeshLibrary
+            from studio.assets.catalog import set_assets
+            try:
+                library = SectorMeshLibrary(set_assets(number))
+            except (OSError, ValueError, RuntimeError):
+                library = None
+            self._attach_library = (number, library)
+        return library
+
+    def _show_attachments(self, vehicle_id=None, *, path=None, base_name="") -> None:
+        """Hand the viewport the guns of a vehicle (or of the model on screen)."""
+
+        attachments = None
+        # The Entity List (and its set selector) exists only after setup.
+        library = (self._attachment_library()
+                   if self._snapshot_workspace_configured else None)
+        if library is not None:
+            if vehicle_id is None:
+                vehicle_id = library.vehicle_for_model(path, base_name)
+            if vehicle_id is not None:
+                attachments, skipped = library.vehicle_attachments(vehicle_id)
+                if skipped:
+                    self.statusBar().showMessage(
+                        f"{skipped} mounted 3DS part(s) cannot be drawn in Snapshot.",
+                        6000)
+        self.viewport.set_attachments(attachments)
+
+    def _open_entity_state(self, *args):
+        entity, choice = self._current_entity, self.entity_state.currentData()
+        previous = self.viewport._attachments
+        vehicle_id = None
+        if entity is not None and choice is not None and entity.kind == "vehicle" \
+                and choice.label.split(" — ")[0].casefold() in self._ATTACHMENT_STATES:
+            vehicle_id = entity.object_id
+        self._attachments_from_entity = True
+        try:
+            self._show_attachments(vehicle_id)
+            opened = super()._open_entity_state(*args)
+        finally:
+            self._attachments_from_entity = False
+        if not opened:
+            self.viewport.set_attachments(previous)
+        return opened
+
+    def open_base(self, path, **kwargs) -> None:
+        if not getattr(self, "_attachments_from_entity", False):
+            self._show_attachments(path=path)
+        super().open_base(path, **kwargs)
+
+    def _activate_setbas_base(self, base_name: str):
+        if not getattr(self, "_attachments_from_entity", False):
+            self._show_attachments(base_name=base_name)
+        return super()._activate_setbas_base(base_name)
 
     def _load_default_bas(self) -> None:
         super()._load_default_bas()
@@ -155,6 +221,7 @@ class SnapshotStudioWindow(EntityListMixin, SetBasMixin, AssemblyWindow):
     def reload_game_resources(self) -> None:
         from studio.assets.catalog import clear_visual_cache
         clear_visual_cache()
+        self._attach_library = (None, None)
         self._reload_entity_resources()
         self._load_bas_for_set(self._set_combo.currentData() or 1)
         self._right_tabs.setCurrentWidget(self._snapshot_scroll)

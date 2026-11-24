@@ -87,10 +87,10 @@ class SnapshotStudioTests(unittest.TestCase):
                 window._right_tabs.tabText(index)
                 for index in range(window._right_tabs.count())
             ]
-            self.assertEqual(labels, ["Snapshot", "BAS Manager", "Entity List"])
+            self.assertEqual(labels, ["Snapshot", "Entity List", "BAS Manager"])
             self.assertIs(
                 window._right_tabs.widget(0), window._snapshot_scroll)
-            self.assertIs(window._right_tabs.widget(1), window._bas_panel)
+            self.assertIs(window._right_tabs.widget(2), window._bas_panel)
             self.assertFalse(
                 isinstance(window._right_tabs.widget(0), QTabWidget))
             self.assertFalse(
