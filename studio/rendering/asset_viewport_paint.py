@@ -28,7 +28,9 @@ from studio.rendering.asset_viewport_common import (
     _PICK_CAMERA_DISTANCE,
     PASTE_GHOST_OPACITY,
     ANIMATED_VERTEX_COLOR,
+    EMITTER_HIGHLIGHT_GREEN,
     MODEL_EDIT_SELECTION_RED,
+    UNIFIED_UV_VERTEX_BLUE,
     ORIGIN_MARKER_SCALE,
     ViewMaterial,
     ViewFace,
@@ -499,7 +501,7 @@ class _PaintingMixin:
                 painter.setPen(QPen(QColor(18, 26, 34, 190), 3.0))
                 outline = outline.simplified()
                 painter.drawPath(outline)
-                painter.setPen(QPen(QColor("white"), 1.25))
+                painter.setPen(QPen(EMITTER_HIGHLIGHT_GREEN, 1.8))
                 painter.drawPath(outline)
 
         if not clean and self._show_wire_overlay and mode == "wireframe":
@@ -857,7 +859,11 @@ class _PaintingMixin:
             painter.drawRect(QRectF(
                 point.x() - 3.0, point.y() - 3.0, 6.0, 6.0))
         mode_color = {
-            "move": MODEL_EDIT_SELECTION_RED,
+            "move": (
+                UNIFIED_UV_VERTEX_BLUE
+                if getattr(self, "_unified_uv_active", False)
+                else MODEL_EDIT_SELECTION_RED
+            ),
             "rotate": QColor(70, 130, 255),
             "scale": QColor(62, 205, 105),
         }[self._direct_transform_mode]
@@ -902,7 +908,7 @@ class _PaintingMixin:
         }
         visible_anchors = emitter_anchors & (
             self._edit_visible_vertices | session.selection)
-        painter.setPen(QPen(QColor(130, 225, 255), 1.5))
+        painter.setPen(QPen(EMITTER_HIGHLIGHT_GREEN, 1.8))
         painter.setBrush(Qt.BrushStyle.NoBrush)
         for index in visible_anchors:
             if index != hover and 0 <= index < len(screen):

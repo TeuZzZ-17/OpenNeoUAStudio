@@ -20,6 +20,7 @@ from studio.rendering.indexed import (
     VANILLA_GAMEPLAY_VIS_LIMIT,
 )
 from studio.rendering.asset_viewport_common import (
+    _apply,
     VIEW_MODES,
     VIEW_PRESET_ANGLES,
     ViewMaterial,
@@ -624,6 +625,17 @@ class _ViewControlsMixin:
         yz_y = y * math.cos(pitch) - xz_z * math.sin(pitch)
         yz_z = y * math.sin(pitch) + xz_z * math.cos(pitch)
         return (xz_x, yz_y, yz_z)
+
+    def project_model_point_to_view(
+            self, point, owner: str | None = None) -> tuple[float, float]:
+        """Project a model-space 3D point onto the current camera screen plane."""
+        session = self._edit_session
+        if session is not None and (owner is None or self._edit_owner == owner):
+            world_point = _apply(session.matrix, point, session.position)
+        else:
+            world_point = point
+        cam = self._camera_vertex(world_point)
+        return (cam[0], -cam[1])
 
     def _project(self, camera_point, target: QRectF | None = None,
                  camera: dict | None = None) -> QPointF:

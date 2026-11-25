@@ -3,7 +3,7 @@
 from time import monotonic
 
 
-DEFAULT_ANIMATION_SPEED = 0.50
+DEFAULT_ANIMATION_SPEED = 1.00
 
 
 class PreviewClock:

@@ -8,6 +8,7 @@ from unittest.mock import patch
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
+from PySide6.QtCore import QSettings
 from PySide6.QtWidgets import QApplication, QMenu, QMessageBox
 
 from studio.workbench.window import AssemblyWindow
@@ -479,6 +480,7 @@ class UVPhase3Tests(unittest.TestCase):
                 "Clear Selection",
                 "Copy UV Position",
                 "Paste UV Position",
+                "Unify UVs",
                 "Revert Selected UV",
             ])
             actions = {action.text(): action for action in menu.actions()}
@@ -513,6 +515,7 @@ class UVPhase3Tests(unittest.TestCase):
                 "Clear Selection",
                 "Copy UV Position",
                 "Paste UV Position",
+                "Unify UVs",
                 "Revert Selected UV",
             ])
             actions = {a.text(): a for a in menu.actions()}
@@ -527,6 +530,90 @@ class UVPhase3Tests(unittest.TestCase):
             self.assertEqual(after, before + 1)
         finally:
             window.close()
+
+    def test_unified_uvs_update_3d_live_persist_across_release_and_separate(self):
+        family, obj = _two_polygon_family()
+        window = _open_memory_window(family, obj)
+        try:
+            window._on_polygon_picked(0)
+            window._on_polygon_picked(1, additive=True)
+            self.assertEqual(window.uv_editor.loop_count(), 2)
+            self.assertFalse(window.viewport._unified_uv_active)
+            # Mark one polygon vertex as shared/protected: polygon selection and
+            # Unify UVs must still keep ALL polygon vertices selectable & draggable.
+            window.viewport.set_edit_read_only_vertices({0})
+            window._unify_selected_uvs()
+            self.assertEqual(window.uv_editor.loop_count(), 1)
+            self.assertTrue(window.viewport._unified_uv_active)
+            self.assertEqual(window.uv_unify_button.text(), "Separate UVs")
+            all_poly_verts = set(obj.skeleton.polygons[0]) | set(obj.skeleton.polygons[1])
+            self.assertEqual(set(window.viewport.edit_session.selection), all_poly_verts)
+            self.assertTrue(all_poly_verts.issubset(window.viewport._available_edit_vertices()))
+            proxy_key = window.uv_editor.loop_keys()[0]
+            original_proxy = window.uv_editor.loop_uvs()[proxy_key]
+            moved_proxy = [(min(255, u + 10), min(255, v + 10)) for u, v in original_proxy]
+            # Simulate live drag (before editFinished)
+            window._on_uv_changed({proxy_key: moved_proxy})
+            face0 = next(f for f in window.viewport._faces if f.poly_id == 0)
+            self.assertEqual(face0.uvs, obj.base_object.ades[0].olpl[0])
+            # Simulate release + full UV editor refresh: must stay unified as 1 loop!
+            window._on_uv_edit_finished()
+            window._update_uv_editor(0)
+            self.assertEqual(window.uv_editor.loop_count(), 1)
+            self.assertEqual(window.uv_editor.loop_uvs()[proxy_key], moved_proxy)
+            # Revert Selected UV works cleanly on unified proxy too
+            self.assertEqual(window._uv_revert_reason(), "")
+            # Toggle Separate UVs -> cleanly restores the 2 individual loops
+            window._unify_selected_uvs()
+            self.assertEqual(window.uv_editor.loop_count(), 2)
+            self.assertFalse(window.viewport._unified_uv_active)
+            self.assertEqual(window.uv_unify_button.text(), "Unify UVs")
+        finally:
+            window.close()
+
+    def test_unified_uvs_persist_across_reopen_via_qsettings(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            ini_path = str(Path(tmp_dir) / "studio.ini")
+            family, obj = _two_polygon_family()
+            family.base_path = Path(tmp_dir) / "TestModel.BASE"
+
+            def fake_settings():
+                return QSettings(ini_path, QSettings.Format.IniFormat)
+
+            with patch.object(AssemblyWindow, "_uv_settings", staticmethod(fake_settings)):
+                window1 = _open_memory_window(family, obj)
+                try:
+                    window1._on_polygon_picked(0)
+                    window1._on_polygon_picked(1, additive=True)
+                    window1._unify_selected_uvs()
+                    self.assertEqual(window1.uv_editor.loop_count(), 1)
+                finally:
+                    window1.close()
+
+                # Simulate closing and reopening the model in a fresh window
+                window2 = _open_memory_window(family, obj)
+                try:
+                    window2._load_persisted_unified_uv_groups()
+                    window2._on_polygon_picked(0)
+                    window2._on_polygon_picked(1, additive=True)
+                    self.assertEqual(window2.uv_editor.loop_count(), 1)
+                    self.assertTrue(window2.viewport._unified_uv_active)
+                    self.assertEqual(window2.uv_unify_button.text(), "Separate UVs")
+                    # Separate UVs persists removal too
+                    window2._unify_selected_uvs()
+                    self.assertEqual(window2.uv_editor.loop_count(), 2)
+                finally:
+                    window2.close()
+
+                window3 = _open_memory_window(family, obj)
+                try:
+                    window3._load_persisted_unified_uv_groups()
+                    window3._on_polygon_picked(0)
+                    window3._on_polygon_picked(1, additive=True)
+                    self.assertEqual(window3.uv_editor.loop_count(), 2)
+                    self.assertFalse(window3.viewport._unified_uv_active)
+                finally:
+                    window3.close()
 
 
 if __name__ == "__main__":

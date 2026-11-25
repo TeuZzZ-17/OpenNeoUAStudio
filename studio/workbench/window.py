@@ -9,15 +9,20 @@ from studio.rendering.playback import DEFAULT_ANIMATION_SPEED
 from pathlib import Path
 import sys
 
-from PySide6.QtCore import QEvent, QSize, Qt, QTimer, QUrl
+from PySide6.QtCore import QEvent, QPointF, QRectF, QSize, Qt, QTimer, QUrl
 from PySide6.QtGui import (
     QAction,
     QColor,
     QDesktopServices,
+    QIcon,
     QImage,
     QImageWriter,
     QKeySequence,
+    QPainter,
+    QPalette,
+    QPen,
     QPixmap,
+    QPolygonF,
 )
 from PySide6.QtWidgets import (
     QAbstractItemView,
@@ -1113,6 +1118,14 @@ class AssemblyWindow(
         self.edit_rotate_action.triggered.connect(
             self._rotate_selected_geometry)
         edit_menu.addAction(self.edit_rotate_action)
+        edit_menu.addSeparator()
+        self.unify_uvs_action = QAction("Unify UVs", self)
+        self.unify_uvs_action.setStatusTip(
+            "Unify the selected polygon UVs into a single continuous contour.")
+        self.unify_uvs_action.triggered.connect(
+            lambda _checked=False: self._unify_selected_uvs())
+        edit_menu.addAction(self.unify_uvs_action)
+        edit_menu.addSeparator()
         self.edit_center_action = QAction("Set Origin to Model Center", self)
         self.edit_center_action.setStatusTip(
             "Set the model's bounding-box center as its origin (0, 0, 0) "
@@ -1673,6 +1686,8 @@ class AssemblyWindow(
         self.uv_editor.editFinished.connect(self._on_uv_edit_finished)
         self.uv_editor.selectionChanged.connect(
             self._sync_uv_add_vertex_button)
+        self.uv_editor.selectionChanged.connect(
+            self._sync_3d_vertices_from_unified_uv)
         self.uv_editor.handleContextMenuRequested.connect(
             self._show_uv_handle_context_menu)
         self.uv_editor.backgroundContextMenuRequested.connect(
@@ -1689,10 +1704,12 @@ class AssemblyWindow(
         uv_canvas.setColumnStretch(0, 1)
         uv_layout.addLayout(uv_canvas, 1)
         self.uv_phase_combo = QComboBox()
+        self.uv_phase_combo.setMinimumWidth(85)
         self.uv_phase_combo.setToolTip(
             "Choose which UV phase is visible. All UV phases is the default.")
         self.uv_phase_combo.activated.connect(self._select_uv_phase)
         self.uv_speed_spin = QSpinBox()
+        self.uv_speed_spin.setMinimumWidth(68)
         self.uv_speed_spin.setRange(FRAME_MIN_MS, FRAME_MAX_MS)
         self.uv_speed_spin.setSuffix(" ms")
         self.uv_speed_spin.setKeyboardTracking(False)
@@ -1702,7 +1719,7 @@ class AssemblyWindow(
             "Without a selected phase it sets every frame of the animation.")
         self.uv_speed_spin.valueChanged.connect(self._set_uv_phase_duration)
         phase_row = QHBoxLayout()
-        phase_row.setSpacing(4)
+        phase_row.setSpacing(3)
         phase_row.addWidget(self.uv_phase_combo, 1)
         phase_row.addWidget(QLabel("Speed"))
         phase_row.addWidget(self.uv_speed_spin)
@@ -1734,12 +1751,39 @@ class AssemblyWindow(
         self.uv_auto_align_check.toggled.connect(
             self.uv_editor.set_auto_align_enabled)
         phase_row.addWidget(self.uv_auto_align_check)
+        self.uv_rotate_preview_button = QPushButton(self.uv_editor)
+        self.uv_rotate_preview_button.setFixedSize(32, 32)
+        self.uv_rotate_preview_button.setIconSize(QSize(22, 22))
+        self.uv_rotate_preview_button.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.uv_rotate_preview_button.setStyleSheet(
+            "QPushButton { background-color: rgba(28, 32, 38, 195); "
+            "border: 1px solid rgba(255, 255, 255, 55); border-radius: 6px; padding: 0px; }"
+            "QPushButton:hover { background-color: rgba(46, 54, 66, 230); "
+            "border: 1px solid rgba(120, 210, 255, 160); }"
+            "QPushButton:pressed { background-color: rgba(20, 24, 30, 235); }")
+        app_instance = QApplication.instance()
+        icon_color = (
+            app_instance.palette().color(QPalette.ColorRole.ButtonText)
+            if app_instance is not None
+            else self.palette().color(QPalette.ColorRole.ButtonText)
+        )
+        self.uv_rotate_preview_button.setIcon(
+            self._make_rotate_90_icon(icon_color, 24))
+        self.uv_rotate_preview_button.setToolTip(
+            "Rotate texture preview 90° (visual only; does not modify UVs).")
+        self.uv_rotate_preview_button.clicked.connect(
+            self._rotate_uv_preview_90)
+        self.uv_editor.set_corner_widget(self.uv_rotate_preview_button)
         self.uv_add_vertex_button = QPushButton("Add Vertex")
         self.uv_add_vertex_button.setEnabled(False)
         self.uv_add_vertex_button.clicked.connect(self._add_uv_vertex)
         self.uv_delete_vertex_button = QPushButton("Delete Vertex")
         self.uv_delete_vertex_button.setEnabled(False)
         self.uv_delete_vertex_button.clicked.connect(self._delete_uv_vertex)
+        self.uv_unify_button = QPushButton("Unify UVs")
+        self.uv_unify_button.setEnabled(False)
+        self.uv_unify_button.clicked.connect(
+            lambda _checked=False: self._unify_selected_uvs())
         self.uv_revert_button = QPushButton("Revert Selected UV")
         self.uv_revert_button.setEnabled(False)
         self.uv_revert_button.clicked.connect(self._revert_selected_uv)
@@ -1747,6 +1791,7 @@ class AssemblyWindow(
         self.uv_reset_all_button.setEnabled(False)
         self.uv_reset_all_button.clicked.connect(self._reset_all_uvs)
         uv_layout.addWidget(_ResponsiveButtonGrid([
+            self.uv_unify_button,
             self.uv_revert_button,
             self.uv_reset_all_button,
         ]))
@@ -2494,6 +2539,11 @@ class AssemblyWindow(
         self._material_clipboard = None
         self._uv_ctx = None
         self._uv_contexts.clear()
+        if hasattr(self, "_uv_unified_groups"):
+            self._uv_unified_groups.clear()
+        self._uv_unified_proxy = None
+        if hasattr(self, "viewport") and hasattr(self.viewport, "set_unified_uv_active"):
+            self.viewport.set_unified_uv_active(False)
         self._uv_original.clear()
         self._vanm_uv_original.clear()
         self._texture_original.clear()
@@ -2508,6 +2558,36 @@ class AssemblyWindow(
         self._edit_redo_stack.clear()
         self._uv_history_before = None
         self._fx_elements.clear()
+
+    @staticmethod
+    def _make_rotate_90_icon(color: QColor, size: int = 24) -> QIcon:
+        """Draw a crisp 90° clockwise circular arrow icon."""
+        pixmap = QPixmap(size, size)
+        pixmap.fill(Qt.GlobalColor.transparent)
+        painter = QPainter(pixmap)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        pen = QPen(color, max(2.2, size * 0.11),
+                   Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap)
+        painter.setPen(pen)
+        painter.setBrush(Qt.BrushStyle.NoBrush)
+        margin = size * 0.18
+        rect = QRectF(margin, margin, size - 2 * margin, size - 2 * margin)
+        # Qt angles are in 1/16th of a degree, CCW from 3 o'clock.
+        # Start near 1 o'clock (40°) and sweep 275° CCW -> ends near 4 o'clock (-45°),
+        # with an arrowhead pointing clockwise at the top-right end.
+        painter.drawArc(rect, int(45 * 16), int(275 * 16))
+        # Filled arrowhead at top-right pointing clockwise (down-right).
+        cx = rect.center().x() + rect.width() * 0.5 * 0.7071
+        cy = rect.center().y() - rect.height() * 0.5 * 0.7071
+        head = size * 0.21
+        tip = QPointF(cx + head * 0.35, cy + head * 0.45)
+        wing1 = QPointF(cx + head * 0.55, cy - head * 0.85)
+        wing2 = QPointF(cx - head * 0.80, cy + head * 0.20)
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.setBrush(color)
+        painter.drawPolygon(QPolygonF([tip, wing1, wing2]))
+        painter.end()
+        return QIcon(pixmap)
         self._bundle_targets.clear()
         self._bundle_base_snapshots.clear()
         self._texture_preview_cache.clear()

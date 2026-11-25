@@ -19,11 +19,14 @@ from studio.rendering.gpu import AcceleratedWidget
 # (formerly uv_topology_editor.py)
 # ----------------------------------------------------------------------------
 
-# Same look as the 3D view: selected handles are red with a yellow rim, the lines of a selected loop
-# use the selection-line color of the 3D polygons.
+# Same look as the 3D view: selected static handles are red squares (or blue squares
+# when UVs are unified), and polygon lines use the cyan selection-line color of the 3D view.
 UV_SELECTED_COLOR = QColor(255, 32, 48)
+UV_UNIFIED_COLOR = QColor(56, 140, 255)
 UV_SELECTED_RIM_COLOR = QColor(255, 214, 40)
 UV_SELECTED_LINE_COLOR = QColor(90, 230, 255)
+UV_EMITTER_LINE_COLOR = QColor(65, 225, 115)
+UV_EMITTER_SELECTED_COLOR = QColor(80, 255, 130)
 
 class UVTopologyError(ValueError):
     pass
@@ -211,6 +214,303 @@ def apply_uv_vertex_deletion(model, block,
     uvs.pop(plan.vertex_index)
 
 
+def _uv_signed_area(points: list[tuple[int, int]]) -> int:
+    return sum(
+        points[i][0] * points[(i + 1) % len(points)][1]
+        - points[(i + 1) % len(points)][0] * points[i][1]
+        for i in range(len(points))
+    )
+
+
+def _convex_hull_2d(points: list[tuple[int, int]]) -> list[tuple[int, int]]:
+    unique = sorted(set(points))
+    if len(unique) <= 2:
+        return unique
+
+    def cross(o, a, b):
+        return (a[0] - o[0]) * (b[1] - o[1]) - (a[1] - o[1]) * (b[0] - o[0])
+
+    lower: list[tuple[int, int]] = []
+    for p in unique:
+        while len(lower) >= 2 and cross(lower[-2], lower[-1], p) <= 0:
+            lower.pop()
+        lower.append(p)
+    upper: list[tuple[int, int]] = []
+    for p in reversed(unique):
+        while len(upper) >= 2 and cross(upper[-2], upper[-1], p) <= 0:
+            upper.pop()
+        upper.append(p)
+    return lower[:-1] + upper[:-1]
+
+
+def _extract_shared_boundary_cycle(
+        loop_uvs: dict[Hashable, list[tuple[int, int]]]) -> list[tuple[int, int]] | None:
+    """Return the single outer boundary cycle if loops tile cleanly without overlap."""
+    directed: dict[tuple[tuple[int, int], tuple[int, int]], int] = {}
+    for uvs in loop_uvs.values():
+        pts = [(int(u), int(v)) for u, v in uvs]
+        area = _uv_signed_area(pts)
+        if area == 0:
+            continue
+        ordered = pts if area > 0 else list(reversed(pts))
+        for i in range(len(ordered)):
+            a = ordered[i]
+            b = ordered[(i + 1) % len(ordered)]
+            if a == b:
+                continue
+            rev = (b, a)
+            if directed.get(rev, 0) > 0:
+                directed[rev] -= 1
+                if directed[rev] == 0:
+                    del directed[rev]
+            else:
+                directed[(a, b)] = directed.get((a, b), 0) + 1
+
+    if not directed or not all(count == 1 for count in directed.values()):
+        return None
+    out_map: dict[tuple[int, int], list[tuple[int, int]]] = {}
+    in_count: dict[tuple[int, int], int] = {}
+    for a, b in directed:
+        out_map.setdefault(a, []).append(b)
+        in_count[b] = in_count.get(b, 0) + 1
+    if not (all(len(v) == 1 for v in out_map.values())
+            and all(in_count.get(k, 0) == 1 for k in out_map)):
+        return None
+    start = next(iter(out_map))
+    cycle = [start]
+    curr = out_map[start][0]
+    while curr != start and len(cycle) <= len(directed):
+        cycle.append(curr)
+        curr = out_map[curr][0]
+    if curr == start and len(cycle) == len(directed) and len(cycle) >= 3:
+        return cycle
+    return None
+
+
+def uv_loops_are_seamless_patch(
+        loop_uvs: dict[Hashable, list[tuple[int, int]]]) -> bool:
+    """True when the loops already form one non-overlapping continuous UV island."""
+    if len(loop_uvs) < 2:
+        return True
+    cycle = _extract_shared_boundary_cycle(loop_uvs)
+    if cycle is None:
+        return False
+    outer_area = abs(_uv_signed_area(cycle))
+    if outer_area <= 0:
+        return False
+    total_area = sum(
+        abs(_uv_signed_area([(int(u), int(v)) for u, v in uvs]))
+        for uvs in loop_uvs.values()
+    )
+    return abs(total_area - outer_area) <= 0.15 * outer_area
+
+
+def spread_unified_uvs(
+        points_by_key: dict[Hashable, list[tuple[float, float, float]]],
+        current_uvs_by_key: dict[Hashable, list[tuple[int, int]]],
+        *,
+        camera_project,
+        to_view=None,
+        from_view=None,
+) -> dict[Hashable, list[tuple[int, int]]]:
+    """Spread overlapping/disconnected polygons into one continuous UV patch.
+
+    Projects all 3D corners from the current 3D camera view into the current UV
+    bounding rectangle (in preview-view space, respecting any 90° preview
+    rotation), so shared 3D vertices get identical (u, v) coordinates and the
+    texture stretches once cleanly across the whole selected surface.
+    """
+    if not points_by_key:
+        raise UVTopologyError("select at least one mapped polygon first")
+    if camera_project is None:
+        raise UVTopologyError("camera projection is unavailable")
+    to_view = to_view or (lambda u, v: (float(u), float(v)))
+    from_view = from_view or (lambda ru, rv: (float(ru), float(rv)))
+
+    projected: dict[Hashable, list[tuple[float, float]]] = {}
+    for key, pts in points_by_key.items():
+        if len(pts) < 3:
+            raise UVTopologyError(f"polygon {key!r} has fewer than 3 vertices")
+        projected[key] = [tuple(camera_project(p)) for p in pts]
+
+    all_xy = [xy for coords in projected.values() for xy in coords]
+    min_x = min(xy[0] for xy in all_xy)
+    max_x = max(xy[0] for xy in all_xy)
+    min_y = min(xy[1] for xy in all_xy)
+    max_y = max(xy[1] for xy in all_xy)
+    span_x = max_x - min_x
+    span_y = max_y - min_y
+    if span_x < 1e-6 and span_y < 1e-6:
+        raise UVTopologyError("the selected polygons are degenerate in this view")
+
+    view_uvs = [
+        to_view(uv[0], uv[1])
+        for uvs in current_uvs_by_key.values()
+        for uv in uvs
+    ]
+    if view_uvs:
+        ru0 = min(p[0] for p in view_uvs)
+        rv0 = min(p[1] for p in view_uvs)
+        ru1 = max(p[0] for p in view_uvs)
+        rv1 = max(p[1] for p in view_uvs)
+        if (ru1 - ru0) < 8.0 or (rv1 - rv0) < 8.0:
+            ru0, rv0, ru1, rv1 = 16.0, 16.0, 240.0, 240.0
+    else:
+        ru0, rv0, ru1, rv1 = 16.0, 16.0, 240.0, 240.0
+
+    result: dict[Hashable, list[tuple[int, int]]] = {}
+    for key, coords in projected.items():
+        mapped: list[tuple[int, int]] = []
+        for px, py in coords:
+            tx = (px - min_x) / span_x if span_x >= 1e-6 else 0.5
+            ty = (py - min_y) / span_y if span_y >= 1e-6 else 0.5
+            ru = ru0 + tx * (ru1 - ru0)
+            rv = rv0 + ty * (rv1 - rv0)
+            u, v = from_view(ru, rv)
+            mapped.append((max(0, min(255, round(u))), max(0, min(255, round(v)))))
+        result[key] = mapped
+    return result
+
+
+def _extract_outer_contour(
+        loop_uvs: dict[Hashable, list[tuple[int, int]]]) -> list[tuple[int, int]]:
+    """Extract a simplified outer boundary polygon from the current UV loops."""
+    all_points: list[tuple[int, int]] = [
+        (int(u), int(v)) for uvs in loop_uvs.values() for u, v in uvs
+    ]
+    contour = _extract_shared_boundary_cycle(loop_uvs)
+
+    if contour is None:
+        hull = _convex_hull_2d(all_points)
+        if len(hull) >= 3:
+            contour = hull
+        else:
+            us = [p[0] for p in all_points]
+            vs = [p[1] for p in all_points]
+            u0, u1 = min(us), max(us)
+            v0, v1 = min(vs), max(vs)
+            if u0 == u1:
+                u1 = min(255, u0 + 1)
+            if v0 == v1:
+                v1 = min(255, v0 + 1)
+            contour = [(u0, v0), (u1, v0), (u1, v1), (u0, v1)]
+
+    # Simplify collinear vertices along straight outer edges (e.g. two triangles
+    # sharing a midpoint on one side collapse into a single 3-vertex triangle).
+    changed = True
+    while changed and len(contour) > 3:
+        changed = False
+        for i in range(len(contour)):
+            prev_pt = contour[(i - 1) % len(contour)]
+            curr_pt = contour[i]
+            next_pt = contour[(i + 1) % len(contour)]
+            dx = next_pt[0] - prev_pt[0]
+            dy = next_pt[1] - prev_pt[1]
+            seg_len = math.hypot(dx, dy)
+            if seg_len < 1e-6:
+                contour.pop(i)
+                changed = True
+                break
+            cross = abs((curr_pt[0] - prev_pt[0]) * dy - (curr_pt[1] - prev_pt[1]) * dx)
+            dist = cross / seg_len
+            dot1 = (curr_pt[0] - prev_pt[0]) * dx + (curr_pt[1] - prev_pt[1]) * dy
+            dot2 = (next_pt[0] - curr_pt[0]) * dx + (next_pt[1] - curr_pt[1]) * dy
+            if dist <= 1.5 and dot1 >= 0 and dot2 >= 0:
+                contour.pop(i)
+                changed = True
+                break
+    return contour
+
+
+def _mean_value_weights(
+        point: tuple[int, int], contour: list[tuple[int, int]]) -> list[float]:
+    """Compute generalized barycentric (Mean Value) weights of point w.r.t. contour."""
+    n = len(contour)
+    px, py = float(point[0]), float(point[1])
+    for i, (vx, vy) in enumerate(contour):
+        if math.hypot(px - vx, py - vy) < 1e-6:
+            w = [0.0] * n
+            w[i] = 1.0
+            return w
+
+    for i in range(n):
+        ax, ay = contour[i]
+        bx, by = contour[(i + 1) % n]
+        dx, dy = bx - ax, by - ay
+        seg_sq = dx * dx + dy * dy
+        if seg_sq < 1e-9:
+            continue
+        t = ((px - ax) * dx + (py - ay) * dy) / seg_sq
+        if 0.0 <= t <= 1.0:
+            proj_x = ax + t * dx
+            proj_y = ay + t * dy
+            if math.hypot(px - proj_x, py - proj_y) <= 1e-4:
+                w = [0.0] * n
+                w[i] = 1.0 - t
+                w[(i + 1) % n] = t
+                return w
+
+    vecs = [(vx - px, vy - py) for vx, vy in contour]
+    radii = [math.hypot(vx, vy) for vx, vy in vecs]
+    tan_half = [0.0] * n
+    for i in range(n):
+        j = (i + 1) % n
+        sx1, sy1 = vecs[i]
+        sx2, sy2 = vecs[j]
+        dot = sx1 * sx2 + sy1 * sy2
+        cross = sx1 * sy2 - sy1 * sx2
+        denom = radii[i] * radii[j] + dot
+        if abs(denom) < 1e-9:
+            tan_half[i] = 0.0
+        else:
+            tan_half[i] = cross / denom
+
+    raw = [
+        (tan_half[(i - 1) % n] + tan_half[i]) / max(radii[i], 1e-9)
+        for i in range(n)
+    ]
+    total = sum(raw)
+    if abs(total) < 1e-9:
+        inv = [1.0 / max(r, 1e-9) for r in radii]
+        inv_sum = sum(inv)
+        return [val / inv_sum for val in inv]
+    return [val / total for val in raw]
+
+
+def build_unified_uv_proxy(
+        loop_uvs: dict[Hashable, list[tuple[int, int]]],
+) -> tuple[list[tuple[int, int]], dict[Hashable, list[list[float]]]]:
+    """Unify multiple UV loops into a single simplified outer contour and weights."""
+    if len(loop_uvs) < 2:
+        raise UVTopologyError("select at least two mapped polygons to unify")
+    for key, uvs in loop_uvs.items():
+        if len(uvs) < 3:
+            raise UVTopologyError(f"polygon {key!r} has fewer than 3 UV vertices")
+    contour = _extract_outer_contour(loop_uvs)
+    weights = {
+        key: [_mean_value_weights(uv, contour) for uv in uvs]
+        for key, uvs in loop_uvs.items()
+    }
+    return contour, weights
+
+
+def evaluate_unified_uv_proxy(
+        proxy_uvs: list[tuple[int, int]],
+        weights_by_key: dict[Hashable, list[list[float]]],
+) -> dict[Hashable, list[tuple[int, int]]]:
+    """Evaluate underlying polygon UVs from the unified contour handles."""
+    result: dict[Hashable, list[tuple[int, int]]] = {}
+    for key, vertex_weights in weights_by_key.items():
+        result[key] = [
+            (
+                max(0, min(255, round(sum(wk * proxy_uvs[k][0] for k, wk in enumerate(w))))),
+                max(0, min(255, round(sum(wk * proxy_uvs[k][1] for k, wk in enumerate(w))))),
+            )
+            for w in vertex_weights
+        ]
+    return result
+
+
 # ----------------------------------------------------------------------------
 # Interactive multi-loop OLPL UV editor over a texture preview.
 # (formerly uv_editor_widget.py)
@@ -235,6 +535,8 @@ class UVLoop:
 class UVEditorWidget(AcceleratedWidget):
     _timeline_visible = None
     _timeline_active = None
+    _timeline_is_emitter = False
+    _timeline_emitter_anchor_animated = False
     # Legacy single-loop signal/API remains available to existing callers.
     uvChanged = Signal(list)
     loopsChanged = Signal(object)
@@ -279,6 +581,8 @@ class UVEditorWidget(AcceleratedWidget):
         self._press_selection: set[tuple[Hashable, int]] = set()
         self._zoom = 1.0
         self._pan = QPointF(0.0, 0.0)
+        self._view_rotation = 0
+        self._corner_widget = None
         self._scrollbars = ()
         self._pan_last: QPoint | None = None
         # Right press on the bare texture: pans if dragged, opens the menu if not.
@@ -307,6 +611,8 @@ class UVEditorWidget(AcceleratedWidget):
         self._image = image
         self._timeline_visible = None
         self._timeline_active = None
+        self._timeline_is_emitter = False
+        self._timeline_emitter_anchor_animated = False
         self._loops = []
         self._loop_indices = {}
         for loop in loops:
@@ -341,6 +647,7 @@ class UVEditorWidget(AcceleratedWidget):
         self._press_pos = None
         self._press_selection.clear()
         self._snap_guides = ()
+        self._timeline_is_emitter = False
         self.update()
 
     # ---- placement preview (Add UV Phase / Copy / Paste UV Position) -------------------------
@@ -745,15 +1052,82 @@ class UVEditorWidget(AcceleratedWidget):
                 bar.setPageStep(extent)
                 bar.setValue(value)
 
+    def set_corner_widget(self, widget) -> None:
+        """Pin a small overlay button to the bottom-right corner of the UV preview."""
+        self._corner_widget = widget
+        if widget is not None:
+            widget.setParent(self)
+            widget.show()
+            widget.raise_()
+            self._position_corner_widget()
+
+    def _position_corner_widget(self) -> None:
+        if self._corner_widget is None:
+            return
+        margin = 8
+        x = max(0, self.width() - self._corner_widget.width() - margin)
+        y = max(0, self.height() - self._corner_widget.height() - margin)
+        self._corner_widget.move(x, y)
+        self._corner_widget.raise_()
+
     def resizeEvent(self, event) -> None:  # noqa: N802
         super().resizeEvent(event)
         self._sync_scrollbars()
+        self._position_corner_widget()
 
     def reset_view(self) -> None:
         self._zoom = 1.0
         self._pan = QPointF(0.0, 0.0)
         self._sync_scrollbars()
         self.update()
+
+    def view_rotation_degrees(self) -> int:
+        return self._view_rotation * 90
+
+    def rotate_view_90(self) -> int:
+        """Rotate the preview (texture + UV overlay) 90° clockwise visually only."""
+        self._view_rotation = (self._view_rotation + 1) % 4
+        self.update()
+        return self.view_rotation_degrees()
+
+    def reset_view_rotation(self) -> None:
+        self._view_rotation = 0
+        self.update()
+
+    def set_timeline_emitter(self, is_emitter: bool,
+                             anchor_animated: bool = False) -> None:
+        self._timeline_is_emitter = bool(is_emitter)
+        self._timeline_emitter_anchor_animated = bool(anchor_animated)
+        self.update()
+
+    def current_image(self) -> QImage | None:
+        return self._image
+
+    def uv_to_view_space(self, u: float, v: float) -> tuple[float, float]:
+        return self._rotate_uv_for_view(u, v)
+
+    def view_space_to_uv(self, ru: float, rv: float) -> tuple[float, float]:
+        return self._unrotate_uv_from_view(ru, rv)
+
+    def _rotate_uv_for_view(self, u: float, v: float) -> tuple[float, float]:
+        rot = self._view_rotation
+        if rot == 1:
+            return 256.0 - v, u
+        if rot == 2:
+            return 256.0 - u, 256.0 - v
+        if rot == 3:
+            return v, 256.0 - u
+        return u, v
+
+    def _unrotate_uv_from_view(self, ru: float, rv: float) -> tuple[float, float]:
+        rot = self._view_rotation
+        if rot == 1:
+            return rv, 256.0 - ru
+        if rot == 2:
+            return 256.0 - ru, 256.0 - rv
+        if rot == 3:
+            return 256.0 - rv, ru
+        return ru, rv
 
     def fit_selection(self) -> None:
         """Fit selected handles, or all UV content when nothing is selected."""
@@ -769,10 +1143,11 @@ class UVEditorWidget(AcceleratedWidget):
         if not points:
             self.reset_view()
             return
-        min_u = min(point[0] for point in points)
-        max_u = max(point[0] for point in points)
-        min_v = min(point[1] for point in points)
-        max_v = max(point[1] for point in points)
+        rot_points = [self._rotate_uv_for_view(p[0], p[1]) for p in points]
+        min_u = min(point[0] for point in rot_points)
+        max_u = max(point[0] for point in rot_points)
+        min_v = min(point[1] for point in rot_points)
+        max_v = max(point[1] for point in rot_points)
         span = max(max_u - min_u, max_v - min_v, 16.0)
         self._zoom = max(1.0, min(6.0, 256.0 * 0.82 / span))
         self._pan = QPointF(0.0, 0.0)
@@ -795,14 +1170,16 @@ class UVEditorWidget(AcceleratedWidget):
 
     def _uv_to_screen(self, uv: tuple[int, int]) -> QPointF:
         ox, oy, size = self._canvas_rect()
-        return QPointF(ox + uv[0] / 256.0 * size,
-                       oy + uv[1] / 256.0 * size)
+        ru, rv = self._rotate_uv_for_view(uv[0], uv[1])
+        return QPointF(ox + ru / 256.0 * size,
+                       oy + rv / 256.0 * size)
 
     def _screen_to_uv(self, point: QPointF) -> tuple[int, int]:
         ox, oy, size = self._canvas_rect()
-        u = round((point.x() - ox) / size * 256.0)
-        v = round((point.y() - oy) / size * 256.0)
-        return max(0, min(255, u)), max(0, min(255, v))
+        ru = (point.x() - ox) / size * 256.0
+        rv = (point.y() - oy) / size * 256.0
+        u, v = self._unrotate_uv_from_view(ru, rv)
+        return max(0, min(255, round(u))), max(0, min(255, round(v)))
 
     @staticmethod
     def _signed_area(points: list[tuple[int, int]]) -> int:
@@ -970,7 +1347,15 @@ class UVEditorWidget(AcceleratedWidget):
                                          else QPalette.ColorRole.AlternateBase),
                 )
         if self._image is not None and not self._image.isNull():
-            painter.drawImage(QRectF(ox, oy, size, size), self._image)
+            if self._view_rotation:
+                painter.save()
+                cx, cy = ox + size * 0.5, oy + size * 0.5
+                painter.translate(cx, cy)
+                painter.rotate(self._view_rotation * 90)
+                painter.drawImage(QRectF(-size * 0.5, -size * 0.5, size, size), self._image)
+                painter.restore()
+            else:
+                painter.drawImage(QRectF(ox, oy, size, size), self._image)
         if self._loops:
             painter.setRenderHint(QPainter.RenderHint.Antialiasing)
             visible = self._visible_loops()
@@ -985,21 +1370,71 @@ class UVEditorWidget(AcceleratedWidget):
                 selected_loop = any((loop.key, index) in self._selected_handles
                                     for index in range(len(points)))
                 dimmed = not self._shows_uv_handles(loop.key)
-                outline = QColor(color)
-                if dimmed:
-                    outline.setAlpha(132)
-                if playing or selected_loop:
-                    painter.setPen(QPen(QColor(20, 20, 20), 4.5))
-                    painter.setBrush(Qt.BrushStyle.NoBrush)
-                    painter.drawPolygon(QPolygonF(points))
-                if playing and selected_loop:
-                    # The playing frame passes over the selection: its cyan lines glow yellow at the edges.
-                    painter.setPen(QPen(outline, 4.5))
-                    painter.drawPolygon(QPolygonF(points))
-                border = UV_SELECTED_LINE_COLOR if selected_loop else outline
-                painter.setPen(QPen(border, 2.5 if playing or selected_loop else 1.3))
-                painter.setBrush(Qt.BrushStyle.NoBrush)
-                painter.drawPolygon(QPolygonF(points))
+                is_timeline = self._timeline_visible is not None
+                is_emitter = is_timeline and self._timeline_is_emitter
+                is_unified = (
+                    isinstance(loop.key, tuple) and bool(loop.key)
+                    and loop.key[0] == "@UNIFIED"
+                )
+                poly = QPolygonF(points)
+                if is_emitter:
+                    if selected_loop:
+                        painter.setPen(Qt.PenStyle.NoPen)
+                        painter.setBrush(
+                            QColor(110, 255, 160, 110) if playing
+                            else QColor(65, 225, 115, 65))
+                        painter.drawPolygon(poly)
+                        painter.setBrush(Qt.BrushStyle.NoBrush)
+                        painter.setPen(QPen(
+                            UV_SELECTED_RIM_COLOR, 7.2 if playing else 5.8))
+                        painter.drawPolygon(poly)
+                        painter.setPen(QPen(
+                            QColor(135, 255, 170) if playing else UV_EMITTER_SELECTED_COLOR,
+                            3.2 if playing else 2.8))
+                        painter.drawPolygon(poly)
+                    else:
+                        line_color = QColor(UV_EMITTER_LINE_COLOR)
+                        line_color.setAlpha(150 if dimmed else (240 if playing else 185))
+                        painter.setPen(QPen(line_color, 2.2 if playing else 1.5))
+                        painter.setBrush(Qt.BrushStyle.NoBrush)
+                        painter.drawPolygon(poly)
+                elif is_timeline:
+                    if selected_loop:
+                        painter.setPen(Qt.PenStyle.NoPen)
+                        painter.setBrush(
+                            QColor(120, 245, 255, 105) if playing
+                            else QColor(90, 230, 255, 60))
+                        painter.drawPolygon(poly)
+                        painter.setBrush(Qt.BrushStyle.NoBrush)
+                        painter.setPen(QPen(
+                            UV_SELECTED_RIM_COLOR, 7.2 if playing else 5.8))
+                        painter.drawPolygon(poly)
+                        painter.setPen(QPen(
+                            QColor(180, 250, 255) if playing else UV_SELECTED_LINE_COLOR,
+                            3.0))
+                        painter.drawPolygon(poly)
+                    else:
+                        line_color = QColor(UV_SELECTED_LINE_COLOR)
+                        line_color.setAlpha(140 if dimmed else (240 if playing else 180))
+                        painter.setPen(QPen(line_color, 2.2 if playing else 1.5))
+                        painter.setBrush(Qt.BrushStyle.NoBrush)
+                        painter.drawPolygon(poly)
+                else:
+                    if selected_loop:
+                        fill = QColor(56, 140, 255, 65) if is_unified else QColor(90, 230, 255, 60)
+                        painter.setPen(Qt.PenStyle.NoPen)
+                        painter.setBrush(fill)
+                        painter.drawPolygon(poly)
+                        painter.setBrush(Qt.BrushStyle.NoBrush)
+                        painter.setPen(QPen(UV_SELECTED_RIM_COLOR, 6.0))
+                        painter.drawPolygon(poly)
+                        painter.setPen(QPen(UV_SELECTED_LINE_COLOR, 3.0))
+                        painter.drawPolygon(poly)
+                    else:
+                        fill = QColor(56, 140, 255, 24) if is_unified else QColor(90, 230, 255, 20)
+                        painter.setPen(QPen(UV_SELECTED_LINE_COLOR, 1.6))
+                        painter.setBrush(fill)
+                        painter.drawPolygon(poly)
                 # The frame the animation sits on shows only its lines until it is selected.
                 if dimmed or (playing and not selected_loop):
                     continue
@@ -1007,14 +1442,55 @@ class UVEditorWidget(AcceleratedWidget):
                     handle = (loop.key, index)
                     active = handle == self._active_handle
                     selected = handle in self._selected_handles
-                    painter.setBrush(
-                        UV_SELECTED_COLOR if selected
-                        else self._opposite_loop_color(color)
-                        if active and self._timeline_visible is None else color)
-                    painter.setPen(QPen(
-                        UV_SELECTED_RIM_COLOR if selected
-                        else QColor(20, 20, 20), 1.8 if selected else 1.4))
-                    painter.drawEllipse(point, HANDLE_RADIUS, HANDLE_RADIUS)
+                    if is_emitter:
+                        ring_radius = 8.5 if (selected or active) else 6.5
+                        ring_color = (
+                            UV_EMITTER_SELECTED_COLOR if selected
+                            else UV_EMITTER_LINE_COLOR
+                        )
+                        painter.setBrush(Qt.BrushStyle.NoBrush)
+                        painter.setPen(QPen(ring_color, 2.2 if selected else 1.6))
+                        painter.drawEllipse(point, ring_radius, ring_radius)
+                        if self._timeline_emitter_anchor_animated:
+                            radius = 4.6 if (selected or active) else 3.5
+                            fill_color = (
+                                UV_SELECTED_COLOR if selected
+                                else UV_EMITTER_LINE_COLOR
+                            )
+                            painter.setBrush(fill_color)
+                            painter.setPen(QPen(
+                                UV_SELECTED_RIM_COLOR, 2.0 if selected else 1.5))
+                            painter.drawEllipse(point, radius, radius)
+                        else:
+                            sq = 4.4 if (selected or active) else 3.2
+                            fill_color = (
+                                UV_SELECTED_COLOR if selected
+                                else UV_EMITTER_LINE_COLOR
+                            )
+                            rim_color = (
+                                UV_SELECTED_COLOR.lighter(165) if selected
+                                else UV_EMITTER_SELECTED_COLOR
+                            )
+                            painter.setBrush(fill_color)
+                            painter.setPen(QPen(rim_color, 1.8 if selected else 1.4))
+                            painter.drawRect(QRectF(
+                                point.x() - sq, point.y() - sq, sq * 2.0, sq * 2.0))
+                    elif is_timeline:
+                        radius = 6.0 if (selected or active) else 4.5
+                        painter.setBrush(
+                            UV_SELECTED_COLOR if selected else UV_SELECTED_LINE_COLOR)
+                        painter.setPen(QPen(
+                            UV_SELECTED_RIM_COLOR, 2.4 if selected else 1.8))
+                        painter.drawEllipse(point, radius, radius)
+                    else:
+                        base_color = UV_UNIFIED_COLOR if is_unified else UV_SELECTED_COLOR
+                        radius = 6.0 if (active or selected) else 4.5
+                        rim = QColor(255, 255, 255) if selected else base_color.lighter(165)
+                        painter.setBrush(base_color)
+                        painter.setPen(QPen(rim, 2.2 if selected else 1.6))
+                        painter.drawRect(QRectF(
+                            point.x() - radius, point.y() - radius,
+                            radius * 2.0, radius * 2.0))
         if self._place_base is not None:
             ghost = QPolygonF([self._uv_to_screen(uv) for uv in self._place_uvs])
             painter.setPen(QPen(QColor(235, 235, 235, 230), 1.4, Qt.PenStyle.DashLine))
@@ -1025,15 +1501,12 @@ class UVEditorWidget(AcceleratedWidget):
                 QColor(120, 230, 255, 180), 1.0, Qt.PenStyle.DashLine))
             for axis, value, _label in self._snap_guides:
                 if axis == "u":
-                    point = self._uv_to_screen((value, 0))
-                    painter.drawLine(
-                        QPointF(point.x(), oy),
-                        QPointF(point.x(), oy + size))
+                    p0 = self._uv_to_screen((value, 0))
+                    p1 = self._uv_to_screen((value, 256))
                 else:
-                    point = self._uv_to_screen((0, value))
-                    painter.drawLine(
-                        QPointF(ox, point.y()),
-                        QPointF(ox + size, point.y()))
+                    p0 = self._uv_to_screen((0, value))
+                    p1 = self._uv_to_screen((256, value))
+                painter.drawLine(p0, p1)
         if self._box_rect is not None:
             painter.setPen(QPen(QColor(90, 230, 255), 1.0,
                                 Qt.PenStyle.DashLine))
@@ -1098,12 +1571,14 @@ class UVEditorWidget(AcceleratedWidget):
             additive = bool(event.modifiers()
                             & Qt.KeyboardModifier.ControlModifier)
             whole_loop = None
-            if self._timeline_visible is not None and not additive:
+            if not additive:
                 if hit is None:
                     whole_loop = self._hit_timeline_loop(pos)
                     if whole_loop is not None:
                         hit = (whole_loop.key, 0)
-                elif self._active_handle is None or self._active_handle[0] != hit[0]:
+                elif (self._timeline_visible is not None
+                      and (self._active_handle is None
+                           or self._active_handle[0] != hit[0])):
                     whole_loop = self._loop(hit[0])
             self._press_hit = hit
             self._press_pos = QPointF(pos)

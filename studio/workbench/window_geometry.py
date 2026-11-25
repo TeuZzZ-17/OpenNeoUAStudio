@@ -1912,6 +1912,14 @@ class _GeometryEditMixin:
                          "Replace Texture" if kinds == {"ilbm"} else
                          "Replace Texture / ANM")
                 menu.addAction(label, self._load_model_texture)
+            if active_emitter is None:
+                unify_reason = self._uv_unify_reason()
+                unify_action = menu.addAction(
+                    self._uv_unify_action_label(),
+                    lambda _checked=False: self._unify_selected_uvs())
+                unify_action.setEnabled(not unify_reason)
+                if unify_reason:
+                    unify_action.setToolTip(unify_reason)
         if active_emitter is not None:
             menu.addAction(self.replace_emitter_action)
             menu.addAction(self.copy_emitter_action)
@@ -2452,6 +2460,8 @@ class _GeometryEditMixin:
             if key[0].casefold() in names}
 
     def _uv_storage(self, key):
+        if not isinstance(key, tuple) or len(key) < 3 or key[0] == "@UNIFIED":
+            return None
         owner, block_index, atts_index = key[:3]
         if owner == "@VANM":
             entry = self._animation_for_name(block_index)

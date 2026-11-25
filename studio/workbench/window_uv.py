@@ -4,9 +4,11 @@ choice and loading."""
 from __future__ import annotations
 
 import copy
+import hashlib
+import json
 from pathlib import Path
 
-from PySide6.QtCore import Qt
+from PySide6.QtCore import QSettings, Qt
 from PySide6.QtGui import (
     QImage,
 )
@@ -47,8 +49,12 @@ from studio.formats.animation import (
 from studio.ui.uv_editor import (
     apply_uv_vertex_deletion,
     apply_uv_vertex_insertion,
+    build_unified_uv_proxy,
+    evaluate_unified_uv_proxy,
     plan_uv_vertex_deletion,
     plan_uv_vertex_insertion,
+    spread_unified_uvs,
+    uv_loops_are_seamless_patch,
     UVLoop,
     UVTopologyError,
 )
@@ -133,6 +139,18 @@ class _UvTexturesMixin:
         if not selected:
             return "Select one or more edited UV handles first."
         for key, index in selected:
+            if isinstance(key, tuple) and key and key[0] == "@UNIFIED":
+                proxy = getattr(self, "_uv_unified_proxy", None)
+                if proxy is None or proxy[0] != key:
+                    continue
+                for orig_key in proxy[1]:
+                    tracker, tracked_key = self._uv_original_tracker(orig_key)
+                    original = tracker.get(tracked_key)
+                    storage = self._uv_storage(orig_key)
+                    if original is not None and storage is not None \
+                            and self._uv_storage_points(storage) != list(original):
+                        return ""
+                continue
             tracker, tracked_key = self._uv_original_tracker(key)
             original = tracker.get(tracked_key)
             storage = self._uv_storage(key)
@@ -161,7 +179,11 @@ class _UvTexturesMixin:
         if getattr(self, "_uv_timeline", None) is not None:
             self.uv_editor.fit_selection()
 
-    def _show_uv_timeline(self, name, animation, obj, poly_id, frame_provider):
+    def _show_uv_timeline(self, name, animation, obj, poly_id, frame_provider,
+                          *, extra_animations=()):
+        self._uv_unified_proxy = None
+        if hasattr(self, "viewport") and hasattr(self.viewport, "set_unified_uv_active"):
+            self.viewport.set_unified_uv_active(False)
         self._uv_ctx = None
         self._uv_contexts = {}
         self._uv_phase_links = {}
@@ -201,7 +223,45 @@ class _UvTexturesMixin:
                 by_group[group_key] = key
             frame_keys.append(key)
             labels.setdefault(key, []).append(str(index + 1))
-        token = (id(obj), poly_id, name, self.emitter_stage_combo.currentData()
+
+        primary_bitmaps = {
+            bname.casefold(): bidx
+            for bidx, bname in enumerate(animation.bitmap_names)
+        }
+        seen_extra_keys = set()
+        for other_name, other_anim, other_poly_id in extra_animations:
+            for frame in other_anim.frames:
+                group, bitmap = frame.texcoords_id, frame.frame_id
+                if not (0 <= group < len(other_anim.texcoord_groups)
+                        and 0 <= bitmap < len(other_anim.bitmap_names)):
+                    continue
+                other_key = ("@VANM", other_name, group)
+                if other_key in seen_extra_keys:
+                    continue
+                seen_extra_keys.add(other_key)
+                uvs = list(other_anim.texcoord_groups[group])
+                editable = (self._editing_allowed()
+                            and (other_poly_id is None
+                                 or len(uvs) == len(obj.skeleton.polygons[other_poly_id]))
+                            and self._animation_uv_writable(other_name, group))
+                if editable:
+                    self._uv_contexts[other_key] = (
+                        obj, None, other_name, group, other_poly_id)
+                bname_cf = other_anim.bitmap_names[bitmap].casefold()
+                shape = (bname_cf, tuple(sorted(uvs)))
+                previous = by_shape.get(shape)
+                if previous and len(set(uvs)) == len(uvs) and set(previous[1]) == set(uvs):
+                    primary, primary_uvs = previous
+                    self._uv_phase_links.setdefault(primary, []).append(
+                        (other_key, tuple(primary_uvs.index(uv) for uv in uvs)))
+                elif bname_cf in primary_bitmaps:
+                    by_shape[shape] = other_key, uvs
+                    loops.append(UVLoop(other_key, other_poly_id or 0, uvs, editable))
+                    bitmaps[other_key] = primary_bitmaps[bname_cf]
+
+        extra_names = tuple(item[0] for item in extra_animations)
+        token = (id(obj), poly_id, name, extra_names,
+                 self.emitter_stage_combo.currentData()
                  if self._selected_emitter() is not None else None)
         focus = token != getattr(self, "_uv_timeline_token", None)
         self._uv_timeline_token = token
@@ -212,6 +272,18 @@ class _UvTexturesMixin:
             self.uv_phase_combo.setCurrentIndex(0)
             self.uv_editor.set_visible_loop_key(None)
         self.uv_editor.set_loops(image, loops, "UV phases shown together by default.")
+        selected_emitter = self._selected_emitter()
+        if selected_emitter is not None:
+            _idx, emitter_block = selected_emitter
+            anchor_id = getattr(emitter_block, "ade_point_id", -1)
+            anchor_animated = any(
+                anchor_id in el.vertex_indices
+                for el in getattr(self, "_fx_elements", ())
+                if el.owner_path == obj.owner_path
+            )
+            self.uv_editor.set_timeline_emitter(True, anchor_animated=anchor_animated)
+        else:
+            self.uv_editor.set_timeline_emitter(False)
         self._refresh_uv_timeline(focus=focus)
         self._sync_uv_add_vertex_button()
 
@@ -542,6 +614,27 @@ class _UvTexturesMixin:
                 "Restore every changed editable UV loop in the active model."
                 if changed else
                 "No changed editable UV loop is available to reset.")
+        unify_reason = self._uv_unify_reason()
+        unify_label = self._uv_unify_action_label()
+        unify_tip = (
+            unify_reason or (
+                "Separate the unified UV contour back into individual polygon loops."
+                if self._is_current_uv_unified() else
+                "Unify selected polygon UVs into a single editable contour."
+            )
+        )
+        unify_button = getattr(self, "uv_unify_button", None)
+        if unify_button is not None:
+            unify_button.setText(unify_label)
+            unify_button.setEnabled(not unify_reason)
+            unify_button.setToolTip(unify_tip)
+        unify_action = getattr(self, "unify_uvs_action", None)
+        if unify_action is not None:
+            unify_action.setText(unify_label)
+            unify_action.setEnabled(not unify_reason)
+            unify_action.setToolTip(unify_tip)
+        if hasattr(self, "viewport") and hasattr(self.viewport, "set_unified_uv_active"):
+            self.viewport.set_unified_uv_active(self._is_current_uv_unified())
 
     @staticmethod
     def _configure_uv_menu_action(action, reason: str,
@@ -611,6 +704,16 @@ class _UvTexturesMixin:
             "Move the vertices of the visible faces to the copied position, "
             "so they show the same part of the texture.")
         paste_position.triggered.connect(self._paste_uv_position)
+        menu.addSeparator()
+        unify_reason = self._uv_unify_reason()
+        unify_action = menu.addAction(self._uv_unify_action_label())
+        self._configure_uv_menu_action(
+            unify_action, unify_reason,
+            "Separate the unified UV contour back into individual polygon loops."
+            if self._is_current_uv_unified() else
+            "Unify the selected polygon UVs into a single editable contour.")
+        unify_action.triggered.connect(
+            lambda _checked=False: self._unify_selected_uvs())
         menu.addSeparator()
         revert = menu.addAction("Revert Selected UV")
         revert_reason = self._uv_revert_reason()
@@ -710,6 +813,286 @@ class _UvTexturesMixin:
         self.uv_editor.replace_loop_uvs({
             key: self._uv_position_clipboard for key in self._uv_paste_targets()})
         self.statusBar().showMessage("UV position pasted.", 4000)
+
+    def _rotate_uv_preview_90(self) -> None:
+        degrees = self.uv_editor.rotate_view_90()
+        btn = getattr(self, "uv_rotate_preview_button", None)
+        if btn is not None:
+            btn.setToolTip(
+                f"Rotate texture preview 90° (current: {degrees}°, visual only; does not modify UVs).")
+        self.statusBar().showMessage(
+            f"Texture preview rotated to {degrees}° (visual only).", 3000)
+
+    def _uv_unified_groups_map(self) -> dict:
+        groups = getattr(self, "_uv_unified_groups", None)
+        if groups is None:
+            groups = {}
+            self._uv_unified_groups = groups
+        return groups
+
+    @staticmethod
+    def _uv_settings() -> QSettings:
+        return QSettings("OpenNeoUA", "Studio")
+
+    def _uv_model_persistence_id(self) -> str | None:
+        family = getattr(self, "_family", None)
+        if family is None:
+            return None
+        base_path = getattr(family, "base_path", None)
+        base_asset = getattr(family, "base_asset", None)
+        asset_source = getattr(base_asset, "source_path", None) if base_asset is not None else None
+        if base_path is None and not asset_source:
+            return None
+        parts: list[str] = []
+        if base_path is not None:
+            try:
+                parts.append(Path(base_path).resolve().as_posix().casefold())
+            except OSError:
+                parts.append(Path(base_path).as_posix().casefold())
+        if asset_source:
+            parts.append(str(asset_source).replace("\\", "/").casefold())
+        root_obj = getattr(family, "root_object", None)
+        if root_obj is not None:
+            bo = getattr(root_obj, "base_object", None)
+            if bo is not None:
+                parts.append(str(getattr(bo, "name", "") or "").casefold())
+                parts.append(str(getattr(bo, "skeleton_name", "") or "").replace("\\", "/").casefold())
+        return hashlib.sha1("|".join(parts).encode("utf-8")).hexdigest()
+
+    def _save_persisted_unified_uv_groups(self) -> None:
+        model_id = self._uv_model_persistence_id()
+        if not model_id:
+            return
+        try:
+            settings = self._uv_settings()
+            groups = self._uv_unified_groups_map()
+            if not groups:
+                settings.remove(f"uv_unified_groups/{model_id}")
+                settings.sync()
+                return
+            payload = []
+            for _group_id, (_proxy_key, weights_by_key, proxy_uvs) in groups.items():
+                sorted_keys = sorted(weights_by_key.keys(), key=repr)
+                payload.append({
+                    "keys": [[str(k[0]), int(k[1]), int(k[2])] for k in sorted_keys],
+                    "proxy_uvs": [[int(u), int(v)] for u, v in proxy_uvs],
+                    "weights": {
+                        f"{k[0]}|{int(k[1])}|{int(k[2])}": [
+                            [float(val) for val in row] for row in weights_by_key[k]
+                        ]
+                        for k in sorted_keys
+                    },
+                })
+            settings.setValue(f"uv_unified_groups/{model_id}", json.dumps(payload))
+            settings.sync()
+        except Exception:
+            pass
+
+    def _load_persisted_unified_uv_groups(self) -> None:
+        groups = self._uv_unified_groups_map()
+        groups.clear()
+        model_id = self._uv_model_persistence_id()
+        if not model_id:
+            return
+        try:
+            raw = self._uv_settings().value(f"uv_unified_groups/{model_id}", "")
+            if not raw:
+                return
+            entries = json.loads(str(raw))
+            if not isinstance(entries, list):
+                return
+            for entry in entries:
+                keys = [
+                    (str(item[0]), int(item[1]), int(item[2]))
+                    for item in entry.get("keys", [])
+                    if isinstance(item, (list, tuple)) and len(item) == 3
+                ]
+                proxy_uvs = [
+                    (int(uv[0]), int(uv[1]))
+                    for uv in entry.get("proxy_uvs", [])
+                    if isinstance(uv, (list, tuple)) and len(uv) == 2
+                ]
+                raw_weights = entry.get("weights", {})
+                if len(keys) < 2 or len(proxy_uvs) < 3 or not isinstance(raw_weights, dict):
+                    continue
+                weights_by_key = {}
+                valid = True
+                for k in keys:
+                    w = raw_weights.get(f"{k[0]}|{k[1]}|{k[2]}")
+                    if not isinstance(w, list) or not w:
+                        valid = False
+                        break
+                    weights_by_key[k] = [[float(val) for val in row] for row in w]
+                if not valid:
+                    continue
+                group_id = frozenset(keys)
+                proxy_key = ("@UNIFIED", tuple(sorted(keys, key=repr)))
+                groups[group_id] = (proxy_key, weights_by_key, proxy_uvs)
+        except Exception:
+            groups.clear()
+
+    def _is_current_uv_unified(self) -> bool:
+        return getattr(self, "_uv_unified_proxy", None) is not None
+
+    def _uv_unify_action_label(self) -> str:
+        return "Separate UVs" if self._is_current_uv_unified() else "Unify UVs"
+
+    def _uv_unify_reason(self) -> str:
+        if not self._editing_allowed():
+            return "Edit Mode is required."
+        if getattr(self, "_uv_timeline", None) is not None:
+            return "Unify UVs is not available on animated VANM timelines."
+        if self._is_current_uv_unified():
+            return ""
+        entries = [
+            (key, ctx) for key, ctx in self._uv_contexts.items()
+            if ctx[1] is not None
+            and (ctx[1].class_id or "").lower() == "amesh.class"
+            and self.uv_editor.loop_editable(key)
+        ]
+        if len(entries) < 2:
+            return "Select at least two editable mapped polygons to unify."
+        texture_names = {
+            (ctx[1].texture.name if ctx[1].texture else "").casefold()
+            for _key, ctx in entries
+        }
+        if len(texture_names) > 1:
+            return "All selected polygons must share the same texture."
+        return ""
+
+    def _sync_3d_vertices_from_unified_uv(self, *_args) -> None:
+        """Keep all 3D vertices of the unified polygon group selected and draggable."""
+        proxy = getattr(self, "_uv_unified_proxy", None)
+        if proxy is None:
+            return
+        session = getattr(self.viewport, "edit_session", None)
+        if session is None or self.viewport.edit_owner != self._selected_owner:
+            return
+        _proxy_key, weights_by_key, _proxy_uvs = proxy
+        target_vertices: set[int] = set()
+        for key in weights_by_key:
+            ctx = self._uv_contexts.get(key)
+            if ctx is None:
+                continue
+            fam_obj, _block, _bi, _ai, poly_id = ctx
+            model = getattr(fam_obj, "skeleton", None)
+            if model is None or not (0 <= poly_id < len(model.polygons)):
+                continue
+            target_vertices.update(model.polygons[poly_id])
+        valid = sorted(
+            v for v in target_vertices
+            if 0 <= v < len(session.model.points)
+        )
+        if valid and set(session.selection) != set(valid):
+            session.set_selection(valid)
+            self.viewport.update()
+
+    def _unify_selected_uvs(self) -> None:
+        if self._is_current_uv_unified():
+            proxy_key, weights_by_key, _proxy_uvs = self._uv_unified_proxy
+            self._uv_unified_groups_map().pop(frozenset(weights_by_key.keys()), None)
+            self._uv_unified_proxy = None
+            self._save_persisted_unified_uv_groups()
+            self._update_uv_editor(self._selected_poly)
+            self._sync_editor_context()
+            self._notify(
+                "Separated unified UVs back into individual polygon loops.", 5000)
+            return
+        reason = self._uv_unify_reason()
+        if reason:
+            self._notify(f"Unify UVs refused: {reason}", 7000)
+            return
+        editor_loops = self.uv_editor.loop_uvs()
+        current_loops = {}
+        points_by_key = {}
+        entries = []
+        owner = None
+        for key, ctx in self._uv_contexts.items():
+            fam_obj, block, _block_index, atts_index, poly_id = ctx
+            if block is None or (block.class_id or "").lower() != "amesh.class":
+                continue
+            if not self.uv_editor.loop_editable(key):
+                continue
+            model = fam_obj.skeleton
+            if not (0 <= poly_id < len(model.polygons)):
+                continue
+            owner = fam_obj.owner_path
+            entries.append((key, ctx))
+            current_loops[key] = [
+                tuple(uv) for uv in (editor_loops.get(key) or block.olpl[atts_index])
+            ]
+            points_by_key[key] = [model.points[pi] for pi in model.polygons[poly_id]]
+        spread_applied = False
+        working_loops = current_loops
+        if not uv_loops_are_seamless_patch(current_loops):
+            try:
+                spread_loops = spread_unified_uvs(
+                    points_by_key,
+                    current_loops,
+                    camera_project=lambda pt, active_owner=owner:
+                        self.viewport.project_model_point_to_view(
+                            pt, owner=active_owner),
+                    to_view=self.uv_editor.uv_to_view_space,
+                    from_view=self.uv_editor.view_space_to_uv,
+                )
+            except UVTopologyError as exc:
+                self._notify(f"Unify UVs failed: {exc}", 7000)
+                return
+            before_snapshot = {
+                key: list(current_loops[key]) for key in spread_loops
+                if spread_loops[key] != current_loops[key]
+            }
+            if before_snapshot:
+                after_snapshot = {
+                    key: list(spread_loops[key]) for key in before_snapshot
+                }
+                if not self._apply_uv_histories(after_snapshot, refresh=False):
+                    self._notify("Unify UVs failed; all selected loops were left unchanged.", 7000)
+                    return
+                live_uvs = {}
+                for key, updated in after_snapshot.items():
+                    ctx = self._uv_contexts.get(key)
+                    if ctx is not None and ctx[1] is not None:
+                        fam_obj, _block, block_index, _atts_index, poly_id = ctx
+                        live_uvs[(fam_obj.owner_path, int(block_index), int(poly_id))] = updated
+                if live_uvs:
+                    self.viewport.update_face_uvs(live_uvs)
+                self._record_edit_command({
+                    "kind": "uv_multi",
+                    "before": before_snapshot,
+                    "after": after_snapshot,
+                    "label": "Unify UVs",
+                })
+                self._sync_geometry_save_controls()
+                self._update_editor_status()
+                spread_applied = True
+            working_loops = spread_loops
+        try:
+            proxy_uvs, weights_by_key = build_unified_uv_proxy(working_loops)
+        except UVTopologyError as exc:
+            self._notify(f"Unify UVs failed: {exc}", 7000)
+            return
+        group_id = frozenset(weights_by_key.keys())
+        proxy_key = ("@UNIFIED", tuple(sorted(weights_by_key.keys(), key=repr)))
+        proxy_state = (proxy_key, weights_by_key, list(proxy_uvs))
+        self._uv_unified_proxy = proxy_state
+        self._uv_unified_groups_map()[group_id] = proxy_state
+        self._save_persisted_unified_uv_groups()
+        self._selected_polys = {ctx[4] for _k, ctx in entries}
+        self.viewport.set_highlight_polys(self._selected_polys)
+        primary_poly_id = entries[0][1][4]
+        image = self.uv_editor.current_image()
+        self.uv_editor.set_loops(
+            image,
+            [UVLoop(proxy_key, primary_poly_id, proxy_uvs, True)],
+            f"Unified {len(entries)} polygon(s) into {len(proxy_uvs)}-vertex UV contour.")
+        self.uv_editor.select_all()
+        self._sync_3d_vertices_from_unified_uv()
+        self._sync_uv_add_vertex_button()
+        suffix = " (texture spread continuously; Undo is available)." if spread_applied else "."
+        self._notify(
+            f"Unified {len(entries)} polygon UVs into a single {len(proxy_uvs)}-vertex contour{suffix}",
+            6000)
 
     def _run_uv_topology_from_handle(self, operation: str, handle) -> None:
         self.uv_editor.select_handle(*handle)
@@ -865,6 +1248,9 @@ class _UvTexturesMixin:
         self._uv_phase_links = {}
         self._uv_ctx = None
         self._uv_contexts = {}
+        self._uv_unified_proxy = None
+        if hasattr(self, "viewport") and hasattr(self.viewport, "set_unified_uv_active"):
+            self.viewport.set_unified_uv_active(False)
         if poly_id is None or self._workbench_obj is None \
                 or self._mapping_index is None:
             self._uv_timeline_token = None
@@ -1028,10 +1414,51 @@ class _UvTexturesMixin:
             else:
                 reason = skipped[0][1] if skipped else "UV data unavailable"
                 message = f"This polygon is not editable: {reason}."
+        group_id = frozenset(loop.key for loop in loops)
+        saved_proxy = (
+            self._uv_unified_groups_map().get(group_id)
+            if len(loops) >= 2 and all(
+                loop.key in self._uv_contexts
+                and self._uv_contexts[loop.key][1] is not None
+                and (self._uv_contexts[loop.key][1].class_id or "").lower() == "amesh.class"
+                for loop in loops)
+            else None
+        )
+        if saved_proxy is not None:
+            proxy_key, weights_by_key, proxy_uvs = saved_proxy
+            current_map = {loop.key: [tuple(uv) for uv in loop.uvs] for loop in loops}
+            if evaluate_unified_uv_proxy(proxy_uvs, weights_by_key) != current_map:
+                try:
+                    proxy_uvs, weights_by_key = build_unified_uv_proxy(current_map)
+                    saved_proxy = (proxy_key, weights_by_key, list(proxy_uvs))
+                    self._uv_unified_groups_map()[group_id] = saved_proxy
+                except UVTopologyError:
+                    self._uv_unified_groups_map().pop(group_id, None)
+                    saved_proxy = None
+        if saved_proxy is not None:
+            proxy_key, weights_by_key, proxy_uvs = saved_proxy
+            self._uv_unified_proxy = (proxy_key, weights_by_key, list(proxy_uvs))
+            self.uv_editor.set_loops(
+                image,
+                [UVLoop(proxy_key, poly_id, list(proxy_uvs), self._editing_allowed())],
+                f"Unified {len(loops)} polygon(s) into {len(proxy_uvs)}-vertex UV contour.")
+            self._sync_3d_vertices_from_unified_uv()
+            self._sync_uv_add_vertex_button()
+            return
+        self._uv_unified_proxy = None
         self.uv_editor.set_loops(image, loops, message)
         self._sync_uv_add_vertex_button()
 
     def _expand_uv_phase_updates(self, loop_uvs):
+        proxy = getattr(self, "_uv_unified_proxy", None)
+        if proxy is not None:
+            proxy_key, weights_by_key, _proxy_uvs = proxy
+            if proxy_key in loop_uvs:
+                updated_proxy = [tuple(uv) for uv in loop_uvs[proxy_key]]
+                updated_state = (proxy_key, weights_by_key, updated_proxy)
+                self._uv_unified_proxy = updated_state
+                self._uv_unified_groups_map()[frozenset(weights_by_key.keys())] = updated_state
+                return evaluate_unified_uv_proxy(updated_proxy, weights_by_key)
         expanded = dict(loop_uvs)
         for primary, links in getattr(self, "_uv_phase_links", {}).items():
             if primary in expanded:
@@ -1073,6 +1500,14 @@ class _UvTexturesMixin:
                 7000)
             self._update_uv_editor(self._selected_poly)
             return
+        live_uvs = {}
+        for key, updated in changed.items():
+            ctx = self._uv_contexts.get(key)
+            if ctx is not None and ctx[1] is not None:
+                fam_obj, _block, block_index, _atts_index, poly_id = ctx
+                live_uvs[(fam_obj.owner_path, int(block_index), int(poly_id))] = updated
+        if live_uvs:
+            self.viewport.update_face_uvs(live_uvs)
         self._sync_geometry_save_controls()
         self._update_editor_status()
         self._sync_uv_add_vertex_button()
@@ -1108,6 +1543,10 @@ class _UvTexturesMixin:
         self.viewport.set_selected_polygon(poly_id)
         self._sync_animation_controls()
         self._sync_editor_context()
+        if self._is_current_uv_unified():
+            self.viewport.set_highlight_polys(self._selected_polys)
+            self._sync_3d_vertices_from_unified_uv()
+            self._save_persisted_unified_uv_groups()
         self._sync_uv_add_vertex_button()
 
     def _restore_uv(self, key: tuple[str, int, int],
@@ -1148,6 +1587,22 @@ class _UvTexturesMixin:
         before = {}
         reverted_count = 0
         for key, index in selected:
+            if isinstance(key, tuple) and key and key[0] == "@UNIFIED":
+                proxy = getattr(self, "_uv_unified_proxy", None)
+                if proxy is None or proxy[0] != key:
+                    continue
+                for orig_key in proxy[1]:
+                    tracker, tracked_key = self._uv_original_tracker(orig_key)
+                    original = tracker.get(tracked_key)
+                    storage = self._uv_storage(orig_key)
+                    if original is None or storage is None:
+                        continue
+                    current = self._uv_storage_points(storage)
+                    if current != list(original):
+                        before.setdefault(orig_key, current)
+                        targets[orig_key] = [tuple(uv) for uv in original]
+                        reverted_count += 1
+                continue
             tracker, tracked_key = self._uv_original_tracker(key)
             original = tracker.get(tracked_key)
             storage = self._uv_storage(key)
@@ -1228,6 +1683,9 @@ class _UvTexturesMixin:
             self._notify(
                 "Reset All UVs failed; all loops were left unchanged.", 7000)
             return
+        self._uv_unified_groups_map().clear()
+        self._uv_unified_proxy = None
+        self._save_persisted_unified_uv_groups()
         self._record_edit_command({
             "kind": "uv_multi",
             "before": before,

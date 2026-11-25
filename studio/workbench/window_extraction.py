@@ -977,7 +977,8 @@ class _ExtractionMixin:
                 owner, vertices = target
                 self._remember_geometry_original(owner)
                 self.viewport.enter_edit_mode_with_vertices(
-                    owner, vertices, pick_polygons=True)
+                    owner, vertices, pick_polygons=True,
+                    include_protected=True)
                 self.viewport.configure_edit_interaction(
                     selected_only=False, pick_polygons=True)
                 return

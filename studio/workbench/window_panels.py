@@ -140,6 +140,10 @@ class _FamilyPanelsMixin:
         self._geometry_clipboard = None
         self._uv_ctx = None
         self._uv_contexts = {}
+        self._uv_unified_groups = {}
+        self._uv_unified_proxy = None
+        if hasattr(self, "_load_persisted_unified_uv_groups"):
+            self._load_persisted_unified_uv_groups()
         self._uv_original = {}
         self._vanm_uv_original = {}
         self._texture_original = {}

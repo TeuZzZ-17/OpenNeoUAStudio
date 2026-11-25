@@ -1013,7 +1013,8 @@ class _EditModeMixin:
         return True
 
     def enter_edit_mode_with_vertices(self, owner: str, indices,
-                                      pick_polygons: bool = False) -> bool:
+                                      pick_polygons: bool = False,
+                                      include_protected: bool = False) -> bool:
         """Enter the existing Edit Mode and select only validated POO2 indices."""
 
         started_here = self._edit_session is None or self._edit_owner != owner
@@ -1023,7 +1024,7 @@ class _EditModeMixin:
             return False
         requested = [
             index for index in indices
-            if index not in self._edit_read_only_vertices
+            if include_protected or index not in self._edit_read_only_vertices
         ]
         try:
             self._edit_session.set_selection(requested)
@@ -1601,9 +1602,8 @@ class _EditModeMixin:
         if not self._edit_visibility_ready:
             self._refresh_edit_vertex_visibility(screen_points)
         return (
-            set(self._edit_visible_vertices)
-            | set(session.selection)
-        ) - self._edit_read_only_vertices
+            set(self._edit_visible_vertices) - self._edit_read_only_vertices
+        ) | set(session.selection)
 
     def _nearest_edit_vertex(self, point: QPoint, *, radius: float = 12.0) -> int | None:
         """Return the vertex under the cursor using the visible pick radius."""

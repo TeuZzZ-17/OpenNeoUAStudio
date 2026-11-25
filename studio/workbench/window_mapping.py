@@ -670,7 +670,7 @@ class _PolygonMappingMixin:
         if target is not None:
             owner, vertices = target
             self.viewport.enter_edit_mode_with_vertices(
-                owner, vertices, pick_polygons=True)
+                owner, vertices, pick_polygons=True, include_protected=True)
             if mirror_active:
                 self._set_mirror_transform_source(
                     self._polygon_vertices(
@@ -741,10 +741,25 @@ class _PolygonMappingMixin:
             entry = (self._animation_for_name(material)
                      if block.texture and block.texture.kind == "bmpanim" else None)
             if entry is not None:
+                extra_animations = []
+                seen_names = {entry[0].casefold()}
+                for other in self._active_fx_elements():
+                    if other.identity == element.identity:
+                        continue
+                    for o_poly_id, _o_blk_idx, _o_atts, o_block, o_mat in self._fx_face_records(other):
+                        if not (o_block.texture and o_block.texture.kind == "bmpanim"):
+                            continue
+                        o_entry = self._animation_for_name(o_mat)
+                        if o_entry is None or o_entry[0].casefold() in seen_names:
+                            continue
+                        seen_names.add(o_entry[0].casefold())
+                        extra_animations.append((*o_entry, o_poly_id))
+                        break
                 self._show_uv_timeline(
                     *entry, obj, poly_id,
                     lambda: self.viewport.current_animation_index(
-                        element.owner_path, block_index))
+                        element.owner_path, block_index),
+                    extra_animations=extra_animations)
                 return
             key = (element.owner_path, block_index, atts_index)
             if key in keys or not 0 <= atts_index < len(block.olpl):

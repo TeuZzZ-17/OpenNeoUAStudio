@@ -68,6 +68,10 @@ PASTE_GHOST_OPACITY = 0.18
 
 # Canonical red used for selected editable vertices in the Model Editor.
 MODEL_EDIT_SELECTION_RED = QColor(255, 32, 48)
+# Blue used for selected vertices when UVs are unified (matches UV preview).
+UNIFIED_UV_VERTEX_BLUE = QColor(56, 140, 255)
+# Green used for emitter outlines and anchor rings in 3D and 2D UV preview.
+EMITTER_HIGHLIGHT_GREEN = QColor(65, 225, 115)
 # Edit-mode vertices of animated (ANM) segments.
 ANIMATED_VERTEX_COLOR = QColor(255, 214, 40)
 

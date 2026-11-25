@@ -278,6 +278,33 @@ class OverwriteWritesTheAnmTests(unittest.TestCase):
             finally:
                 window.close()
 
+    def test_multi_anm_selection_links_and_updates_all_selected_animations(self):
+        family, obj = _two_polygon_family()
+        convert_polygon_to_animation(family, obj, 0, "TRC1AA.ANM")
+        convert_polygon_to_animation(family, obj, 1, "TRC2AA.ANM")
+        anim_a = family.animations["TRC1AA.ANM"]
+        anim_b = family.animations["TRC2AA.ANM"]
+        # Give anim_b the exact same UV rect as anim_a, with mirrored corner order
+        uv_a = list(anim_a.texcoord_groups[0])
+        uv_b_mirrored = list(reversed(uv_a))
+        anim_b.texcoord_groups[0] = list(uv_b_mirrored)
+        anim_b.bitmap_names = list(anim_a.bitmap_names)
+        window = _open_memory_window(family, obj)
+        try:
+            window.edit_toggle_action.setChecked(True)
+            window._show_uv_timeline(
+                "TRC1AA.ANM", anim_a, obj, 0, lambda: 0,
+                extra_animations=[("TRC2AA.ANM", anim_b, 1)])
+            primary_key = ("@VANM", "TRC1AA.ANM", 0)
+            extra_key = ("@VANM", "TRC2AA.ANM", 0)
+            self.assertIn(extra_key, window._uv_contexts)
+            moved = [(u, min(255, v + 20)) for u, v in uv_a]
+            window._on_uv_changed({primary_key: moved})
+            self.assertEqual(anim_a.texcoord_groups[0], moved)
+            self.assertEqual(anim_b.texcoord_groups[0], list(reversed(moved)))
+        finally:
+            window.close()
+
 
 if __name__ == "__main__":
     unittest.main()

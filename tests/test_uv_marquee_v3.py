@@ -213,6 +213,22 @@ class UVMarqueeV3Tests(unittest.TestCase):
 
         self.assertEqual(requested[0][:2], (key, 1))
 
+    def test_click_and_drag_inside_static_loop_moves_whole_segment(self):
+        center = self.widget._uv_to_screen((70, 70))
+        QTest.mouseClick(
+            self.widget, Qt.MouseButton.LeftButton,
+            Qt.KeyboardModifier.NoModifier, center.toPoint())
+        self.assertEqual(self.widget.selected_points(), {0, 1, 2, 3})
+        before = self.widget.uvs()
+        self._drag(center, center + QPointF(20, 14))
+        after = self.widget.uvs()
+        deltas = {
+            (after[i][0] - before[i][0], after[i][1] - before[i][1])
+            for i in range(4)
+        }
+        self.assertEqual(len(deltas), 1)
+        self.assertNotEqual(next(iter(deltas)), (0, 0))
+
 
 if __name__ == "__main__":
     unittest.main()

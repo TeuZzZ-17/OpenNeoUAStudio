@@ -283,6 +283,9 @@ class _EmittersMixin:
         stage_index = self.emitter_stage_combo.currentData()
         names = emitter_texture_names(block)
         self._uv_timeline = None
+        self._uv_unified_proxy = None
+        if hasattr(self, "viewport") and hasattr(self.viewport, "set_unified_uv_active"):
+            self.viewport.set_unified_uv_active(False)
         self._emitter_sequence = None
         self._emitter_clock.start()
         try:

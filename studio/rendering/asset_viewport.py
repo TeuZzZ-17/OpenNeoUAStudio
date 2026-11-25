@@ -202,6 +202,7 @@ class AssetViewport(
         self._direct_grab_selected_only = False
         self._edit_pick_polygons = False
         self._edit_read_only_vertices: set[int] = set()
+        self._unified_uv_active = False
         self._edit_visible_vertices: set[int] = set()
         self._edit_visibility_ready = False
         self._edit_visibility_view_key: tuple | None = None
@@ -270,6 +271,7 @@ class AssetViewport(
         self._direct_grab_selected_only = False
         self._edit_pick_polygons = False
         self._edit_read_only_vertices.clear()
+        self._unified_uv_active = False
         self._edit_visible_vertices.clear()
         self._edit_visibility_ready = False
         self._edit_visibility_view_key = None
@@ -314,6 +316,12 @@ class AssetViewport(
     def set_highlight_polys(self, poly_ids: set[int]) -> None:
         self._highlight_polys = set(poly_ids)
         self.update()
+
+    def set_unified_uv_active(self, active: bool) -> None:
+        flag = bool(active)
+        if self._unified_uv_active != flag:
+            self._unified_uv_active = flag
+            self.update()
 
 
     def set_diagnostics(self, diagnostics: list[str]) -> None:
@@ -518,6 +526,21 @@ class AssetViewport(
                 if new_shade is not None and face.shade != new_shade:
                     face.shade = new_shade
                     changed = True
+        if changed:
+            self.update()
+
+    def update_face_uvs(
+            self, updates: dict[tuple[str, int, int], list[tuple[int, int]]]) -> None:
+        """Fast in-place UV update for live UV drag preview (no family reload)."""
+
+        if not updates:
+            return
+        changed = False
+        for face in self._faces:
+            new_uvs = updates.get((face.owner, face.block_index, face.poly_id))
+            if new_uvs is not None and face.uvs != new_uvs:
+                face.uvs = list(new_uvs)
+                changed = True
         if changed:
             self.update()
 
