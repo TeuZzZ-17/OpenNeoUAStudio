@@ -280,6 +280,34 @@ def test_viewport_digs_the_ground_and_puts_the_decal_on_it(app):
     assert covered == {id(decal)}, "a decal on the crater is painted on the dug ground"
 
 
+def test_decal_wider_than_the_crater_is_not_cut_at_the_rim(app):
+    from PySide6.QtGui import QImage, QPainter
+    from entity_designer.viewport import CollisionViewport
+
+    # Spore-like: crater radius 15, decal 60 wide (the engine paints it past the rim).
+    crater = fx.PreviewItem(0, "crater", 0, (0.0, 0.0, 0.0), fx.IDENTITY,
+                            (15.0, 5.0, 0.0), 1.0, None, "crater")
+    decal = fx.PreviewItem(fx.PROFILE_DECAL_SOURCE, fx.MODE_DECAL, 0, (0.0, 0.0, 0.0),
+                           fx.IDENTITY, (1.0, 1.0, 1.0), 1.0, None, "decal",
+                           texture="", decal_size=(60.0, 60.0))
+    viewport = CollisionViewport()
+    viewport.resize(600, 400)
+    try:
+        canvas = QImage(600, 400, QImage.Format.Format_RGBA8888)   # Kept alive for the painter.
+        painter = QPainter(canvas)
+        viewport._draw_fx_craters(painter, viewport.rect().toRectF(), viewport._camera_state(),
+                                  [crater], [decal])
+        painter.end()
+        texture = viewport._fx_crater_cache[1]
+        # 25 units from the centre: past the crater rim, inside the decal. The dug square
+        # grows to the decal's bounding circle (diameter = diagonal of the 60 x 60 quad).
+        side = math.hypot(60.0, 60.0)
+        pixel = texture.pixelColor(int((side / 2.0 + 25.0) / side * texture.width()), texture.height() // 2)
+        assert pixel.alpha() > 0, "the decal is drawn past the crater rim"
+    finally:
+        viewport.close()
+
+
 def test_same_view_reuses_the_drawn_crater_and_a_new_view_redraws_it(app):
     from PySide6.QtGui import QColor, QImage, QPainter
     from entity_designer.viewport import CollisionViewport

@@ -1253,8 +1253,10 @@ class FxPreviewViewportMixin:
     CRATER_TEXTURE = 512
     # Depth below the ground where the lip of the opening ends (world units).
     CRATER_LIP = 2.0
-    # Neutral ground colour of the preview (Studio has no level terrain).
-    CRATER_GROUND = (96, 108, 116)
+    # Neutral ground colour of the preview (Studio has no level terrain). Dark like the
+    # game's terrain and close to the preview background, so the crater shows mostly
+    # as shading, not as a bright disc.
+    CRATER_GROUND = (46, 54, 64)
 
     def _draw_fx_craters(self, painter, target, camera, craters, decals) -> set[int]:
         """Weapon craters: the ground dug with the engine's shape and shading.
@@ -1275,6 +1277,7 @@ class FxPreviewViewportMixin:
         side = max(high_x - low_x, high_z - low_z, 1.0)
         centre_x, centre_z = (low_x + high_x) * 0.5, (low_z + high_z) * 0.5
         low_x, low_z = centre_x - side * 0.5, centre_z - side * 0.5
+        high_x, high_z = low_x + side, low_z + side
         ground_y = shapes[0].y
 
         def inside(item):
@@ -1282,6 +1285,15 @@ class FxPreviewViewportMixin:
             return low_x <= x <= low_x + side and low_z <= z <= low_z + side
 
         covered = [item for item in decals if inside(item)]
+        # A decal wider than the crater goes on over the flat ground around it, like
+        # the engine's projected decal: the dug square grows to hold the whole decal.
+        for item in covered:
+            half = 0.5 * math.hypot(*item.decal_size)
+            low_x, high_x = min(low_x, item.position[0] - half), max(high_x, item.position[0] + half)
+            low_z, high_z = min(low_z, item.position[2] - half), max(high_z, item.position[2] + half)
+        side = max(high_x - low_x, high_z - low_z, 1.0)
+        centre_x, centre_z = (low_x + high_x) * 0.5, (low_z + high_z) * 0.5
+        low_x, low_z = centre_x - side * 0.5, centre_z - side * 0.5
         key = (tuple(shapes), tuple(
             (item.texture, item.position, item.decal_size, tuple(map(tuple, item.rotation)),
              round(item.alpha, 2), item.tint, item.decal_edge_fade) for item in covered))
@@ -1391,9 +1403,6 @@ class FxPreviewViewportMixin:
         self._fx_crater_layer = (view_key, layer_image)
         painter.drawImage(QPointF(target.left(), target.top()), layer_image)
         return {id(item) for item in covered}
-        self._fx_crater_layer = (view_key, layer_image)
-        painter.drawImage(QPointF(target.left(), target.top()), layer_image)
-        return {id(item) for item in covered}
 
     @staticmethod
     def _crater_seen_from_above(camera, ground_y) -> bool:
@@ -1434,8 +1443,7 @@ class FxPreviewViewportMixin:
         if decals:
             layer = QPainter(texture)
             layer.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform, True)
-            # Decals cover the ground but never widen the dug square's outline.
-            layer.setCompositionMode(QPainter.CompositionMode.CompositionMode_SourceAtop)
+            layer.setCompositionMode(QPainter.CompositionMode.CompositionMode_SourceOver)
             for item in decals:
                 image, opacity = self._decal_look(item)
                 if image is None:
@@ -1464,6 +1472,9 @@ class FxPreviewViewportMixin:
         empty = _np.ones((cells, cells), bool)
         for shape in shapes:
             empty &= _np.hypot(cx - shape.x, cz - shape.z) > crater_preview.reach(shape) + step * 0.75
+        for item in decals:
+            half = 0.5 * math.hypot(*item.decal_size)
+            empty &= _np.hypot(cx - item.position[0], cz - item.position[2]) > half + step * 0.75
         # Where the ground is dug below its level (the opening one looks into),
         # and the same texture with that part taken out: a little of both along
         # the lip, so no line of the see-through plane shows between them.

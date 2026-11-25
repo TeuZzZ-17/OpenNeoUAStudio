@@ -444,6 +444,7 @@ def rebuild_as_genesis(lm: LooseModel, source_obj) -> None:
     Genesis material again. Emitters keep their place.
     """
     from model_editor.genesis_generator import generate_genesis   # the package pulls in the Qt window
+    from studio_mcp import edit   # noqa: F401  (edit loads edit_materials itself; importing it first alone is circular)
     from studio_mcp.edit_materials import loose_genesis_animations
     lm.require_topology_edit()
     old_positions = [tuple(point) for point in lm.points]
