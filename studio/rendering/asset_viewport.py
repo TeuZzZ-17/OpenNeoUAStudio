@@ -213,6 +213,10 @@ class AssetViewport(
         self._paste_left_pressed_at = None
         self._vertex_press: VertexPressState | None = None
         self._mode_label_rect: QRect | None = None
+        self._anim_step_rects: dict[str, QRect] = {}
+        self._anim_step_pill_rect: QRect | None = None
+        self._anim_step_material_id: int | None = None
+        self._anim_step_hover: str | None = None
 
         self._mode = "textured"
         self._show_axes = True
@@ -295,6 +299,10 @@ class AssetViewport(
         self._pick_shapes = []
         self._owner_bounds = {}
         self._selected_owner = None
+        self._anim_step_rects = {}
+        self._anim_step_pill_rect = None
+        self._anim_step_material_id = None
+        self._anim_step_hover = None
         self.stop_animation()
         self._invalidate_indexed_view_cache()
         self.update()

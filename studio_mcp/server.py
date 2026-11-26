@@ -32,12 +32,13 @@ from studio_mcp import analysis, core, edit, guide, history, sets, textures, wir
 from studio_mcp.loose import resolve_base
 from studio_mcp.select import select_points, select_polygons, view_of_object
 
-INSTRUCTIONS = """OpenNeoUA Studio tools for Urban Assault models (inspect, render, EDIT, undo).
-FIRST call studio_help() for the workflow, conventions, selectors, UV modes and recipes.
+INSTRUCTIONS = """OpenNeoUA Studio tools for Urban Assault 3D models, HUD wireframes, textures, sets and sectors
+(inspect, render, EDIT, undo). FIRST call studio_help() (or 'design', 'wireframe', 'sets', 'textures', 'ops', 'set_ops').
 Sources: 'set1:77' (VP number from studio_list_vp), 'set1:VPwGLID2' (object name) or a path to a .BASE file
-(absolute, or relative to the game Data folder). Editing needs a loose copy: studio_export_model first.
-Coordinates: x right, y DOWN (negative = up), z forward. Writes are limited to Data/Models; every edit keeps an
-undo snapshot. Several edits can be chained atomically with studio_edit_batch."""
+(absolute, or relative to the game Data folder). Editing a Set.BAS model needs a loose copy: studio_export_model first
+(or studio_new_model for a brand-new design). Coordinates: x right, y DOWN (negative = up), z forward.
+Writes are limited to Data/Models, Data/Wireless and Data/Sets; every edit keeps an undo snapshot.
+Several edits can be chained atomically with studio_edit_batch / studio_wire_edit / studio_set_edit."""
 
 mcp = _Server("openneoua-studio", instructions=INSTRUCTIONS)
 
@@ -65,7 +66,8 @@ def _guard(function, *args, **kwargs) -> str:
 
 @mcp.tool()
 def studio_help(topic: str = "start") -> str:
-    """Manual for modeling with this server. Topics: start, conventions, selectors, uv, recipes, ops, all."""
+    """Manual for modeling, wireframes, textures and sets/sectors with this server.
+    Topics: start, design, conventions, selectors, uv, recipes, wireframe, ops, sets, set_ops, textures, all."""
     return guide.help_text(topic)
 
 

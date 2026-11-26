@@ -23,6 +23,14 @@ class _InteractionMixin:
 
     # -- interaction ------------------------------------------------------------
 
+    def _anim_step_hit(self, pos: QPoint) -> str | None:
+        if self._anim_step_material_id is None or self._snapshot_active:
+            return None
+        for key, rect in self._anim_step_rects.items():
+            if rect.contains(pos):
+                return key
+        return None
+
     def mousePressEvent(self, event: QMouseEvent) -> None:  # noqa: N802
         if self._snapshot_active and event.button() == Qt.MouseButton.LeftButton:
             self.setCursor(studio_cursor("closed"))
@@ -72,6 +80,20 @@ class _InteractionMixin:
             self.toggle_edit_mode()
             event.accept()
             return
+        if event.button() == Qt.MouseButton.LeftButton \
+                and not self._snapshot_active:
+            anim_hit = self._anim_step_hit(pos)
+            if anim_hit is not None:
+                self.step_material_animation(
+                    self._anim_step_material_id,
+                    -1 if anim_hit == "prev" else 1,
+                )
+                event.accept()
+                return
+            if (self._anim_step_pill_rect is not None
+                    and self._anim_step_pill_rect.contains(pos)):
+                event.accept()
+                return
         if self._edit_session is not None and not self._snapshot_active:
             if self._modal_op is not None:
                 if event.button() == Qt.MouseButton.LeftButton:
@@ -442,6 +464,17 @@ class _InteractionMixin:
                 self._last_mouse = current
             event.accept()
             return
+        if not self._snapshot_active and not event.buttons():
+            anim_hover = self._anim_step_hit(current)
+            if anim_hover != self._anim_step_hover:
+                self._anim_step_hover = anim_hover
+                if anim_hover is not None:
+                    self._gizmo_hover_axis = None
+                    self.unsetCursor()
+                self.update()
+            if anim_hover is not None:
+                event.accept()
+                return
         if self._edit_session is not None and not self._snapshot_active:
             if self._modal_op is not None:
                 self._modal_last_mouse = current
@@ -537,5 +570,24 @@ class _InteractionMixin:
         event.accept()
 
     def mouseDoubleClickEvent(self, event: QMouseEvent) -> None:  # noqa: N802
-        self.deselect_at(event.position().toPoint())
+        pos = event.position().toPoint()
+        if event.button() == Qt.MouseButton.LeftButton \
+                and not self._snapshot_active:
+            anim_hit = self._anim_step_hit(pos)
+            if anim_hit is not None:
+                self.step_material_animation(
+                    self._anim_step_material_id,
+                    -1 if anim_hit == "prev" else 1,
+                )
+                event.accept()
+                return
+            if (self._anim_step_pill_rect is not None
+                    and self._anim_step_pill_rect.contains(pos)):
+                event.accept()
+                return
+            if (self._mode_label_rect is not None
+                    and self._mode_label_rect.contains(pos)):
+                event.accept()
+                return
+        self.deselect_at(pos)
         event.accept()

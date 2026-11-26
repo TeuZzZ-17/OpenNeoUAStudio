@@ -807,15 +807,16 @@ class SectorEditorWindow(QMainWindow):
 
     def _tick_transition(self, delta_ms=0.0):
         if self._transition is None or self.view.lib is None:
-            return
+            return False
         simulation, time_ms = self._transition
         time_ms += delta_ms
         self._transition[1] = time_ms
         if time_ms > simulation.duration + 250.0:
             self._transition = None
             self.view.lib.effects, self.view.lib.sources = [], {}
-            return
+            return True
         self.view.lib.sample_effects(self.play_view, simulation, time_ms)
+        return False
 
     def _reload_play(self):
         if not getattr(self, "play_button", None) or self.document is None:
@@ -835,8 +836,11 @@ class SectorEditorWindow(QMainWindow):
     def _advance_animation(self, delta_ms):
         if self.view.lib is None:
             return
-        self._tick_transition(delta_ms)
-        self.view.sample_animation(getattr(self.view, "animation_time_ms", 0.0) + delta_ms)
+        cleared = self._tick_transition(delta_ms)
+        self.view.sample_animation(
+            getattr(self.view, "animation_time_ms", 0.0) + delta_ms,
+            force=cleared,
+        )
 
     def _animation_tick(self):
         delta = self._animation_clock.restart() * self.speed_spin.value()
@@ -1293,7 +1297,8 @@ class SectorEditorWindow(QMainWindow):
             return
         self._copied_sectors = {"sectors": [deepcopy(self.document.sdf.sectors[n]) for n in numbers],
                                 "cut": cut, "sources": numbers}
-        self.sectors.start_carry(self.sectors.item(numbers[0]).icon(), len(numbers))
+        first_item = self._item_by_id(self.sectors, numbers[0])
+        self.sectors.start_carry(first_item.icon() if first_item is not None else QIcon(), len(numbers))
         verb = "Move" if cut else "Copy"
         self.statusBar().showMessage(f"{verb} {len(numbers)} sector(s): release the mouse on a slot to place | Esc: cancel")
 
@@ -1634,6 +1639,21 @@ class SectorEditorWindow(QMainWindow):
         self.sklt.clear()
         self.sklt.addItems(sorted(skeletons, key=str.casefold))
 
+    @staticmethod
+    def _item_by_id(browser, target_id):
+        """Find a list item by its UserRole ID, even when the list is sorted."""
+        if target_id is None:
+            return None
+        if isinstance(target_id, int) and 0 <= target_id < browser.count():
+            fast = browser.item(target_id)
+            if fast is not None and fast.data(Qt.ItemDataRole.UserRole) == target_id:
+                return fast
+        for row in range(browser.count()):
+            item = browser.item(row)
+            if item is not None and item.data(Qt.ItemDataRole.UserRole) == target_id:
+                return item
+        return None
+
     def _bind_tables(self):
         self.assets.sdf = self.document.sdf
         self.library.resolver = SectorResolver(self.document.sdf)
@@ -1658,9 +1678,13 @@ class SectorEditorWindow(QMainWindow):
             set_card(item, f"Sector {number:03d} [{number:02X}]", detail, color, number)
             item.setData(Qt.ItemDataRole.UserRole, number)
             self.sectors.addItem(item)
-        self.sectors.setCurrentRow(self.current_sector or 0, QItemSelectionModel.SelectionFlag.NoUpdate)
+        current_item = self._item_by_id(self.sectors, self.current_sector or 0)
+        if current_item is not None:
+            self.sectors.setCurrentItem(current_item, QItemSelectionModel.SelectionFlag.NoUpdate)
         for number in selected_sectors or {self.current_sector or 0}:
-            self.sectors.item(number).setSelected(True)
+            sel_item = self._item_by_id(self.sectors, number)
+            if sel_item is not None:
+                sel_item.setSelected(True)
         self.sectors.blockSignals(False)
         self._filter_sectors()
         selected_model = self.model_combo.currentData()
@@ -1684,7 +1708,10 @@ class SectorEditorWindow(QMainWindow):
                     combo.addItem(title, model.id)
             model_index = max(0, self.model_combo.findData(selected_model))
             self.model_combo.setCurrentIndex(model_index)
-            self.models.setCurrentRow(model_index)
+            target_mid = self.model_combo.itemData(model_index)
+            model_item = self._item_by_id(self.models, target_mid)
+            if model_item is not None:
+                self.models.setCurrentItem(model_item)
             self.models.blockSignals(False)
             self.model_combo.blockSignals(False)
             self._model_titles = model_signature
@@ -1709,10 +1736,11 @@ class SectorEditorWindow(QMainWindow):
         usage = self.document.sectors_using_model(self.model_combo.currentData()) if self.document and mode == 3 else set()
         for row in range(self.sectors.count()):
             item = self.sectors.item(row)
-            defined = self.document is not None and row in self.document.sdf.sectors
+            number = item.data(Qt.ItemDataRole.UserRole)
+            defined = self.document is not None and number in self.document.sdf.sectors
             text = f"{item.text()} {item.data(DETAIL_ROLE) or ''}".casefold()
             item.setHidden(query not in text or (mode == 1 and not defined) or (mode == 2 and defined)
-                           or (mode == 3 and row not in usage))
+                           or (mode == 3 and number not in usage))
         if hasattr(self, "preview_timer"):
             self.preview_timer.start()
 
@@ -1771,7 +1799,7 @@ class SectorEditorWindow(QMainWindow):
 
     def _card_ready(self, key, icon):
         browser = self.sectors if key[1] == "sector" else self.models
-        item = browser.item(key[2])
+        item = self._item_by_id(browser, key[2])
         if item is not None and item.data(PREVIEW_ROLE) == key:
             item.setIcon(icon)
 
@@ -1783,7 +1811,7 @@ class SectorEditorWindow(QMainWindow):
         self.cancel_preview()
         self.current_sector = number
         self.sectors.blockSignals(True)
-        self.sectors.setCurrentRow(number, QItemSelectionModel.SelectionFlag.NoUpdate)
+        self.sectors.setCurrentItem(item, QItemSelectionModel.SelectionFlag.NoUpdate)
         self.sectors.blockSignals(False)
         self.selected_cells = {4}
         self._selection_anchor = 4
@@ -1845,9 +1873,13 @@ class SectorEditorWindow(QMainWindow):
             view.selected_cells = set(self.selected_cells)
             view.update()
         self._update_cell_actions()
-        if self.library is not None and sector:
-            self.ground_preview.set_ground(self.library, sector.ground)
-            self.symbol_preview.set_sector(self.document, self.current_sector, self.state.currentIndex())
+        if self.library is not None:
+            if sector:
+                self.ground_preview.set_ground(self.library, sector.ground)
+                self.symbol_preview.set_sector(self.document, self.current_sector, self.state.currentIndex())
+            else:
+                self.ground_preview.set_ground(self.library, -1)
+                self._refresh_map_icons()
         self._update_ghost()
 
     def _update_cell_actions(self):
@@ -1979,7 +2011,9 @@ class SectorEditorWindow(QMainWindow):
                 self.model_combo.setCurrentIndex(self.model_combo.findData(self._editing_model_id))
                 self.model_combo.blockSignals(False)
                 self.models.blockSignals(True)
-                self.models.setCurrentRow(self._editing_model_id)
+                old_item = self._item_by_id(self.models, self._editing_model_id)
+                if old_item is not None:
+                    self.models.setCurrentItem(old_item)
                 self.models.blockSignals(False)
                 return
         self._syncing = True
@@ -1997,7 +2031,9 @@ class SectorEditorWindow(QMainWindow):
             self.effects_model_label.setText(f"Editing model {mid:03d} · {model.base}")
         self._update_model_usage()
         self.models.blockSignals(True)
-        self.models.setCurrentRow(mid)
+        model_item = self._item_by_id(self.models, mid)
+        if model_item is not None:
+            self.models.setCurrentItem(model_item)
         self.models.blockSignals(False)
         self._model_snapshot = self._model_form_values()
         self._syncing = False

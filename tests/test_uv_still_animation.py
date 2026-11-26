@@ -305,6 +305,74 @@ class OverwriteWritesTheAnmTests(unittest.TestCase):
         finally:
             window.close()
 
+    def test_in_viewport_frame_arrows_only_appear_for_animated_selection(self):
+        from PySide6.QtGui import QImage, QPainter
+        family, obj = _two_polygon_family()
+        window = _open_memory_window(family, obj)
+        try:
+            window.resize(900, 650)
+            window.show()
+            window._on_polygon_picked(0)
+            window.uv_add_phase_button.click()
+            window.uv_editor.finish_placement()
+            viewport = window.viewport
+            viewport._yaw = 145.0
+            for _ in range(4):
+                self.app.processEvents()
+
+            def _paint_once():
+                img = QImage(viewport.size(), QImage.Format.Format_ARGB32)
+                painter = QPainter(img)
+                viewport._paint_viewport(painter)
+                painter.end()
+
+            # Static polygon 1: no animation stepper arrows.
+            window._on_polygon_picked(1)
+            _paint_once()
+            self.assertEqual(viewport._anim_step_rects, {})
+
+            # Animated polygon 0: prev/next arrows appear and step only its animation.
+            window._on_polygon_picked(0)
+            _paint_once()
+            self.assertEqual(set(viewport._anim_step_rects.keys()), {"prev", "next"})
+            mat_id = viewport._anim_step_material_id
+            self.assertIsNotNone(mat_id)
+            self.assertEqual(viewport._anim_states.get(mat_id, (0, 1))[0], 0)
+
+            frames_seen = []
+            viewport.animationFrameChanged.connect(frames_seen.append)
+            QTest.mouseClick(
+                viewport, Qt.MouseButton.LeftButton,
+                pos=viewport._anim_step_rects["next"].center(),
+            )
+            self.assertEqual(viewport._anim_states[mat_id][0], 1)
+            self.assertIn("frame 2/2", frames_seen[-1])
+
+            QTest.mouseClick(
+                viewport, Qt.MouseButton.LeftButton,
+                pos=viewport._anim_step_rects["prev"].center(),
+            )
+            self.assertEqual(viewport._anim_states[mat_id][0], 0)
+            self.assertIn("frame 1/2", frames_seen[-1])
+
+            # Rapid double-click on the arrows must step frames, never deselect.
+            QTest.mouseDClick(
+                viewport, Qt.MouseButton.LeftButton,
+                pos=viewport._anim_step_rects["next"].center(),
+            )
+            self.assertEqual(viewport._selected_poly, 0)
+            self.assertEqual(viewport._anim_states[mat_id][0], 1)
+
+            QTest.mouseDClick(
+                viewport, Qt.MouseButton.LeftButton,
+                pos=viewport._anim_step_rects["prev"].center(),
+            )
+            self.assertEqual(viewport._selected_poly, 0)
+            self.assertEqual(viewport._anim_states[mat_id][0], 0)
+        finally:
+            window._skip_model_switch_warning = True
+            window.close()
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -231,9 +231,15 @@ def effects(source) -> dict:
                              "attributes": {k: v for k, v in vars(attrs).items() if not k.startswith("_")} if attrs else None,
                              "stages": len(block.particle_stages)})
         elif cls == "area.class":
-            animated.append({"block": index, "polygon": block.ade_poly_id,
-                             "texture": block.texture.name if block.texture else None,
-                             "kind": block.texture.kind if block.texture else None})
+            tex_name = block.texture.name if block.texture else None
+            anm = next((v for k, v in family.animations.items()
+                        if tex_name and k.casefold() == tex_name.casefold()), None)
+            entry = {"block": index, "polygon": block.ade_poly_id,
+                     "texture": tex_name,
+                     "kind": block.texture.kind if block.texture else None}
+            if anm is not None:
+                entry["frames"] = len(anm.frames)
+            animated.append(entry)
     return {"source": source.label, "fx_elements": fx, "emitters": emitters, "animated_polygons": animated,
             "hint": "studio_add_fx / studio_delete_fx use the fx index; studio_add_emitter copies an emitter block "
                     "of one model onto a point of another."}

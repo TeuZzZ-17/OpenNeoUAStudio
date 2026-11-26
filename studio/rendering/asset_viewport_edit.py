@@ -1067,6 +1067,7 @@ class _EditModeMixin:
         self._direct_grab_active = False
         self._gizmo_drag_axis = None
         self._gizmo_hover_axis = None
+        self._anim_step_hover = None
         self.unsetCursor()
         self.setMouseTracking(False)
         self._active_edit_vertex = None

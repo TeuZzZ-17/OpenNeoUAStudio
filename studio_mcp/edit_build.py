@@ -21,17 +21,20 @@ from studio_mcp.edit_materials import op_add_material_block, op_set_texture
 SWATCH_FILE = Path(__file__).with_name("swatches.json")
 _SWATCHES: dict | None = None
 _DONORS: dict | None = None
+_SWATCH_MTIME: int | None = None
 
 # Medians of the original Set1 vehicles live in studio.assets.shade (shared with the Model Editor panel).
 
 
 def swatches() -> dict:
     """Named texture patches: {name: {texture, rect, use}}; names starting with '_' are comments."""
-    global _SWATCHES, _DONORS
-    if _SWATCHES is None:
+    global _SWATCHES, _DONORS, _SWATCH_MTIME
+    mtime = SWATCH_FILE.stat().st_mtime_ns
+    if _SWATCHES is None or _SWATCH_MTIME != mtime:
         data = json.loads(SWATCH_FILE.read_text(encoding="utf-8"))
         _SWATCHES = {k: v for k, v in data.items() if not k.startswith("_")}
         _DONORS = {k.upper(): v for k, v in data.get("_donors", {}).items()}
+        _SWATCH_MTIME = mtime
     return _SWATCHES
 
 
@@ -364,6 +367,8 @@ def swatch_board(rows: dict) -> Path | None:
     from PIL import Image, ImageDraw
     from studio_mcp import textures
 
+    if not rows:
+        return None
     columns, cell_w, cell_h, shot_h = 5, 200, 150, 112
     sheet = Image.new("RGB", (columns * cell_w, ((len(rows) + columns - 1) // columns) * cell_h), (16, 16, 24))
     draw = ImageDraw.Draw(sheet)
@@ -375,8 +380,14 @@ def swatch_board(rows: dict) -> Path | None:
                 atlases[texture] = textures.load_picture(f"set1:{texture}", "set1")
             u0, v0, u1, v1 = entry["rect"]
             patch = atlases[texture].crop((u0, v0, u1 + 1, v1 + 1))
-            scale = max(1, min((cell_w - 10) // patch.width, shot_h // patch.height))
-            patch = patch.resize((patch.width * scale, patch.height * scale), Image.NEAREST)
+            max_w, max_h = cell_w - 10, shot_h
+            if patch.width > max_w or patch.height > max_h:
+                ratio = min(max_w / patch.width, max_h / patch.height)
+                new_size = (max(1, round(patch.width * ratio)), max(1, round(patch.height * ratio)))
+            else:
+                scale = max(1, min(max_w // patch.width, max_h // patch.height))
+                new_size = (patch.width * scale, patch.height * scale)
+            patch = patch.resize(new_size, Image.NEAREST)
             x, y = (index % columns) * cell_w + 5, (index // columns) * cell_h + 4
             sheet.paste(patch, (x, y))
             draw.text((x, y + shot_h + 4), name, fill=(255, 210, 60))

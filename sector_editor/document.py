@@ -188,13 +188,15 @@ class SetDocument:
     def change(self, label, operation):
         """Record one complete table edit; failed edits leave the document intact."""
         before = deepcopy(self.sdf)
+        before_ext = set(self.external_sector_slots)
         try:
             result = operation()
         except Exception:
             self.sdf = before
+            self.external_sector_slots = before_ext
             raise
-        if before != self.sdf:
-            self._undo.append((label, before, deepcopy(self.sdf)))
+        if before != self.sdf or before_ext != self.external_sector_slots:
+            self._undo.append((label, before, deepcopy(self.sdf), before_ext, set(self.external_sector_slots)))
             self._redo.clear()
         return result
 
@@ -203,12 +205,14 @@ class SetDocument:
             edit = self._undo.pop()
             self._redo.append(edit)
             self.sdf = deepcopy(edit[1])
+            self.external_sector_slots = set(edit[3])
 
     def redo(self):
         if self._redo:
             edit = self._redo.pop()
             self._undo.append(edit)
             self.sdf = deepcopy(edit[2])
+            self.external_sector_slots = set(edit[4])
 
     def free_sector(self):
         # Border types 248–255 have a fixed purpose in native maps.
@@ -280,11 +284,18 @@ class SetDocument:
             raise ValueError("The copied sectors use buildings that no longer exist.")
 
         def apply():
+            source_external = {n: (sector.number in self.external_sector_slots)
+                               for n, sector in placed.items()}
             for n in remove:
                 if n not in placed:
                     self.sdf.sectors.pop(n, None)
+                    self.external_sector_slots.discard(n)
             for n, sector in placed.items():
                 self.sdf.sectors[n] = replace(sector, number=n)
+                if source_external[n]:
+                    self.external_sector_slots.add(n)
+                else:
+                    self.external_sector_slots.discard(n)
         self.change("Move sectors" if remove else "Paste sectors", apply)
         return sorted(placed)
 
@@ -295,6 +306,7 @@ class SetDocument:
                 self.sdf = deepcopy(self.saved)
             else:
                 self.sdf.sectors.clear()
+            self.external_sector_slots.clear()
         self.change("Restore saved set" if saved else "Reset set", apply)
 
     def suggest_fields(self, number):
@@ -738,6 +750,10 @@ class SetDocument:
         def _queue_texture_variants(tex_path: Path, files_dict: dict) -> None:
             variants_found = False
             textures_dir = bootstrap.find_ci(loose.parent, "Textures")
+            if textures_dir is None or not textures_dir.is_dir():
+                parent_textures = bootstrap.find_ci(loose.parent.parent, "Textures")
+                if parent_textures is not None and parent_textures.is_dir():
+                    textures_dir = parent_textures
             if textures_dir is not None and textures_dir.is_dir():
                 for sub in sorted(textures_dir.iterdir(), key=lambda p: p.name.casefold()):
                     if not sub.is_dir():
@@ -1204,6 +1220,7 @@ class SetDocument:
         self.external_models.clear()
         self.external_buildings.clear()
         self.external_own.clear()
+        self.external_sector_slots.clear()
         # Older undo steps still hold the imported rows; they must not come back untracked.
         self._undo.clear()
         self._redo.clear()

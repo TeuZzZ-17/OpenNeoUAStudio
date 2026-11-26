@@ -99,8 +99,15 @@ class DestructionEffectsEditor(QWidget):
         self._catalog = {obj.object_id: obj.name.replace("_", " ")
                          for obj in effect_objects_by_id(load_game_objects(install)).values()}
 
-    def _changed(self):
+    def _changed(self, source=None):
         if not self._loading:
+            if source is not None:
+                for row in range(self.table.rowCount()):
+                    for col in range(4):
+                        if self.table.cellWidget(row, col) is source:
+                            if self.table.currentRow() != row:
+                                self.table.selectRow(row)
+                            break
             self._invalid_text = None
             self._sync_detail_from_row()
             self.textChanged.emit()
@@ -110,6 +117,13 @@ class DestructionEffectsEditor(QWidget):
         has_row = 0 <= row < self.table.rowCount()
         self.detail_box.setEnabled(has_row)
         if not has_row:
+            self._syncing_detail = True
+            try:
+                self.detail_effect.clear()
+                for spin in self.detail_coords:
+                    spin.setValue(0)
+            finally:
+                self._syncing_detail = False
             return
         combo = self.table.cellWidget(row, 0)
         if combo is None:
@@ -136,6 +150,7 @@ class DestructionEffectsEditor(QWidget):
             idx = combo.findData(self.detail_effect.currentData())
             if idx >= 0:
                 combo.setCurrentIndex(idx)
+                combo.setToolTip(combo.currentText())
             combo.blockSignals(False)
         for idx, spin in enumerate(self.detail_coords):
             cell_spin = self.table.cellWidget(row, idx + 1)
@@ -175,7 +190,7 @@ class DestructionEffectsEditor(QWidget):
         choice.setMinimumContentsLength(8)
         _fill_effect_combo(choice, self._catalog, effect_id)
         choice.setToolTip(choice.currentText())
-        choice.currentIndexChanged.connect(lambda _idx, c=choice: (c.setToolTip(c.currentText()), self._changed()))
+        choice.currentIndexChanged.connect(lambda _idx, c=choice: (c.setToolTip(c.currentText()), self._changed(c)))
         self.table.setCellWidget(row, 0, choice)
         for column, value in enumerate((x, -file_z, height), 1):
             spin = QSpinBox()
@@ -183,7 +198,7 @@ class DestructionEffectsEditor(QWidget):
             spin.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
             spin.setRange(-32768, 32767)
             spin.setValue(value)
-            spin.valueChanged.connect(self._changed)
+            spin.valueChanged.connect(lambda _v, s=spin: self._changed(s))
             self.table.setCellWidget(row, column, spin)
         self.table.selectRow(row)
         self._changed()

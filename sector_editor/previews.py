@@ -4,6 +4,7 @@ from collections import OrderedDict
 
 from PySide6.QtCore import QObject, QRunnable, QThreadPool, QTimer, Signal
 from PySide6.QtGui import QIcon, QPixmap
+from PySide6.QtWidgets import QListWidget
 
 from map_editor.render.sector_sprite import rasterize_sprite, sprite_input
 from .viewport import PreviewLibrary
@@ -116,9 +117,10 @@ def visible_items(view):
         return []
     rect = view.viewport().rect()
     items = []
+    # Walk visual (possibly sorted) rows so the bottom early-exit never cuts off sorted lists.
     for row in range(view.count()):
-        item = view.item(row)
-        if item.isHidden():
+        item = QListWidget.item(view, row)
+        if item is None or item.isHidden():
             continue
         item_rect = view.visualItemRect(item)
         if item_rect.top() > rect.bottom():

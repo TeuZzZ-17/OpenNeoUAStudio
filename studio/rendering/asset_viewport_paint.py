@@ -144,6 +144,14 @@ class _PaintingMixin:
         elif not allow_transparent_background:
             painter.fillRect(target, QColor(24, 26, 32))
 
+        if not clean and (
+                int(target.left()), int(target.top()),
+                int(target.width()), int(target.height()),
+        ) == (0, 0, self.width(), self.height()):
+            self._anim_step_rects = {}
+            self._anim_step_pill_rect = None
+            self._anim_step_material_id = None
+
         if not self._faces:
             if self._particle_emitters:
                 # A frame after the last particle dies is a valid empty frame.
@@ -172,6 +180,7 @@ class _PaintingMixin:
             self._last_indexed_stats = {}
         pick_shapes = []
         selected_shape = None
+        selected_face = None
         source_polygons: dict[int, QPolygonF] = {}
         visible_faces: set[int] = set()
         highlight_paths: dict[int, QPainterPath] = {}
@@ -574,6 +583,19 @@ class _PaintingMixin:
             self._draw_edit_overlay(painter, target, camera)
         elif not clean and not self._snapshot_active:
             self._draw_mode_label(painter, target, False)
+
+        if (not clean and not self._snapshot_active
+                and self._paste_preview is None
+                and self._modal_op is None
+                and self._box_start is None
+                and not (self._edit_session is not None
+                         and self._edit_session.modal_active)
+                and selected_face is not None
+                and selected_shape is not None
+                and 0 <= selected_face.material < len(self._materials)
+                and len(self._materials[selected_face.material].anim_frames) > 1):
+            self._draw_anim_frame_stepper(
+                painter, target, selected_shape, selected_face.material)
 
     def _indexed_scene_background(self, target, camera, background, clean,
                                   camera_preview=False):
@@ -1112,6 +1134,92 @@ class _PaintingMixin:
         if (int(target.left()), int(target.top()), int(target.width()),
                 int(target.height())) == (0, 0, self.width(), self.height()):
             self._mode_label_rect = QRect(x, y, width, height)
+
+    def _draw_anim_frame_stepper(
+            self, painter: QPainter, target: QRectF,
+            selected_shape: QPolygonF, material_id: int) -> None:
+        """Draw compact prev/next frame arrows near the selected animated face."""
+        mat = self._materials[material_id]
+        total = len(mat.anim_frames)
+        if total <= 1:
+            return
+        frame, _ = self._anim_states.get(material_id, (0, 1))
+        label = f"{frame + 1}/{total}"
+
+        painter.save()
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+        font = painter.font()
+        font.setPointSizeF(max(8.0, font.pointSizeF() - 1.0))
+        painter.setFont(font)
+
+        btn_w = 22.0
+        pill_h = 22.0
+        text_w = max(26.0, painter.fontMetrics().horizontalAdvance(label) + 10.0)
+        pill_w = btn_w + text_w + btn_w
+
+        poly_rect = selected_shape.boundingRect()
+        safe_bottom = poly_rect.bottom()
+        safe_top = poly_rect.top()
+        for _center, tip in self._gizmo_handles().values():
+            if abs(tip.x() - poly_rect.center().x()) <= pill_w * 0.7:
+                safe_bottom = max(safe_bottom, tip.y())
+                safe_top = min(safe_top, tip.y())
+
+        x = poly_rect.center().x() - pill_w * 0.5
+        y = safe_bottom + 12.0
+        if y + pill_h > target.bottom() - 10.0:
+            y = safe_top - pill_h - 12.0
+        x = max(target.left() + 8.0, min(x, target.right() - pill_w - 8.0))
+        y = max(target.top() + 38.0, min(y, target.bottom() - pill_h - 8.0))
+
+        pill_rect = QRectF(x, y, pill_w, pill_h)
+        painter.setPen(QPen(QColor(255, 215, 70, 120), 1.0))
+        painter.setBrush(QColor(22, 25, 32, 185))
+        painter.drawRoundedRect(pill_rect, pill_h * 0.5, pill_h * 0.5)
+
+        prev_rect = QRectF(x, y, btn_w, pill_h)
+        next_rect = QRectF(x + pill_w - btn_w, y, btn_w, pill_h)
+        for key, rect, direction in (("prev", prev_rect, -1), ("next", next_rect, 1)):
+            hovered = self._anim_step_hover == key
+            if hovered:
+                painter.setPen(Qt.PenStyle.NoPen)
+                painter.setBrush(QColor(255, 215, 70, 70))
+                painter.drawRoundedRect(
+                    rect.adjusted(2.0, 2.0, -2.0, -2.0),
+                    (pill_h - 4.0) * 0.5,
+                    (pill_h - 4.0) * 0.5,
+                )
+            cx = rect.center().x()
+            cy = rect.center().y()
+            tip_x = cx + (2.5 if direction > 0 else -2.5)
+            back_x = cx - (2.5 if direction > 0 else -2.5)
+            painter.setPen(QPen(
+                QColor(255, 232, 115) if hovered else QColor(225, 230, 238, 225),
+                1.8, Qt.PenStyle.SolidLine,
+                Qt.PenCapStyle.RoundCap, Qt.PenJoinStyle.RoundJoin,
+            ))
+            painter.drawPolyline(QPolygonF([
+                QPointF(back_x, cy - 4.0),
+                QPointF(tip_x, cy),
+                QPointF(back_x, cy + 4.0),
+            ]))
+
+        painter.setPen(QColor(185, 192, 206, 220))
+        painter.drawText(
+            QRectF(x + btn_w, y, text_w, pill_h),
+            Qt.AlignmentFlag.AlignCenter,
+            label,
+        )
+        painter.restore()
+
+        if (int(target.left()), int(target.top()), int(target.width()),
+                int(target.height())) == (0, 0, self.width(), self.height()):
+            self._anim_step_rects = {
+                "prev": prev_rect.toAlignedRect(),
+                "next": next_rect.toAlignedRect(),
+            }
+            self._anim_step_pill_rect = pill_rect.toAlignedRect()
+            self._anim_step_material_id = material_id
 
     def _preview_diagnostics(self):
         return self._diagnostics

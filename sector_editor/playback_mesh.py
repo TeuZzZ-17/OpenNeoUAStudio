@@ -33,9 +33,12 @@ class PlaybackMesh:
         if self.effects:
             return True
         original = self.library.mesh(typ, state)
-        if any(getattr(face, "animated", False) for face, _, _ in original.faces):
-            return True
         loader = self.library._loader
+        if any(getattr(face, "animated", False)
+               or (0 <= face.material < len(loader._materials)
+                   and bool(loader._materials[face.material].anim_frames))
+               for face, _, _ in original.faces):
+            return True
         if not loader._particle_emitters:
             return False
         placements = {(face.owner, ox, oz, id(self.library._material_adapters.get(face.material,

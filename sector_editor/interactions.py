@@ -208,7 +208,8 @@ class SectorList(KeyboardList):
             if item is None:
                 self.carryCancelled.emit()
             else:
-                self.carryDropped.emit(self.row(item))
+                target = item.data(Qt.ItemDataRole.UserRole)
+                self.carryDropped.emit(self.row(item) if target is None else int(target))
             event.accept()
             return
         super().mouseReleaseEvent(event)

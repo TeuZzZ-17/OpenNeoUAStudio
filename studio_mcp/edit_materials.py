@@ -200,8 +200,27 @@ def _ensure_texture(lm, name: str) -> str:
     for key in lm.family.textures:
         if key.casefold() == name.casefold():
             return key
-    loose = next((p for p in sorted(lm.base_path.parent.rglob("*"))
-                  if p.is_file() and p.name.casefold() == name.casefold()), None)
+    loose = None
+    if lm.set_hint:
+        from studio_mcp.sets import set_number
+        try:
+            num = set_number(lm.set_hint)
+            textures_dir = next((p for p in lm.base_path.parent.iterdir()
+                                 if p.is_dir() and p.name.casefold() == "textures"), None)
+            if textures_dir is not None:
+                set_dir = next((p for p in textures_dir.iterdir()
+                                if p.is_dir() and p.name.casefold() == f"set{num}"), None)
+                if set_dir is not None:
+                    loose = next((p for p in sorted(set_dir.iterdir())
+                                  if p.is_file() and p.name.casefold() == name.casefold()), None)
+        except core.McpToolError:
+            pass
+    if loose is None:
+        loose = next((p for p in sorted(lm.base_path.parent.iterdir())
+                      if p.is_file() and p.name.casefold() == name.casefold()), None)
+    if loose is None:
+        loose = next((p for p in sorted(lm.base_path.parent.rglob("*"))
+                      if p.is_file() and p.name.casefold() == name.casefold()), None)
     if loose is None and lm.set_hint:
         # The engine also reads repainted/new set textures from Sets/SetN/Loose/ILBM before SET.BAS.
         from studio_mcp.sets import set_folder      # local import: sets imports this module's siblings
@@ -345,9 +364,12 @@ def op_animate_polygons(ctx, select=None, shifts=None, frames=None, name: str = 
     for pid in ids:
         block_index, atts_index = table[pid]
         block = lm.blocks[block_index]
-        if (block.class_id or "").lower() != "amesh.class" or block.uses_atts_only_mapping:
+        if ((block.class_id or "").lower() != "amesh.class" or block.uses_atts_only_mapping
+                or block.texture is None):
             raise core.McpToolError(f"Polygon #{pid} is not an ordinary textured face")
         per_uv.setdefault(tuple(map(tuple, block.olpl[atts_index])), []).append(pid)
+    if len(per_uv) > 26:
+        raise core.McpToolError(f"Too many distinct UV groups ({len(per_uv)} > 26): split into multiple calls")
     created = {}
     for letter, (uvs, polys) in zip("ABCDEFGHIJKLMNOPQRSTUVWXYZ", per_uv.items()):
         groups = []
@@ -361,7 +383,7 @@ def op_animate_polygons(ctx, select=None, shifts=None, frames=None, name: str = 
             if not 0 <= int(state) < len(shifts) or int(ms) < 1:
                 raise core.McpToolError("frames = [[state, ms], ...] with state 0..%d and ms > 0" % (len(shifts) - 1))
             sequence.append(VanmFrame(max(1, round(int(ms) * 1024 / 1000)), 0, int(state)))
-        first = lm.blocks[table[polys[0]][0]]
+        first = lm.blocks[lm.slot_table()[polys[0]][0]]
         source = VanmData(source_name=f"{clean}{letter}.ANM", bitmap_class="ilbm.class",
                           bitmap_names=[first.texture.name], frames=sequence)
         anm_name = f"{clean}{letter}.ANM"
@@ -375,6 +397,8 @@ def op_animate_polygons(ctx, select=None, shifts=None, frames=None, name: str = 
             old = lm.blocks[block_index]
             old.atts.pop(atts_index)
             old.olpl.pop(atts_index)
+            if not old.atts:
+                lm.blocks.pop(block_index)
             lm.blocks.append(animated_polygon_block(anm_name, pid))
     return {"animations": created, "polygons": sorted(ids)}
 

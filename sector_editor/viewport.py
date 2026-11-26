@@ -161,12 +161,13 @@ class SectorViewport(GpuMapViewport):
             self._fit_top()
         self.update()
 
-    def sample_animation(self, time_ms):
+    def sample_animation(self, time_ms, *, force=False):
         """Refresh animated geometry only; navigation and selection stay untouched."""
         self.animation_time_ms = time_ms
         if self.lib is None or self.top_down:
             return
-        if hasattr(self.lib, "has_dynamic_content") and not self.lib.has_dynamic_content(self._number, self._state):
+        if (not force and hasattr(self.lib, "has_dynamic_content")
+                and not self.lib.has_dynamic_content(self._number, self._state)):
             return
         self.lib.time_ms = time_ms
         self.lib.camera = self.camera

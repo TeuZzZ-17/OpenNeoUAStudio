@@ -1007,3 +1007,70 @@ def test_imported_external_sector_scopes_models_and_auto_selects_single_texture_
     window.sectors.setCurrentRow(0)
     visible_after = sum(1 for i in range(window.models.count()) if not window.models.item(i).isHidden())
     assert visible_after > 10
+
+
+def test_external_sector_slots_follow_undo_redo_move_and_reset(document):
+    document.external_sector_slots.add(5)
+    source = deepcopy(document.sdf.sectors[5])
+    document.paste_sectors([source], 7, remove=(5,))
+    assert 7 in document.external_sector_slots and 5 not in document.external_sector_slots
+    document.undo()
+    assert 5 in document.external_sector_slots and 7 not in document.external_sector_slots
+    document.redo()
+    assert 7 in document.external_sector_slots and 5 not in document.external_sector_slots
+    document.reset_sectors(saved=False)
+    assert document.external_sector_slots == set()
+    document.undo()
+    assert 7 in document.external_sector_slots
+
+
+def test_sorted_sector_list_keeps_id_mapping_for_filter_selection_and_icons(real_window):
+    from PySide6.QtCore import Qt
+    from PySide6.QtGui import QIcon, QPixmap
+    from PySide6.QtWidgets import QListWidget
+    from sector_editor.previews import visible_items
+    window = real_window
+    window.show()
+    window.sectors.sortItems(Qt.SortOrder.DescendingOrder)
+    # Visual row 0 is now Sector 255, not Sector 0.
+    assert QListWidget.item(window.sectors, 0).data(Qt.ItemDataRole.UserRole) == 255
+    # visible_items must return visible top cards even when sorted descending.
+    shown = visible_items(window.sectors)
+    assert shown and shown[0].data(Qt.ItemDataRole.UserRole) == 255
+    window.slot_filter.setCurrentIndex(1)  # Defined sectors
+    for row in range(window.sectors.count()):
+        item = QListWidget.item(window.sectors, row)
+        num = item.data(Qt.ItemDataRole.UserRole)
+        assert item.isHidden() == (num not in window.document.sdf.sectors)
+    window.slot_filter.setCurrentIndex(0)
+    item5 = window._item_by_id(window.sectors, 5)
+    assert item5 is not None and QListWidget.row(window.sectors, item5) != 5
+    window._sector_selected(item5)
+    assert window.current_sector == 5
+    assert window.sectors.currentItem() is item5
+    # Card preview callback must land on Sector 5's item.
+    key = ("gen", "sector", 5, "sig", 64)
+    item5.setData(int(Qt.ItemDataRole.UserRole) + 10, key)
+    icon = QIcon(QPixmap(8, 8))
+    window._card_ready(key, icon)
+    assert not item5.icon().isNull()
+
+
+def test_effects_editor_clears_detail_when_empty_and_syncs_edited_row():
+    from PySide6.QtWidgets import QApplication
+    from sector_editor.effects_editor import DestructionEffectsEditor
+    QApplication.instance() or QApplication([])
+    editor = DestructionEffectsEditor()
+    editor._catalog = {49: "Boom", 50: "Spark"}
+    editor.setPlainText("49 10 20 100\n50 -5 15 200")
+    editor.table.selectRow(0)
+    # Edit spinbox on row 1 while row 0 is selected: detail must switch to row 1.
+    row1_x = editor.table.cellWidget(1, 1)
+    row1_x.setValue(77)
+    assert editor.table.currentRow() == 1
+    assert editor.detail_coords[0].value() == 77
+    # Switching to an empty model clears stale values in detail box.
+    editor.setPlainText("")
+    assert not editor.detail_box.isEnabled()
+    assert editor.detail_effect.count() == 0
+    assert [s.value() for s in editor.detail_coords] == [0, 0, 0]

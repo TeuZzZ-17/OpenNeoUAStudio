@@ -474,6 +474,21 @@ class _ViewControlsMixin:
         self.update()
         self.animationFrameChanged.emit(self.current_frame_text())
 
+    def step_material_animation(self, material_id: int, delta: int) -> bool:
+        """Step a single VANM material's animation by ``delta`` frames."""
+        if not (0 <= material_id < len(self._materials)):
+            return False
+        mat = self._materials[material_id]
+        if len(mat.anim_frames) <= 1:
+            return False
+        frame, direction = self._anim_states.get(material_id, (0, 1))
+        frame = (frame + int(delta)) % len(mat.anim_frames)
+        self._anim_states[material_id] = (frame, 1 if direction >= 0 else -1)
+        self._anim_left_ms[material_id] = 0.0
+        self.update()
+        self.animationFrameChanged.emit(self.current_frame_text())
+        return True
+
     def reset_animation(self) -> None:
         self._reset_animation_states()
         self.update()

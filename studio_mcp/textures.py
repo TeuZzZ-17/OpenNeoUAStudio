@@ -61,7 +61,7 @@ def decode_ilbm(spec: str, set_name: str) -> IlbmImage:
         archive = core._setbas(match[1])[0]
         resource = next((r for r in archive.find(match[2].strip(), "ilbm.class") if r.decodable), None)
         if resource is None:
-            raise core.McpToolError(f"{match[1]} has no texture {match[2]!r} (see studio_set_textures)")
+            raise core.McpToolError(f"{match[1]} has no texture {match[2]!r} (see studio_set_list_textures)")
         image = decode_texture(archive, resource)
         if image.palette is None:
             image.palette = set_palette(match[1])

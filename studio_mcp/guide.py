@@ -36,12 +36,17 @@ DESIGN = """NEW DESIGNS IN THE URBAN ASSAULT LOOK (measured on the original Set1
    - create_primitive = boxes/wedges/prisms for turrets, barrels, fins, skids.
    - import_geometry = reuse original parts (tracks, rotors, turrets, cockpits) from a faction donor:
      the surest way to the faction look. Animated parts (tracks, rotors, glows) travel with add_fx.
-3. Texture with faction swatches: studio_swatches() lists them with a picture; pass swatch='ghorkov.hull' to
-   loft / create_primitive / add_polygons, or studio_paint later. Every face shows one whole panel (like the
-   originals). Use the faction's own atlas only: Resistance BAGGER/MTL, Ghorkov HUBI (+ AIR1TXT for the pale
-   Gigant top/belly), Taerkasten FAERROBO + dark HUBI armour, Mykonian AIR1TXT veins, Sulgogar FBAGGER flesh,
-   Black Sect ROBONEU. Read the whole studio_swatches list and vary the patches per part (hull, glass, panels,
-   glow strips): hull + hull_dark alone look flat. Map the two triangles of one quad with one shared projection.
+3. Texture with faction swatches: studio_swatches('<faction>') lists all 106 developer-measured patches with a
+   picture; pass swatch='ghorkov.hull' to loft / create_primitive / add_polygons, or studio_paint later. Every face
+   shows one whole panel (like the originals). Use the faction's own atlases only:
+   - Resistance (38): BAGGER, MTL, FBAGGER (wrecks/truck), TAERROBO (cab), AIR1TXT (box/wedge_glass).
+   - Ghorkov (24): HUBI, FHUBI (wrecks/Turantul wing/tracks), AIR1TXT (pale Gigant top/belly).
+   - Taerkasten (23): FAERROBO, TAERROBO (fortress masonry/arches/windows), HUBI/FHUBI (tank armour/tracks), MTL (Serp).
+   - Mykonian (3): AIR1TXT (veins), BODEN5 (pipe_lattice) + animated electric/glow cards (add_fx).
+   - Sulgogar (3): FBAGGER (olive flesh, ember_glow) + animated tendrils/spores (add_fx).
+   - Black Sect (15): ROBONEU (dark steel, light strips/rows, slots, glyphs, lights_wide).
+   Read the whole studio_swatches('<faction>') list and vary the patches per part (hull, glass, panels, glow strips):
+   hull + hull_dark alone look flat. Map the two triangles of one quad with one shared projection.
 4. Light: the engine has none, every face carries a baked shade. End with {"op":"auto_shade"} (top bright,
    sides mid, belly dark). Without it the model looks flat and wrong.
 5. Check scale and look: studio_render_model(model, views=[...], compare_with='set1:<similar unit>') puts the
