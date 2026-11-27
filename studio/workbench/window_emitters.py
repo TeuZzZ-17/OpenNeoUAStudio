@@ -6,11 +6,13 @@ from dataclasses import replace
 from bisect import bisect_right
 from itertools import accumulate
 import copy
+import struct
 
 from PySide6.QtCore import QEvent, QObject, QPoint, QSignalBlocker, QTimer, Qt
 from PySide6.QtGui import QCursor, QImage, QPainter, QPixmap
 from PySide6.QtWidgets import (
-    QDialog, QDialogButtonBox, QFormLayout, QLabel, QMenu, QSpinBox,
+    QDialog, QDialogButtonBox, QDoubleSpinBox, QFormLayout, QHBoxLayout, QLabel,
+    QMenu, QSpinBox, QWidget,
 )
 
 from studio.ui.cursor_themes import studio_cursor
@@ -414,7 +416,7 @@ class _EmittersMixin:
             return
         self._pick_emitter_anchor(lambda anchor: self._insert_emitter(
             entry.family, entry.owner, block, anchor, "Add emitter"),
-            preview=emitter_preview(entry.family, block, sample_limit=48))
+            preview=emitter_preview(entry.family, block, sample_limit=48, anchored=True))
 
     def _insert_emitter(self, family, source, block, anchor, label):
         def operation():
@@ -485,7 +487,7 @@ class _EmittersMixin:
                 self._insert_emitter(family, owner, block, anchor, 'Copy emitter')
 
         self._pick_emitter_anchor(
-            place, preview=emitter_preview(family, block, sample_limit=48),
+            place, preview=emitter_preview(family, block, sample_limit=48, anchored=True),
             cut_block=block if cut else None)
 
     def _cut_emitter(self):
@@ -503,21 +505,59 @@ class _EmittersMixin:
         dialog.setWindowTitle("Emitter Settings")
         form = QFormLayout(dialog)
         fields = {}
-        for key, label in (
-                ("start_speed", "Start speed"),
-                ("context_lifetime", "Context lifetime (ticks)"),
-                ("context_start_generation", "Emission start (ticks)"),
-                ("context_stop_generation", "Emission stop (ticks)"),
-                ("birth_rate", "Birth rate"),
-                ("lifetime", "Particle lifetime (ticks)"),
-                ("start_size", "Start size"),
-                ("end_size", "End size"),
-                ("noise", "Noise")):
+        top = 2147483647
+        # Lower bounds mirror particle.cpp: a zero rate or lifetime divides by zero.
+        for key, label, low, high, tip in (
+                ("start_speed", "Start speed", min(0, attrs.start_speed), top,
+                 "Particle speed at birth (units per second)."),
+                ("context_lifetime", "Context lifetime (ticks)", 1, top,
+                 "Length of one emission cycle; the cycle repeats every "
+                 "max(context lifetime, emission stop). 1024 ticks = 1 second."),
+                ("context_start_generation", "Emission start (ticks)", 0, top,
+                 "Cycle time when emission begins."),
+                ("context_stop_generation", "Emission stop (ticks)", 0, top,
+                 "Cycle time when emission ends."),
+                ("birth_rate", "Birth rate", 1, 1024,
+                 "Particles per second (1-1024)."),
+                ("lifetime", "Particle lifetime (ticks)", 1, top,
+                 "How long each particle lives; the stage textures share it equally."),
+                ("start_size", "Start size", 0, top, "Particle size at birth."),
+                ("end_size", "End size", 0, top, "Particle size at death."),
+                ("noise", "Noise", 0, top,
+                 "Random jitter added to the position every frame "
+                 "(value / 10 units per frame at 60 fps).")):
             spin = QSpinBox()
-            spin.setRange(min(0, getattr(attrs, key)), 2147483647)
+            spin.setRange(low, high)
             spin.setValue(getattr(attrs, key))
+            spin.setToolTip(tip)
             form.addRow(label, spin)
             fields[key] = spin
+        vectors = {}
+        for key, label, tip in (
+                ("accel_start", "Acceleration start",
+                 "Velocity added every frame, in world axes (y down: a positive y "
+                 "falls, a negative y rises)."),
+                ("accel_end", "Acceleration end",
+                 "Acceleration reached after one context lifetime of particle age."),
+                ("magnify_start", "Direction start",
+                 "Launch direction bias, turned with the model: 0 = random in all "
+                 "directions, larger values = narrower cone (y down)."),
+                ("magnify_end", "Direction end",
+                 "Direction bias reached at the end of the context lifetime.")):
+            row = QWidget()
+            layout = QHBoxLayout(row)
+            layout.setContentsMargins(0, 0, 0, 0)
+            spins = []
+            for value in getattr(attrs, key):
+                spin = QDoubleSpinBox()
+                spin.setRange(-1000000.0, 1000000.0)
+                spin.setDecimals(4)
+                spin.setValue(value)
+                spin.setToolTip(tip)
+                layout.addWidget(spin)
+                spins.append(spin)
+            form.addRow(label, row)
+            vectors[key] = (spins, [spin.value() for spin in spins])
         buttons = QDialogButtonBox(
             QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
         buttons.accepted.connect(dialog.accept)
@@ -525,11 +565,14 @@ class _EmittersMixin:
         form.addRow(buttons)
         if dialog.exec() != QDialog.DialogCode.Accepted:
             return
-        changed = replace(attrs, **{key: spin.value() for key, spin in fields.items()})
+        values = {key: spin.value() for key, spin in fields.items()}
+        for key, (spins, shown) in vectors.items():
+            # untouched vectors keep their exact bytes despite the 4-decimal display
+            if [spin.value() for spin in spins] != shown:
+                values[key] = tuple(struct.unpack(">f", struct.pack(">f", spin.value()))[0]
+                                    for spin in spins)
+        changed = replace(attrs, **values)
         if changed == attrs:
-            return
-        if changed.context_stop_generation < changed.context_start_generation:
-            self._notify("Emission stop must be at or after emission start.", 7000)
             return
 
         def operation():

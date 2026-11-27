@@ -1793,6 +1793,13 @@ def update_particle_emitter(block, attributes):
     if (block.class_id or "").lower() != "particle.class" \
             or original is None or original.version != 1 or attributes.version != 1:
         raise MappingEditError("only decoded version 1 emitter settings are editable")
+    # particle.cpp divides by these: 0 crashes the game, a birth rate above 1024 hangs it
+    if not 1 <= attributes.birth_rate <= 1024:
+        raise MappingEditError("birth rate must be between 1 and 1024")
+    if attributes.lifetime < 1 or attributes.context_lifetime < 1:
+        raise MappingEditError("particle and context lifetime must be at least 1")
+    if attributes.context_stop_generation < attributes.context_start_generation:
+        raise MappingEditError("emission stop must be at or after emission start")
     wrapped = _wrap_ades_objt(block.source_objt_bytes)
     parsed = parse_base_bytes(wrapped, "<particle-attributes>")
     if parsed.root is None or parsed.tree is None or len(parsed.root.ades) != 1:

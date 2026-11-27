@@ -109,6 +109,28 @@ class FrameSequence:
 _preview_atlases = local()
 
 
+def _luma_alpha(image):
+    """Apply the ILBM "luma" alpha to an additive effect PNG.
+
+    The engine draws HI/ALPHA FX textures additively, so their opaque black
+    background adds nothing; alpha blending would show it as a black square.
+    """
+    if image is None:
+        return None
+    image = image.convertToFormat(QImage.Format.Format_RGBA8888)
+    pixels = image.bits()
+    for offset in range(0, image.sizeInBytes(), 4):
+        r, g, b, a = pixels[offset:offset + 4]
+        mx = max(r, g, b)
+        if mx <= 8 or a == 0:
+            pixels[offset:offset + 4] = b"\x00\x00\x00\x00"
+        else:
+            pixels[offset:offset + 4] = bytes((
+                min(255, 255 * r // mx), min(255, 255 * g // mx),
+                min(255, 255 * b // mx), mx * a // 255))
+    return image.convertToFormat(QImage.Format.Format_ARGB32)
+
+
 def _preview_atlas(family, name, additive=False):
     bitmap = _resource(family.textures, name)
     override = (family.effect_override_paths.get(name.lower())
@@ -126,7 +148,7 @@ def _preview_atlas(family, name, additive=False):
         # opaque black square instead of staying transparent). "luma" keeps
         # the preview a safe, always-transparent approximation of the
         # engine's glow instead.
-        image = (_image_from_effect_png(override) if override is not None
+        image = (_luma_alpha(_image_from_effect_png(override)) if override is not None
                  else qimage_from_ilbm(
                      bitmap, family.external_palette,
                      "luma" if additive else "chroma"))
@@ -170,7 +192,8 @@ def _texture_sequence(family, texture, groups=(), additive=False):
 def effect_preview(entry, kind):
     if kind == "emitter":
         return emitter_preview(
-            entry.family, entry.owner.base_object.ades[entry.value], sample_limit=48)
+            entry.family, entry.owner.base_object.ades[entry.value],
+            sample_limit=400, size=CATALOG_PREVIEW_SIZE)
     for block_index, atts_index in zip(entry.value.block_indices,
                                        entry.value.atts_indices):
         block = entry.owner.base_object.ades[block_index]
@@ -187,8 +210,17 @@ def emitter_stage_preview(family, stage):
         family, stage.texture, stage.olpl, stage.tracy_mode == "flat")
 
 
-def emitter_preview(family, block, *, sample_limit=6000):
-    """Render a looping sample of the same particle simulation as the viewport."""
+CATALOG_PREVIEW_SIZE = 256
+
+
+def emitter_preview(family, block, *, sample_limit=6000, size=128, anchored=False):
+    """Render a looping sample of the same particle simulation as the viewport.
+
+    The whole loop is framed by its real bounding box (with a safety margin),
+    so off-centre effects such as rising smoke fill the image and nothing is
+    cropped. ``anchored`` keeps the emitter point at the image centre instead
+    (the placement ghost is drawn centred on the picked point).
+    """
     if block.particle_attributes is None or not block.particle_stages:
         return FrameSequence([], ())
     # Flat-tracy stages decode with "luma" alpha (see _preview_atlas), which
@@ -208,23 +240,35 @@ def emitter_preview(family, block, *, sample_limit=6000):
     step = span / 16
     samples = [list(emitter.samples(start + index * step, limit=sample_limit))
                for index in range(1, 17)]
-    extent = max((max(abs(x), abs(y)) + size
-                  for frame in samples for (x, y, _z), size, _ in frame),
-                 default=0)
-    if not extent:
+    boxes = [(x - radius, y - radius, x + radius, y + radius)
+             for frame in samples for (x, y, _z), radius, _ in frame if radius > 0]
+    left = min((box[0] for box in boxes), default=0.0)
+    top = min((box[1] for box in boxes), default=0.0)
+    right = max((box[2] for box in boxes), default=0.0)
+    bottom = max((box[3] for box in boxes), default=0.0)
+    if anchored:
+        reach = max(-left, -top, right, bottom, 0.0)
+        left, top, right, bottom = -reach, -reach, reach, reach
+    extent = max(right - left, bottom - top)
+    if extent <= 1e-6:
         return next((stage for stage in stages if stage.images), FrameSequence([], ()))
-    scale = 58 / extent
+    margin = size * 0.06
+    scale = (size - 2 * margin) / extent
+    centre_x, centre_y = (left + right) / 2, (top + bottom) / 2
+    # small debris on long arcs stays readable; the margin still covers it
+    min_radius = margin * 0.6
     frames = []
     for index, frame in enumerate(samples, 1):
-        image = QImage(128, 128, QImage.Format.Format_ARGB32_Premultiplied)
+        image = QImage(size, size, QImage.Format.Format_ARGB32_Premultiplied)
         image.fill(Qt.GlobalColor.transparent)
         painter = QPainter(image)
-        for (x, y, _z), size, (_, _, sequence) in frame:
+        for (x, y, _z), particle_size, (_, _, sequence) in frame:
             sprite = sequence.at(start + index * step)
             if sprite is not None:
-                radius = size * scale
+                radius = max(min_radius, particle_size * scale)
                 painter.drawImage(QRectF(
-                    64 + x * scale - radius, 64 + y * scale - radius,
+                    size / 2 + (x - centre_x) * scale - radius,
+                    size / 2 + (y - centre_y) * scale - radius,
                     2 * radius, 2 * radius), sprite)
         painter.end()
         frames.append((image, max(50, min(350, step))))
@@ -239,7 +283,7 @@ class EffectCatalogDialog(QDialog):
                  playback_speed=None):
         super().__init__(parent)
         self.setWindowTitle("Add Emitter" if kind == "emitter" else "Add ANM")
-        self.resize(870, 690)
+        self.resize(1180, 860)
         self._kind = kind
         self._current = current
         self._preferred = preferred
@@ -283,10 +327,10 @@ class EffectCatalogDialog(QDialog):
         self.gallery.setResizeMode(QListView.ResizeMode.Adjust)
         self.gallery.setLayoutMode(QListView.LayoutMode.Batched)
         self.gallery.setVerticalScrollMode(QAbstractItemView.ScrollMode.ScrollPerPixel)
-        self.gallery.setGridSize(QSize(198, 123))
+        self.gallery.setGridSize(QSize(262, 270))
         self.gallery.setWordWrap(True)
         self.gallery.setUniformItemSizes(True)
-        self.gallery.setIconSize(QSize(128, 92))
+        self.gallery.setIconSize(QSize(CATALOG_PREVIEW_SIZE - 32, CATALOG_PREVIEW_SIZE - 32))
         self.gallery.currentItemChanged.connect(self._selection_changed)
         self.gallery.itemDoubleClicked.connect(lambda _item: self.accept())
         add_list_sort(layout, self.gallery, label="Effect", stretch=1)
@@ -445,9 +489,13 @@ class EffectCatalogDialog(QDialog):
             if frame is not None and item.data(frame_role) != frame:
                 item.setData(frame_role, frame)
                 if frame not in self._icons:
+                    icon_size = self.gallery.iconSize()
+                    # smooth when shrinking renders, nearest when enlarging pixel art
+                    smooth = image.width() > icon_size.width()                         or image.height() > icon_size.height()
                     self._icons[frame] = QIcon(QPixmap.fromImage(image).scaled(
-                        self.gallery.iconSize(), Qt.AspectRatioMode.KeepAspectRatio,
-                        Qt.TransformationMode.FastTransformation))
+                        icon_size, Qt.AspectRatioMode.KeepAspectRatio,
+                        Qt.TransformationMode.SmoothTransformation if smooth
+                        else Qt.TransformationMode.FastTransformation))
                 self._icons.move_to_end(frame)
                 if len(self._icons) > 512:
                     self._icons.popitem(last=False)

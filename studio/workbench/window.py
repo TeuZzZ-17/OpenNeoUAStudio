@@ -1096,7 +1096,7 @@ class AssemblyWindow(
                 ("replace_emitter_action", "Replace Emitter", self._replace_emitter),
                 ("copy_emitter_action", "Copy Emitter", self._copy_emitter),
                 ("cut_emitter_action", "Cut Emitter", self._cut_emitter),
-                ("edit_emitter_action", "Edit Emitter Settings", self._edit_emitter_settings),
+                ("edit_emitter_action", "Emitter Settings", self._edit_emitter_settings),
                 ("delete_emitter_action", "Delete Emitter", self._delete_emitter)):
             action = QAction(label, self)
             action.setEnabled(False)

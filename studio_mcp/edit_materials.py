@@ -518,7 +518,7 @@ def op_set_emitter(ctx, block: int = -1, settings=None):
     """Change the settings of a particle emitter (block number from studio_effects). `settings` is a dictionary with
     any of: accel_start, accel_end, magnify_start, magnify_end (each [x, y, z]; y DOWN, so a negative y goes up) and
     collide, start_speed, num_contexts, context_lifetime, context_start_generation, context_stop_generation,
-    birth_rate (particles per second), lifetime, start_size, end_size, noise (whole numbers). Missing keys stay as they
+    birth_rate (particles per second, 1-1024), lifetime, start_size, end_size, noise (whole numbers). Missing keys stay as they
     are. Spray recipe: small `magnify` (the random part wins -> wide cone), high start_speed, positive y accel (gravity),
     end_size smaller than start_size (the particles shrink out)."""
     import dataclasses
