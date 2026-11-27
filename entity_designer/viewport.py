@@ -433,10 +433,10 @@ class CollisionViewport(FxPreviewViewportMixin, AssetViewport):
         return (dx, -dy, 4.0 - dz)
 
     def _front_facing_from_screen_area(self, area: float) -> bool:
-        """Match OpenNeoUA GL_CCW culling in the cockpit-only Qt view.
+        """Match OpenNeoUA CCW back-face culling in the cockpit-only Qt view.
 
-        OpenNeoUA renders the vehicle body with OpenGL's default CCW
-        front-face convention. Cockpit projection is converted to Qt's
+        OpenNeoUA renders the vehicle body with counter-clockwise front
+        faces (in normalized device coordinates). Cockpit projection is converted to Qt's
         top-left screen coordinates, which invert window Y; therefore a
         runtime front-facing triangle has a negative signed area here.
         The regular editor keeps its historical winding unchanged.
@@ -448,7 +448,7 @@ class CollisionViewport(FxPreviewViewportMixin, AssetViewport):
 
     def _uses_retail_source_face_culling(self) -> bool:
         # The normal Collision/Model Editor view remains on the shared Retail
-        # whole-source-face rule. OpenNeoUA cockpit rendering is OpenGL-facing:
+        # whole-source-face rule. OpenNeoUA cockpit rendering culls per triangle:
         # culling is determined from each clipped fan triangle after projection.
         return not self._cockpit_preview_active
 
