@@ -1,7 +1,6 @@
 """Weapon terrain craters in the Entity Designer: keys, engine math, preview."""
 
 import math
-import random
 
 import numpy as np
 import pytest

@@ -12,9 +12,6 @@ from PySide6.QtCore import (
 from PySide6.QtGui import (
     QBrush,
 )
-from PySide6.QtWidgets import (
-    QTreeWidgetItem,
-)
 
 from entity_designer.script_model import (
     _clamp_gun_angle,

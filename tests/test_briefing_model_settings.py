@@ -3,7 +3,7 @@ import pytest
 os.environ.setdefault('QT_QPA_PLATFORM','offscreen')
 from types import SimpleNamespace
 from PySide6.QtWidgets import QApplication,QWidget
-from entity_designer.script_model import *
+from entity_designer.script_model import (CollisionProject, VEHICLE, WEAPON, apply_editable_overwrite_preview, build_editable_overwrite_preview, export_collision_text, find_script_blocks, import_briefing_xyz_block, plan_script_update)
 from entity_designer.briefing import BriefingControls,BriefingPreview
 
 def test_xyz_every_writer_and_nested_preservation():

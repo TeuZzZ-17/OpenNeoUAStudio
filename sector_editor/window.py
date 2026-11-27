@@ -13,9 +13,9 @@ from zipfile import ZipFile, ZIP_DEFLATED
 from PySide6.QtCore import QBuffer, QByteArray, QIODevice, QTimer, Qt, QItemSelectionModel, QEvent, Signal
 from PySide6.QtGui import QAction, QIcon, QKeySequence, QKeyEvent
 from PySide6.QtWidgets import (
-    QApplication, QButtonGroup, QCheckBox, QComboBox, QDialog, QDialogButtonBox, QDoubleSpinBox, QFileDialog,
+    QApplication, QButtonGroup, QCheckBox, QComboBox, QDialog, QDialogButtonBox, QFileDialog,
     QFormLayout, QAbstractItemView, QGridLayout, QHBoxLayout, QInputDialog, QLabel, QLineEdit,
-    QListWidgetItem, QMainWindow, QMenu, QMessageBox, QPlainTextEdit, QPushButton, QRadioButton,
+    QMainWindow, QMenu, QMessageBox, QPlainTextEdit, QPushButton, QRadioButton,
     QSizePolicy, QSpinBox, QSplitter, QTabWidget, QToolButton, QVBoxLayout, QWidget,
 )
 
@@ -764,7 +764,7 @@ class SectorEditorWindow(QMainWindow):
 
     def _start_transition(self, old_state, new_state, obj, family):
         """Explosions of the damage steps old_state -> new_state of the played cell (engine order)."""
-        from .transition_fx import required_vps, transition_simulation
+        from .transition_fx import transition_simulation
         sector = self.document.sdf.sectors.get(self.current_sector)
         if sector is None or old_state == new_state:
             return

@@ -7,7 +7,7 @@ from unittest.mock import patch
 import numpy as np
 from PySide6.QtCore import QMimeData, QPoint, QPointF, Qt, QTimer
 from PySide6.QtTest import QTest
-from PySide6.QtWidgets import QApplication, QInputDialog, QMenu
+from PySide6.QtWidgets import QApplication, QMenu
 
 from test_sector_editor import real_window  # noqa: F401 - shared Qt fixture
 

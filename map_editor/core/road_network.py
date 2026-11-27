@@ -30,10 +30,6 @@ SPECIAL_NAMES = ("GEM", "SUPERITEM", "ENDLEVEL", "GATE", "KEY")
 SPECIAL_TYPES = {0xf3, 0xf4}
 
 
-def side_names(mask: int) -> str:
-    return "".join(name for bit, name in ((NORTH, "N"), (EAST, "E"), (SOUTH, "S"), (WEST, "W")) if mask & bit)
-
-
 @dataclass
 class RoadPlan:
     changes: list = field(default_factory=list)      # (col, row, old_type, new_type)

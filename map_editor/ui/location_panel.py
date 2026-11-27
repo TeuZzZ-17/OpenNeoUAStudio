@@ -7,8 +7,7 @@ from studio.rendering.playback import DEFAULT_ANIMATION_SPEED
 from PySide6.QtCore import QObject, QEvent, QPointF, QRectF, QSize, Qt, QTimer, QElapsedTimer, QUrl
 from PySide6.QtGui import QColor, QIcon, QPainter, QPalette, QPen, QPixmap, QPolygonF, QFont, QFontDatabase, QPainterPath
 from PySide6.QtWidgets import (QApplication, QComboBox, QStyledItemDelegate, QStyle,
-    QStyleOptionViewItem, QWidget, QVBoxLayout, QHBoxLayout, QFormLayout, QListWidget,
-    QListWidgetItem, QLineEdit, QSpinBox, QPushButton, QLabel, QFileDialog, QDialog)
+    QStyleOptionViewItem, QWidget, QVBoxLayout, QHBoxLayout, QFormLayout, QLineEdit, QSpinBox, QPushButton, QLabel, QFileDialog, QDialog)
 from PySide6.QtMultimedia import QMediaPlayer, QAudioOutput
 
 from studio.exchange.portable import find_existing_path

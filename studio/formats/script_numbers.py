@@ -13,7 +13,9 @@ def parse_bool(text: str) -> bool | None:
     if word in ("no", "false", "off"):
         return False
     try:
-        return int(word, 0) != 0
+        # strtol base 0 also reads a leading-zero number as octal ("01" = on).
+        octal = len(word.lstrip("+-")) > 1 and word.lstrip("+-")[0] == "0" and word.lstrip("+-").isdigit()
+        return int(word, 8 if octal else 0) != 0
     except ValueError:
         return None
 

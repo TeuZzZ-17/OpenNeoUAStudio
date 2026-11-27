@@ -1090,10 +1090,6 @@ class UVEditorWidget(AcceleratedWidget):
         self.update()
         return self.view_rotation_degrees()
 
-    def reset_view_rotation(self) -> None:
-        self._view_rotation = 0
-        self.update()
-
     def set_timeline_emitter(self, is_emitter: bool,
                              anchor_animated: bool = False) -> None:
         self._timeline_is_emitter = bool(is_emitter)
@@ -1364,7 +1360,6 @@ class UVEditorWidget(AcceleratedWidget):
                 visible = sorted(visible, key=lambda loop: (
                     loop.key in selected_keys, loop.key == self._timeline_active))
             for loop in visible:
-                color = self.loop_color(loop.key)
                 points = [self._uv_to_screen(uv) for uv in loop.uvs]
                 playing = loop.key == self._timeline_active
                 selected_loop = any((loop.key, index) in self._selected_handles

@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import math
 from types import SimpleNamespace
 
 import numpy as np
@@ -9,13 +8,9 @@ import pytest
 from map_editor import bootstrap
 from map_editor.core.asset_bridge import SetAssets
 from map_editor.core.building_defs import parse_building_text
-from map_editor.core.ldf_model import LdfDocument
 from map_editor.core.vehicle_defs import WHITE_TINT, parse_tint, parse_vehicle_text
-from map_editor.render.camera import IsoCamera
-from map_editor.render.map_scene import render_scene, scene_polygons
 from map_editor.render.sector_mesh import SectorMeshLibrary, visual_rotation_matrix
 from map_editor.render.sector_sprite import rasterize_sprite, sprite_input
-from map_editor.render.terrain_mesh import TerrainMesh
 from studio.rendering.asset_viewport_common import ViewFace
 from studio.rendering.indexed import IndexedSurface, IndexedTables
 

@@ -1841,8 +1841,8 @@ def _building_gun_data_lines(points: list[GunPoint]) -> list[str]:
     lines = []
     for index, point in enumerate(points):
         lines.extend([f"sbact_act = {index}", f"sbact_vehicle = {point.gun_type}"])
-        for field, values in (("pos", point.position), ("dir", point.direction)):
-            lines.extend(f"sbact_{field}_{axis} = {_number(value)}"
+        for part, values in (("pos", point.position), ("dir", point.direction)):
+            lines.extend(f"sbact_{part}_{axis} = {_number(value)}"
                          for axis, value in zip("xyz", values))
     # A modify_building block inherits earlier slots. Terminate the mounted
     # list explicitly so shortening it cannot bring old slots back.

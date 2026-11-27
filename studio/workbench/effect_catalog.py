@@ -13,8 +13,7 @@ from threading import local
 from PySide6.QtCore import QRectF, QSize, Qt, QTimer
 from PySide6.QtGui import QIcon, QImage, QPainter, QPixmap
 from PySide6.QtWidgets import (
-    QDialog, QDialogButtonBox, QHBoxLayout, QLabel, QLineEdit, QListWidget,
-    QListWidgetItem, QListView, QAbstractItemView, QPushButton, QVBoxLayout,
+    QDialog, QDialogButtonBox, QHBoxLayout, QLabel, QLineEdit, QListView, QAbstractItemView, QPushButton, QVBoxLayout,
 )
 
 from studio.assets.family import load_asset_family

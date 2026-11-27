@@ -2,7 +2,6 @@ from copy import deepcopy
 from dataclasses import replace
 from unittest.mock import patch
 
-import pytest
 
 from map_editor.core.set_sdf_parser import (
     SetSdf, SdfBuilding, SdfBuildingModel, SdfSector,

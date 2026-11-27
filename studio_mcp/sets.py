@@ -31,7 +31,6 @@ from pathlib import Path
 from studio_mcp import core, history, textures
 from studio_mcp.loose import resolve_base
 
-from map_editor import bootstrap  # noqa: E402
 from map_editor.core.set_sdf_parser import SdfBuildingModel, decode_sdf, parse_set_sdf_text  # noqa: E402
 from sector_editor.document import (  # noqa: E402
     AUTO, BUILDING_LIMIT, MODEL_LIMIT, SECTOR_LIMIT, SetDocument, table_issues,

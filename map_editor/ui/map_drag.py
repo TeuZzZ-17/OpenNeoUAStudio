@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 
 from PySide6.QtCore import QMimeData, QObject, QEvent, Qt
-from PySide6.QtGui import QDrag, QPixmap
+from PySide6.QtGui import QDrag
 from PySide6.QtWidgets import QApplication
 
 MIME_TYPE = 'application/x-openneoua-map-item'

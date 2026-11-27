@@ -27,7 +27,7 @@ from studio.formats.animation import parse_anm_file, VanmData
 from studio.formats.base_format import (
     AmeshBlock, AttsEntry, BaseAsset, BaseObject, TextureRef, parse_base_file,
 )
-from studio.formats.images import IffReadError, IlbmImage, Palette, parse_ilbm_file, parse_pal_file
+from studio.formats.images import IlbmImage, Palette, parse_ilbm_file, parse_pal_file
 from studio.formats.setbas import (
     decode_animation,
     decode_skeleton,

@@ -295,8 +295,8 @@ VEHICLE_SOUND_EVENTS = (
     "normal", "fire", "wait", "genesis", "explode", "crashland", "crashvhcl",
     "goingdown", "cockpit", "beamin", "beamout", "build", "airexplode", "spawn")
 # launch_player only has a shake package (shk_launch_player_*): the view shake
-# of the player's own launches.
-WEAPON_SOUND_EVENTS = ("normal", "launch", "hit", "launch_player")
+# of the player's own launches. cluster plays where a cluster weapon splits.
+WEAPON_SOUND_EVENTS = ("normal", "launch", "hit", "launch_player", "cluster")
 PHYSICAL_SOUND_EVENTS = ("normal", "goingdown", "explode")
 # Sounds that keep playing while their state lasts (TVhclProto::IsLoopingSnd).
 LOOPING_VEHICLE_SOUNDS = frozenset({
@@ -397,13 +397,17 @@ def _shake_fx(values: dict[str, str], event: str) -> ShakeFx | None:
             fade=parse_fade_inout(values.get(f"shk_{event}_fade_inout")))
     if slot == 0:
         return None
+    if event == "cluster":
+        # One compact key; an invalid group keeps the 0.2 defaults like the engine.
+        axes = split_tuple(values.get("shk_cluster_xyz"), 3)
+        pos = tuple(_stof(axis) for axis in axes) if axes else (0.2, 0.2, 0.2)
+    else:
+        pos = tuple(_stof(values.get(f"shk_{event}_{axis}", "0.2")) for axis in "xyz")
     return ShakeFx(
         slot=slot, mag0=_stof(values.get(f"shk_{event}_mag0", "1")),
         mag1=_stof(values.get(f"shk_{event}_mag1", "0")),
         time=script_int(values.get(f"shk_{event}_time"), 1000),
-        pos=tuple(_stof(values.get(f"shk_{event}_{axis}", "0.2"))
-                  for axis in "xyz"),
-        fade=parse_fade_inout(values.get(f"shk_{event}_fade_inout")))
+        pos=pos, fade=parse_fade_inout(values.get(f"shk_{event}_fade_inout")))
 
 
 def sound_specs(values: dict[str, str], events) -> dict[str, SoundSpec]:
@@ -649,6 +653,30 @@ KEY_GROUP_FIELDS = {
     "shake": ("slot", "mag0", "mag1", "time", "radius", "mute", "x", "y", "z",
               "fade_inout"),
 }
+# Events whose package differs from the generic one (WeaponProtoParser keys).
+# launch_player is a shake only; cluster is an OpenNeoUA block: no ext sample
+# and one compact shk_cluster_xyz = x|y|z instead of the vanilla x / y / z keys.
+EVENT_GROUP_FIELDS = {
+    "launch_player": {"shake": ("slot", "time", "mag0", "mag1", "fade_inout")},
+    "cluster": {
+        "sound": ("sample", "volume", "pitch", "radius", "fade_inout"),
+        "palette": KEY_GROUP_FIELDS["palette"],
+        "shake": ("slot", "mag0", "mag1", "time", "radius", "mute", "xyz", "fade_inout"),
+    },
+}
+
+
+# Compact fields hold a fixed number of "|" parts (all numbers).
+_TUPLE_FIELDS = {"fade_inout": 2, "xyz": 3}
+
+
+def group_fields(kind: str, event: str) -> tuple[str, ...]:
+    """Field names the engine reads after ``<kind prefix>_<event>_``."""
+
+    special = EVENT_GROUP_FIELDS.get(event)
+    if special is not None:
+        return special.get(kind, ())
+    return KEY_GROUP_FIELDS[kind]
 
 
 def key_group_of(key: str) -> tuple[str, str] | None:
@@ -1467,16 +1495,20 @@ def key_group_issues(group: FxKeyGroup, context: str) -> tuple[FxIssue, ...]:
             continue
         field = key[len(("snd" if kind == "sound" else "pal" if kind == "palette"
                          else "shk") + "_" + event) + 1:]
-        if event == "launch_player":
-            valid = field in ("slot", "time", "mag0", "mag1")
-        else:
-            valid = field in KEY_GROUP_FIELDS[kind]
-        if not valid:
+        if field not in group_fields(kind, event):
             issues.append(FxIssue(
                 SEVERITY_UNKNOWN,
                 f"Unknown key '{key}': if the engine does not know it either, "
                 "it stops loading the whole script file."))
-        elif field not in ("sample", "ext", "pitch") and _full_float(value) is None:
+        elif field in ("sample", "ext", "pitch"):
+            continue
+        elif field in _TUPLE_FIELDS:
+            parts = split_tuple(value, _TUPLE_FIELDS[field])
+            if parts is None or any(_full_float(part.strip()) is None for part in parts):
+                shape = "in|out" if field == "fade_inout" else "x|y|z"
+                issues.append(FxIssue(
+                    SEVERITY_WARNING, f"{key} = '{value}' is not {shape}: the key is ignored."))
+        elif _full_float(value) is None:
             issues.append(FxIssue(
                 SEVERITY_WARNING, f"{key} = '{value}' is not a number: 0 is used."))
     return tuple(issues)
@@ -2544,7 +2576,7 @@ def weapon_vps(unit: "UnitPhases", document: "FxDocument", weapons: dict,
 
 # Classes that fly: their preview starts in the air.
 FLYING_MODELS = frozenset({
-    "plane", "heli", "flyer", "glider", "zeppelin", "cruiser", "ufo"})
+    "plane", "heli", "glider", "zeppelin", "cruiser", "ufo"})
 DEFAULT_FLIGHT_ALTITUDE = 300.0
 
 

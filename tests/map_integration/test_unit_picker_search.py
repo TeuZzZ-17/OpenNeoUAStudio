@@ -5,7 +5,7 @@ import pytest
 from PySide6.QtCore import Qt
 from PySide6.QtTest import QTest
 
-from .test_special_objects import app
+from .test_special_objects import app  # noqa: F401 (pytest fixtures)
 from map_editor.core.ldf_model import LdfDocument
 from map_editor.ui.squad_panel import SquadPanel
 from map_editor.ui.host_panel import HostPanel

@@ -3,7 +3,7 @@ import pytest
 from map_editor.core.ambient_sound import (ambient_candidates, ambient_sound_value, import_into_data,
                                            relative_to_data)
 from map_editor.core.ldf_model import LdfDocument, dumps_ldf, loads_ldf
-from .test_special_objects import app, win
+from .test_special_objects import app, win  # noqa: F401 (pytest fixtures)
 
 
 def test_ambient_sound_roundtrip_and_vanilla_default():

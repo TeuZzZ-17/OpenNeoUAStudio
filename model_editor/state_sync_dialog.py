@@ -26,7 +26,6 @@ from PySide6.QtWidgets import (
     QPushButton,
     QSplitter,
     QTreeWidget,
-    QTreeWidgetItem,
     QVBoxLayout,
     QWidget,
 )

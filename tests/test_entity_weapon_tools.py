@@ -1,5 +1,4 @@
 """Weapon tools share the vehicle paths, except vehicle-only briefing settings."""
-from pathlib import Path
 from dataclasses import replace
 import pytest
 from PySide6.QtWidgets import QApplication, QMessageBox

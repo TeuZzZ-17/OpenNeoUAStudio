@@ -8,7 +8,7 @@ the viewport (playback, speed and the visual timeline).
 
 from __future__ import annotations
 
-from studio.ui.playback_controls import PlaybackButton, PlaybackStepButton, PlaybackSpeedSpinBox
+from studio.ui.playback_controls import PlaybackButton
 from studio.rendering.playback import DEFAULT_ANIMATION_SPEED
 
 import math

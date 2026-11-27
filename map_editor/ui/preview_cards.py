@@ -1,7 +1,7 @@
 """Resource cards with a fitted model, faction accent and readable details."""
 from PySide6.QtCore import QPointF, QRect, QSize, Qt, Signal
 from PySide6.QtGui import QPainter, QPalette, QColor, QFont, QPen, QTextLayout, QTextOption
-from PySide6.QtWidgets import (QApplication, QAbstractItemView, QHBoxLayout, QLabel, QListWidget, QLayout, QScrollArea,
+from PySide6.QtWidgets import (QApplication, QAbstractItemView, QHBoxLayout, QLabel, QLayout, QScrollArea,
                               QPushButton, QStyledItemDelegate, QStyle, QStyleOptionButton, QWidget, QLineEdit)
 from studio.ui.sorting import IndexedListWidget
 

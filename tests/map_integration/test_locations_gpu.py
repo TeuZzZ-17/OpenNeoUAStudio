@@ -2,7 +2,7 @@
 import pytest
 from PySide6.QtCore import QPointF
 from PySide6.QtTest import QTest
-from .test_special_objects import app, win
+from .test_special_objects import app, win  # noqa: F401 (pytest fixtures)
 from .test_locations import area
 
 

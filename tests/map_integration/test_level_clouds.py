@@ -3,7 +3,7 @@ import numpy as np
 from map_editor.core.clouds import (CloudProfile, CloudSimulation, fade_envelope, load_cloud_profiles,
                                     map_particle_count, parse_cloud_profiles)
 from map_editor.core.ldf_model import LdfDocument, cloud_id_value, dumps_ldf, loads_ldf
-from .test_special_objects import app, win
+from .test_special_objects import app, win  # noqa: F401 (pytest fixtures)
 
 SCRIPT = '''
 new_cloud 2

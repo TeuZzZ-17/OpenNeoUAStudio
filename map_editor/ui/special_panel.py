@@ -5,7 +5,7 @@ import copy
 from PySide6.QtCore import Qt, Signal
 from PySide6.QtGui import QValidator, QIcon
 from PySide6.QtWidgets import (QWidget, QSizePolicy, QVBoxLayout, QHBoxLayout, QFormLayout, QLineEdit,
-                              QListWidget, QListWidgetItem, QPushButton, QSpinBox,
+                              QPushButton, QSpinBox,
                               QComboBox, QCheckBox, QLabel, QGroupBox, QDialog, QDialogButtonBox)
 
 from studio.ui.widgets import use_standard_list_style

@@ -1,7 +1,7 @@
 from types import SimpleNamespace
 import pytest
 from map_editor.core.ldf_model import LdfDocument, dumps_ldf, loads_ldf
-from map_editor.core.special_objects import add_special, update_special, remove_special, set_item_key_road, special_store
+from map_editor.core.special_objects import add_special, update_special, remove_special, set_item_key_road
 
 BUILDINGS={50:SimpleNamespace(sec_type=123),51:SimpleNamespace(sec_type=124)}
 ACTIONS=[{'target_type':'modify_vehicle','id':1,'param':'enable','val':'1'}]
@@ -74,7 +74,7 @@ def test_comment_history_follows_objects_when_unplaced_slots_are_omitted():
     assert restored.grids['type'][3][3]=='a1'
 
 
-from .test_special_objects import app, win
+from .test_special_objects import app, win  # noqa: F401 (pytest fixtures)
 from PySide6.QtCore import Qt
 
 

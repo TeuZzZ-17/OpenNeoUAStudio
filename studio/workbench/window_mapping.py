@@ -18,7 +18,7 @@ from PySide6.QtWidgets import (
 )
 
 from studio.assets.catalog import classify_texture_assignment
-from studio.assets.shade import SHADE_MAX, apply_polygon_shade, shadable_entries, shade_offset
+from studio.assets.shade import SHADE_MAX, apply_polygon_shade, shadable_entries
 from studio.assets.family import (
     AssetFamily,
 )

@@ -131,12 +131,6 @@ def sector_reference(raw: str) -> tuple[str, int]:
         return "", 0
 
 
-def format_sec_type(sector_file: str, fallback: int | None) -> str:
-    if not sector_file:
-        return str(fallback or 0)
-    return f"{sector_file}|{fallback}" if fallback else sector_file
-
-
 def normalize_data_path(value: str) -> str:
     """Engine rule (uaNormalizeDataAssetPath without legacy paths): Data/... only, no traversal."""
     value = value.replace("\\", "/")
@@ -153,10 +147,6 @@ def resolve_data_path(data_dir: Path, value: str) -> Path:
     parts = normalize_data_path(value).split("/")[1:]
     found = bootstrap.find_ci(Path(data_dir), "/".join(parts))
     return found if found is not None else Path(data_dir).joinpath(*parts)
-
-
-def data_relative(data_dir: Path, path: Path) -> str:
-    return "Data/" + Path(path).resolve().relative_to(Path(data_dir).resolve()).as_posix()
 
 
 # ----------------------------------------------------------------------------

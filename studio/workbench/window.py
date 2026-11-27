@@ -30,7 +30,6 @@ from PySide6.QtWidgets import (
     QCheckBox,
     QComboBox,
     QDialog,
-    QDoubleSpinBox,
     QGraphicsDropShadowEffect,
     # Tests patch this module attribute to drive the file dialogs used by the
     # mixins (the Qt class is shared, so the patch reaches them too).
@@ -42,7 +41,6 @@ from PySide6.QtWidgets import (
     QHBoxLayout,
     QHeaderView,
     QLabel,
-    QListWidget,
     QMainWindow,
     QMenu,
     QMessageBox,
@@ -2559,35 +2557,6 @@ class AssemblyWindow(
         self._uv_history_before = None
         self._fx_elements.clear()
 
-    @staticmethod
-    def _make_rotate_90_icon(color: QColor, size: int = 24) -> QIcon:
-        """Draw a crisp 90° clockwise circular arrow icon."""
-        pixmap = QPixmap(size, size)
-        pixmap.fill(Qt.GlobalColor.transparent)
-        painter = QPainter(pixmap)
-        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
-        pen = QPen(color, max(2.2, size * 0.11),
-                   Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap)
-        painter.setPen(pen)
-        painter.setBrush(Qt.BrushStyle.NoBrush)
-        margin = size * 0.18
-        rect = QRectF(margin, margin, size - 2 * margin, size - 2 * margin)
-        # Qt angles are in 1/16th of a degree, CCW from 3 o'clock.
-        # Start near 1 o'clock (40°) and sweep 275° CCW -> ends near 4 o'clock (-45°),
-        # with an arrowhead pointing clockwise at the top-right end.
-        painter.drawArc(rect, int(45 * 16), int(275 * 16))
-        # Filled arrowhead at top-right pointing clockwise (down-right).
-        cx = rect.center().x() + rect.width() * 0.5 * 0.7071
-        cy = rect.center().y() - rect.height() * 0.5 * 0.7071
-        head = size * 0.21
-        tip = QPointF(cx + head * 0.35, cy + head * 0.45)
-        wing1 = QPointF(cx + head * 0.55, cy - head * 0.85)
-        wing2 = QPointF(cx - head * 0.80, cy + head * 0.20)
-        painter.setPen(Qt.PenStyle.NoPen)
-        painter.setBrush(color)
-        painter.drawPolygon(QPolygonF([tip, wing1, wing2]))
-        painter.end()
-        return QIcon(pixmap)
         self._bundle_targets.clear()
         self._bundle_base_snapshots.clear()
         self._texture_preview_cache.clear()
@@ -2621,6 +2590,36 @@ class AssemblyWindow(
         self._set_document_title(None)
         self._notify(
             "Current resource closed. The workbench is empty.", 7000)
+
+    @staticmethod
+    def _make_rotate_90_icon(color: QColor, size: int = 24) -> QIcon:
+        """Draw a crisp 90° clockwise circular arrow icon."""
+        pixmap = QPixmap(size, size)
+        pixmap.fill(Qt.GlobalColor.transparent)
+        painter = QPainter(pixmap)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        pen = QPen(color, max(2.2, size * 0.11),
+                   Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap)
+        painter.setPen(pen)
+        painter.setBrush(Qt.BrushStyle.NoBrush)
+        margin = size * 0.18
+        rect = QRectF(margin, margin, size - 2 * margin, size - 2 * margin)
+        # Qt angles are in 1/16th of a degree, CCW from 3 o'clock.
+        # Start near 1 o'clock (40°) and sweep 275° CCW -> ends near 4 o'clock (-45°),
+        # with an arrowhead pointing clockwise at the top-right end.
+        painter.drawArc(rect, int(45 * 16), int(275 * 16))
+        # Filled arrowhead at top-right pointing clockwise (down-right).
+        cx = rect.center().x() + rect.width() * 0.5 * 0.7071
+        cy = rect.center().y() - rect.height() * 0.5 * 0.7071
+        head = size * 0.21
+        tip = QPointF(cx + head * 0.35, cy + head * 0.45)
+        wing1 = QPointF(cx + head * 0.55, cy - head * 0.85)
+        wing2 = QPointF(cx - head * 0.80, cy + head * 0.20)
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.setBrush(color)
+        painter.drawPolygon(QPolygonF([tip, wing1, wing2]))
+        painter.end()
+        return QIcon(pixmap)
 
 
     def open_setbas(self, path: str | Path) -> None:

@@ -1,9 +1,5 @@
 """Reusable ground decal profiles (new_decal) and their preview in Destruction FX."""
 
-import math
-from dataclasses import replace
-from pathlib import Path
-from types import SimpleNamespace
 
 import pytest
 

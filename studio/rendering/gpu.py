@@ -535,10 +535,6 @@ class RendererBadge(QPushButton):
                    else 'Windows could not save the GPU preference.')
         self.window().statusBar().showMessage(message, 15000)
 
-    def toggle_backend(self):
-        target = 'software' if self.viewport.renderer_mode == 'gpu' else 'gpu'
-        self.switch_backend(target)
-
     def switch_backend(self, target):
         success = True
         for viewport in self._viewports:

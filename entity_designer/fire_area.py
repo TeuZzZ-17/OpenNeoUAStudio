@@ -79,7 +79,7 @@ def usable_family(model: str) -> str | None:
         return "below"
     if model == "laser":
         return "both"
-    if model in ("rocket", "missile", "grenade", "arc_grenade", "laser"):
+    if model in ("rocket", "missile", "grenade", "arc_grenade"):
         return "forward"
     return None
 

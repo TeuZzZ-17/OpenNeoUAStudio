@@ -1,7 +1,6 @@
 """Terrain previews must use native slurp overrides and retain height slots."""
 import os
 os.environ.setdefault('QT_QPA_PLATFORM', 'offscreen')
-from pathlib import Path
 from tempfile import TemporaryDirectory
 import shutil
 import pytest

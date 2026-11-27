@@ -13,7 +13,6 @@ from PySide6.QtWidgets import (
     QDialog,
     QFileDialog,
     QMessageBox,
-    QTreeWidgetItem,
 )
 
 from entity_designer import destruction_fx as fx

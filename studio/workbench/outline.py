@@ -1424,16 +1424,6 @@ class OutlineEditor(QWidget):
 
 
     @property
-    def has_structural_changes(self) -> bool:
-        if self._mode != "poo2" or not self._model:
-            return False
-        return (
-            len(self._points_3d) != len(self._model.points)
-            or [list(group) for group in self._groups] != self._model.polygons
-        )
-
-
-    @property
     def editable_point_count(self) -> int:
         return self._point_count()
 

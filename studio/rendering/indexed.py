@@ -1241,17 +1241,6 @@ class IndexedFamilyAdapter:
                 return str(names[int(image_id)])
         return str(getattr(material, "label", ""))
 
-    def active_uvs(self, material, frame_index: int):
-        frames = list(getattr(material, "anim_frames", ()) or ())
-        groups = list(getattr(material, "anim_uv_groups", ()) or ())
-        if not frames:
-            return ()
-        frame_index = max(0, min(int(frame_index), len(frames) - 1))
-        _duration, _image_id, uv_id = frames[frame_index]
-        if 0 <= int(uv_id) < len(groups):
-            return tuple(tuple(pair) for pair in groups[int(uv_id)])
-        return ()
-
     def _texture(self, name: str):
         textures = getattr(self.family, "textures", {})
         revision = (id(textures), len(textures))

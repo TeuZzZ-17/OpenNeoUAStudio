@@ -5,7 +5,7 @@ import pytest
 from PySide6.QtCore import QPoint
 from PySide6.QtWidgets import QMessageBox
 
-from tests.map_integration.test_actor_editor import app, win, host, squad
+from tests.map_integration.test_actor_editor import app, win, host, squad  # noqa: F401 (pytest fixtures)
 from map_editor.core.ldf_model import dumps_ldf, loads_ldf
 from map_editor.core.special_objects import add_special, update_special
 

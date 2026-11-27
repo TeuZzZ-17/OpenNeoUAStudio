@@ -129,36 +129,6 @@ def _symbol_tile(path: str, modified: int, size: int, symbol: int,
     return image.copy(x, y, tile_size, tile_size)
 
 
-def _map_symbol_image(symbol: int) -> QImage | None:
-    directory = _font_directory()
-    if directory is None:
-        return None
-    tiles = []
-    for tile_size in (4, 8):
-        stem = f"sec{tile_size}"
-        path = bootstrap.find_ci(directory, stem + ".PNG", stem + ".ILB",
-                                 stem + ".ILBM")
-        if path is None or not path.is_file():
-            return None
-        stat = path.stat()
-        tile = _symbol_tile(str(path), stat.st_mtime_ns, stat.st_size,
-                            symbol, tile_size)
-        if tile.isNull():
-            return None
-        tiles.append(tile.scaled(
-            QSize(32, 32), Qt.AspectRatioMode.IgnoreAspectRatio,
-            Qt.TransformationMode.FastTransformation))
-
-    image = QImage(68, 32, QImage.Format.Format_ARGB32_Premultiplied)
-    image.fill(Qt.GlobalColor.transparent)
-    painter = QPainter(image)
-    painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform, False)
-    painter.drawImage(0, 0, tiles[0])
-    painter.drawImage(36, 0, tiles[1])
-    painter.end()
-    return image
-
-
 MAP_ZOOM_TITLES = ("Zoom 1", "Zoom 2", "Zoom 3", "Zoom 4", "Zoom 5")
 
 

@@ -12,7 +12,7 @@ import pytest
 from PySide6.QtCore import QSize, Qt
 from PySide6.QtGui import QColor, QImage
 from PySide6.QtTest import QTest
-from PySide6.QtWidgets import QApplication, QMenu, QTreeWidgetItem
+from PySide6.QtWidgets import QApplication, QTreeWidgetItem
 
 from studio.assets.family import (
     AssetFamily, FamilyObject, animation_preview_family, load_asset_family,

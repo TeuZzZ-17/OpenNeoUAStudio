@@ -5,7 +5,7 @@ from map_editor.core.ldf_model import LdfDocument, dumps_ldf, loads_ldf
 from map_editor.core.locations import (LOCATION_COLORS, new_location, validate_location,
                                        contains_point, notice_opacity)
 from map_editor.ui.location_panel import LOCATION_DRAFT_ROLE
-from .test_special_objects import app, win
+from .test_special_objects import app, win  # noqa: F401 (pytest fixtures)
 
 
 def area():

@@ -24,7 +24,6 @@ from PySide6.QtWidgets import (
     QLabel,
     QMenu,
     QTreeWidget,
-    QTreeWidgetItem,
     QVBoxLayout,
     QWidget,
 )

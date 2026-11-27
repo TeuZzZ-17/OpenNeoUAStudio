@@ -2,7 +2,7 @@
 from PySide6.QtCore import Qt, Signal, QPointF
 from PySide6.QtGui import QColor, QTextLayout, QTextCharFormat
 from PySide6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QComboBox, QLineEdit, QLabel,
-                               QTreeWidget, QTreeWidgetItem, QHeaderView, QStyledItemDelegate, QCheckBox)
+                               QTreeWidget, QHeaderView, QStyledItemDelegate, QCheckBox)
 from ..core.ldf_model import FACTIONS
 from ..core.building_defs import is_special_building
 from .preview_cards import PreviewList, set_card

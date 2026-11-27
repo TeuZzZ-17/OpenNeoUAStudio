@@ -2,7 +2,7 @@ import pytest
 from PySide6.QtCore import Qt, QPoint
 from PySide6.QtGui import QColor, QImage, QPainter
 
-from .test_special_objects import app, win
+from .test_special_objects import app, win  # noqa: F401 (pytest fixtures)
 from map_editor.core.special_objects import add_special, update_special
 from map_editor.render.camera import IsoCamera
 from .test_actor_editor import host, squad

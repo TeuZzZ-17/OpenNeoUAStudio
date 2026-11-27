@@ -22,7 +22,6 @@ def effect_text(item) -> str:
 
 def _not_an_effect_message(text: str, context: str) -> str:
     """Say why the text is not one effect, naming its first unknown key."""
-    from entity_designer import fx_visuals
 
     weapon = context == fx.CONTEXT_WEAPON
     kinds = ("one begin_fx block, one dest_fx line, the snd_ / pal_ / shk_ keys of one "

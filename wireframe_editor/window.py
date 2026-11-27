@@ -30,7 +30,6 @@ from PySide6.QtWidgets import (
     QGridLayout,
     QGroupBox,
     QLabel,
-    QListWidget,
     QMainWindow,
     QMenu,
     QMessageBox,

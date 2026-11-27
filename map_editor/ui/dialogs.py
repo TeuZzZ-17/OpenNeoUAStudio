@@ -11,7 +11,7 @@ from PySide6.QtGui import QIcon, QImage, QPixmap
 from PySide6.QtMultimedia import QAudioOutput, QMediaPlayer
 from PySide6.QtWidgets import (QCheckBox, QComboBox, QDialog, QDialogButtonBox, QFileDialog,
                                QFormLayout, QHBoxLayout, QLabel,
-                               QLineEdit, QPlainTextEdit, QListWidget, QListWidgetItem, QMessageBox, QPushButton, QSpinBox,
+                               QLineEdit, QPlainTextEdit, QListWidget, QMessageBox, QPushButton, QSpinBox,
                                QStyle, QVBoxLayout, QWidget)
 
 from .. import bootstrap

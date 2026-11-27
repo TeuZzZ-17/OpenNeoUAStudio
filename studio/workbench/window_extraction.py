@@ -32,7 +32,6 @@ from PySide6.QtWidgets import (
     QPushButton,
     QTabWidget,
     QTreeWidget,
-    QTreeWidgetItem,
     QVBoxLayout,
 )
 
@@ -1544,12 +1543,6 @@ class _ExtractionMixin:
         self.statusBar().showMessage(
             f"Snapshot written to {path} ({size.width()} x {size.height()}, "
             f"{frame_count} frame(s)).")
-
-    @staticmethod
-    def _write_snapshot_png_atomic(image: QImage, path: Path) -> None:
-        """Write one PNG atomically through the shared still-image writer."""
-
-        write_static_image_atomic(image, path, "png")
 
     def _image_set_file_names(
             self, extension: str, name_mode: str) -> list[tuple[str, str]]:

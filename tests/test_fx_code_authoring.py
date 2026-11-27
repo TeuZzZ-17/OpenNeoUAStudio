@@ -1,7 +1,6 @@
 """Live FX code editing, source provenance and non-destructive script saving."""
 
 import os
-from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 

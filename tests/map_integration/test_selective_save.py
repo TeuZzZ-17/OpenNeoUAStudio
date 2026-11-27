@@ -1,4 +1,3 @@
-from pathlib import Path
 from map_editor.core.ldf_model import LdfDocument,dumps_ldf,loads_ldf,save_ldf,load_ldf
 import pytest
 

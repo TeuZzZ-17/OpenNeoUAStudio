@@ -39,4 +39,4 @@ def test_level_info_briefing_edit_and_compatibility(app, win):
     assert loads_ldf(dumps_ldf(win.doc)).lvl_info['briefing_text'] == panel.briefing_edit.toPlainText()
 
 
-from .test_special_objects import app, win
+from .test_special_objects import app, win  # noqa: F401 (pytest fixtures)

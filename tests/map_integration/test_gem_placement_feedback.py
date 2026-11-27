@@ -6,7 +6,7 @@ import pytest
 from PySide6.QtWidgets import QMessageBox, QToolTip
 from PySide6.QtTest import QTest
 
-from .test_special_objects import app, win
+from .test_special_objects import app, win  # noqa: F401 (pytest fixtures)
 from map_editor.render import map_viewport
 from map_editor.render.special_scene import scene_object_styles
 

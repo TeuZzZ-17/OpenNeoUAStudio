@@ -36,7 +36,6 @@ from PySide6.QtWidgets import (
     QLabel,
     QLineEdit,
     QListView,
-    QListWidget,
     QListWidgetItem,
     QMessageBox,
     QPushButton,

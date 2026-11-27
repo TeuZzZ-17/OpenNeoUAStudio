@@ -220,7 +220,6 @@ def test_switching_theme_changes_open_widgets_and_keeps_widget_made_cursors(app)
 
 
 def test_the_cursor_theme_choice_is_saved_and_unknown_ids_fall_back(app, tmp_path):
-    from PySide6.QtCore import QSettings
     from studio.ui.cursor_themes import restore_cursor_theme, set_cursor_theme
 
     try:
